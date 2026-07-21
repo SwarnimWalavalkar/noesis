@@ -1,0 +1,20 @@
+{
+  "name": "@noesis/app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "noesis": "./src/cli.ts"
+  },
+  "dependencies": {
+    "@noesis/capabilities": "workspace:*",
+    "@noesis/config": "workspace:*",
+    "@noesis/domain": "workspace:*",
+    "@noesis/evals": "workspace:*",
+    "@noesis/learning": "workspace:*",
+    "@noesis/policy": "workspace:*",
+    "@noesis/runtime": "workspace:*",
+    "@noesis/runtime-pi": "workspace:*",
+    "@noesis/tui": "workspace:*"
+  }
+}

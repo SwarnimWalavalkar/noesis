@@ -1,0 +1,7 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.4.10/schema.json",
+  "files": { "includes": ["**", "!!noesis-first-complete-iteration.html", "!!**/dist", "!!**/.noesis*"] },
+  "formatter": { "enabled": true, "indentStyle": "space", "lineWidth": 110 },
+  "linter": { "enabled": true, "rules": { "recommended": true } },
+  "javascript": { "formatter": { "quoteStyle": "double", "semicolons": "always" } }
+}

@@ -1,0 +1,17 @@
+{
+  "name": "@noesis/evals",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@noesis/capabilities": "workspace:*",
+    "@noesis/domain": "workspace:*",
+    "@noesis/ledger": "workspace:*"
+  },
+  "devDependencies": {
+    "@noesis/policy": "workspace:*"
+  }
+}

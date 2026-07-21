@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2024"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "types": ["node", "vitest/globals"],
+    "baseUrl": ".",
+    "paths": {
+      "@noesis/capabilities": ["packages/capabilities/src/index.ts"],
+      "@noesis/config": ["packages/config/src/index.ts"],
+      "@noesis/context": ["packages/context/src/index.ts"],
+      "@noesis/domain": ["packages/domain/src/index.ts"],
+      "@noesis/evals": ["packages/evals/src/index.ts"],
+      "@noesis/learning": ["packages/learning/src/index.ts"],
+      "@noesis/ledger": ["packages/ledger/src/index.ts"],
+      "@noesis/memory": ["packages/memory/src/index.ts"],
+      "@noesis/policy": ["packages/policy/src/index.ts"],
+      "@noesis/runtime": ["packages/runtime/src/index.ts"],
+      "@noesis/runtime-pi": ["packages/runtime-pi/src/index.ts"],
+      "@noesis/tui": ["packages/tui/src/index.ts"]
+    }
+  },
+  "include": ["apps/**/*.ts", "packages/**/*.ts", "vitest.config.ts"]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "@noesis/runtime-pi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.80.6",
+    "@earendil-works/pi-ai": "0.80.6",
+    "zod": "4.4.3"
+  }
+}

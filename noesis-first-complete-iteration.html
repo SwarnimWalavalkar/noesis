@@ -1,0 +1,1476 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; style-src 'unsafe-inline' blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; img-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; font-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; media-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; worker-src blob:; connect-src blob: data:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Noesis First Complete Iteration</title>
+<style>:root{color-scheme:light dark;background:light-dark(rgb(255 255 255), rgb(24 24 24))}html,body{margin:0}body{box-sizing:border-box;padding:1rem;background:inherit}iframe{display:block;width:100%;max-width:736px;height:calc(100vh - 2rem);margin:0 auto;border:0}</style>
+</head>
+<body>
+<iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="Noesis First Complete Iteration" srcdoc="&lt;!doctype html&gt;
+&lt;html lang=&quot;en&quot;&gt;
+&lt;head&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot;&gt;
+&lt;meta name=&quot;referrer&quot; content=&quot;no-referrer&quot;&gt;
+&lt;meta http-equiv=&quot;Content-Security-Policy&quot; content=&quot;default-src &#x27;none&#x27;; script-src &#x27;unsafe-inline&#x27; &#x27;unsafe-eval&#x27; &#x27;wasm-unsafe-eval&#x27; blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; style-src &#x27;unsafe-inline&#x27; blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; img-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; font-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; media-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; worker-src blob:; connect-src blob: data:; frame-src &#x27;none&#x27;; object-src &#x27;none&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;&quot;&gt;
+&lt;title&gt;Noesis First Complete Iteration&lt;/title&gt;
+&lt;style&gt;:root {
+  color-scheme: light dark;
+  background-color: var(--background) !important;
+
+  /* Agent-facing contract; keep in sync with SKILL.md. */
+  --background: light-dark(rgb(255 255 255), rgb(24 24 24));
+  --foreground: light-dark(rgb(26 28 31), rgb(255 255 255));
+  --card: color-mix(in oklab, var(--foreground) 5%, transparent);
+  --card-foreground: var(--foreground);
+  --popover: light-dark(rgb(255 255 255), rgb(45 45 45));
+  --popover-foreground: var(--foreground);
+  --primary: light-dark(rgb(51 156 255), rgb(131 195 255));
+  --primary-foreground: light-dark(rgb(255 255 255), rgb(13 13 13));
+  --secondary: light-dark(rgb(255 255 255 / 96%), rgb(54 54 54 / 96%));
+  --secondary-foreground: var(--foreground);
+  --muted: color-mix(in srgb, var(--foreground) 10%, transparent);
+  --muted-foreground: light-dark(
+    rgb(26 28 31 / 49.4%),
+    rgb(255 255 255 / 49.8%)
+  );
+  --accent: light-dark(rgb(229 242 255), rgb(13 39 63));
+  --accent-foreground: var(--primary);
+  --destructive: light-dark(rgb(226 85 7), rgb(255 133 73));
+  --border: light-dark(rgb(26 28 31 / 8%), rgb(255 255 255 / 8.2%));
+  --input: light-dark(
+    rgb(26 28 31 / 11.8%),
+    color-mix(in oklab, rgb(0 0 0) 10%, transparent)
+  );
+  --ring: light-dark(rgb(51 156 255), rgb(131 195 255 / 76%));
+  --font-size-base: 14px;
+  --viz-series-1: var(--primary);
+  --viz-series-2: light-dark(rgb(243 136 59), rgb(245 154 86));
+  --viz-series-3: light-dark(rgb(93 201 119), rgb(116 213 139));
+  --viz-series-4: light-dark(rgb(235 119 177), rgb(240 143 192));
+  --viz-series-5: light-dark(rgb(155 121 236), rgb(170 145 239));
+  --viz-series-6: light-dark(rgb(58 185 177), rgb(90 203 194));
+
+  /* Internal implementation variables; not part of the agent contract. */
+  --font-sans: -apple-system, system-ui, &quot;Segoe UI&quot;, sans-serif;
+  --font-mono:
+    ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, &quot;Liberation Mono&quot;,
+    monospace;
+  --font-size-normal: max(11px, var(--font-size-base));
+  --font-size-tooltip: calc(var(--font-size-base) - 1px);
+  --font-size-small: max(11px, calc(var(--font-size-base) - 2px));
+  --font-size-h1: calc(var(--font-size-normal) * 1.7142857143);
+  --font-size-h2: calc(var(--font-size-normal) * 1.4285714286);
+  --font-size-h3: calc(var(--font-size-normal) * 1.2857142857);
+  --font-weight-normal: 430;
+  --font-weight-medium: 500;
+  --line-height-normal: calc(var(--font-size-normal) * 1.5);
+  --line-height-tooltip: calc(var(--font-size-tooltip) * 1.4285714286);
+  --line-height-small: calc(var(--font-size-small) + 4px);
+  --radius: 12.5px;
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-2xl: calc(var(--radius) * 1.6);
+  --radius-full: 9999px;
+  --shadow-sm: 0 1px 2px -1px rgb(0 0 0 / 8%);
+  --checkmark-image: url(&quot;data:image/svg+xml,%3Csvg xmlns=&#x27;http://www.w3.org/2000/svg&#x27; viewBox=&#x27;0 0 17 17&#x27;%3E%3Cpath d=&#x27;M12.8961 3.64101C13.1297 3.41418 13.4984 3.37523 13.7779 3.56581C14.0571 3.75635 14.1554 4.11331 14.0299 4.41347L13.9615 4.53847L7.71151 13.7045C7.59411 13.8767 7.4063 13.9877 7.19881 14.0072C6.99136 14.0267 6.78564 13.9533 6.63826 13.806L2.88826 10.056L2.79842 9.9457C2.6192 9.67407 2.64927 9.30496 2.88826 9.06581C3.12738 8.82669 3.49647 8.79676 3.76815 8.97597L3.8785 9.06581L7.03084 12.2182L12.8053 3.74941L12.8961 3.64101Z&#x27;/%3E%3C/svg%3E&quot;);
+
+  /* Legacy aliases; not part of the current agent contract. */
+  --viz-bg: transparent;
+  --viz-panel: var(--card);
+  --viz-border: var(--border);
+  --viz-text: var(--foreground);
+  --viz-muted: var(--muted-foreground);
+  --viz-accent: var(--primary);
+  --viz-accent-text: var(--primary-foreground);
+  --viz-accent-bg: var(--accent);
+  --viz-font-size: var(--font-size-base);
+  --viz-warning: var(--destructive);
+  --color-background-primary: var(--background);
+  --color-text-primary: var(--foreground);
+  --color-border-secondary: var(--border);
+}
+
+:root[data-theme=&quot;light&quot;] {
+  color-scheme: light;
+}
+
+:root[data-theme=&quot;dark&quot;] {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html &gt; body {
+  margin: 0;
+  padding: 5px;
+  color: var(--foreground);
+  background: transparent !important;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-normal);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--line-height-normal);
+}
+
+a {
+  color: color-mix(in srgb, var(--viz-accent) 80%, var(--viz-text) 20%);
+  cursor: pointer;
+  font-weight: var(--viz-font-weight-medium);
+  text-decoration: none;
+  text-underline-offset: 2px;
+}
+
+a:is(:hover, :focus-visible) {
+  text-decoration-line: underline;
+  text-decoration-style: dashed;
+  text-decoration-thickness: 0.5px;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p {
+  margin-block: 0;
+}
+
+h1 {
+  font-size: var(--font-size-h1);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+h2 {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+h3,
+h4,
+h5,
+h6 {
+  font-size: var(--font-size-h3);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.3;
+}
+
+b,
+strong,
+th {
+  font-weight: var(--font-weight-medium);
+}
+
+code:not(pre code) {
+  display: inline;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  corner-shape: superellipse(1.5);
+  background: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  word-break: break-word;
+}
+
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  color: var(--foreground);
+  font: inherit;
+  text-align: start;
+}
+
+.table :is(th, td) {
+  padding-block: 10px;
+  padding-inline: 0 24px;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--border);
+  text-align: start;
+  vertical-align: top;
+}
+
+.table-responsive &gt; .table :is(th, td) {
+  overflow-wrap: break-word;
+}
+
+.table :is(th, td):last-child {
+  padding-inline-end: 0;
+}
+
+.table :is(caption, thead th) {
+  font-weight: 600;
+}
+
+.table thead th {
+  padding-block: 8px;
+  border-bottom-color: color-mix(in srgb, var(--foreground) 16%, transparent);
+}
+
+.table tbody tr:last-child :is(th, td) {
+  border-bottom: 0;
+}
+
+.table.table-sm :is(th, td) {
+  padding-block: 6px;
+}
+
+.table.table-sm :is(th, td):not(:last-child) {
+  padding-inline-end: 16px;
+}
+
+.table :is(.text-end, [align=&quot;right&quot;]) {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.table :is(.text-center, [align=&quot;center&quot;]) {
+  text-align: center;
+}
+
+.table .text-nowrap {
+  white-space: nowrap;
+}
+
+#widget {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  background: transparent !important;
+}
+
+.card {
+  min-width: 0;
+  padding: 12px;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  border-radius: var(--radius-2xl);
+  corner-shape: superellipse(1.5);
+  color: var(--card-foreground);
+  background: var(--card);
+}
+
+#widget &gt; :not(.card) {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.tooltip {
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  left: 0;
+  width: max-content;
+  max-width: min(
+    20rem,
+    var(--tooltip-available-width, calc(100vw - 10px)),
+    calc(100vw - 10px)
+  );
+  max-height: min(
+    var(--tooltip-available-height, calc(100vh - 10px)),
+    calc(100vh - 10px)
+  );
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--popover-foreground);
+  background: var(--popover);
+  box-shadow: none;
+  font-size: var(--font-size-tooltip);
+  line-height: var(--line-height-tooltip);
+  overflow-wrap: break-word;
+  white-space: normal;
+  pointer-events: none;
+  user-select: none;
+}
+
+.viz-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(max(180px, 24%), 1fr));
+  gap: 10px;
+}
+
+.viz-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.viz-stat-value {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+.viz-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.viz-badge {
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  color: var(--accent-foreground);
+  background: var(--accent);
+  font-weight: var(--font-weight-medium);
+}
+
+small,
+.text-small,
+.viz-badge {
+  font-size: var(--font-size-small);
+  line-height: var(--line-height-small);
+}
+
+.text-muted {
+  color: var(--muted-foreground);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.viz-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.viz-controls &gt; .form-label {
+  display: grid;
+  min-width: min(100%, 260px);
+  flex: 1 1 280px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px 12px;
+  margin-bottom: 0;
+}
+
+.viz-controls &gt; .form-label &gt; :is(.form-control, .form-range, .form-select) {
+  grid-column: 1 / -1;
+}
+
+.btn,
+.form-check-input,
+.form-control,
+.form-range,
+.form-select {
+  font: inherit;
+}
+
+.btn {
+  appearance: button;
+  display: inline-flex;
+  inline-size: fit-content;
+  max-inline-size: 100%;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0 8px;
+  -webkit-app-region: no-drag;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+  cursor: var(--cursor-interaction, pointer);
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+.btn:is(.btn-block, .viz-tile) {
+  inline-size: 100%;
+}
+
+.btn.viz-tile {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+a.btn {
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn:not(:disabled):hover {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.btn-primary {
+  border-color: transparent;
+  color: var(--primary-foreground);
+  background: var(--foreground);
+  background-clip: padding-box;
+}
+
+.btn-primary .text-muted {
+  color: color-mix(in srgb, var(--primary-foreground) 50%, transparent);
+}
+
+.btn-primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--foreground) 80%, transparent);
+  background-clip: padding-box;
+}
+
+.btn-ghost {
+  border-color: transparent;
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.btn-ghost:not(:disabled):hover {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+[data-lucide] {
+  stroke-width: 1.6;
+}
+
+.form-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--foreground);
+}
+
+.form-control {
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  outline: none;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--foreground);
+  background: var(--secondary);
+}
+
+.form-control::placeholder {
+  color: var(--muted-foreground);
+}
+
+.form-control[type=&quot;file&quot;] {
+  padding: 0;
+  overflow: hidden;
+  cursor: var(--cursor-interaction, pointer);
+}
+
+.form-control[type=&quot;file&quot;]::file-selector-button {
+  min-height: 26px;
+  margin-right: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-right: 1px solid var(--input);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+  cursor: inherit;
+  font: inherit;
+}
+
+.form-control[type=&quot;file&quot;]:not(:disabled):hover::file-selector-button {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.form-control-color[type=&quot;color&quot;] {
+  width: 40px;
+  height: 28px;
+  padding: 3px;
+  cursor: var(--cursor-interaction, pointer);
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch {
+  border: 0;
+  border-radius: calc(var(--radius-lg) - 4px);
+  corner-shape: superellipse(1.5);
+}
+
+textarea.form-control {
+  height: auto;
+  min-height: 72px;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+.form-control:focus-visible {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-control:disabled,
+.form-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.form-select {
+  appearance: none;
+  display: block;
+  width: 100%;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 32px 0 8px;
+  outline: none;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg);
+  corner-shape: superellipse(1.5);
+  color: var(--foreground);
+  background-color: var(--secondary);
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted-foreground) 50%),
+    linear-gradient(135deg, var(--muted-foreground) 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) 50%,
+    calc(100% - 10px) 50%;
+  background-repeat: no-repeat;
+  background-size: 4px 4px;
+  cursor: var(--cursor-interaction, default);
+}
+
+.form-select:not(:disabled):hover {
+  background-color: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.form-select:focus-visible {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-check {
+  display: flex;
+  min-height: 20px;
+  align-items: center;
+  gap: 6px;
+}
+
+.form-check-input {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin: 0;
+  border: 1px solid var(--input);
+  color: var(--primary-foreground);
+  background-color: transparent;
+  cursor: var(--cursor-interaction, default);
+  transition:
+    background-color 150ms,
+    border-color 150ms,
+    box-shadow 150ms;
+}
+
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;] {
+  border-color: var(--input);
+  border-radius: var(--radius-sm);
+  corner-shape: superellipse(1.5);
+  background-color: var(--secondary);
+  box-shadow: var(--shadow-sm);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input:not(:disabled):not(:checked):hover {
+  background-color: var(--card);
+}
+
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;]:checked {
+  border-color: var(--primary);
+  background-color: var(--primary);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input[type=&quot;checkbox&quot;]:checked::before {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--primary-foreground);
+  content: &quot;&quot;;
+  mask: var(--checkmark-image) center / 12px 12px no-repeat;
+}
+
+.form-check-input[type=&quot;radio&quot;] {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+}
+
+.form-check-input[type=&quot;radio&quot;]:checked {
+  border: 2px solid var(--primary);
+  background:
+    radial-gradient(circle, var(--primary-foreground) 0 2.5px, transparent 3px),
+    var(--primary);
+}
+
+.form-check:not(.form-switch) .form-check-input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled {
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+}
+
+.form-switch .form-check-input:disabled,
+.form-switch .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.form-check-label {
+  color: var(--foreground);
+  cursor: var(--cursor-interaction, default);
+}
+
+.form-switch .form-check-input {
+  position: relative;
+  width: 32px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--muted);
+  box-shadow: none;
+  transition: background-color 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.form-switch .form-check-input::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid light-dark(var(--primary-foreground), var(--foreground));
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+  box-shadow: var(--shadow-sm);
+  content: &quot;&quot;;
+  transform: translate(2px, -50%);
+  transition: transform 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.form-switch .form-check-input:checked {
+  background: var(--primary);
+}
+
+.form-switch .form-check-input:checked::before {
+  transform: translate(14px, -50%);
+}
+
+.form-switch .form-check-input:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.form-range {
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 28px;
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  outline: none;
+  border: 0;
+  accent-color: var(--primary);
+  background: linear-gradient(
+      color-mix(in srgb, var(--foreground) 7%, transparent),
+      color-mix(in srgb, var(--foreground) 7%, transparent)
+    )
+    center / 100% 2px no-repeat;
+}
+
+.form-range::-webkit-slider-runnable-track {
+  height: 28px;
+  background: transparent;
+}
+
+.form-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  margin-top: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+}
+
+.form-range:focus-visible::-webkit-slider-thumb {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-range::-moz-range-track {
+  height: 28px;
+  background: transparent;
+}
+
+.form-range::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: light-dark(var(--primary-foreground), var(--foreground));
+}
+
+.form-range:focus-visible::-moz-range-thumb {
+  border-color: var(--ring);
+  box-shadow: inset 0 0 0 1px var(--ring);
+}
+
+.form-range:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.btn:not(.btn-primary, .viz-tile):is(
+    [aria-pressed=&quot;true&quot;],
+    [aria-selected=&quot;true&quot;],
+    .is-selected
+  ) {
+  border-color: var(--primary);
+  color: var(--primary-foreground);
+  background: var(--primary);
+}
+
+.btn.viz-tile:is([aria-pressed=&quot;true&quot;], [aria-selected=&quot;true&quot;], .is-selected) {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+#widget &gt; svg {
+  width: 100%;
+}
+
+.text-warning,
+.text-destructive {
+  color: var(--destructive);
+}
+
+html&gt;body{padding:0}&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;div id=&quot;noesis-plan&quot;&gt;
+  &lt;style&gt;
+    #noesis-plan {
+      color: var(--foreground);
+      display: grid;
+      gap: 18px;
+    }
+    #noesis-plan .plan-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    #noesis-plan .plan-panel[hidden] {
+      display: none;
+    }
+    #noesis-plan .section-stack {
+      display: grid;
+      gap: 18px;
+    }
+    #noesis-plan .summary-copy {
+      margin-top: 4px;
+    }
+    #noesis-plan .architecture-svg,
+    #noesis-plan .lifecycle-svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      overflow: visible;
+    }
+    #noesis-plan .architecture-svg text,
+    #noesis-plan .lifecycle-svg text {
+      fill: var(--foreground);
+      font-family: inherit;
+      font-weight: 400;
+    }
+    #noesis-plan .architecture-svg .muted,
+    #noesis-plan .lifecycle-svg .muted {
+      fill: var(--muted-foreground);
+    }
+    #noesis-plan .architecture-svg .node,
+    #noesis-plan .lifecycle-svg .node {
+      stroke: none;
+    }
+    #noesis-plan .architecture-svg .interface {
+      fill: color-mix(in srgb, var(--viz-series-1) 16%, transparent);
+    }
+    #noesis-plan .architecture-svg .runtime {
+      fill: color-mix(in srgb, var(--viz-series-2) 16%, transparent);
+    }
+    #noesis-plan .architecture-svg .learning {
+      fill: color-mix(in srgb, var(--viz-series-3) 16%, transparent);
+    }
+    #noesis-plan .architecture-svg .substrate {
+      fill: color-mix(in srgb, var(--viz-series-4) 16%, transparent);
+    }
+    #noesis-plan .architecture-svg .protected {
+      fill: color-mix(in srgb, var(--viz-series-5) 16%, transparent);
+    }
+    #noesis-plan .architecture-svg .store {
+      fill: color-mix(in srgb, var(--viz-series-6) 16%, transparent);
+    }
+    #noesis-plan .architecture-svg .connector,
+    #noesis-plan .lifecycle-svg .connector {
+      stroke: var(--border);
+      stroke-width: 2;
+      fill: none;
+    }
+    #noesis-plan .lifecycle-svg .observed {
+      fill: color-mix(in srgb, var(--viz-series-1) 16%, transparent);
+    }
+    #noesis-plan .lifecycle-svg .candidate {
+      fill: color-mix(in srgb, var(--viz-series-2) 16%, transparent);
+    }
+    #noesis-plan .lifecycle-svg .evaluated {
+      fill: color-mix(in srgb, var(--viz-series-3) 16%, transparent);
+    }
+    #noesis-plan .lifecycle-svg .active {
+      fill: color-mix(in srgb, var(--viz-series-4) 16%, transparent);
+    }
+    #noesis-plan .lifecycle-svg .rejected {
+      fill: color-mix(in srgb, var(--destructive) 12%, transparent);
+    }
+    #noesis-plan .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      margin-top: 8px;
+    }
+    #noesis-plan .legend-item {
+      align-items: center;
+      display: inline-flex;
+      gap: 6px;
+    }
+    #noesis-plan .swatch {
+      border-radius: 999px;
+      display: inline-block;
+      height: 8px;
+      width: 8px;
+    }
+    #noesis-plan .swatch.noesis {
+      background: var(--viz-series-2);
+    }
+    #noesis-plan .swatch.pi {
+      background: var(--viz-series-4);
+    }
+    #noesis-plan .swatch.protected {
+      background: var(--viz-series-5);
+    }
+    #noesis-plan .acceptance-list {
+      margin: 0;
+      padding-left: 20px;
+    }
+    #noesis-plan .acceptance-list li + li {
+      margin-top: 6px;
+    }
+    #noesis-plan .decision-label {
+      white-space: nowrap;
+    }
+    #noesis-plan .source-list {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding-left: 20px;
+    }
+    #noesis-plan .workspace-tree {
+      margin: 0;
+      white-space: pre-wrap;
+    }
+    @media (max-width: 600px) {
+      #noesis-plan .architecture-svg text,
+      #noesis-plan .lifecycle-svg text {
+        font-size: 12px;
+      }
+    }
+  &lt;/style&gt;
+
+  &lt;div class=&quot;viz-grid&quot; aria-label=&quot;Plan summary&quot;&gt;
+    &lt;div class=&quot;card viz-stat&quot;&gt;
+      &lt;div class=&quot;text-muted&quot;&gt;Execution substrate&lt;/div&gt;
+      &lt;div class=&quot;viz-stat-value&quot;&gt;Pi AgentHarness&lt;/div&gt;
+      &lt;div class=&quot;text-small summary-copy&quot;&gt;Pinned behind a Noesis-owned adapter&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class=&quot;card viz-stat&quot;&gt;
+      &lt;div class=&quot;text-muted&quot;&gt;System of record&lt;/div&gt;
+      &lt;div class=&quot;viz-stat-value&quot;&gt;Event ledger&lt;/div&gt;
+      &lt;div class=&quot;text-small summary-copy&quot;&gt;JSONL truth, SQLite projections, Markdown views&lt;/div&gt;
+    &lt;/div&gt;
+    &lt;div class=&quot;card viz-stat&quot;&gt;
+      &lt;div class=&quot;text-muted&quot;&gt;Learning contract&lt;/div&gt;
+      &lt;div class=&quot;viz-stat-value&quot;&gt;Evidence loop&lt;/div&gt;
+      &lt;div class=&quot;text-small summary-copy&quot;&gt;Propose, replay, promote, monitor, roll back&lt;/div&gt;
+    &lt;/div&gt;
+  &lt;/div&gt;
+
+  &lt;div class=&quot;plan-tabs&quot; role=&quot;tablist&quot; aria-label=&quot;Plan views&quot;&gt;
+    &lt;button class=&quot;btn btn-primary&quot; type=&quot;button&quot; role=&quot;tab&quot; aria-selected=&quot;true&quot; aria-controls=&quot;plan-architecture&quot; id=&quot;tab-architecture&quot; data-panel=&quot;plan-architecture&quot;&gt;Architecture&lt;/button&gt;
+    &lt;button class=&quot;btn&quot; type=&quot;button&quot; role=&quot;tab&quot; aria-selected=&quot;false&quot; aria-controls=&quot;plan-build&quot; id=&quot;tab-build&quot; data-panel=&quot;plan-build&quot;&gt;Build graph&lt;/button&gt;
+    &lt;button class=&quot;btn&quot; type=&quot;button&quot; role=&quot;tab&quot; aria-selected=&quot;false&quot; aria-controls=&quot;plan-learning&quot; id=&quot;tab-learning&quot; data-panel=&quot;plan-learning&quot;&gt;Learning system&lt;/button&gt;
+    &lt;button class=&quot;btn&quot; type=&quot;button&quot; role=&quot;tab&quot; aria-selected=&quot;false&quot; aria-controls=&quot;plan-decisions&quot; id=&quot;tab-decisions&quot; data-panel=&quot;plan-decisions&quot;&gt;Decisions&lt;/button&gt;
+  &lt;/div&gt;
+
+  &lt;section class=&quot;plan-panel section-stack&quot; id=&quot;plan-architecture&quot; role=&quot;tabpanel&quot; aria-labelledby=&quot;tab-architecture&quot;&gt;
+    &lt;svg class=&quot;architecture-svg&quot; viewBox=&quot;0 0 980 650&quot; role=&quot;img&quot; aria-labelledby=&quot;architecture-title architecture-desc&quot;&gt;
+      &lt;title id=&quot;architecture-title&quot;&gt;Noesis system architecture&lt;/title&gt;
+      &lt;desc id=&quot;architecture-desc&quot;&gt;A Noesis-owned interface and runtime sit over Pi&#x27;s generic agent harness. An append-only experience ledger feeds memory, skills, reflection, and evaluation. Permission and promotion controls remain protected outside the self-modification loop.&lt;/desc&gt;
+      &lt;defs&gt;
+        &lt;marker id=&quot;plan-arrow&quot; markerWidth=&quot;9&quot; markerHeight=&quot;9&quot; refX=&quot;7&quot; refY=&quot;3&quot; orient=&quot;auto&quot; markerUnits=&quot;strokeWidth&quot;&gt;
+          &lt;path d=&quot;M0,0 L0,6 L8,3 z&quot; fill=&quot;var(--border)&quot;&gt;&lt;/path&gt;
+        &lt;/marker&gt;
+      &lt;/defs&gt;
+
+      &lt;rect class=&quot;node interface&quot; x=&quot;70&quot; y=&quot;24&quot; width=&quot;840&quot; height=&quot;72&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;94&quot; y=&quot;55&quot; font-weight=&quot;500&quot;&gt;Noesis interface&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;94&quot; y=&quot;78&quot;&gt;TUI · CLI · trail navigator · artifact viewer · approvals · model and mode controls&lt;/text&gt;
+
+      &lt;path class=&quot;connector&quot; d=&quot;M490 96 L490 128&quot; marker-end=&quot;url(#plan-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;rect class=&quot;node runtime&quot; x=&quot;70&quot; y=&quot;130&quot; width=&quot;840&quot; height=&quot;112&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;94&quot; y=&quot;161&quot; font-weight=&quot;500&quot;&gt;Noesis runtime&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;94&quot; y=&quot;184&quot;&gt;Trail coordinator · context compiler · capability registry · scheduler · artifact manager&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;94&quot; y=&quot;207&quot;&gt;Pi adapter · event translation · retries · crash recovery · compaction policy&lt;/text&gt;
+
+      &lt;path class=&quot;connector&quot; d=&quot;M330 242 L330 276&quot; marker-end=&quot;url(#plan-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;path class=&quot;connector&quot; d=&quot;M650 242 L650 276&quot; marker-end=&quot;url(#plan-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;rect class=&quot;node substrate&quot; x=&quot;70&quot; y=&quot;278&quot; width=&quot;430&quot; height=&quot;108&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;94&quot; y=&quot;309&quot; font-weight=&quot;500&quot;&gt;Pi execution substrate&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;94&quot; y=&quot;332&quot;&gt;pi-ai · AgentHarness · provider streams · typed tools&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;94&quot; y=&quot;355&quot;&gt;turn snapshots · steering · branchable session projection&lt;/text&gt;
+
+      &lt;rect class=&quot;node learning&quot; x=&quot;520&quot; y=&quot;278&quot; width=&quot;390&quot; height=&quot;108&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;544&quot; y=&quot;309&quot; font-weight=&quot;500&quot;&gt;Noesis learning organs&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;544&quot; y=&quot;332&quot;&gt;memory · workflow mining · skills · reflection&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;544&quot; y=&quot;355&quot;&gt;evaluation · promotion · longitudinal monitoring&lt;/text&gt;
+
+      &lt;path class=&quot;connector&quot; d=&quot;M285 386 L285 426&quot; marker-end=&quot;url(#plan-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;path class=&quot;connector&quot; d=&quot;M715 386 L715 426&quot; marker-end=&quot;url(#plan-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;rect class=&quot;node store&quot; x=&quot;70&quot; y=&quot;428&quot; width=&quot;540&quot; height=&quot;114&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;94&quot; y=&quot;459&quot; font-weight=&quot;500&quot;&gt;Experience and artifact substrate&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;94&quot; y=&quot;482&quot;&gt;append-only JSONL events · content-addressed artifacts&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;94&quot; y=&quot;505&quot;&gt;SQLite projections and FTS · human-editable Markdown projections&lt;/text&gt;
+
+      &lt;rect class=&quot;node protected&quot; x=&quot;630&quot; y=&quot;428&quot; width=&quot;280&quot; height=&quot;114&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;654&quot; y=&quot;459&quot; font-weight=&quot;500&quot;&gt;Protected control plane&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;654&quot; y=&quot;482&quot;&gt;effect gateway · evaluator&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;654&quot; y=&quot;505&quot;&gt;promotion rules · rollback · audit&lt;/text&gt;
+
+      &lt;path class=&quot;connector&quot; d=&quot;M610 485 L628 485&quot; marker-end=&quot;url(#plan-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;path class=&quot;connector&quot; d=&quot;M770 428 C770 408 770 406 770 386&quot; marker-end=&quot;url(#plan-arrow)&quot;&gt;&lt;/path&gt;
+
+      &lt;text x=&quot;70&quot; y=&quot;593&quot; font-weight=&quot;500&quot;&gt;Boundary rule&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;70&quot; y=&quot;619&quot;&gt;Pi executes a turn. Noesis decides what it means, what it may do, what is learned, and what changes survive.&lt;/text&gt;
+    &lt;/svg&gt;
+
+    &lt;div class=&quot;legend text-small&quot; aria-label=&quot;Architecture legend&quot;&gt;
+      &lt;span class=&quot;legend-item&quot;&gt;&lt;span class=&quot;swatch noesis&quot;&gt;&lt;/span&gt;Noesis-owned product logic&lt;/span&gt;
+      &lt;span class=&quot;legend-item&quot;&gt;&lt;span class=&quot;swatch pi&quot;&gt;&lt;/span&gt;Pi execution primitives&lt;/span&gt;
+      &lt;span class=&quot;legend-item&quot;&gt;&lt;span class=&quot;swatch protected&quot;&gt;&lt;/span&gt;Outside self-modification&lt;/span&gt;
+    &lt;/div&gt;
+
+    &lt;div class=&quot;table-responsive&quot;&gt;
+      &lt;table class=&quot;table table-sm&quot;&gt;
+        &lt;thead&gt;
+          &lt;tr&gt;&lt;th&gt;Workspace&lt;/th&gt;&lt;th&gt;Responsibility&lt;/th&gt;&lt;th&gt;Public boundary&lt;/th&gt;&lt;/tr&gt;
+        &lt;/thead&gt;
+        &lt;tbody&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;apps/noesis&lt;/code&gt;&lt;/td&gt;&lt;td&gt;CLI entrypoint and complete TUI application&lt;/td&gt;&lt;td&gt;&lt;code&gt;noesis&lt;/code&gt; executable&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;packages/domain&lt;/code&gt;&lt;/td&gt;&lt;td&gt;IDs, events, trails, artifacts, memory, capabilities, experiments&lt;/td&gt;&lt;td&gt;Versioned Zod schemas&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;packages/runtime&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Trail lifecycle, orchestration, background principals, recovery&lt;/td&gt;&lt;td&gt;&lt;code&gt;NoesisRuntime&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;packages/runtime-pi&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Only package allowed to import Pi runtime types&lt;/td&gt;&lt;td&gt;&lt;code&gt;NoesisAgentRuntime&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;packages/ledger&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Append-only event journal, projections, FTS, migrations&lt;/td&gt;&lt;td&gt;&lt;code&gt;ExperienceLedger&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;packages/context&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Evidence-aware context planning and token budgets&lt;/td&gt;&lt;td&gt;&lt;code&gt;ContextCompiler&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;packages/memory&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Typed retained knowledge and editable projections&lt;/td&gt;&lt;td&gt;&lt;code&gt;MemoryRepository&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;packages/capabilities&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Tools, skills, versions, provenance, ownership, manifests&lt;/td&gt;&lt;td&gt;&lt;code&gt;CapabilityRegistry&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;packages/learning&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Reflection, workflow mining, candidate generation&lt;/td&gt;&lt;td&gt;&lt;code&gt;LearningEngine&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;packages/evals&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Replay, held-out suites, shadow runs, promotion decisions&lt;/td&gt;&lt;td&gt;&lt;code&gt;EvaluationLab&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;packages/policy&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Effect enforcement, principal grants, approval, protected rules&lt;/td&gt;&lt;td&gt;&lt;code&gt;EffectGateway&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;&lt;code&gt;packages/tui&lt;/code&gt;&lt;/td&gt;&lt;td&gt;Noesis components built directly with &lt;code&gt;pi-tui&lt;/code&gt;&lt;/td&gt;&lt;td&gt;&lt;code&gt;NoesisApp&lt;/code&gt;&lt;/td&gt;&lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;plan-panel section-stack&quot; id=&quot;plan-build&quot; role=&quot;tabpanel&quot; aria-labelledby=&quot;tab-build&quot; hidden&gt;
+    &lt;div class=&quot;card&quot;&gt;
+      &lt;div class=&quot;text-muted&quot;&gt;Completion rule&lt;/div&gt;
+      &lt;div class=&quot;viz-stat-value&quot;&gt;One compounding loop, end to end&lt;/div&gt;
+      &lt;p class=&quot;summary-copy&quot;&gt;The iteration is complete only when ordinary work produces an inspectable trail, reflection creates an evidence-linked candidate, evaluation governs promotion, and a later trail demonstrably uses the promoted learning.&lt;/p&gt;
+    &lt;/div&gt;
+
+    &lt;div class=&quot;table-responsive&quot;&gt;
+      &lt;table class=&quot;table table-sm&quot;&gt;
+        &lt;thead&gt;
+          &lt;tr&gt;&lt;th&gt;Workstream&lt;/th&gt;&lt;th&gt;Build&lt;/th&gt;&lt;th&gt;Depends on&lt;/th&gt;&lt;th&gt;Done when&lt;/th&gt;&lt;/tr&gt;
+        &lt;/thead&gt;
+        &lt;tbody&gt;
+          &lt;tr&gt;&lt;td&gt;Contract spine&lt;/td&gt;&lt;td&gt;Strict TS event schemas, IDs, errors, clocks, principals, versioning&lt;/td&gt;&lt;td&gt;Nothing&lt;/td&gt;&lt;td&gt;Every subsystem communicates through validated domain events&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Pi boundary&lt;/td&gt;&lt;td&gt;&lt;code&gt;AgentHarness&lt;/code&gt; adapter, exact dependency pin, provider and credential wrapper&lt;/td&gt;&lt;td&gt;Contract spine&lt;/td&gt;&lt;td&gt;Fake and real providers run without leaking Pi types elsewhere&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Ledger&lt;/td&gt;&lt;td&gt;Write-ahead JSONL segments, checksums, replay, SQLite projections, FTS&lt;/td&gt;&lt;td&gt;Contract spine&lt;/td&gt;&lt;td&gt;Crash recovery reconstructs identical trail state&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Trail runtime&lt;/td&gt;&lt;td&gt;Start, resume, fork, steer, follow up, abort, compact, branch, recover&lt;/td&gt;&lt;td&gt;Pi boundary, ledger&lt;/td&gt;&lt;td&gt;Every transition is durable and replayable&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Effect gateway&lt;/td&gt;&lt;td&gt;Principal grants, effect classes, approvals, budgets, idempotency&lt;/td&gt;&lt;td&gt;Contract spine, ledger&lt;/td&gt;&lt;td&gt;All tools and background work fail closed through one boundary&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Artifact store&lt;/td&gt;&lt;td&gt;Content-addressed files, metadata, lineage, previews, references&lt;/td&gt;&lt;td&gt;Ledger&lt;/td&gt;&lt;td&gt;Outputs survive compaction and remain attributable&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Context compiler&lt;/td&gt;&lt;td&gt;Frozen turn snapshots, token budgets, provenance, redaction, staleness&lt;/td&gt;&lt;td&gt;Ledger, memory, capabilities&lt;/td&gt;&lt;td&gt;Every injected fragment is bounded and explainable&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Personal memory&lt;/td&gt;&lt;td&gt;Typed records, evidence, contradictions, supersession, Markdown projection&lt;/td&gt;&lt;td&gt;Ledger&lt;/td&gt;&lt;td&gt;User edits round-trip without losing provenance or history&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Capabilities&lt;/td&gt;&lt;td&gt;Tools and skill packages, versions, ownership, permissions, discovery&lt;/td&gt;&lt;td&gt;Effect gateway, artifact store&lt;/td&gt;&lt;td&gt;Candidate and active versions are isolated and reversible&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Reflection&lt;/td&gt;&lt;td&gt;Isolated reviewer principal, correction and recurrence triggers, proposals&lt;/td&gt;&lt;td&gt;Ledger, memory, capabilities&lt;/td&gt;&lt;td&gt;Reviewer can propose but cannot silently promote changes&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Evaluation&lt;/td&gt;&lt;td&gt;Historical replay, held-out cases, shadow runs, baseline comparison&lt;/td&gt;&lt;td&gt;Trail runtime, capabilities, reflection&lt;/td&gt;&lt;td&gt;Every promotion records evidence, predicted risks, and regressions&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Scheduler&lt;/td&gt;&lt;td&gt;Durable leases, isolated jobs, scoped grants, heartbeats, delivery log&lt;/td&gt;&lt;td&gt;Trail runtime, effect gateway&lt;/td&gt;&lt;td&gt;Restart-safe jobs never broaden their own permissions&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;TUI&lt;/td&gt;&lt;td&gt;Conversation, trail tree, context inspector, artifacts, memory, skills, evals&lt;/td&gt;&lt;td&gt;All read models; Pi TUI primitives&lt;/td&gt;&lt;td&gt;The full loop is operable without editing internal files&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Verification&lt;/td&gt;&lt;td&gt;Fake provider, virtual terminal, golden event fixtures, fault injection&lt;/td&gt;&lt;td&gt;All contracts&lt;/td&gt;&lt;td&gt;CI covers interruption, migration, denial, rollback, and deterministic replay&lt;/td&gt;&lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+
+    &lt;div class=&quot;card&quot;&gt;
+      &lt;div class=&quot;text-muted&quot;&gt;Acceptance journey&lt;/div&gt;
+      &lt;ol class=&quot;acceptance-list summary-copy&quot;&gt;
+        &lt;li&gt;Start Noesis, select a model, work with streaming tools, and inspect exactly which context and capability versions were used.&lt;/li&gt;
+        &lt;li&gt;Interrupt, restart, resume, and fork the trail without corrupting history or repeating unsafe effects.&lt;/li&gt;
+        &lt;li&gt;Finish useful work and receive separate memory, knowledge, and workflow proposals with source evidence.&lt;/li&gt;
+        &lt;li&gt;Turn a recurring workflow into a versioned candidate skill with permission manifest and generated regression cases.&lt;/li&gt;
+        &lt;li&gt;Replay the candidate against source failures and held-out trails; reject regressions and record negative results.&lt;/li&gt;
+        &lt;li&gt;Promote a passing candidate, use it in a later trail, measure the result, and roll it back from the TUI.&lt;/li&gt;
+        &lt;li&gt;Run the same loop as a background job under smaller grants, with heartbeats, budget limits, and an auditable delivery record.&lt;/li&gt;
+      &lt;/ol&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;plan-panel section-stack&quot; id=&quot;plan-learning&quot; role=&quot;tabpanel&quot; aria-labelledby=&quot;tab-learning&quot; hidden&gt;
+    &lt;svg class=&quot;lifecycle-svg&quot; viewBox=&quot;0 0 980 330&quot; role=&quot;img&quot; aria-labelledby=&quot;learning-title learning-desc&quot;&gt;
+      &lt;title id=&quot;learning-title&quot;&gt;Evidence-governed learning lifecycle&lt;/title&gt;
+      &lt;desc id=&quot;learning-desc&quot;&gt;A trace produces observations. Recurrence and corrections create a candidate. Replay and held-out evaluation determine whether the candidate is promoted, rejected, or revised. Active capabilities remain monitored and can roll back.&lt;/desc&gt;
+      &lt;defs&gt;
+        &lt;marker id=&quot;learning-arrow&quot; markerWidth=&quot;9&quot; markerHeight=&quot;9&quot; refX=&quot;7&quot; refY=&quot;3&quot; orient=&quot;auto&quot; markerUnits=&quot;strokeWidth&quot;&gt;
+          &lt;path d=&quot;M0,0 L0,6 L8,3 z&quot; fill=&quot;var(--border)&quot;&gt;&lt;/path&gt;
+        &lt;/marker&gt;
+      &lt;/defs&gt;
+      &lt;rect class=&quot;node observed&quot; x=&quot;24&quot; y=&quot;92&quot; width=&quot;150&quot; height=&quot;82&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;99&quot; y=&quot;124&quot; text-anchor=&quot;middle&quot; font-weight=&quot;500&quot;&gt;Experience&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;99&quot; y=&quot;150&quot; text-anchor=&quot;middle&quot;&gt;trace + outcome&lt;/text&gt;
+
+      &lt;path class=&quot;connector&quot; d=&quot;M174 133 L224 133&quot; marker-end=&quot;url(#learning-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;rect class=&quot;node observed&quot; x=&quot;226&quot; y=&quot;92&quot; width=&quot;160&quot; height=&quot;82&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;306&quot; y=&quot;124&quot; text-anchor=&quot;middle&quot; font-weight=&quot;500&quot;&gt;Observation&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;306&quot; y=&quot;150&quot; text-anchor=&quot;middle&quot;&gt;evidence + scope&lt;/text&gt;
+
+      &lt;path class=&quot;connector&quot; d=&quot;M386 133 L436 133&quot; marker-end=&quot;url(#learning-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;rect class=&quot;node candidate&quot; x=&quot;438&quot; y=&quot;92&quot; width=&quot;168&quot; height=&quot;82&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;522&quot; y=&quot;124&quot; text-anchor=&quot;middle&quot; font-weight=&quot;500&quot;&gt;Candidate&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;522&quot; y=&quot;150&quot; text-anchor=&quot;middle&quot;&gt;hypothesis + tests&lt;/text&gt;
+
+      &lt;path class=&quot;connector&quot; d=&quot;M606 133 L656 133&quot; marker-end=&quot;url(#learning-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;rect class=&quot;node evaluated&quot; x=&quot;658&quot; y=&quot;92&quot; width=&quot;144&quot; height=&quot;82&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;730&quot; y=&quot;124&quot; text-anchor=&quot;middle&quot; font-weight=&quot;500&quot;&gt;Evaluation&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;730&quot; y=&quot;150&quot; text-anchor=&quot;middle&quot;&gt;replay + held-out&lt;/text&gt;
+
+      &lt;path class=&quot;connector&quot; d=&quot;M802 133 L852 133&quot; marker-end=&quot;url(#learning-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;rect class=&quot;node active&quot; x=&quot;854&quot; y=&quot;92&quot; width=&quot;102&quot; height=&quot;82&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;905&quot; y=&quot;124&quot; text-anchor=&quot;middle&quot; font-weight=&quot;500&quot;&gt;Active&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;905&quot; y=&quot;150&quot; text-anchor=&quot;middle&quot;&gt;monitored&lt;/text&gt;
+
+      &lt;path class=&quot;connector&quot; d=&quot;M730 174 C730 236 640 252 604 252&quot; marker-end=&quot;url(#learning-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;rect class=&quot;node rejected&quot; x=&quot;420&quot; y=&quot;220&quot; width=&quot;184&quot; height=&quot;76&quot; rx=&quot;10&quot;&gt;&lt;/rect&gt;
+      &lt;text x=&quot;512&quot; y=&quot;250&quot; text-anchor=&quot;middle&quot; font-weight=&quot;500&quot;&gt;Reject or revise&lt;/text&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;512&quot; y=&quot;275&quot; text-anchor=&quot;middle&quot;&gt;negative result retained&lt;/text&gt;
+
+      &lt;path class=&quot;connector&quot; d=&quot;M905 174 C905 270 820 292 606 273&quot; marker-end=&quot;url(#learning-arrow)&quot;&gt;&lt;/path&gt;
+      &lt;text class=&quot;muted&quot; x=&quot;784&quot; y=&quot;280&quot; text-anchor=&quot;middle&quot;&gt;regression → rollback&lt;/text&gt;
+    &lt;/svg&gt;
+
+    &lt;div class=&quot;table-responsive&quot;&gt;
+      &lt;table class=&quot;table table-sm&quot;&gt;
+        &lt;thead&gt;
+          &lt;tr&gt;&lt;th&gt;Learning product&lt;/th&gt;&lt;th&gt;Schema&lt;/th&gt;&lt;th&gt;Promotion evidence&lt;/th&gt;&lt;th&gt;Context behavior&lt;/th&gt;&lt;/tr&gt;
+        &lt;/thead&gt;
+        &lt;tbody&gt;
+          &lt;tr&gt;&lt;td&gt;Personal memory&lt;/td&gt;&lt;td&gt;Claim, preference, goal, commitment, relationship&lt;/td&gt;&lt;td&gt;Explicit statement or repeated corroboration&lt;/td&gt;&lt;td&gt;Retrieved by scope; never declared universally authoritative&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Knowledge&lt;/td&gt;&lt;td&gt;Fact, model, source, confidence, validity window&lt;/td&gt;&lt;td&gt;Source quality and contradiction checks&lt;/td&gt;&lt;td&gt;Cited or linked to durable artifacts&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Procedure&lt;/td&gt;&lt;td&gt;Skill package, contract, examples, effects, failure modes&lt;/td&gt;&lt;td&gt;Replay and held-out behavioral improvement&lt;/td&gt;&lt;td&gt;Progressive disclosure; active version pinned per turn&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Harness change&lt;/td&gt;&lt;td&gt;Bounded code or policy diff with predicted impact&lt;/td&gt;&lt;td&gt;Regression suite plus shadow execution&lt;/td&gt;&lt;td&gt;Promoted only outside the mutable worker&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td&gt;Human learning&lt;/td&gt;&lt;td&gt;Question, mental model, practice and transfer evidence&lt;/td&gt;&lt;td&gt;Delayed recall, explanation, prediction, transfer&lt;/td&gt;&lt;td&gt;Teaching contract selected by the user&lt;/td&gt;&lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+
+    &lt;div class=&quot;card&quot;&gt;
+      &lt;div class=&quot;text-muted&quot;&gt;Separate principals&lt;/div&gt;
+      &lt;p class=&quot;summary-copy&quot;&gt;&lt;code&gt;foreground&lt;/code&gt; may act with approved user grants; &lt;code&gt;reflector&lt;/code&gt; may read traces and write proposals; &lt;code&gt;evaluator&lt;/code&gt; may run sandboxes and record scores; &lt;code&gt;promoter&lt;/code&gt; may activate qualified versions; &lt;code&gt;scheduler&lt;/code&gt; receives job-scoped, expiring grants. None may silently widen its own authority.&lt;/p&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;section class=&quot;plan-panel section-stack&quot; id=&quot;plan-decisions&quot; role=&quot;tabpanel&quot; aria-labelledby=&quot;tab-decisions&quot; hidden&gt;
+    &lt;div class=&quot;table-responsive&quot;&gt;
+      &lt;table class=&quot;table table-sm&quot;&gt;
+        &lt;thead&gt;
+          &lt;tr&gt;&lt;th&gt;Decision&lt;/th&gt;&lt;th&gt;Adopt&lt;/th&gt;&lt;th&gt;Do not copy&lt;/th&gt;&lt;th&gt;Noesis position&lt;/th&gt;&lt;/tr&gt;
+        &lt;/thead&gt;
+        &lt;tbody&gt;
+          &lt;tr&gt;&lt;td class=&quot;decision-label&quot;&gt;Pi boundary&lt;/td&gt;&lt;td&gt;Provider stream, typed tool loop, turn snapshots, generic sessions&lt;/td&gt;&lt;td&gt;Coding-agent SDK as the product kernel&lt;/td&gt;&lt;td&gt;Use generic &lt;code&gt;AgentHarness&lt;/code&gt; through one adapter package&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td class=&quot;decision-label&quot;&gt;TUI&lt;/td&gt;&lt;td&gt;&lt;code&gt;pi-tui&lt;/code&gt; rendering, editor, overlays, virtual terminal&lt;/td&gt;&lt;td&gt;Pi &lt;code&gt;InteractiveMode&lt;/code&gt; navigation and coding assumptions&lt;/td&gt;&lt;td&gt;Build a distinct Noesis trail-and-artifact interface&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td class=&quot;decision-label&quot;&gt;Hermes memory&lt;/td&gt;&lt;td&gt;Readable files, frozen snapshots, locks, atomic writes, drift detection&lt;/td&gt;&lt;td&gt;Flat strings, inject-everything, inferred memory as authority&lt;/td&gt;&lt;td&gt;Typed evidence records with Markdown as editable projection&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td class=&quot;decision-label&quot;&gt;Hermes reflection&lt;/td&gt;&lt;td&gt;Isolated reviewer with reduced tools and provenance&lt;/td&gt;&lt;td&gt;Cadence-only trigger and pressure to always mutate&lt;/td&gt;&lt;td&gt;Trigger on corrections, recurrence, surprise, outcome, or explicit request&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td class=&quot;decision-label&quot;&gt;Hermes skills&lt;/td&gt;&lt;td&gt;Packages, progressive disclosure, ownership, archival&lt;/td&gt;&lt;td&gt;Immediate activation and usage count as value&lt;/td&gt;&lt;td&gt;Candidate → replay → shadow → promotion → monitored revision&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td class=&quot;decision-label&quot;&gt;Codex rollouts&lt;/td&gt;&lt;td&gt;Append-only event history, resumability, compact projections&lt;/td&gt;&lt;td&gt;Coding-specific event semantics as domain truth&lt;/td&gt;&lt;td&gt;Noesis event vocabulary with Pi/Codex-style projections&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td class=&quot;decision-label&quot;&gt;Storage&lt;/td&gt;&lt;td&gt;Files for audit and ownership; SQLite for query and views&lt;/td&gt;&lt;td&gt;One mutable database as the only history&lt;/td&gt;&lt;td&gt;JSONL source of truth, SQLite rebuildable, artifacts content-addressed&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td class=&quot;decision-label&quot;&gt;Extensibility&lt;/td&gt;&lt;td&gt;Declarative skills and trusted developer adapters&lt;/td&gt;&lt;td&gt;Generated in-process TypeScript extensions&lt;/td&gt;&lt;td&gt;Generated code runs out of process behind the effect gateway&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td class=&quot;decision-label&quot;&gt;Security&lt;/td&gt;&lt;td&gt;Explicit grants, audit, safe defaults, protected evaluator&lt;/td&gt;&lt;td&gt;Tool-name checks or fail-open fallbacks&lt;/td&gt;&lt;td&gt;Enforce effects beneath every tool and fail closed&lt;/td&gt;&lt;/tr&gt;
+          &lt;tr&gt;&lt;td class=&quot;decision-label&quot;&gt;Model learning&lt;/td&gt;&lt;td&gt;Trace export, study-set generation, adapter hooks&lt;/td&gt;&lt;td&gt;Weights as the personal system of record&lt;/td&gt;&lt;td&gt;Foundation supports later training without coupling runtime truth to it&lt;/td&gt;&lt;/tr&gt;
+        &lt;/tbody&gt;
+      &lt;/table&gt;
+    &lt;/div&gt;
+
+    &lt;div class=&quot;card&quot;&gt;
+      &lt;div class=&quot;text-muted&quot;&gt;Technical baseline&lt;/div&gt;
+      &lt;pre class=&quot;workspace-tree&quot;&gt;&lt;code&gt;TypeScript 5.9 · strict · ESM · Node ≥22.19
+pnpm workspace · Vitest · Zod schemas
+@earendil-works/pi-ai 0.80.6
+@earendil-works/pi-agent-core 0.80.6
+@earendil-works/pi-tui 0.80.6
+JSONL journal · node:sqlite projections · Markdown views
+exact dependency pins · migrations from the first commit&lt;/code&gt;&lt;/pre&gt;
+    &lt;/div&gt;
+
+    &lt;div class=&quot;card&quot;&gt;
+      &lt;div class=&quot;text-muted&quot;&gt;Research references&lt;/div&gt;
+      &lt;ul class=&quot;source-list summary-copy&quot;&gt;
+        &lt;li&gt;Pi SDK and local &lt;code&gt;pi-mono&lt;/code&gt;: generic harness, turn snapshots, tools, sessions, TUI.&lt;/li&gt;
+        &lt;li&gt;Hermes: file-backed memory, isolated reflection, skill packages, curator lifecycle, scheduling.&lt;/li&gt;
+        &lt;li&gt;Codex: rollout/event history, memory derivation, compaction, resumability, approval boundaries.&lt;/li&gt;
+        &lt;li&gt;Harness and continual-learning research: evidence-bound mutation, traces as substrate, protected evaluators.&lt;/li&gt;
+      &lt;/ul&gt;
+    &lt;/div&gt;
+  &lt;/section&gt;
+
+  &lt;script&gt;
+    (() =&gt; {
+      const root = document.getElementById(&quot;noesis-plan&quot;);
+      const tabs = Array.from(root.querySelectorAll(&#x27;[role=&quot;tab&quot;]&#x27;));
+      const panels = Array.from(root.querySelectorAll(&#x27;[role=&quot;tabpanel&quot;]&#x27;));
+
+      const activate = (tab) =&gt; {
+        const targetId = tab.dataset.panel;
+        for (const candidate of tabs) {
+          const selected = candidate === tab;
+          candidate.setAttribute(&quot;aria-selected&quot;, String(selected));
+          candidate.classList.toggle(&quot;btn-primary&quot;, selected);
+        }
+        for (const panel of panels) {
+          panel.hidden = panel.id !== targetId;
+        }
+      };
+
+      for (const tab of tabs) {
+        tab.addEventListener(&quot;click&quot;, () =&gt; activate(tab));
+      }
+    })();
+  &lt;/script&gt;
+&lt;/div&gt;
+
+&lt;script src=&quot;https://unpkg.com/@floating-ui/core@1.7.3/dist/floating-ui.core.umd.min.js&quot;&gt;&lt;/script&gt;
+&lt;script src=&quot;https://unpkg.com/@floating-ui/dom@1.7.4/dist/floating-ui.dom.umd.min.js&quot;&gt;&lt;/script&gt;
+&lt;script&gt;
+(() =&gt; {
+  if (window.FloatingUIDOM == null) {
+    return;
+  }
+  const { autoUpdate, computePosition, flip, offset, shift, size } =
+    window.FloatingUIDOM;
+  const tooltipPlacements = new Set([&quot;top&quot;, &quot;right&quot;, &quot;bottom&quot;, &quot;left&quot;]);
+  const tooltipId = `codex-visualization-tooltip-${
+    window.crypto?.randomUUID?.() ?? Date.now().toString(36)
+  }`;
+  const tooltipGap = 5;
+  const hoverDelay = 700;
+  const skipDelay = 300;
+  let activeTrigger = null;
+  let pendingTrigger = null;
+  let tooltip = null;
+  let openTimeout = null;
+  let autoUpdateCleanup = null;
+  let positionRequest = 0;
+  let skipDelayUntil = 0;
+
+  const getTrigger = (target) =&gt;
+    target?.nodeType === Node.ELEMENT_NODE
+      ? target.closest(&quot;[data-tooltip]&quot;)
+      : null;
+  const containsTarget = (trigger, target) =&gt;
+    target?.nodeType != null &amp;&amp; trigger.contains(target);
+  const getContent = (trigger) =&gt;
+    trigger.getAttribute(&quot;data-tooltip&quot;)?.trim() ?? &quot;&quot;;
+  const getPlacement = (trigger) =&gt; {
+    const placement = trigger.getAttribute(&quot;data-tooltip-placement&quot;);
+    return tooltipPlacements.has(placement) ? placement : &quot;top&quot;;
+  };
+  const getTooltip = () =&gt; {
+    if (tooltip == null) {
+      tooltip = document.createElement(&quot;div&quot;);
+      tooltip.id = tooltipId;
+      tooltip.className = &quot;tooltip&quot;;
+      tooltip.setAttribute(&quot;role&quot;, &quot;tooltip&quot;);
+    }
+    return tooltip;
+  };
+  const setDescribedBy = (trigger, described) =&gt; {
+    const ids = new Set(
+      (trigger.getAttribute(&quot;aria-describedby&quot;) ?? &quot;&quot;)
+        .split(/\s+/)
+        .filter(Boolean),
+    );
+    if (described) {
+      ids.add(tooltipId);
+    } else {
+      ids.delete(tooltipId);
+    }
+    if (ids.size === 0) {
+      trigger.removeAttribute(&quot;aria-describedby&quot;);
+    } else {
+      trigger.setAttribute(&quot;aria-describedby&quot;, [...ids].join(&quot; &quot;));
+    }
+  };
+  const clearOpenTimeout = () =&gt; {
+    if (openTimeout != null) {
+      window.clearTimeout(openTimeout);
+      openTimeout = null;
+    }
+    pendingTrigger = null;
+  };
+  const closeTooltip = (activateSkipDelay = true) =&gt; {
+    clearOpenTimeout();
+    positionRequest += 1;
+    autoUpdateCleanup?.();
+    autoUpdateCleanup = null;
+    if (activeTrigger == null) {
+      return;
+    }
+    setDescribedBy(activeTrigger, false);
+    activeTrigger = null;
+    tooltip?.remove();
+    if (activateSkipDelay) {
+      skipDelayUntil = Date.now() + skipDelay;
+    }
+  };
+  const updatePosition = (trigger, floating) =&gt; {
+    const request = ++positionRequest;
+    void computePosition(trigger, floating, {
+      middleware: [
+        offset(tooltipGap),
+        flip({ padding: tooltipGap }),
+        shift({ padding: tooltipGap }),
+        size({
+          padding: tooltipGap,
+          apply({ availableHeight, availableWidth, elements }) {
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-width&quot;,
+              `${Math.max(0, availableWidth)}px`,
+            );
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-height&quot;,
+              `${Math.max(0, availableHeight)}px`,
+            );
+          },
+        }),
+      ],
+      placement: getPlacement(trigger),
+      strategy: &quot;fixed&quot;,
+    })
+      .then(({ x, y }) =&gt; {
+        if (activeTrigger !== trigger || request !== positionRequest) {
+          return;
+        }
+        const scale = window.devicePixelRatio || 1;
+        floating.style.transform = `translate(${Math.round(x * scale) / scale}px, ${Math.round(y * scale) / scale}px)`;
+        floating.style.visibility = &quot;visible&quot;;
+      })
+      .catch(() =&gt; {
+        if (activeTrigger === trigger &amp;&amp; request === positionRequest) {
+          closeTooltip(false);
+        }
+      });
+  };
+  const openTooltip = (trigger) =&gt; {
+    const content = getContent(trigger);
+    if (!trigger.isConnected || content.length === 0) {
+      return;
+    }
+    clearOpenTimeout();
+    if (activeTrigger === trigger) {
+      return;
+    }
+    closeTooltip();
+    const floating = getTooltip();
+    floating.textContent = content;
+    floating.style.visibility = &quot;hidden&quot;;
+    floating.style.transform = &quot;translate(0, 0)&quot;;
+    document.body.appendChild(floating);
+    activeTrigger = trigger;
+    setDescribedBy(trigger, true);
+    autoUpdateCleanup = autoUpdate(trigger, floating, () =&gt; {
+      updatePosition(trigger, floating);
+    });
+  };
+  const requestOpen = (trigger, immediate = false) =&gt; {
+    if (
+      getContent(trigger).length === 0 ||
+      activeTrigger === trigger ||
+      pendingTrigger === trigger
+    ) {
+      return;
+    }
+    clearOpenTimeout();
+    pendingTrigger = trigger;
+    const delay =
+      immediate || activeTrigger != null || Date.now() &lt; skipDelayUntil
+        ? 0
+        : hoverDelay;
+    if (delay === 0) {
+      openTooltip(trigger);
+      return;
+    }
+    openTimeout = window.setTimeout(() =&gt; {
+      openTimeout = null;
+      pendingTrigger = null;
+      openTooltip(trigger);
+    }, delay);
+  };
+  const handlePointerOpen = (event) =&gt; {
+    if (event.pointerType === &quot;touch&quot;) {
+      return;
+    }
+    const trigger = getTrigger(event.target);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    requestOpen(trigger);
+  };
+  const handleLeave = (event) =&gt; {
+    const trigger = getTrigger(event.target);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const handleFocusIn = (event) =&gt; {
+    const trigger = getTrigger(event.target);
+    if (trigger?.matches(&quot;:focus-visible&quot;)) {
+      requestOpen(trigger, true);
+    }
+  };
+  const handleKeyDown = (event) =&gt; {
+    if (event.key === &quot;Escape&quot;) {
+      closeTooltip();
+    }
+  };
+  const handleContextMenu = (event) =&gt; {
+    const trigger = getTrigger(event.target);
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const destroy = () =&gt; {
+    closeTooltip(false);
+    document.removeEventListener(&quot;pointerover&quot;, handlePointerOpen);
+    document.removeEventListener(&quot;pointerout&quot;, handleLeave);
+    document.removeEventListener(&quot;focusin&quot;, handleFocusIn);
+    document.removeEventListener(&quot;focusout&quot;, handleLeave);
+    document.removeEventListener(&quot;keydown&quot;, handleKeyDown);
+    document.removeEventListener(&quot;contextmenu&quot;, handleContextMenu);
+    tooltip = null;
+  };
+
+  document.addEventListener(&quot;pointerover&quot;, handlePointerOpen);
+  document.addEventListener(&quot;pointerout&quot;, handleLeave);
+  document.addEventListener(&quot;focusin&quot;, handleFocusIn);
+  document.addEventListener(&quot;focusout&quot;, handleLeave);
+  document.addEventListener(&quot;keydown&quot;, handleKeyDown);
+  document.addEventListener(&quot;contextmenu&quot;, handleContextMenu);
+  window.addEventListener(&quot;pagehide&quot;, destroy, { once: true });
+})();
+&lt;/script&gt;
+&lt;script id=&quot;codex-visualization-lucide&quot; async src=&quot;https://unpkg.com/lucide@1.17.0/dist/umd/lucide.js&quot;&gt;&lt;/script&gt;
+&lt;script&gt;
+(() =&gt; {
+  const initialize = () =&gt; {
+    globalThis.lucide?.createIcons({ attrs: { width: 16, height: 16 } });
+  };
+  if (globalThis.lucide != null) {
+    initialize();
+    return;
+  }
+  document
+    .getElementById(&quot;codex-visualization-lucide&quot;)
+    ?.addEventListener(&quot;load&quot;, initialize, { once: true });
+})();
+&lt;/script&gt;
+
+&lt;/body&gt;
+&lt;/html&gt;
+"></iframe>
+</body>
+</html>

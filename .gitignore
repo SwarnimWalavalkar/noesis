@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.noesis/
+.noesis-demo/
+coverage/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+.idea/
+.vscode/
+test-results/

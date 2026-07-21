@@ -1,0 +1,16 @@
+{
+  "name": "@noesis/tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "0.80.6",
+    "@noesis/domain": "workspace:*",
+    "@noesis/learning": "workspace:*",
+    "@noesis/context": "workspace:*",
+    "@noesis/runtime": "workspace:*"
+  }
+}
