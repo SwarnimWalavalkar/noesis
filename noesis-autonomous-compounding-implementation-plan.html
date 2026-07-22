@@ -1,0 +1,1185 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Noesis Autonomous Compounding — Implementation Plan</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0e14;
+      --panel: #121722;
+      --panel-2: #171d2a;
+      --text: #eef2f7;
+      --muted: #9ba7b8;
+      --line: #2a3445;
+      --accent: #90e0c1;
+      --accent-2: #9db9ff;
+      --warn: #ffd58a;
+      --danger: #ff9f9f;
+      --good: #a9e99f;
+      --radius: 12px;
+      --measure: 78rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 15px;
+      line-height: 1.58;
+    }
+    a { color: var(--accent-2); }
+    a:focus-visible,
+    summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+      border-radius: 3px;
+    }
+    code {
+      color: var(--accent);
+      overflow-wrap: anywhere;
+    }
+    pre {
+      margin: 0;
+      padding: 1rem;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #090c11;
+      color: #dce5f1;
+    }
+    h1, h2, h3 { line-height: 1.2; text-wrap: balance; }
+    h1 { margin: 0; font-size: clamp(2rem, 6vw, 4.8rem); letter-spacing: -0.06em; }
+    h2 { margin-top: 0; font-size: clamp(1.4rem, 3vw, 2.1rem); }
+    h3 { margin-bottom: .4rem; font-size: 1rem; color: var(--accent); }
+    p { max-width: 76ch; }
+    ul, ol { padding-left: 1.3rem; }
+    li + li { margin-top: .3rem; }
+    header,
+    main,
+    footer {
+      width: min(calc(100% - 2rem), var(--measure));
+      margin-inline: auto;
+    }
+    header { padding: clamp(3rem, 8vw, 7rem) 0 2rem; }
+    main { padding-bottom: 5rem; }
+    footer {
+      padding: 2rem 0 4rem;
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+    }
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-block: 1px solid var(--line);
+      background: color-mix(in srgb, var(--bg) 94%, transparent);
+      backdrop-filter: blur(10px);
+    }
+    nav ul {
+      width: min(calc(100% - 2rem), var(--measure));
+      margin: 0 auto;
+      padding: .75rem 0;
+      display: flex;
+      gap: 1rem;
+      list-style: none;
+      overflow-x: auto;
+    }
+    nav a { white-space: nowrap; text-decoration: none; color: var(--muted); }
+    nav a:hover { color: var(--text); }
+    section {
+      margin-top: 1.25rem;
+      padding: clamp(1.1rem, 3vw, 2rem);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      scroll-margin-top: 5rem;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: .7rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { color: var(--accent); font-size: .82rem; text-transform: uppercase; letter-spacing: .04em; }
+    .eyebrow { color: var(--accent); text-transform: uppercase; letter-spacing: .14em; font-weight: 700; }
+    .lede { max-width: 66ch; color: var(--muted); font-size: clamp(1rem, 2vw, 1.25rem); }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 1rem; }
+    .card {
+      grid-column: span 4;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--panel-2);
+    }
+    .card p { margin-bottom: 0; color: var(--muted); }
+    .wide { grid-column: span 6; }
+    .full { grid-column: 1 / -1; }
+    .pill {
+      display: inline-block;
+      margin: .15rem .2rem .15rem 0;
+      padding: .15rem .5rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: .8rem;
+    }
+    .callout {
+      padding: 1rem;
+      border-left: 3px solid var(--accent);
+      background: var(--panel-2);
+    }
+    .warning { border-left-color: var(--warn); }
+    .danger { border-left-color: var(--danger); }
+    .good { border-left-color: var(--good); }
+    .muted { color: var(--muted); }
+    .phase { color: var(--accent-2); font-weight: 700; }
+    .task {
+      padding: 1rem 0;
+      border-top: 1px solid var(--line);
+    }
+    .task:first-of-type { border-top: 0; }
+    .task h3 { display: flex; gap: .7rem; align-items: baseline; color: var(--text); }
+    .task-id { color: var(--accent); min-width: 4rem; }
+    .task dl { display: grid; grid-template-columns: 8rem 1fr; gap: .35rem 1rem; }
+    .task dt { color: var(--muted); }
+    .task dd { margin: 0; }
+    details { border-top: 1px solid var(--line); padding: .8rem 0; }
+    summary { cursor: pointer; color: var(--accent-2); }
+    .scroll { overflow-x: auto; }
+    @media (max-width: 820px) {
+      .card, .wide { grid-column: 1 / -1; }
+      .task dl { grid-template-columns: 1fr; }
+      .task dt { margin-top: .5rem; }
+      table { min-width: 48rem; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print {
+      :root { color-scheme: light; --bg: white; --panel: white; --panel-2: #f5f5f5; --text: #111; --muted: #444; --line: #bbb; }
+      nav { display: none; }
+      section { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="eyebrow">Noesis · research preview blueprint</div>
+    <h1>Autonomous compounding</h1>
+    <p class="lede">
+      A single integrated build that turns ordinary work into evidence, uses LLMs to author coupled prompt,
+      skill, tool, toolset, and routing improvements, tests them in fast comparative loops, activates convincing
+      low-risk capability revisions automatically, and keeps every experiment inspectable and reversible.
+    </p>
+    <span class="pill">research preview</span>
+    <span class="pill">workspace-native persistence</span>
+    <span class="pill">Pi adapter only</span>
+    <span class="pill">LLM-native experiments</span>
+  </header>
+
+  <nav aria-label="Plan sections">
+    <ul>
+      <li><a href="#thesis">Thesis</a></li>
+      <li><a href="#research">Research posture</a></li>
+      <li><a href="#gaps">Current gaps</a></li>
+      <li><a href="#architecture">Architecture</a></li>
+      <li><a href="#contracts">Types &amp; boundaries</a></li>
+      <li><a href="#lifecycle">Lifecycle</a></li>
+      <li><a href="#evaluation">Evaluation</a></li>
+      <li><a href="#autonomy">Autonomy</a></li>
+      <li><a href="#ux">UX</a></li>
+      <li><a href="#dag">Task DAG</a></li>
+      <li><a href="#verification">Verification</a></li>
+      <li><a href="#done">Done</a></li>
+    </ul>
+  </nav>
+
+  <main>
+    <section id="thesis">
+      <h2>Product thesis</h2>
+      <div class="callout good">
+        <strong>Magic on the surface; evidence underneath.</strong>
+        Noesis should become better during normal use without asking the user to operate a learning pipeline.
+        The user may inspect, guide, veto, pin, approve authority expansion, or revert an active revision at any time.
+      </div>
+      <div class="grid">
+        <article class="card">
+          <h3>LLMs do semantic work</h3>
+          <p>Signal interpretation, reflection, hypothesis formation, capability-revision authoring, case generation, judging, revision, and explanation.</p>
+        </article>
+        <article class="card">
+          <h3>Code holds thin rails</h3>
+          <p>Transactional operational state, file revisions, provenance, authority, bounded execution, activation, and reversion remain dependable while research objects evolve quickly.</p>
+        </article>
+        <article class="card">
+          <h3>Stable capability, evolvable revisions</h3>
+          <p>A <code>Capability</code> names a learned behavior; each <code>CapabilityRevision</code> couples its concrete prompt, skill, tools, router, activation, and permission implementation.</p>
+        </article>
+      </div>
+      <pre aria-label="Autonomous learning lifecycle">ordinary work
+  → evidence signals
+  → LLM reflection: no_change | experiment brief
+  → candidate CapabilityRevision authored
+  → lightweight preflight against the baseline revision
+  → low-risk automatic activation
+  → open experiment gathers real-world feedback
+  → keep, revise, or revert</pre>
+    </section>
+
+    <section id="research">
+      <h2>Research-preview posture</h2>
+      <div class="callout good">
+        <strong>Optimize for learning velocity.</strong>
+        Noesis is a research system before it is a hardened platform. Prefer the smallest credible experiment that can
+        produce a trace, a comparison, and a user-visible result. Harden a seam after evidence shows it matters.
+      </div>
+      <div class="grid">
+        <article class="card">
+          <h3>LLM-pilled by default</h3>
+          <p>Use capable models for interpretation, search planning, hypothesis formation, capability-revision authoring, case generation, judging, routing, explanation, and revision. Deterministic code supports the loop; it does not replace semantic intelligence.</p>
+        </article>
+        <article class="card">
+          <h3>Experiments are products</h3>
+          <p>Every research idea should be runnable against a baseline, preserve its prompt/model/policy choices, and produce comparable traces and artifacts that can inform the next experiment.</p>
+        </article>
+        <article class="card">
+          <h3>Rigidity must earn its keep</h3>
+          <p>Internal TypeScript objects evolve freely. Add validation, versioning, packages, statistical ceremony, or stronger isolation only at a real boundary or when an experiment demonstrates the need.</p>
+        </article>
+      </div>
+      <h3>First-class experiment seams</h3>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Axis</th><th>Swappable variants</th><th>Comparable evidence</th></tr></thead>
+          <tbody>
+            <tr><td>LLM roles</td><td>Prompts, models, reasoning levels, context policies, structured-output repair</td><td>Role inputs/outputs, usage, latency, failures, downstream quality</td></tr>
+            <tr><td>History intelligence</td><td>Lexical, semantic, LLM search planning/reranking, summarization, citation selection</td><td>Retrieval recall, citation precision, context cost, task outcome</td></tr>
+            <tr><td>Capability routing</td><td>Prompt routers, model routers, tool-choice policies, abstention and composition strategies</td><td>Activation quality, tool success, cost, user correction</td></tr>
+            <tr><td>Evaluation</td><td>Case generators, rubrics, judges, critics, aggregators, sampling policies</td><td>Arm-level trials, judgments, disagreements, later real-world outcomes</td></tr>
+            <tr><td>Generated tools</td><td>Code-author prompts, languages, dependency policies, local or isolated runtime backends</td><td>Fixtures, traces, failures, effects, latency, artifact quality</td></tr>
+            <tr><td>Activation and outcomes</td><td>Preflight policies, risk policies, feedback interpretation, keep/revise/revert rules</td><td>Activation decision, observed gain, regressions, experiment outcome, recovery</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <pre>interface ResearchExperimentRun {
+  experimentId: string;
+  question: string;
+  axis: "role" | "retrieval" | "routing" | "evaluation" | "tool_runtime" | "activation";
+  baselineVariant: ExperimentVariantRef;
+  candidateVariants: readonly ExperimentVariantRef[];
+  inputRefs: readonly ArtifactRef[];
+  trialRefs: readonly ArtifactRef[];
+  comparisonRef?: ArtifactRef;
+  status: "planned" | "running" | "completed" | "failed";
+}</pre>
+      <p>
+        A variant is configuration, not a new subsystem: prompt file revision, model assignment, strategy ID, runtime backend,
+        and policy parameters. SQLite records the experiment lifecycle and points to ordinary input, output, and comparison
+        files. The TUI can compare runs without turning research code into permanent architecture.
+      </p>
+    </section>
+
+    <section id="gaps">
+      <h2>Verified current gaps</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Current behavior</th><th>Anchor</th><th>Required replacement</th></tr></thead>
+          <tbody>
+            <tr><td>Current code models memory, knowledge, and workflow suggestions plus four lifecycle states.</td><td><code>packages/domain/src/index.ts:13-57</code></td><td>Capabilities, concrete revisions, durable experiments, feedback signals, activation, pins, vetoes, and outcomes.</td></tr>
+            <tr><td>Current reflection always fabricates the same three suggestions from the last turn.</td><td><code>packages/learning/src/index.ts:23-69</code></td><td>Cross-session LLM reflection with a valid no-change outcome or evidence-linked experiment brief.</td></tr>
+            <tr><td>Only declarative read-only workflow skills can be candidates.</td><td><code>packages/learning/src/index.ts:72-88</code></td><td>Coupled capability revisions spanning prompt, skill, executable tool, and router.</td></tr>
+            <tr><td>Evaluation concatenates instructions and input, then substring scores.</td><td><code>packages/evals/src/index.ts:33-36,73-103</code></td><td>Real paired baseline/candidate trials and blinded LLM judges.</td></tr>
+            <tr><td>One static held-out case.</td><td><code>packages/evals/src/index.ts:38-57</code></td><td>Source, transfer, negative-activation, adversarial, user, and protected suites.</td></tr>
+            <tr><td>Learning, evaluation, and activation require manual commands.</td><td><code>packages/tui/src/index.ts:1382-1424</code></td><td>Durable ambient coordinator and optional resident worker.</td></tr>
+            <tr><td>All active capabilities are injected into every turn.</td><td><code>packages/runtime/src/index.ts:322-373</code></td><td>LLM-assisted routing frozen in one activation snapshot.</td></tr>
+            <tr><td>Capability monitoring records only a completion reference.</td><td><code>packages/capabilities/src/index.ts:260-273</code></td><td>Continuous feedback attribution and keep/revise/revert experiment outcomes.</td></tr>
+            <tr><td>One hardcoded protected prompt sentence.</td><td><code>packages/runtime/src/index.ts:328-335</code></td><td>Protected kernel, user constitution, learned profile, capability, retrieval layers.</td></tr>
+            <tr><td>Pi exposes only snapshot inspection.</td><td><code>packages/runtime-pi/src/index.ts:207-280</code></td><td>Generic Noesis agent contract, generated tool bridge, session tools.</td></tr>
+            <tr><td>FTS table exists without public session-search API.</td><td><code>current SQLite migration:58</code></td><td>Hybrid FTS + local embeddings + LLM rerank with exact citations.</td></tr>
+            <tr><td>Idempotency lookup matches a key alone.</td><td><code>packages/policy/src/index.ts:126-184</code></td><td>Bind the key to the effect class, resource, actor, and request identity before autonomous work.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="muted">A one-time workspace migration imports current history into SQLite, writes declarative material to its canonical files, and then stops dual-writing. Every datum has one declared authority.</p>
+    </section>
+
+    <section id="architecture">
+      <h2>Deep modules with earned boundaries</h2>
+      <p>
+        A concept starts as a package-local file beside its first consumer. It becomes a package only when multiple real
+        consumers need a stable boundary or the runtime needs independent process ownership. This keeps the research loop
+        malleable without collapsing the important Pi, workspace, authority, and generated-code boundaries.
+      </p>
+      <div class="grid">
+        <article class="card wide">
+          <h3><code>@noesis/workspace</code></h3>
+          <p><code>WorkspaceStore</code> owns SQLite transactions and migrations, canonical file locations, file revision/activity metadata, artifact metadata, backups, and the one-authority-per-datum rules.</p>
+        </article>
+        <article class="card wide">
+          <h3><code>@noesis/agent-types</code></h3>
+          <p>Small adapter-neutral types and ports for model roles, tools, traces, usage, and experiments. AC-00 creates the package from the needs of the parallel foundation consumers; later tasks extend it only through a shared metadata barrier. It imports no Pi types.</p>
+        </article>
+        <article class="card wide">
+          <h3><code>@noesis/intelligence</code></h3>
+          <p>Hybrid history search over authoritative SQLite session/message/tool/outcome rows and canonical file revisions. FTS, embedding, and search-document rows are rebuildable indexes that always cite those canonical sources.</p>
+        </article>
+        <article class="card wide">
+          <h3><code>@noesis/tool-runtime</code></h3>
+          <p>Out-of-process generated code host, exact dependency locks, schemas, resource limits, and <code>EffectGateway</code> mediation.</p>
+        </article>
+        <article class="card wide">
+          <h3><code>@noesis/background</code></h3>
+          <p>Created only when runtime and the resident worker both consume durable work orchestration; until then, opportunistic coordination stays inside runtime.</p>
+        </article>
+        <article class="card">
+          <h3><code>@noesis/learning</code></h3>
+          <p>Signals, LLM reflection, hypotheses, experiment briefs, source cases, and capability-revision authoring.</p>
+        </article>
+        <article class="card">
+          <h3><code>@noesis/evals</code></h3>
+          <p>Generated cases, paired trials, a swappable judge/critic, protected gates, comparison reports, and optional advanced policies.</p>
+        </article>
+        <article class="card">
+          <h3><code>@noesis/capabilities</code></h3>
+          <p>Stable capability identities, candidate and active revisions, activation policies, pins, vetoes, and SQLite activation pointers.</p>
+        </article>
+        <article class="card">
+          <h3><code>@noesis/runtime-pi</code></h3>
+          <p>The only Pi import boundary. Implements foreground and isolated role execution plus the generated-tool adapter.</p>
+        </article>
+        <article class="card">
+          <h3><code>@noesis/runtime</code></h3>
+          <p>Adapter-neutral turn orchestration, frozen intelligence plans, coordinator, activation decisions, experiment outcomes, and continuous feedback.</p>
+        </article>
+        <article class="card">
+          <h3><code>@noesis/tui</code></h3>
+          <p>Ephemeral read models: chat, learning activity, changes, evidence, experiments, approval, pin, veto, and revert.</p>
+        </article>
+      </div>
+      <div class="callout danger">
+        Generated behavior can propose arbitrary tool code and mutable prompt layers, but cannot modify the protected kernel,
+        authority, workspace ownership rules, activation rails, evaluation evidence, or its own permission manifest. Evaluation strategies are experimental;
+        the separation between generated revision authorship and protected activation authority is not.
+      </div>
+      <h3>Fixed dependency direction and composition root</h3>
+      <pre>domain + agent-types
+  ← workspace / intelligence / capabilities / policy / config
+  ← learning / evals / tool-runtime / background
+  ← runtime
+
+runtime-pi → agent-types + Pi packages
+tui        → runtime read models
+apps/noesis → runtime + runtime-pi + tui</pre>
+      <p>
+        <code>apps/noesis</code> is the composition root and injects the Pi adapter into the adapter-neutral runtime.
+        <code>packages/runtime</code> no longer imports <code>packages/runtime-pi</code>. Learning, evaluation, background,
+        intelligence, and tool-runtime depend only on adapter-neutral types, never on the Pi adapter. Only
+        <code>runtime-pi</code> imports Pi runtime/model types. AST import checks and package-manifest graph tests enforce this.
+      </p>
+      <h3>Workspace authority map</h3>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Datum</th><th>Single authority</th><th>How it changes</th></tr></thead>
+          <tbody>
+            <tr><td>Sessions, messages, tool calls, jobs, experiments, trials, evaluations, activation pointers, search configuration</td><td>SQLite</td><td>Repository APIs inside transactions and migrations</td></tr>
+            <tr><td>FTS, embedding, and search-document rows</td><td>Rebuildable SQLite indexes</td><td>Derived only from canonical DB row IDs or canonical file revision IDs; safe to delete and regenerate</td></tr>
+            <tr><td>Config, profile/memory, prompt modules, skills/capabilities, generated tool source, eval definitions</td><td>Ordinary editable working files</td><td>Canonical live authoring surfaces for the user, another system, or Noesis; each detected edit creates a stable recorded revision</td></tr>
+            <tr><td>Recorded definition revisions</td><td>Byte snapshots in a simple revisions area</td><td>Each revision stores immutable bytes, content digest, actor, and predecessor; experiments, turns, activation, inspection, and revert pin this revision</td></tr>
+            <tr><td>Candidate prompt/skill/tool definitions</td><td>Candidate working files and their recorded revisions, physically separate from active definitions</td><td>Noesis writes candidate revisions; activation stages an active revision only after preflight</td></tr>
+            <tr><td>Large outputs and user artifacts</td><td>Ordinary artifact files</td><td>SQLite stores path, media type, actor, timestamps, and relationships—not a second copy of content</td></tr>
+            <tr><td>Raw evaluation inputs, outputs, judgments, and reports</td><td>Revisioned evidence files</td><td>Append a new evidence revision; never overwrite evidence used by a decision</td></tr>
+            <tr><td>Provider credentials and secrets</td><td>Protected credential store or process environment</td><td>Explicit authentication flows only; never copy secret values into SQLite, editable definitions, artifacts, or activity history</td></tr>
+            <tr><td>Chronological provenance/debug history</td><td>SQLite <code>activity_log</code> and <code>file_revisions</code></td><td>Best-effort activity entries support inspection; they are not a recovery substrate</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout warning">
+        <strong>One authority per datum.</strong> Rebuildable search indexes and read models may reference canonical content but never
+        become a competing copy. Direct file edits are legitimate input: the workspace watcher records actor, previous revision,
+        and new revision, then refreshes affected search indexes and invalidates stale candidate evaluations. Prior pinned
+        revisions continue to resolve to their original byte snapshots even after the working file changes.
+      </div>
+    </section>
+
+    <section id="contracts">
+      <h2>Core types and real boundaries</h2>
+      <p>
+        These are intentionally ordinary TypeScript types owned by the deepest relevant module. They can change together
+        during research. Zod validates unknown data at SQLite, config/file, artifact metadata, IPC, external tool, and model-output
+        boundaries; it is not duplicated around trusted in-memory values.
+      </p>
+      <h3>Learning signals, capabilities, and experiments</h3>
+      <pre>type LearningSignalKind =
+  | "explicit_correction" | "preference_expression" | "recurring_workflow"
+  | "repeated_failure" | "surprising_success" | "friction"
+  | "capability_gap" | "cost_or_latency" | "user_request";
+
+interface FeedbackSignal {
+  signalId: string;
+  kind: LearningSignalKind;
+  scope: string;
+  evidenceRefs: readonly EvidenceRef[];
+  strength: number;
+  novelty: number;
+  sensitivity: "normal" | "private" | "secret";
+  experimentId?: string;
+  capabilityRevisionId?: string;
+}
+
+interface EvidenceObservation {
+  observationId: string;
+  kind: LearningSignalKind;
+  citations: readonly ExactCitation[];
+  scope: string;
+  confidence: number;
+}
+
+interface SessionAnalysis {
+  analysisId: string;
+  sessionId: string;
+  observations: readonly EvidenceObservation[];
+  outcome: "accepted" | "corrected" | "failed" | "unknown";
+}
+
+interface Capability {
+  capabilityId: string;
+  name: string;
+  scope: string;
+  intent: string;
+  activeRevisionId: string | null;
+}
+
+interface CapabilityRevision {
+  capabilityRevisionId: string;
+  capabilityId: string;
+  predecessorRevisionId?: string;
+  status: "candidate" | "active" | "inactive";
+  promptModules: readonly FileRevisionRef[];
+  skills: readonly FileRevisionRef[];
+  tools: readonly FileRevisionRef[];
+  toolset: ToolsetAndRouter;
+  activationPolicy: ActivationPolicy;
+  dependencyLock?: FileRevisionRef;
+  permissionManifest: PermissionManifest;
+  evidenceRefs: readonly EvidenceRef[];
+  sourceEvaluationDefinitions: readonly FileRevisionRef[];
+  requestedPermissionDelta: PermissionDelta;
+}
+
+type ExperimentOutcome = "keep" | "revise" | "revert";
+
+interface Experiment {
+  experimentId: string;
+  hypothesis: string;
+  scope: string;
+  evidenceRefs: readonly EvidenceRef[];
+  baselineRevisionId: string;
+  candidateRevisionIds: readonly string[];
+  preflightRef?: EvidenceRevisionRef;
+  activatedRevisionId?: string;
+  feedbackSignalIds: readonly string[];
+  status: "briefed" | "authoring" | "preflight" | "active" | "completed";
+  outcome?: ExperimentOutcome;
+  followUpExperimentId?: string;
+}</pre>
+      <p>
+        A capability is the stable deployable behavior; a revision is one concrete implementation. An experiment is a durable
+        learning episode connecting the reflection hypothesis, baseline and candidate revisions, preflight, activation,
+        real-world feedback, and final outcome. Experiments never become capabilities and are never activated. Product behavior
+        changes normally create capability revisions; experiments may also compare internal research strategies without creating
+        a user-facing capability.
+      </p>
+      <p>A coupled revision is preflighted from stable snapshots. Activation first stages/materializes the selected revision bytes, then one SQLite transaction makes the complete prompt/tool/router revision set visible and updates the activation pointer. Abandoned staged revisions are inert and cleanable.</p>
+
+      <h3>Separate global, per-turn, and prompt lifetimes</h3>
+      <pre>interface ActivationSnapshot {
+  activationId: string;
+  revision: number;
+  activeDefinitions: Readonly&lt;Record&lt;string, FileRevisionRef&gt;&gt;;
+  previousActivationId: string | null;
+}
+
+interface TurnIntelligencePlan {
+  planId: string;
+  sessionId: string;
+  turnId: string;
+  activationId: string;
+  selectedDefinitions: readonly FileRevisionRef[];
+  retrievalCitations: readonly ExactCitation[];
+  availableTools: readonly FrozenToolRef[];
+  routingDecisionRef: ArtifactRef;
+  contextSnapshotRef: ArtifactRef;
+  permissionSnapshotId: string;
+  promptSnapshotId: string;
+}
+
+interface PromptSnapshot {
+  layers: {
+    protectedKernel: FileRevisionRef;
+    userConstitution: FileRevisionRef;
+    learnedProfile: readonly FileRevisionRef[];
+    capabilities: readonly FileRevisionRef[];
+    retrievedContext: readonly EvidenceRef[];
+    turn: ArtifactRef;
+  };
+  promptSnapshotId: string;
+  renderedPromptRef: EvidenceRevisionRef;
+}</pre>
+      <p>
+        After revision bytes already exist, activation and revert use one SQLite transaction to check the expected activation
+        revision, update the complete visible-definition pointer set, and record an activity entry. Each turn row pins one <code>TurnIntelligencePlan</code>
+        with the activation ID, selected definitions, routing, tools, citations, context, permissions, and prompt snapshot used.
+      </p>
+
+      <h3>Preflight plan and personal contract</h3>
+      <pre>interface PreflightPlan {
+  planId: string;
+  candidateRevision: FileRevisionRef;
+  baselineRevision: FileRevisionRef;
+  caseRefs: readonly EvaluationCaseRef[];
+  judgeVariant: ExperimentVariantRef;
+  runtimeVariant: ExperimentVariantRef;
+  budget: EvaluationBudget;
+}
+
+interface PreflightReport {
+  preflightId: string;
+  candidateRevision: FileRevisionRef;
+  baselineRevision: FileRevisionRef;
+  trialEvidence: readonly EvidenceRevisionRef[];
+  judgmentEvidence: readonly EvidenceRevisionRef[];
+  appliedCriteria: readonly AppliedCriterionRef[];
+  railChecks: readonly RailCheckResult[];
+  comparison: EvaluationComparison;
+  decision: "pass" | "block" | "inconclusive";
+  reportEvidence: EvidenceRevisionRef;
+}
+
+interface EvaluationContract {
+  contractId: string;
+  revision: number;
+  scope: string;
+  owner: "user" | "protected_system" | "learned";
+  strength: "hard_gate" | "weighted";
+  evaluatorInstruction: string;
+  positiveExamples: readonly EvidenceRef[];
+  negativeExamples: readonly EvidenceRef[];
+  evidenceRefs: readonly EvidenceRef[];
+}
+
+interface UserEvaluationCriterion {
+  criterionId: string;
+  revision: number;
+  status: "active" | "retired";
+  source: "explicit_statement" | "correction" | "expert_command";
+  scope: string;
+  evaluatorInstruction: string;
+  evidenceRefs: readonly EvidenceRef[];
+  pinned: boolean;
+}</pre>
+
+      <h3>Authority, revisions, and validation boundaries</h3>
+      <p>
+        Keep the existing config <code>schemaVersion: 1</code>. SQLite uses ordinary numbered migrations and transactional
+        constraints. Editable definitions use human-readable file formats plus lightweight revision metadata. Internal
+        analyses, hypotheses, plans, role messages, snapshots, and work items do not carry ceremonial versions.
+      </p>
+      <pre>interface FileRevision {
+  revisionId: string;
+  workingPath: string;
+  snapshotPath: string;
+  contentDigest: string;
+  predecessorRevisionId?: string;
+  actor: ActorRef;
+  reason?: string;
+  recordedAt: string;
+}
+
+interface EvidenceRevision extends FileRevision {
+  evidenceKind: "input" | "output" | "tool_trace" | "judgment" | "report";
+  supersedesRevisionId?: string;
+}
+
+// Working definitions stay editable; every recorded revision snapshot is byte-stable.
+// Evidence revisions append and never replace evidence used by an evaluation.
+// Zod validates SQLite/file reads, IPC, tools, and model output—not trusted in-memory values.</pre>
+      <pre>interface HistoryPort {
+  search(request: HistorySearchRequest): Promise&lt;HistorySearchResult&gt;;
+  open(request: HistoryOpenRequest): Promise&lt;HistoryOpenResult&gt;;
+  resolve(citations: readonly ExactCitation[]): Promise&lt;readonly ExactCitation[]&gt;;
+}
+
+interface StructuredInferencePort {
+  run&lt;T&gt;(request: InferenceRequest, outputSchema: ZodSchema&lt;T&gt;): Promise&lt;InferenceResult&lt;T&gt;&gt;;
+}
+
+interface EmbeddingPort {
+  embed(request: EmbeddingRequest): Promise&lt;EmbeddingResult&gt;;
+}
+
+type BackgroundWorkItem =
+  | ReflectWork | AuthorRevisionWork | GenerateCasesWork | PreflightWork
+  | ActivateWork | ObserveWork | ResolveExperimentWork | ReviseWork | RevertWork;
+
+interface StableOperation {
+  operationId: string;
+  idempotencyKey: string;
+  principal: Principal;
+  effect: EffectClass;
+  resource: string;
+  estimatedCost: number;
+  attempt: number;
+}</pre>
+      <p>
+        Generic agent tool types bind name, input/output schemas, permission manifest, and broker request/result.
+        Config v1 adds optional learning enabled/notification/background-budget defaults; autonomy risk, approval, pin/veto
+        defaults; and history lexical/embedding/rerank limits and privacy defaults. Missing fields decode safely without rewrite.
+      </p>
+
+      <h3>Prompt ownership layers</h3>
+      <ol>
+        <li><strong>Protected kernel:</strong> code-owned authority, provenance, credential, and dangerous-effect rules.</li>
+        <li><strong>User constitution:</strong> explicit user-owned instructions; no silent learned rewrite.</li>
+        <li><strong>Learned profile:</strong> automatically evaluable style, reasoning, teaching, and workflow modules.</li>
+        <li><strong>Capability layer:</strong> modules tied to selected active capability revisions.</li>
+        <li><strong>Retrieved context:</strong> bounded history/memory fragments with exact citations and untrusted-data framing.</li>
+        <li><strong>Turn context:</strong> current session, artifacts, tools, and request.</li>
+      </ol>
+    </section>
+
+    <section id="lifecycle">
+      <h2>Automatic lifecycle in the workspace</h2>
+      <pre>signal_detected
+  → reflection_queued → reflecting
+  → no_change | experiment_briefed
+  → candidate_revision_authored
+  → preflight_queued → preflighting
+  → blocked | revision_requested | ready_to_activate
+  → approval_required | activated
+  → observing_real_use
+  → keep | revise | revert</pre>
+      <p class="muted">The experiment stays open after activation so real use can confirm, refine, or reverse the hypothesis. <code>revise</code> authors a follow-up capability revision and experiment; <code>revert</code> restores the prior activation.</p>
+      <div class="grid">
+        <article class="card wide">
+          <h3>Signal harvesting</h3>
+          <p>Store sessions, messages, tool calls, usage, latency, steering, aborts, retries, follow-ups, corrections, and outcomes in SQLite. Put large raw traces and outputs in artifact/evidence files and reference them from their operational rows.</p>
+        </article>
+        <article class="card wide">
+          <h3>Reflection trigger</h3>
+          <p>Explicit correction, recurring workflow/failure, friction, surprise, capability gap, cost anomaly, preference change, or direct request. <em>No useful change</em> is a first-class outcome.</p>
+        </article>
+      </div>
+      <h3>Transactional state and lightweight activity</h3>
+      <p>
+        SQLite rows own the current lifecycle state for jobs, capabilities, revisions, experiments, trials, preflights,
+        approvals, and activations. Each meaningful transition updates its row transactionally and writes a concise
+        <code>activity_log</code> entry with actor, kind, subject, timestamp, and references. Activity is for provenance,
+        debugging, and UX feeds; current state is read directly from the owning table, never reconstructed from activity.
+      </p>
+      <p>
+        A working-file edit first snapshots its bytes into the revisions area with content digest and predecessor. One SQLite
+        transaction then registers the revision and updates any visible pointer. A staged snapshot abandoned before that
+        transaction is inert and eligible for cleanup. Agent-authored material always lands in candidate directories; active
+        definitions stay separate. Evaluations and turns pin stable revision snapshots, never mutable working-file bytes.
+        Raw cases, trial outputs, tool traces, judgments, and reports create new evidence revisions.
+      </p>
+      <div class="callout warning">
+        The activity log is deliberately not a universal change journal. Recovery uses SQLite transactions, migrations,
+        integrity checks, and backups; declarative recovery uses the canonical files and their revision history. Evaluation
+        evidence is append-only so neither Noesis nor an external editor can silently alter the basis of a prior activation or outcome.
+      </div>
+    </section>
+
+    <section id="intelligence">
+      <h2>Longitudinal intelligence and session search</h2>
+      <ul>
+        <li>SQLite is authoritative for sessions, messages, tool calls, outcomes, and operational search configuration.</li>
+        <li>FTS5 retrieves exact lexical evidence and stable session/message/tool-call IDs.</li>
+        <li>Local embeddings provide semantic recurrence without sending the full history to a provider.</li>
+        <li>FTS, embedding, and search-document rows are rebuildable indexes whose source reference is always an authoritative DB row or canonical file revision.</li>
+        <li>File-backed profile, memory, prompts, skills, tools, and eval definitions are indexed from their canonical recorded revisions, never unpinned mutable bytes.</li>
+        <li>An LLM search planner/reranker receives only bounded candidates and returns a typed ranking with reasons.</li>
+        <li>Every result carries a session/message row reference or file/evidence revision, timestamp, excerpt, retrieval scores, and provenance.</li>
+        <li>Retrieved history is untrusted context, never protected instruction.</li>
+      </ul>
+      <pre>search_sessions(query, filters)
+open_session(sessionId, range)
+resolve_citations(citations)
+search_corrections(topic)
+find_similar_tasks(description)
+retrieve_prior_outcomes(task)
+explain_evidence(evidenceRefs)</pre>
+    </section>
+
+    <section id="evaluation">
+      <h2>LLM-native evaluation laboratory</h2>
+      <div class="callout good">
+        <strong>Default preflight:</strong> an LLM generates a small case set from source evidence and the intended
+        behavior; baseline and candidate attempt the same cases; one strong blinded judge/critic compares the artifacts;
+        thin protected rails check authority and obvious regressions. This is enough to run the first experiment.
+      </div>
+      <h3>Role separation</h3>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Role</th><th>Sees</th><th>Produces</th><th>Excluded context</th></tr></thead>
+          <tbody>
+            <tr><td>Signal interpreter</td><td>Turn and bounded related history</td><td>Signals and citations</td><td>Activation authority</td></tr>
+            <tr><td>Reflector</td><td>Signals, evidence, active capabilities and user preferences</td><td>No-change or hypothesis/experiment brief</td><td>Activation authority</td></tr>
+            <tr><td>Revision author</td><td>Hypothesis and source cases</td><td>Concrete capability revision and fixtures</td><td>Judge decision</td></tr>
+            <tr><td>Case generator</td><td>Behavioral objective, evidence, user criteria</td><td>Source variations, transfer and negative cases</td><td>Candidate outputs</td></tr>
+            <tr><td>Trial agent</td><td>One case and one arm</td><td>Output, artifacts, traces</td><td>Other arm</td></tr>
+            <tr><td>Blind judge/critic</td><td>Randomized A/B outputs, rubric, relevant traces</td><td>Winner, reasons, confidence, violations</td><td>Arm identity and activation authority</td></tr>
+            <tr><td>Revision agent</td><td>Failures and judgment evidence</td><td>Follow-up capability revision</td><td>Activation authority</td></tr>
+            <tr><td>UX explainer</td><td>Evidence, diff, report, activation lineage</td><td>User-facing explanation</td><td>Secrets, hidden cases, chain of thought</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Paired execution</h3>
+      <ul>
+        <li>Give the baseline and candidate the same task evidence and a comparable execution budget; record any intentional model or runtime difference as the experiment variable.</li>
+        <li>Run the arms independently, randomize their labels for the judge, and ask for evidence-backed criticism rather than a bare score.</li>
+        <li>Retain outputs, artifacts, tool/effect traces, usage, latency, and failures so later real-world outcomes can audit the judgment.</li>
+      </ul>
+      <h3>Optional user criteria, captured conversationally</h3>
+      <ul>
+        <li>Explicit normative statements such as “always preserve my voice” and direct corrections become scoped active criteria with exact session/message or file-revision citations. The normal interaction receives only a quiet summary; no setup flow or approval prompt interrupts the user.</li>
+        <li>Ambiguous or inferred preferences remain tentative profile/memory observations until corroborated. Editing or retiring a criterion never rewrites its prior revisions or the evaluations that used them.</li>
+        <li>For each candidate, relevance selection produces a criterion snapshot. The case generator uses it to create targeted cases, and the judge/critic reports which criterion ID, revision, instruction, and evidence it applied.</li>
+        <li>Pinned criteria cannot be silently superseded. The expert surface can add, edit, retire, or pin criteria without making routine learning interactive.</li>
+      </ul>
+      <h3>Case composition</h3>
+      <span class="pill">historical source cases</span>
+      <span class="pill">LLM-generated variations</span>
+      <span class="pill">user corrections</span>
+      <span class="pill">small negative set</span>
+      <span class="pill">optional transfer/adversarial cases</span>
+      <h3>Protected rails</h3>
+      <ul>
+        <li>Protected or user-owned hard-contract violation</li>
+        <li>Self-granted permission, credential access, or unexpected dangerous effect</li>
+        <li>Crash, hang, output/resource-limit failure</li>
+        <li>Candidate identity mismatch or material regression on motivating source cases</li>
+      </ul>
+      <div class="callout warning">A high LLM quality judgment never grants authority or overrides a protected rail.</div>
+      <h3>Heterogeneous candidate matrix</h3>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Surface</th><th>Fast default</th><th>Progressive hardening when useful</th></tr></thead>
+          <tbody>
+            <tr><td>Prompt</td><td>Source and generated cases, baseline comparison, judge critique, token cost.</td><td>Transfer suites, overtrigger/abstention matrix, multiple judges and repeated samples.</td></tr>
+            <tr><td>Tool</td><td>Generated fixtures, one realistic historical case, schema check, timeout and declared-effect trace.</td><td>Property/fuzz suites, hostile inputs, reproducible builds, hardened isolation.</td></tr>
+            <tr><td>Toolset/router</td><td>Positive and negative tasks, baseline routing, aggregate effect manifest.</td><td>Composition failures, precision/recall studies, abstention and activation-policy comparisons.</td></tr>
+            <tr><td>Retrieval</td><td>Known-answer sessions, citation exactness, context cost, qualitative task outcome.</td><td>Larger recall benchmark, privacy probes, stale-evidence and reranker comparisons.</td></tr>
+            <tr><td>Memory/knowledge</td><td>Contradiction, scope, provenance and user correction.</td><td>Temporal validity, supersession studies, broader retrieval regressions.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Judge diversity, repeated statistical sampling, rotating holdouts, exhaustive property tests, and adversarial panels
+        are composable techniques—not mandatory ceremony for every candidate revision. Optional effect-free shadow comparison
+        belongs inside this evaluation lab only. Activate from the small preflight when the result is convincing and low risk;
+        escalate evaluation when confidence, blast radius, or novelty demands it. Every report still identifies the candidate
+        revision, baseline revision, cases, judge variant, runtime variant, evidence, and decision.
+      </p>
+    </section>
+
+    <section id="autonomy">
+      <h2>Risk-based autonomy</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Change</th><th>Default policy</th></tr></thead>
+          <tbody>
+            <tr><td>Explicit, non-contradictory memory/preference</td><td>Record automatically; quiet notification.</td></tr>
+            <tr><td>Inferred or contradictory memory</td><td>Keep tentative until corroborated or inspected; this is profile/memory state, not a capability.</td></tr>
+            <tr><td>Narrow read-only skill or learned prompt module</td><td>Author a capability revision, run preflight, and activate automatically when convincingly better and low risk.</td></tr>
+            <tr><td>Routing among already-authorized tools</td><td>Automatic preflight, activation, and open real-use experiment.</td></tr>
+            <tr><td>Generated code within existing effects/resources</td><td>Run locally with preview limits, preflight, then activate automatically when low risk.</td></tr>
+            <tr><td>Pinned dependency in the generated-tool runtime</td><td>Automatic if policy-approved; install hooks/native binaries require approval.</td></tr>
+            <tr><td>New write/network/execute effect or broader scope</td><td>Explicit approval.</td></tr>
+            <tr><td>Credential/account access</td><td>Explicit user action.</td></tr>
+            <tr><td>User constitution</td><td>User-owned confirmation.</td></tr>
+            <tr><td>Protected kernel/authority/workspace ownership/execution boundary</td><td>Never self-modifiable or activatable by generated behavior.</td></tr>
+            <tr><td>Pinned capability</td><td>Never automatically superseded.</td></tr>
+            <tr><td>Hard regression</td><td>Resolve the experiment as <code>revert</code> and restore the prior activation automatically.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Optional <code>learning</code> and <code>autonomy</code> fields extend the existing config version 1 without bumping it during research development.</p>
+
+      <h3>Continuous feedback and experiment outcomes</h3>
+      <ul>
+        <li><strong>Observe continuously:</strong> attribute corrections, retries, aborts, follow-ups, explicit feedback, artifact acceptance, effects, errors, cost, latency, context, activation quality, and user-policy compliance to the serving revision and open experiment.</li>
+        <li><strong>Keep:</strong> close the experiment while leaving the revision active when preflight and real-world evidence support the hypothesis.</li>
+        <li><strong>Revise:</strong> close with a documented learning, author a successor revision, and connect a follow-up experiment to the original lineage.</li>
+        <li><strong>Revert:</strong> restore the previous activation as the outcome action when evidence shows a hard failure or convincing regression.</li>
+      </ul>
+    </section>
+
+    <section id="security">
+      <h2>Research runtime, authority, and progressive hardening</h2>
+      <div class="grid">
+        <article class="card wide">
+          <h3>Generated-code research backend</h3>
+          <p>The first backend runs a local child process in a fresh temporary directory with a sanitized environment, bounded time and output, declared effects, and brokered Noesis tools. Capture source and execution artifacts. This is explicitly <strong>not a production security boundary</strong>; use it for trusted local research, and never auto-grant dangerous external effects.</p>
+        </article>
+        <article class="card wide">
+          <h3>Evaluator isolation</h3>
+          <p>Candidate authors do not receive judge decisions or hidden protected cases. Judges receive escaped artifacts and randomized arms. Role context separation reduces gaming, while stronger process/storage isolation remains a hardening option.</p>
+        </article>
+        <article class="card wide">
+          <h3>Idempotent orchestration</h3>
+          <p>Each durable work item has a stable identity and a minimal operation fingerprint. Reservation precedes dangerous external execution; ambiguous external effects fail closed without forcing every internal research object into an identity graph.</p>
+        </article>
+        <article class="card wide">
+          <h3>Crash recovery</h3>
+          <p>Expired leases retry safe work. Ambiguous paid LLM attempts consume a new explicit attempt budget. SQLite corruption restores from a verified backup; missing declarative files or artifacts are reported rather than fabricated from activity history.</p>
+        </article>
+      </div>
+      <p>
+        Generated tools communicate over bounded stdio JSON-RPC with a trusted broker for declared capabilities. The broker
+        validates boundary payloads and asks <code>EffectGateway</code> to authorize dangerous external effects; workers never
+        receive authority handles or receipts. The runtime backend remains a port so later experiments can swap in a container,
+        VM, or OS sandbox without changing capability authorship or evaluation.
+      </p>
+      <h3>Progressive hardening ladder</h3>
+      <ol>
+        <li><strong>Research preview:</strong> temporary-directory child process, sanitized environment, limits, brokered tools, explicit approval for dangerous effects.</li>
+        <li><strong>Evidence-driven isolation:</strong> Node permissions, containers, or OS sandbox backends for experiments that execute less-trusted code.</li>
+        <li><strong>Production hardening:</strong> reproducible builds, dependency policy, SBOMs, read-only materialization, registry controls, fuzz/property suites, and stronger evaluator isolation.</li>
+      </ol>
+      <pre>reflect:&lt;signal-set&gt;:&lt;policy&gt;
+author-revision:&lt;experiment&gt;:&lt;author-policy&gt;
+preflight:&lt;revision&gt;:&lt;plan&gt;
+activate:&lt;revision&gt;:&lt;preflight-report&gt;
+observe:&lt;experiment&gt;:&lt;turn-context&gt;
+resolve:&lt;experiment&gt;:&lt;keep-or-revise-or-revert&gt;</pre>
+    </section>
+
+    <section id="ux">
+      <h2>Product experience</h2>
+      <p>The user does not operate a pipeline. Learning appears as low-noise ambient activity below the input:</p>
+      <pre>learning · reflecting on 2 corrections
+learning · preflighting source-grounded-research r3 · 11/18
+learning · testing research toolset v2
+learned  · criterion “preserve my voice” · from your correction
+learned  · improved source-grounded research · 18 evals passed</pre>
+      <p>A completed change becomes a compact notification:</p>
+      <pre>Noesis improved “source-grounded research”
+Why: 3 corrections across 4 sessions
+Result: +21% judged quality · no regressions · same permissions</pre>
+      <h3>Change detail</h3>
+      <ul>
+        <li>What Noesis noticed, with exact session/message or file-revision citations</li>
+        <li>Hypothesis and concrete capability-revision diff</li>
+        <li>Baseline/candidate examples and judge disagreement</li>
+        <li>Applied user criteria with revision and source-evidence citations</li>
+        <li>Permissions, dependencies, cost, latency, preflight evidence, and attributed real-world feedback</li>
+        <li>Active definition revision, previous activation, experiment outcome, pin, veto, approve, and revert</li>
+      </ul>
+      <h3>Expert controls</h3>
+      <pre>/changes                  list recent experiments, revisions, and activations
+/why                      explain the active turn and exact definition revisions
+/change &lt;id&gt;              inspect evidence, diff, eval, permissions
+/learning pause|resume    control ambient work
+/autonomy                 edit risk policy without changing schema version
+/criteria list|add        list criteria or add one explicitly
+/criteria &lt;id&gt;            inspect its instruction, evidence, and evaluation use
+/criteria &lt;id&gt; edit|retire|pin
+                          change lifecycle or prevent silent supersession
+/approve &lt;id&gt;             approve authority expansion
+/veto &lt;id&gt;                block an experiment or capability-revision lineage
+/pin &lt;capability&gt;         prevent automatic supersession
+/revert &lt;capability&gt;      restore the previous active revision
+/feedback good|bad        attach explicit outcome evidence</pre>
+      <p>Only authority expansion should interrupt the chat with a modal. All other changes remain inspectable but non-blocking.</p>
+    </section>
+
+    <section id="dag">
+      <h2>Implementation DAG · AC-00 through AC-14</h2>
+      <div class="callout">
+        This is one ambitious research build with multiple parallel feedback loops. Capacity is four total agents: one root
+        orchestrator plus at most three implementation tasks. Shared metadata has one owner; integration barriers reconcile
+        package manifests and <code>pnpm-lock.yaml</code>, run focused checks, and produce a runnable experiment after each wave.
+      </div>
+
+      <article class="task">
+        <h3><span class="task-id">Genesis</span> Freeze the current repository</h3>
+        <dl>
+          <dt>Depends</dt><dd>Nothing.</dd>
+          <dt>Owns</dt><dd>Git metadata only.</dd>
+          <dt>Deliverables</dt><dd>Initialized repository and concise conventional genesis commit.</dd>
+          <dt>Gate</dt><dd>Clean committed baseline; no source changes.</dd>
+          <dt>Conflict</dt><dd>Must complete before AC-00 or any implementation task.</dd>
+        </dl>
+      </article>
+
+      <article class="task">
+        <h3><span class="task-id">AC-00</span> Research spine and protected rails</h3>
+        <dl>
+          <dt>Depends</dt><dd>Genesis.</dd>
+          <dt>Owns</dt><dd><code>AGENTS.md</code>, supersession notice/storage sections in <code>noesis-first-complete-iteration.html</code>, <code>packages/domain</code>, the minimal <code>packages/agent-types</code> shell, WorkspaceStore interfaces, experiment metadata, architecture tests, root manifests, workspace, lockfile.</dd>
+          <dt>Deliverables</dt><dd>Before parallel work, replace only the old storage instructions in active repo guidance and mark the older plan superseded by this WorkspaceStore plan. Preserve Pi-only runtime ownership, TUI read-model state, authority/effect and credential boundaries, provenance, functional TypeScript style, tests, and workflow invariants. Also deliver evolvable internal types; minimal shared agent types; the one-authority matrix; SQLite/file/revision/evidence/artifact ports; boundary validation; stable effect-operation identities.</dd>
+          <dt>Gate</dt><dd>Active repo instructions contain no contradictory storage model; architecture tests reject competing authorities; generated roles cannot update activation or permission tables; one fake experiment records comparable DB rows and evidence files.</dd>
+          <dt>Conflict</dt><dd>Only AC-00 edits root metadata in this wave. <code>agent-types</code> is the only new shell it creates, justified by AC-01/02/03 consumers; all other packages remain owner-created when consumed.</dd>
+        </dl>
+      </article>
+
+      <p class="phase">Foundation wave — AC-01, AC-02, AC-03 occupy the three worker slots; AC-04 starts when AC-03 finishes.</p>
+
+      <article class="task">
+        <h3><span class="task-id">AC-01</span> Workspace persistence, artifacts, and longitudinal intelligence</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-00.</dd>
+          <dt>Owns</dt><dd><code>packages/workspace</code>, <code>packages/intelligence</code>, SQLite migrations, canonical workspace directories, file revision/activity tables, backup APIs.</dd>
+          <dt>Deliverables</dt><dd>Authoritative SQLite operational repositories; canonical editable working files; a simple byte-stable revisions area with digest/predecessor metadata; stage/register/cleanup flow; separate candidate/active directories; ordinary artifacts with DB metadata; append-only evaluation evidence; rebuildable FTS/embedding/search-document indexes with exact DB-row/file-revision citations.</dd>
+          <dt>Gate</dt><dd>Direct edits create new revisions without changing prior pinned bytes; abandoned staged revisions remain invisible and cleanable; deleting search indexes and regenerating them yields the same canonical references; workspace backup/restore preserves DB, definitions, revisions, artifacts, and evidence.</dd>
+          <dt>Conflict</dt><dd>No runtime-pi, learning, eval, TUI, or root-manifest edits.</dd>
+        </dl>
+      </article>
+
+      <article class="task">
+        <h3><span class="task-id">AC-02</span> Pi experiment bridge</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-00.</dd>
+          <dt>Owns</dt><dd>Isolated implementation modules under <code>packages/runtime-pi</code>; it consumes the AC-00 <code>agent-types</code> package.</dd>
+          <dt>Deliverables</dt><dd>Configurable foreground/role runners; swappable role prompts, models, reasoning and judges; boundary output repair; telemetry; fake runner; generated-tool adapter seam. Any newly proven shared type is proposed to the Barrier F metadata owner rather than added concurrently.</dd>
+          <dt>Gate</dt><dd>No Pi types escape runtime-pi; two role variants can run against the same fixture and produce comparable traces.</dd>
+          <dt>Conflict</dt><dd>Session tools and role execution use separate files; no policy decisions here.</dd>
+        </dl>
+      </article>
+
+      <article class="task">
+        <h3><span class="task-id">AC-03</span> Atomic capabilities and generated tool runtime</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-00.</dd>
+          <dt>Owns</dt><dd><code>packages/capabilities</code>, <code>packages/tool-runtime</code>.</dd>
+          <dt>Deliverables</dt><dd>Capability and CapabilityRevision registry; local temporary-directory child-process backend; sanitized environment; time/output bounds; source and trace artifacts; bounded JSON-RPC broker; EffectGateway adapter; runtime backend port for later isolation.</dd>
+          <dt>Gate</dt><dd>A coupled prompt/tool/router revision remains stable for comparison; declared dangerous effects cannot obtain authority without approval. Document that the local backend is not a production security boundary.</dd>
+          <dt>Conflict</dt><dd>No runtime composition, activation policy, or TUI edits.</dd>
+        </dl>
+      </article>
+
+      <article class="task">
+        <h3><span class="task-id">AC-04</span> User controls, pins, and autonomy configuration</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-00 and AC-03, so capability-owned pin/veto files have one writer.</dd>
+          <dt>Owns</dt><dd><code>packages/config</code> plus package-local policy/read-model files in <code>runtime</code> and <code>capabilities</code>; no new user-policy package.</dd>
+          <dt>Deliverables</dt><dd>File-backed user-criterion definitions with SQLite revision/activity metadata, criterion relevance snapshots, prompt ownership, pins, vetoes, learning/autonomy preferences, experiment defaults; no new policy package.</dd>
+          <dt>Gate</dt><dd>Config remains version 1; explicit off/low values and legacy files remain valid; criteria can be inspected, revised, retired, and pinned without rewriting history.</dd>
+          <dt>Conflict</dt><dd>Define read models, not TUI rendering or activation decisions.</dd>
+        </dl>
+      </article>
+
+      <p class="phase">Barrier F — the integration coordinator takes one worker slot after AC-01..04, reconciles package metadata/lockfile, runs SQLite migration/file-authority/import checks, and demonstrates one swappable-role and retrieval experiment before releasing the organ wave.</p>
+
+      <p class="phase">Organ wave — AC-05, AC-06, and AC-07 use the three worker slots in parallel.</p>
+
+      <article class="task">
+        <h3><span class="task-id">AC-05</span> Automatic learning organ</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-01, AC-02, AC-03.</dd>
+          <dt>Owns</dt><dd><code>packages/learning</code>.</dd>
+          <dt>Deliverables</dt><dd>Signal harvester, conversational capture of explicit criteria/corrections, recurrence retrieval, configurable LLM reflector, no-change or experiment brief, hypothesis dedupe, source cases, configurable capability-revision author, follow-up revision, and traceable prompt/model research runs.</dd>
+          <dt>Gate</dt><dd>A normal correction creates one evidence-linked experiment brief and, when explicitly normative, one scoped criterion automatically; irrelevant turns produce no change and no modal interrupts chat.</dd>
+          <dt>Conflict</dt><dd>Cannot see protected cases or update activation/authority state.</dd>
+        </dl>
+      </article>
+
+      <article class="task">
+        <h3><span class="task-id">AC-06</span> Dynamic evaluation laboratory</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-02, AC-03, AC-04.</dd>
+          <dt>Owns</dt><dd><code>packages/evals</code>.</dd>
+          <dt>Deliverables</dt><dd>Relevant user-criterion snapshots, criterion-guided LLM case generation, baseline/candidate trials, one strong swappable blind judge/critic, protected rails, preflight reports citing every applied criterion/revision/evidence source, and optional advanced policies.</dd>
+          <dt>Gate</dt><dd>The default small loop can pass a convincing candidate revision and block a source regression; an explicit criterion changes generated cases and judgment, and swapping generator/judge/aggregation policy creates a comparable research run.</dd>
+          <dt>Conflict</dt><dd>Evaluator records a preflight decision only; it never activates revisions or resolves experiments.</dd>
+        </dl>
+      </article>
+
+      <article class="task">
+        <h3><span class="task-id">AC-07</span> Session-search capabilities</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-01, AC-02, AC-03.</dd>
+          <dt>Owns</dt><dd>Session-tool module in intelligence and a dedicated runtime-pi registration module.</dd>
+          <dt>Deliverables</dt><dd>Search/open/corrections/similar-task/prior-outcome tools with citations and bounds, plus automatic retrieval and routing strategy variants consumable by turns and learning.</dd>
+          <dt>Gate</dt><dd>Session B can retrieve Session A evidence without injecting unrelated session secrets.</dd>
+          <dt>Conflict</dt><dd>Does not edit AC-02 role-runner files or runtime composition.</dd>
+        </dl>
+      </article>
+
+      <p class="phase">Barrier O — reconcile only through the integration coordinator; run package graph, role isolation, capability-revision identity, search citation, and default preflight-loop checks; preserve at least one runnable alternative strategy per research seam.</p>
+
+      <p class="phase">Control-plane stack — AC-08, AC-09, AC-10 are sequential and share one integration owner.</p>
+
+      <article class="task">
+        <h3><span class="task-id">AC-08</span> Automatic in-runtime coordinator</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-05, AC-06, AC-07.</dd>
+          <dt>Owns</dt><dd>Coordinator modules inside <code>packages/runtime</code>. Do not create <code>packages/background</code> until AC-12 introduces an independent resident-worker consumer.</dd>
+          <dt>Deliverables</dt><dd>Automatic opportunistic reflection/evaluation work, a simple durable queue, leases, budget, cancellation, retry, recovery, and experiment lifecycle composition.</dd>
+          <dt>Gate</dt><dd>No user commands are required; restart resumes queued work without repeating dangerous external effects; research failures remain visible and retryable.</dd>
+          <dt>Conflict</dt><dd>Only this stack edits runtime composition until AC-10 finishes.</dd>
+        </dl>
+      </article>
+
+      <article class="task">
+        <h3><span class="task-id">AC-09</span> Preflight policy and atomic activation</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-08, AC-04.</dd>
+          <dt>Owns</dt><dd>Protected preflight interpretation and activation modules in runtime/policy.</dd>
+          <dt>Deliverables</dt><dd>Simple configurable risk policy, approval-required state, pins/vetoes, preflight-to-candidate-revision binding, active-revision staging, and one SQLite transaction that atomically exposes the staged revision set and updates activation pointers; each turn pins stable revision IDs.</dd>
+          <dt>Gate</dt><dd>A low-risk revision auto-activates only after bytes are materialized; failure before the SQLite transaction leaves inert staged revisions, failure after it exposes the complete coupled set; authority expansion still waits.</dd>
+          <dt>Conflict</dt><dd>No generated component receives an activation authority handle.</dd>
+        </dl>
+      </article>
+
+      <article class="task">
+        <h3><span class="task-id">AC-10</span> Continuous feedback and experiment outcomes</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-09.</dd>
+          <dt>Owns</dt><dd>Runtime experiment observation, capability health queries/read models, keep/revise/revert decisions, and prior-activation restoration.</dd>
+          <dt>Deliverables</dt><dd>Feedback attribution to experiments and serving revisions, degradation detection, open-experiment observation, keep/revise/revert outcomes, follow-up experiment lineage, and automatic prior-activation restoration.</dd>
+          <dt>Gate</dt><dd>A hard regression resolves the open experiment as <code>revert</code> and restores the prior activation automatically and audibly; <code>revise</code> links a successor revision and experiment.</dd>
+          <dt>Conflict</dt><dd>Monitoring cannot widen permissions or alter protected thresholds.</dd>
+        </dl>
+      </article>
+
+      <p class="phase">Barrier C — after AC-10, reconcile runtime/public APIs and shared metadata, then run activation/recovery checks.</p>
+
+      <p class="phase">Product wave — AC-11 and AC-12 run in parallel after Barrier C; the third worker prepares acceptance fixtures without production edits.</p>
+
+      <article class="task">
+        <h3><span class="task-id">AC-11</span> TUI compounding experience</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-10.</dd>
+          <dt>Owns</dt><dd><code>packages/tui</code> only.</dd>
+          <dt>Deliverables</dt><dd>Ambient status, quiet summaries, changes/preflight/evidence and experiment-comparison views, <code>/why</code>, complete <code>/criteria</code> list/inspect/add/edit/retire/pin surface, approval, capability pin/veto/revert, responsive rendering.</dd>
+          <dt>Gate</dt><dd>Normal chat remains uncluttered; every change is inspectable; authority approval is accessible and explicit.</dd>
+          <dt>Conflict</dt><dd>TUI owns no durable state or policy decisions.</dd>
+        </dl>
+      </article>
+
+      <article class="task">
+        <h3><span class="task-id">AC-12</span> CLI and resident background worker</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-10.</dd>
+          <dt>Owns</dt><dd><code>apps/noesis</code>, worker lifecycle and CLI tests.</dd>
+          <dt>Deliverables</dt><dd><code>noesis worker</code>, inspect/export/backup/restore/experiment commands, lifecycle shutdown, actionable errors. Extract <code>@noesis/background</code> only if the resident worker and runtime genuinely share a deep orchestration API.</dd>
+          <dt>Gate</dt><dd>Worker resumes durable queue, exits cleanly, and cannot broaden scheduler grants.</dd>
+          <dt>Conflict</dt><dd>No TUI source edits.</dd>
+        </dl>
+      </article>
+
+      <p class="phase">Barrier P — integration coordinator reconciles UI/CLI metadata, runs full contract checks, and freezes the review target before AC-13.</p>
+
+      <article class="task">
+        <h3><span class="task-id">AC-13</span> Focused architecture and correctness review</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-11, AC-12.</dd>
+          <dt>Owns</dt><dd>Review report and focused test additions only.</dd>
+          <dt>Deliverables</dt><dd>Findings on competing authorities, candidate/active separation, evidence revision integrity, recovery, automatic UX, experiment comparability, excessive rigidity, and tech debt.</dd>
+          <dt>Gate</dt><dd>One bounded fix loop returns material findings to the owning implementation tasks.</dd>
+          <dt>Conflict</dt><dd>No unsolicited redesign or stylistic nitpicks.</dd>
+        </dl>
+      </article>
+
+      <article class="task">
+        <h3><span class="task-id">AC-14</span> Acceptance, research guide, and hardening backlog</h3>
+        <dl>
+          <dt>Depends</dt><dd>AC-13 fixes.</dd>
+          <dt>Owns</dt><dd>Acceptance fixtures, focused failure tests, README, architecture plan, research guide, progressive-hardening backlog.</dd>
+          <dt>Deliverables</dt><dd>End-to-end fake-model journey, one-time workspace import proof, SQLite backup/restore proof, editable-file round trip, experiment cookbook, honest preview threat model, user guide, verified full check. Reproducible builds, SBOMs, hardened OS backends, exhaustive fuzz/property suites, and multi-model judge panels remain explicit follow-on policies unless evidence makes one necessary now.</dd>
+          <dt>Gate</dt><dd>Definition-of-done journey passes and <code>pnpm check</code> is green without paid model calls.</dd>
+          <dt>Conflict</dt><dd>Root manifest/lock changes remain centralized through the integration owner.</dd>
+        </dl>
+      </article>
+
+      <h3>Four-total-agent schedule</h3>
+      <pre>root orchestrator  coordinate → dispatch → review barriers → synthesize
+worker A           Genesis/AC-00 → AC-01 → Barrier F → AC-05 → Barrier O → AC-08→09→10 → Barrier C → AC-11 → Barrier P → AC-13
+worker B                         → AC-02             → AC-06                                      → AC-12             → fixes
+worker C                         → AC-03 → AC-04     → AC-07                                      → fixtures          → AC-14</pre>
+    </section>
+
+    <section id="verification">
+      <h2>Verification and research feedback</h2>
+      <div class="grid">
+        <article class="card wide">
+          <h3>Boundary tests</h3>
+          <ul>
+            <li>Config v1, SQLite migrations, transaction constraints, and backup restore</li>
+            <li>One declared authority for every persisted datum</li>
+            <li>Direct file edits snapshot immutable revision bytes with digest/predecessor; prior pins still resolve identically</li>
+            <li>Search indexes can be deleted and rebuilt from canonical DB rows and file revisions</li>
+            <li>Source-only author boundary</li>
+            <li>Role context isolation</li>
+            <li>Candidate/active directory separation and atomic activation pointers</li>
+            <li>Staged revision failure before pointer commit is inert and cleanable</li>
+            <li>Pin/veto and autonomy decisions</li>
+            <li>Effectful operation identity and retry behavior</li>
+            <li>AST and package-manifest dependency direction; runtime cannot import runtime-pi</li>
+          </ul>
+        </article>
+        <article class="card wide">
+          <h3>Evaluation tests</h3>
+          <ul>
+            <li>Comparable baseline/candidate inputs with the experiment variable recorded</li>
+            <li>Blind labels and evidence-backed judge criticism</li>
+            <li>Prompt injection cannot grant authority or alter protected rails</li>
+            <li>Protected rails override qualitative wins</li>
+            <li>Candidate revision changes invalidate its preflight report</li>
+            <li>Negative reports remain queryable</li>
+            <li>Evidence used by a decision cannot be overwritten; corrections create revisions</li>
+          </ul>
+        </article>
+        <article class="card wide">
+          <h3>Focused failure paths</h3>
+          <ul>
+            <li>Malformed LLM output, timeout, rate limit</li>
+            <li>Restart around queue reservation and activation</li>
+            <li>Tool crash, hang, and oversized output</li>
+            <li>SQLite restore, missing file reference, and orphan artifact metadata</li>
+            <li>Ambiguous dangerous external effect</li>
+          </ul>
+          <p class="muted">Exhaustive interleavings, fuzz/property suites, and hardened-runtime penetration tests are progressive hardening, not preview launch gates.</p>
+        </article>
+        <article class="card wide">
+          <h3>CI rules</h3>
+          <ul>
+            <li>Fake role runner and fake generated-tool backend cover the core loop.</li>
+            <li>No provider login or paid call is required.</li>
+            <li>Run format, lint, typecheck, tests, and architecture checks.</li>
+            <li>Workspace fixtures prove SQLite/file authority, migration, evidence revisions, and backup restore.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section id="done">
+      <h2>Definition of done</h2>
+      <ol>
+        <li><strong>Session A:</strong> the user corrects Noesis during ordinary work and explicitly says “always preserve my voice”; no learning or criteria command is issued.</li>
+        <li>Noesis captures the scoped criterion with its correction citation and shows only a quiet summary; <code>/criteria</code> can inspect, edit, retire, or pin it later.</li>
+        <li>Noesis automatically searches prior sessions, detects recurrence, and records exact evidence citations.</li>
+        <li>LLM reflection returns an evidence-linked hypothesis/experiment brief, then authors a candidate capability revision coupling a learned prompt module, generated tool code, and routing rule.</li>
+        <li>The tool runs in the bounded local preview backend. A criteria-off versus criteria-on fixture proves that activating the voice-preservation criterion adds targeted generated cases and changes the judge rubric.</li>
+        <li>Baseline and candidate run blind paired trials; one strong judge/critic prefers the candidate, cites the applied criterion revision and evidence, and protected rails pass.</li>
+        <li>The low-risk capability revision activates automatically by staging stable active-revision bytes, then atomically exposing the complete revision set and updating the SQLite activation pointer; its experiment remains open.</li>
+        <li><strong>Session B:</strong> relevant history is retrieved with exact citations and the router selects the new active capability revision.</li>
+        <li><code>/why</code> shows evidence, baseline/candidate variants, judge reasoning, permission manifest, and exact active revision IDs.</li>
+        <li>Real-world feedback is attributed to the active revision and open experiment; a seeded regression resolves it as <code>revert</code> and automatically restores the prior activation pointer, while a separate fixture proves <code>revise</code> creates linked successor revision and experiment.</li>
+        <li>A direct user edit remains the canonical working file, creates a new stable revision without changing prior pinned bytes, refreshes rebuildable search indexes, and invalidates stale evaluations without copying definition content into SQLite.</li>
+        <li>SQLite backup/restore recovers sessions, jobs, experiments, evaluations, search configuration, and activation pointers; FTS/embedding/search-document indexes rebuild from canonical DB rows and file revisions.</li>
+        <li>The entire journey passes with fake models and tools in CI, followed by a green <code>pnpm check</code>.</li>
+      </ol>
+      <div class="callout good">
+        The user experiences a capable agent that quietly becomes better. The system retains enough evidence to explain exactly
+        why it changed, what won, what authority it has, which version served a turn, and how to reverse it.
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Noesis autonomous compounding research-preview plan · SQLite operations · editable definitions · one authority per datum.</p>
+  </footer>
+</body>
+</html>

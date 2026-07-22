@@ -10,12 +10,19 @@ export type Result<T, E> =
 export const ok = <T>(value: T): Result<T, never> => ({ ok: true, value });
 export const err = <E>(error: E): Result<never, E> => ({ ok: false, error });
 
-const PrincipalSchema = z.enum(["foreground", "reflector", "evaluator", "promoter", "scheduler", "system"]);
+export const PrincipalSchema = z.enum([
+  "foreground",
+  "reflector",
+  "evaluator",
+  "promoter",
+  "scheduler",
+  "system",
+]);
 export type Principal = z.infer<typeof PrincipalSchema>;
 export type TrailStatus = "idle" | "running" | "aborted" | "failed" | "completed";
 export type ProposalKind = "memory" | "knowledge" | "workflow";
 export type CapabilityStatus = "candidate" | "active" | "rejected" | "rolled_back";
-const EffectClassSchema = z.enum(["read", "write", "execute", "network", "promote", "schedule"]);
+export const EffectClassSchema = z.enum(["read", "write", "execute", "network", "promote", "schedule"]);
 export type EffectClass = z.infer<typeof EffectClassSchema>;
 
 export const EventTypeSchema = z.enum([
@@ -147,3 +154,36 @@ export function assertGrant(value: unknown): asserts value is Grant {
 export function eventChecksum(event: Omit<LedgerEvent, "checksum">): string {
   return sha256(canonicalJson(event));
 }
+
+export const StableEffectOperationIdentitySchema = z.strictObject({
+  operationId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  principal: PrincipalSchema,
+  effect: EffectClassSchema,
+  resource: z.string().min(1),
+  requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
+});
+export type StableEffectOperationIdentity = Readonly<z.infer<typeof StableEffectOperationIdentitySchema>>;
+
+export const StableEffectOperationAttemptSchema = z.strictObject({
+  identity: StableEffectOperationIdentitySchema,
+  estimatedCost: z.number().nonnegative(),
+  attempt: z.number().int().positive(),
+});
+export type StableEffectOperationAttempt = Readonly<z.infer<typeof StableEffectOperationAttemptSchema>>;
+
+export function effectOperationFingerprint(identity: StableEffectOperationIdentity): string {
+  return sha256(
+    canonicalJson({
+      idempotencyKey: identity.idempotencyKey,
+      principal: identity.principal,
+      effect: identity.effect,
+      resource: identity.resource,
+      requestDigest: identity.requestDigest,
+    }),
+  );
+}
+
+export * from "./research.ts";
+export * from "./storage-schemas.ts";
+export * from "./workspace.ts";

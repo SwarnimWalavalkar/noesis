@@ -7,16 +7,6 @@ settings:
 importers:
 
   .:
-    dependencies:
-      '@earendil-works/pi-agent-core':
-        specifier: 0.80.6
-        version: 0.80.6(ws@8.21.1)(zod@4.4.3)
-      '@earendil-works/pi-ai':
-        specifier: 0.80.6
-        version: 0.80.6(ws@8.21.1)(zod@4.4.3)
-      '@earendil-works/pi-tui':
-        specifier: 0.80.6
-        version: 0.80.6
     devDependencies:
       '@biomejs/biome':
         specifier: 2.4.10
@@ -66,6 +56,15 @@ importers:
       '@noesis/tui':
         specifier: workspace:*
         version: link:../../packages/tui
+
+  packages/agent-types:
+    dependencies:
+      '@noesis/domain':
+        specifier: workspace:*
+        version: link:../domain
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
 
   packages/capabilities:
     dependencies:

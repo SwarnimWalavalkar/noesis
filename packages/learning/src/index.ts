@@ -25,7 +25,7 @@ export function createLearningEngine(ledger: ExperienceLedger): LearningEngine {
     const events = ledger.eventsForTrail(trailId);
     const completed = events.filter((event) => event.type === "turn.completed");
     if (completed.length === 0) throw new Error("A trail needs a completed turn before reflection");
-    const evidence = completed.map((event) => event.eventId); 
+    const evidence = completed.map((event) => event.eventId);
     const last = completed.at(-1);
     const input = String(last?.payload["input"] ?? "completed work");
     const output = String(last?.payload["output"] ?? "");

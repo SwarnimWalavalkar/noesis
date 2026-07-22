@@ -17,10 +17,12 @@
     "types": ["node", "vitest/globals"],
     "baseUrl": ".",
     "paths": {
+      "@noesis/agent-types": ["packages/agent-types/src/index.ts"],
       "@noesis/capabilities": ["packages/capabilities/src/index.ts"],
       "@noesis/config": ["packages/config/src/index.ts"],
       "@noesis/context": ["packages/context/src/index.ts"],
       "@noesis/domain": ["packages/domain/src/index.ts"],
+      "@noesis/domain/protected-state": ["packages/domain/src/protected-state.ts"],
       "@noesis/evals": ["packages/evals/src/index.ts"],
       "@noesis/learning": ["packages/learning/src/index.ts"],
       "@noesis/ledger": ["packages/ledger/src/index.ts"],

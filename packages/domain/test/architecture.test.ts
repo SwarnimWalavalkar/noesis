@@ -2,6 +2,12 @@ import { readFile, readdir } from "node:fs/promises";
 import { extname, relative, resolve } from "node:path";
 import * as ts from "typescript";
 import { describe, expect, test } from "vitest";
+import {
+  PERSISTED_AUTHORITIES,
+  PERSISTED_AUTHORITY_BY_DATUM,
+  PERSISTED_DATA,
+  declaredAuthorityFor,
+} from "../src/index.ts";
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const allowedErrorClasses = new Set([
@@ -119,6 +125,83 @@ describe("first-party architecture boundaries", () => {
       }
     }
     expect(violations).toEqual([]);
+
+    const manifests = [
+      resolve(repositoryRoot, "package.json"),
+      ...(await firstPartyFiles()).filter((path) => path.endsWith("package.json")),
+    ];
+    const dependencyViolations: string[] = [];
+    for (const path of manifests) {
+      const localPath = relativePath(path);
+      const manifest = JSON.parse(await readFile(path, "utf8")) as {
+        readonly dependencies?: Readonly<Record<string, string>>;
+        readonly devDependencies?: Readonly<Record<string, string>>;
+      };
+      const dependencies = { ...manifest.dependencies, ...manifest.devDependencies };
+      for (const name of Object.keys(dependencies)) {
+        if (!name.startsWith("@earendil-works/pi-")) continue;
+        const allowedRuntimePi =
+          localPath === "packages/runtime-pi/package.json" &&
+          (name === "@earendil-works/pi-agent-core" || name === "@earendil-works/pi-ai");
+        const allowedTui = localPath === "packages/tui/package.json" && name === "@earendil-works/pi-tui";
+        if (!allowedRuntimePi && !allowedTui) dependencyViolations.push(`${localPath}:${name}`);
+      }
+    }
+    expect(dependencyViolations).toEqual([]);
+  });
+
+  test("keeps generated roles outside activation and authority mutation surfaces", async () => {
+    const roleRoots = ["agent-types", "learning", "evals", "runtime-pi"];
+    const files = (
+      await Promise.all(
+        roleRoots.map(async (name) => await filesBelow(resolve(repositoryRoot, "packages", name, "src"))),
+      )
+    )
+      .flat()
+      .filter((path) => /\.tsx?$/.test(path));
+    const forbiddenCalls = new Set([
+      "activate",
+      "completeEffect",
+      "failEffect",
+      "issueGrant",
+      "promote",
+      "reserveEffect",
+      "revert",
+      "rollback",
+    ]);
+    const violations: string[] = [];
+
+    for (const path of files) {
+      const sourceFile = parseSource(path, await readFile(path, "utf8"));
+      const localPath = relativePath(path);
+      for (const specifier of moduleSpecifiers(sourceFile)) {
+        if (specifier === "@noesis/policy" || specifier === "@noesis/domain/protected-state")
+          violations.push(`${localPath}:imports:${specifier}`);
+      }
+      const visit = (node: ts.Node): void => {
+        if (
+          ts.isCallExpression(node) &&
+          ts.isPropertyAccessExpression(node.expression) &&
+          forbiddenCalls.has(node.expression.name.text)
+        ) {
+          const position = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+          violations.push(`${localPath}:calls:${node.expression.name.text}:${position.line + 1}`);
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(sourceFile);
+    }
+
+    expect(violations).toEqual([]);
+  });
+
+  test("declares exactly one authority for every persisted datum", () => {
+    expect(Object.keys(PERSISTED_AUTHORITY_BY_DATUM).sort()).toEqual([...PERSISTED_DATA].sort());
+    for (const datum of PERSISTED_DATA) {
+      const authority = declaredAuthorityFor(datum);
+      expect(PERSISTED_AUTHORITIES).toContain(authority);
+      expect(Array.isArray(authority)).toBe(false);
+    }
   });
 
   test("forbids first-party TypeBox imports and direct dependencies", async () => {

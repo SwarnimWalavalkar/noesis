@@ -1,0 +1,154 @@
+import type {
+  ActorRef,
+  ArtifactFileRef,
+  DatabaseRowRef,
+  EvidenceRevisionRef,
+  Experiment,
+  ExperimentOutcome,
+  FeedbackSignal,
+  FileRevisionRef,
+} from "./research.ts";
+
+export const PERSISTED_DATA = [
+  "session",
+  "message",
+  "tool_call",
+  "job",
+  "experiment",
+  "experiment_trial",
+  "feedback_signal",
+  "evaluation",
+  "activation_pointer",
+  "search_configuration",
+  "activity_provenance",
+  "file_revision_metadata",
+  "search_index",
+  "config_definition",
+  "profile_memory_definition",
+  "prompt_module_definition",
+  "skill_capability_definition",
+  "generated_tool_definition",
+  "evaluation_definition",
+  "recorded_definition_revision",
+  "candidate_definition",
+  "artifact_content",
+  "evaluation_evidence",
+  "credential_secret",
+] as const;
+
+export type PersistedDatum = (typeof PERSISTED_DATA)[number];
+
+export const PERSISTED_AUTHORITIES = [
+  "sqlite_operational",
+  "rebuildable_index",
+  "editable_workspace_file",
+  "byte_snapshot",
+  "artifact_file",
+  "evidence_revision_file",
+  "protected_credential_store",
+] as const;
+
+export type PersistedAuthority = (typeof PERSISTED_AUTHORITIES)[number];
+
+export const PERSISTED_AUTHORITY_BY_DATUM = {
+  session: "sqlite_operational",
+  message: "sqlite_operational",
+  tool_call: "sqlite_operational",
+  job: "sqlite_operational",
+  experiment: "sqlite_operational",
+  experiment_trial: "sqlite_operational",
+  feedback_signal: "sqlite_operational",
+  evaluation: "sqlite_operational",
+  activation_pointer: "sqlite_operational",
+  search_configuration: "sqlite_operational",
+  activity_provenance: "sqlite_operational",
+  file_revision_metadata: "sqlite_operational",
+  search_index: "rebuildable_index",
+  config_definition: "editable_workspace_file",
+  profile_memory_definition: "editable_workspace_file",
+  prompt_module_definition: "editable_workspace_file",
+  skill_capability_definition: "editable_workspace_file",
+  generated_tool_definition: "editable_workspace_file",
+  evaluation_definition: "editable_workspace_file",
+  recorded_definition_revision: "byte_snapshot",
+  candidate_definition: "editable_workspace_file",
+  artifact_content: "artifact_file",
+  evaluation_evidence: "evidence_revision_file",
+  credential_secret: "protected_credential_store",
+} as const satisfies Readonly<Record<PersistedDatum, PersistedAuthority>>;
+
+export function declaredAuthorityFor(datum: PersistedDatum): PersistedAuthority {
+  return PERSISTED_AUTHORITY_BY_DATUM[datum];
+}
+
+export interface DefinitionWriteRequest {
+  readonly workingPath: string;
+  readonly bytes: Uint8Array;
+  readonly actor: ActorRef;
+  readonly reason?: string;
+  readonly predecessorRevisionId?: string;
+}
+
+export interface EvidenceWriteRequest extends DefinitionWriteRequest {
+  readonly evidenceKind: EvidenceRevisionRef["evidenceKind"];
+  readonly supersedesRevisionId?: string;
+}
+
+export interface ArtifactWriteRequest {
+  readonly path: string;
+  readonly mediaType: string;
+  readonly bytes: Uint8Array;
+  readonly actor: ActorRef;
+  readonly relationshipRefs: readonly (DatabaseRowRef | FileRevisionRef)[];
+}
+
+export interface WorkspaceReadPort {
+  readonly readDatabaseRow: (ref: DatabaseRowRef) => Promise<Readonly<Record<string, unknown>> | undefined>;
+  readonly readWorkingFile: (workingPath: string) => Promise<Uint8Array | undefined>;
+  readonly readRevision: (ref: FileRevisionRef) => Promise<Uint8Array>;
+  readonly readEvidence: (ref: EvidenceRevisionRef) => Promise<Uint8Array>;
+  readonly readArtifact: (ref: ArtifactFileRef) => Promise<Uint8Array>;
+}
+
+export interface DefinitionFilePort {
+  readonly recordWorkingDefinition: (request: DefinitionWriteRequest) => Promise<FileRevisionRef>;
+  readonly recordCandidateDefinition: (request: DefinitionWriteRequest) => Promise<FileRevisionRef>;
+}
+
+export interface RevisionSnapshotPort {
+  readonly resolveRevision: (revisionId: string) => Promise<FileRevisionRef | undefined>;
+  readonly removeUnregisteredSnapshots: () => Promise<number>;
+}
+
+export interface EvidenceFilePort {
+  readonly appendEvidence: (request: EvidenceWriteRequest) => Promise<EvidenceRevisionRef>;
+}
+
+export interface ArtifactFilePort {
+  readonly writeArtifact: (request: ArtifactWriteRequest) => Promise<ArtifactFileRef>;
+}
+
+export interface ResearchStatePort {
+  readonly getExperiment: (experimentId: string) => Promise<Experiment | undefined>;
+  readonly recordExperiment: (experiment: Experiment) => Promise<DatabaseRowRef>;
+  readonly recordFeedbackSignal: (signal: FeedbackSignal) => Promise<DatabaseRowRef>;
+  readonly resolveExperiment: (
+    experimentId: string,
+    outcome: ExperimentOutcome,
+    evidenceRefs: readonly EvidenceRevisionRef[],
+  ) => Promise<void>;
+}
+
+/**
+ * The non-protected persistence surface shared by research packages. Activation and authority mutation
+ * deliberately live in the separately exported protected-state module.
+ */
+export interface WorkspaceStore {
+  readonly reads: WorkspaceReadPort;
+  readonly definitions: DefinitionFilePort;
+  readonly revisions: RevisionSnapshotPort;
+  readonly evidence: EvidenceFilePort;
+  readonly artifacts: ArtifactFilePort;
+  readonly research: ResearchStatePort;
+  readonly declaredAuthority: typeof declaredAuthorityFor;
+}
