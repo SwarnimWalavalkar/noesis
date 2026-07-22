@@ -231,6 +231,24 @@ function classifyFailure(error: unknown): ActivationAttemptResult {
   });
 }
 
+function recoveredPolicy(operation: ActivationOperationRecord): PreflightPolicyDecision {
+  return Object.freeze({
+    outcome: operation.decision,
+    reasonCodes: z.array(z.string()).parse(operation.policySnapshot["reasonCodes"]),
+    risk: z.enum(["low", "medium", "high"]).parse(operation.policySnapshot["risk"]),
+    permissionExpansion: z
+      .object({
+        addedEffects: z.array(z.string()),
+        widenedResources: z.array(z.string()),
+        addedCredentialRefs: z.array(z.string()),
+        expandsAuthority: z.boolean(),
+        matchesDeclaredDelta: z.boolean(),
+      })
+      .parse(operation.policySnapshot["permissionExpansion"]),
+    snapshotDigest: operation.policyDigest,
+  });
+}
+
 export function createAtomicActivationController(
   options: AtomicActivationControllerOptions,
 ): AtomicActivationController {
@@ -442,6 +460,20 @@ export function createAtomicActivationController(
     handoff: PreflightActivationHandoff,
   ): Promise<ActivationAttemptResult> => {
     try {
+      const recovered = (await options.workspace.protectedActivations.listOperations(1_000)).find(
+        (operation) =>
+          operation.status === "committed" &&
+          operation.binding.experimentId === handoff.experiment.experimentId &&
+          operation.binding.preflightId === handoff.report.preflightId &&
+          sameCapabilityRevisionRef(operation.binding.candidateRevision, handoff.candidateRevision),
+      );
+      if (recovered)
+        return Object.freeze({
+          ok: true,
+          status: "activated",
+          operation: recovered,
+          policy: recoveredPolicy(recovered),
+        });
       const validated = await validate(handoff);
       const permissionExpansion = derivePermissionExpansion(
         validated.baseline.permissionManifest,

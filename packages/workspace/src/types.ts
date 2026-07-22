@@ -1,11 +1,14 @@
 import type {
   ActorRef,
   ArtifactFileRef,
+  EvidenceRef,
+  Experiment,
   DatabaseRowRef,
   FileRevisionRef,
   WorkspaceStore,
   CapabilityRevisionRef,
   DataSensitivity,
+  PermissionManifest,
 } from "@noesis/domain";
 
 export type Sensitivity = DataSensitivity;
@@ -180,6 +183,131 @@ export interface TurnActivationPinRecord {
   readonly activeDefinitions: Readonly<Record<string, FileRevisionRef>>;
   readonly activeCapabilityRevisions: Readonly<Record<string, CapabilityRevisionRef>>;
   readonly pinnedAt: string;
+}
+
+export interface ObservationMetrics {
+  readonly quality: number | null;
+  readonly baselineQuality: number | null;
+  readonly latencyMs: number | null;
+  readonly baselineLatencyMs: number | null;
+  readonly cost: number | null;
+  readonly baselineCost: number | null;
+  readonly failed: boolean;
+  readonly protectedRailViolation: boolean;
+}
+
+export type ObservationPrecedence = "none" | "correction" | "preference" | "user_veto";
+
+export interface ExperimentObservationRecord {
+  readonly observationId: string;
+  readonly dedupeKey: string;
+  readonly experimentId: string;
+  readonly signalId: string;
+  readonly outcomeId: string;
+  readonly preflightId: string;
+  readonly experimentActivationId: string;
+  readonly servingActivationId: string;
+  readonly activationRevision: number;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly capabilityRevision: CapabilityRevisionRef;
+  readonly metrics: ObservationMetrics;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly precedence: ObservationPrecedence;
+  readonly userDecision?: "keep" | "revise" | "revert";
+  readonly hardRegression: boolean;
+  readonly createdAt: string;
+}
+
+export interface ExperimentResearchRunRecord {
+  readonly runId: string;
+  readonly experimentId: string;
+  readonly strategyId: string;
+  readonly inputDigest: string;
+  readonly status: "running" | "completed" | "failed";
+  readonly proposal?: "keep" | "revise" | "revert";
+  readonly citedObservationIds: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly attempt: number;
+  readonly failureMessage?: string;
+  readonly retryable: boolean;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ExperimentOutcomeOperationRecord {
+  readonly operationId: string;
+  readonly idempotencyKey: string;
+  readonly experimentId: string;
+  readonly decision: "keep" | "revise" | "revert";
+  readonly strategyId: string;
+  readonly researchRunId?: string;
+  readonly expectedActivationId: string;
+  readonly expectedActivationRevision: number;
+  readonly restoreSourceActivationId?: string;
+  readonly restoredActivationId?: string;
+  readonly successorExperimentId?: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly operationDigest: string;
+  readonly committedAt: string;
+}
+
+export interface SuccessorLineageInputRecord {
+  readonly inputId: string;
+  readonly predecessorExperimentId: string;
+  readonly successorExperimentId: string;
+  readonly predecessorActivationId: string;
+  readonly predecessorRevision: CapabilityRevisionRef;
+  readonly baselineRevision: CapabilityRevisionRef;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly createdAt: string;
+}
+
+export interface CommitExperimentOutcomeRequest {
+  readonly operationId: string;
+  readonly idempotencyKey: string;
+  readonly experimentId: string;
+  readonly decision: "keep" | "revise" | "revert";
+  readonly strategyId: string;
+  readonly researchRunId?: string;
+  readonly expectedActivationId: string;
+  readonly expectedActivationRevision: number;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly operationDigest: string;
+  readonly restore?: {
+    readonly sourceActivationId: string;
+    readonly currentPermissionManifest: PermissionManifest;
+    readonly restoredPermissionManifest: PermissionManifest;
+  };
+  readonly successor?: {
+    readonly experiment: Experiment;
+    readonly lineage: Omit<SuccessorLineageInputRecord, "createdAt">;
+  };
+}
+
+export interface ProtectedFeedbackStore {
+  readonly operationForActivation: (activationId: string) => Promise<ActivationOperationRecord | undefined>;
+  readonly recordObservation: (
+    record: Omit<ExperimentObservationRecord, "createdAt">,
+    maximumObservations: number,
+  ) => Promise<ExperimentObservationRecord | undefined>;
+  readonly getObservation: (observationId: string) => Promise<ExperimentObservationRecord | undefined>;
+  readonly listObservations: (
+    experimentId: string,
+    limit: number,
+  ) => Promise<readonly ExperimentObservationRecord[]>;
+  readonly putResearchRun: (
+    record: Omit<ExperimentResearchRunRecord, "createdAt" | "updatedAt">,
+  ) => Promise<ExperimentResearchRunRecord>;
+  readonly getResearchRun: (runId: string) => Promise<ExperimentResearchRunRecord | undefined>;
+  readonly listResearchRuns: (experimentId: string) => Promise<readonly ExperimentResearchRunRecord[]>;
+  readonly getOutcome: (experimentId: string) => Promise<ExperimentOutcomeOperationRecord | undefined>;
+  readonly commitOutcome: (
+    request: CommitExperimentOutcomeRequest,
+  ) => Promise<ExperimentOutcomeOperationRecord>;
+  readonly getSuccessorInput: (
+    predecessorExperimentId: string,
+  ) => Promise<SuccessorLineageInputRecord | undefined>;
 }
 
 export interface PrepareActivationOperationRequest {
@@ -383,6 +511,8 @@ export interface NoesisWorkspaceStore extends WorkspaceStore {
   readonly operational: OperationalRepositories;
   /** Protected runtime composition only; never pass this surface to generated roles. */
   readonly protectedActivations: ProtectedActivationStore;
+  /** Protected runtime composition only; never pass this surface to generated or reflection roles. */
+  readonly protectedFeedback: ProtectedFeedbackStore;
   readonly search: SearchIndexPort;
   readonly recordDirectEdit: (
     workingPath: string,

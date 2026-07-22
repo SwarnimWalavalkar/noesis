@@ -105,7 +105,7 @@ describe("WorkspaceStore", () => {
       .all()
       .map((row) => Reflect.get(row, "version"));
     database.close();
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7]);
   });
 
   test("rolls back repository activity when a foreign-key write fails", async () => {

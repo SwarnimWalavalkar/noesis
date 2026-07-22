@@ -32,6 +32,7 @@ export * from "./coordinator-composition.ts";
 export * from "./preflight-policy.ts";
 export * from "./atomic-activation.ts";
 export * from "./protected-activation.ts";
+export * from "./continuous-feedback.ts";
 
 export interface TrailState {
   readonly trailId: string;
