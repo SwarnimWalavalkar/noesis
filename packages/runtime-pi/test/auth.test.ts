@@ -8,7 +8,9 @@ import { describe, expect, test } from "vitest";
 import {
   credentialFileMode,
   createPiAgentRuntime,
+  createPiAgentRoleRunner,
   createPiAuthManager,
+  createDefaultRoleContextPolicy,
   createSecurePiCredentialStore,
   piAuthPath,
 } from "../src/index.ts";
@@ -106,6 +108,33 @@ describe("Pi authentication", () => {
       activeCapabilities: [],
     };
     await expect(runtime.run(request, () => undefined)).rejects.toThrow("OPENROUTER_API_KEY");
+  });
+
+  test("reuses the Pi provider and auth lifecycle for isolated roles without reaching the network", async () => {
+    const models = createModels({ authContext: emptyAuthContext });
+    models.setProvider(openrouterProvider());
+    const runner = createPiAgentRoleRunner(process.cwd(), models, [
+      {
+        variant: { variantId: "reflect-openrouter", axis: "role", configurationRefs: [] },
+        role: "reflector",
+        provider: "openrouter",
+        model: "openai/gpt-4o-mini",
+        reasoning: "off",
+        systemPrompt: "Reflect on bounded evidence only.",
+        contextPolicy: createDefaultRoleContextPolicy("reflector"),
+      },
+    ]);
+
+    await expect(
+      runner.run({
+        runId: "role-missing-auth",
+        role: "reflector",
+        variant: { variantId: "reflect-openrouter", axis: "role", configurationRefs: [] },
+        messages: [{ role: "user", name: "signals", content: "must not reach the network" }],
+        evidenceRefs: [],
+        availableTools: [],
+      }),
+    ).rejects.toThrow("OPENROUTER_API_KEY");
   });
 
   test("rejects duplicate Pi executions while auth resolution is pending without network access", async () => {

@@ -1,0 +1,128 @@
+import type { AgentMessage, AgentRole, AgentRunRequest } from "@noesis/agent-types";
+import type { CapabilityRevisionRef } from "@noesis/domain";
+import type { BoundedRoleInput, RoleContextPolicy } from "./role-types.ts";
+
+const DEFAULT_MAX_MESSAGES = 24;
+const DEFAULT_MESSAGE_CHARACTERS = 12_000;
+const DEFAULT_TOTAL_CHARACTERS = 48_000;
+const DEFAULT_EVIDENCE_REFS = 64;
+
+const isolatedRoleMessageNames = {
+  signal_interpreter: ["turn", "related_history"],
+  reflector: ["signals", "evidence", "active_capabilities", "user_preferences"],
+  revision_author: ["hypothesis", "source_cases"],
+  case_generator: ["behavioral_objective", "evidence", "user_criteria"],
+  trial: ["case", "arm"],
+  judge_critic: ["rubric", "arm_A", "arm_B", "relevant_traces"],
+  revision_agent: ["failures", "judgment_evidence"],
+  ux_explainer: ["evidence", "diff", "report", "activation_lineage"],
+} as const satisfies Readonly<Record<Exclude<AgentRole, "foreground">, readonly string[]>>;
+
+export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPolicy {
+  const foreground = role === "foreground";
+  return Object.freeze({
+    policyId: foreground ? "foreground-bounded-v1" : `${role}-isolated-v1`,
+    maxMessages: DEFAULT_MAX_MESSAGES,
+    maxCharactersPerMessage: DEFAULT_MESSAGE_CHARACTERS,
+    maxTotalCharacters: DEFAULT_TOTAL_CHARACTERS,
+    maxEvidenceRefs: DEFAULT_EVIDENCE_REFS,
+    maxTools: foreground ? 32 : 0,
+    ...(foreground ? {} : { allowedMessageNames: isolatedRoleMessageNames[role] }),
+    includeCapabilityRevisions: role !== "judge_critic",
+  });
+}
+
+function isCapabilityRevisionRef(revision: unknown): revision is CapabilityRevisionRef {
+  return (
+    revision !== null &&
+    typeof revision === "object" &&
+    "kind" in revision &&
+    revision.kind === "capability_revision" &&
+    "capabilityId" in revision &&
+    typeof revision.capabilityId === "string" &&
+    revision.capabilityId.length > 0 &&
+    "capabilityRevisionId" in revision &&
+    typeof revision.capabilityRevisionId === "string" &&
+    revision.capabilityRevisionId.length > 0 &&
+    "bundleDigest" in revision &&
+    typeof revision.bundleDigest === "string" &&
+    /^[a-f0-9]{64}$/.test(revision.bundleDigest)
+  );
+}
+
+function capabilityRevisionsOf(request: AgentRunRequest): readonly CapabilityRevisionRef[] {
+  if (!("capabilityRevisions" in request)) return [];
+  const revisions = request.capabilityRevisions;
+  if (!Array.isArray(revisions) || !revisions.every(isCapabilityRevisionRef)) {
+    throw new Error("Role input contains an invalid CapabilityRevisionRef");
+  }
+  return revisions;
+}
+
+export function signalOf(request: AgentRunRequest): AbortSignal | undefined {
+  if (!("signal" in request)) return undefined;
+  const signal = request.signal;
+  return signal instanceof AbortSignal ? signal : undefined;
+}
+
+function boundMessages(
+  messages: readonly AgentMessage[],
+  policy: RoleContextPolicy,
+): readonly AgentMessage[] {
+  const selected = messages.slice(0, policy.maxMessages);
+  const bounded: AgentMessage[] = [];
+  let totalCharacters = 0;
+  for (const message of selected) {
+    if (policy.allowedMessageNames) {
+      if (!message.name || !policy.allowedMessageNames.includes(message.name)) {
+        throw new Error(
+          `Context policy ${policy.policyId} rejects undeclared message ${message.name ?? "<unnamed>"}`,
+        );
+      }
+    }
+    if (policy.forbiddenContent?.test(message.content)) {
+      throw new Error(`Context policy ${policy.policyId} rejects unblinded or protected context`);
+    }
+    const remaining = policy.maxTotalCharacters - totalCharacters;
+    if (remaining <= 0) break;
+    const content = message.content.slice(0, Math.min(policy.maxCharactersPerMessage, remaining));
+    totalCharacters += content.length;
+    bounded.push(Object.freeze({ ...message, content }));
+  }
+  return Object.freeze(bounded);
+}
+
+export function applyRoleContextPolicy(
+  request: AgentRunRequest,
+  policy: RoleContextPolicy,
+): BoundedRoleInput {
+  if (request.role !== "foreground" && policy.maxTools > 0) {
+    throw new Error(`Context policy ${policy.policyId} cannot expose tools to isolated role ${request.role}`);
+  }
+  return Object.freeze({
+    runId: request.runId,
+    role: request.role,
+    variant: request.variant,
+    messages: boundMessages(request.messages, policy),
+    evidenceRefs: Object.freeze(request.evidenceRefs.slice(0, policy.maxEvidenceRefs)),
+    availableTools: Object.freeze(request.availableTools.slice(0, policy.maxTools)),
+    capabilityRevisions: Object.freeze(capabilityRevisionsOf(request).map((revision) => ({ ...revision }))),
+  });
+}
+
+export function renderBoundedRolePrompt(input: BoundedRoleInput, policy: RoleContextPolicy): string {
+  const visibleCapabilityRevisions = policy.includeCapabilityRevisions ? input.capabilityRevisions : [];
+  return JSON.stringify(
+    {
+      runId: input.runId,
+      role: input.role,
+      variant: input.variant,
+      messages: input.messages,
+      evidenceRefs: input.evidenceRefs,
+      availableTools: input.availableTools,
+      capabilityRevisions: visibleCapabilityRevisions,
+    },
+    null,
+    2,
+  );
+}

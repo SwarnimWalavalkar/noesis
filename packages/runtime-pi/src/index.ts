@@ -4,6 +4,12 @@ import type { MutableModels } from "@earendil-works/pi-ai";
 import { z } from "zod";
 
 export * from "./auth.ts";
+export * from "./experiment-fixtures.ts";
+export * from "./generated-tool-broker.ts";
+export * from "./pi-role-backend.ts";
+export * from "./role-context.ts";
+export * from "./role-runner.ts";
+export * from "./role-types.ts";
 
 export type AgentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
