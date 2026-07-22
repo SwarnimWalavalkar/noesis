@@ -56,6 +56,10 @@ function createFakeResearchState(): ResearchStatePort {
   return Object.freeze({
     experiments: Object.freeze({
       getExperiment: async (experimentId: string) => experiments.get(experimentId),
+      listExperiments: async (request: Parameters<ResearchStatePort["experiments"]["listExperiments"]>[0]) =>
+        [...experiments.values()]
+          .filter((experiment) => request.status === undefined || experiment.status === request.status)
+          .slice(0, request.limit),
       putExperiment: async (experiment: Experiment) => {
         const existing = experiments.get(experiment.experimentId);
         if (

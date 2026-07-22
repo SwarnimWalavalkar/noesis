@@ -214,6 +214,10 @@ export interface ArtifactFilePort {
 
 export interface ExperimentStorePort {
   readonly getExperiment: (experimentId: string) => Promise<Experiment | undefined>;
+  readonly listExperiments: (request: {
+    readonly status?: Experiment["status"];
+    readonly limit: number;
+  }) => Promise<readonly Experiment[]>;
   readonly putExperiment: (experiment: Experiment) => Promise<DatabaseRowRef<"experiments">>;
 }
 

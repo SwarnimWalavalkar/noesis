@@ -1487,6 +1487,22 @@ function createResearchRepositories(
         decodeExperiment(
           db.prepare("SELECT data_json FROM experiments WHERE experiment_id = ?").get(experimentId),
         ),
+      listExperiments: async (
+        request: Parameters<NoesisWorkspaceStore["research"]["experiments"]["listExperiments"]>[0],
+      ) => {
+        if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 1_000)
+          throw new Error("Experiment list limit must be an integer between 1 and 1000");
+        const rows = request.status
+          ? db
+              .prepare("SELECT data_json FROM experiments WHERE status = ? ORDER BY experiment_id LIMIT ?")
+              .all(request.status, request.limit)
+          : db.prepare("SELECT data_json FROM experiments ORDER BY experiment_id LIMIT ?").all(request.limit);
+        return rows.map((row) => {
+          const experiment = decodeExperiment(row);
+          if (!experiment) throw new Error("Experiment row is missing canonical data");
+          return experiment;
+        });
+      },
       putExperiment: async (experiment: Experiment) => {
         const value = ExperimentSchema.parse(experiment);
         const encoded = JSON.stringify(value);

@@ -274,6 +274,11 @@ describe("atomic capability registry", () => {
       experiments: {
         getExperiment: async (experimentId) =>
           experiment?.experimentId === experimentId ? experiment : undefined,
+        listExperiments: async (request) => {
+          const current = experiment;
+          if (!current || (request.status !== undefined && current.status !== request.status)) return [];
+          return [current].slice(0, request.limit);
+        },
         putExperiment: async (value) => row("experiments", value.experimentId),
       },
       trials: {
