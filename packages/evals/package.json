@@ -15,6 +15,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@noesis/learning": "workspace:*",
     "@noesis/runtime-pi": "workspace:*"
   }
 }

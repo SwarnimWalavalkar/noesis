@@ -9,8 +9,10 @@ import {
   type EvidenceRevisionRef,
   type ExperimentTrial,
   type FileRevisionRef,
+  PreflightReportSchema,
   sha256,
 } from "@noesis/domain";
+import type { AuthorRevisionResult } from "@noesis/learning";
 import type { RoleBackendRequest } from "@noesis/runtime-pi";
 import {
   createDefaultRoleContextPolicy,
@@ -25,13 +27,17 @@ import {
   ALTERNATIVE_JUDGE_STRATEGY,
   createCandidateAuthorCaseView,
   createDynamicEvaluationLaboratory,
+  createLearningPreflightInput,
+  DynamicPreflightInputBoundarySchema,
   type DynamicEvaluationConfig,
   type DynamicPreflightInput,
   type DynamicPreflightReport,
   type EvaluationCase,
   type EvaluationCriterionSet,
   type EvaluationEvidenceRecorder,
+  type LearningAuthoredCandidate,
   selectEvaluationCriteria,
+  toWorkspacePreflightReport,
 } from "../src/index.ts";
 
 function digest(label: string): string {
@@ -503,6 +509,101 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     expect(selected.value.snapshotDigest).toMatch(/^[a-f0-9]{64}$/);
   });
 
+  test("composes an AC-05 authored candidate into the AC-06 preflight contract without runtime coordination", async () => {
+    const learningOutputFitsHandoff: AuthorRevisionResult extends LearningAuthoredCandidate ? true : false =
+      true;
+    expect(learningOutputFitsHandoff).toBe(true);
+    const authored: LearningAuthoredCandidate = Object.freeze({
+      brief: Object.freeze({
+        experimentId: "experiment-research",
+        hypothesis: "Produce an evidence-grounded concise research update",
+        scope: "research",
+        baselineRevision: baselineRef,
+        sourceCases: Object.freeze([
+          Object.freeze({
+            caseId: sourceCase.caseId,
+            scope: "research",
+            input: sourceCase.input,
+            expectedBehavior: sourceCase.instruction,
+            evidenceRefs: sourceCase.evidenceRefs,
+          }),
+        ]),
+      }),
+      revision: candidateRevision,
+      revisionRef: candidateRef,
+      experiment: Object.freeze({
+        experimentId: "experiment-research",
+        hypothesis: "Produce an evidence-grounded concise research update",
+        scope: "research",
+        evidenceRefs: Object.freeze([sourceEvidence]),
+        baselineRevision: baselineRef,
+        candidateRevisions: Object.freeze([candidateRef]),
+        feedbackSignalIds: Object.freeze(["signal-correction"]),
+        status: "authoring" as const,
+      }),
+    });
+    const composed = createLearningPreflightInput({
+      preflightId: "preflight-learning-handoff",
+      planId: "plan-learning-handoff",
+      authored,
+      baselineRevision,
+      criteria: criterionSet(),
+      protectedCases: Object.freeze([protectedCase]),
+      budget: Object.freeze({ maxCases: 3, maxAttemptsPerArm: 1, maxCost: 0 }),
+      config: config(),
+    });
+
+    expect(composed.ok).toBe(true);
+    if (!composed.ok) return;
+    expect(DynamicPreflightInputBoundarySchema.safeParse(composed.value).success).toBe(true);
+    expect(composed.value.candidate.ref).toEqual(candidateRef);
+    expect(composed.value.sourceCases).toEqual([sourceCase]);
+    expect(
+      createCandidateAuthorCaseView([...composed.value.sourceCases, ...composed.value.protectedCases]),
+    ).toEqual({ sourceCases: [sourceCase] });
+    const driftedRef = Object.freeze({ ...candidateRef, bundleDigest: "0".repeat(64) });
+    const mismatched = createLearningPreflightInput({
+      preflightId: "preflight-drifted-handoff",
+      planId: "plan-drifted-handoff",
+      authored: Object.freeze({
+        ...authored,
+        revisionRef: driftedRef,
+        experiment: Object.freeze({
+          ...authored.experiment,
+          candidateRevisions: Object.freeze([driftedRef]),
+        }),
+      }),
+      baselineRevision,
+      criteria: criterionSet("Preserve my voice and concise phrasing", "voice", driftedRef),
+      protectedCases: Object.freeze([protectedCase]),
+      budget: Object.freeze({ maxCases: 3, maxAttemptsPerArm: 1, maxCost: 0 }),
+      config: config(),
+    });
+    expect(mismatched).toMatchObject({ ok: false, error: { code: "identity_mismatch" } });
+
+    const harness = createHarness();
+    const result = await harness.laboratory.runPreflight(composed.value);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toMatchObject({
+      decision: "pass",
+      baselineRevision: baselineRef,
+      candidateRevision: candidateRef,
+      canonicalCandidateDigest: candidateRef.bundleDigest,
+    });
+    const roleRequests = harness.backend.prompts.map(parseRolePrompt);
+    expect(roleRequests.find((request) => request.role === "case_generator")?.messages).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ content: expect.stringContaining("SECRET HELD OUT INPUT") }),
+      ]),
+    );
+    expect(
+      roleRequests
+        .filter((request) => request.role === "judge_critic")
+        .every((request) => !JSON.stringify(request.messages).includes(candidateRef.capabilityRevisionId)),
+    ).toBe(true);
+  });
+
   test("passes a convincing candidate and emits a fully cited preflight report", async () => {
     const harness = createHarness();
     const result = await harness.laboratory.runPreflight(input());
@@ -576,7 +677,7 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     });
   });
 
-  test("records approval-required without activating or resolving an experiment", async () => {
+  test("records approval_required without activating or resolving an experiment", async () => {
     const permissionCandidate = Object.freeze({
       ...candidateRevision,
       requestedPermissionDelta: Object.freeze({
@@ -597,8 +698,11 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.aggregation.winner).toBe("candidate");
-    expect(result.value.decision).toBe("approval-required");
-    expect(harness.recorder.reports.at(-1)?.decision).toBe("approval-required");
+    expect(result.value.decision).toBe("approval_required");
+    expect(harness.recorder.reports.at(-1)?.decision).toBe("approval_required");
+    const durableReport = toWorkspacePreflightReport(result.value);
+    expect(durableReport.decision).toBe("approval_required");
+    expect(PreflightReportSchema.safeParse(durableReport).success).toBe(true);
   });
 
   test("an explicit criterion changes generated cases and evidence-backed judgment", async () => {

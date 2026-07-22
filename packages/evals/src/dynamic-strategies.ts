@@ -191,9 +191,9 @@ export function decisionFromEvaluation(input: {
   readonly railsPassed: boolean;
   readonly aggregation: AggregatedComparison;
   readonly config: DynamicEvaluationConfig;
-}): "pass" | "block" | "approval-required" {
+}): "pass" | "block" | "approval_required" {
   if (!input.railsPassed || input.aggregation.winner !== "candidate") return "block";
   if (input.candidateHasPermissionDelta && input.config.rails.approvalOnPermissionDelta)
-    return "approval-required";
+    return "approval_required";
   return "pass";
 }

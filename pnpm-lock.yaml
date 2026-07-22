@@ -138,6 +138,9 @@ importers:
         specifier: 4.4.3
         version: 4.4.3
     devDependencies:
+      '@noesis/learning':
+        specifier: workspace:*
+        version: link:../learning
       '@noesis/runtime-pi':
         specifier: workspace:*
         version: link:../runtime-pi

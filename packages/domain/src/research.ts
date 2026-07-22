@@ -264,6 +264,8 @@ export interface EvaluationComparison {
   readonly summary: string;
 }
 
+export type PreflightDecision = "pass" | "block" | "inconclusive" | "approval_required";
+
 export interface PreflightReport {
   readonly preflightId: string;
   readonly experimentId: string;
@@ -276,7 +278,7 @@ export interface PreflightReport {
   readonly appliedCriteria: readonly AppliedCriterionRef[];
   readonly railChecks: readonly RailCheckResult[];
   readonly comparison: EvaluationComparison;
-  readonly decision: "pass" | "block" | "inconclusive";
+  readonly decision: PreflightDecision;
   readonly reportEvidence: EvidenceRevisionRef<"report">;
 }
 

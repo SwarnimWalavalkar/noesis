@@ -14,6 +14,7 @@ import {
   type ExperimentVariantRef,
   type FileRevisionRef,
   FileRevisionRefSchema,
+  type PreflightDecision,
   type Result,
 } from "@noesis/domain";
 import { z } from "zod";
@@ -379,7 +380,7 @@ export interface DynamicPreflightReport {
   readonly railChecks: readonly EvaluationRailResult[];
   readonly config: DynamicEvaluationConfig;
   readonly roleTelemetry: readonly EvaluationRoleTrace[];
-  readonly decision: "pass" | "block" | "approval-required";
+  readonly decision: Exclude<PreflightDecision, "inconclusive">;
   readonly reportEvidence: EvidenceRevisionRef<"report">;
 }
 

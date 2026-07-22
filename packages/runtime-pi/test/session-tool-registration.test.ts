@@ -1,4 +1,5 @@
 import type { SessionToolDefinition, SessionToolName } from "@noesis/intelligence";
+import { sha256 } from "@noesis/domain";
 import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import { createPiSessionToolRegistration } from "../src/session-tool-registration.ts";
@@ -34,6 +35,13 @@ describe("Pi session tool registration", () => {
       content: [{ type: "text", text: expect.stringContaining("bounded") }],
       details: { toolName: "search_sessions" },
     });
+    const visibleText = result?.content[0]?.type === "text" ? result.content[0].text : "";
+    expect(visibleText.match(/bounded/gu)).toHaveLength(1);
+    expect(result?.details).toEqual({
+      toolName: "search_sessions",
+      resultDigest: sha256(visibleText),
+    });
+    expect(JSON.stringify(result?.details)).not.toContain("bounded");
   });
 
   test("checks cancellation before and after forwarding Pi's signal", async () => {

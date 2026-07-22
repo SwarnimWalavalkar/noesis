@@ -235,7 +235,7 @@ export const PreflightReportSchema = z.strictObject({
     confidence: z.number().min(0).max(1),
     summary: z.string().min(1),
   }),
-  decision: z.enum(["pass", "block", "inconclusive"]),
+  decision: z.enum(["pass", "block", "inconclusive", "approval_required"]),
   reportEvidence: ReportEvidenceRevisionRefSchema,
 }) satisfies z.ZodType<PreflightReport>;
 

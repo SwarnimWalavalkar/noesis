@@ -16,7 +16,7 @@ function safeName(value: string): string {
   return safe;
 }
 
-function reportForWorkspace(report: DynamicPreflightReport): PreflightReport {
+export function toWorkspacePreflightReport(report: DynamicPreflightReport): PreflightReport {
   return Object.freeze({
     preflightId: report.preflightId,
     experimentId: report.experimentId,
@@ -49,7 +49,7 @@ function reportForWorkspace(report: DynamicPreflightReport): PreflightReport {
       confidence: report.aggregation.confidence,
       summary: report.aggregation.summary,
     }),
-    decision: report.decision === "approval-required" ? "inconclusive" : report.decision,
+    decision: report.decision,
     reportEvidence: report.reportEvidence,
   });
 }
@@ -79,7 +79,7 @@ export function createWorkspaceEvaluationRecorder(
     await workspace.research.trials.putTrial(trial);
 
   const recordReport: EvaluationEvidenceRecorder["recordReport"] = async (report) => {
-    const row = await workspace.research.preflights.putPreflightReport(reportForWorkspace(report));
+    const row = await workspace.research.preflights.putPreflightReport(toWorkspacePreflightReport(report));
     const evaluation: EvaluationRecord = Object.freeze({
       evaluationId: `evaluation:${report.preflightId}`,
       experimentId: report.experimentId,

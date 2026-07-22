@@ -16,6 +16,7 @@ import {
   type DefinitionWriteRequest,
   type EvidenceRef,
   type Experiment,
+  type ExperimentStorePort,
   type FeedbackSignal,
   type FileRevisionRef,
   type Result,
@@ -388,6 +389,12 @@ function createHarness(input: {
     experiments: Object.freeze({
       getExperiment: async (experimentId: string) =>
         experiments.find((experiment) => experiment.experimentId === experimentId),
+      listExperiments: async (request: Parameters<ExperimentStorePort["listExperiments"]>[0]) =>
+        Object.freeze(
+          experiments
+            .filter((experiment) => request.status === undefined || experiment.status === request.status)
+            .slice(0, request.limit),
+        ),
       putExperiment: async (experiment: Experiment) => {
         experiments.push(experiment);
         return Object.freeze({
@@ -556,7 +563,7 @@ describe("automatic learning organ", () => {
   test("deduplicates recurring hypotheses while retaining exact source-case citations", async () => {
     const briefs = createInMemoryExperimentBriefStore();
     const harness = createHarness({
-      steps: [reflectionStep, reflectionStep],
+      steps: [reflectionStep, reflectionStep, authorStep],
       citations: [citation(1), citation(2)],
       briefs,
     });
@@ -585,6 +592,10 @@ describe("automatic learning organ", () => {
     expect(first.brief.sourceCases[0]?.citations).toEqual(first.brief.citations);
     expect(first.brief.sourceCases[0]?.citations).toHaveLength(2);
     expect(harness.feedback.signals()).toHaveLength(2);
+    const authored = await harness.organ.authorExperimentRevision({ brief: second.brief });
+    expect(authored.brief.experimentId).toBe(first.brief.experimentId);
+    expect(authored.revisionRef).toEqual(capabilityRevisionRef(authored.revision));
+    expect(authored.experiment.candidateRevisions).toEqual([authored.revisionRef]);
   });
 
   test("authors a complete immutable AC-03 revision and a canonical authoring experiment", async () => {
