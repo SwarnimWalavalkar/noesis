@@ -1,0 +1,741 @@
+import type { AgentRunRequest } from "@noesis/agent-types";
+import { createAtomicCapabilityRegistry, type CapabilityRevisionConstruction } from "@noesis/capabilities";
+import type {
+  CreateUserCriterionInput,
+  UserCriterionError,
+  UserCriterionReadModel,
+  UserCriterionRepository,
+} from "@noesis/config";
+import {
+  capabilityRevisionRef,
+  err,
+  ok,
+  sha256,
+  type Capability,
+  type DatabaseRowRef,
+  type DefinitionWriteRequest,
+  type EvidenceRef,
+  type Experiment,
+  type FeedbackSignal,
+  type FileRevisionRef,
+  type Result,
+} from "@noesis/domain";
+import type { ExactCitation, HistoryPort, HistorySearchRequest } from "@noesis/intelligence";
+import { describe, expect, test } from "vitest";
+import {
+  createAutomaticLearningOrgan,
+  createInMemoryExperimentBriefStore,
+  createScriptedLearningInferencePort,
+  AutomaticLearningConfigSchema,
+  RevisionAuthorOutputSchema,
+  type AutomaticLearningConfig,
+  type ExperimentBriefStore,
+  type ScriptedLearningInferenceStep,
+} from "../src/index.ts";
+
+const capability: Capability = Object.freeze({
+  capabilityId: "writing-assistance",
+  name: "Writing assistance",
+  scope: "writing",
+  intent: "Help with evidence-grounded writing",
+});
+
+function fileRef(name: string): FileRevisionRef {
+  return Object.freeze({
+    kind: "file_revision",
+    revisionId: `revision-${name}`,
+    workingPath: `definitions/candidates/${name}`,
+    snapshotPath: `revisions/${name}`,
+    contentDigest: sha256(name),
+  });
+}
+
+const reflectorPrompt = fileRef("reflector-prompt.md");
+const authorPrompt = fileRef("author-prompt.md");
+const revisionPrompt = fileRef("revision-prompt.md");
+
+const config: AutomaticLearningConfig = Object.freeze({
+  schemaVersion: 1,
+  enabled: true,
+  notifications: "quiet",
+  retrieval: Object.freeze({
+    maxResults: 2,
+    lexicalLimit: 4,
+    semanticLimit: 3,
+    maxExcerptChars: 240,
+    recurrenceThreshold: 2,
+  }),
+  roles: Object.freeze({
+    reflector: Object.freeze({
+      variant: Object.freeze({
+        variantId: "reflector-v1",
+        axis: "role",
+        configurationRefs: Object.freeze([reflectorPrompt]),
+      }),
+      promptRevision: reflectorPrompt,
+      model: "fake-reflector-1",
+      reasoning: "medium",
+    }),
+    revisionAuthor: Object.freeze({
+      variant: Object.freeze({
+        variantId: "revision-author-v1",
+        axis: "role",
+        configurationRefs: Object.freeze([authorPrompt]),
+      }),
+      promptRevision: authorPrompt,
+      model: "fake-author-1",
+      reasoning: "high",
+    }),
+    revisionAgent: Object.freeze({
+      variant: Object.freeze({
+        variantId: "revision-agent-v1",
+        axis: "role",
+        configurationRefs: Object.freeze([revisionPrompt]),
+      }),
+      promptRevision: revisionPrompt,
+      model: "fake-reviser-1",
+      reasoning: "xhigh",
+    }),
+  }),
+});
+
+function citation(index: number, excerpt = `prior correction ${index}`): ExactCitation {
+  return Object.freeze({
+    source: Object.freeze({
+      kind: "database_row",
+      table: "messages",
+      rowId: `prior-message-${index}`,
+      field: "content",
+    }),
+    occurredAt: `2026-01-0${index}T00:00:00.000Z`,
+    excerpt,
+    startOffset: 0,
+    endOffset: excerpt.length,
+    contentDigest: sha256(excerpt),
+  });
+}
+
+function databaseRef(rowId: string): DatabaseRowRef<"messages"> {
+  return Object.freeze({ kind: "database_row", table: "messages", rowId });
+}
+
+function createHistoryHarness(citations: readonly ExactCitation[]) {
+  const requests: HistorySearchRequest[] = [];
+  const history: Pick<HistoryPort, "search" | "resolve"> = Object.freeze({
+    search: async (request: HistorySearchRequest) => {
+      requests.push(request);
+      const selected = citations.slice(0, request.limit);
+      return Object.freeze({
+        query: request.query,
+        hits: Object.freeze(
+          selected.map((item, index) => Object.freeze({ citation: item, combinedScore: 1 - index * 0.1 })),
+        ),
+        candidateCount: citations.length,
+        appliedBounds: Object.freeze({
+          lexicalLimit: request.lexicalLimit ?? 0,
+          semanticLimit: request.semanticLimit ?? 0,
+          rerankLimit: selected.length,
+          resultLimit: selected.length,
+          maxExcerptChars: request.maxExcerptChars ?? 240,
+        }),
+      });
+    },
+    resolve: async (values: readonly ExactCitation[]) => Object.freeze([...values]),
+  });
+  return Object.freeze({ history, requests: () => Object.freeze([...requests]) });
+}
+
+function createFeedbackHarness() {
+  const signals: FeedbackSignal[] = [];
+  return Object.freeze({
+    port: Object.freeze({
+      getFeedbackSignal: async (signalId: string) => signals.find((signal) => signal.signalId === signalId),
+      recordFeedbackSignal: async (signal: FeedbackSignal) => {
+        signals.push(signal);
+        return Object.freeze({
+          kind: "database_row" as const,
+          table: "feedback_signals" as const,
+          rowId: signal.signalId,
+        });
+      },
+    }),
+    signals: () => Object.freeze([...signals]),
+  });
+}
+
+function criterionModel(
+  input: CreateUserCriterionInput & { readonly criterionId: string },
+): UserCriterionReadModel {
+  const definitionRevision = fileRef(`criterion-${input.criterionId}.json`);
+  return Object.freeze({
+    definition: Object.freeze({
+      kind: "user_evaluation_criterion",
+      criterionId: input.criterionId,
+      revision: 1,
+      status: "active",
+      source: input.source,
+      scope: input.scope,
+      evaluatorInstruction: input.evaluatorInstruction,
+      evidenceRefs: Object.freeze([...input.evidenceRefs]),
+      promptOwnership: Object.freeze({ owner: "user", layer: "learned_profile" }),
+      pinned: false,
+    }),
+    metadata: Object.freeze({
+      criterionId: input.criterionId,
+      revision: 1,
+      definitionRevision,
+      fileRevisionRow: Object.freeze({
+        kind: "database_row",
+        table: "file_revisions",
+        rowId: definitionRevision.revisionId,
+      }),
+      activityRow: Object.freeze({
+        kind: "database_row",
+        table: "activity_log",
+        rowId: `activity-${input.criterionId}`,
+      }),
+    }),
+  });
+}
+
+function createCriteriaHarness() {
+  const values = new Map<string, UserCriterionReadModel>();
+  const creates: CreateUserCriterionInput[] = [];
+  const repository: Pick<UserCriterionRepository, "create" | "inspect"> = Object.freeze({
+    create: async (
+      input: CreateUserCriterionInput,
+    ): Promise<Result<UserCriterionReadModel, UserCriterionError>> => {
+      creates.push(input);
+      const criterionId = input.criterionId;
+      if (!criterionId) return err({ code: "invalid_definition", message: "missing ID" });
+      if (values.has(criterionId)) {
+        return err({ code: "already_exists", message: "already exists", criterionId });
+      }
+      const model = criterionModel({ ...input, criterionId });
+      values.set(criterionId, model);
+      return ok(model);
+    },
+    inspect: async (criterionId: string): Promise<Result<UserCriterionReadModel, UserCriterionError>> => {
+      const value = values.get(criterionId);
+      return value ? ok(value) : err({ code: "not_found", message: "not found", criterionId });
+    },
+  });
+  return Object.freeze({
+    repository,
+    creates: () => Object.freeze([...creates]),
+    values: () => Object.freeze([...values.values()]),
+  });
+}
+
+function baselineConstruction(): CapabilityRevisionConstruction {
+  return Object.freeze({
+    definitionState: "candidate",
+    capabilityRevisionId: "baseline-revision",
+    capabilityId: capability.capabilityId,
+    promptModules: Object.freeze([fileRef("baseline-prompt.md")]),
+    skills: Object.freeze([fileRef("baseline-skill.md")]),
+    tools: Object.freeze([fileRef("baseline-tool.mjs")]),
+    routerRevision: fileRef("baseline-router.json"),
+    routerStrategyId: "baseline-router",
+    activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: capability.scope }),
+    permissionManifest: Object.freeze({
+      effects: Object.freeze(["read"]),
+      resourcePatterns: Object.freeze(["workspace:"]),
+      credentialRefs: Object.freeze([]),
+    }),
+    evidenceRefs: Object.freeze([]),
+    sourceEvaluationDefinitions: Object.freeze([fileRef("baseline-source-case.json")]),
+    requestedPermissionDelta: Object.freeze({
+      addedEffects: Object.freeze([]),
+      widenedResources: Object.freeze([]),
+      addedCredentialRefs: Object.freeze([]),
+    }),
+  });
+}
+
+function createCandidateDefinitionHarness() {
+  const requests: DefinitionWriteRequest[] = [];
+  return Object.freeze({
+    port: Object.freeze({
+      recordCandidateDefinition: async (request: DefinitionWriteRequest): Promise<FileRevisionRef> => {
+        requests.push(request);
+        const sequence = requests.length;
+        const contentDigest = sha256(request.bytes);
+        return Object.freeze({
+          kind: "file_revision",
+          revisionId: `candidate-file-${sequence}`,
+          workingPath: `definitions/candidates/${request.workingPath}`,
+          snapshotPath: `revisions/candidate-file-${sequence}`,
+          contentDigest,
+        });
+      },
+    }),
+    requests: () => Object.freeze([...requests]),
+  });
+}
+
+const reflectionStep = Object.freeze({
+  role: "reflector" as const,
+  value: Object.freeze({
+    decision: "experiment" as const,
+    title: "Preserve writing intent",
+    hypothesis: "A scoped writing capability can apply corrections consistently",
+    scope: "writing",
+    capabilityName: "Writing assistance",
+    capabilityIntent: "Apply evidence-grounded writing corrections",
+    sourceCases: Object.freeze([
+      Object.freeze({
+        title: "Apply the observed correction",
+        input: "Rewrite this paragraph",
+        expectedBehavior: "Preserve the requested voice and cite primary evidence",
+      }),
+    ]),
+  }),
+}) satisfies ScriptedLearningInferenceStep;
+
+const authorStep = Object.freeze({
+  role: "revision_author" as const,
+  value: Object.freeze({
+    promptModules: Object.freeze([
+      Object.freeze({ path: "voice.md", content: "Preserve the user's voice." }),
+    ]),
+    skills: Object.freeze([
+      Object.freeze({ path: "SKILL.md", content: "Apply scoped writing corrections." }),
+    ]),
+    tools: Object.freeze([
+      Object.freeze({ path: "rewrite.mjs", content: "export const rewrite = (text) => text;" }),
+    ]),
+    router: Object.freeze({
+      path: "router.json",
+      content: '{"when":"writing"}',
+      strategyId: "writing-router-v2",
+    }),
+    activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "writing" }),
+    permissionManifest: Object.freeze({
+      effects: Object.freeze(["read"]),
+      resourcePatterns: Object.freeze(["workspace:"]),
+      credentialRefs: Object.freeze([]),
+    }),
+    sourceEvaluationDefinitions: Object.freeze([
+      Object.freeze({ path: "source-case.json", content: '{"kind":"source"}' }),
+    ]),
+    requestedPermissionDelta: Object.freeze({
+      addedEffects: Object.freeze([]),
+      widenedResources: Object.freeze([]),
+      addedCredentialRefs: Object.freeze([]),
+    }),
+  }),
+}) satisfies ScriptedLearningInferenceStep;
+
+const revisionStep = Object.freeze({
+  ...authorStep,
+  role: "revision_agent" as const,
+}) satisfies ScriptedLearningInferenceStep;
+
+function turn(input: {
+  readonly turnId?: string;
+  readonly userMessage?: string;
+  readonly correction?: string;
+  readonly outcome?: "accepted" | "corrected" | "failed" | "unknown";
+  readonly evidenceRef?: EvidenceRef;
+}) {
+  return Object.freeze({
+    sessionId: "session-1",
+    turnId: input.turnId ?? "turn-1",
+    scope: "writing",
+    userMessage: input.userMessage ?? "Please rewrite this paragraph",
+    ...(input.correction ? { correction: input.correction } : {}),
+    outcome: input.outcome ?? "corrected",
+    occurredAt: "2026-01-10T00:00:00.000Z",
+    evidenceRefs: Object.freeze([input.evidenceRef ?? databaseRef("current-message")]),
+    sensitivity: "normal" as const,
+    telemetry: Object.freeze({ retryCount: 0, toolFailureCount: 0, aborted: false }),
+  });
+}
+
+function sequentialIds() {
+  const counts = new Map<string, number>();
+  return (prefix: string) => {
+    const next = (counts.get(prefix) ?? 0) + 1;
+    counts.set(prefix, next);
+    return `${prefix}-${next}`;
+  };
+}
+
+function createHarness(input: {
+  readonly steps: readonly ScriptedLearningInferenceStep[];
+  readonly citations?: readonly ExactCitation[];
+  readonly briefs?: ExperimentBriefStore;
+}) {
+  const history = createHistoryHarness(input.citations ?? []);
+  const feedback = createFeedbackHarness();
+  const criteria = createCriteriaHarness();
+  const inference = createScriptedLearningInferencePort({ steps: input.steps });
+  const registry = createAtomicCapabilityRegistry();
+  registry.registerCapability(capability);
+  const baseline = registry.constructRevision(baselineConstruction());
+  const candidates = createCandidateDefinitionHarness();
+  const experiments: Experiment[] = [];
+  const organ = createAutomaticLearningOrgan({
+    config,
+    history: history.history,
+    feedbackSignals: feedback.port,
+    criteria: criteria.repository,
+    inference,
+    briefs: input.briefs ?? createInMemoryExperimentBriefStore(),
+    capabilities: registry,
+    candidateDefinitions: candidates.port,
+    experiments: Object.freeze({
+      getExperiment: async (experimentId: string) =>
+        experiments.find((experiment) => experiment.experimentId === experimentId),
+      putExperiment: async (experiment: Experiment) => {
+        experiments.push(experiment);
+        return Object.freeze({
+          kind: "database_row" as const,
+          table: "experiments" as const,
+          rowId: experiment.experimentId,
+        });
+      },
+    }),
+    nextId: sequentialIds(),
+  });
+  return Object.freeze({
+    organ,
+    baseline,
+    registry,
+    history,
+    feedback,
+    criteria,
+    inference,
+    candidates,
+    experiments: () => Object.freeze([...experiments]),
+  });
+}
+
+describe("automatic learning organ", () => {
+  test("keeps automatic-learning configuration on schema version 1", () => {
+    expect(AutomaticLearningConfigSchema.safeParse(config).success).toBe(true);
+    expect(AutomaticLearningConfigSchema.safeParse({ ...config, schemaVersion: 2 }).success).toBe(false);
+  });
+
+  test("turns a normal correction into one bounded evidence-linked experiment brief", async () => {
+    const harness = createHarness({
+      steps: [reflectionStep],
+      citations: [citation(1), citation(2), citation(3)],
+    });
+    const result = await harness.organ.observeTurn({
+      turn: turn({ correction: "Use primary sources, not summaries." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    expect(result.status).toBe("experiment");
+    if (result.status !== "experiment") throw new Error("Expected an experiment brief");
+    expect(result.harvest.signals).toHaveLength(1);
+    expect(harness.feedback.signals()).toHaveLength(1);
+    expect(result.brief.feedbackSignalIds).toEqual([result.harvest.signals[0]?.signal.signalId]);
+    expect(result.brief.evidenceRefs).toEqual([
+      databaseRef("current-message"),
+      databaseRef("prior-message-1"),
+      databaseRef("prior-message-2"),
+    ]);
+    expect(result.brief.citations).toHaveLength(2);
+    expect(result.brief.recurrenceCount).toBe(2);
+    expect(result.notification).toEqual({
+      mode: "quiet",
+      kind: "experiment",
+      message: "Learning experiment ready: Preserve writing intent",
+    });
+    expect(result.interruption).toBeNull();
+    expect(harness.criteria.creates()).toHaveLength(0);
+    expect(harness.history.requests()[0]).toMatchObject({
+      limit: 2,
+      lexicalLimit: 4,
+      semanticLimit: 3,
+      maxExcerptChars: 240,
+      privacy: "normal",
+    });
+  });
+
+  test("creates exactly one scoped criterion only for explicitly normative feedback", async () => {
+    const harness = createHarness({ steps: [reflectionStep], citations: [citation(1)] });
+    const result = await harness.organ.observeTurn({
+      turn: turn({ correction: "Always preserve my voice when editing." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    expect(result.status).toBe("experiment");
+    expect(harness.criteria.creates()).toHaveLength(1);
+    expect(harness.criteria.values()[0]?.definition).toMatchObject({
+      source: "correction",
+      scope: "writing",
+      evaluatorInstruction: "Always preserve my voice when editing.",
+      promptOwnership: { owner: "user", layer: "learned_profile" },
+    });
+    expect(result.harvest.criterionCapture).toMatchObject({
+      created: true,
+      capture: { explicitlyNormative: true, confidence: 0.99, scope: "writing" },
+    });
+    expect(result.notification).toEqual({
+      mode: "quiet",
+      kind: "criterion",
+      message: "Learned criterion for writing: Always preserve my voice when editing.",
+    });
+  });
+
+  test("returns no change for irrelevant chat without retrieval, roles, criteria, or a modal", async () => {
+    const harness = createHarness({ steps: [] });
+    const result = await harness.organ.observeTurn({
+      turn: turn({ userMessage: "Thanks, that looks good.", outcome: "accepted" }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    expect(result).toMatchObject({ status: "no_change", reason: "irrelevant", interruption: null });
+    expect(harness.history.requests()).toHaveLength(0);
+    expect(harness.feedback.signals()).toHaveLength(0);
+    expect(harness.criteria.creates()).toHaveLength(0);
+    expect(harness.inference.requests()).toHaveLength(0);
+  });
+
+  test("accepts an explicit reflector no-change result without authoring a candidate", async () => {
+    const harness = createHarness({
+      steps: [
+        Object.freeze({
+          role: "reflector",
+          value: Object.freeze({
+            decision: "no_change",
+            reason: "The correction is specific to this one artifact.",
+          }),
+        }),
+      ],
+      citations: [citation(1)],
+    });
+    const result = await harness.organ.observeTurn({
+      turn: turn({ correction: "Change this one heading." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    expect(result).toMatchObject({
+      status: "no_change",
+      reason: "reflector_no_change",
+      interruption: null,
+      reflectionRun: { role: "reflector" },
+    });
+    expect(harness.candidates.requests()).toHaveLength(0);
+    expect(harness.experiments()).toHaveLength(0);
+  });
+
+  test("harvests failed session outcomes as evidence-linked failure signals", async () => {
+    const harness = createHarness({
+      steps: [
+        Object.freeze({
+          role: "reflector",
+          value: Object.freeze({ decision: "no_change", reason: "One failure is not recurrent yet." }),
+        }),
+      ],
+      citations: [citation(1)],
+    });
+    const result = await harness.organ.observeTurn({
+      turn: turn({ userMessage: "Generate the report", outcome: "failed" }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    expect(result.status).toBe("no_change");
+    expect(result.harvest.signals[0]?.signal).toMatchObject({
+      kind: "repeated_failure",
+      scope: "writing",
+      evidenceRefs: [databaseRef("current-message"), databaseRef("prior-message-1")],
+    });
+    expect(harness.criteria.creates()).toHaveLength(0);
+  });
+
+  test("deduplicates recurring hypotheses while retaining exact source-case citations", async () => {
+    const briefs = createInMemoryExperimentBriefStore();
+    const harness = createHarness({
+      steps: [reflectionStep, reflectionStep],
+      citations: [citation(1), citation(2)],
+      briefs,
+    });
+    const first = await harness.organ.observeTurn({
+      turn: turn({ turnId: "turn-1", correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+    const second = await harness.organ.observeTurn({
+      turn: turn({
+        turnId: "turn-2",
+        correction: "Use primary sources.",
+        evidenceRef: databaseRef("current-message-2"),
+      }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    expect(first.status).toBe("experiment");
+    expect(second.status).toBe("deduped");
+    if (first.status !== "experiment" || second.status !== "deduped") {
+      throw new Error("Expected experiment and deduped outcomes");
+    }
+    expect(second.brief.experimentId).toBe(first.brief.experimentId);
+    expect(first.brief.sourceCases[0]?.evidenceRefs).toEqual(first.brief.evidenceRefs);
+    expect(first.brief.sourceCases[0]?.citations).toEqual(first.brief.citations);
+    expect(first.brief.sourceCases[0]?.citations).toHaveLength(2);
+    expect(harness.feedback.signals()).toHaveLength(2);
+  });
+
+  test("authors a complete immutable AC-03 revision and a canonical authoring experiment", async () => {
+    const harness = createHarness({ steps: [reflectionStep, authorStep], citations: [citation(1)] });
+    const observed = await harness.organ.observeTurn({
+      turn: turn({ correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+    if (observed.status !== "experiment") throw new Error("Expected an experiment brief");
+    const authored = await harness.organ.authorExperimentRevision({ brief: observed.brief });
+
+    expect(authored.revisionRef).toEqual(capabilityRevisionRef(authored.revision));
+    expect(authored.revision.predecessorRevisionId).toBe(harness.baseline.capabilityRevisionId);
+    expect(authored.revision.promptModules).toHaveLength(1);
+    expect(authored.revision.skills).toHaveLength(1);
+    expect(authored.revision.tools).toHaveLength(1);
+    expect(authored.revision.toolset.toolRevisionIds).toEqual([authored.revision.tools[0]?.revisionId]);
+    expect(authored.revision.sourceEvaluationDefinitions).toHaveLength(1);
+    expect(authored.revision.permissionManifest).toEqual({
+      effects: ["read"],
+      resourcePatterns: ["workspace:"],
+      credentialRefs: [],
+    });
+    expect(Object.isFrozen(authored.revision)).toBe(true);
+    expect(harness.candidates.requests()).toHaveLength(5);
+    expect(
+      harness.candidates
+        .requests()
+        .every((request) =>
+          request.workingPath.startsWith(
+            `${capability.capabilityId}/${authored.revision.capabilityRevisionId}/`,
+          ),
+        ),
+    ).toBe(true);
+    expect(authored.experiment).toMatchObject({
+      experimentId: observed.brief.experimentId,
+      status: "authoring",
+      candidateRevisions: [authored.revisionRef],
+    });
+    expect(harness.experiments()).toEqual([authored.experiment]);
+    expect("activate" in harness.registry).toBe(false);
+  });
+
+  test("isolates reflector and author inputs from protected control-plane context", async () => {
+    const harness = createHarness({ steps: [reflectionStep, authorStep], citations: [citation(1)] });
+    const observed = await harness.organ.observeTurn({
+      turn: turn({ correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+    if (observed.status !== "experiment") throw new Error("Expected an experiment brief");
+    await harness.organ.authorExperimentRevision({ brief: observed.brief });
+
+    const requests = harness.inference.requests();
+    expect(requests.map((request) => request.role)).toEqual(["reflector", "revision_author"]);
+    expect(requests[0]?.messages.map((message) => message.name)).toEqual([
+      "signals",
+      "evidence",
+      "active_capabilities",
+      "user_preferences",
+    ]);
+    expect(requests[1]?.messages.map((message) => message.name)).toEqual(["hypothesis", "source_cases"]);
+    for (const request of requests) {
+      expect(request.availableTools).toEqual([]);
+      expect(request).not.toHaveProperty("authorityGrant");
+      expect(request).not.toHaveProperty("activationHandle");
+      expect(request).not.toHaveProperty("protectedCases");
+      const encoded = JSON.stringify(request).toLocaleLowerCase();
+      expect(encoded).not.toContain("hidden_policy");
+      expect(encoded).not.toContain("authority_grant");
+      expect(encoded).not.toContain("protected_case");
+      expect(encoded).not.toContain("activation_handle");
+    }
+  });
+
+  test("authors revise outcomes as successor revisions with linked experiment lineage", async () => {
+    const harness = createHarness({ steps: [revisionStep], citations: [] });
+    const parent: Experiment = Object.freeze({
+      experimentId: "experiment-parent",
+      hypothesis: "The candidate preserves voice",
+      scope: "writing",
+      evidenceRefs: Object.freeze([databaseRef("parent-evidence")]),
+      baselineRevision: harness.baseline,
+      candidateRevisions: Object.freeze([harness.baseline]),
+      activatedRevision: harness.baseline,
+      feedbackSignalIds: Object.freeze(["signal-parent"]),
+      followUpExperimentId: "experiment-follow-up",
+      status: "completed",
+      outcome: "revise",
+    });
+    const result = await harness.organ.authorFollowUpRevision({
+      parentExperiment: parent,
+      capability,
+      failureSummary: "The rewrite flattened the user's tone",
+      judgmentEvidenceRefs: Object.freeze([databaseRef("judgment-evidence")]),
+      citations: Object.freeze([citation(1, "The rewrite flattened the user's tone")]),
+    });
+
+    expect(result.brief.experimentId).toBe(parent.followUpExperimentId);
+    expect(result.revision.predecessorRevisionId).toBe(harness.baseline.capabilityRevisionId);
+    expect(result.experiment.baselineRevision).toEqual(harness.baseline);
+    expect(result.authorRun.role).toBe("revision_agent");
+    expect(result.authorRun.research).toMatchObject({
+      promptRevision: revisionPrompt,
+      model: "fake-reviser-1",
+      reasoning: "xhigh",
+    });
+    expect(harness.inference.requests()[0]?.messages.map((message) => message.name)).toEqual([
+      "failures",
+      "judgment_evidence",
+    ]);
+  });
+
+  test("records deterministic fake prompt, model, reasoning, and trace metadata", async () => {
+    const harness = createHarness({ steps: [reflectionStep], citations: [citation(1)] });
+    const result = await harness.organ.observeTurn({
+      turn: turn({ correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+    if (result.status !== "experiment") throw new Error("Expected an experiment brief");
+
+    expect(result.reflectionRun).toMatchObject({
+      role: "reflector",
+      research: {
+        promptRevision: reflectorPrompt,
+        model: "fake-reflector-1",
+        reasoning: "medium",
+      },
+      trace: {
+        traceId: "fake-learning-trace-1",
+        usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCost: 0 },
+      },
+    });
+    expect(harness.inference.remaining()).toBe(0);
+  });
+
+  test("the scripted fake rejects role drift deterministically", async () => {
+    const inference = createScriptedLearningInferencePort({ steps: [reflectionStep] });
+    const request: AgentRunRequest = Object.freeze({
+      runId: "wrong-role",
+      role: "revision_author",
+      variant: config.roles.revisionAuthor.variant,
+      messages: Object.freeze([]),
+      evidenceRefs: Object.freeze([]),
+      availableTools: Object.freeze([]),
+    });
+
+    await expect(inference.run(request, RevisionAuthorOutputSchema)).rejects.toThrow(
+      "Expected scripted role reflector",
+    );
+  });
+});
