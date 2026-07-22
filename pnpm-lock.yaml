@@ -223,6 +223,9 @@ importers:
       '@noesis/capabilities':
         specifier: workspace:*
         version: link:../capabilities
+      '@noesis/config':
+        specifier: workspace:*
+        version: link:../config
       '@noesis/context':
         specifier: workspace:*
         version: link:../context
@@ -232,6 +235,12 @@ importers:
       '@noesis/evals':
         specifier: workspace:*
         version: link:../evals
+      '@noesis/intelligence':
+        specifier: workspace:*
+        version: link:../intelligence
+      '@noesis/learning':
+        specifier: workspace:*
+        version: link:../learning
       '@noesis/ledger':
         specifier: workspace:*
         version: link:../ledger
@@ -241,10 +250,12 @@ importers:
       '@noesis/policy':
         specifier: workspace:*
         version: link:../policy
-    devDependencies:
-      '@noesis/learning':
+      '@noesis/workspace':
         specifier: workspace:*
-        version: link:../learning
+        version: link:../workspace
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
 
   packages/runtime-pi:
     dependencies:

@@ -26,6 +26,9 @@ import type {
 } from "@noesis/agent-types";
 
 export { compareTrailRecency } from "@noesis/ledger";
+export * from "./coordinator-contracts.ts";
+export * from "./coordinator.ts";
+export * from "./coordinator-composition.ts";
 
 export interface TrailState {
   readonly trailId: string;

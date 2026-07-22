@@ -53,6 +53,7 @@ import {
   type WorkspaceDatabase,
 } from "./database.ts";
 import { importLegacyWorkspace } from "./importer.ts";
+import { createDurableJobStore } from "./jobs.ts";
 import {
   initializeWorkspaceDirectories,
   pathInside,
@@ -624,6 +625,9 @@ export async function createWorkspaceStore(
 
   const research = createResearchRepositories(database, recordActivity, now);
   const operational = createOperationalRepositories(database, recordActivity);
+  const jobs = createDurableJobStore(database, recordActivity, (reference) =>
+    assertStoredReference(db, reference),
+  );
   const definitionMetadataRepository = createDefinitionMetadataRepository(database, recordActivity, now);
   const definitionMetadata: DefinitionMetadataPort = Object.freeze({
     getCurrent: definitionMetadataRepository.getCurrent,
@@ -902,6 +906,7 @@ export async function createWorkspaceStore(
     evidence: Object.freeze({ appendEvidence }),
     artifacts: Object.freeze({ writeArtifact }),
     research,
+    jobs,
     declaredAuthority: declaredAuthorityFor,
     operational,
     search,
@@ -1516,8 +1521,21 @@ function createResearchRepositories(
       value.preflightId,
       () =>
         db
-          .prepare("INSERT INTO preflight_reports VALUES (?, ?, ?, ?, ?, ?)")
-          .run(value.preflightId, value.experimentId, value.planId, value.decision, encoded, now()),
+          .prepare(
+            `INSERT INTO preflight_reports(
+              preflight_id, experiment_id, plan_id, decision, data_json, created_at,
+              approval_required
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            value.preflightId,
+            value.experimentId,
+            value.planId,
+            value.decision === "approval_required" ? "inconclusive" : value.decision,
+            encoded,
+            now(),
+            value.decision === "approval_required" ? 1 : 0,
+          ),
       encoded,
     );
     recordActivity(actor, "preflight.report_put", "preflight_report", value.preflightId);
