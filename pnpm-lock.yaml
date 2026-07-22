@@ -119,15 +119,28 @@ importers:
 
   packages/evals:
     dependencies:
+      '@noesis/agent-types':
+        specifier: workspace:*
+        version: link:../agent-types
       '@noesis/capabilities':
         specifier: workspace:*
         version: link:../capabilities
+      '@noesis/config':
+        specifier: workspace:*
+        version: link:../config
       '@noesis/domain':
         specifier: workspace:*
         version: link:../domain
       '@noesis/ledger':
         specifier: workspace:*
         version: link:../ledger
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@noesis/runtime-pi':
+        specifier: workspace:*
+        version: link:../runtime-pi
 
   packages/intelligence:
     dependencies:

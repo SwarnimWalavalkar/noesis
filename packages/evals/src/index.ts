@@ -1,11 +1,16 @@
 import {
-  candidateDigest,
   type CandidateSkill,
   type CapabilityRegistry,
+  candidateDigest,
   type RegressionCase,
 } from "@noesis/capabilities";
 import { canonicalJson, sha256, toJsonValue } from "@noesis/domain";
 import type { ExperienceLedger } from "@noesis/ledger";
+
+export * from "./dynamic-contracts.ts";
+export * from "./dynamic-lab.ts";
+export * from "./dynamic-strategies.ts";
+export * from "./workspace-recorder.ts";
 
 export interface CaseResult {
   readonly caseId: string;
