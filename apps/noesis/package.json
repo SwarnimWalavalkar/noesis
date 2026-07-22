@@ -12,9 +12,12 @@
     "@noesis/domain": "workspace:*",
     "@noesis/evals": "workspace:*",
     "@noesis/learning": "workspace:*",
+    "@noesis/intelligence": "workspace:*",
     "@noesis/policy": "workspace:*",
     "@noesis/runtime": "workspace:*",
     "@noesis/runtime-pi": "workspace:*",
-    "@noesis/tui": "workspace:*"
+    "@noesis/tui": "workspace:*",
+    "@noesis/workspace": "workspace:*",
+    "zod": "4.4.3"
   }
 }

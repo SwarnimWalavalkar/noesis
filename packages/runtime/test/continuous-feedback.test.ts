@@ -1,9 +1,11 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   canonicalJson,
   capabilityRevisionRef,
+  sha256,
   type CapabilityRevision,
   type CapabilityRevisionRef,
   type EvidenceRevisionRef,
@@ -573,22 +575,38 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     ).toHaveLength(1);
   });
 
-  test("stale serving activation fails closed", async () => {
+  test("delayed target feedback reverts only its capability after an unrelated activation", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-stale");
     const otherRoot = await revision(fixture.workspace, "other-capability", "other-r0", undefined);
     const otherCandidate = await revision(fixture.workspace, "other-capability", "other-r1", "other-r0");
     await activate(fixture, "experiment-other", otherRoot, otherCandidate);
-    await expect(
-      controller(fixture).observeTurnOutcome(
-        observationInput(fixture, "turn-stale", {
-          status: "failed",
-          summary: "stale failure",
-          metrics: Object.freeze({ failed: true, protectedRailViolation: true }),
-        }),
+    const unrelated = await fixture.workspace.protectedActivations.current();
+    const result = await controller(fixture).observeTurnOutcome(
+      observationInput(fixture, "turn-stale", {
+        status: "failed",
+        summary: "stale failure",
+        metrics: Object.freeze({ failed: true, protectedRailViolation: true }),
+      }),
+    );
+    expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "revert" } });
+    const restored = await fixture.workspace.protectedActivations.current();
+    expect(restored?.activeCapabilityRevisions[fixture.capabilityId]).toEqual(
+      capabilityRevisionRef(fixture.baseline),
+    );
+    expect(restored?.activeCapabilityRevisions["other-capability"]).toEqual(
+      capabilityRevisionRef(otherCandidate),
+    );
+    const otherPrefix = `${sha256("other-capability")}:`;
+    expect(
+      Object.fromEntries(
+        Object.entries(restored?.activeDefinitions ?? {}).filter(([slot]) => slot.startsWith(otherPrefix)),
       ),
-    ).rejects.toThrow(/stale|CAS/iu);
-    expect(await fixture.workspace.protectedFeedback.getOutcome(fixture.experimentId)).toBeUndefined();
+    ).toEqual(
+      Object.fromEntries(
+        Object.entries(unrelated?.activeDefinitions ?? {}).filter(([slot]) => slot.startsWith(otherPrefix)),
+      ),
+    );
   });
 
   test("revert rejects permission widening and an unrecorded prior snapshot", async () => {
@@ -640,7 +658,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     ).rejects.toThrow(/prior AC-09/iu);
   });
 
-  test("research failures are visible and retryable, alternative strategies run, and roles receive no authority", async () => {
+  test("ambiguous research fails closed, alternative operation identities run, and roles receive no authority", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-research");
     let attempt = 0;
@@ -661,14 +679,86 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     });
     const feedback = controller(fixture, role, config(1));
     const first = await feedback.observeTurnOutcome(observationInput(fixture, "turn-research"));
-    expect(first[0]).toMatchObject({ status: "research_failed", run: { retryable: true, attempt: 1 } });
+    expect(first[0]).toMatchObject({ status: "research_failed", run: { retryable: false, attempt: 1 } });
+    await expect(feedback.evaluateExperiment(fixture.experimentId)).resolves.toMatchObject({
+      status: "research_failed",
+      run: { attempt: 1 },
+    });
+    expect(seen).toHaveLength(1);
     const retried = await feedback.evaluateExperiment(fixture.experimentId, "alternative-judge-v2");
     expect(retried).toMatchObject({ status: "resolved", outcome: { decision: "keep" } });
     expect(seen).toHaveLength(2);
     expect((await feedback.experimentComparison(fixture.experimentId)).researchRuns).toMatchObject([
-      { strategyId: "judge-default", status: "failed", retryable: true },
+      { strategyId: "judge-default", status: "failed", retryable: false },
       { strategyId: "alternative-judge-v2", status: "completed", proposal: "keep" },
     ]);
     expect(canonicalJson(seen)).not.toMatch(/authority|threshold|protectedFeedback|commitOutcome/iu);
+    const failedJob = (await fixture.workspace.jobs.list({ kind: "runtime.outcome_judge" }))[0];
+    expect(failedJob).toMatchObject({
+      status: "failed",
+      attempt: 1,
+      maxAttempts: 2,
+      budgetRemaining: 1,
+      lastError: { ambiguous: true, retryable: false },
+    });
+  });
+
+  test("an expired running outcome lease fails closed without duplicate model work", async () => {
+    const fixture = await createFixture();
+    await pinTurn(fixture, "turn-ambiguous-lease");
+    const first = controller(
+      fixture,
+      Object.freeze({ run: async () => Promise.reject(new Error("initial ambiguous failure")) }),
+      config(1),
+    );
+    await expect(
+      first.observeTurnOutcome(observationInput(fixture, "turn-ambiguous-lease")),
+    ).resolves.toMatchObject([{ status: "research_failed" }]);
+    const job = (await fixture.workspace.jobs.list({ kind: "runtime.outcome_judge" }))[0];
+    const run = (await fixture.workspace.protectedFeedback.listResearchRuns(fixture.experimentId))[0];
+    if (!job || !run) throw new Error("Expected durable outcome job and research run");
+    await fixture.workspace.protectedFeedback.putResearchRun({
+      runId: run.runId,
+      experimentId: run.experimentId,
+      strategyId: run.strategyId,
+      inputDigest: run.inputDigest,
+      status: "running",
+      citedObservationIds: Object.freeze([]),
+      evidenceRefs: Object.freeze([]),
+      attempt: 1,
+      retryable: false,
+    });
+    const database = new DatabaseSync(fixture.workspace.unsafeDatabasePathForTesting);
+    database
+      .prepare(
+        `UPDATE jobs SET status = 'running', lease_owner = 'crashed-worker',
+         lease_token = 'stale-lease', lease_until = '2000-01-01T00:00:00.000Z',
+         attempt = 1, budget_remaining = 1, completed_at = NULL WHERE job_id = ?`,
+      )
+      .run(job.jobId);
+    database.close();
+
+    let duplicateCalls = 0;
+    const recovered = controller(
+      fixture,
+      Object.freeze({
+        run: async () => {
+          duplicateCalls += 1;
+          throw new Error("must not rerun ambiguous paid work");
+        },
+      }),
+      config(1),
+    );
+    await expect(recovered.evaluateExperiment(fixture.experimentId)).resolves.toMatchObject({
+      status: "research_failed",
+      run: { attempt: 2, retryable: false },
+    });
+    expect(duplicateCalls).toBe(0);
+    expect(await fixture.workspace.jobs.get(job.jobId)).toMatchObject({
+      status: "failed",
+      attempt: 2,
+      budgetRemaining: 0,
+      lastError: { code: "outcome_judge_ambiguous", ambiguous: true },
+    });
   });
 });

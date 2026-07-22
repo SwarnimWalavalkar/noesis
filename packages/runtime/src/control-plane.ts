@@ -5,10 +5,23 @@ import type { RuntimeCoordinator } from "./coordinator.ts";
 import type { ContinuousFeedbackController } from "./continuous-feedback.ts";
 
 export interface RuntimeControlPlaneOptions {
-  readonly workspace: Pick<WorkspaceStore, "research">;
+  readonly workspace: Pick<WorkspaceStore, "jobs" | "research">;
   readonly coordinator: RuntimeCoordinator;
   readonly activation: AtomicActivationController;
   readonly feedback: ContinuousFeedbackController;
+  readonly now?: () => Date;
+  readonly timers?: RuntimeControlPlaneTimers;
+  readonly autoStart?: boolean;
+}
+
+export interface RuntimeControlPlaneTimerHandle {
+  readonly cancel: () => void;
+  readonly unref?: () => void;
+}
+
+export interface RuntimeControlPlaneTimers {
+  readonly setTimeout: (callback: () => void, delayMs: number) => RuntimeControlPlaneTimerHandle;
+  readonly clearTimeout: (handle: RuntimeControlPlaneTimerHandle) => void;
 }
 
 export interface ActivationReconciliation {
@@ -42,7 +55,57 @@ function isPreflightExperiment(
  */
 export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): RuntimeControlPlane {
   let running: Promise<readonly ActivationReconciliation[]> | undefined;
+  let wakeTimer: RuntimeControlPlaneTimerHandle | undefined;
   let stopped = false;
+  const now = options.now ?? (() => new Date());
+  const timers =
+    options.timers ??
+    Object.freeze({
+      setTimeout: (callback: () => void, delayMs: number) => {
+        const handle = setTimeout(callback, delayMs);
+        return Object.freeze({
+          cancel: () => clearTimeout(handle),
+          unref: () => handle.unref(),
+        });
+      },
+      clearTimeout: (handle: RuntimeControlPlaneTimerHandle) => handle.cancel(),
+    });
+
+  const clearWake = (): void => {
+    if (wakeTimer) timers.clearTimeout(wakeTimer);
+    wakeTimer = undefined;
+  };
+
+  const nextDurableWake = async (): Promise<number | undefined> => {
+    const jobs = await options.workspace.jobs.list({ limit: 1_000 });
+    const supported = jobs.filter(
+      (job) =>
+        job.kind === "runtime.reflect_turn" ||
+        job.kind === "runtime.author_revision" ||
+        job.kind === "runtime.preflight" ||
+        job.kind === "runtime.outcome_judge",
+    );
+    const times = supported.flatMap((job) => {
+      if (job.status === "scheduled") return [new Date(job.notBefore).getTime()];
+      if (job.status === "running" && job.leaseUntil) return [new Date(job.leaseUntil).getTime()];
+      return [];
+    });
+    return times.length === 0 ? undefined : Math.min(...times);
+  };
+
+  const armNextWake = async (): Promise<void> => {
+    clearWake();
+    if (stopped) return;
+    const wakeAt = await nextDurableWake();
+    if (wakeAt === undefined || stopped) return;
+    const remaining = wakeAt - now().getTime();
+    const delay = remaining <= 0 ? 25 : Math.min(2_147_483_647, remaining);
+    wakeTimer = timers.setTimeout(() => {
+      wakeTimer = undefined;
+      void runAvailable();
+    }, delay);
+    wakeTimer.unref?.();
+  };
 
   const reconcileActivations = async (): Promise<readonly ActivationReconciliation[]> => {
     const experiments = await options.workspace.research.experiments.listExperiments({
@@ -64,9 +127,11 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     if (running) return running;
     const next = (async () => {
       await options.coordinator.runAvailable();
+      await options.feedback.runAvailable();
       return await reconcileActivations();
     })().finally(() => {
       if (running === next) running = undefined;
+      if (!stopped) void armNextWake();
     });
     running = next;
     return next;
@@ -75,17 +140,20 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
   const observeCompletedTurn = async (input: CompletedNormalTurn): Promise<CoordinatorJobView> => {
     if (stopped) throw new Error("Runtime control plane is stopped");
     const job = await options.coordinator.observeCompletedTurn(input);
+    clearWake();
     queueMicrotask(() => void runAvailable());
     return job;
   };
 
   const stop = async (): Promise<void> => {
     stopped = true;
+    clearWake();
     await options.coordinator.stop();
+    await options.feedback.stop();
     await running;
   };
 
-  return Object.freeze({
+  const controlPlane = Object.freeze({
     coordinator: options.coordinator,
     activation: options.activation,
     feedback: options.feedback,
@@ -95,4 +163,12 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     reconcileActivations,
     stop,
   });
+  if (options.autoStart !== false) {
+    wakeTimer = timers.setTimeout(() => {
+      wakeTimer = undefined;
+      void runAvailable();
+    }, 0);
+    wakeTimer.unref?.();
+  }
+  return controlPlane;
 }

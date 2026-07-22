@@ -157,6 +157,7 @@ export interface ActivationOperationRecord {
   readonly expectedActivationRevision: number;
   readonly previousActivationId: string | null;
   readonly approvalId?: string;
+  readonly supersededByOperationId?: string;
   readonly materializations: readonly ActivationMaterializationRecord[];
   readonly createdAt: string;
   readonly updatedAt: string;
@@ -334,6 +335,10 @@ export interface ProtectedActivationStore {
   readonly getOperation: (operationId: string) => Promise<ActivationOperationRecord | undefined>;
   readonly listOperations: (limit?: number) => Promise<readonly ActivationOperationRecord[]>;
   readonly getApproval: (approvalId: string) => Promise<ActivationApprovalRecord | undefined>;
+  readonly supersede: (request: {
+    readonly operationId: string;
+    readonly supersededByOperationId: string;
+  }) => Promise<ActivationOperationRecord>;
   readonly decideApproval: (request: {
     readonly approvalId: string;
     readonly operationId: string;

@@ -934,6 +934,7 @@ export async function createWorkspaceStore(
     const operationId = requiredString(row, "operation_id");
     const approvalId = optionalString(row, "approval_id");
     const committedAt = optionalString(row, "committed_at");
+    const supersededByOperationId = optionalString(row, "superseded_by_operation_id");
     return Object.freeze({
       operationId,
       idempotencyKey: requiredString(row, "idempotency_key"),
@@ -951,6 +952,7 @@ export async function createWorkspaceStore(
       expectedActivationRevision: requiredNumber(row, "expected_activation_revision"),
       previousActivationId: optionalString(row, "previous_activation_id") ?? null,
       ...(approvalId === undefined ? {} : { approvalId }),
+      ...(supersededByOperationId === undefined ? {} : { supersededByOperationId }),
       materializations: materializationsFor(operationId),
       createdAt: requiredString(row, "created_at"),
       updatedAt: requiredString(row, "updated_at"),
@@ -1273,6 +1275,54 @@ export async function createWorkspaceStore(
     return operation;
   };
 
+  const supersedeActivationOperation = async (request: {
+    readonly operationId: string;
+    readonly supersededByOperationId: string;
+  }): Promise<ActivationOperationRecord> => {
+    if (!request.supersededByOperationId)
+      throw new Error("A superseded activation operation requires its successor identity");
+    database.transaction(() => {
+      const row = db
+        .prepare(
+          "SELECT status, approval_id, superseded_by_operation_id FROM activation_operations WHERE operation_id = ?",
+        )
+        .get(request.operationId);
+      if (row === undefined) throw new Error(`Unknown activation operation ${request.operationId}`);
+      const status = ActivationOperationStatusSchema.parse(requiredString(row, "status"));
+      const priorSuccessor = optionalString(row, "superseded_by_operation_id");
+      if (priorSuccessor !== undefined) {
+        if (priorSuccessor !== request.supersededByOperationId)
+          throw new Error(`Activation operation ${request.operationId} has a different successor`);
+        return;
+      }
+      if (status === "committed" || status === "blocked" || status === "rejected")
+        throw new Error(`Activation operation ${request.operationId} cannot be superseded from ${status}`);
+      const timestamp = now();
+      db.prepare(
+        `UPDATE activation_operations
+         SET status = 'rejected', superseded_by_operation_id = ?, updated_at = ?
+         WHERE operation_id = ?`,
+      ).run(request.supersededByOperationId, timestamp, request.operationId);
+      const approvalId = optionalString(row, "approval_id");
+      if (approvalId)
+        db.prepare(
+          `UPDATE activation_approvals
+           SET status = 'rejected', decided_at = ?, decision_actor = 'protected-activation:stale-cas'
+           WHERE approval_id = ? AND status != 'rejected'`,
+        ).run(timestamp, approvalId);
+      recordActivity(
+        { actorId: "protected-activation", kind: "system" },
+        "activation.superseded",
+        "activation_operation",
+        request.operationId,
+        [request.supersededByOperationId],
+      );
+    });
+    const superseded = await getActivationOperation(request.operationId);
+    if (!superseded) throw new Error(`Superseded activation operation ${request.operationId} disappeared`);
+    return superseded;
+  };
+
   const commitActivation = async (
     request: Parameters<NoesisWorkspaceStore["protectedActivations"]["commit"]>[0],
   ): Promise<ActivationOperationRecord> => {
@@ -1452,7 +1502,31 @@ export async function createWorkspaceStore(
     if (!request.sessionId || !request.turnId) throw new Error("Turn activation pin requires stable IDs");
     const existing = await getTurnActivationPin(request.sessionId, request.turnId);
     if (existing) return existing;
-    const current = await currentActivation();
+    let current = await currentActivation();
+    if (!current) {
+      const createdAt = now();
+      database.transaction(() => {
+        const identity = currentActivationIdentity();
+        if (identity.activationId !== null || identity.revision !== 0) return;
+        db.prepare(
+          `INSERT INTO activations(
+            activation_id, revision, previous_activation_id, definitions_json,
+            capability_revisions_json, preflight_id, created_at
+          ) VALUES ('activation_genesis', 1, NULL, '{}', '{}', NULL, ?)`,
+        ).run(createdAt);
+        db.prepare(
+          `INSERT INTO activation_state(state_id, activation_id, revision, updated_at)
+           VALUES ('current', 'activation_genesis', 1, ?)`,
+        ).run(createdAt);
+        recordActivity(
+          { actorId: "protected-activation", kind: "system" },
+          "activation.genesis_initialized",
+          "activation",
+          "activation_genesis",
+        );
+      });
+      current = await currentActivation();
+    }
     if (!current) throw new Error("No activation snapshot exists to pin for this turn");
     const activeCapabilityRevisions = z
       .record(z.string(), CapabilityRevisionRefSchema)
@@ -1520,6 +1594,7 @@ export async function createWorkspaceStore(
         db.prepare("SELECT * FROM activation_approvals WHERE approval_id = ?").get(approvalId),
         decodeActivationApproval,
       ),
+    supersede: supersedeActivationOperation,
     decideApproval: decideActivationApproval,
     commit: commitActivation,
     current: currentActivation,
@@ -1982,9 +2057,30 @@ export async function createWorkspaceStore(
         const sourceCapabilities = z
           .record(z.string(), CapabilityRevisionRefSchema)
           .parse(source.activeCapabilityRevisions);
-        const restoredRevision = sourceCapabilities[experiment.activatedRevision.capabilityId];
+        const targetCapabilityId = experiment.activatedRevision.capabilityId;
+        const restoredRevision = sourceCapabilities[targetCapabilityId];
         if (!restoredRevision || !sameCapabilityRevisionRef(restoredRevision, experiment.baselineRevision))
           throw new Error("Recorded prior snapshot does not restore the experiment baseline revision");
+        const definitionPrefix = `${sha256(targetCapabilityId)}:`;
+        const restoredDefinitions = Object.freeze({
+          ...Object.fromEntries(
+            Object.entries(currentActivation.activeDefinitions).filter(
+              ([slotKey]) => !slotKey.startsWith(definitionPrefix),
+            ),
+          ),
+          ...Object.fromEntries(
+            Object.entries(source.activeDefinitions).filter(([slotKey]) =>
+              slotKey.startsWith(definitionPrefix),
+            ),
+          ),
+        });
+        const currentCapabilities = z
+          .record(z.string(), CapabilityRevisionRefSchema)
+          .parse(currentActivation.activeCapabilityRevisions);
+        const restoredCapabilities = Object.freeze({
+          ...currentCapabilities,
+          [targetCapabilityId]: restoredRevision,
+        });
         restoredActivationId = `restoration_${sha256(request.operationId).slice(0, 32)}`;
         db.prepare(
           `INSERT INTO activations(
@@ -1995,26 +2091,29 @@ export async function createWorkspaceStore(
           restoredActivationId,
           request.expectedActivationRevision + 1,
           request.expectedActivationId,
-          JSON.stringify(source.activeDefinitions),
-          JSON.stringify(sourceCapabilities),
-          source.preflightId ?? null,
+          JSON.stringify(restoredDefinitions),
+          JSON.stringify(restoredCapabilities),
+          currentActivation.preflightId ?? null,
           committedAt,
         );
-        db.prepare("DELETE FROM activation_pointers").run();
-        for (const [capabilityId, revision] of Object.entries(sourceCapabilities))
-          db.prepare(
-            `INSERT INTO activation_pointers(
-              pointer_id, capability_id, activation_id, capability_revision_id, updated_at,
-              capability_revision_json
-            ) VALUES (?, ?, ?, ?, ?, ?)`,
-          ).run(
-            `activation_pointer_${sha256(capabilityId).slice(0, 32)}`,
-            capabilityId,
-            restoredActivationId,
-            revision.capabilityRevisionId,
-            committedAt,
-            JSON.stringify(revision),
-          );
+        db.prepare(
+          `INSERT INTO activation_pointers(
+            pointer_id, capability_id, activation_id, capability_revision_id, updated_at,
+            capability_revision_json
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(capability_id) DO UPDATE SET
+            pointer_id = excluded.pointer_id, activation_id = excluded.activation_id,
+            capability_revision_id = excluded.capability_revision_id,
+            capability_revision_json = excluded.capability_revision_json,
+            updated_at = excluded.updated_at`,
+        ).run(
+          `activation_pointer_${sha256(targetCapabilityId).slice(0, 32)}`,
+          targetCapabilityId,
+          restoredActivationId,
+          restoredRevision.capabilityRevisionId,
+          committedAt,
+          JSON.stringify(restoredRevision),
+        );
         db.prepare(
           `UPDATE activation_state SET activation_id = ?, revision = ?, updated_at = ?
            WHERE state_id = 'current'`,

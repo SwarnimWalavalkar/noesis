@@ -207,16 +207,17 @@ function completeDefinitionSlots(
 function operationIdentity(
   binding: ActivationEvidenceBinding,
   policyDigest: string,
+  expectedActivation: { readonly activationId: string | null; readonly revision: number },
 ): {
   readonly operationId: string;
   readonly idempotencyKey: string;
   readonly activationId: string;
   readonly approvalId: string;
 } {
-  const digest = sha256(canonicalJson({ binding, policyDigest }));
+  const digest = sha256(canonicalJson({ binding, policyDigest, expectedActivation }));
   return Object.freeze({
     operationId: `activation_operation_${digest.slice(0, 32)}`,
-    idempotencyKey: `activate:${binding.candidateDigest}:${binding.preflightDigest}:${policyDigest}`,
+    idempotencyKey: `activate:${binding.candidateDigest}:${binding.preflightDigest}:${policyDigest}:${expectedActivation.revision}:${expectedActivation.activationId ?? "none"}`,
     activationId: `activation_${digest.slice(0, 32)}`,
     approvalId: `activation_approval_${digest.slice(0, 32)}`,
   });
@@ -456,8 +457,9 @@ export function createAtomicActivationController(
     });
   };
 
-  const activateFromPreflight = async (
+  const attemptActivation = async (
     handoff: PreflightActivationHandoff,
+    retriesRemaining: number,
   ): Promise<ActivationAttemptResult> => {
     try {
       const recovered = (await options.workspace.protectedActivations.listOperations(1_000)).find(
@@ -516,7 +518,27 @@ export function createAtomicActivationController(
         allRailsPassed: validated.allRailsPassed,
       });
       const policyDigest = sha256(canonicalJson(policySnapshot));
-      const identities = operationIdentity(validated.binding, policyDigest);
+      const current = await options.workspace.protectedActivations.current();
+      const expectedActivation = Object.freeze({
+        activationId: current?.activationId ?? null,
+        revision: current?.revision ?? 0,
+      });
+      const identities = operationIdentity(validated.binding, policyDigest, expectedActivation);
+      const staleAttempts = (await options.workspace.protectedActivations.listOperations(1_000)).filter(
+        (operation) =>
+          operation.binding.experimentId === handoff.experiment.experimentId &&
+          sameCapabilityRevisionRef(operation.binding.candidateRevision, handoff.candidateRevision) &&
+          (operation.status === "staged" ||
+            operation.status === "approved" ||
+            operation.status === "pending_approval") &&
+          (operation.expectedActivationRevision !== expectedActivation.revision ||
+            operation.previousActivationId !== expectedActivation.activationId),
+      );
+      for (const stale of staleAttempts)
+        await options.workspace.protectedActivations.supersede({
+          operationId: stale.operationId,
+          supersededByOperationId: identities.operationId,
+        });
       const existing = await options.workspace.protectedActivations.getOperation(identities.operationId);
       if (existing) {
         if (existing.status === "committed")
@@ -534,9 +556,11 @@ export function createAtomicActivationController(
           });
         if (existing.status === "rejected")
           return Object.freeze({ ok: true, status: "rejected", operation: existing });
-        return await commitWithAuthority(existing, policy);
+        const committed = await commitWithAuthority(existing, policy);
+        if (!committed.ok && committed.code === "activation_conflict" && retriesRemaining > 0)
+          return await attemptActivation(handoff, retriesRemaining - 1);
+        return committed;
       }
-      const current = await options.workspace.protectedActivations.current();
       const stagedDefinitions = [];
       if (policy.outcome !== "block") {
         for (const slot of completeDefinitionSlots(validated.binding.manifestRevision, validated.candidate)) {
@@ -583,11 +607,21 @@ export function createAtomicActivationController(
           approvalId: identities.approvalId,
           bindingDigest,
         });
-      return await commitWithAuthority(operation, policy);
+      const committed = await commitWithAuthority(operation, policy);
+      if (!committed.ok && committed.code === "activation_conflict" && retriesRemaining > 0)
+        return await attemptActivation(handoff, retriesRemaining - 1);
+      return committed;
     } catch (error) {
-      return classifyFailure(error);
+      const failure = classifyFailure(error);
+      if (!failure.ok && failure.code === "activation_conflict" && retriesRemaining > 0)
+        return await attemptActivation(handoff, retriesRemaining - 1);
+      return failure;
     }
   };
+
+  const activateFromPreflight = async (
+    handoff: PreflightActivationHandoff,
+  ): Promise<ActivationAttemptResult> => await attemptActivation(handoff, 2);
 
   const approve = async (request: {
     readonly approvalId: string;
@@ -602,6 +636,19 @@ export function createAtomicActivationController(
       if (existing.status === "committed") return await commitWithAuthority(existing);
       if (existing.status === "rejected")
         return Object.freeze({ ok: true, status: "rejected", operation: existing });
+      const current = await options.workspace.protectedActivations.current();
+      if (
+        existing.expectedActivationRevision !== (current?.revision ?? 0) ||
+        existing.previousActivationId !== (current?.activationId ?? null)
+      ) {
+        await options.workspace.protectedActivations.supersede({
+          operationId: existing.operationId,
+          supersededByOperationId: `activation_revalidation_${sha256(
+            `${existing.operationId}:${current?.revision ?? 0}:${current?.activationId ?? "none"}`,
+          ).slice(0, 32)}`,
+        });
+        throw new Error("Activation approval is bound to a stale expected activation snapshot");
+      }
       const authority = await options.authority.promote(
         `activation-approval:${request.approvalId}:approve`,
         `activation-approval:${request.approvalId}:approve:${request.bindingDigest}`,

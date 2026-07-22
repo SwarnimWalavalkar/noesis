@@ -6,6 +6,7 @@ import {
   type CapabilityRevision,
   type CapabilityRevisionRef,
   type DatabaseRowRef,
+  type DurableJobRecord,
   type EvidenceRef,
   type Experiment,
   type ExperimentOutcome,
@@ -36,6 +37,16 @@ const SignalKindSchema = z.enum([
   "user_request",
 ]);
 const OutcomeDecisionSchema = z.enum(["keep", "revise", "revert"]);
+const OutcomeJudgeJobPayloadSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  experimentId: z.string().min(1),
+  strategyId: z.string().min(1),
+  inputDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+  runId: z.string().min(1),
+});
+const OUTCOME_JOB_KIND = "runtime.outcome_judge";
+const OUTCOME_JOB_LEASE_MS = 30_000;
+const OUTCOME_JOB_HEARTBEAT_MS = 5_000;
 const MetricsSchema = z.strictObject({
   quality: z.number().min(0).max(1).nullable().default(null),
   baselineQuality: z.number().min(0).max(1).nullable().default(null),
@@ -123,17 +134,21 @@ export interface ExperimentOutcomeProposal {
 }
 
 export interface ExperimentOutcomeJudge {
-  readonly run: (input: {
-    readonly strategyId: string;
-    readonly experiment: {
-      readonly experimentId: string;
-      readonly hypothesis: string;
-      readonly scope: string;
-      readonly baselineRevision: CapabilityRevisionRef;
-      readonly activatedRevision: CapabilityRevisionRef;
-    };
-    readonly comparison: ExperimentComparisonReadModel;
-  }) => Promise<ExperimentOutcomeProposal>;
+  readonly run: (
+    input: {
+      readonly strategyId: string;
+      readonly experiment: {
+        readonly experimentId: string;
+        readonly hypothesis: string;
+        readonly scope: string;
+        readonly baselineRevision: CapabilityRevisionRef;
+        readonly activatedRevision: CapabilityRevisionRef;
+      };
+      readonly comparison: ExperimentComparisonReadModel;
+    },
+    execution?: { readonly operationId: string; readonly signal: AbortSignal },
+  ) => Promise<ExperimentOutcomeProposal>;
+  readonly rehydrate?: (operationId: string) => Promise<ExperimentOutcomeProposal | undefined>;
 }
 
 export interface FeedbackCapabilityResolver {
@@ -210,6 +225,9 @@ export interface ContinuousFeedbackController {
   ) => Promise<ObservationResolution | undefined>;
   readonly experimentComparison: (experimentId: string) => Promise<ExperimentComparisonReadModel>;
   readonly capabilityHealth: (capabilityId: string) => Promise<CapabilityHealthReadModel>;
+  readonly runAvailable: () => Promise<void>;
+  readonly cancel: (jobId: string) => Promise<DurableJobRecord | undefined>;
+  readonly stop: () => Promise<void>;
 }
 
 export interface ContinuousFeedbackControllerOptions {
@@ -218,6 +236,8 @@ export interface ContinuousFeedbackControllerOptions {
   readonly capabilities: FeedbackCapabilityResolver;
   readonly judge: ExperimentOutcomeJudge;
   readonly config?: ContinuousFeedbackConfig;
+  readonly workerId?: string;
+  readonly now?: () => Date;
 }
 
 function databaseRef<Table extends DatabaseRowRef["table"]>(
@@ -295,10 +315,52 @@ function evidenceForObservations(
   );
 }
 
+function outcomeResearchInputDigest(comparison: ExperimentComparisonReadModel): string {
+  return sha256(
+    canonicalJson({
+      experimentId: comparison.experimentId,
+      status: comparison.status,
+      hypothesis: comparison.hypothesis,
+      baselineRevision: comparison.baselineRevision,
+      activatedRevision: comparison.activatedRevision,
+      preflight: comparison.preflight,
+      observations: comparison.observations,
+      liveMetrics: comparison.liveMetrics,
+      evidenceRefs: comparison.evidenceRefs,
+    }),
+  );
+}
+
 export function createContinuousFeedbackController(
   options: ContinuousFeedbackControllerOptions,
 ): ContinuousFeedbackController {
   const config = ContinuousFeedbackConfigSchema.parse(options.config ?? DEFAULT_CONTINUOUS_FEEDBACK_CONFIG);
+  const now = options.now ?? (() => new Date());
+  const workerId = options.workerId ?? `runtime-feedback:${process.pid}`;
+  const active = new Map<string, AbortController>();
+  let draining: Promise<void> | undefined;
+  let stopping = false;
+
+  const isoNow = (): string => now().toISOString();
+
+  const validateProposal = (
+    proposed: ExperimentOutcomeProposal,
+    observations: readonly ExperimentObservationRecord[],
+  ): ExperimentOutcomeProposal => {
+    const proposal = OutcomeDecisionSchema.parse(proposed.proposal);
+    const available = new Set(observations.map((observation) => observation.observationId));
+    const citations = Object.freeze([...new Set(proposed.citedObservationIds)]);
+    if (citations.length === 0 || citations.some((id) => !available.has(id)))
+      throw new Error("Outcome judge must cite observations from its bounded input");
+    const correctionPrecedence = observations.some(
+      (observation) => observation.precedence === "correction" || observation.precedence === "preference",
+    );
+    return Object.freeze({
+      proposal: proposal === "keep" && correctionPrecedence ? "revise" : proposal,
+      citedObservationIds: citations,
+      summary: proposed.summary,
+    });
+  };
 
   const experimentComparison = async (experimentId: string): Promise<ExperimentComparisonReadModel> => {
     const experiment = await options.workspace.research.experiments.getExperiment(experimentId);
@@ -356,16 +418,20 @@ export function createContinuousFeedbackController(
     if (existing) return existing;
     if (input.experiment.status !== "observing" || !input.experiment.activatedRevision)
       throw new Error("Observing experiment has no activated revision identity");
+    const activatedRevision = input.experiment.activatedRevision;
     const current = await options.workspace.protectedActivations.current();
     if (!current) throw new Error("No current activation exists for experiment outcome");
-    if (input.observations.some((observation) => observation.servingActivationId !== current.activationId))
-      throw new Error("Experiment outcome is stale relative to its serving turn activation (CAS conflict)");
-    const currentRevision =
-      current.activeCapabilityRevisions[input.experiment.activatedRevision.capabilityId];
+    if (
+      input.observations.some(
+        (observation) => !sameCapabilityRevisionRef(observation.capabilityRevision, activatedRevision),
+      )
+    )
+      throw new Error("Experiment outcome contains evidence from an incompatible capability revision");
+    const currentRevision = current.activeCapabilityRevisions[activatedRevision.capabilityId];
     if (
       !currentRevision ||
       currentRevision.kind !== "capability_revision" ||
-      !sameCapabilityRevisionRef(currentRevision, input.experiment.activatedRevision)
+      !sameCapabilityRevisionRef(currentRevision, activatedRevision)
     )
       throw new Error("Experiment outcome is stale relative to the current activation");
     const operationId = `experiment_outcome_${sha256(`${input.experiment.experimentId}:${input.decision}`).slice(0, 32)}`;
@@ -472,6 +538,166 @@ export function createContinuousFeedbackController(
     throw new Error("Protected experiment outcome completed without a committed operation");
   };
 
+  const executeOutcomeJob = async (job: DurableJobRecord): Promise<void> => {
+    const leaseToken = job.leaseToken;
+    if (!leaseToken) throw new Error(`Claimed outcome job ${job.jobId} has no lease token`);
+    const payload = OutcomeJudgeJobPayloadSchema.parse(job.payload);
+    const controller = new AbortController();
+    active.set(job.jobId, controller);
+    const heartbeat = setInterval(() => {
+      void options.workspace.jobs
+        .renew({
+          jobId: job.jobId,
+          leaseToken,
+          now: isoNow(),
+          leaseUntil: new Date(now().getTime() + OUTCOME_JOB_LEASE_MS).toISOString(),
+        })
+        .then((renewed) => {
+          if (!renewed) controller.abort("lease_lost");
+        })
+        .catch(() => controller.abort("lease_renewal_failed"));
+    }, OUTCOME_JOB_HEARTBEAT_MS);
+    heartbeat.unref?.();
+    try {
+      const experiment = await options.workspace.research.experiments.getExperiment(payload.experimentId);
+      if (!experiment || experiment.status !== "observing" || !experiment.activatedRevision)
+        throw new Error(`Outcome job experiment ${payload.experimentId} is no longer observing`);
+      const observations = await options.workspace.protectedFeedback.listObservations(
+        payload.experimentId,
+        config.observationWindow,
+      );
+      const comparison = await experimentComparison(payload.experimentId);
+      if (outcomeResearchInputDigest(comparison) !== payload.inputDigest)
+        throw new Error("Outcome job input changed before its leased execution");
+      const input = Object.freeze({
+        strategyId: payload.strategyId,
+        experiment: Object.freeze({
+          experimentId: payload.experimentId,
+          hypothesis: experiment.hypothesis,
+          scope: experiment.scope,
+          baselineRevision: experiment.baselineRevision,
+          activatedRevision: experiment.activatedRevision,
+        }),
+        comparison,
+      });
+      const prior = await options.workspace.protectedFeedback.getResearchRun(payload.runId);
+      let proposed: ExperimentOutcomeProposal | undefined;
+      if (prior?.status === "completed") {
+        await options.workspace.jobs.complete({
+          jobId: job.jobId,
+          leaseToken,
+          now: isoNow(),
+          result: Object.freeze({ runId: prior.runId, recovered: true }),
+        });
+        return;
+      }
+      if (prior?.status === "running" && job.attempt > 1) {
+        proposed = await options.judge.rehydrate?.(job.operationId);
+        if (!proposed)
+          throw new Error(
+            "Outcome judge lease expired with an ambiguous provider outcome; exact operation rehydration is unavailable",
+          );
+      } else {
+        await options.workspace.protectedFeedback.putResearchRun({
+          runId: payload.runId,
+          experimentId: payload.experimentId,
+          strategyId: payload.strategyId,
+          inputDigest: payload.inputDigest,
+          status: "running",
+          citedObservationIds: Object.freeze([]),
+          evidenceRefs: Object.freeze([]),
+          attempt: job.attempt,
+          retryable: false,
+        });
+        proposed = await options.judge.run(input, {
+          operationId: job.operationId,
+          signal: controller.signal,
+        });
+      }
+      if (controller.signal.aborted) throw new Error("Outcome judge lost its durable lease");
+      const validated = validateProposal(proposed, observations);
+      const run = await options.workspace.protectedFeedback.putResearchRun({
+        runId: payload.runId,
+        experimentId: payload.experimentId,
+        strategyId: payload.strategyId,
+        inputDigest: payload.inputDigest,
+        status: "completed",
+        proposal: validated.proposal,
+        citedObservationIds: validated.citedObservationIds,
+        evidenceRefs: evidenceForObservations(
+          observations.filter((observation) =>
+            validated.citedObservationIds.includes(observation.observationId),
+          ),
+        ),
+        attempt: job.attempt,
+        retryable: false,
+      });
+      await options.workspace.jobs.complete({
+        jobId: job.jobId,
+        leaseToken,
+        now: isoNow(),
+        result: Object.freeze({ runId: run.runId }),
+      });
+    } catch (error) {
+      const current = await options.workspace.jobs.get(job.jobId);
+      const message = error instanceof Error ? error.message : String(error);
+      await options.workspace.protectedFeedback.putResearchRun({
+        runId: payload.runId,
+        experimentId: payload.experimentId,
+        strategyId: payload.strategyId,
+        inputDigest: payload.inputDigest,
+        status: "failed",
+        citedObservationIds: Object.freeze([]),
+        evidenceRefs: Object.freeze([]),
+        attempt: job.attempt,
+        failureMessage: current?.status === "cancelled" ? "Outcome judge job was cancelled" : message,
+        retryable: false,
+      });
+      if (current?.status === "cancelled") return;
+      await options.workspace.jobs.fail({
+        jobId: job.jobId,
+        leaseToken,
+        now: isoNow(),
+        retryAt: isoNow(),
+        failure: Object.freeze({
+          code: "outcome_judge_ambiguous",
+          message,
+          retryable: false,
+          ambiguous: true,
+        }),
+      });
+    } finally {
+      clearInterval(heartbeat);
+      active.delete(job.jobId);
+    }
+  };
+
+  const drainOutcomeJobs = async (): Promise<void> => {
+    let claimed = 0;
+    while (!stopping && claimed < 8) {
+      const job = await options.workspace.jobs.claim({
+        workerId,
+        now: isoNow(),
+        leaseUntil: new Date(now().getTime() + OUTCOME_JOB_LEASE_MS).toISOString(),
+        maximumCost: 8 - claimed,
+        kinds: Object.freeze([OUTCOME_JOB_KIND]),
+      });
+      if (!job) break;
+      claimed += 1;
+      await executeOutcomeJob(job);
+    }
+  };
+
+  function runAvailable(): Promise<void> {
+    if (draining) return draining;
+    stopping = false;
+    const next = drainOutcomeJobs().finally(() => {
+      if (draining === next) draining = undefined;
+    });
+    draining = next;
+    return next;
+  }
+
   const evaluateExperiment = async (
     experimentId: string,
     requestedStrategyId = config.researchStrategyId,
@@ -524,79 +750,40 @@ export function createContinuousFeedbackController(
         observationId: latest.observationId,
       });
     const comparison = await experimentComparison(experimentId);
-    const inputDigest = sha256(canonicalJson(comparison));
+    const inputDigest = outcomeResearchInputDigest(comparison);
     const runId = `outcome_research_${sha256(`${experimentId}:${requestedStrategyId}:${inputDigest}`).slice(0, 32)}`;
-    const prior = await options.workspace.protectedFeedback.getResearchRun(runId);
-    let run = prior;
-    if (!run || run.status !== "completed") {
-      const attempt = (run?.attempt ?? 0) + 1;
-      await options.workspace.protectedFeedback.putResearchRun({
-        runId,
+    const operationId = `outcome-judge:${experimentId}:${requestedStrategyId}:${inputDigest}`;
+    await options.workspace.jobs.enqueue({
+      jobId: `job_${sha256(operationId).slice(0, 32)}`,
+      kind: OUTCOME_JOB_KIND,
+      payload: OutcomeJudgeJobPayloadSchema.parse({
+        schemaVersion: 1,
         experimentId,
         strategyId: requestedStrategyId,
         inputDigest,
-        status: "running",
-        citedObservationIds: Object.freeze([]),
-        evidenceRefs: Object.freeze([]),
-        attempt,
-        retryable: false,
+        runId,
+      }),
+      payloadRefs: comparison.evidenceRefs,
+      operationId,
+      idempotencyKey: operationId,
+      notBefore: isoNow(),
+      maxAttempts: 2,
+      estimatedCost: 1,
+      budget: 2,
+    });
+    await runAvailable();
+    const run = await options.workspace.protectedFeedback.getResearchRun(runId);
+    if (!run)
+      return Object.freeze({ status: "observing", experimentId, observationId: latest.observationId });
+    if (run.status === "failed")
+      return Object.freeze({
+        status: "research_failed",
+        experimentId,
+        observationId: latest.observationId,
+        run,
       });
-      try {
-        const proposed = await options.judge.run({
-          strategyId: requestedStrategyId,
-          experiment: Object.freeze({
-            experimentId,
-            hypothesis: experiment.hypothesis,
-            scope: experiment.scope,
-            baselineRevision: experiment.baselineRevision,
-            activatedRevision: experiment.activatedRevision,
-          }),
-          comparison,
-        });
-        const proposal = OutcomeDecisionSchema.parse(proposed.proposal);
-        const available = new Set(observations.map((observation) => observation.observationId));
-        const citations = Object.freeze([...new Set(proposed.citedObservationIds)]);
-        if (citations.length === 0 || citations.some((id) => !available.has(id)))
-          throw new Error("Outcome judge must cite observations from its bounded input");
-        const correctionPrecedence = observations.some(
-          (observation) => observation.precedence === "correction" || observation.precedence === "preference",
-        );
-        const protectedProposal = proposal === "keep" && correctionPrecedence ? "revise" : proposal;
-        run = await options.workspace.protectedFeedback.putResearchRun({
-          runId,
-          experimentId,
-          strategyId: requestedStrategyId,
-          inputDigest,
-          status: "completed",
-          proposal: protectedProposal,
-          citedObservationIds: citations,
-          evidenceRefs: evidenceForObservations(
-            observations.filter((observation) => citations.includes(observation.observationId)),
-          ),
-          attempt,
-          retryable: false,
-        });
-      } catch (error) {
-        run = await options.workspace.protectedFeedback.putResearchRun({
-          runId,
-          experimentId,
-          strategyId: requestedStrategyId,
-          inputDigest,
-          status: "failed",
-          citedObservationIds: Object.freeze([]),
-          evidenceRefs: evidenceForObservations(observations),
-          attempt,
-          failureMessage: error instanceof Error ? error.message : String(error),
-          retryable: true,
-        });
-        return Object.freeze({
-          status: "research_failed",
-          experimentId,
-          observationId: latest.observationId,
-          run,
-        });
-      }
-    }
+    if (run.status !== "completed")
+      return Object.freeze({ status: "observing", experimentId, observationId: latest.observationId });
     if (!run.proposal) throw new Error(`Completed research run ${run.runId} has no proposal`);
     const cited = observations.filter((observation) =>
       run?.citedObservationIds.includes(observation.observationId),
@@ -786,10 +973,24 @@ export function createContinuousFeedbackController(
     });
   };
 
+  const cancel = async (jobId: string): Promise<DurableJobRecord | undefined> => {
+    active.get(jobId)?.abort("cancelled");
+    return await options.workspace.jobs.cancel(jobId, isoNow());
+  };
+
+  const stop = async (): Promise<void> => {
+    stopping = true;
+    for (const controller of active.values()) controller.abort("worker_stopped");
+    await draining;
+  };
+
   return Object.freeze({
     observeTurnOutcome,
     evaluateExperiment,
     experimentComparison,
     capabilityHealth,
+    runAvailable,
+    cancel,
+    stop,
   });
 }

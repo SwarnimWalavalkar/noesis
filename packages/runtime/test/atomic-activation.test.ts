@@ -697,6 +697,33 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     expect(current?.revision).toBe(1);
     expect(Object.keys(current?.activeCapabilityRevisions ?? {})).toHaveLength(1);
     expect(Object.keys(current?.activeDefinitions ?? {})).toHaveLength(5);
+
+    const firstWon = results[0]?.ok === true && results[0].status === "activated";
+    const stalePending = firstWon ? pendingB : pendingA;
+    const staleFixture = firstWon ? second : first;
+    const fresh = await staleFixture.controller.activateFromPreflight(staleFixture.handoff);
+    if (!fresh.ok || fresh.status !== "pending_approval")
+      throw new Error("Expected a fresh approval after stale activation CAS");
+    expect(fresh.operation.operationId).not.toBe(stalePending.operation.operationId);
+    expect(fresh.approvalId).not.toBe(stalePending.approvalId);
+    expect(
+      await workspace.protectedActivations.getOperation(stalePending.operation.operationId),
+    ).toMatchObject({
+      status: "rejected",
+      supersededByOperationId: fresh.operation.operationId,
+    });
+    expect(await workspace.protectedActivations.getApproval(stalePending.approvalId)).toMatchObject({
+      status: "rejected",
+      decisionActor: "protected-activation:stale-cas",
+    });
+    await expect(
+      staleFixture.controller.approve({
+        approvalId: fresh.approvalId,
+        operationId: fresh.operation.operationId,
+        bindingDigest: fresh.bindingDigest,
+      }),
+    ).resolves.toMatchObject({ ok: true, status: "activated" });
+    expect((await workspace.protectedActivations.current())?.revision).toBe(2);
   });
 
   test("controller leaks no authority handle to candidate resolvers or generated content", async () => {
