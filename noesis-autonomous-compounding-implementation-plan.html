@@ -480,7 +480,7 @@ interface ExperimentBase {
   evidenceRefs: readonly EvidenceRef[];
   baselineRevision: CapabilityRevisionRef;
   candidateRevisions: readonly CapabilityRevisionRef[];
-  preflightRef?: EvidenceRevisionRef;
+  preflightRef?: DatabaseRowRef&lt;"preflight_reports"&gt;;
   activatedRevision?: CapabilityRevisionRef;
   feedbackSignalIds: readonly string[];
   followUpExperimentId?: string;
@@ -496,7 +496,7 @@ type Experiment =
         changes normally create capability revisions; experiments may also compare internal research strategies without creating
         a user-facing capability.
       </p>
-      <p>A coupled revision is preflighted from stable snapshots. Activation first stages/materializes the selected revision bytes, then one SQLite transaction makes the complete prompt/tool/router revision set visible and updates the activation pointer. Abandoned staged revisions are inert and cleanable.</p>
+      <p>A coupled revision is preflighted from stable snapshots. Protected activation reloads a recorded passing preflight report, recomputes the canonical digest of the complete materialized <code>CapabilityRevision</code>, and requires it to match the report's candidate identity. Activation then uses one SQLite transaction to make that exact prompt/tool/router revision set visible and update the activation pointer. Abandoned staged revisions are inert and cleanable.</p>
 
       <h3>Separate global, per-turn, and prompt lifetimes</h3>
       <pre>interface ActivationSnapshot {
@@ -557,13 +557,14 @@ interface PreflightReport {
   planId: string;
   candidateRevision: CapabilityRevisionRef;
   baselineRevision: CapabilityRevisionRef;
-  trialEvidence: readonly EvidenceRevisionRef[];
-  judgmentEvidence: readonly EvidenceRevisionRef[];
+  trialRowRefs: readonly DatabaseRowRef&lt;"experiment_trials"&gt;[];
+  trialEvidence: readonly EvidenceRevisionRef&lt;"output"&gt;[];
+  judgmentEvidence: readonly EvidenceRevisionRef&lt;"judgment"&gt;[];
   appliedCriteria: readonly AppliedCriterionRef[];
   railChecks: readonly RailCheckResult[];
   comparison: EvaluationComparison;
   decision: "pass" | "block" | "inconclusive";
-  reportEvidence: EvidenceRevisionRef;
+  reportEvidence: EvidenceRevisionRef&lt;"report"&gt;;
 }
 
 interface EvaluationContract {

@@ -2,6 +2,8 @@ import type {
   ActorRef,
   ArtifactFileRef,
   DatabaseRowRef,
+  DatabaseTable,
+  EvidenceKind,
   EvidenceRevisionRef,
   EvaluationRecord,
   Experiment,
@@ -96,8 +98,9 @@ export interface DefinitionWriteRequest {
   readonly predecessorRevisionId?: string;
 }
 
-export interface EvidenceWriteRequest extends DefinitionWriteRequest {
-  readonly evidenceKind: EvidenceRevisionRef["evidenceKind"];
+export interface EvidenceWriteRequest<Kind extends EvidenceKind = EvidenceKind>
+  extends DefinitionWriteRequest {
+  readonly evidenceKind: Kind;
   readonly supersedesRevisionId?: string;
 }
 
@@ -110,10 +113,12 @@ export interface ArtifactWriteRequest {
 }
 
 export interface WorkspaceReadPort {
-  readonly readDatabaseRow: (ref: DatabaseRowRef) => Promise<Readonly<Record<string, unknown>> | undefined>;
+  readonly readDatabaseRow: <Table extends DatabaseTable>(
+    ref: DatabaseRowRef<Table>,
+  ) => Promise<Readonly<Record<string, unknown>> | undefined>;
   readonly readWorkingFile: (workingPath: string) => Promise<Uint8Array | undefined>;
   readonly readRevision: (ref: FileRevisionRef) => Promise<Uint8Array>;
-  readonly readEvidence: (ref: EvidenceRevisionRef) => Promise<Uint8Array>;
+  readonly readEvidence: <Kind extends EvidenceKind>(ref: EvidenceRevisionRef<Kind>) => Promise<Uint8Array>;
   readonly readArtifact: (ref: ArtifactFileRef) => Promise<Uint8Array>;
 }
 
@@ -128,7 +133,9 @@ export interface RevisionSnapshotPort {
 }
 
 export interface EvidenceFilePort {
-  readonly appendEvidence: (request: EvidenceWriteRequest) => Promise<EvidenceRevisionRef>;
+  readonly appendEvidence: <Kind extends EvidenceKind>(
+    request: EvidenceWriteRequest<Kind>,
+  ) => Promise<EvidenceRevisionRef<Kind>>;
 }
 
 export interface ArtifactFilePort {
@@ -137,31 +144,31 @@ export interface ArtifactFilePort {
 
 export interface ExperimentStorePort {
   readonly getExperiment: (experimentId: string) => Promise<Experiment | undefined>;
-  readonly putExperiment: (experiment: Experiment) => Promise<DatabaseRowRef>;
+  readonly putExperiment: (experiment: Experiment) => Promise<DatabaseRowRef<"experiments">>;
 }
 
 export interface ExperimentTrialStorePort {
   readonly getTrial: (trialId: string) => Promise<ExperimentTrial | undefined>;
   readonly listTrials: (experimentId: string) => Promise<readonly ExperimentTrial[]>;
-  readonly putTrial: (trial: ExperimentTrial) => Promise<DatabaseRowRef>;
+  readonly putTrial: (trial: ExperimentTrial) => Promise<DatabaseRowRef<"experiment_trials">>;
 }
 
 export interface PreflightStorePort {
   readonly getPreflightPlan: (planId: string) => Promise<PreflightPlan | undefined>;
-  readonly putPreflightPlan: (plan: PreflightPlan) => Promise<DatabaseRowRef>;
+  readonly putPreflightPlan: (plan: PreflightPlan) => Promise<DatabaseRowRef<"preflight_plans">>;
   readonly getPreflightReport: (preflightId: string) => Promise<PreflightReport | undefined>;
-  readonly putPreflightReport: (report: PreflightReport) => Promise<DatabaseRowRef>;
+  readonly putPreflightReport: (report: PreflightReport) => Promise<DatabaseRowRef<"preflight_reports">>;
 }
 
 export interface EvaluationStorePort {
   readonly getEvaluation: (evaluationId: string) => Promise<EvaluationRecord | undefined>;
   readonly listEvaluations: (experimentId: string) => Promise<readonly EvaluationRecord[]>;
-  readonly putEvaluation: (evaluation: EvaluationRecord) => Promise<DatabaseRowRef>;
+  readonly putEvaluation: (evaluation: EvaluationRecord) => Promise<DatabaseRowRef<"evaluations">>;
 }
 
 export interface FeedbackSignalStorePort {
   readonly getFeedbackSignal: (signalId: string) => Promise<FeedbackSignal | undefined>;
-  readonly recordFeedbackSignal: (signal: FeedbackSignal) => Promise<DatabaseRowRef>;
+  readonly recordFeedbackSignal: (signal: FeedbackSignal) => Promise<DatabaseRowRef<"feedback_signals">>;
 }
 
 export interface ResearchStatePort {

@@ -5,13 +5,21 @@ import {
   PreflightPlanSchema,
   PreflightReportSchema,
   capabilityRevisionRef,
+  declaredAuthorityFor,
   isExperimentTransitionAllowed,
   preflightPlanMatchesExperiment,
   preflightReportMatchesPlan,
+  sha256,
   type CapabilityRevision,
+  type ArtifactFileRef,
+  type ArtifactWriteRequest,
   type DatabaseRowRef,
+  type DatabaseTable,
+  type DefinitionWriteRequest,
   type EvaluationRecord,
+  type EvidenceKind,
   type EvidenceRevisionRef,
+  type EvidenceWriteRequest,
   type Experiment,
   type ExperimentTrial,
   type FeedbackSignal,
@@ -19,6 +27,7 @@ import {
   type PreflightPlan,
   type PreflightReport,
   type ResearchStatePort,
+  type WorkspaceStore,
 } from "../src/index.ts";
 
 const fileRevision = (revisionId: string, digestCharacter: string): FileRevisionRef => ({
@@ -29,18 +38,6 @@ const fileRevision = (revisionId: string, digestCharacter: string): FileRevision
   contentDigest: digestCharacter.repeat(64),
 });
 
-const evidence = (
-  revisionId: string,
-  evidenceKind: EvidenceRevisionRef["evidenceKind"],
-): EvidenceRevisionRef => ({
-  kind: "evidence_revision",
-  revisionId,
-  workingPath: `evidence/${revisionId}.json`,
-  snapshotPath: `evidence/revisions/${revisionId}.json`,
-  contentDigest: "e".repeat(64),
-  evidenceKind,
-});
-
 function createFakeResearchState(): ResearchStatePort {
   const experiments = new Map<string, Experiment>();
   const trials = new Map<string, ExperimentTrial>();
@@ -48,7 +45,7 @@ function createFakeResearchState(): ResearchStatePort {
   const reports = new Map<string, PreflightReport>();
   const evaluations = new Map<string, EvaluationRecord>();
   const feedbackSignals = new Map<string, FeedbackSignal>();
-  const row = (table: DatabaseRowRef["table"], rowId: string): DatabaseRowRef => ({
+  const row = <Table extends DatabaseTable>(table: Table, rowId: string): DatabaseRowRef<Table> => ({
     kind: "database_row",
     table,
     rowId,
@@ -110,6 +107,84 @@ function createFakeResearchState(): ResearchStatePort {
   });
 }
 
+function createFakeWorkspaceStore(): WorkspaceStore {
+  const encoder = new TextEncoder();
+  const evidenceBytes = new Map<string, Uint8Array>();
+  const workingFiles = new Map<string, Uint8Array>();
+  const revisions = new Map<string, FileRevisionRef>();
+  const revisionBytes = new Map<string, Uint8Array>();
+  let nextRevision = 1;
+
+  const copy = (bytes: Uint8Array): Uint8Array => Uint8Array.from(bytes);
+  const recordDefinition = async (request: DefinitionWriteRequest): Promise<FileRevisionRef> => {
+    const revisionId = `definition-${nextRevision++}`;
+    const bytes = copy(request.bytes);
+    const ref: FileRevisionRef = {
+      kind: "file_revision",
+      revisionId,
+      workingPath: request.workingPath,
+      snapshotPath: `revisions/${revisionId}`,
+      contentDigest: sha256(bytes),
+    };
+    workingFiles.set(request.workingPath, bytes);
+    revisions.set(revisionId, ref);
+    revisionBytes.set(revisionId, bytes);
+    return ref;
+  };
+
+  return Object.freeze({
+    reads: Object.freeze({
+      readDatabaseRow: async () => undefined,
+      readWorkingFile: async (workingPath: string) => workingFiles.get(workingPath),
+      readRevision: async (ref: FileRevisionRef) => {
+        const bytes = revisionBytes.get(ref.revisionId);
+        if (!bytes) throw new Error(`Missing revision: ${ref.revisionId}`);
+        return copy(bytes);
+      },
+      readEvidence: async (ref: EvidenceRevisionRef) => {
+        const bytes = evidenceBytes.get(ref.revisionId);
+        if (!bytes) throw new Error(`Missing evidence: ${ref.revisionId}`);
+        return copy(bytes);
+      },
+      readArtifact: async () => encoder.encode("fake artifact"),
+    }),
+    definitions: Object.freeze({
+      recordWorkingDefinition: recordDefinition,
+      recordCandidateDefinition: recordDefinition,
+    }),
+    revisions: Object.freeze({
+      resolveRevision: async (revisionId: string) => revisions.get(revisionId),
+      removeUnregisteredSnapshots: async () => 0,
+    }),
+    evidence: Object.freeze({
+      appendEvidence: async <Kind extends EvidenceKind>(request: EvidenceWriteRequest<Kind>) => {
+        const revisionId = `evidence-${nextRevision++}`;
+        const bytes = copy(request.bytes);
+        const ref: EvidenceRevisionRef<Kind> = {
+          kind: "evidence_revision",
+          revisionId,
+          workingPath: request.workingPath,
+          snapshotPath: `evidence/revisions/${revisionId}`,
+          contentDigest: sha256(bytes),
+          evidenceKind: request.evidenceKind,
+        };
+        evidenceBytes.set(revisionId, bytes);
+        return ref;
+      },
+    }),
+    artifacts: Object.freeze({
+      writeArtifact: async (request: ArtifactWriteRequest): Promise<ArtifactFileRef> => ({
+        kind: "artifact_file",
+        artifactId: `artifact-${sha256(request.bytes)}`,
+        path: request.path,
+        mediaType: request.mediaType,
+      }),
+    }),
+    research: createFakeResearchState(),
+    declaredAuthority: declaredAuthorityFor,
+  });
+}
+
 const capabilityRevision = (
   capabilityRevisionId: string,
   promptDigest: string,
@@ -138,7 +213,23 @@ const capabilityRevision = (
 
 describe("AC-00 research contract", () => {
   test("round-trips one canonical experiment and binds preflight to the complete revision bundle", async () => {
-    const store = createFakeResearchState();
+    const store = createFakeWorkspaceStore();
+    const research = store.research;
+    const encoder = new TextEncoder();
+    const appendEvidence = async <Kind extends EvidenceKind>(
+      name: string,
+      evidenceKind: Kind,
+    ): Promise<EvidenceRevisionRef<Kind>> => {
+      const bytes = encoder.encode(`${evidenceKind}:${name}`);
+      const ref = await store.evidence.appendEvidence({
+        workingPath: `evidence/${name}.json`,
+        bytes,
+        actor: { actorId: "fake-evaluator", kind: "system" },
+        evidenceKind,
+      });
+      expect(await store.reads.readEvidence(ref)).toEqual(bytes);
+      return ref;
+    };
     const baselineDefinition = capabilityRevision("capability-r1", "1", "2");
     const candidateDefinition = capabilityRevision("capability-r2", "3", "4");
     const baselineRevision = capabilityRevisionRef(baselineDefinition);
@@ -154,9 +245,9 @@ describe("AC-00 research contract", () => {
       table: "messages",
       rowId: "message-1",
     } as const;
-    const sharedCase = evidence("case-1", "input");
-    const baselineOutput = evidence("baseline-output-1", "output");
-    const candidateOutput = evidence("candidate-output-1", "output");
+    const sharedCase = await appendEvidence("case-1", "input");
+    const baselineOutput = await appendEvidence("baseline-output-1", "output");
+    const candidateOutput = await appendEvidence("candidate-output-1", "output");
     const variant = {
       variantId: "fake-runtime",
       axis: "evaluation",
@@ -175,12 +266,12 @@ describe("AC-00 research contract", () => {
     expect(ExperimentSchema.safeParse(experiment).success).toBe(true);
     expect(isExperimentTransitionAllowed("hypothesis", "authoring")).toBe(true);
     expect(isExperimentTransitionAllowed("authoring", "completed")).toBe(false);
-    await store.experiments.putExperiment(experiment);
-    await store.experiments.putExperiment({ ...experiment, status: "authoring" });
+    await research.experiments.putExperiment(experiment);
+    await research.experiments.putExperiment({ ...experiment, status: "authoring" });
     await expect(
-      store.experiments.putExperiment({ ...experiment, status: "completed", outcome: "keep" }),
+      research.experiments.putExperiment({ ...experiment, status: "completed", outcome: "keep" }),
     ).rejects.toThrow("Invalid experiment transition");
-    await store.experiments.putExperiment({ ...experiment, status: "preflight" });
+    await research.experiments.putExperiment({ ...experiment, status: "preflight" });
 
     const plan: PreflightPlan = {
       planId: "plan-1",
@@ -197,7 +288,7 @@ describe("AC-00 research contract", () => {
     expect(
       preflightPlanMatchesExperiment(experiment, { ...plan, candidateRevision: changedToolRevision }),
     ).toBe(false);
-    await store.preflights.putPreflightPlan(plan);
+    await research.preflights.putPreflightPlan(plan);
 
     const commonTrial = {
       experimentId: experiment.experimentId,
@@ -223,11 +314,12 @@ describe("AC-00 research contract", () => {
     };
     expect(ExperimentTrialSchema.safeParse(baselineTrial).success).toBe(true);
     const trialRowRefs = await Promise.all([
-      store.trials.putTrial(baselineTrial),
-      store.trials.putTrial(candidateTrial),
+      research.trials.putTrial(baselineTrial),
+      research.trials.putTrial(candidateTrial),
     ]);
 
-    const reportEvidence = evidence("report-1", "report");
+    const reportEvidence = await appendEvidence("report-1", "report");
+    const judgmentEvidence = await appendEvidence("judgment-1", "judgment");
     const report: PreflightReport = {
       preflightId: "preflight-1",
       experimentId: experiment.experimentId,
@@ -236,7 +328,7 @@ describe("AC-00 research contract", () => {
       baselineRevision,
       trialRowRefs,
       trialEvidence: [baselineOutput, candidateOutput],
-      judgmentEvidence: [evidence("judgment-1", "judgment")],
+      judgmentEvidence: [judgmentEvidence],
       appliedCriteria: [],
       railChecks: [{ rail: "same-authority", passed: true, evidenceRefs: [] }],
       comparison: { winner: "candidate", confidence: 0.9, summary: "Candidate wins the paired trial" },
@@ -244,12 +336,30 @@ describe("AC-00 research contract", () => {
       reportEvidence,
     };
     expect(PreflightReportSchema.safeParse(report).success).toBe(true);
+    expect(
+      PreflightReportSchema.safeParse({
+        ...report,
+        trialRowRefs: [motivatingMessage, trialRowRefs[1]],
+      }).success,
+    ).toBe(false);
+    expect(
+      PreflightReportSchema.safeParse({
+        ...report,
+        trialEvidence: [judgmentEvidence, candidateOutput],
+      }).success,
+    ).toBe(false);
     expect(preflightReportMatchesPlan(plan, report)).toBe(true);
     expect(preflightReportMatchesPlan(plan, { ...report, candidateRevision: changedToolRevision })).toBe(
       false,
     );
-    await store.preflights.putPreflightReport(report);
-    await store.evaluations.putEvaluation({
+    const reportRowRef = await research.preflights.putPreflightReport(report);
+    type MessageRowCannotBeTrial =
+      DatabaseRowRef<"messages"> extends DatabaseRowRef<"experiment_trials"> ? false : true;
+    type InputEvidenceCannotBeOutput =
+      EvidenceRevisionRef<"input"> extends EvidenceRevisionRef<"output"> ? false : true;
+    const refsRemainSpecific: readonly [MessageRowCannotBeTrial, InputEvidenceCannotBeOutput] = [true, true];
+    expect(refsRemainSpecific).toEqual([true, true]);
+    await research.evaluations.putEvaluation({
       evaluationId: "evaluation-1",
       experimentId: experiment.experimentId,
       preflightId: report.preflightId,
@@ -264,15 +374,18 @@ describe("AC-00 research contract", () => {
       status: "completed",
       outcome: "keep",
       activatedRevision: candidateRevision,
-      preflightRef: reportEvidence,
+      preflightRef: reportRowRef,
     };
-    await store.experiments.putExperiment(completed);
+    await research.experiments.putExperiment(completed);
 
-    expect(await store.experiments.getExperiment(experiment.experimentId)).toEqual(completed);
-    expect(await store.trials.listTrials(experiment.experimentId)).toEqual([baselineTrial, candidateTrial]);
-    expect(await store.preflights.getPreflightPlan(plan.planId)).toEqual(plan);
-    expect(await store.preflights.getPreflightReport(report.preflightId)).toEqual(report);
-    expect(await store.evaluations.listEvaluations(experiment.experimentId)).toHaveLength(1);
+    expect(await research.experiments.getExperiment(experiment.experimentId)).toEqual(completed);
+    expect(await research.trials.listTrials(experiment.experimentId)).toEqual([
+      baselineTrial,
+      candidateTrial,
+    ]);
+    expect(await research.preflights.getPreflightPlan(plan.planId)).toEqual(plan);
+    expect(await research.preflights.getPreflightReport(report.preflightId)).toEqual(report);
+    expect(await research.evaluations.listEvaluations(experiment.experimentId)).toHaveLength(1);
     expect(report.candidateRevision).toEqual(candidateRevision);
     expect(report.candidateRevision).not.toEqual(changedToolRevision);
 

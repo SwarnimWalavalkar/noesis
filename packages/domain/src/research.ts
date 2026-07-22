@@ -17,9 +17,9 @@ export const DATABASE_TABLES = [
 
 export type DatabaseTable = (typeof DATABASE_TABLES)[number];
 
-export interface DatabaseRowRef {
+export interface DatabaseRowRef<Table extends DatabaseTable = DatabaseTable> {
   readonly kind: "database_row";
-  readonly table: DatabaseTable;
+  readonly table: Table;
   readonly rowId: string;
 }
 
@@ -33,13 +33,13 @@ export interface FileRevisionRef {
 
 export type EvidenceKind = "input" | "output" | "tool_trace" | "judgment" | "report";
 
-export interface EvidenceRevisionRef {
+export interface EvidenceRevisionRef<Kind extends EvidenceKind = EvidenceKind> {
   readonly kind: "evidence_revision";
   readonly revisionId: string;
   readonly workingPath: string;
   readonly snapshotPath: string;
   readonly contentDigest: string;
-  readonly evidenceKind: EvidenceKind;
+  readonly evidenceKind: Kind;
 }
 
 export interface ArtifactFileRef {
@@ -155,7 +155,7 @@ export interface CapabilityRevisionRef {
 export interface CapabilityActivationReadModel {
   readonly capability: Capability;
   readonly activeRevision: CapabilityRevisionRef | null;
-  readonly activationPointer: DatabaseRowRef | null;
+  readonly activationPointer: DatabaseRowRef<"activation_pointers"> | null;
 }
 
 export function sameCapabilityRevisionRef(
@@ -180,7 +180,7 @@ interface ExperimentBase {
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly baselineRevision: CapabilityRevisionRef;
   readonly candidateRevisions: readonly CapabilityRevisionRef[];
-  readonly preflightRef?: EvidenceRevisionRef;
+  readonly preflightRef?: DatabaseRowRef<"preflight_reports">;
   readonly activatedRevision?: CapabilityRevisionRef;
   readonly feedbackSignalIds: readonly string[];
   readonly followUpExperimentId?: string;
@@ -227,7 +227,7 @@ export interface PreflightPlan {
   readonly experimentId: string;
   readonly candidateRevision: CapabilityRevisionRef;
   readonly baselineRevision: CapabilityRevisionRef;
-  readonly caseRefs: readonly EvidenceRevisionRef[];
+  readonly caseRefs: readonly EvidenceRevisionRef<"input">[];
   readonly judgeVariant: ExperimentVariantRef;
   readonly runtimeVariant: ExperimentVariantRef;
   readonly budget: EvaluationBudget;
@@ -240,8 +240,8 @@ export interface ExperimentTrial {
   readonly arm: "baseline" | "candidate";
   readonly capabilityRevision: CapabilityRevisionRef;
   readonly inputRefs: readonly EvidenceRef[];
-  readonly outputEvidenceRefs: readonly EvidenceRevisionRef[];
-  readonly traceEvidenceRefs: readonly EvidenceRevisionRef[];
+  readonly outputEvidenceRefs: readonly EvidenceRevisionRef<"output">[];
+  readonly traceEvidenceRefs: readonly EvidenceRevisionRef<"tool_trace">[];
   readonly variant: ExperimentVariantRef;
   readonly status: "planned" | "running" | "completed" | "failed";
 }
@@ -270,14 +270,14 @@ export interface PreflightReport {
   readonly planId: string;
   readonly candidateRevision: CapabilityRevisionRef;
   readonly baselineRevision: CapabilityRevisionRef;
-  readonly trialRowRefs: readonly DatabaseRowRef[];
-  readonly trialEvidence: readonly EvidenceRevisionRef[];
-  readonly judgmentEvidence: readonly EvidenceRevisionRef[];
+  readonly trialRowRefs: readonly DatabaseRowRef<"experiment_trials">[];
+  readonly trialEvidence: readonly EvidenceRevisionRef<"output">[];
+  readonly judgmentEvidence: readonly EvidenceRevisionRef<"judgment">[];
   readonly appliedCriteria: readonly AppliedCriterionRef[];
   readonly railChecks: readonly RailCheckResult[];
   readonly comparison: EvaluationComparison;
   readonly decision: "pass" | "block" | "inconclusive";
-  readonly reportEvidence: EvidenceRevisionRef;
+  readonly reportEvidence: EvidenceRevisionRef<"report">;
 }
 
 export interface EvaluationRecord {
@@ -286,7 +286,7 @@ export interface EvaluationRecord {
   readonly preflightId: string;
   readonly candidateRevision: CapabilityRevisionRef;
   readonly trialIds: readonly string[];
-  readonly evidenceRefs: readonly EvidenceRevisionRef[];
+  readonly evidenceRefs: readonly (EvidenceRevisionRef<"judgment"> | EvidenceRevisionRef<"report">)[];
   readonly status: "running" | "completed" | "failed";
 }
 

@@ -17,6 +17,13 @@ export const DatabaseRowRefSchema = z.strictObject({
   rowId: z.string().min(1),
 });
 
+export const databaseRowRefSchema = <Table extends (typeof DATABASE_TABLES)[number]>(table: Table) =>
+  z.strictObject({
+    kind: z.literal("database_row"),
+    table: z.literal(table),
+    rowId: z.string().min(1),
+  });
+
 export const FileRevisionRefSchema = z.strictObject({
   kind: z.literal("file_revision"),
   revisionId: z.string().min(1),
@@ -25,14 +32,36 @@ export const FileRevisionRefSchema = z.strictObject({
   contentDigest: ContentDigestSchema,
 });
 
-export const EvidenceRevisionRefSchema = z.strictObject({
+const EvidenceRevisionRefShape = {
   kind: z.literal("evidence_revision"),
   revisionId: z.string().min(1),
   workingPath: StoredPathSchema,
   snapshotPath: StoredPathSchema,
   contentDigest: ContentDigestSchema,
+};
+
+export const EvidenceRevisionRefSchema = z.strictObject({
+  ...EvidenceRevisionRefShape,
   evidenceKind: z.enum(["input", "output", "tool_trace", "judgment", "report"]),
 });
+
+export const evidenceRevisionRefSchema = <
+  Kind extends "input" | "output" | "tool_trace" | "judgment" | "report",
+>(
+  evidenceKind: Kind,
+) =>
+  z.strictObject({
+    ...EvidenceRevisionRefShape,
+    evidenceKind: z.literal(evidenceKind),
+  });
+
+const InputEvidenceRevisionRefSchema = evidenceRevisionRefSchema("input");
+const OutputEvidenceRevisionRefSchema = evidenceRevisionRefSchema("output");
+const ToolTraceEvidenceRevisionRefSchema = evidenceRevisionRefSchema("tool_trace");
+const JudgmentEvidenceRevisionRefSchema = evidenceRevisionRefSchema("judgment");
+const ReportEvidenceRevisionRefSchema = evidenceRevisionRefSchema("report");
+const ExperimentTrialRowRefSchema = databaseRowRefSchema("experiment_trials");
+const PreflightReportRowRefSchema = databaseRowRefSchema("preflight_reports");
 
 export const ArtifactFileRefSchema = z.strictObject({
   kind: z.literal("artifact_file"),
@@ -132,7 +161,7 @@ const ExperimentBaseShape = {
   evidenceRefs: z.array(EvidenceRefSchema),
   baselineRevision: CapabilityRevisionRefSchema,
   candidateRevisions: z.array(CapabilityRevisionRefSchema).min(1),
-  preflightRef: EvidenceRevisionRefSchema.optional(),
+  preflightRef: PreflightReportRowRefSchema.optional(),
   activatedRevision: CapabilityRevisionRefSchema.optional(),
   feedbackSignalIds: z.array(z.string().min(1)),
   followUpExperimentId: z.string().min(1).optional(),
@@ -157,8 +186,8 @@ export const ExperimentTrialSchema = z.strictObject({
   arm: z.enum(["baseline", "candidate"]),
   capabilityRevision: CapabilityRevisionRefSchema,
   inputRefs: z.array(EvidenceRefSchema).min(1),
-  outputEvidenceRefs: z.array(EvidenceRevisionRefSchema).min(1),
-  traceEvidenceRefs: z.array(EvidenceRevisionRefSchema),
+  outputEvidenceRefs: z.array(OutputEvidenceRevisionRefSchema).min(1),
+  traceEvidenceRefs: z.array(ToolTraceEvidenceRevisionRefSchema),
   variant: ExperimentVariantRefSchema,
   status: z.enum(["planned", "running", "completed", "failed"]),
 }) satisfies z.ZodType<ExperimentTrial>;
@@ -168,7 +197,7 @@ export const PreflightPlanSchema = z.strictObject({
   experimentId: z.string().min(1),
   candidateRevision: CapabilityRevisionRefSchema,
   baselineRevision: CapabilityRevisionRefSchema,
-  caseRefs: z.array(EvidenceRevisionRefSchema).min(1),
+  caseRefs: z.array(InputEvidenceRevisionRefSchema).min(1),
   judgeVariant: ExperimentVariantRefSchema,
   runtimeVariant: ExperimentVariantRefSchema,
   budget: z.strictObject({
@@ -184,9 +213,9 @@ export const PreflightReportSchema = z.strictObject({
   planId: z.string().min(1),
   candidateRevision: CapabilityRevisionRefSchema,
   baselineRevision: CapabilityRevisionRefSchema,
-  trialRowRefs: z.array(DatabaseRowRefSchema).min(2),
-  trialEvidence: z.array(EvidenceRevisionRefSchema).min(2),
-  judgmentEvidence: z.array(EvidenceRevisionRefSchema).min(1),
+  trialRowRefs: z.array(ExperimentTrialRowRefSchema).min(2),
+  trialEvidence: z.array(OutputEvidenceRevisionRefSchema).min(2),
+  judgmentEvidence: z.array(JudgmentEvidenceRevisionRefSchema).min(1),
   appliedCriteria: z.array(
     z.strictObject({
       criterionId: z.string().min(1),
@@ -207,7 +236,7 @@ export const PreflightReportSchema = z.strictObject({
     summary: z.string().min(1),
   }),
   decision: z.enum(["pass", "block", "inconclusive"]),
-  reportEvidence: EvidenceRevisionRefSchema,
+  reportEvidence: ReportEvidenceRevisionRefSchema,
 }) satisfies z.ZodType<PreflightReport>;
 
 export const EvaluationRecordSchema = z.strictObject({
@@ -216,6 +245,6 @@ export const EvaluationRecordSchema = z.strictObject({
   preflightId: z.string().min(1),
   candidateRevision: CapabilityRevisionRefSchema,
   trialIds: z.array(z.string().min(1)).min(1),
-  evidenceRefs: z.array(EvidenceRevisionRefSchema),
+  evidenceRefs: z.array(z.union([JudgmentEvidenceRevisionRefSchema, ReportEvidenceRevisionRefSchema])),
   status: z.enum(["running", "completed", "failed"]),
 }) satisfies z.ZodType<EvaluationRecord>;
