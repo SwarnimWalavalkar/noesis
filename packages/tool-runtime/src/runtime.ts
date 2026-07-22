@@ -39,6 +39,9 @@ export function validateDependencyLock(tool: GeneratedToolDefinition): string | 
       return `Dependency ${name} at ${version} is absent from the supplied lockfile`;
     }
   }
+  if (Object.keys(tool.dependencyLock.dependencies).length > 0) {
+    return "Local generated-tool preview does not provision dependencies; non-empty dependency sets are unsupported";
+  }
   return undefined;
 }
 

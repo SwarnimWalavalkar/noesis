@@ -4,8 +4,10 @@ import { basename, dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import {
   ArtifactFileRefSchema,
+  CapabilityRevisionRefSchema,
   declaredAuthorityFor,
   EvaluationRecordSchema,
+  EvidenceRefSchema,
   ExperimentSchema,
   ExperimentTrialSchema,
   FeedbackSignalSchema,
@@ -19,8 +21,12 @@ import {
   type ArtifactFileRef,
   type DatabaseRowRef,
   type DatabaseTable,
+  type DataSensitivity,
   type DefinitionMetadataCommitRequest,
+  type DefinitionMetadataCommitResult,
+  type DefinitionMetadataPort,
   type DefinitionMetadataRecord,
+  type DefinitionPublicationRequest,
   type DefinitionWriteRequest,
   type EvaluationRecord,
   type EvidenceRevisionRef,
@@ -74,6 +80,7 @@ import type {
 export interface WorkspaceStoreOptions {
   readonly now?: () => string;
   readonly createId?: (prefix: string) => string;
+  readonly afterDefinitionCommitForTesting?: () => void;
 }
 
 const JsonRecordSchema = z.record(z.string(), z.unknown());
@@ -269,6 +276,8 @@ export async function createWorkspaceStore(
       readonly predecessorRevisionId?: string;
       readonly evidenceKind?: EvidenceRevisionRef["evidenceKind"];
       readonly supersedesRevisionId?: string;
+      readonly sensitivity: DataSensitivity;
+      readonly provenanceRefs: readonly EvidenceRef[];
     },
     stageId?: string,
   ): void => {
@@ -276,8 +285,8 @@ export async function createWorkspaceStore(
       `INSERT INTO file_revisions(
         revision_id, revision_kind, working_path, snapshot_path, content_digest,
         predecessor_revision_id, actor_id, actor_kind, reason, recorded_at,
-        evidence_kind, supersedes_revision_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        evidence_kind, supersedes_revision_id, sensitivity, provenance_refs_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       request.revisionId,
       request.revisionKind,
@@ -291,6 +300,8 @@ export async function createWorkspaceStore(
       now(),
       request.evidenceKind ?? null,
       request.supersedesRevisionId ?? null,
+      request.sensitivity,
+      JSON.stringify(request.provenanceRefs),
     );
     if (stageId)
       db.prepare("UPDATE staged_definitions SET registered_revision_id = ? WHERE stage_id = ?").run(
@@ -314,6 +325,7 @@ export async function createWorkspaceStore(
     stageId?: string,
   ): Promise<FileRevisionRef> => {
     ActorSchema.parse(request.actor);
+    for (const ref of request.provenanceRefs ?? []) assertStoredReference(db, ref);
     const target = pathsForDefinition(request.workingPath, forcedArea);
     const bytes = Uint8Array.from(request.bytes);
     const contentDigest = sha256(bytes);
@@ -336,6 +348,8 @@ export async function createWorkspaceStore(
           actor: request.actor,
           ...(request.reason === undefined ? {} : { reason: request.reason }),
           ...(predecessorRevisionId === undefined ? {} : { predecessorRevisionId }),
+          sensitivity: request.sensitivity ?? "normal",
+          provenanceRefs: request.provenanceRefs ?? [],
         },
         stageId,
       ),
@@ -350,12 +364,26 @@ export async function createWorkspaceStore(
   ): Promise<FileRevisionRef> => {
     const target = pathsForDefinition(workingPath);
     const bytes = await readFile(target.absolute);
+    const previous = db
+      .prepare(
+        `SELECT sensitivity, provenance_refs_json FROM file_revisions
+         WHERE working_path = ? ORDER BY recorded_at DESC, revision_id DESC LIMIT 1`,
+      )
+      .get(target.stored);
     return await recordDefinitionBytes(
       {
         workingPath: target.stored,
         bytes,
         actor,
         ...(reason === undefined ? {} : { reason }),
+        sensitivity:
+          previous === undefined
+            ? "normal"
+            : z.enum(["normal", "private", "secret"]).parse(requiredString(previous, "sensitivity")),
+        provenanceRefs:
+          previous === undefined
+            ? []
+            : z.array(EvidenceRefSchema).parse(parseJson(requiredString(previous, "provenance_refs_json"))),
       },
       target.stored.startsWith("definitions/candidates/")
         ? "candidate"
@@ -371,6 +399,7 @@ export async function createWorkspaceStore(
     request: EvidenceWriteRequest<Kind>,
   ): Promise<EvidenceRevisionRef<Kind>> => {
     ActorSchema.parse(request.actor);
+    for (const ref of request.provenanceRefs ?? []) assertStoredReference(db, ref);
     for (const revisionId of [request.predecessorRevisionId, request.supersedesRevisionId]) {
       if (revisionId === undefined) continue;
       const predecessor = db
@@ -403,6 +432,8 @@ export async function createWorkspaceStore(
         ...(request.supersedesRevisionId === undefined
           ? {}
           : { supersedesRevisionId: request.supersedesRevisionId }),
+        sensitivity: request.sensitivity ?? "private",
+        provenanceRefs: request.provenanceRefs ?? [],
       }),
     );
     return {
@@ -591,7 +622,198 @@ export async function createWorkspaceStore(
 
   const research = createResearchRepositories(database, recordActivity, now);
   const operational = createOperationalRepositories(database, recordActivity);
-  const definitionMetadata = createDefinitionMetadataRepository(database, recordActivity, now);
+  const definitionMetadataRepository = createDefinitionMetadataRepository(database, recordActivity, now);
+  const definitionMetadata: DefinitionMetadataPort = Object.freeze({
+    getCurrent: definitionMetadataRepository.getCurrent,
+    listCurrent: definitionMetadataRepository.listCurrent,
+    listRevisions: definitionMetadataRepository.listRevisions,
+  });
+
+  const cleanupPublication = async (publicationId: string, revisionId: string): Promise<void> => {
+    const row = db
+      .prepare("SELECT staged_path, snapshot_path FROM definition_publications WHERE publication_id = ?")
+      .get(publicationId);
+    if (row === undefined) return;
+    const removed = database.transaction(() => {
+      const current = db
+        .prepare("SELECT 1 FROM definition_current_pointers WHERE definition_revision_id = ?")
+        .get(revisionId);
+      if (current !== undefined) return false;
+      db.prepare("DELETE FROM definition_publications WHERE publication_id = ?").run(publicationId);
+      db.prepare("DELETE FROM activity_log WHERE subject_kind = 'file_revision' AND subject_id = ?").run(
+        revisionId,
+      );
+      db.prepare("DELETE FROM file_revisions WHERE revision_id = ?").run(revisionId);
+      return true;
+    });
+    if (!removed) return;
+    await rm(dirname(pathInside(paths.root, requiredString(row, "staged_path"))), {
+      recursive: true,
+      force: true,
+    });
+    await rm(dirname(pathInside(paths.root, requiredString(row, "snapshot_path"))), {
+      recursive: true,
+      force: true,
+    });
+  };
+
+  const recoverPendingPublications = async (): Promise<number> => {
+    const rows = db
+      .prepare(
+        `SELECT publications.* FROM definition_publications AS publications
+         JOIN definition_current_pointers AS current
+           ON current.namespace = publications.namespace
+          AND current.definition_id = publications.definition_id
+          AND current.definition_revision_id = publications.revision_id
+         WHERE publications.status != 'published'`,
+      )
+      .all();
+    let recovered = 0;
+    for (const row of rows) {
+      const snapshotPath = requiredString(row, "snapshot_path");
+      const digest = requiredString(row, "content_digest");
+      const bytes = await readVerifiedFile(snapshotPath, digest);
+      await persistAtomically(pathsForDefinition(requiredString(row, "working_path")).absolute, bytes);
+      database.transaction(() => {
+        db.prepare(
+          "UPDATE definition_publications SET status = 'published', published_at = ? WHERE publication_id = ?",
+        ).run(now(), requiredString(row, "publication_id"));
+      });
+      await rm(dirname(pathInside(paths.root, requiredString(row, "staged_path"))), {
+        recursive: true,
+        force: true,
+      });
+      recovered += 1;
+    }
+    return recovered;
+  };
+
+  const cleanupAbandonedPublications = async (): Promise<number> => {
+    const rows = db
+      .prepare(
+        `SELECT publication_id, revision_id FROM definition_publications
+         WHERE status IN ('staged', 'rejected')
+           AND revision_id NOT IN (SELECT definition_revision_id FROM definition_current_pointers)`,
+      )
+      .all();
+    for (const row of rows)
+      await cleanupPublication(requiredString(row, "publication_id"), requiredString(row, "revision_id"));
+    return rows.length;
+  };
+
+  const publishDefinition = async (
+    request: DefinitionPublicationRequest,
+  ): Promise<DefinitionMetadataCommitResult> => {
+    ActorSchema.parse(request.activity.actor);
+    for (const ref of request.provenanceRefs ?? []) assertStoredReference(db, ref);
+    const target = pathsForDefinition(request.workingPath);
+    const bytes = Uint8Array.from(request.bytes);
+    const contentDigest = sha256(bytes);
+    const publicationId = createId("publication");
+    const revisionId = createId("revision");
+    const stagedAbsolute = join(paths.staging, "publications", publicationId, "content");
+    const snapshotAbsolute = join(paths.revisions, revisionId, basename(target.absolute) || "content");
+    try {
+      await persistAtomically(stagedAbsolute, bytes);
+      await persistAtomically(snapshotAbsolute, bytes);
+    } catch (error) {
+      await rm(dirname(stagedAbsolute), { recursive: true, force: true });
+      await rm(dirname(snapshotAbsolute), { recursive: true, force: true });
+      throw error;
+    }
+    const stagedPath = workspaceRelative(paths, stagedAbsolute);
+    const snapshotPath = workspaceRelative(paths, snapshotAbsolute);
+    const definitionRevision: FileRevisionRef = {
+      kind: "file_revision",
+      revisionId,
+      workingPath: target.stored,
+      snapshotPath,
+      contentDigest,
+    };
+    try {
+      database.transaction(() => {
+        db.prepare(
+          `INSERT INTO definition_publications(
+          publication_id, namespace, definition_id, revision, revision_id, staged_path,
+          working_path, snapshot_path, content_digest, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?)`,
+        ).run(
+          publicationId,
+          request.namespace,
+          request.definitionId,
+          request.revision,
+          revisionId,
+          stagedPath,
+          target.stored,
+          snapshotPath,
+          contentDigest,
+          now(),
+        );
+        insertRevision({
+          revisionId,
+          revisionKind: "definition",
+          workingPath: target.stored,
+          snapshotPath,
+          contentDigest,
+          actor: request.activity.actor,
+          ...(request.activity.reason === undefined ? {} : { reason: request.activity.reason }),
+          ...(request.expectedCurrentRevisionId === undefined
+            ? {}
+            : { predecessorRevisionId: request.expectedCurrentRevisionId }),
+          sensitivity: request.sensitivity ?? "normal",
+          provenanceRefs: request.provenanceRefs ?? [],
+        });
+      });
+    } catch (error) {
+      await rm(dirname(stagedAbsolute), { recursive: true, force: true });
+      await rm(dirname(snapshotAbsolute), { recursive: true, force: true });
+      throw error;
+    }
+    let committed: DefinitionMetadataCommitResult;
+    try {
+      committed = await definitionMetadataRepository.commitRevision({
+        namespace: request.namespace,
+        definitionId: request.definitionId,
+        revision: request.revision,
+        definitionRevision,
+        ...(request.expectedCurrentRevisionId === undefined
+          ? {}
+          : { expectedCurrentRevisionId: request.expectedCurrentRevisionId }),
+        activity: request.activity,
+      });
+    } catch (error) {
+      db.prepare("UPDATE definition_publications SET status = 'rejected' WHERE publication_id = ?").run(
+        publicationId,
+      );
+      await cleanupPublication(publicationId, revisionId);
+      throw error;
+    }
+    if (!committed.ok) {
+      db.prepare("UPDATE definition_publications SET status = 'rejected' WHERE publication_id = ?").run(
+        publicationId,
+      );
+      await cleanupPublication(publicationId, revisionId);
+      return committed;
+    }
+    db.prepare("UPDATE definition_publications SET status = 'committed' WHERE publication_id = ?").run(
+      publicationId,
+    );
+    options.afterDefinitionCommitForTesting?.();
+    await persistAtomically(target.absolute, bytes);
+    db.prepare(
+      "UPDATE definition_publications SET status = 'published', published_at = ? WHERE publication_id = ?",
+    ).run(now(), publicationId);
+    await rm(dirname(stagedAbsolute), { recursive: true, force: true });
+    return committed;
+  };
+
+  const definitionPublications = Object.freeze({
+    publish: publishDefinition,
+    recoverPending: recoverPendingPublications,
+    cleanupAbandoned: cleanupAbandonedPublications,
+  });
+  await recoverPendingPublications();
+  await cleanupAbandonedPublications();
   const search = createSearchIndex(database, paths);
 
   const readDatabaseRow = async (
@@ -673,6 +895,7 @@ export async function createWorkspaceStore(
         await recordDefinitionBytes(request, "candidate", "candidate"),
     }),
     definitionMetadata,
+    definitionPublications,
     revisions: Object.freeze({ resolveRevision, removeUnregisteredSnapshots }),
     evidence: Object.freeze({ appendEvidence }),
     artifacts: Object.freeze({ writeArtifact }),
@@ -703,6 +926,12 @@ export async function createWorkspaceStore(
   });
 }
 
+interface DefinitionMetadataRepository extends DefinitionMetadataPort {
+  readonly commitRevision: (
+    request: DefinitionMetadataCommitRequest,
+  ) => Promise<DefinitionMetadataCommitResult>;
+}
+
 function createDefinitionMetadataRepository(
   database: WorkspaceDatabase,
   recordActivity: (
@@ -713,7 +942,7 @@ function createDefinitionMetadataRepository(
     references?: unknown,
   ) => DatabaseRowRef<"activity_log">,
   now: () => string,
-): NoesisWorkspaceStore["definitionMetadata"] {
+): DefinitionMetadataRepository {
   const db = database.connection;
   const decode = (row: unknown): DefinitionMetadataRecord => {
     const predecessorRevisionId = optionalString(row, "predecessor_revision_id");
@@ -790,7 +1019,7 @@ function createDefinitionMetadataRepository(
 
   const commitRevision = async (
     request: DefinitionMetadataCommitRequest,
-  ): Promise<Awaited<ReturnType<NoesisWorkspaceStore["definitionMetadata"]["commitRevision"]>>> => {
+  ): Promise<DefinitionMetadataCommitResult> => {
     if (request.namespace.trim() === "" || request.definitionId.trim() === "") {
       throw new Error("Definition metadata requires a namespace and definition ID");
     }
@@ -809,6 +1038,20 @@ function createDefinitionMetadataRepository(
         .get(request.namespace, request.definitionId);
       const currentRevisionId =
         current === undefined ? undefined : requiredString(current, "definition_revision_id");
+      if (currentRevisionId !== undefined) {
+        const publication = db
+          .prepare("SELECT status FROM definition_publications WHERE revision_id = ?")
+          .get(currentRevisionId);
+        if (publication !== undefined && requiredString(publication, "status") !== "published") {
+          return {
+            ok: false,
+            error: {
+              code: "conflict",
+              message: `Current ${request.namespace}/${request.definitionId} revision is still publishing`,
+            },
+          };
+        }
+      }
       if (currentRevisionId !== request.expectedCurrentRevisionId) {
         return {
           ok: false,
@@ -1066,6 +1309,12 @@ function createOperationalRepositories(
     return databaseRef("jobs", record.jobId);
   };
   const putActivation = async (record: ActivationRecord): Promise<void> => {
+    const completeCapabilityRevisions = z
+      .record(z.string(), CapabilityRevisionRefSchema)
+      .parse(record.activeCapabilityRevisions);
+    for (const [capabilityId, revision] of Object.entries(completeCapabilityRevisions))
+      if (revision.capabilityId !== capabilityId)
+        throw new Error(`Activation capability key ${capabilityId} does not match its revision identity`);
     database.transaction(() => {
       db.prepare(
         `INSERT INTO activations(
@@ -1077,7 +1326,7 @@ function createOperationalRepositories(
         record.revision,
         record.previousActivationId,
         JSON.stringify(record.activeDefinitions),
-        JSON.stringify(record.activeCapabilityRevisions),
+        JSON.stringify(completeCapabilityRevisions),
         record.preflightId ?? null,
         record.createdAt,
       );
@@ -1085,20 +1334,27 @@ function createOperationalRepositories(
     });
   };
   const putPointer = async (record: ActivationPointerRecord): Promise<DatabaseRowRef> => {
+    const capabilityRevision = CapabilityRevisionRefSchema.parse(record.capabilityRevision);
+    if (capabilityRevision.capabilityId !== record.capabilityId)
+      throw new Error("Activation pointer capability does not match its revision identity");
     database.transaction(() => {
       db.prepare(
         `INSERT INTO activation_pointers(
-          pointer_id, capability_id, activation_id, capability_revision_id, updated_at
-        ) VALUES (?, ?, ?, ?, ?)
+          pointer_id, capability_id, activation_id, capability_revision_id, updated_at,
+          capability_revision_json
+        ) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(capability_id) DO UPDATE SET
           pointer_id = excluded.pointer_id, activation_id = excluded.activation_id,
-          capability_revision_id = excluded.capability_revision_id, updated_at = excluded.updated_at`,
+          capability_revision_id = excluded.capability_revision_id,
+          capability_revision_json = excluded.capability_revision_json,
+          updated_at = excluded.updated_at`,
       ).run(
         record.pointerId,
         record.capabilityId,
         record.activationId,
-        record.capabilityRevisionId,
+        capabilityRevision.capabilityRevisionId,
         record.updatedAt,
+        JSON.stringify(capabilityRevision),
       );
       recordActivity(systemActor, "activation.pointer_put", "activation_pointer", record.pointerId);
     });
@@ -1555,17 +1811,11 @@ function createSearchIndex(
         if (isMissing(error)) continue;
         throw error;
       }
-      const workingPath = requiredString(row, "working_path");
-      const sensitivity = workingPath.includes("profile-memory")
-        ? "private"
-        : workingPath.toLowerCase().includes("secret")
-          ? "secret"
-          : "normal";
       add(
         { kind: "file_revision", revisionId: requiredString(row, "revision_id"), field: "bytes" },
         body,
         requiredString(row, "recorded_at"),
-        sensitivity,
+        z.enum(["normal", "private", "secret"]).parse(requiredString(row, "sensitivity")),
       );
     }
     return documents.sort((left, right) => left.documentId.localeCompare(right.documentId));
@@ -1823,6 +2073,24 @@ function decodeJob(row: unknown): JobRecord {
 
 function decodeActivation(row: unknown): ActivationRecord {
   const preflightId = optionalString(row, "preflight_id");
+  const storedCapabilityRevisions = z
+    .record(z.string(), z.unknown())
+    .parse(parseJson(requiredString(row, "capability_revisions_json")));
+  const activeCapabilityRevisions = Object.fromEntries(
+    Object.entries(storedCapabilityRevisions).map(([capabilityId, value]) => {
+      const revision =
+        typeof value === "string"
+          ? {
+              kind: "legacy_capability_revision" as const,
+              capabilityId,
+              capabilityRevisionId: value,
+            }
+          : CapabilityRevisionRefSchema.parse(value);
+      if (revision.capabilityId !== capabilityId)
+        throw new Error(`Stored activation capability key ${capabilityId} is mismatched`);
+      return [capabilityId, revision];
+    }),
+  );
   return {
     activationId: requiredString(row, "activation_id"),
     revision: requiredNumber(row, "revision"),
@@ -1830,20 +2098,30 @@ function decodeActivation(row: unknown): ActivationRecord {
     activeDefinitions: z
       .record(z.string(), FileRevisionRefSchema)
       .parse(parseJson(requiredString(row, "definitions_json"))),
-    activeCapabilityRevisions: z
-      .record(z.string(), z.string())
-      .parse(parseJson(requiredString(row, "capability_revisions_json"))),
+    activeCapabilityRevisions,
     ...(preflightId === undefined ? {} : { preflightId }),
     createdAt: requiredString(row, "created_at"),
   };
 }
 
 function decodeActivationPointer(row: unknown): ActivationPointerRecord {
+  const capabilityId = requiredString(row, "capability_id");
+  const encoded = optionalString(row, "capability_revision_json");
+  const capabilityRevision =
+    encoded === undefined
+      ? {
+          kind: "legacy_capability_revision" as const,
+          capabilityId,
+          capabilityRevisionId: requiredString(row, "capability_revision_id"),
+        }
+      : CapabilityRevisionRefSchema.parse(parseJson(encoded));
+  if (capabilityRevision.capabilityId !== capabilityId)
+    throw new Error("Stored activation pointer capability identity is mismatched");
   return {
     pointerId: requiredString(row, "pointer_id"),
-    capabilityId: requiredString(row, "capability_id"),
+    capabilityId,
     activationId: requiredString(row, "activation_id"),
-    capabilityRevisionId: requiredString(row, "capability_revision_id"),
+    capabilityRevision,
     updatedAt: requiredString(row, "updated_at"),
   };
 }

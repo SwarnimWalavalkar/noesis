@@ -121,6 +121,7 @@ export async function importLegacyWorkspace(
         bytes: memoryBytes,
         actor: dependencies.actor,
         reason: "legacy import",
+        sensitivity: "private",
       },
       "definition",
     );

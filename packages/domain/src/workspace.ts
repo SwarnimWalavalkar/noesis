@@ -4,6 +4,7 @@ import type {
   DatabaseRowRef,
   DatabaseTable,
   EvidenceKind,
+  EvidenceRef,
   EvidenceRevisionRef,
   EvaluationRecord,
   Experiment,
@@ -92,12 +93,16 @@ export function declaredAuthorityFor(datum: PersistedDatum): PersistedAuthority 
   return PERSISTED_AUTHORITY_BY_DATUM[datum];
 }
 
+export type DataSensitivity = "normal" | "private" | "secret";
+
 export interface DefinitionWriteRequest {
   readonly workingPath: string;
   readonly bytes: Uint8Array;
   readonly actor: ActorRef;
   readonly reason?: string;
   readonly predecessorRevisionId?: string;
+  readonly sensitivity?: DataSensitivity;
+  readonly provenanceRefs?: readonly EvidenceRef[];
 }
 
 export interface EvidenceWriteRequest<Kind extends EvidenceKind = EvidenceKind>
@@ -167,9 +172,29 @@ export interface DefinitionMetadataPort {
     namespace: string,
     definitionId: string,
   ) => Promise<readonly DefinitionMetadataRecord[]>;
-  readonly commitRevision: (
-    request: DefinitionMetadataCommitRequest,
-  ) => Promise<DefinitionMetadataCommitResult>;
+}
+
+export interface DefinitionPublicationRequest {
+  readonly namespace: string;
+  readonly definitionId: string;
+  readonly revision: number;
+  readonly workingPath: string;
+  readonly bytes: Uint8Array;
+  readonly expectedCurrentRevisionId?: string;
+  readonly sensitivity?: DataSensitivity;
+  readonly provenanceRefs?: readonly EvidenceRef[];
+  readonly activity: {
+    readonly kind: string;
+    readonly actor: ActorRef;
+    readonly reason?: string;
+  };
+}
+
+/** Coordinates immutable snapshot registration, pointer CAS, and publication of the winning working bytes. */
+export interface DefinitionPublicationPort {
+  readonly publish: (request: DefinitionPublicationRequest) => Promise<DefinitionMetadataCommitResult>;
+  readonly recoverPending: () => Promise<number>;
+  readonly cleanupAbandoned: () => Promise<number>;
 }
 
 export interface RevisionSnapshotPort {
@@ -232,6 +257,7 @@ export interface WorkspaceStore {
   readonly reads: WorkspaceReadPort;
   readonly definitions: DefinitionFilePort;
   readonly definitionMetadata: DefinitionMetadataPort;
+  readonly definitionPublications: DefinitionPublicationPort;
   readonly revisions: RevisionSnapshotPort;
   readonly evidence: EvidenceFilePort;
   readonly artifacts: ArtifactFilePort;

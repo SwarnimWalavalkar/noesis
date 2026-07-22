@@ -85,7 +85,7 @@ export interface UserCriterionMetadataPort {
   readonly getCurrent: (criterionId: string) => Promise<unknown | undefined>;
   readonly listCurrent: () => Promise<readonly unknown[]>;
   readonly listRevisions: (criterionId: string) => Promise<readonly unknown[]>;
-  readonly commitRevision: (
+  readonly commitRevision?: (
     request: CriterionRevisionCommitRequest,
   ) => Promise<Result<unknown, CriterionMetadataConflict>>;
 }
@@ -94,6 +94,16 @@ export interface UserCriterionMetadataPort {
 export interface UserCriterionDefinitionPort {
   readonly recordWorkingDefinition: (request: DefinitionWriteRequest) => Promise<FileRevisionRef>;
   readonly readRevision: (ref: FileRevisionRef) => Promise<Uint8Array>;
+}
+
+export interface UserCriterionPublicationPort {
+  readonly publishRevision: (
+    request: Omit<CriterionRevisionCommitRequest, "definitionRevision"> & {
+      readonly workingPath: string;
+      readonly bytes: Uint8Array;
+      readonly evidenceRefs: readonly EvidenceRef[];
+    },
+  ) => Promise<Result<unknown, CriterionMetadataConflict>>;
 }
 
 export type UserCriterionErrorCode =
@@ -196,6 +206,7 @@ export interface UserCriterionRepository {
 export interface UserCriterionRepositoryOptions {
   readonly definitions: UserCriterionDefinitionPort;
   readonly metadata: UserCriterionMetadataPort;
+  readonly publications?: UserCriterionPublicationPort;
   readonly nextCriterionId?: () => string;
 }
 
@@ -216,12 +227,42 @@ function criterionMetadataFromStored(record: DefinitionMetadataRecord): Criterio
 
 /** Connects the criterion repository to WorkspaceStore's file bytes and SQLite current pointers. */
 export function createWorkspaceUserCriterionPorts(
-  workspace: Pick<WorkspaceStore, "definitions" | "definitionMetadata" | "reads">,
-): Pick<UserCriterionRepositoryOptions, "definitions" | "metadata"> {
+  workspace: Pick<WorkspaceStore, "definitions" | "definitionMetadata" | "definitionPublications" | "reads">,
+): Pick<UserCriterionRepositoryOptions, "definitions" | "metadata" | "publications"> {
   return Object.freeze({
     definitions: Object.freeze({
       recordWorkingDefinition: workspace.definitions.recordWorkingDefinition,
       readRevision: workspace.reads.readRevision,
+    }),
+    publications: Object.freeze({
+      publishRevision: async (
+        request: Omit<CriterionRevisionCommitRequest, "definitionRevision"> & {
+          readonly workingPath: string;
+          readonly bytes: Uint8Array;
+          readonly evidenceRefs: readonly EvidenceRef[];
+        },
+      ) => {
+        const committed = await workspace.definitionPublications.publish({
+          namespace: USER_CRITERION_NAMESPACE,
+          definitionId: request.criterionId,
+          revision: request.revision,
+          workingPath: request.workingPath,
+          bytes: request.bytes,
+          ...(request.expectedCurrentRevisionId === undefined
+            ? {}
+            : { expectedCurrentRevisionId: request.expectedCurrentRevisionId }),
+          sensitivity: "normal",
+          provenanceRefs: request.evidenceRefs,
+          activity: {
+            kind: `criterion.${request.activity.kind}`,
+            actor: request.activity.actor,
+            ...(request.activity.reason === undefined ? {} : { reason: request.activity.reason }),
+          },
+        });
+        return committed.ok
+          ? ok(criterionMetadataFromStored(committed.value))
+          : err({ code: "conflict" as const, message: committed.error.message });
+      },
     }),
     metadata: Object.freeze({
       getCurrent: async (criterionId: string) => {
@@ -236,25 +277,6 @@ export function createWorkspaceUserCriterionPorts(
         (await workspace.definitionMetadata.listRevisions(USER_CRITERION_NAMESPACE, criterionId)).map(
           criterionMetadataFromStored,
         ),
-      commitRevision: async (request: CriterionRevisionCommitRequest) => {
-        const committed = await workspace.definitionMetadata.commitRevision({
-          namespace: USER_CRITERION_NAMESPACE,
-          definitionId: request.criterionId,
-          revision: request.revision,
-          definitionRevision: request.definitionRevision,
-          ...(request.expectedCurrentRevisionId === undefined
-            ? {}
-            : { expectedCurrentRevisionId: request.expectedCurrentRevisionId }),
-          activity: {
-            kind: `criterion.${request.activity.kind}`,
-            actor: request.activity.actor,
-            ...(request.activity.reason === undefined ? {} : { reason: request.activity.reason }),
-          },
-        });
-        return committed.ok
-          ? ok(criterionMetadataFromStored(committed.value))
-          : err({ code: "conflict" as const, message: committed.error.message });
-      },
     }),
   });
 }
@@ -475,51 +497,55 @@ export function createUserCriterionRepository(
         ),
       );
     }
-    let definitionRevision: FileRevisionRef;
+    let definitionRevision: FileRevisionRef | undefined;
+    let committed: Result<unknown, CriterionMetadataConflict>;
     try {
-      definitionRevision = await options.definitions.recordWorkingDefinition({
-        workingPath: criterionWorkingPath(definition.criterionId),
-        bytes: renderDefinition(validated.data),
-        actor,
-        ...(reason ? { reason } : {}),
-        ...(predecessor ? { predecessorRevisionId: predecessor.metadata.definitionRevision.revisionId } : {}),
-      });
+      if (options.publications) {
+        committed = await options.publications.publishRevision({
+          criterionId: definition.criterionId,
+          revision: definition.revision,
+          workingPath: criterionWorkingPath(definition.criterionId),
+          bytes: renderDefinition(validated.data),
+          evidenceRefs: definition.evidenceRefs,
+          ...(predecessor
+            ? { expectedCurrentRevisionId: predecessor.metadata.definitionRevision.revisionId }
+            : {}),
+          activity: { kind: activityKind, actor, ...(reason ? { reason } : {}) },
+        });
+      } else {
+        if (!options.metadata.commitRevision)
+          throw new Error("Criterion storage does not provide a coordinated publication port");
+        definitionRevision = await options.definitions.recordWorkingDefinition({
+          workingPath: criterionWorkingPath(definition.criterionId),
+          bytes: renderDefinition(validated.data),
+          actor,
+          provenanceRefs: definition.evidenceRefs,
+          ...(reason ? { reason } : {}),
+          ...(predecessor
+            ? { predecessorRevisionId: predecessor.metadata.definitionRevision.revisionId }
+            : {}),
+        });
+        committed = await options.metadata.commitRevision({
+          criterionId: definition.criterionId,
+          revision: definition.revision,
+          definitionRevision,
+          ...(predecessor
+            ? { expectedCurrentRevisionId: predecessor.metadata.definitionRevision.revisionId }
+            : {}),
+          activity: { kind: activityKind, actor, ...(reason ? { reason } : {}) },
+        });
+      }
     } catch (error) {
       return err(
         criterionError(
           "storage_error",
-          `Could not record criterion definition: ${errorMessage(error)}`,
+          `Could not publish criterion definition: ${errorMessage(error)}`,
           definition.criterionId,
           definition.revision,
         ),
       );
     }
 
-    let committed: Result<unknown, CriterionMetadataConflict>;
-    try {
-      committed = await options.metadata.commitRevision({
-        criterionId: definition.criterionId,
-        revision: definition.revision,
-        definitionRevision,
-        ...(predecessor
-          ? { expectedCurrentRevisionId: predecessor.metadata.definitionRevision.revisionId }
-          : {}),
-        activity: {
-          kind: activityKind,
-          actor,
-          ...(reason ? { reason } : {}),
-        },
-      });
-    } catch (error) {
-      return err(
-        criterionError(
-          "storage_error",
-          `Could not commit criterion metadata: ${errorMessage(error)}`,
-          definition.criterionId,
-          definition.revision,
-        ),
-      );
-    }
     if (!committed.ok) {
       return err(
         criterionError("conflict", committed.error.message, definition.criterionId, definition.revision),
@@ -527,7 +553,7 @@ export function createUserCriterionRepository(
     }
     const decoded = decodeMetadata(committed.value, definition.criterionId);
     if (!decoded.ok) return decoded;
-    if (!sameFileRevision(decoded.value.definitionRevision, definitionRevision)) {
+    if (definitionRevision && !sameFileRevision(decoded.value.definitionRevision, definitionRevision)) {
       return err(
         criterionError(
           "invalid_metadata",

@@ -11,8 +11,17 @@ import type {
   FileRevisionRef,
   ResearchStatePort,
 } from "@noesis/domain";
+import { createWorkspaceStore } from "@noesis/workspace";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { type CapabilityRevisionConstruction, createAtomicCapabilityRegistry } from "../src/index.ts";
+import {
+  type CapabilityRevisionConstruction,
+  createAtomicCapabilityRegistry,
+  createInMemoryCapabilityControlStore,
+  createWorkspaceCapabilityControlStore,
+} from "../src/index.ts";
 
 const capability: Capability = {
   capabilityId: "source-research",
@@ -72,7 +81,7 @@ describe("atomic capability registry", () => {
   });
 
   test("preserves predecessor lineage and rejects cross-capability predecessors", () => {
-    const registry = createAtomicCapabilityRegistry();
+    const registry = createAtomicCapabilityRegistry({ controlStore: createInMemoryCapabilityControlStore() });
     registry.registerCapability(capability);
     const first = registry.constructRevision(
       construction("revision-1", { prompt: "1", tool: "2", router: "3" }),
@@ -136,7 +145,9 @@ describe("atomic capability registry", () => {
   });
 
   test("tracks pin and predecessor-rooted veto metadata without mutating activation", async () => {
-    const registry = createAtomicCapabilityRegistry();
+    const registry = createAtomicCapabilityRegistry({
+      controlStore: createInMemoryCapabilityControlStore(),
+    });
     registry.registerCapability(capability);
     const first = registry.constructRevision(
       construction("revision-1", { prompt: "1", tool: "2", router: "3" }),
@@ -144,8 +155,8 @@ describe("atomic capability registry", () => {
     registry.constructRevision(
       construction("revision-2", { prompt: "4", tool: "2", router: "3" }, first.capabilityRevisionId),
     );
-    registry.pin({ capabilityId: capability.capabilityId, revision: first, reason: "user pin" });
-    registry.veto({
+    await registry.pin({ capabilityId: capability.capabilityId, revision: first, reason: "user pin" });
+    await registry.veto({
       capabilityId: capability.capabilityId,
       rootRevision: first,
       reason: "user veto",
@@ -161,11 +172,11 @@ describe("atomic capability registry", () => {
       pin: { capabilityId: capability.capabilityId, revision: first, reason: "user pin" },
       vetoes: [{ capabilityId: capability.capabilityId, rootRevision: first, reason: "user veto" }],
     });
-    expect("activate" in (registry.readControls(capability.capabilityId) ?? {})).toBe(false);
+    expect("activate" in ((await registry.readControls(capability.capabilityId)) ?? {})).toBe(false);
   });
 
-  test("binds pin and veto controls to the canonical capability revision digest", () => {
-    const registry = createAtomicCapabilityRegistry();
+  test("binds pin and veto controls to the canonical capability revision digest", async () => {
+    const registry = createAtomicCapabilityRegistry({ controlStore: createInMemoryCapabilityControlStore() });
     registry.registerCapability(capability);
     const revision = registry.constructRevision(
       construction("revision-1", { prompt: "1", tool: "2", router: "3" }),
@@ -173,24 +184,81 @@ describe("atomic capability registry", () => {
     const digestMismatch = { ...revision, bundleDigest: "f".repeat(64) };
 
     expect(
-      registry.pin({
+      await registry.pin({
         capabilityId: capability.capabilityId,
         revision: digestMismatch,
         reason: "bad pin",
       }),
     ).toMatchObject({ ok: false, error: { code: "invalid_control" } });
     expect(
-      registry.veto({
+      await registry.veto({
         capabilityId: capability.capabilityId,
         rootRevision: digestMismatch,
         reason: "bad veto",
       }),
     ).toMatchObject({ ok: false, error: { code: "invalid_control" } });
-    expect(registry.readControls(capability.capabilityId)).toEqual({
+    expect(await registry.readControls(capability.capabilityId)).toEqual({
       capabilityId: capability.capabilityId,
       pin: null,
       vetoes: [],
     });
+  });
+
+  test("reloads canonical-file pin and veto controls through WorkspaceStore revisions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-capability-controls-"));
+    try {
+      const firstWorkspace = await createWorkspaceStore(root);
+      const firstRegistry = createAtomicCapabilityRegistry({
+        controlStore: createWorkspaceCapabilityControlStore(firstWorkspace),
+      });
+      firstRegistry.registerCapability(capability);
+      const firstRevision = firstRegistry.constructRevision(
+        construction("revision-1", { prompt: "1", tool: "2", router: "3" }),
+      );
+      await expect(
+        firstRegistry.pin({
+          capabilityId: capability.capabilityId,
+          revision: firstRevision,
+          reason: "durable user pin",
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      await expect(
+        firstRegistry.veto({
+          capabilityId: capability.capabilityId,
+          rootRevision: firstRevision,
+          reason: "durable lineage veto",
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      firstWorkspace.close();
+
+      const secondWorkspace = await createWorkspaceStore(root);
+      const secondRegistry = createAtomicCapabilityRegistry({
+        controlStore: createWorkspaceCapabilityControlStore(secondWorkspace),
+      });
+      secondRegistry.registerCapability(capability);
+      secondRegistry.constructRevision(construction("revision-1", { prompt: "1", tool: "2", router: "3" }));
+      expect(await secondRegistry.readControls(capability.capabilityId)).toEqual({
+        capabilityId: capability.capabilityId,
+        pin: {
+          capabilityId: capability.capabilityId,
+          revision: firstRevision,
+          reason: "durable user pin",
+        },
+        vetoes: [
+          {
+            capabilityId: capability.capabilityId,
+            rootRevision: firstRevision,
+            reason: "durable lineage veto",
+          },
+        ],
+      });
+      expect(
+        await secondWorkspace.definitionMetadata.listRevisions("capability_control", capability.capabilityId),
+      ).toHaveLength(2);
+      secondWorkspace.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   test("links only explicit children of the canonical Experiment lifecycle", async () => {

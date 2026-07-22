@@ -207,6 +207,28 @@ describe("first-party architecture boundaries", () => {
     expect(protectedAliases).toEqual([]);
   });
 
+  test("keeps adapter-neutral runtime independent from the Pi adapter package", async () => {
+    const runtimeRoot = resolve(repositoryRoot, "packages/runtime");
+    const sourceViolations: string[] = [];
+    for (const path of (await filesBelow(resolve(runtimeRoot, "src"))).filter((file) =>
+      /\.tsx?$/.test(file),
+    )) {
+      const sourceFile = parseSource(path, await readFile(path, "utf8"));
+      for (const specifier of moduleSpecifiers(sourceFile))
+        if (specifier === "@noesis/runtime-pi" || specifier.startsWith("@noesis/runtime-pi/"))
+          sourceViolations.push(`${relativePath(path)}:${specifier}`);
+    }
+    const manifest = JSON.parse(await readFile(resolve(runtimeRoot, "package.json"), "utf8")) as {
+      readonly dependencies?: Readonly<Record<string, string>>;
+      readonly devDependencies?: Readonly<Record<string, string>>;
+    };
+    const dependencies = { ...manifest.dependencies, ...manifest.devDependencies };
+
+    expect(sourceViolations).toEqual([]);
+    expect("@noesis/runtime-pi" in dependencies).toBe(false);
+    expect(dependencies["@noesis/agent-types"]).toBe("workspace:*");
+  });
+
   test("declares exactly one authority for every persisted datum", () => {
     expect(Object.keys(PERSISTED_AUTHORITY_BY_DATUM).sort()).toEqual([...PERSISTED_DATA].sort());
     for (const datum of PERSISTED_DATA) {

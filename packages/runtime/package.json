@@ -7,14 +7,14 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@noesis/agent-types": "workspace:*",
     "@noesis/capabilities": "workspace:*",
     "@noesis/context": "workspace:*",
     "@noesis/domain": "workspace:*",
     "@noesis/evals": "workspace:*",
     "@noesis/ledger": "workspace:*",
     "@noesis/memory": "workspace:*",
-    "@noesis/policy": "workspace:*",
-    "@noesis/runtime-pi": "workspace:*"
+    "@noesis/policy": "workspace:*"
   },
   "devDependencies": {
     "@noesis/learning": "workspace:*"

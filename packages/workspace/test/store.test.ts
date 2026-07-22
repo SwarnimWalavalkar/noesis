@@ -105,7 +105,7 @@ describe("WorkspaceStore", () => {
       .all()
       .map((row) => Reflect.get(row, "version"));
     database.close();
-    expect(versions).toEqual([1, 2, 3]);
+    expect(versions).toEqual([1, 2, 3, 4]);
   });
 
   test("rolls back repository activity when a foreign-key write fails", async () => {
@@ -125,6 +125,91 @@ describe("WorkspaceStore", () => {
     expect(countRows(store, "messages")).toBe(0);
     expect(countRows(store, "activity_log")).toBe(before);
     store.close();
+  });
+
+  test("persists and validates complete capability revision identity for activation state", async () => {
+    const store = await createWorkspaceStore(await temporary("activation-identity"));
+    const capabilityRevision = revision("capability-revision-1", "a");
+    await store.operational.activations.put({
+      activationId: "activation-1",
+      revision: 1,
+      previousActivationId: null,
+      activeDefinitions: {},
+      activeCapabilityRevisions: { [capabilityRevision.capabilityId]: capabilityRevision },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await store.operational.activations.putPointer({
+      pointerId: "activation-pointer-1",
+      capabilityId: capabilityRevision.capabilityId,
+      activationId: "activation-1",
+      capabilityRevision,
+      updatedAt: "2026-01-01T00:01:00.000Z",
+    });
+
+    expect(await store.operational.activations.get("activation-1")).toMatchObject({
+      activeCapabilityRevisions: { [capabilityRevision.capabilityId]: capabilityRevision },
+    });
+    expect(await store.operational.activations.getPointer(capabilityRevision.capabilityId)).toMatchObject({
+      capabilityRevision,
+    });
+    await expect(
+      store.operational.activations.put({
+        activationId: "activation-incomplete",
+        revision: 2,
+        previousActivationId: "activation-1",
+        activeDefinitions: {},
+        activeCapabilityRevisions: {
+          [capabilityRevision.capabilityId]: {
+            kind: "legacy_capability_revision",
+            capabilityId: capabilityRevision.capabilityId,
+            capabilityRevisionId: capabilityRevision.capabilityRevisionId,
+          },
+        },
+        createdAt: "2026-01-01T00:02:00.000Z",
+      }),
+    ).rejects.toThrow();
+    store.close();
+
+    const legacyDatabase = new DatabaseSync(store.unsafeDatabasePathForTesting);
+    legacyDatabase
+      .prepare(
+        `INSERT INTO activations(
+          activation_id, revision, previous_activation_id, definitions_json,
+          capability_revisions_json, preflight_id, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "activation-legacy",
+        2,
+        "activation-1",
+        "{}",
+        JSON.stringify({ [capabilityRevision.capabilityId]: "legacy-revision-id" }),
+        null,
+        "2026-01-01T00:02:00.000Z",
+      );
+    legacyDatabase
+      .prepare(
+        `UPDATE activation_pointers SET activation_id = ?, capability_revision_id = ?,
+         capability_revision_json = NULL WHERE capability_id = ?`,
+      )
+      .run("activation-legacy", "legacy-revision-id", capabilityRevision.capabilityId);
+    legacyDatabase.close();
+    const reopened = await createWorkspaceStore(store.paths.root);
+    expect(await reopened.operational.activations.get("activation-legacy")).toMatchObject({
+      activeCapabilityRevisions: {
+        [capabilityRevision.capabilityId]: {
+          kind: "legacy_capability_revision",
+          capabilityRevisionId: "legacy-revision-id",
+        },
+      },
+    });
+    expect(await reopened.operational.activations.getPointer(capabilityRevision.capabilityId)).toMatchObject({
+      capabilityRevision: {
+        kind: "legacy_capability_revision",
+        capabilityRevisionId: "legacy-revision-id",
+      },
+    });
+    reopened.close();
   });
 
   test("round-trips the experiment, trials, preflight, evaluation, and feedback lifecycle", async () => {

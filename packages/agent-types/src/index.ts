@@ -62,6 +62,76 @@ export interface AgentRoleRunner {
   readonly run: (request: AgentRunRequest) => Promise<AgentRunResult>;
 }
 
+export type AgentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface AgentContextUsage {
+  readonly usedTokens: number;
+  readonly contextWindow: number;
+  readonly accuracy: "reported" | "estimated";
+}
+
+export type AgentCompletedStopReason = "stop" | "length" | "toolUse";
+
+export interface AgentRuntimeRequest {
+  readonly trailId: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly thinkingLevel: AgentThinkingLevel;
+  readonly systemPrompt: string;
+  readonly prompt: string;
+  readonly activeCapabilities: readonly {
+    readonly name: string;
+    readonly version: number;
+  }[];
+}
+
+export type AgentRuntimeEvent =
+  | { readonly type: "delta"; readonly text: string }
+  | {
+      readonly type: "model";
+      readonly provider: string;
+      readonly model: string;
+      readonly contextWindow: number;
+    }
+  | ({ readonly type: "usage" } & AgentContextUsage)
+  | { readonly type: "tool-start"; readonly name: string; readonly input: Readonly<Record<string, unknown>> }
+  | { readonly type: "tool-end"; readonly name: string; readonly isError: boolean }
+  | { readonly type: "status"; readonly status: "started" | "completed" | "aborted" }
+  | { readonly type: "status"; readonly status: "failed"; readonly error: string };
+
+interface AgentRuntimeResultBase {
+  readonly text: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly contextUsage?: AgentContextUsage;
+}
+
+export type AgentRuntimeResult =
+  | (AgentRuntimeResultBase & {
+      readonly outcome: "completed";
+      readonly stopReason: AgentCompletedStopReason;
+    })
+  | (AgentRuntimeResultBase & {
+      readonly outcome: "aborted";
+      readonly stopReason: "aborted";
+    })
+  | (AgentRuntimeResultBase & {
+      readonly outcome: "failed";
+      readonly stopReason: "error";
+      readonly error: string;
+    });
+
+export interface NoesisAgentRuntime {
+  readonly name: string;
+  readonly run: (
+    request: AgentRuntimeRequest,
+    emit: (event: AgentRuntimeEvent) => void,
+  ) => Promise<AgentRuntimeResult>;
+  readonly steer: (trailId: string, text: string) => Promise<void>;
+  readonly followUp: (trailId: string, text: string) => Promise<void>;
+  readonly abort: (trailId: string) => Promise<void>;
+}
+
 export interface StructuredInferencePort {
   readonly run: <T>(
     request: AgentRunRequest,

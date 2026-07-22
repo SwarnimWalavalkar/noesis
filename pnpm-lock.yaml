@@ -80,6 +80,10 @@ importers:
       zod:
         specifier: 4.4.3
         version: 4.4.3
+    devDependencies:
+      '@noesis/workspace':
+        specifier: workspace:*
+        version: link:../workspace
 
   packages/config:
     dependencies:
@@ -172,6 +176,9 @@ importers:
 
   packages/runtime:
     dependencies:
+      '@noesis/agent-types':
+        specifier: workspace:*
+        version: link:../agent-types
       '@noesis/capabilities':
         specifier: workspace:*
         version: link:../capabilities
@@ -193,9 +200,6 @@ importers:
       '@noesis/policy':
         specifier: workspace:*
         version: link:../policy
-      '@noesis/runtime-pi':
-        specifier: workspace:*
-        version: link:../runtime-pi
     devDependencies:
       '@noesis/learning':
         specifier: workspace:*

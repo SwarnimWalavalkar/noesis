@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkspaceStore } from "@noesis/workspace";
@@ -86,5 +86,65 @@ describe("Barrier F WorkspaceStore criterion integration", () => {
     });
     expect("activate" in reopened).toBe(false);
     reopenedStore.close();
+  });
+
+  test("publishes only the criterion revision that wins a concurrent pointer CAS", async () => {
+    root = await mkdtemp(join(tmpdir(), "noesis-criterion-race-"));
+    const store = await createWorkspaceStore(root);
+    const publish = (instruction: string) =>
+      store.definitionPublications.publish({
+        namespace: "user_criterion",
+        definitionId: "race",
+        revision: 1,
+        workingPath: "config/criteria/race.json",
+        bytes: Buffer.from(instruction),
+        activity: { kind: "criterion.created", actor: user },
+      });
+
+    const results = await Promise.all([publish("winner-a"), publish("winner-b")]);
+    const winner = results.find((result) => result.ok);
+    expect(results.filter((result) => result.ok)).toHaveLength(1);
+    expect(results.filter((result) => !result.ok)).toHaveLength(1);
+    if (!winner?.ok) throw new Error("Expected one publication winner");
+    expect(await readFile(join(store.paths.definitions, "config", "criteria", "race.json"), "utf8")).toBe(
+      Buffer.from(await store.reads.readRevision(winner.value.definitionRevision)).toString(),
+    );
+    expect(await store.definitionPublications.cleanupAbandoned()).toBe(0);
+    store.close();
+  });
+
+  test("recovers a committed criterion publication after a crash before working-file publish", async () => {
+    root = await mkdtemp(join(tmpdir(), "noesis-criterion-recovery-"));
+    let crash = true;
+    const first = await createWorkspaceStore(root, {
+      afterDefinitionCommitForTesting: () => {
+        if (crash) {
+          crash = false;
+          throw new Error("simulated publication crash");
+        }
+      },
+    });
+    const repository = createUserCriterionRepository({
+      ...createWorkspaceUserCriterionPorts(first),
+      nextCriterionId: () => "recoverable",
+    });
+    await expect(
+      repository.create({
+        source: "explicit_statement",
+        scope: "writing",
+        evaluatorInstruction: "Keep immutable bytes recoverable.",
+        evidenceRefs: [],
+        actor: user,
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "storage_error" } });
+    first.close();
+
+    const reopened = await createWorkspaceStore(root);
+    const recovered = await createUserCriterionRepository(
+      createWorkspaceUserCriterionPorts(reopened),
+    ).inspect("recoverable");
+    expect(recovered).toMatchObject({ ok: true, value: { definition: { revision: 1 } } });
+    expect(await reopened.definitionPublications.recoverPending()).toBe(0);
+    reopened.close();
   });
 });

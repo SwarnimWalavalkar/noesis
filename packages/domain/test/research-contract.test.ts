@@ -180,6 +180,11 @@ function createFakeWorkspaceStore(): WorkspaceStore {
         },
       }),
     }),
+    definitionPublications: Object.freeze({
+      publish: async () => ({ ok: false, error: { code: "conflict", message: "not implemented" } }) as const,
+      recoverPending: async () => 0,
+      cleanupAbandoned: async () => 0,
+    }),
     revisions: Object.freeze({
       resolveRevision: async (revisionId: string) => revisions.get(revisionId),
       removeUnregisteredSnapshots: async () => 0,

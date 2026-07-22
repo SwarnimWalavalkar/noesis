@@ -303,6 +303,44 @@ describe("generated-tool runtime boundaries", () => {
     expect(result).toMatchObject({ ok: false, code: "dependency_lock" });
   });
 
+  test("rejects exact dependencies until local provisioning exists", async () => {
+    let backendCalls = 0;
+    const artifacts = createArtifacts();
+    const runtime = createGeneratedToolRuntime({
+      backend: {
+        backendId: "must-not-run",
+        execute: async () => {
+          backendCalls += 1;
+          throw new Error("backend must not run");
+        },
+      },
+      artifacts: artifacts.sink,
+      brokerFor: () => noBroker,
+    });
+    const definition: GeneratedToolDefinition = {
+      ...tool("export default async function (input) { return input; }"),
+      dependencyLock: {
+        packageManager: "pnpm",
+        dependencies: { zod: "4.4.3" },
+        lockfile: "lockfileVersion: '9.0'\nzod: 4.4.3\n",
+      },
+    };
+
+    const result = await runtime.run({
+      runId: "exact-dependency",
+      tool: definition,
+      input: {},
+      principal: "foreground",
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "dependency_lock",
+      reason: expect.stringContaining("does not provision dependencies"),
+    });
+    expect(backendCalls).toBe(0);
+  });
+
   test("the deterministic fake backend is stable", async () => {
     const artifacts = createArtifacts();
     const runtime = createGeneratedToolRuntime({

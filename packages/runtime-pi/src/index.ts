@@ -1,6 +1,13 @@
 import { AgentHarness, InMemorySessionStorage, Session, type AgentTool } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { MutableModels } from "@earendil-works/pi-ai";
+import type {
+  AgentContextUsage,
+  AgentRuntimeEvent,
+  AgentRuntimeRequest,
+  AgentRuntimeResult,
+  NoesisAgentRuntime,
+} from "@noesis/agent-types";
 import { z } from "zod";
 
 export * from "./auth.ts";
@@ -10,80 +17,15 @@ export * from "./pi-role-backend.ts";
 export * from "./role-context.ts";
 export * from "./role-runner.ts";
 export * from "./role-types.ts";
-
-export type AgentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-
-export interface AgentContextUsage {
-  /** Tokens used by the most recent provider request. */
-  readonly usedTokens: number;
-  /** Context window advertised by the selected Pi model. */
-  readonly contextWindow: number;
-  /** Provider usage is exact when reported; fake/test runtimes may explicitly estimate it. */
-  readonly accuracy: "reported" | "estimated";
-}
-
-export type AgentCompletedStopReason = "stop" | "length" | "toolUse";
-
-export interface AgentRuntimeRequest {
-  readonly trailId: string;
-  readonly provider: string;
-  readonly model: string;
-  readonly thinkingLevel: AgentThinkingLevel;
-  readonly systemPrompt: string;
-  readonly prompt: string;
-  readonly activeCapabilities: readonly {
-    readonly name: string;
-    readonly version: number;
-  }[];
-}
-
-export type AgentRuntimeEvent =
-  | { readonly type: "delta"; readonly text: string }
-  | {
-      readonly type: "model";
-      readonly provider: string;
-      readonly model: string;
-      readonly contextWindow: number;
-    }
-  | ({ readonly type: "usage" } & AgentContextUsage)
-  | { readonly type: "tool-start"; readonly name: string; readonly input: Readonly<Record<string, unknown>> }
-  | { readonly type: "tool-end"; readonly name: string; readonly isError: boolean }
-  | { readonly type: "status"; readonly status: "started" | "completed" | "aborted" }
-  | { readonly type: "status"; readonly status: "failed"; readonly error: string };
-
-interface AgentRuntimeResultBase {
-  readonly text: string;
-  readonly provider: string;
-  readonly model: string;
-  readonly contextUsage?: AgentContextUsage;
-}
-
-export type AgentRuntimeResult =
-  | (AgentRuntimeResultBase & {
-      readonly outcome: "completed";
-      readonly stopReason: AgentCompletedStopReason;
-    })
-  | (AgentRuntimeResultBase & {
-      readonly outcome: "aborted";
-      readonly stopReason: "aborted";
-    })
-  | (AgentRuntimeResultBase & {
-      readonly outcome: "failed";
-      readonly stopReason: "error";
-      /** Provider detail preserved as text; callers must render it as untrusted terminal content. */
-      readonly error: string;
-    });
-
-export interface NoesisAgentRuntime {
-  readonly name: string;
-  readonly run: (
-    request: AgentRuntimeRequest,
-    emit: (event: AgentRuntimeEvent) => void,
-  ) => Promise<AgentRuntimeResult>;
-  readonly steer: (trailId: string, text: string) => Promise<void>;
-  readonly followUp: (trailId: string, text: string) => Promise<void>;
-  readonly abort: (trailId: string) => Promise<void>;
-}
+export type {
+  AgentCompletedStopReason,
+  AgentContextUsage,
+  AgentRuntimeEvent,
+  AgentRuntimeRequest,
+  AgentRuntimeResult,
+  AgentThinkingLevel,
+  NoesisAgentRuntime,
+} from "@noesis/agent-types";
 
 function assistantText(message: { readonly content: readonly unknown[] }): string {
   return message.content

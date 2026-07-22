@@ -165,6 +165,15 @@ describe("longitudinal history", () => {
       bytes: Buffer.from("Controlled longitudinal evidence supports the research hypothesis."),
       actor: { actorId: "barrier-evaluator", kind: "system" },
       evidenceKind: "output",
+      sensitivity: "normal",
+      provenanceRefs: [{ kind: "database_row", table: "messages", rowId: "message-normal" }],
+    });
+    const privateEvidence = await workspace.evidence.appendEvidence({
+      workingPath: "sessions/session-b/evaluation-output.json",
+      bytes: Buffer.from("Private longitudinal evidence supports the research hypothesis."),
+      actor: { actorId: "barrier-evaluator", kind: "system" },
+      evidenceKind: "output",
+      sensitivity: "private",
     });
     const history = createHistoryPort({
       workspace,
@@ -186,6 +195,13 @@ describe("longitudinal history", () => {
       revisionId: evidence.revisionId,
       field: "bytes",
     });
+    expect(
+      result.hits.some(
+        (hit) =>
+          hit.citation.source.kind === "file_revision" &&
+          hit.citation.source.revisionId === privateEvidence.revisionId,
+      ),
+    ).toBe(false);
     expect(result.hits[0]?.citation.excerpt.length).toBeLessThanOrEqual(48);
     const citation = result.hits[0]?.citation;
     if (!citation) throw new Error("Expected the prior evidence citation");

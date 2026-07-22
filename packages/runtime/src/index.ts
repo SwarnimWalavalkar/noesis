@@ -23,7 +23,7 @@ import type {
   AgentRuntimeEvent,
   AgentThinkingLevel,
   NoesisAgentRuntime,
-} from "@noesis/runtime-pi";
+} from "@noesis/agent-types";
 
 export { compareTrailRecency } from "@noesis/ledger";
 

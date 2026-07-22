@@ -15,7 +15,9 @@ import {
   type PermissionManifest,
   type ResearchStatePort,
   type Result,
+  type WorkspaceStore,
   sameCapabilityRevisionRef,
+  sha256,
 } from "@noesis/domain";
 import { z } from "zod";
 import type { CandidateSkill } from "./index.ts";
@@ -83,6 +85,19 @@ export interface CapabilityControlReadModel {
   readonly vetoes: readonly CapabilityVetoMetadata[];
 }
 
+export interface CapabilityControlState {
+  readonly controls: CapabilityControlReadModel;
+  readonly revision?: FileRevisionRef;
+}
+
+export interface CapabilityControlStorePort {
+  readonly read: (capabilityId: string) => Promise<CapabilityControlState>;
+  readonly commit: (request: {
+    readonly controls: CapabilityControlReadModel;
+    readonly expectedRevisionId?: string;
+  }) => Promise<Result<CapabilityControlState, CapabilityControlError>>;
+}
+
 export interface CapabilityRevisionReadModel {
   readonly revision: CapabilityRevision;
   readonly revisionRef: CapabilityRevisionRef;
@@ -106,6 +121,7 @@ export interface CapabilityActivationReader {
 export interface AtomicCapabilityRegistryOptions {
   readonly activationReader?: CapabilityActivationReader;
   readonly researchState?: ResearchStatePort;
+  readonly controlStore?: CapabilityControlStorePort;
 }
 
 export interface AtomicCapabilityRegistry {
@@ -119,10 +135,133 @@ export interface AtomicCapabilityRegistry {
     revision: CapabilityRevisionRef,
     refs: CapabilityRevisionResearchRefs,
   ) => Promise<void>;
-  readonly pin: (metadata: CapabilityPinMetadata) => Result<CapabilityPinMetadata, CapabilityControlError>;
-  readonly veto: (metadata: CapabilityVetoMetadata) => Result<CapabilityVetoMetadata, CapabilityControlError>;
-  readonly readControls: (capabilityId: string) => CapabilityControlReadModel | undefined;
+  readonly pin: (
+    metadata: CapabilityPinMetadata,
+  ) => Promise<Result<CapabilityPinMetadata, CapabilityControlError>>;
+  readonly veto: (
+    metadata: CapabilityVetoMetadata,
+  ) => Promise<Result<CapabilityVetoMetadata, CapabilityControlError>>;
+  readonly readControls: (capabilityId: string) => Promise<CapabilityControlReadModel | undefined>;
   readonly read: (capabilityId: string) => Promise<CapabilityReadModel | undefined>;
+}
+
+const CapabilityControlReadModelSchema: z.ZodType<CapabilityControlReadModel> = z.strictObject({
+  capabilityId: z.string().min(1),
+  pin: CapabilityPinMetadataSchema.nullable(),
+  vetoes: z.array(CapabilityVetoMetadataSchema),
+});
+
+function emptyControls(capabilityId: string): CapabilityControlReadModel {
+  return Object.freeze({ capabilityId, pin: null, vetoes: Object.freeze([]) });
+}
+
+function freezeControls(value: CapabilityControlReadModel): CapabilityControlReadModel {
+  return Object.freeze({
+    capabilityId: value.capabilityId,
+    pin: value.pin
+      ? Object.freeze({ ...value.pin, revision: Object.freeze({ ...value.pin.revision }) })
+      : null,
+    vetoes: Object.freeze(
+      value.vetoes.map((item) =>
+        Object.freeze({ ...item, rootRevision: Object.freeze({ ...item.rootRevision }) }),
+      ),
+    ),
+  });
+}
+
+export function createInMemoryCapabilityControlStore(): CapabilityControlStorePort {
+  const states = new Map<string, CapabilityControlState>();
+  const store: CapabilityControlStorePort = {
+    read: async (capabilityId) => states.get(capabilityId) ?? { controls: emptyControls(capabilityId) },
+    commit: async (request): Promise<Result<CapabilityControlState, CapabilityControlError>> => {
+      const current = states.get(request.controls.capabilityId);
+      if (current?.revision?.revisionId !== request.expectedRevisionId)
+        return err({
+          code: "invalid_control",
+          message: "Capability controls changed concurrently",
+          capabilityId: request.controls.capabilityId,
+        });
+      const sequence = (current?.revision ? Number(current.revision.revisionId.split("-").at(-1)) : 0) + 1;
+      const bytes = new TextEncoder().encode(JSON.stringify(request.controls));
+      const revision: FileRevisionRef = {
+        kind: "file_revision",
+        revisionId: `memory-control-${sequence}`,
+        workingPath: `definitions/capabilities/${request.controls.capabilityId}/controls.json`,
+        snapshotPath: `revisions/memory-control-${sequence}/controls.json`,
+        contentDigest: sha256(bytes),
+      };
+      const state = Object.freeze({ controls: freezeControls(request.controls), revision });
+      states.set(request.controls.capabilityId, state);
+      return ok(state);
+    },
+  };
+  return Object.freeze(store);
+}
+
+export function createWorkspaceCapabilityControlStore(
+  workspace: Pick<WorkspaceStore, "definitionMetadata" | "definitionPublications" | "reads">,
+): CapabilityControlStorePort {
+  const namespace = "capability_control";
+  const actor = { actorId: "capability-control-store", kind: "system" as const };
+  const read = async (capabilityId: string): Promise<CapabilityControlState> => {
+    const metadata = await workspace.definitionMetadata.getCurrent(namespace, capabilityId);
+    if (!metadata) return { controls: emptyControls(capabilityId) };
+    const parsed = CapabilityControlReadModelSchema.parse(
+      JSON.parse(
+        new TextDecoder("utf8", { fatal: true }).decode(
+          await workspace.reads.readRevision(metadata.definitionRevision),
+        ),
+      ),
+    );
+    if (parsed.capabilityId !== capabilityId)
+      throw new Error("Capability control file identity does not match its revision metadata");
+    if (
+      parsed.pin &&
+      (parsed.pin.capabilityId !== capabilityId || parsed.pin.revision.capabilityId !== capabilityId)
+    )
+      throw new Error("Capability pin identity does not match its control file");
+    if (
+      parsed.vetoes.some(
+        (veto) => veto.capabilityId !== capabilityId || veto.rootRevision.capabilityId !== capabilityId,
+      )
+    )
+      throw new Error("Capability veto identity does not match its control file");
+    return Object.freeze({ controls: freezeControls(parsed), revision: metadata.definitionRevision });
+  };
+  const store: CapabilityControlStorePort = {
+    read,
+    commit: async (request): Promise<Result<CapabilityControlState, CapabilityControlError>> => {
+      const current = await read(request.controls.capabilityId);
+      if (current.revision?.revisionId !== request.expectedRevisionId)
+        return err({
+          code: "invalid_control",
+          message: "Capability controls changed concurrently",
+          capabilityId: request.controls.capabilityId,
+        });
+      const parsed = CapabilityControlReadModelSchema.parse(request.controls);
+      const currentMetadata = await workspace.definitionMetadata.getCurrent(namespace, parsed.capabilityId);
+      const committed = await workspace.definitionPublications.publish({
+        namespace,
+        definitionId: parsed.capabilityId,
+        revision: (currentMetadata?.revision ?? 0) + 1,
+        workingPath: `capabilities/${parsed.capabilityId}/controls.json`,
+        bytes: new TextEncoder().encode(`${JSON.stringify(parsed, null, 2)}\n`),
+        ...(request.expectedRevisionId === undefined
+          ? {}
+          : { expectedCurrentRevisionId: request.expectedRevisionId }),
+        sensitivity: "normal",
+        activity: { kind: "capability.controls_updated", actor },
+      });
+      if (!committed.ok)
+        return err({
+          code: "invalid_control",
+          message: committed.error.message,
+          capabilityId: parsed.capabilityId,
+        });
+      return ok({ controls: freezeControls(parsed), revision: committed.value.definitionRevision });
+    },
+  };
+  return Object.freeze(store);
 }
 
 function cloneFileRevision(ref: FileRevisionRef): FileRevisionRef {
@@ -190,8 +329,17 @@ export function createAtomicCapabilityRegistry(
   const capabilities = new Map<string, Capability>();
   const revisions = new Map<string, CapabilityRevision>();
   const researchRefs = new Map<string, CapabilityRevisionResearchRefs>();
-  const pins = new Map<string, CapabilityPinMetadata>();
-  const vetoes = new Map<string, CapabilityVetoMetadata[]>();
+  const controlStore: CapabilityControlStorePort =
+    options.controlStore ??
+    Object.freeze({
+      read: async (capabilityId: string) => ({ controls: emptyControls(capabilityId) }),
+      commit: async (request: { readonly controls: CapabilityControlReadModel }) =>
+        err({
+          code: "invalid_control" as const,
+          message: "Capability control mutation requires a durable control store",
+          capabilityId: request.controls.capabilityId,
+        }),
+    });
 
   const registerCapability = (input: Capability): Capability => {
     const existing = capabilities.get(input.capabilityId);
@@ -313,7 +461,9 @@ export function createAtomicCapabilityRegistry(
     );
   };
 
-  const pin = (metadata: CapabilityPinMetadata): Result<CapabilityPinMetadata, CapabilityControlError> => {
+  const pin = async (
+    metadata: CapabilityPinMetadata,
+  ): Promise<Result<CapabilityPinMetadata, CapabilityControlError>> => {
     const parsed = CapabilityPinMetadataSchema.safeParse(metadata);
     if (
       !parsed.success ||
@@ -330,11 +480,17 @@ export function createAtomicCapabilityRegistry(
       ...parsed.data,
       revision: Object.freeze({ ...parsed.data.revision }),
     });
-    pins.set(parsed.data.capabilityId, stored);
-    return ok(stored);
+    const current = await controlStore.read(parsed.data.capabilityId);
+    const committed = await controlStore.commit({
+      controls: freezeControls({ ...current.controls, pin: stored }),
+      ...(current.revision === undefined ? {} : { expectedRevisionId: current.revision.revisionId }),
+    });
+    return committed.ok ? ok(stored) : committed;
   };
 
-  const veto = (metadata: CapabilityVetoMetadata): Result<CapabilityVetoMetadata, CapabilityControlError> => {
+  const veto = async (
+    metadata: CapabilityVetoMetadata,
+  ): Promise<Result<CapabilityVetoMetadata, CapabilityControlError>> => {
     const parsed = CapabilityVetoMetadataSchema.safeParse(metadata);
     if (
       !parsed.success ||
@@ -351,13 +507,16 @@ export function createAtomicCapabilityRegistry(
       ...parsed.data,
       rootRevision: Object.freeze({ ...parsed.data.rootRevision }),
     });
-    const existing = vetoes.get(parsed.data.capabilityId) ?? [];
-    vetoes.set(parsed.data.capabilityId, [...existing, stored]);
-    return ok(stored);
+    const current = await controlStore.read(parsed.data.capabilityId);
+    const committed = await controlStore.commit({
+      controls: freezeControls({ ...current.controls, vetoes: [...current.controls.vetoes, stored] }),
+      ...(current.revision === undefined ? {} : { expectedRevisionId: current.revision.revisionId }),
+    });
+    return committed.ok ? ok(stored) : committed;
   };
 
-  const isVetoed = (revision: CapabilityRevision): boolean => {
-    const lineageRoots = (vetoes.get(revision.capabilityId) ?? []).map((item) => item.rootRevision);
+  const isVetoed = (revision: CapabilityRevision, controls: CapabilityControlReadModel): boolean => {
+    const lineageRoots = controls.vetoes.map((item) => item.rootRevision);
     let current: CapabilityRevision | undefined = revision;
     while (current) {
       const currentRef = capabilityRevisionRef(current);
@@ -367,27 +526,9 @@ export function createAtomicCapabilityRegistry(
     return false;
   };
 
-  const readControls = (capabilityId: string): CapabilityControlReadModel | undefined => {
+  const readControls = async (capabilityId: string): Promise<CapabilityControlReadModel | undefined> => {
     if (!getCapability(capabilityId)) return undefined;
-    const pinMetadata = pins.get(capabilityId);
-    const vetoMetadata = vetoes.get(capabilityId) ?? [];
-    return Object.freeze({
-      capabilityId,
-      pin: pinMetadata
-        ? Object.freeze({
-            ...pinMetadata,
-            revision: Object.freeze({ ...pinMetadata.revision }),
-          })
-        : null,
-      vetoes: Object.freeze(
-        vetoMetadata.map((item) =>
-          Object.freeze({
-            ...item,
-            rootRevision: Object.freeze({ ...item.rootRevision }),
-          }),
-        ),
-      ),
-    });
+    return freezeControls((await controlStore.read(capabilityId)).controls);
   };
 
   const read = async (capabilityId: string): Promise<CapabilityReadModel | undefined> => {
@@ -396,9 +537,9 @@ export function createAtomicCapabilityRegistry(
     const activation = options.activationReader
       ? await options.activationReader.read(capability)
       : Object.freeze({ capability, activeRevision: null, activationPointer: null });
-    const pinMetadata = pins.get(capabilityId);
-    const controls = readControls(capabilityId);
+    const controls = await readControls(capabilityId);
     if (!controls) return undefined;
+    const pinMetadata = controls.pin;
     const candidateRevisions = [...revisions.values()]
       .filter((revision) => revision.capabilityId === capabilityId)
       .map((revision) => {
@@ -410,7 +551,7 @@ export function createAtomicCapabilityRegistry(
           definitionState: "candidate",
           ...(refs ? { researchRefs: refs } : {}),
           pinned: pinMetadata ? sameCapabilityRevisionRef(pinMetadata.revision, revisionRef) : false,
-          vetoed: isVetoed(revision),
+          vetoed: isVetoed(revision, controls),
         });
         return model;
       });

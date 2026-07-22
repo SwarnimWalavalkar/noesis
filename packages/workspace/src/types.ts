@@ -4,9 +4,11 @@ import type {
   DatabaseRowRef,
   FileRevisionRef,
   WorkspaceStore,
+  CapabilityRevisionRef,
+  DataSensitivity,
 } from "@noesis/domain";
 
-export type Sensitivity = "normal" | "private" | "secret";
+export type Sensitivity = DataSensitivity;
 export type SessionStatus = "idle" | "running" | "completed" | "aborted" | "failed";
 
 export interface WorkspacePaths {
@@ -86,16 +88,24 @@ export interface ActivationRecord {
   readonly revision: number;
   readonly previousActivationId: string | null;
   readonly activeDefinitions: Readonly<Record<string, FileRevisionRef>>;
-  readonly activeCapabilityRevisions: Readonly<Record<string, string>>;
+  readonly activeCapabilityRevisions: Readonly<Record<string, StoredCapabilityRevisionRef>>;
   readonly preflightId?: string;
   readonly createdAt: string;
 }
+
+export interface LegacyCapabilityRevisionRef {
+  readonly kind: "legacy_capability_revision";
+  readonly capabilityId: string;
+  readonly capabilityRevisionId: string;
+}
+
+export type StoredCapabilityRevisionRef = CapabilityRevisionRef | LegacyCapabilityRevisionRef;
 
 export interface ActivationPointerRecord {
   readonly pointerId: string;
   readonly capabilityId: string;
   readonly activationId: string;
-  readonly capabilityRevisionId: string;
+  readonly capabilityRevision: StoredCapabilityRevisionRef;
   readonly updatedAt: string;
 }
 
