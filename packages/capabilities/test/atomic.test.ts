@@ -147,7 +147,7 @@ describe("atomic capability registry", () => {
     registry.pin({ capabilityId: capability.capabilityId, revision: first, reason: "user pin" });
     registry.veto({
       capabilityId: capability.capabilityId,
-      rootRevisionId: first.capabilityRevisionId,
+      rootRevision: first,
       reason: "user veto",
     });
 
@@ -156,6 +156,41 @@ describe("atomic capability registry", () => {
       { pinned: true, vetoed: true },
       { pinned: false, vetoed: true },
     ]);
+    expect(readModel?.controls).toEqual({
+      capabilityId: capability.capabilityId,
+      pin: { capabilityId: capability.capabilityId, revision: first, reason: "user pin" },
+      vetoes: [{ capabilityId: capability.capabilityId, rootRevision: first, reason: "user veto" }],
+    });
+    expect("activate" in (registry.readControls(capability.capabilityId) ?? {})).toBe(false);
+  });
+
+  test("binds pin and veto controls to the canonical capability revision digest", () => {
+    const registry = createAtomicCapabilityRegistry();
+    registry.registerCapability(capability);
+    const revision = registry.constructRevision(
+      construction("revision-1", { prompt: "1", tool: "2", router: "3" }),
+    );
+    const digestMismatch = { ...revision, bundleDigest: "f".repeat(64) };
+
+    expect(
+      registry.pin({
+        capabilityId: capability.capabilityId,
+        revision: digestMismatch,
+        reason: "bad pin",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "invalid_control" } });
+    expect(
+      registry.veto({
+        capabilityId: capability.capabilityId,
+        rootRevision: digestMismatch,
+        reason: "bad veto",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "invalid_control" } });
+    expect(registry.readControls(capability.capabilityId)).toEqual({
+      capabilityId: capability.capabilityId,
+      pin: null,
+      vetoes: [],
+    });
   });
 
   test("links only explicit children of the canonical Experiment lifecycle", async () => {

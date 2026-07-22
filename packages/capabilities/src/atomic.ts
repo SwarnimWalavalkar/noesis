@@ -1,4 +1,7 @@
 import {
+  CapabilityRevisionRefSchema,
+  err,
+  ok,
   type ActivationPolicy,
   type Capability,
   type CapabilityActivationReadModel,
@@ -11,8 +14,10 @@ import {
   type PermissionDelta,
   type PermissionManifest,
   type ResearchStatePort,
+  type Result,
   sameCapabilityRevisionRef,
 } from "@noesis/domain";
+import { z } from "zod";
 import type { CandidateSkill } from "./index.ts";
 
 export interface CapabilityRevisionConstruction {
@@ -48,10 +53,34 @@ export interface CapabilityPinMetadata {
   readonly reason: string;
 }
 
+export const CapabilityPinMetadataSchema = z.strictObject({
+  capabilityId: z.string().min(1),
+  revision: CapabilityRevisionRefSchema,
+  reason: z.string().min(1),
+});
+
 export interface CapabilityVetoMetadata {
   readonly capabilityId: string;
-  readonly rootRevisionId: string;
+  readonly rootRevision: CapabilityRevisionRef;
   readonly reason: string;
+}
+
+export const CapabilityVetoMetadataSchema = z.strictObject({
+  capabilityId: z.string().min(1),
+  rootRevision: CapabilityRevisionRefSchema,
+  reason: z.string().min(1),
+});
+
+export interface CapabilityControlError {
+  readonly code: "invalid_control";
+  readonly message: string;
+  readonly capabilityId: string;
+}
+
+export interface CapabilityControlReadModel {
+  readonly capabilityId: string;
+  readonly pin: CapabilityPinMetadata | null;
+  readonly vetoes: readonly CapabilityVetoMetadata[];
 }
 
 export interface CapabilityRevisionReadModel {
@@ -66,6 +95,7 @@ export interface CapabilityRevisionReadModel {
 export interface CapabilityReadModel {
   readonly capability: Capability;
   readonly candidateRevisions: readonly CapabilityRevisionReadModel[];
+  readonly controls: CapabilityControlReadModel;
   readonly activation: CapabilityActivationReadModel;
 }
 
@@ -89,8 +119,9 @@ export interface AtomicCapabilityRegistry {
     revision: CapabilityRevisionRef,
     refs: CapabilityRevisionResearchRefs,
   ) => Promise<void>;
-  readonly pin: (metadata: CapabilityPinMetadata) => void;
-  readonly veto: (metadata: CapabilityVetoMetadata) => void;
+  readonly pin: (metadata: CapabilityPinMetadata) => Result<CapabilityPinMetadata, CapabilityControlError>;
+  readonly veto: (metadata: CapabilityVetoMetadata) => Result<CapabilityVetoMetadata, CapabilityControlError>;
+  readonly readControls: (capabilityId: string) => CapabilityControlReadModel | undefined;
   readonly read: (capabilityId: string) => Promise<CapabilityReadModel | undefined>;
 }
 
@@ -282,32 +313,81 @@ export function createAtomicCapabilityRegistry(
     );
   };
 
-  const pin = (metadata: CapabilityPinMetadata): void => {
-    if (!getRevision(metadata.revision) || metadata.capabilityId !== metadata.revision.capabilityId) {
-      throw new Error("Pin metadata must identify a recorded revision of the capability");
+  const pin = (metadata: CapabilityPinMetadata): Result<CapabilityPinMetadata, CapabilityControlError> => {
+    const parsed = CapabilityPinMetadataSchema.safeParse(metadata);
+    if (
+      !parsed.success ||
+      !getRevision(parsed.data.revision) ||
+      parsed.data.capabilityId !== parsed.data.revision.capabilityId
+    ) {
+      return err({
+        code: "invalid_control",
+        message: "Pin metadata must identify a recorded revision of the capability",
+        capabilityId: metadata.capabilityId,
+      });
     }
-    pins.set(metadata.capabilityId, Object.freeze({ ...metadata }));
+    const stored = Object.freeze({
+      ...parsed.data,
+      revision: Object.freeze({ ...parsed.data.revision }),
+    });
+    pins.set(parsed.data.capabilityId, stored);
+    return ok(stored);
   };
 
-  const veto = (metadata: CapabilityVetoMetadata): void => {
-    const root = getStoredRevision(metadata.rootRevisionId);
-    if (!root || root.capabilityId !== metadata.capabilityId) {
-      throw new Error("Veto metadata must identify a recorded revision lineage");
+  const veto = (metadata: CapabilityVetoMetadata): Result<CapabilityVetoMetadata, CapabilityControlError> => {
+    const parsed = CapabilityVetoMetadataSchema.safeParse(metadata);
+    if (
+      !parsed.success ||
+      !getRevision(parsed.data.rootRevision) ||
+      parsed.data.rootRevision.capabilityId !== parsed.data.capabilityId
+    ) {
+      return err({
+        code: "invalid_control",
+        message: "Veto metadata must identify a recorded revision lineage",
+        capabilityId: metadata.capabilityId,
+      });
     }
-    const existing = vetoes.get(metadata.capabilityId) ?? [];
-    vetoes.set(metadata.capabilityId, [...existing, Object.freeze({ ...metadata })]);
+    const stored = Object.freeze({
+      ...parsed.data,
+      rootRevision: Object.freeze({ ...parsed.data.rootRevision }),
+    });
+    const existing = vetoes.get(parsed.data.capabilityId) ?? [];
+    vetoes.set(parsed.data.capabilityId, [...existing, stored]);
+    return ok(stored);
   };
 
   const isVetoed = (revision: CapabilityRevision): boolean => {
-    const lineageRoots = new Set(
-      (vetoes.get(revision.capabilityId) ?? []).map((item) => item.rootRevisionId),
-    );
+    const lineageRoots = (vetoes.get(revision.capabilityId) ?? []).map((item) => item.rootRevision);
     let current: CapabilityRevision | undefined = revision;
     while (current) {
-      if (lineageRoots.has(current.capabilityRevisionId)) return true;
+      const currentRef = capabilityRevisionRef(current);
+      if (lineageRoots.some((root) => sameCapabilityRevisionRef(root, currentRef))) return true;
       current = current.predecessorRevisionId ? getStoredRevision(current.predecessorRevisionId) : undefined;
     }
     return false;
+  };
+
+  const readControls = (capabilityId: string): CapabilityControlReadModel | undefined => {
+    if (!getCapability(capabilityId)) return undefined;
+    const pinMetadata = pins.get(capabilityId);
+    const vetoMetadata = vetoes.get(capabilityId) ?? [];
+    return Object.freeze({
+      capabilityId,
+      pin: pinMetadata
+        ? Object.freeze({
+            ...pinMetadata,
+            revision: Object.freeze({ ...pinMetadata.revision }),
+          })
+        : null,
+      vetoes: Object.freeze(
+        vetoMetadata.map((item) =>
+          Object.freeze({
+            ...item,
+            rootRevision: Object.freeze({ ...item.rootRevision }),
+          }),
+        ),
+      ),
+    });
   };
 
   const read = async (capabilityId: string): Promise<CapabilityReadModel | undefined> => {
@@ -317,6 +397,8 @@ export function createAtomicCapabilityRegistry(
       ? await options.activationReader.read(capability)
       : Object.freeze({ capability, activeRevision: null, activationPointer: null });
     const pinMetadata = pins.get(capabilityId);
+    const controls = readControls(capabilityId);
+    if (!controls) return undefined;
     const candidateRevisions = [...revisions.values()]
       .filter((revision) => revision.capabilityId === capabilityId)
       .map((revision) => {
@@ -335,6 +417,7 @@ export function createAtomicCapabilityRegistry(
     return Object.freeze({
       capability,
       candidateRevisions: Object.freeze(candidateRevisions),
+      controls,
       activation,
     });
   };
@@ -349,6 +432,7 @@ export function createAtomicCapabilityRegistry(
     recordResearchRefs,
     pin,
     veto,
+    readControls,
     read,
   });
 }
