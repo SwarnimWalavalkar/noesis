@@ -120,10 +120,6 @@ importers:
       '@noesis/ledger':
         specifier: workspace:*
         version: link:../ledger
-    devDependencies:
-      '@noesis/policy':
-        specifier: workspace:*
-        version: link:../policy
 
   packages/learning:
     dependencies:

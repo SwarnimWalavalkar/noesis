@@ -1,6 +1,10 @@
 import {
+  StableEffectOperationIdentitySchema,
   assertGrant,
+  canonicalJson,
   createId,
+  effectOperationFingerprint,
+  sha256,
   toJsonValue,
   type EffectClass,
   type Grant,
@@ -10,17 +14,87 @@ import {
 import { LedgerConflictError, type ExperienceLedger } from "@noesis/ledger";
 
 export interface EffectRequest<T extends JsonValue> {
+  readonly operationId: string;
   readonly principal: Principal;
   readonly effect: EffectClass;
   readonly resource: string;
   readonly estimatedCost: number;
   readonly idempotencyKey: string;
+  readonly requestDigest: string;
   readonly execute: (receipt: AuthorityReceipt) => Promise<T>;
 }
 
 export type EffectDecision<T extends JsonValue> =
   | { readonly ok: true; readonly value: T; readonly replayed: boolean }
-  | { readonly ok: false; readonly code: "denied" | "failed" | "ambiguous"; readonly reason: string };
+  | {
+      readonly ok: false;
+      readonly code: "denied" | "failed" | "ambiguous" | "collision";
+      readonly reason: string;
+    };
+
+interface EffectOperation {
+  readonly identity: ReturnType<typeof StableEffectOperationIdentitySchema.parse>;
+  readonly fingerprint: string;
+  readonly estimatedCost: number;
+}
+
+function effectOperation<T extends JsonValue>(request: EffectRequest<T>): EffectOperation {
+  const identity = StableEffectOperationIdentitySchema.parse({
+    operationId: request.operationId,
+    idempotencyKey: request.idempotencyKey,
+    principal: request.principal,
+    effect: request.effect,
+    resource: request.resource,
+    requestDigest: request.requestDigest,
+  });
+  return Object.freeze({
+    identity,
+    fingerprint: effectOperationFingerprint(identity),
+    estimatedCost: request.estimatedCost,
+  });
+}
+
+function operationPayload(operation: EffectOperation): Readonly<Record<string, JsonValue>> {
+  return {
+    operationId: operation.identity.operationId,
+    operationFingerprint: operation.fingerprint,
+    idempotencyKey: operation.identity.idempotencyKey,
+    principal: operation.identity.principal,
+    effect: operation.identity.effect,
+    resource: operation.identity.resource,
+    requestDigest: operation.identity.requestDigest,
+    estimatedCost: operation.estimatedCost,
+  };
+}
+
+function storedOperationMatches(
+  payload: Readonly<Record<string, JsonValue>>,
+  operation: EffectOperation,
+): boolean {
+  return (
+    payload["operationId"] === operation.identity.operationId &&
+    payload["operationFingerprint"] === operation.fingerprint &&
+    payload["principal"] === operation.identity.principal &&
+    payload["effect"] === operation.identity.effect &&
+    payload["resource"] === operation.identity.resource &&
+    payload["requestDigest"] === operation.identity.requestDigest &&
+    payload["estimatedCost"] === operation.estimatedCost
+  );
+}
+
+function internalOperationFields(
+  principal: Principal,
+  effect: EffectClass,
+  resource: string,
+  estimatedCost: number,
+  idempotencyKey: string,
+): Pick<EffectRequest<JsonValue>, "operationId" | "requestDigest"> {
+  const requestDigest = sha256(canonicalJson({ principal, effect, resource, estimatedCost }));
+  return {
+    operationId: `operation_${sha256(canonicalJson({ idempotencyKey, requestDigest }))}`,
+    requestDigest,
+  };
+}
 
 export interface GrantHandle {
   readonly grantId: string;
@@ -108,25 +182,44 @@ export interface EffectGateway {
 function createOwnedEffectGateway(ledger: ExperienceLedger, tokens: AuthorityTokens): EffectGateway {
   const deny = async <T extends JsonValue>(
     request: EffectRequest<T>,
+    operation: EffectOperation,
     reason: string,
+    code: "denied" | "collision" = "denied",
   ): Promise<EffectDecision<T>> => {
     await ledger.append({
       type: "effect.denied",
       principal: request.principal,
       payload: {
-        effect: request.effect,
-        resource: request.resource,
-        idempotencyKey: request.idempotencyKey,
+        ...operationPayload(operation),
         reason,
       },
     });
-    return { ok: false, code: "denied", reason };
+    return { ok: false, code, reason };
   };
 
   const run = async <T extends JsonValue>(
     request: EffectRequest<T>,
     handle?: GrantHandle,
   ): Promise<EffectDecision<T>> => {
+    const operation = effectOperation(request);
+    const operationEvents = ledger
+      .readAll()
+      .filter(
+        (event) =>
+          (event.type === "effect.requested" ||
+            event.type === "effect.reserved" ||
+            event.type === "effect.completed" ||
+            event.type === "effect.failed") &&
+          event.payload["idempotencyKey"] === request.idempotencyKey,
+      );
+    if (operationEvents.some((event) => !storedOperationMatches(event.payload, operation))) {
+      return await deny(
+        request,
+        operation,
+        "The idempotency key is already bound to a different effect operation",
+        "collision",
+      );
+    }
     const completion = ledger
       .findByType("effect.completed")
       .find((event) => event.payload["idempotencyKey"] === request.idempotencyKey);
@@ -143,10 +236,8 @@ function createOwnedEffectGateway(ledger: ExperienceLedger, tokens: AuthorityTok
         type: "effect.denied",
         principal: request.principal,
         payload: {
-          effect: request.effect,
-          resource: request.resource,
+          ...operationPayload(operation),
           reason,
-          idempotencyKey: request.idempotencyKey,
         },
       });
       return { ok: false, code: "ambiguous", reason };
@@ -157,17 +248,32 @@ function createOwnedEffectGateway(ledger: ExperienceLedger, tokens: AuthorityTok
       principal: request.principal,
       payload: {
         effectId: createId("effect"),
-        effect: request.effect,
-        resource: request.resource,
-        idempotencyKey: request.idempotencyKey,
-        estimatedCost: request.estimatedCost,
+        ...operationPayload(operation),
       },
     });
 
-    if (!tokens.ownsHandle(handle)) return await deny(request, "No authority handle was supplied");
+    if (!tokens.ownsHandle(handle)) return await deny(request, operation, "No authority handle was supplied");
 
     for (;;) {
       const expectedSequence = ledger.readAll().length;
+      const concurrentEvents = ledger
+        .readAll()
+        .filter(
+          (event) =>
+            (event.type === "effect.requested" ||
+              event.type === "effect.reserved" ||
+              event.type === "effect.completed" ||
+              event.type === "effect.failed") &&
+            event.payload["idempotencyKey"] === request.idempotencyKey,
+        );
+      if (concurrentEvents.some((event) => !storedOperationMatches(event.payload, operation))) {
+        return await deny(
+          request,
+          operation,
+          "The idempotency key was concurrently bound to a different effect operation",
+          "collision",
+        );
+      }
       const concurrentCompletion = ledger
         .findByType("effect.completed")
         .find((event) => event.payload["idempotencyKey"] === request.idempotencyKey);
@@ -203,6 +309,7 @@ function createOwnedEffectGateway(ledger: ExperienceLedger, tokens: AuthorityTok
       ) {
         return await deny(
           request,
+          operation,
           "No unexpired durable grant covers this principal, effect, resource, usage, and cost budget",
         );
       }
@@ -214,10 +321,7 @@ function createOwnedEffectGateway(ledger: ExperienceLedger, tokens: AuthorityTok
             payload: {
               reservationId: createId("reservation"),
               grantId: grant.grantId,
-              effect: request.effect,
-              resource: request.resource,
-              idempotencyKey: request.idempotencyKey,
-              estimatedCost: request.estimatedCost,
+              ...operationPayload(operation),
             },
           },
           expectedSequence,
@@ -235,9 +339,7 @@ function createOwnedEffectGateway(ledger: ExperienceLedger, tokens: AuthorityTok
         type: "effect.completed",
         principal: request.principal,
         payload: {
-          effect: request.effect,
-          resource: request.resource,
-          idempotencyKey: request.idempotencyKey,
+          ...operationPayload(operation),
           grantId: handle.grantId,
           result: toJsonValue(value),
         },
@@ -249,9 +351,7 @@ function createOwnedEffectGateway(ledger: ExperienceLedger, tokens: AuthorityTok
         type: "effect.failed",
         principal: request.principal,
         payload: {
-          effect: request.effect,
-          resource: request.resource,
-          idempotencyKey: request.idempotencyKey,
+          ...operationPayload(operation),
           grantId: handle.grantId,
           reason,
         },
@@ -336,7 +436,15 @@ export function createAuthorityBoundary(ledger: ExperienceLedger): AuthorityBoun
       maxCost: cost,
     });
     return await gateway.run(
-      { principal, effect, resource, estimatedCost: cost, idempotencyKey, execute },
+      {
+        ...internalOperationFields(principal, effect, resource, cost, idempotencyKey),
+        principal,
+        effect,
+        resource,
+        estimatedCost: cost,
+        idempotencyKey,
+        execute,
+      },
       grant,
     );
   };
@@ -400,13 +508,19 @@ export function createAuthorityBoundary(ledger: ExperienceLedger): AuthorityBoun
     execute: (receipt: AuthorityReceipt) => Promise<T>,
   ): Promise<EffectDecision<T>> => {
     const handle = schedulerHandle(jobId);
+    const principal = "scheduler" as const;
+    const effect = "execute" as const;
+    const resource = `job:${jobId}:runtime`;
+    const estimatedCost = 1;
+    const idempotencyKey = `job:${jobId}:run:${runNumber}`;
     return await gateway.run(
       {
-        principal: "scheduler",
-        effect: "execute",
-        resource: `job:${jobId}:runtime`,
-        estimatedCost: 1,
-        idempotencyKey: `job:${jobId}:run:${runNumber}`,
+        ...internalOperationFields(principal, effect, resource, estimatedCost, idempotencyKey),
+        principal,
+        effect,
+        resource,
+        estimatedCost,
+        idempotencyKey,
         execute,
       },
       handle,

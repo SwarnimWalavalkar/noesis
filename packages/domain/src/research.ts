@@ -6,6 +6,8 @@ export const DATABASE_TABLES = [
   "experiments",
   "experiment_trials",
   "feedback_signals",
+  "preflight_plans",
+  "preflight_reports",
   "evaluations",
   "activation_pointers",
   "search_configuration",
@@ -123,14 +125,12 @@ export interface Capability {
   readonly name: string;
   readonly scope: string;
   readonly intent: string;
-  readonly activeRevisionId: string | null;
 }
 
 export interface CapabilityRevision {
   readonly capabilityRevisionId: string;
   readonly capabilityId: string;
   readonly predecessorRevisionId?: string;
-  readonly status: "candidate" | "active" | "inactive";
   readonly promptModules: readonly FileRevisionRef[];
   readonly skills: readonly FileRevisionRef[];
   readonly tools: readonly FileRevisionRef[];
@@ -143,21 +143,71 @@ export interface CapabilityRevision {
   readonly requestedPermissionDelta: PermissionDelta;
 }
 
+/** Immutable identity for the complete coupled prompt, skill, tool, router, policy, and permission bundle. */
+export interface CapabilityRevisionRef {
+  readonly kind: "capability_revision";
+  readonly capabilityId: string;
+  readonly capabilityRevisionId: string;
+  readonly bundleDigest: string;
+}
+
+/** Derived from the SQLite activation pointer; neither immutable definition owns current state. */
+export interface CapabilityActivationReadModel {
+  readonly capability: Capability;
+  readonly activeRevision: CapabilityRevisionRef | null;
+  readonly activationPointer: DatabaseRowRef | null;
+}
+
+export function sameCapabilityRevisionRef(
+  left: CapabilityRevisionRef,
+  right: CapabilityRevisionRef,
+): boolean {
+  return (
+    left.capabilityId === right.capabilityId &&
+    left.capabilityRevisionId === right.capabilityRevisionId &&
+    left.bundleDigest === right.bundleDigest
+  );
+}
+
 export type ExperimentOutcome = "keep" | "revise" | "revert";
 
-export interface Experiment {
+export type ExperimentStatus = "hypothesis" | "authoring" | "preflight" | "observing" | "completed";
+
+interface ExperimentBase {
   readonly experimentId: string;
   readonly hypothesis: string;
   readonly scope: string;
   readonly evidenceRefs: readonly EvidenceRef[];
-  readonly baselineRevisionId: string;
-  readonly candidateRevisionIds: readonly string[];
+  readonly baselineRevision: CapabilityRevisionRef;
+  readonly candidateRevisions: readonly CapabilityRevisionRef[];
   readonly preflightRef?: EvidenceRevisionRef;
-  readonly activatedRevisionId?: string;
+  readonly activatedRevision?: CapabilityRevisionRef;
   readonly feedbackSignalIds: readonly string[];
-  readonly status: "briefed" | "authoring" | "preflight" | "active" | "completed";
-  readonly outcome?: ExperimentOutcome;
   readonly followUpExperimentId?: string;
+}
+
+export interface OpenExperiment extends ExperimentBase {
+  readonly status: Exclude<ExperimentStatus, "completed">;
+  readonly outcome?: never;
+}
+
+export interface CompletedExperiment extends ExperimentBase {
+  readonly status: "completed";
+  readonly outcome: ExperimentOutcome;
+}
+
+export type Experiment = OpenExperiment | CompletedExperiment;
+
+const EXPERIMENT_TRANSITIONS = {
+  hypothesis: ["authoring"],
+  authoring: ["preflight"],
+  preflight: ["observing", "completed"],
+  observing: ["completed"],
+  completed: [],
+} as const satisfies Readonly<Record<ExperimentStatus, readonly ExperimentStatus[]>>;
+
+export function isExperimentTransitionAllowed(from: ExperimentStatus, to: ExperimentStatus): boolean {
+  return EXPERIMENT_TRANSITIONS[from].some((candidate) => candidate === to);
 }
 
 export interface ExperimentVariantRef {
@@ -174,8 +224,9 @@ export interface EvaluationBudget {
 
 export interface PreflightPlan {
   readonly planId: string;
-  readonly candidateRevision: FileRevisionRef;
-  readonly baselineRevision: FileRevisionRef;
+  readonly experimentId: string;
+  readonly candidateRevision: CapabilityRevisionRef;
+  readonly baselineRevision: CapabilityRevisionRef;
   readonly caseRefs: readonly EvidenceRevisionRef[];
   readonly judgeVariant: ExperimentVariantRef;
   readonly runtimeVariant: ExperimentVariantRef;
@@ -187,7 +238,7 @@ export interface ExperimentTrial {
   readonly experimentId: string;
   readonly comparisonGroupId: string;
   readonly arm: "baseline" | "candidate";
-  readonly capabilityRevisionId: string;
+  readonly capabilityRevision: CapabilityRevisionRef;
   readonly inputRefs: readonly EvidenceRef[];
   readonly outputEvidenceRefs: readonly EvidenceRevisionRef[];
   readonly traceEvidenceRefs: readonly EvidenceRevisionRef[];
@@ -215,8 +266,10 @@ export interface EvaluationComparison {
 
 export interface PreflightReport {
   readonly preflightId: string;
-  readonly candidateRevision: FileRevisionRef;
-  readonly baselineRevision: FileRevisionRef;
+  readonly experimentId: string;
+  readonly planId: string;
+  readonly candidateRevision: CapabilityRevisionRef;
+  readonly baselineRevision: CapabilityRevisionRef;
   readonly trialRowRefs: readonly DatabaseRowRef[];
   readonly trialEvidence: readonly EvidenceRevisionRef[];
   readonly judgmentEvidence: readonly EvidenceRevisionRef[];
@@ -225,4 +278,33 @@ export interface PreflightReport {
   readonly comparison: EvaluationComparison;
   readonly decision: "pass" | "block" | "inconclusive";
   readonly reportEvidence: EvidenceRevisionRef;
+}
+
+export interface EvaluationRecord {
+  readonly evaluationId: string;
+  readonly experimentId: string;
+  readonly preflightId: string;
+  readonly candidateRevision: CapabilityRevisionRef;
+  readonly trialIds: readonly string[];
+  readonly evidenceRefs: readonly EvidenceRevisionRef[];
+  readonly status: "running" | "completed" | "failed";
+}
+
+export function preflightPlanMatchesExperiment(experiment: Experiment, plan: PreflightPlan): boolean {
+  return (
+    plan.experimentId === experiment.experimentId &&
+    sameCapabilityRevisionRef(plan.baselineRevision, experiment.baselineRevision) &&
+    experiment.candidateRevisions.some((revision) =>
+      sameCapabilityRevisionRef(plan.candidateRevision, revision),
+    )
+  );
+}
+
+export function preflightReportMatchesPlan(plan: PreflightPlan, report: PreflightReport): boolean {
+  return (
+    report.experimentId === plan.experimentId &&
+    report.planId === plan.planId &&
+    sameCapabilityRevisionRef(report.baselineRevision, plan.baselineRevision) &&
+    sameCapabilityRevisionRef(report.candidateRevision, plan.candidateRevision)
+  );
 }

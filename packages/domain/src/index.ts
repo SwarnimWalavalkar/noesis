@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import type { CapabilityRevision, CapabilityRevisionRef } from "./research.ts";
 
 export const SCHEMA_VERSION = 1 as const;
 const ISO_DATE_TIME_PATTERN = "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$";
@@ -140,6 +141,19 @@ export function canonicalJson(value: unknown): string {
 export const sha256 = (value: string | Uint8Array): string =>
   createHash("sha256").update(value).digest("hex");
 
+export function capabilityRevisionDigest(revision: CapabilityRevision): string {
+  return sha256(canonicalJson(revision));
+}
+
+export function capabilityRevisionRef(revision: CapabilityRevision): CapabilityRevisionRef {
+  return Object.freeze({
+    kind: "capability_revision",
+    capabilityId: revision.capabilityId,
+    capabilityRevisionId: revision.capabilityRevisionId,
+    bundleDigest: capabilityRevisionDigest(revision),
+  });
+}
+
 export function assertLedgerEvent(value: unknown): asserts value is LedgerEvent {
   const parsed = LedgerEventSchema.safeParse(value);
   if (parsed.success) return;
@@ -175,6 +189,7 @@ export type StableEffectOperationAttempt = Readonly<z.infer<typeof StableEffectO
 export function effectOperationFingerprint(identity: StableEffectOperationIdentity): string {
   return sha256(
     canonicalJson({
+      operationId: identity.operationId,
       idempotencyKey: identity.idempotencyKey,
       principal: identity.principal,
       effect: identity.effect,

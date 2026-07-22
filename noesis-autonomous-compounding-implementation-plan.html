@@ -260,9 +260,10 @@
           </tbody>
         </table>
       </div>
-      <pre>interface ResearchExperimentRun {
+      <pre>interface ExperimentExecutionRun {
+  runId: string;
   experimentId: string;
-  question: string;
+  purpose: string;
   axis: "role" | "retrieval" | "routing" | "evaluation" | "tool_runtime" | "activation";
   baselineVariant: ExperimentVariantRef;
   candidateVariants: readonly ExperimentVariantRef[];
@@ -445,14 +446,12 @@ interface Capability {
   name: string;
   scope: string;
   intent: string;
-  activeRevisionId: string | null;
 }
 
 interface CapabilityRevision {
   capabilityRevisionId: string;
   capabilityId: string;
   predecessorRevisionId?: string;
-  status: "candidate" | "active" | "inactive";
   promptModules: readonly FileRevisionRef[];
   skills: readonly FileRevisionRef[];
   tools: readonly FileRevisionRef[];
@@ -465,22 +464,31 @@ interface CapabilityRevision {
   requestedPermissionDelta: PermissionDelta;
 }
 
+interface CapabilityRevisionRef {
+  kind: "capability_revision";
+  capabilityId: string;
+  capabilityRevisionId: string;
+  bundleDigest: string;
+}
+
 type ExperimentOutcome = "keep" | "revise" | "revert";
 
-interface Experiment {
+interface ExperimentBase {
   experimentId: string;
   hypothesis: string;
   scope: string;
   evidenceRefs: readonly EvidenceRef[];
-  baselineRevisionId: string;
-  candidateRevisionIds: readonly string[];
+  baselineRevision: CapabilityRevisionRef;
+  candidateRevisions: readonly CapabilityRevisionRef[];
   preflightRef?: EvidenceRevisionRef;
-  activatedRevisionId?: string;
+  activatedRevision?: CapabilityRevisionRef;
   feedbackSignalIds: readonly string[];
-  status: "briefed" | "authoring" | "preflight" | "active" | "completed";
-  outcome?: ExperimentOutcome;
   followUpExperimentId?: string;
-}</pre>
+}
+
+type Experiment =
+  | (ExperimentBase &amp; { status: "hypothesis" | "authoring" | "preflight" | "observing" })
+  | (ExperimentBase &amp; { status: "completed"; outcome: ExperimentOutcome });</pre>
       <p>
         A capability is the stable deployable behavior; a revision is one concrete implementation. An experiment is a durable
         learning episode connecting the reflection hypothesis, baseline and candidate revisions, preflight, activation,
@@ -495,6 +503,7 @@ interface Experiment {
   activationId: string;
   revision: number;
   activeDefinitions: Readonly&lt;Record&lt;string, FileRevisionRef&gt;&gt;;
+  activeCapabilityRevisions: Readonly&lt;Record&lt;string, CapabilityRevisionRef&gt;&gt;;
   previousActivationId: string | null;
 }
 
@@ -533,8 +542,9 @@ interface PromptSnapshot {
       <h3>Preflight plan and personal contract</h3>
       <pre>interface PreflightPlan {
   planId: string;
-  candidateRevision: FileRevisionRef;
-  baselineRevision: FileRevisionRef;
+  experimentId: string;
+  candidateRevision: CapabilityRevisionRef;
+  baselineRevision: CapabilityRevisionRef;
   caseRefs: readonly EvaluationCaseRef[];
   judgeVariant: ExperimentVariantRef;
   runtimeVariant: ExperimentVariantRef;
@@ -543,8 +553,10 @@ interface PromptSnapshot {
 
 interface PreflightReport {
   preflightId: string;
-  candidateRevision: FileRevisionRef;
-  baselineRevision: FileRevisionRef;
+  experimentId: string;
+  planId: string;
+  candidateRevision: CapabilityRevisionRef;
+  baselineRevision: CapabilityRevisionRef;
   trialEvidence: readonly EvidenceRevisionRef[];
   judgmentEvidence: readonly EvidenceRevisionRef[];
   appliedCriteria: readonly AppliedCriterionRef[];
@@ -650,13 +662,13 @@ interface StableOperation {
       <h2>Automatic lifecycle in the workspace</h2>
       <pre>signal_detected
   → reflection_queued → reflecting
-  → no_change | experiment_briefed
+  → no_change | experiment_hypothesis
   → candidate_revision_authored
   → preflight_queued → preflighting
   → blocked | revision_requested | ready_to_activate
   → approval_required | activated
-  → observing_real_use
-  → keep | revise | revert</pre>
+  → observing
+  → completed: keep | revise | revert</pre>
       <p class="muted">The experiment stays open after activation so real use can confirm, refine, or reverse the hypothesis. <code>revise</code> authors a follow-up capability revision and experiment; <code>revert</code> restores the prior activation.</p>
       <div class="grid">
         <article class="card wide">

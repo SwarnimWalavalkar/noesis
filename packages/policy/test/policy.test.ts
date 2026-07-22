@@ -1,6 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { effectOperationFingerprint, type StableEffectOperationIdentity } from "@noesis/domain";
 import { describe, expect, test } from "vitest";
 import { createExperienceLedger } from "@noesis/ledger";
 import { createAuthorityBoundary, createEffectGateway } from "../src/index.ts";
@@ -12,11 +13,13 @@ describe("effect policy", () => {
     const gateway = createEffectGateway(ledger);
     let executed = false;
     const decision = await gateway.run({
+      operationId: "operation-deny-1",
       principal: "reflector",
       effect: "promote",
       resource: "capability:x",
       estimatedCost: 0,
       idempotencyKey: "deny-1",
+      requestDigest: "a".repeat(64),
       execute: async () => {
         executed = true;
         return null;
@@ -64,15 +67,22 @@ describe("effect policy", () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-policy-inflight-"));
     const ledger = createExperienceLedger(root);
     await ledger.initialize();
+    const identity: StableEffectOperationIdentity = {
+      operationId: "operation-inflight-1",
+      idempotencyKey: "inflight-1",
+      principal: "scheduler",
+      effect: "execute",
+      resource: "job:1:runtime",
+      requestDigest: "b".repeat(64),
+    };
     await ledger.append({
       type: "effect.reserved",
       principal: "scheduler",
       payload: {
         reservationId: "reservation-1",
         grantId: "grant-1",
-        effect: "execute",
-        resource: "job:1:runtime",
-        idempotencyKey: "inflight-1",
+        ...identity,
+        operationFingerprint: effectOperationFingerprint(identity),
         estimatedCost: 1,
       },
     });
@@ -80,11 +90,13 @@ describe("effect policy", () => {
     await recoveredLedger.initialize();
     let executed = false;
     const decision = await createEffectGateway(recoveredLedger).run({
+      operationId: identity.operationId,
       principal: "scheduler",
       effect: "execute",
       resource: "job:1:runtime",
       estimatedCost: 1,
       idempotencyKey: "inflight-1",
+      requestDigest: identity.requestDigest,
       execute: async () => {
         executed = true;
         return null;
@@ -92,6 +104,73 @@ describe("effect policy", () => {
     });
     expect(decision).toMatchObject({ ok: false, code: "ambiguous" });
     expect(executed).toBe(false);
+  });
+
+  test.each([
+    {
+      name: "principal",
+      change: { principal: "evaluator" as const },
+    },
+    {
+      name: "effect",
+      change: { effect: "network" as const },
+    },
+    {
+      name: "resource",
+      change: { resource: "workspace:other" },
+    },
+    {
+      name: "cost",
+      change: { estimatedCost: 2 },
+    },
+    {
+      name: "request identity",
+      change: { requestDigest: "d".repeat(64) },
+    },
+  ])("fails closed when an idempotency key collides on $name", async ({ change }) => {
+    const ledger = createExperienceLedger(await mkdtemp(join(tmpdir(), "noesis-policy-collision-")));
+    await ledger.initialize();
+    const gateway = createEffectGateway(ledger);
+    const original = {
+      operationId: "operation-collision-1",
+      principal: "reflector" as const,
+      effect: "read" as const,
+      resource: "workspace:item",
+      estimatedCost: 1,
+      idempotencyKey: "collision-1",
+      requestDigest: "c".repeat(64),
+      execute: async () => null,
+    };
+    await expect(gateway.run(original)).resolves.toMatchObject({ ok: false, code: "denied" });
+
+    let executed = false;
+    const collision = await gateway.run({
+      ...original,
+      ...change,
+      execute: async () => {
+        executed = true;
+        return null;
+      },
+    });
+
+    expect(collision).toMatchObject({ ok: false, code: "collision" });
+    expect(executed).toBe(false);
+    expect(ledger.findByType("effect.requested")).toHaveLength(1);
+    expect(ledger.findByType("effect.requested")[0]?.payload).toMatchObject({
+      operationId: original.operationId,
+      principal: original.principal,
+      effect: original.effect,
+      resource: original.resource,
+      estimatedCost: original.estimatedCost,
+      operationFingerprint: effectOperationFingerprint({
+        operationId: original.operationId,
+        idempotencyKey: original.idempotencyKey,
+        principal: original.principal,
+        effect: original.effect,
+        resource: original.resource,
+        requestDigest: original.requestDigest,
+      }),
+    });
   });
 
   test("allows only one concurrent reservation for an idempotency key", async () => {

@@ -108,9 +108,11 @@ export interface ToolBrokerPort {
   readonly invoke: (request: ToolBrokerRequest) => Promise<ToolBrokerResult>;
 }
 
-export interface ResearchExperimentRun {
+/** One execution child of the canonical domain Experiment lifecycle. */
+export interface ExperimentExecutionRun {
+  readonly runId: string;
   readonly experimentId: string;
-  readonly question: string;
+  readonly purpose: string;
   readonly axis: ExperimentVariantRef["axis"];
   readonly baselineVariant: ExperimentVariantRef;
   readonly candidateVariants: readonly ExperimentVariantRef[];

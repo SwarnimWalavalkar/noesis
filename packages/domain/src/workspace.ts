@@ -3,10 +3,13 @@ import type {
   ArtifactFileRef,
   DatabaseRowRef,
   EvidenceRevisionRef,
+  EvaluationRecord,
   Experiment,
-  ExperimentOutcome,
+  ExperimentTrial,
   FeedbackSignal,
   FileRevisionRef,
+  PreflightPlan,
+  PreflightReport,
 } from "./research.ts";
 
 export const PERSISTED_DATA = [
@@ -17,6 +20,8 @@ export const PERSISTED_DATA = [
   "experiment",
   "experiment_trial",
   "feedback_signal",
+  "preflight_plan",
+  "preflight_report",
   "evaluation",
   "activation_pointer",
   "search_configuration",
@@ -58,6 +63,8 @@ export const PERSISTED_AUTHORITY_BY_DATUM = {
   experiment: "sqlite_operational",
   experiment_trial: "sqlite_operational",
   feedback_signal: "sqlite_operational",
+  preflight_plan: "sqlite_operational",
+  preflight_report: "sqlite_operational",
   evaluation: "sqlite_operational",
   activation_pointer: "sqlite_operational",
   search_configuration: "sqlite_operational",
@@ -128,20 +135,46 @@ export interface ArtifactFilePort {
   readonly writeArtifact: (request: ArtifactWriteRequest) => Promise<ArtifactFileRef>;
 }
 
-export interface ResearchStatePort {
+export interface ExperimentStorePort {
   readonly getExperiment: (experimentId: string) => Promise<Experiment | undefined>;
-  readonly recordExperiment: (experiment: Experiment) => Promise<DatabaseRowRef>;
+  readonly putExperiment: (experiment: Experiment) => Promise<DatabaseRowRef>;
+}
+
+export interface ExperimentTrialStorePort {
+  readonly getTrial: (trialId: string) => Promise<ExperimentTrial | undefined>;
+  readonly listTrials: (experimentId: string) => Promise<readonly ExperimentTrial[]>;
+  readonly putTrial: (trial: ExperimentTrial) => Promise<DatabaseRowRef>;
+}
+
+export interface PreflightStorePort {
+  readonly getPreflightPlan: (planId: string) => Promise<PreflightPlan | undefined>;
+  readonly putPreflightPlan: (plan: PreflightPlan) => Promise<DatabaseRowRef>;
+  readonly getPreflightReport: (preflightId: string) => Promise<PreflightReport | undefined>;
+  readonly putPreflightReport: (report: PreflightReport) => Promise<DatabaseRowRef>;
+}
+
+export interface EvaluationStorePort {
+  readonly getEvaluation: (evaluationId: string) => Promise<EvaluationRecord | undefined>;
+  readonly listEvaluations: (experimentId: string) => Promise<readonly EvaluationRecord[]>;
+  readonly putEvaluation: (evaluation: EvaluationRecord) => Promise<DatabaseRowRef>;
+}
+
+export interface FeedbackSignalStorePort {
+  readonly getFeedbackSignal: (signalId: string) => Promise<FeedbackSignal | undefined>;
   readonly recordFeedbackSignal: (signal: FeedbackSignal) => Promise<DatabaseRowRef>;
-  readonly resolveExperiment: (
-    experimentId: string,
-    outcome: ExperimentOutcome,
-    evidenceRefs: readonly EvidenceRevisionRef[],
-  ) => Promise<void>;
+}
+
+export interface ResearchStatePort {
+  readonly experiments: ExperimentStorePort;
+  readonly trials: ExperimentTrialStorePort;
+  readonly preflights: PreflightStorePort;
+  readonly evaluations: EvaluationStorePort;
+  readonly feedbackSignals: FeedbackSignalStorePort;
 }
 
 /**
  * The non-protected persistence surface shared by research packages. Activation and authority mutation
- * deliberately live in the separately exported protected-state module.
+ * deliberately live behind unexported runtime and policy internals.
  */
 export interface WorkspaceStore {
   readonly reads: WorkspaceReadPort;

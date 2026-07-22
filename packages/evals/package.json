@@ -10,8 +10,5 @@
     "@noesis/capabilities": "workspace:*",
     "@noesis/domain": "workspace:*",
     "@noesis/ledger": "workspace:*"
-  },
-  "devDependencies": {
-    "@noesis/policy": "workspace:*"
   }
 }
