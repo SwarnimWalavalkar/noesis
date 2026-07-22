@@ -503,12 +503,13 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     }
     if (source.table === "sessions") {
       const session = await options.workspace.operational.sessions.get(source.rowId);
+      const sensitivity = await options.workspace.operational.sessions.sensitivity(source.rowId);
       return session
         ? {
             identity: { kind: "session", sessionId: session.sessionId },
             sessionIds: [session.sessionId],
             messageIds: [],
-            sensitivity: "normal",
+            sensitivity: sensitivity ?? "private",
             provenanceRefs: [],
             occurredAt: session.updatedAt,
           }

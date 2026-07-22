@@ -39,6 +39,17 @@ describe("AC-07 session search tools", () => {
         metadata: {},
       }),
       workspace.operational.sessions.put({
+        sessionId: "session-private-title",
+        title: "Private oriole acquisition title",
+        status: "completed",
+        provider: "fake",
+        model: "fake",
+        runtime: "fake",
+        createdAt,
+        updatedAt: createdAt,
+        metadata: {},
+      }),
+      workspace.operational.sessions.put({
         sessionId: "session-b",
         title: "Current release research",
         status: "idle",
@@ -68,6 +79,15 @@ describe("AC-07 session search tools", () => {
         role: "user",
         content: "Always preserve my voice and cite the exact source in release research.",
         sensitivity: "normal",
+        createdAt,
+        metadata: {},
+      }),
+      workspace.operational.messages.put({
+        messageId: "message-private-title",
+        sessionId: "session-private-title",
+        role: "user",
+        content: "Private oriole acquisition context.",
+        sensitivity: "private",
         createdAt,
         metadata: {},
       }),
@@ -238,6 +258,41 @@ describe("AC-07 session search tools", () => {
     if (!privateCitation) throw new Error("Expected authorized private citation");
     const reopenedWithoutGrant = await tools().openSessionEvidence({ citation: privateCitation });
     expect(reopenedWithoutGrant).toMatchObject({ ok: false, error: { code: "unauthorized" } });
+  });
+
+  test("keeps a title at its session's authoritative private sensitivity", async () => {
+    const unauthorized = await tools().searchSessions({
+      query: "Private oriole acquisition title",
+      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
+    });
+    expect(unauthorized.ok).toBe(true);
+    if (!unauthorized.ok) return;
+    expect(JSON.stringify(unauthorized.value.fragments)).not.toContain("Private oriole acquisition title");
+
+    const authorized = await tools({
+      currentSessionId: "session-b",
+      privateSessionIds: ["session-private-title"],
+    }).searchSessions({
+      query: "Private oriole acquisition title",
+      sessionId: "session-private-title",
+      includePrivate: true,
+      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
+    });
+    expect(authorized.ok).toBe(true);
+    if (!authorized.ok) return;
+    const title = authorized.value.fragments.find(
+      (fragment) => fragment.citation.identity.kind === "session",
+    );
+    expect(title).toMatchObject({
+      content: "Private oriole acquisition title",
+      citation: { sensitivity: "private", sessionIds: ["session-private-title"] },
+    });
+    if (!title) return;
+    const opened = await tools({
+      currentSessionId: "session-b",
+      privateSessionIds: ["session-private-title"],
+    }).openSessionEvidence({ citation: title.citation });
+    expect(opened).toMatchObject({ ok: true, value: { fragment: { content: title.content } } });
   });
 
   test("opens only bounded authorized windows and rejects tampered or stale citations", async () => {

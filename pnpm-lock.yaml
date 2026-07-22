@@ -144,6 +144,9 @@ importers:
       '@noesis/runtime-pi':
         specifier: workspace:*
         version: link:../runtime-pi
+      '@noesis/workspace':
+        specifier: workspace:*
+        version: link:../workspace
 
   packages/intelligence:
     dependencies:
@@ -180,6 +183,10 @@ importers:
       zod:
         specifier: 4.4.3
         version: 4.4.3
+    devDependencies:
+      '@noesis/workspace':
+        specifier: workspace:*
+        version: link:../workspace
 
   packages/ledger:
     dependencies:

@@ -187,13 +187,12 @@ export const BUILT_IN_AGGREGATION_STRATEGIES = Object.freeze([
 ]);
 
 export function decisionFromEvaluation(input: {
-  readonly candidateHasPermissionDelta: boolean;
+  readonly approvalRequired: boolean;
   readonly railsPassed: boolean;
   readonly aggregation: AggregatedComparison;
   readonly config: DynamicEvaluationConfig;
 }): "pass" | "block" | "approval_required" {
+  if (input.approvalRequired) return "approval_required";
   if (!input.railsPassed || input.aggregation.winner !== "candidate") return "block";
-  if (input.candidateHasPermissionDelta && input.config.rails.approvalOnPermissionDelta)
-    return "approval_required";
   return "pass";
 }

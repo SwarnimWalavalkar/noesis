@@ -121,6 +121,7 @@ export interface SearchConfiguration {
 export interface OperationalRepositories {
   readonly sessions: {
     readonly get: (sessionId: string) => Promise<SessionRecord | undefined>;
+    readonly sensitivity: (sessionId: string) => Promise<Sensitivity | undefined>;
     readonly put: (record: SessionRecord) => Promise<DatabaseRowRef>;
     readonly list: () => Promise<readonly SessionRecord[]>;
   };

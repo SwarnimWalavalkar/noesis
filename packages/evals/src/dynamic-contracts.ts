@@ -14,6 +14,7 @@ import {
   type ExperimentVariantRef,
   type FileRevisionRef,
   FileRevisionRefSchema,
+  type PreflightPlan,
   type PreflightDecision,
   type Result,
 } from "@noesis/domain";
@@ -320,6 +321,7 @@ export interface EvaluationEvidenceRecorder {
     readonly value: unknown;
     readonly provenanceRefs: readonly EvidenceRef[];
   }) => Promise<EvidenceRevisionRef<Kind>>;
+  readonly recordPlan: (plan: PreflightPlan) => Promise<DatabaseRowRef<"preflight_plans">>;
   readonly recordTrial: (trial: ExperimentTrial) => Promise<DatabaseRowRef<"experiment_trials">>;
   readonly recordReport: (report: DynamicPreflightReport) => Promise<DatabaseRowRef<"preflight_reports">>;
 }

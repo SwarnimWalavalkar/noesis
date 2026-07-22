@@ -78,8 +78,11 @@ export function createWorkspaceEvaluationRecorder(
   const recordTrial: EvaluationEvidenceRecorder["recordTrial"] = async (trial) =>
     await workspace.research.trials.putTrial(trial);
 
+  const recordPlan: EvaluationEvidenceRecorder["recordPlan"] = async (plan) =>
+    await workspace.research.preflights.putPreflightPlan(plan);
+
   const recordReport: EvaluationEvidenceRecorder["recordReport"] = async (report) => {
-    const row = await workspace.research.preflights.putPreflightReport(toWorkspacePreflightReport(report));
+    const workspaceReport = toWorkspacePreflightReport(report);
     const evaluation: EvaluationRecord = Object.freeze({
       evaluationId: `evaluation:${report.preflightId}`,
       experimentId: report.experimentId,
@@ -92,9 +95,12 @@ export function createWorkspaceEvaluationRecorder(
       ]),
       status: "completed",
     });
-    await workspace.research.evaluations.putEvaluation(evaluation);
-    return row;
+    const completed = await workspace.research.preflights.completePreflight({
+      report: workspaceReport,
+      evaluation,
+    });
+    return completed.report;
   };
 
-  return Object.freeze({ appendEvidence, recordTrial, recordReport });
+  return Object.freeze({ appendEvidence, recordPlan, recordTrial, recordReport });
 }

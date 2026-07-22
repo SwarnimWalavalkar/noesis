@@ -94,6 +94,67 @@ describe("Pi session tool registration", () => {
       "Missing session tools: search_sessions",
     );
   });
+
+  test("bounds the serialized Pi payload and resolves compact citation handles", async () => {
+    const observed: Array<{ readonly name: SessionToolName; readonly input: unknown }> = [];
+    const citationDigest = "a".repeat(64);
+    const definitionsList = definitions(async (name, input) => {
+      observed.push({ name, input });
+      if (name === "search_sessions") {
+        return {
+          ok: true,
+          value: {
+            query: "bounded",
+            fragments: [
+              {
+                id: "history-1",
+                kind: "trail",
+                content: "é".repeat(1_000),
+                provenance: ["database_row:messages:secret-source"],
+                citation: {
+                  citationDigest,
+                  documentId: "document-1",
+                  source: { kind: "database_row", table: "messages", rowId: "message-1" },
+                  sessionIds: ["session-private"],
+                  messageIds: ["message-1"],
+                  sensitivity: "private",
+                  provenanceRefs: [{ kind: "database_row", table: "messages", rowId: "message-1" }],
+                  occurredAt: "2026-07-22T10:00:00.000Z",
+                  excerptDigest: "b".repeat(64),
+                  startOffset: 0,
+                  endOffset: 1_000,
+                  contentDigest: "c".repeat(64),
+                },
+                priority: 1,
+                untrusted: true,
+                sensitive: true,
+              },
+            ],
+            hits: [{ fragmentId: "history-1", score: 1 }],
+          },
+        };
+      }
+      return { ok: true, value: { fragment: { content: "opened" } } };
+    });
+    const tools = createPiSessionToolRegistration({
+      definitions: definitionsList,
+      maxSerializedResultBytes: 320,
+    });
+    const search = tools.find((tool) => tool.name === "search_sessions");
+    const open = tools.find((tool) => tool.name === "open_session_evidence");
+    if (!search || !open) throw new Error("Expected session tools");
+    const result = await search.execute("call-search", { query: "bounded" });
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+    expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(320);
+    expect(text).toContain(citationDigest);
+    expect(text).not.toContain("provenance");
+    expect(text).not.toContain("session-private");
+    await open.execute("call-open", { citationId: citationDigest, maxChars: 200 });
+    expect(observed.at(-1)).toMatchObject({
+      name: "open_session_evidence",
+      input: { citation: { citationDigest }, maxChars: 200 },
+    });
+  });
 });
 
 function definitions(

@@ -232,6 +232,13 @@ export interface PreflightStorePort {
   readonly putPreflightPlan: (plan: PreflightPlan) => Promise<DatabaseRowRef<"preflight_plans">>;
   readonly getPreflightReport: (preflightId: string) => Promise<PreflightReport | undefined>;
   readonly putPreflightReport: (report: PreflightReport) => Promise<DatabaseRowRef<"preflight_reports">>;
+  readonly completePreflight: (input: {
+    readonly report: PreflightReport;
+    readonly evaluation: EvaluationRecord;
+  }) => Promise<{
+    readonly report: DatabaseRowRef<"preflight_reports">;
+    readonly evaluation: DatabaseRowRef<"evaluations">;
+  }>;
 }
 
 export interface EvaluationStorePort {

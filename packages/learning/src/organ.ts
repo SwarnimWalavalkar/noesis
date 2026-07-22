@@ -161,7 +161,16 @@ export interface AutomaticLearningOrganOptions {
   readonly capabilities: AtomicCapabilityRegistry;
   readonly candidateDefinitions: Pick<DefinitionFilePort, "recordCandidateDefinition">;
   readonly experiments?: ExperimentStorePort;
+  readonly candidateManifests?: LearningCandidateManifestStore;
   readonly nextId?: (prefix: string) => string;
+}
+
+export interface LearningCandidateManifestStore {
+  readonly persist: (input: {
+    readonly brief: ExperimentBrief;
+    readonly revision: CapabilityRevision;
+    readonly revisionRef: CapabilityRevisionRef;
+  }) => Promise<FileRevisionRef>;
 }
 
 export interface ObserveLearningTurnRequest {
@@ -691,13 +700,18 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
 
   const persistCandidateExperiment = async (
     brief: ExperimentBrief,
+    revision: CapabilityRevision,
     revisionRef: CapabilityRevisionRef,
   ): Promise<Experiment> => {
+    const manifestRevision = await options.candidateManifests?.persist({ brief, revision, revisionRef });
     const experiment: Experiment = Object.freeze({
       experimentId: brief.experimentId,
       hypothesis: brief.hypothesis,
       scope: brief.scope,
-      evidenceRefs: cloneEvidenceRefs(brief.evidenceRefs),
+      evidenceRefs: uniqueEvidenceRefs([
+        ...brief.evidenceRefs,
+        ...(manifestRevision ? [manifestRevision] : []),
+      ]),
       baselineRevision: Object.freeze({ ...brief.baselineRevision }),
       candidateRevisions: Object.freeze([Object.freeze({ ...revisionRef })]),
       feedbackSignalIds: Object.freeze([...brief.feedbackSignalIds]),
@@ -807,7 +821,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     const revisionRef = options.capabilities.constructRevision(construction);
     const revision = options.capabilities.getRevision(revisionRef);
     if (!revision) throw new Error("AC-03 did not retain the complete authored capability revision");
-    const experiment = await persistCandidateExperiment(input.brief, revisionRef);
+    const experiment = await persistCandidateExperiment(input.brief, revision, revisionRef);
     return Object.freeze({
       brief: input.brief,
       revision,

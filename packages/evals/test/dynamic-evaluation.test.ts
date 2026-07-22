@@ -9,6 +9,7 @@ import {
   type EvidenceRevisionRef,
   type ExperimentTrial,
   type FileRevisionRef,
+  type PreflightPlan,
   PreflightReportSchema,
   sha256,
 } from "@noesis/domain";
@@ -409,10 +410,14 @@ function createRecorder(): EvaluationEvidenceRecorder & {
   readonly evidence: RecordedEvidence[];
   readonly trials: ExperimentTrial[];
   readonly reports: DynamicPreflightReport[];
+  readonly plans: PreflightPlan[];
+  readonly events: string[];
 } {
   const evidence: RecordedEvidence[] = [];
   const trials: ExperimentTrial[] = [];
   const reports: DynamicPreflightReport[] = [];
+  const plans: PreflightPlan[] = [];
+  const events: string[] = [];
   let revision = 0;
   const appendEvidence = async <Kind extends EvidenceKind>(request: {
     readonly preflightId: string;
@@ -434,8 +439,14 @@ function createRecorder(): EvaluationEvidenceRecorder & {
     return ref;
   };
   const recordTrial = async (trial: ExperimentTrial): Promise<DatabaseRowRef<"experiment_trials">> => {
+    events.push(`trial:${trial.trialId}`);
     trials.push(trial);
     return Object.freeze({ kind: "database_row", table: "experiment_trials", rowId: trial.trialId });
+  };
+  const recordPlan = async (plan: PreflightPlan): Promise<DatabaseRowRef<"preflight_plans">> => {
+    plans.push(plan);
+    events.push(`plan:${plan.planId}`);
+    return Object.freeze({ kind: "database_row", table: "preflight_plans", rowId: plan.planId });
   };
   const recordReport = async (
     report: DynamicPreflightReport,
@@ -447,7 +458,17 @@ function createRecorder(): EvaluationEvidenceRecorder & {
       rowId: report.preflightId,
     });
   };
-  return Object.freeze({ appendEvidence, recordTrial, recordReport, evidence, trials, reports });
+  return Object.freeze({
+    appendEvidence,
+    recordPlan,
+    recordTrial,
+    recordReport,
+    evidence,
+    trials,
+    reports,
+    plans,
+    events,
+  });
 }
 
 function createHarness(scenario: BackendScenario = {}, maxRepairAttempts = 1) {
@@ -648,6 +669,9 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       ]),
     );
     expect(harness.recorder.reports).toHaveLength(1);
+    expect(harness.recorder.plans).toHaveLength(1);
+    expect(harness.recorder.plans[0]?.caseRefs).toEqual(result.value.caseEvidence);
+    expect(harness.recorder.events[0]).toBe(`plan:${result.value.planId}`);
   });
 
   test("blocks a motivating source regression even when the blind judge prefers the candidate", async () => {
@@ -703,6 +727,44 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     const durableReport = toWorkspacePreflightReport(result.value);
     expect(durableReport.decision).toBe("approval_required");
     expect(PreflightReportSchema.safeParse(durableReport).success).toBe(true);
+  });
+
+  test("derives approval_required from manifest expansion despite a lying empty delta", async () => {
+    const expandedCandidate = Object.freeze({
+      ...candidateRevision,
+      permissionManifest: Object.freeze({
+        ...candidateRevision.permissionManifest,
+        effects: Object.freeze([...candidateRevision.permissionManifest.effects, "network"]),
+      }),
+      requestedPermissionDelta: Object.freeze({
+        addedEffects: Object.freeze([]),
+        widenedResources: Object.freeze([]),
+        addedCredentialRefs: Object.freeze([]),
+      }),
+    });
+    const expandedRef = capabilityRevisionRef(expandedCandidate);
+    const result = await createHarness().laboratory.runPreflight(
+      input({
+        candidate: Object.freeze({ ref: expandedRef, revision: expandedCandidate }),
+        criteria: criterionSet("Preserve my voice and concise phrasing", "voice", expandedRef),
+      }),
+    );
+    expect(result).toMatchObject({ ok: true, value: { decision: "approval_required" } });
+  });
+
+  test("records explicit approval-required activation policy even without permission expansion", async () => {
+    const approvalCandidate = Object.freeze({
+      ...candidateRevision,
+      activationPolicy: Object.freeze({ mode: "approval_required" as const, scope: "research" }),
+    });
+    const approvalRef = capabilityRevisionRef(approvalCandidate);
+    const result = await createHarness().laboratory.runPreflight(
+      input({
+        candidate: Object.freeze({ ref: approvalRef, revision: approvalCandidate }),
+        criteria: criterionSet("Preserve my voice and concise phrasing", "voice", approvalRef),
+      }),
+    );
+    expect(result).toMatchObject({ ok: true, value: { decision: "approval_required" } });
   });
 
   test("an explicit criterion changes generated cases and evidence-backed judgment", async () => {

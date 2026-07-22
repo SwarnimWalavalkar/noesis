@@ -93,6 +93,20 @@ function createFakeResearchState(): ResearchStatePort {
         reports.set(report.preflightId, report);
         return row("preflight_reports", report.preflightId);
       },
+      completePreflight: async ({
+        report,
+        evaluation,
+      }: {
+        readonly report: PreflightReport;
+        readonly evaluation: EvaluationRecord;
+      }) => {
+        reports.set(report.preflightId, report);
+        evaluations.set(evaluation.evaluationId, evaluation);
+        return {
+          report: row("preflight_reports", report.preflightId),
+          evaluation: row("evaluations", evaluation.evaluationId),
+        };
+      },
     }),
     evaluations: Object.freeze({
       getEvaluation: async (evaluationId: string) => evaluations.get(evaluationId),

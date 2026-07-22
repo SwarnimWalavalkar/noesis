@@ -294,6 +294,10 @@ describe("atomic capability registry", () => {
         putPreflightPlan: async (value) => row("preflight_plans", value.planId),
         getPreflightReport: async () => undefined,
         putPreflightReport: async (value) => row("preflight_reports", value.preflightId),
+        completePreflight: async ({ report, evaluation: completedEvaluation }) => ({
+          report: row("preflight_reports", report.preflightId),
+          evaluation: row("evaluations", completedEvaluation.evaluationId),
+        }),
       },
       evaluations: {
         getEvaluation: async (evaluationId) =>

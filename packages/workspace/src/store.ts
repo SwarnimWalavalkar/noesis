@@ -16,6 +16,7 @@ import {
   PreflightPlanSchema,
   preflightReportMatchesPlan,
   PreflightReportSchema,
+  sameCapabilityRevisionRef,
   sha256,
   type ActorRef,
   type ArtifactFileRef,
@@ -96,6 +97,7 @@ const SearchConfigurationSchema = z.strictObject({
   includePrivate: z.boolean(),
   updatedAt: z.string().min(1),
 });
+const SensitivitySchema = z.enum(["normal", "private", "secret"]);
 
 const databaseRef = <Table extends DatabaseTable>(table: Table, rowId: string): DatabaseRowRef<Table> => ({
   kind: "database_row",
@@ -1387,6 +1389,7 @@ function createOperationalRepositories(
           db.prepare("SELECT * FROM sessions WHERE session_id = ?").get(sessionId),
           decodeSession,
         ),
+      sensitivity: async (sessionId: string) => sessionSensitivity(db, sessionId),
       put: putSession,
       list: async () =>
         db.prepare("SELECT * FROM sessions ORDER BY created_at, session_id").all().map(decodeSession),
@@ -1480,6 +1483,70 @@ function createResearchRepositories(
       return;
     }
     insert();
+  };
+  const insertPreflightReport = (value: PreflightReport): void => {
+    const plan = decodeStored(
+      db.prepare("SELECT data_json FROM preflight_plans WHERE plan_id = ?").get(value.planId),
+      PreflightPlanSchema,
+    );
+    if (!plan || !preflightReportMatchesPlan(plan, value))
+      throw new Error(`Preflight report ${value.preflightId} does not match its plan`);
+    for (const trialRef of value.trialRowRefs) {
+      if (trialRef.table !== "experiment_trials")
+        throw new Error(`Preflight trial reference points to ${trialRef.table}`);
+      assertStoredReference(db, trialRef);
+      const trial = db
+        .prepare("SELECT experiment_id FROM experiment_trials WHERE trial_id = ?")
+        .get(trialRef.rowId);
+      if (!trial || requiredString(trial, "experiment_id") !== value.experimentId)
+        throw new Error(`Preflight trial ${trialRef.rowId} belongs to another experiment`);
+    }
+    for (const ref of [
+      ...value.trialEvidence,
+      ...value.judgmentEvidence,
+      value.reportEvidence,
+      ...value.appliedCriteria.flatMap((criterion) => criterion.evidenceRefs),
+      ...value.railChecks.flatMap((rail) => rail.evidenceRefs),
+    ])
+      assertStoredReference(db, ref);
+    const encoded = JSON.stringify(value);
+    immutableInsert(
+      "preflight_reports",
+      "preflight_id",
+      value.preflightId,
+      () =>
+        db
+          .prepare("INSERT INTO preflight_reports VALUES (?, ?, ?, ?, ?, ?)")
+          .run(value.preflightId, value.experimentId, value.planId, value.decision, encoded, now()),
+      encoded,
+    );
+    recordActivity(actor, "preflight.report_put", "preflight_report", value.preflightId);
+  };
+  const insertEvaluation = (value: EvaluationRecord): void => {
+    for (const ref of value.evidenceRefs) assertStoredReference(db, ref);
+    const current = db
+      .prepare("SELECT status FROM evaluations WHERE evaluation_id = ?")
+      .get(value.evaluationId);
+    const encoded = JSON.stringify(value);
+    if (current === undefined) {
+      db.prepare("INSERT INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+        value.evaluationId,
+        value.experimentId,
+        value.preflightId,
+        value.status,
+        encoded,
+        now(),
+        now(),
+      );
+    } else {
+      const from = requiredString(current, "status");
+      if (from !== value.status && !(from === "running" && ["completed", "failed"].includes(value.status)))
+        throw new Error(`Invalid evaluation transition ${from} -> ${value.status}`);
+      db.prepare(
+        "UPDATE evaluations SET status = ?, data_json = ?, updated_at = ? WHERE evaluation_id = ?",
+      ).run(value.status, encoded, now(), value.evaluationId);
+    }
+    recordActivity(actor, "evaluation.put", "evaluation", value.evaluationId);
   };
   return Object.freeze({
     experiments: Object.freeze({
@@ -1617,45 +1684,29 @@ function createResearchRepositories(
         ),
       putPreflightReport: async (report: PreflightReport) => {
         const value = PreflightReportSchema.parse(report);
-        const plan = decodeStored(
-          db.prepare("SELECT data_json FROM preflight_plans WHERE plan_id = ?").get(value.planId),
-          PreflightPlanSchema,
-        );
-        if (!plan || !preflightReportMatchesPlan(plan, value))
-          throw new Error(`Preflight report ${value.preflightId} does not match its plan`);
-        const encoded = JSON.stringify(value);
-        database.transaction(() => {
-          for (const trialRef of value.trialRowRefs) {
-            if (trialRef.table !== "experiment_trials")
-              throw new Error(`Preflight trial reference points to ${trialRef.table}`);
-            assertStoredReference(db, trialRef);
-            const trial = db
-              .prepare("SELECT experiment_id FROM experiment_trials WHERE trial_id = ?")
-              .get(trialRef.rowId);
-            if (!trial || requiredString(trial, "experiment_id") !== value.experimentId)
-              throw new Error(`Preflight trial ${trialRef.rowId} belongs to another experiment`);
-          }
-          for (const ref of [
-            ...value.trialEvidence,
-            ...value.judgmentEvidence,
-            value.reportEvidence,
-            ...value.appliedCriteria.flatMap((criterion) => criterion.evidenceRefs),
-            ...value.railChecks.flatMap((rail) => rail.evidenceRefs),
-          ])
-            assertStoredReference(db, ref);
-          immutableInsert(
-            "preflight_reports",
-            "preflight_id",
-            value.preflightId,
-            () =>
-              db
-                .prepare("INSERT INTO preflight_reports VALUES (?, ?, ?, ?, ?, ?)")
-                .run(value.preflightId, value.experimentId, value.planId, value.decision, encoded, now()),
-            encoded,
-          );
-          recordActivity(actor, "preflight.report_put", "preflight_report", value.preflightId);
-        });
+        database.transaction(() => insertPreflightReport(value));
         return databaseRef("preflight_reports", value.preflightId);
+      },
+      completePreflight: async (input: {
+        readonly report: PreflightReport;
+        readonly evaluation: EvaluationRecord;
+      }) => {
+        const report = PreflightReportSchema.parse(input.report);
+        const evaluation = EvaluationRecordSchema.parse(input.evaluation);
+        if (
+          evaluation.experimentId !== report.experimentId ||
+          evaluation.preflightId !== report.preflightId ||
+          !sameCapabilityRevisionRef(evaluation.candidateRevision, report.candidateRevision)
+        )
+          throw new Error(`Evaluation ${evaluation.evaluationId} does not match its preflight report`);
+        database.transaction(() => {
+          insertPreflightReport(report);
+          insertEvaluation(evaluation);
+        });
+        return Object.freeze({
+          report: databaseRef("preflight_reports", report.preflightId),
+          evaluation: databaseRef("evaluations", evaluation.evaluationId),
+        });
       },
     }),
     evaluations: Object.freeze({
@@ -1671,35 +1722,7 @@ function createResearchRepositories(
           .map((row) => EvaluationRecordSchema.parse(parseJson(requiredString(row, "data_json")))),
       putEvaluation: async (evaluation: EvaluationRecord) => {
         const value = EvaluationRecordSchema.parse(evaluation);
-        const encoded = JSON.stringify(value);
-        database.transaction(() => {
-          for (const ref of value.evidenceRefs) assertStoredReference(db, ref);
-          const current = db
-            .prepare("SELECT status FROM evaluations WHERE evaluation_id = ?")
-            .get(value.evaluationId);
-          if (current === undefined) {
-            db.prepare("INSERT INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-              value.evaluationId,
-              value.experimentId,
-              value.preflightId,
-              value.status,
-              encoded,
-              now(),
-              now(),
-            );
-          } else {
-            const from = requiredString(current, "status");
-            if (
-              from !== value.status &&
-              !(from === "running" && ["completed", "failed"].includes(value.status))
-            )
-              throw new Error(`Invalid evaluation transition ${from} -> ${value.status}`);
-            db.prepare(
-              "UPDATE evaluations SET status = ?, data_json = ?, updated_at = ? WHERE evaluation_id = ?",
-            ).run(value.status, encoded, now(), value.evaluationId);
-          }
-          recordActivity(actor, "evaluation.put", "evaluation", value.evaluationId);
-        });
+        database.transaction(() => insertEvaluation(value));
         return databaseRef("evaluations", value.evaluationId);
       },
     }),
@@ -1768,7 +1791,7 @@ function createSearchIndex(
         { kind: "database_row", table: "sessions", rowId: requiredString(row, "session_id"), field: "title" },
         requiredString(row, "title"),
         requiredString(row, "updated_at"),
-        "normal",
+        sessionSensitivity(db, requiredString(row, "session_id")) ?? "private",
         requiredString(row, "session_id"),
       );
     for (const row of db.prepare("SELECT * FROM messages").all())
@@ -1964,6 +1987,28 @@ function createSearchIndex(
     openCanonicalSource: async (source: CanonicalSearchSource) =>
       await openCanonicalSource(db, paths, source),
   });
+}
+
+function sessionSensitivity(db: DatabaseSync, sessionId: string): SearchDocument["sensitivity"] | undefined {
+  const session = db.prepare("SELECT metadata_json FROM sessions WHERE session_id = ?").get(sessionId);
+  if (!session) return undefined;
+  const metadata = JsonRecordSchema.parse(parseJson(requiredString(session, "metadata_json")));
+  const explicit = SensitivitySchema.safeParse(metadata["sensitivity"]);
+  const sensitivities = [
+    ...(explicit.success ? [explicit.data] : []),
+    ...db
+      .prepare(
+        `SELECT sensitivity FROM messages WHERE session_id = ?
+         UNION ALL SELECT sensitivity FROM tool_calls WHERE session_id = ?
+         UNION ALL SELECT sensitivity FROM outcomes WHERE session_id = ?`,
+      )
+      .all(sessionId, sessionId, sessionId)
+      .map((row) => SensitivitySchema.parse(requiredString(row, "sensitivity"))),
+  ];
+  if (sensitivities.includes("secret")) return "secret";
+  if (sensitivities.includes("private")) return "private";
+  if (sensitivities.includes("normal")) return "normal";
+  return "private";
 }
 
 async function openCanonicalSource(

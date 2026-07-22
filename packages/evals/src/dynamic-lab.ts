@@ -406,10 +406,22 @@ function winnerFromBlind(
   return winner === "A" || winner === "B" ? labels[winner] : winner;
 }
 
-function permissionDeltaPresent(input: DynamicPreflightInput): boolean {
+function approvalRequired(input: DynamicPreflightInput): boolean {
   const delta = input.candidate.revision.requestedPermissionDelta;
+  const declaredExpansion =
+    delta.addedEffects.length > 0 ||
+    delta.widenedResources.length > 0 ||
+    delta.addedCredentialRefs.length > 0;
+  const baseline = input.baseline.revision.permissionManifest;
+  const candidate = input.candidate.revision.permissionManifest;
+  const manifestExpansion =
+    candidate.effects.some((effect) => !baseline.effects.includes(effect)) ||
+    candidate.resourcePatterns.some((resource) => !baseline.resourcePatterns.includes(resource)) ||
+    candidate.credentialRefs.some((credential) => !baseline.credentialRefs.includes(credential));
   return (
-    delta.addedEffects.length > 0 || delta.widenedResources.length > 0 || delta.addedCredentialRefs.length > 0
+    input.candidate.revision.activationPolicy.mode === "approval_required" ||
+    declaredExpansion ||
+    manifestExpansion
   );
 }
 
@@ -741,6 +753,27 @@ export function createDynamicEvaluationLaboratory(
       });
     }
 
+    try {
+      await options.recorder.recordPlan(
+        Object.freeze({
+          planId: rawInput.planId,
+          experimentId: rawInput.experimentId,
+          candidateRevision: rawInput.candidate.ref,
+          baselineRevision: rawInput.baseline.ref,
+          caseRefs: Object.freeze([...caseEvidence]),
+          judgeVariant: rawInput.config.judge.variant,
+          runtimeVariant: rawInput.config.trial.variant,
+          budget: rawInput.budget,
+        }),
+      );
+    } catch (error) {
+      return failure({
+        code: "recording_failed",
+        message: errorMessage(error),
+        stage: "recording",
+      });
+    }
+
     const trials: TrialResult[] = [];
     const roleTelemetry: EvaluationRoleTrace[] = [generatorTrace];
     for (const [caseIndex, evaluationCase] of cases.entries()) {
@@ -1061,7 +1094,7 @@ export function createDynamicEvaluationLaboratory(
       });
     const rails = railChecks(rawInput, trials);
     const decision = decisionFromEvaluation({
-      candidateHasPermissionDelta: permissionDeltaPresent(rawInput),
+      approvalRequired: approvalRequired(rawInput),
       railsPassed: rails.every((rail) => rail.passed),
       aggregation,
       config: rawInput.config,
