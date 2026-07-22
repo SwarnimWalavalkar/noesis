@@ -109,6 +109,123 @@ export interface ActivationPointerRecord {
   readonly updatedAt: string;
 }
 
+export type ActivationPolicyDecision = "block" | "approval_required" | "eligible_auto_activate";
+export type ActivationOperationStatus =
+  | "blocked"
+  | "staged"
+  | "pending_approval"
+  | "approved"
+  | "rejected"
+  | "committed";
+
+export interface ActivationEvidenceBinding {
+  readonly experimentId: string;
+  readonly candidateRevision: CapabilityRevisionRef;
+  readonly manifestRevision: FileRevisionRef;
+  readonly preflightId: string;
+  readonly planId: string;
+  readonly candidateDigest: string;
+  readonly manifestDigest: string;
+  readonly suiteDigest: string;
+  readonly preflightDigest: string;
+  readonly reportDigest: string;
+  readonly definitionSetDigest: string;
+  readonly controlRevisionId: string | null;
+}
+
+export interface ActivationMaterializationRecord {
+  readonly slotKey: string;
+  readonly stageId: string;
+  readonly sourceRevision: FileRevisionRef;
+  readonly activeRevision: FileRevisionRef;
+  readonly published: boolean;
+}
+
+export interface ActivationOperationRecord {
+  readonly operationId: string;
+  readonly idempotencyKey: string;
+  readonly activationId: string;
+  readonly binding: ActivationEvidenceBinding;
+  readonly bindingDigest: string;
+  readonly policySnapshot: Readonly<Record<string, unknown>>;
+  readonly policyDigest: string;
+  readonly decision: ActivationPolicyDecision;
+  readonly status: ActivationOperationStatus;
+  readonly expectedActivationRevision: number;
+  readonly previousActivationId: string | null;
+  readonly approvalId?: string;
+  readonly materializations: readonly ActivationMaterializationRecord[];
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly committedAt?: string;
+}
+
+export interface ActivationApprovalRecord {
+  readonly approvalId: string;
+  readonly operationId: string;
+  readonly bindingDigest: string;
+  readonly policyDigest: string;
+  readonly status: "pending" | "approved" | "rejected";
+  readonly requestedAt: string;
+  readonly decidedAt?: string;
+  readonly decisionActor?: string;
+}
+
+export interface TurnActivationPinRecord {
+  readonly turnKey: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly activationId: string;
+  readonly activationRevision: number;
+  readonly activeDefinitions: Readonly<Record<string, FileRevisionRef>>;
+  readonly activeCapabilityRevisions: Readonly<Record<string, CapabilityRevisionRef>>;
+  readonly pinnedAt: string;
+}
+
+export interface PrepareActivationOperationRequest {
+  readonly operationId: string;
+  readonly idempotencyKey: string;
+  readonly activationId: string;
+  readonly binding: ActivationEvidenceBinding;
+  readonly bindingDigest: string;
+  readonly policySnapshot: Readonly<Record<string, unknown>>;
+  readonly policyDigest: string;
+  readonly decision: ActivationPolicyDecision;
+  readonly expectedActivationRevision: number;
+  readonly previousActivationId: string | null;
+  readonly approvalId?: string;
+  readonly stagedDefinitions: readonly {
+    readonly slotKey: string;
+    readonly stageId: string;
+    readonly sourceRevision: FileRevisionRef;
+  }[];
+}
+
+export interface ProtectedActivationStore {
+  readonly prepare: (request: PrepareActivationOperationRequest) => Promise<ActivationOperationRecord>;
+  readonly getOperation: (operationId: string) => Promise<ActivationOperationRecord | undefined>;
+  readonly listOperations: (limit?: number) => Promise<readonly ActivationOperationRecord[]>;
+  readonly getApproval: (approvalId: string) => Promise<ActivationApprovalRecord | undefined>;
+  readonly decideApproval: (request: {
+    readonly approvalId: string;
+    readonly operationId: string;
+    readonly bindingDigest: string;
+    readonly decision: "approved" | "rejected";
+    readonly actorId: string;
+  }) => Promise<ActivationOperationRecord>;
+  readonly commit: (request: {
+    readonly operationId: string;
+    readonly bindingDigest: string;
+  }) => Promise<ActivationOperationRecord>;
+  readonly current: () => Promise<ActivationRecord | undefined>;
+  readonly pinTurn: (request: {
+    readonly sessionId: string;
+    readonly turnId: string;
+  }) => Promise<TurnActivationPinRecord>;
+  readonly getTurnPin: (sessionId: string, turnId: string) => Promise<TurnActivationPinRecord | undefined>;
+  readonly recoverCommittedPublications: () => Promise<number>;
+}
+
 export interface SearchConfiguration {
   readonly lexicalLimit: number;
   readonly semanticLimit: number;
@@ -264,6 +381,8 @@ export interface LegacyImportReport {
 export interface NoesisWorkspaceStore extends WorkspaceStore {
   readonly paths: WorkspacePaths;
   readonly operational: OperationalRepositories;
+  /** Protected runtime composition only; never pass this surface to generated roles. */
+  readonly protectedActivations: ProtectedActivationStore;
   readonly search: SearchIndexPort;
   readonly recordDirectEdit: (
     workingPath: string,

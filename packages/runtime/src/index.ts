@@ -29,6 +29,9 @@ export { compareTrailRecency } from "@noesis/ledger";
 export * from "./coordinator-contracts.ts";
 export * from "./coordinator.ts";
 export * from "./coordinator-composition.ts";
+export * from "./preflight-policy.ts";
+export * from "./atomic-activation.ts";
+export * from "./protected-activation.ts";
 
 export interface TrailState {
   readonly trailId: string;

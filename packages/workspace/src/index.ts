@@ -1,6 +1,12 @@
 export { restoreWorkspaceBackup } from "./backup.ts";
 export { createWorkspaceStore, type WorkspaceStoreOptions } from "./store.ts";
 export type {
+  ActivationApprovalRecord,
+  ActivationEvidenceBinding,
+  ActivationMaterializationRecord,
+  ActivationOperationRecord,
+  ActivationOperationStatus,
+  ActivationPolicyDecision,
   ActivationPointerRecord,
   ActivationRecord,
   BackupReport,
@@ -13,6 +19,8 @@ export type {
   NoesisWorkspaceStore,
   OperationalRepositories,
   OutcomeRecord,
+  PrepareActivationOperationRequest,
+  ProtectedActivationStore,
   RestoreReport,
   SearchCandidate,
   SearchConfiguration,
@@ -25,5 +33,6 @@ export type {
   StoredCapabilityRevisionRef,
   StagedDefinition,
   ToolCallRecord,
+  TurnActivationPinRecord,
   WorkspacePaths,
 } from "./types.ts";
