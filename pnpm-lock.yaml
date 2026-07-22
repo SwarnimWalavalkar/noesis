@@ -89,6 +89,10 @@ importers:
       zod:
         specifier: 4.4.3
         version: 4.4.3
+    devDependencies:
+      '@noesis/workspace':
+        specifier: workspace:*
+        version: link:../workspace
 
   packages/context:
     dependencies:
@@ -226,6 +230,10 @@ importers:
       zod:
         specifier: 4.4.3
         version: 4.4.3
+    devDependencies:
+      '@noesis/workspace':
+        specifier: workspace:*
+        version: link:../workspace
 
   packages/tui:
     dependencies:

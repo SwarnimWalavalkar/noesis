@@ -19,10 +19,13 @@ import {
   type ArtifactFileRef,
   type DatabaseRowRef,
   type DatabaseTable,
+  type DefinitionMetadataCommitRequest,
+  type DefinitionMetadataRecord,
   type DefinitionWriteRequest,
   type EvaluationRecord,
   type EvidenceRevisionRef,
   type EvidenceRef,
+  type EvidenceKind,
   type EvidenceWriteRequest,
   type Experiment,
   type ExperimentStatus,
@@ -87,7 +90,7 @@ const SearchConfigurationSchema = z.strictObject({
   updatedAt: z.string().min(1),
 });
 
-const databaseRef = (table: DatabaseTable, rowId: string): DatabaseRowRef => ({
+const databaseRef = <Table extends DatabaseTable>(table: Table, rowId: string): DatabaseRowRef<Table> => ({
   kind: "database_row",
   table,
   rowId,
@@ -171,14 +174,15 @@ export async function createWorkspaceStore(
     subjectKind: string,
     subjectId: string,
     references: unknown = [],
-  ): void => {
+  ): DatabaseRowRef<"activity_log"> => {
     ActorSchema.parse(actor);
+    const activityId = createId("activity");
     db.prepare(
       `INSERT INTO activity_log(
         activity_id, actor_id, actor_kind, activity_kind, subject_kind, subject_id, references_json, occurred_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
-      createId("activity"),
+      activityId,
       actor.actorId,
       actor.kind,
       activityKind,
@@ -187,6 +191,7 @@ export async function createWorkspaceStore(
       JSON.stringify(references),
       now(),
     );
+    return databaseRef("activity_log", activityId);
   };
 
   const pathsForDefinition = (
@@ -362,7 +367,9 @@ export async function createWorkspaceStore(
     );
   };
 
-  const appendEvidence = async (request: EvidenceWriteRequest): Promise<EvidenceRevisionRef> => {
+  const appendEvidence = async <Kind extends EvidenceKind>(
+    request: EvidenceWriteRequest<Kind>,
+  ): Promise<EvidenceRevisionRef<Kind>> => {
     ActorSchema.parse(request.actor);
     for (const revisionId of [request.predecessorRevisionId, request.supersedesRevisionId]) {
       if (revisionId === undefined) continue;
@@ -584,6 +591,7 @@ export async function createWorkspaceStore(
 
   const research = createResearchRepositories(database, recordActivity, now);
   const operational = createOperationalRepositories(database, recordActivity);
+  const definitionMetadata = createDefinitionMetadataRepository(database, recordActivity, now);
   const search = createSearchIndex(database, paths);
 
   const readDatabaseRow = async (
@@ -664,6 +672,7 @@ export async function createWorkspaceStore(
       recordCandidateDefinition: async (request: DefinitionWriteRequest) =>
         await recordDefinitionBytes(request, "candidate", "candidate"),
     }),
+    definitionMetadata,
     revisions: Object.freeze({ resolveRevision, removeUnregisteredSnapshots }),
     evidence: Object.freeze({ appendEvidence }),
     artifacts: Object.freeze({ writeArtifact }),
@@ -692,6 +701,201 @@ export async function createWorkspaceStore(
     unsafeDatabasePathForTesting: paths.database,
     getArtifactMetadata,
   });
+}
+
+function createDefinitionMetadataRepository(
+  database: WorkspaceDatabase,
+  recordActivity: (
+    actor: ActorRef,
+    activityKind: string,
+    subjectKind: string,
+    subjectId: string,
+    references?: unknown,
+  ) => DatabaseRowRef<"activity_log">,
+  now: () => string,
+): NoesisWorkspaceStore["definitionMetadata"] {
+  const db = database.connection;
+  const decode = (row: unknown): DefinitionMetadataRecord => {
+    const predecessorRevisionId = optionalString(row, "predecessor_revision_id");
+    const definitionRevision = decodeFileRevisionRef(row);
+    return Object.freeze({
+      namespace: requiredString(row, "namespace"),
+      definitionId: requiredString(row, "definition_id"),
+      revision: requiredNumber(row, "revision"),
+      definitionRevision,
+      fileRevisionRow: databaseRef("file_revisions", definitionRevision.revisionId),
+      activityRow: databaseRef("activity_log", requiredString(row, "activity_id")),
+      ...(predecessorRevisionId === undefined ? {} : { predecessorRevisionId }),
+    });
+  };
+  const selectMetadata = `SELECT
+    metadata.namespace,
+    metadata.definition_id,
+    metadata.revision,
+    metadata.predecessor_revision_id,
+    metadata.activity_id,
+    revisions.revision_id,
+    revisions.working_path,
+    revisions.snapshot_path,
+    revisions.content_digest
+  FROM definition_revision_metadata AS metadata
+  JOIN file_revisions AS revisions
+    ON revisions.revision_id = metadata.definition_revision_id`;
+
+  const getCurrent = async (
+    namespace: string,
+    definitionId: string,
+  ): Promise<DefinitionMetadataRecord | undefined> => {
+    const row = db
+      .prepare(
+        `${selectMetadata}
+         JOIN definition_current_pointers AS current
+           ON current.namespace = metadata.namespace
+          AND current.definition_id = metadata.definition_id
+          AND current.revision = metadata.revision
+          AND current.definition_revision_id = metadata.definition_revision_id
+         WHERE metadata.namespace = ? AND metadata.definition_id = ?`,
+      )
+      .get(namespace, definitionId);
+    return row === undefined ? undefined : decode(row);
+  };
+
+  const listCurrent = async (namespace: string): Promise<readonly DefinitionMetadataRecord[]> =>
+    db
+      .prepare(
+        `${selectMetadata}
+         JOIN definition_current_pointers AS current
+           ON current.namespace = metadata.namespace
+          AND current.definition_id = metadata.definition_id
+          AND current.revision = metadata.revision
+          AND current.definition_revision_id = metadata.definition_revision_id
+         WHERE metadata.namespace = ?
+         ORDER BY metadata.definition_id`,
+      )
+      .all(namespace)
+      .map(decode);
+
+  const listRevisions = async (
+    namespace: string,
+    definitionId: string,
+  ): Promise<readonly DefinitionMetadataRecord[]> =>
+    db
+      .prepare(
+        `${selectMetadata}
+         WHERE metadata.namespace = ? AND metadata.definition_id = ?
+         ORDER BY metadata.revision`,
+      )
+      .all(namespace, definitionId)
+      .map(decode);
+
+  const commitRevision = async (
+    request: DefinitionMetadataCommitRequest,
+  ): Promise<Awaited<ReturnType<NoesisWorkspaceStore["definitionMetadata"]["commitRevision"]>>> => {
+    if (request.namespace.trim() === "" || request.definitionId.trim() === "") {
+      throw new Error("Definition metadata requires a namespace and definition ID");
+    }
+    if (!Number.isInteger(request.revision) || request.revision <= 0) {
+      throw new Error("Definition metadata revision must be a positive integer");
+    }
+    ActorSchema.parse(request.activity.actor);
+    assertStoredReference(db, request.definitionRevision);
+
+    return database.transaction(() => {
+      const current = db
+        .prepare(
+          `SELECT revision, definition_revision_id
+           FROM definition_current_pointers WHERE namespace = ? AND definition_id = ?`,
+        )
+        .get(request.namespace, request.definitionId);
+      const currentRevisionId =
+        current === undefined ? undefined : requiredString(current, "definition_revision_id");
+      if (currentRevisionId !== request.expectedCurrentRevisionId) {
+        return {
+          ok: false,
+          error: {
+            code: "conflict",
+            message: `Current ${request.namespace}/${request.definitionId} revision changed`,
+          },
+        };
+      }
+      const expectedRevision = (current === undefined ? 0 : requiredNumber(current, "revision")) + 1;
+      if (request.revision !== expectedRevision) {
+        return {
+          ok: false,
+          error: {
+            code: "conflict",
+            message: `Expected ${request.namespace}/${request.definitionId} revision ${expectedRevision}`,
+          },
+        };
+      }
+      const revisionRow = db
+        .prepare("SELECT predecessor_revision_id FROM file_revisions WHERE revision_id = ?")
+        .get(request.definitionRevision.revisionId);
+      if (revisionRow === undefined) throw new Error("Definition revision disappeared during commit");
+      const recordedPredecessor = optionalString(revisionRow, "predecessor_revision_id");
+      if (recordedPredecessor !== currentRevisionId) {
+        return {
+          ok: false,
+          error: {
+            code: "conflict",
+            message: `Definition snapshot predecessor does not match the current ${request.namespace}/${request.definitionId} pointer`,
+          },
+        };
+      }
+      const activityRow = recordActivity(
+        request.activity.actor,
+        request.activity.kind,
+        request.namespace,
+        request.definitionId,
+        [
+          request.definitionRevision,
+          ...(request.activity.reason ? [{ reason: request.activity.reason }] : []),
+        ],
+      );
+      db.prepare(
+        `INSERT INTO definition_revision_metadata(
+          namespace, definition_id, revision, definition_revision_id,
+          predecessor_revision_id, activity_id
+        ) VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(
+        request.namespace,
+        request.definitionId,
+        request.revision,
+        request.definitionRevision.revisionId,
+        currentRevisionId ?? null,
+        activityRow.rowId,
+      );
+      db.prepare(
+        `INSERT INTO definition_current_pointers(
+          namespace, definition_id, revision, definition_revision_id, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(namespace, definition_id) DO UPDATE SET
+          revision = excluded.revision,
+          definition_revision_id = excluded.definition_revision_id,
+          updated_at = excluded.updated_at`,
+      ).run(
+        request.namespace,
+        request.definitionId,
+        request.revision,
+        request.definitionRevision.revisionId,
+        now(),
+      );
+      return {
+        ok: true,
+        value: Object.freeze({
+          namespace: request.namespace,
+          definitionId: request.definitionId,
+          revision: request.revision,
+          definitionRevision: Object.freeze({ ...request.definitionRevision }),
+          fileRevisionRow: databaseRef("file_revisions", request.definitionRevision.revisionId),
+          activityRow,
+          ...(currentRevisionId === undefined ? {} : { predecessorRevisionId: currentRevisionId }),
+        }),
+      };
+    });
+  };
+
+  return Object.freeze({ getCurrent, listCurrent, listRevisions, commitRevision });
 }
 
 function createOperationalRepositories(

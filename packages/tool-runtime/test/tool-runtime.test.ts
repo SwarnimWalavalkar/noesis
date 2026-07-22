@@ -41,7 +41,7 @@ function createArtifacts(): {
   };
   const recordTrace: GeneratedToolArtifactSink["recordTrace"] = async (
     request,
-  ): Promise<EvidenceRevisionRef> => {
+  ): Promise<EvidenceRevisionRef<"tool_trace">> => {
     traces.push(request.trace);
     return {
       kind: "evidence_revision",

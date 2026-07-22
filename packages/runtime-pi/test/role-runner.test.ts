@@ -287,6 +287,54 @@ describe("adapter-neutral role runner", () => {
       "reflect-candidate",
     ]);
   });
+
+  test("runs one two-variant fixture through swappable fake trial and judge roles with stable capability identity", async () => {
+    const runner = createFakeAgentRoleRunner({
+      variants: [
+        configuration("trial", "trial-baseline"),
+        configuration("trial", "trial-candidate"),
+        configuration("judge_critic", "judge-comparison"),
+      ],
+      respond: (backendRequest) => ({
+        text: backendRequest.model.includes("judge")
+          ? JSON.stringify({ winner: "B", reason: "more cited evidence" })
+          : JSON.stringify({ answer: backendRequest.model, citations: ["source-1"] }),
+      }),
+    });
+    const fixture = createComparableRoleVariantFixture({
+      request: {
+        runId: "research-comparison",
+        role: "trial",
+        messages: [
+          { role: "user", name: "case", content: "Research the same bounded fixture." },
+          { role: "user", name: "arm", content: "Apply the configured role variant." },
+        ],
+        evidenceRefs: [],
+        availableTools: [],
+      },
+      baselineVariant: roleVariant("trial-baseline"),
+      candidateVariant: roleVariant("trial-candidate"),
+      capabilityRevisions: [capabilityRevision],
+    });
+    const [baseline, candidate] = await Promise.all([
+      runner.run({ ...fixture.baseline, runId: "research-baseline" }),
+      runner.run({ ...fixture.candidate, runId: "research-candidate" }),
+    ]);
+    const blinded = createBlindedJudgeFixture({
+      first: JSON.parse(baseline.text),
+      second: JSON.parse(candidate.text),
+      swap: false,
+      rubric: "Prefer the answer with stronger cited evidence.",
+    });
+    const judgment = await runner.run(request("judge_critic", "judge-comparison", blinded.messages));
+
+    expect(fixture.baseline.messages).toEqual(fixture.candidate.messages);
+    expect(baseline.capabilityRevisions).toEqual(fixture.capabilityRevisions);
+    expect(candidate.capabilityRevisions).toEqual(fixture.capabilityRevisions);
+    expect(baseline.trace.capabilityRevisions).toEqual(candidate.trace.capabilityRevisions);
+    expect(judgment.capabilityRevisions).toEqual(fixture.capabilityRevisions);
+    expect(JSON.parse(judgment.text)).toEqual({ winner: "B", reason: "more cited evidence" });
+  });
 });
 
 describe("research role isolation", () => {

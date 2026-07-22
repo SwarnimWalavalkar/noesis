@@ -158,4 +158,39 @@ describe("longitudinal history", () => {
       maxExcerptChars: 64,
     });
   });
+
+  test("retrieves bounded prior evidence with an immutable file-revision citation", async () => {
+    const evidence = await workspace.evidence.appendEvidence({
+      workingPath: "barrier/research-output.json",
+      bytes: Buffer.from("Controlled longitudinal evidence supports the research hypothesis."),
+      actor: { actorId: "barrier-evaluator", kind: "system" },
+      evidenceKind: "output",
+    });
+    const history = createHistoryPort({
+      workspace,
+      embeddings: createDeterministicEmbeddingPort(),
+      reranker: createDeterministicRerankPort(),
+    });
+    await history.rebuild();
+    const result = await history.search({
+      query: "longitudinal evidence hypothesis",
+      limit: 1,
+      lexicalLimit: 3,
+      semanticLimit: 3,
+      maxExcerptChars: 48,
+    });
+
+    expect(result.hits).toHaveLength(1);
+    expect(result.hits[0]?.citation.source).toEqual({
+      kind: "file_revision",
+      revisionId: evidence.revisionId,
+      field: "bytes",
+    });
+    expect(result.hits[0]?.citation.excerpt.length).toBeLessThanOrEqual(48);
+    const citation = result.hits[0]?.citation;
+    if (!citation) throw new Error("Expected the prior evidence citation");
+    await expect(history.open({ citation })).resolves.toMatchObject({
+      content: "Controlled longitudinal evidence supports the research hypothesis.",
+    });
+  });
 });

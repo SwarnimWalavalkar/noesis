@@ -26,6 +26,7 @@ export const PERSISTED_DATA = [
   "preflight_report",
   "evaluation",
   "activation_pointer",
+  "definition_current_pointer",
   "search_configuration",
   "activity_provenance",
   "file_revision_metadata",
@@ -69,6 +70,7 @@ export const PERSISTED_AUTHORITY_BY_DATUM = {
   preflight_report: "sqlite_operational",
   evaluation: "sqlite_operational",
   activation_pointer: "sqlite_operational",
+  definition_current_pointer: "sqlite_operational",
   search_configuration: "sqlite_operational",
   activity_provenance: "sqlite_operational",
   file_revision_metadata: "sqlite_operational",
@@ -125,6 +127,49 @@ export interface WorkspaceReadPort {
 export interface DefinitionFilePort {
   readonly recordWorkingDefinition: (request: DefinitionWriteRequest) => Promise<FileRevisionRef>;
   readonly recordCandidateDefinition: (request: DefinitionWriteRequest) => Promise<FileRevisionRef>;
+}
+
+export interface DefinitionMetadataRecord {
+  readonly namespace: string;
+  readonly definitionId: string;
+  readonly revision: number;
+  readonly definitionRevision: FileRevisionRef;
+  readonly fileRevisionRow: DatabaseRowRef<"file_revisions">;
+  readonly activityRow: DatabaseRowRef<"activity_log">;
+  readonly predecessorRevisionId?: string;
+}
+
+export interface DefinitionMetadataCommitRequest {
+  readonly namespace: string;
+  readonly definitionId: string;
+  readonly revision: number;
+  readonly definitionRevision: FileRevisionRef;
+  readonly expectedCurrentRevisionId?: string;
+  readonly activity: {
+    readonly kind: string;
+    readonly actor: ActorRef;
+    readonly reason?: string;
+  };
+}
+
+export type DefinitionMetadataCommitResult =
+  | { readonly ok: true; readonly value: DefinitionMetadataRecord }
+  | { readonly ok: false; readonly error: { readonly code: "conflict"; readonly message: string } };
+
+/** SQLite owns current pointers and revision metadata; definition bytes remain file-backed. */
+export interface DefinitionMetadataPort {
+  readonly getCurrent: (
+    namespace: string,
+    definitionId: string,
+  ) => Promise<DefinitionMetadataRecord | undefined>;
+  readonly listCurrent: (namespace: string) => Promise<readonly DefinitionMetadataRecord[]>;
+  readonly listRevisions: (
+    namespace: string,
+    definitionId: string,
+  ) => Promise<readonly DefinitionMetadataRecord[]>;
+  readonly commitRevision: (
+    request: DefinitionMetadataCommitRequest,
+  ) => Promise<DefinitionMetadataCommitResult>;
 }
 
 export interface RevisionSnapshotPort {
@@ -186,6 +231,7 @@ export interface ResearchStatePort {
 export interface WorkspaceStore {
   readonly reads: WorkspaceReadPort;
   readonly definitions: DefinitionFilePort;
+  readonly definitionMetadata: DefinitionMetadataPort;
   readonly revisions: RevisionSnapshotPort;
   readonly evidence: EvidenceFilePort;
   readonly artifacts: ArtifactFilePort;

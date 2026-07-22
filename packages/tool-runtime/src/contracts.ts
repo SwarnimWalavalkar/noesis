@@ -129,7 +129,7 @@ export interface GeneratedToolArtifactSink {
     readonly toolId: string;
     readonly trace: Uint8Array;
     readonly actor: ActorRef;
-  }) => Promise<EvidenceRevisionRef>;
+  }) => Promise<EvidenceRevisionRef<"tool_trace">>;
 }
 
 export interface GeneratedToolRunRequest {
@@ -151,14 +151,14 @@ export type GeneratedToolRunResult =
       readonly ok: true;
       readonly output: JsonValue;
       readonly sourceArtifact: ArtifactFileRef;
-      readonly traceEvidence: EvidenceRevisionRef;
+      readonly traceEvidence: EvidenceRevisionRef<"tool_trace">;
     }
   | {
       readonly ok: false;
       readonly code: "invalid_input" | "invalid_output" | "dependency_lock" | GeneratedToolBackendFailureCode;
       readonly reason: string;
       readonly sourceArtifact: ArtifactFileRef;
-      readonly traceEvidence: EvidenceRevisionRef;
+      readonly traceEvidence: EvidenceRevisionRef<"tool_trace">;
     };
 
 export interface EffectExecutionRequest {

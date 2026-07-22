@@ -10,9 +10,11 @@ import {
   type ActorRef,
   type CapabilityRevisionRef,
   type DefinitionWriteRequest,
+  type DefinitionMetadataRecord,
   type EvidenceRef,
   type FileRevisionRef,
   type Result,
+  type WorkspaceStore,
 } from "@noesis/domain";
 import { z } from "zod";
 
@@ -197,6 +199,66 @@ export interface UserCriterionRepositoryOptions {
   readonly nextCriterionId?: () => string;
 }
 
+const USER_CRITERION_NAMESPACE = "user_criterion";
+
+function criterionMetadataFromStored(record: DefinitionMetadataRecord): CriterionRevisionMetadata {
+  return {
+    criterionId: record.definitionId,
+    revision: record.revision,
+    definitionRevision: record.definitionRevision,
+    fileRevisionRow: record.fileRevisionRow,
+    activityRow: record.activityRow,
+    ...(record.predecessorRevisionId === undefined
+      ? {}
+      : { predecessorRevisionId: record.predecessorRevisionId }),
+  };
+}
+
+/** Connects the criterion repository to WorkspaceStore's file bytes and SQLite current pointers. */
+export function createWorkspaceUserCriterionPorts(
+  workspace: Pick<WorkspaceStore, "definitions" | "definitionMetadata" | "reads">,
+): Pick<UserCriterionRepositoryOptions, "definitions" | "metadata"> {
+  return Object.freeze({
+    definitions: Object.freeze({
+      recordWorkingDefinition: workspace.definitions.recordWorkingDefinition,
+      readRevision: workspace.reads.readRevision,
+    }),
+    metadata: Object.freeze({
+      getCurrent: async (criterionId: string) => {
+        const record = await workspace.definitionMetadata.getCurrent(USER_CRITERION_NAMESPACE, criterionId);
+        return record === undefined ? undefined : criterionMetadataFromStored(record);
+      },
+      listCurrent: async () =>
+        (await workspace.definitionMetadata.listCurrent(USER_CRITERION_NAMESPACE)).map(
+          criterionMetadataFromStored,
+        ),
+      listRevisions: async (criterionId: string) =>
+        (await workspace.definitionMetadata.listRevisions(USER_CRITERION_NAMESPACE, criterionId)).map(
+          criterionMetadataFromStored,
+        ),
+      commitRevision: async (request: CriterionRevisionCommitRequest) => {
+        const committed = await workspace.definitionMetadata.commitRevision({
+          namespace: USER_CRITERION_NAMESPACE,
+          definitionId: request.criterionId,
+          revision: request.revision,
+          definitionRevision: request.definitionRevision,
+          ...(request.expectedCurrentRevisionId === undefined
+            ? {}
+            : { expectedCurrentRevisionId: request.expectedCurrentRevisionId }),
+          activity: {
+            kind: `criterion.${request.activity.kind}`,
+            actor: request.activity.actor,
+            ...(request.activity.reason === undefined ? {} : { reason: request.activity.reason }),
+          },
+        });
+        return committed.ok
+          ? ok(criterionMetadataFromStored(committed.value))
+          : err({ code: "conflict" as const, message: committed.error.message });
+      },
+    }),
+  });
+}
+
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf8", { fatal: true });
 
@@ -285,7 +347,7 @@ function decodeDefinition(
   if (
     parsed.data.criterionId !== metadata.criterionId ||
     parsed.data.revision !== metadata.revision ||
-    metadata.definitionRevision.workingPath !== criterionWorkingPath(metadata.criterionId)
+    !isCriterionWorkingPath(metadata.definitionRevision.workingPath, metadata.criterionId)
   ) {
     return err(
       criterionError(
@@ -300,7 +362,12 @@ function decodeDefinition(
 }
 
 function criterionWorkingPath(criterionId: string): string {
-  return `criteria/${criterionId}.json`;
+  return `config/criteria/${criterionId}.json`;
+}
+
+function isCriterionWorkingPath(workingPath: string, criterionId: string): boolean {
+  const expected = criterionWorkingPath(criterionId);
+  return workingPath === expected || workingPath === `definitions/${expected}`;
 }
 
 function sameFileRevision(left: FileRevisionRef, right: FileRevisionRef): boolean {

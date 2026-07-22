@@ -15,6 +15,8 @@ import {
   type ArtifactWriteRequest,
   type DatabaseRowRef,
   type DatabaseTable,
+  type DefinitionMetadataCommitRequest,
+  type DefinitionMetadataCommitResult,
   type DefinitionWriteRequest,
   type EvaluationRecord,
   type EvidenceKind,
@@ -151,6 +153,32 @@ function createFakeWorkspaceStore(): WorkspaceStore {
     definitions: Object.freeze({
       recordWorkingDefinition: recordDefinition,
       recordCandidateDefinition: recordDefinition,
+    }),
+    definitionMetadata: Object.freeze({
+      getCurrent: async () => undefined,
+      listCurrent: async () => [],
+      listRevisions: async () => [],
+      commitRevision: async (
+        request: DefinitionMetadataCommitRequest,
+      ): Promise<DefinitionMetadataCommitResult> => ({
+        ok: true,
+        value: {
+          namespace: request.namespace,
+          definitionId: request.definitionId,
+          revision: request.revision,
+          definitionRevision: request.definitionRevision,
+          fileRevisionRow: {
+            kind: "database_row",
+            table: "file_revisions",
+            rowId: request.definitionRevision.revisionId,
+          },
+          activityRow: {
+            kind: "database_row",
+            table: "activity_log",
+            rowId: `activity-${request.definitionRevision.revisionId}`,
+          },
+        },
+      }),
     }),
     revisions: Object.freeze({
       resolveRevision: async (revisionId: string) => revisions.get(revisionId),

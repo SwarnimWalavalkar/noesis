@@ -105,7 +105,7 @@ describe("WorkspaceStore", () => {
       .all()
       .map((row) => Reflect.get(row, "version"));
     database.close();
-    expect(versions).toEqual([1, 2]);
+    expect(versions).toEqual([1, 2, 3]);
   });
 
   test("rolls back repository activity when a foreign-key write fails", async () => {
@@ -129,21 +129,39 @@ describe("WorkspaceStore", () => {
 
   test("round-trips the experiment, trials, preflight, evaluation, and feedback lifecycle", async () => {
     const store = await createWorkspaceStore(await temporary("experiment"));
-    const evidence = await Promise.all(
-      ["case", "baseline", "candidate", "judgment", "report"].map(
-        async (name, index) =>
-          await store.evidence.appendEvidence({
-            workingPath: `evals/${name}`,
-            bytes: text(name),
-            actor,
-            evidenceKind:
-              index === 0 ? "input" : index === 3 ? "judgment" : index === 4 ? "report" : "output",
-          }),
-      ),
-    );
-    const [caseEvidence, baselineEvidence, candidateEvidence, judgmentEvidence, reportEvidence] = evidence;
-    if (!caseEvidence || !baselineEvidence || !candidateEvidence || !judgmentEvidence || !reportEvidence)
-      throw new Error("Evidence fixture was incomplete");
+    const [caseEvidence, baselineEvidence, candidateEvidence, judgmentEvidence, reportEvidence] =
+      await Promise.all([
+        store.evidence.appendEvidence({
+          workingPath: "evals/case",
+          bytes: text("case"),
+          actor,
+          evidenceKind: "input",
+        }),
+        store.evidence.appendEvidence({
+          workingPath: "evals/baseline",
+          bytes: text("baseline"),
+          actor,
+          evidenceKind: "output",
+        }),
+        store.evidence.appendEvidence({
+          workingPath: "evals/candidate",
+          bytes: text("candidate"),
+          actor,
+          evidenceKind: "output",
+        }),
+        store.evidence.appendEvidence({
+          workingPath: "evals/judgment",
+          bytes: text("judgment"),
+          actor,
+          evidenceKind: "judgment",
+        }),
+        store.evidence.appendEvidence({
+          workingPath: "evals/report",
+          bytes: text("report"),
+          actor,
+          evidenceKind: "report",
+        }),
+      ]);
     const baseline = revision("baseline", "a");
     const candidate = revision("candidate", "b");
     const experiment: Experiment = {
@@ -194,7 +212,7 @@ describe("WorkspaceStore", () => {
       decision: "pass",
       reportEvidence,
     };
-    await store.research.preflights.putPreflightReport(report);
+    const preflightRow = await store.research.preflights.putPreflightReport(report);
     await store.research.evaluations.putEvaluation({
       evaluationId: "evaluation-1",
       experimentId: experiment.experimentId,
@@ -228,7 +246,7 @@ describe("WorkspaceStore", () => {
       ...experiment,
       status: "completed",
       outcome: "keep",
-      preflightRef: reportEvidence,
+      preflightRef: preflightRow,
       activatedRevision: candidate,
       feedbackSignalIds: ["feedback-1"],
     };
