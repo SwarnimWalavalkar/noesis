@@ -1,0 +1,27 @@
+export { restoreWorkspaceBackup } from "./backup.ts";
+export { createWorkspaceStore, type WorkspaceStoreOptions } from "./store.ts";
+export type {
+  ActivationPointerRecord,
+  ActivationRecord,
+  BackupReport,
+  CanonicalSearchSource,
+  IntegrityReport,
+  JobRecord,
+  LegacyImportReport,
+  MessageRecord,
+  NoesisWorkspaceStore,
+  OperationalRepositories,
+  OutcomeRecord,
+  RestoreReport,
+  SearchCandidate,
+  SearchConfiguration,
+  SearchDocument,
+  SearchIndexPort,
+  Sensitivity,
+  SessionRecord,
+  SessionStatus,
+  StageDefinitionRequest,
+  StagedDefinition,
+  ToolCallRecord,
+  WorkspacePaths,
+} from "./types.ts";

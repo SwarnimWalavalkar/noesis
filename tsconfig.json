@@ -24,6 +24,7 @@
       "@noesis/context": ["packages/context/src/index.ts"],
       "@noesis/domain": ["packages/domain/src/index.ts"],
       "@noesis/evals": ["packages/evals/src/index.ts"],
+      "@noesis/intelligence": ["packages/intelligence/src/index.ts"],
       "@noesis/learning": ["packages/learning/src/index.ts"],
       "@noesis/ledger": ["packages/ledger/src/index.ts"],
       "@noesis/memory": ["packages/memory/src/index.ts"],
@@ -31,7 +32,8 @@
       "@noesis/runtime": ["packages/runtime/src/index.ts"],
       "@noesis/runtime-pi": ["packages/runtime-pi/src/index.ts"],
       "@noesis/tool-runtime": ["packages/tool-runtime/src/index.ts"],
-      "@noesis/tui": ["packages/tui/src/index.ts"]
+      "@noesis/tui": ["packages/tui/src/index.ts"],
+      "@noesis/workspace": ["packages/workspace/src/index.ts"]
     }
   },
   "include": ["apps/**/*.ts", "packages/**/*.ts", "vitest.config.ts"]

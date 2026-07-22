@@ -121,6 +121,12 @@ importers:
         specifier: workspace:*
         version: link:../ledger
 
+  packages/intelligence:
+    dependencies:
+      '@noesis/workspace':
+        specifier: workspace:*
+        version: link:../workspace
+
   packages/learning:
     dependencies:
       '@noesis/capabilities':
@@ -232,6 +238,15 @@ importers:
       '@noesis/runtime':
         specifier: workspace:*
         version: link:../runtime
+
+  packages/workspace:
+    dependencies:
+      '@noesis/domain':
+        specifier: workspace:*
+        version: link:../domain
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
 
 packages:
 
