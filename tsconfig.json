@@ -30,6 +30,7 @@
       "@noesis/policy": ["packages/policy/src/index.ts"],
       "@noesis/runtime": ["packages/runtime/src/index.ts"],
       "@noesis/runtime-pi": ["packages/runtime-pi/src/index.ts"],
+      "@noesis/tool-runtime": ["packages/tool-runtime/src/index.ts"],
       "@noesis/tui": ["packages/tui/src/index.ts"]
     }
   },
