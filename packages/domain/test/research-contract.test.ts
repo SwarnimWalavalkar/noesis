@@ -232,6 +232,23 @@ function createFakeWorkspaceStore(): WorkspaceStore {
       }),
     }),
     research: createFakeResearchState(),
+    jobs: Object.freeze({
+      enqueue: async () => {
+        throw new Error("unused fake job store");
+      },
+      get: async () => undefined,
+      list: async () => [],
+      claim: async () => undefined,
+      renew: async () => false,
+      complete: async () => false,
+      fail: async () => {
+        throw new Error("unused fake job store");
+      },
+      cancel: async () => undefined,
+      retry: async () => {
+        throw new Error("unused fake job store");
+      },
+    }),
     declaredAuthority: declaredAuthorityFor,
   });
 }

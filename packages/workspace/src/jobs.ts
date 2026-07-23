@@ -1,0 +1,384 @@
+import { randomUUID } from "node:crypto";
+import {
+  EvidenceRefSchema,
+  JsonValueSchema,
+  type ActorRef,
+  type DurableJobEnqueueRequest,
+  type DurableJobFailure,
+  type DurableJobRecord,
+  type DurableJobStatus,
+  type EvidenceRef,
+} from "@noesis/domain";
+import { z } from "zod";
+import {
+  optionalString,
+  parseJson,
+  requiredNumber,
+  requiredString,
+  type WorkspaceDatabase,
+} from "./database.ts";
+
+const JobStatusSchema = z.enum([
+  "scheduled",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+  "budget_exhausted",
+]);
+const JobFailureSchema = z.strictObject({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  retryable: z.boolean(),
+  ambiguous: z.boolean(),
+});
+const EnqueueSchema = z.strictObject({
+  jobId: z.string().min(1),
+  kind: z.string().min(1),
+  payload: JsonValueSchema,
+  payloadRefs: z.array(EvidenceRefSchema),
+  operationId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  notBefore: z.string().datetime(),
+  maxAttempts: z.number().int().positive(),
+  estimatedCost: z.number().nonnegative(),
+  budget: z.number().nonnegative(),
+});
+
+type RecordActivity = (
+  actor: ActorRef,
+  activityKind: string,
+  subjectKind: string,
+  subjectId: string,
+  references?: unknown,
+) => unknown;
+
+export function createDurableJobStore(
+  database: WorkspaceDatabase,
+  recordActivity: RecordActivity,
+  assertReference: (reference: EvidenceRef) => void,
+): import("@noesis/domain").DurableJobStorePort {
+  const db = database.connection;
+  const actor: ActorRef = Object.freeze({ actorId: "runtime-coordinator", kind: "system" });
+
+  const read = (jobId: string): DurableJobRecord | undefined => {
+    const row = db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId);
+    return row === undefined ? undefined : decodeDurableJob(row);
+  };
+
+  const enqueue = async (request: DurableJobEnqueueRequest): Promise<DurableJobRecord> => {
+    const value = EnqueueSchema.parse(request);
+    for (const reference of value.payloadRefs) assertReference(reference);
+    return database.transaction(() => {
+      const current = db
+        .prepare("SELECT * FROM jobs WHERE operation_id = ? OR idempotency_key = ?")
+        .get(value.operationId, value.idempotencyKey);
+      if (current !== undefined) {
+        const existing = decodeDurableJob(current);
+        const sameRequest =
+          existing.jobId === value.jobId &&
+          existing.kind === value.kind &&
+          JSON.stringify(existing.payload) === JSON.stringify(value.payload) &&
+          JSON.stringify(existing.payloadRefs) === JSON.stringify(value.payloadRefs) &&
+          existing.operationId === value.operationId &&
+          existing.idempotencyKey === value.idempotencyKey &&
+          existing.maxAttempts === value.maxAttempts &&
+          existing.estimatedCost === value.estimatedCost;
+        if (!sameRequest)
+          throw new Error(`Durable job operation identity collision for ${value.operationId}`);
+        return existing;
+      }
+      db.prepare(
+        `INSERT INTO jobs(
+          job_id, kind, payload_json, status, lease_owner, lease_until, attempt,
+          budget_remaining, created_at, updated_at, payload_refs_json, operation_id,
+          idempotency_key, not_before, lease_token, max_attempts, estimated_cost,
+          result_json, last_error_json, completed_at
+        ) VALUES (?, ?, ?, 'scheduled', NULL, NULL, 0, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL)`,
+      ).run(
+        value.jobId,
+        value.kind,
+        JSON.stringify(value.payload),
+        value.budget,
+        value.notBefore,
+        value.notBefore,
+        JSON.stringify(value.payloadRefs),
+        value.operationId,
+        value.idempotencyKey,
+        value.notBefore,
+        value.maxAttempts,
+        value.estimatedCost,
+      );
+      recordActivity(actor, "coordinator.job_enqueued", "job", value.jobId, value.payloadRefs);
+      const created = read(value.jobId);
+      if (!created) throw new Error(`Durable job ${value.jobId} disappeared after enqueue`);
+      return created;
+    });
+  };
+
+  const list = async (
+    request: { readonly status?: DurableJobStatus; readonly kind?: string; readonly limit?: number } = {},
+  ): Promise<readonly DurableJobRecord[]> => {
+    const limit = request.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1_000)
+      throw new Error("Durable job list limit must be between 1 and 1000");
+    if (request.status) JobStatusSchema.parse(request.status);
+    const clauses: string[] = [];
+    const values: Array<string | number> = [];
+    if (request.status) {
+      clauses.push("status = ?");
+      values.push(request.status);
+    }
+    if (request.kind) {
+      clauses.push("kind = ?");
+      values.push(request.kind);
+    }
+    const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
+    return db
+      .prepare(`SELECT * FROM jobs${where} ORDER BY created_at, job_id LIMIT ?`)
+      .all(...values, limit)
+      .map(decodeDurableJob);
+  };
+
+  const claim = async (request: {
+    readonly workerId: string;
+    readonly now: string;
+    readonly leaseUntil: string;
+    readonly maximumCost: number;
+    readonly kinds?: readonly string[];
+  }): Promise<DurableJobRecord | undefined> => {
+    if (!request.workerId) throw new Error("A durable job claim requires a worker ID");
+    z.string().datetime().parse(request.now);
+    z.string().datetime().parse(request.leaseUntil);
+    if (!Number.isFinite(request.maximumCost) || request.maximumCost < 0)
+      throw new Error("A durable job claim requires a non-negative maximum cost");
+    const kinds = request.kinds ?? [];
+    if (kinds.some((kind) => kind.length === 0)) throw new Error("Durable job kinds must be non-empty");
+    return database.transaction(() => {
+      const exhaustedError: DurableJobFailure = Object.freeze({
+        code: "attempts_exhausted",
+        message: "The durable job exhausted its bounded attempt policy",
+        retryable: false,
+        ambiguous: false,
+      });
+      db.prepare(
+        `UPDATE jobs SET status = 'failed', lease_owner = NULL, lease_token = NULL,
+          lease_until = NULL, last_error_json = ?, updated_at = ?, completed_at = ?
+         WHERE status IN ('scheduled', 'running') AND attempt >= max_attempts
+           AND (status = 'scheduled' OR lease_until <= ?)`,
+      ).run(JSON.stringify(exhaustedError), request.now, request.now, request.now);
+      db.prepare(
+        `UPDATE jobs SET status = 'budget_exhausted', lease_owner = NULL, lease_token = NULL,
+          lease_until = NULL, updated_at = ?, completed_at = ?
+         WHERE status IN ('scheduled', 'running') AND estimated_cost > budget_remaining
+           AND (status = 'scheduled' OR lease_until <= ?)`,
+      ).run(request.now, request.now, request.now);
+      const kindClause = kinds.length === 0 ? "" : ` AND kind IN (${kinds.map(() => "?").join(", ")})`;
+      const row = db
+        .prepare(
+          `SELECT job_id FROM jobs
+           WHERE ((status = 'scheduled' AND not_before <= ?)
+             OR (status = 'running' AND lease_until <= ?))
+             AND attempt < max_attempts
+             AND estimated_cost <= budget_remaining
+             AND estimated_cost <= ?${kindClause}
+           ORDER BY not_before, created_at, job_id LIMIT 1`,
+        )
+        .get(request.now, request.now, request.maximumCost, ...kinds);
+      if (row === undefined) return undefined;
+      const jobId = requiredString(row, "job_id");
+      const leaseToken = `lease_${randomUUID()}`;
+      const updated = db
+        .prepare(
+          `UPDATE jobs SET status = 'running', lease_owner = ?, lease_token = ?, lease_until = ?,
+            attempt = attempt + 1, budget_remaining = budget_remaining - estimated_cost,
+            updated_at = ?, last_error_json = NULL
+           WHERE job_id = ? AND ((status = 'scheduled' AND not_before <= ?)
+             OR (status = 'running' AND lease_until <= ?))`,
+        )
+        .run(request.workerId, leaseToken, request.leaseUntil, request.now, jobId, request.now, request.now);
+      if (updated.changes !== 1) return undefined;
+      recordActivity(actor, "coordinator.job_claimed", "job", jobId);
+      const claimed = read(jobId);
+      if (!claimed) throw new Error(`Claimed durable job ${jobId} disappeared`);
+      return claimed;
+    });
+  };
+
+  const renew = async (request: {
+    readonly jobId: string;
+    readonly leaseToken: string;
+    readonly now: string;
+    readonly leaseUntil: string;
+  }): Promise<boolean> =>
+    database.transaction(() => {
+      const result = db
+        .prepare(
+          `UPDATE jobs SET lease_until = ?, updated_at = ?
+           WHERE job_id = ? AND status = 'running' AND lease_token = ? AND lease_until > ?`,
+        )
+        .run(request.leaseUntil, request.now, request.jobId, request.leaseToken, request.now);
+      return result.changes === 1;
+    });
+
+  const complete = async (request: {
+    readonly jobId: string;
+    readonly leaseToken: string;
+    readonly now: string;
+    readonly result?: unknown;
+  }): Promise<boolean> => {
+    const resultValue = request.result === undefined ? undefined : JsonValueSchema.parse(request.result);
+    return database.transaction(() => {
+      const result = db
+        .prepare(
+          `UPDATE jobs SET status = 'completed', result_json = ?, lease_owner = NULL,
+            lease_token = NULL, lease_until = NULL, updated_at = ?, completed_at = ?
+           WHERE job_id = ? AND status = 'running' AND lease_token = ?`,
+        )
+        .run(
+          resultValue === undefined ? null : JSON.stringify(resultValue),
+          request.now,
+          request.now,
+          request.jobId,
+          request.leaseToken,
+        );
+      if (result.changes === 1) recordActivity(actor, "coordinator.job_completed", "job", request.jobId);
+      return result.changes === 1;
+    });
+  };
+
+  const fail = async (request: {
+    readonly jobId: string;
+    readonly leaseToken: string;
+    readonly now: string;
+    readonly retryAt: string;
+    readonly failure: DurableJobFailure;
+  }): Promise<DurableJobRecord> => {
+    const failure = JobFailureSchema.parse(request.failure);
+    return database.transaction(() => {
+      const current = read(request.jobId);
+      if (!current) throw new Error(`Unknown durable job ${request.jobId}`);
+      if (current.status !== "running" || current.leaseToken !== request.leaseToken)
+        throw new Error(`Cannot fail stale durable job lease ${request.jobId}`);
+      const canRetry =
+        failure.retryable &&
+        !failure.ambiguous &&
+        current.attempt < current.maxAttempts &&
+        current.budgetRemaining >= current.estimatedCost;
+      const status: DurableJobStatus = canRetry
+        ? "scheduled"
+        : failure.retryable && !failure.ambiguous && current.budgetRemaining < current.estimatedCost
+          ? "budget_exhausted"
+          : "failed";
+      db.prepare(
+        `UPDATE jobs SET status = ?, not_before = ?, lease_owner = NULL, lease_token = NULL,
+          lease_until = NULL, last_error_json = ?, updated_at = ?, completed_at = ?
+         WHERE job_id = ? AND status = 'running' AND lease_token = ?`,
+      ).run(
+        status,
+        canRetry ? request.retryAt : current.notBefore,
+        JSON.stringify(failure),
+        request.now,
+        canRetry ? null : request.now,
+        request.jobId,
+        request.leaseToken,
+      );
+      recordActivity(
+        actor,
+        canRetry ? "coordinator.job_retry_scheduled" : "coordinator.job_failed",
+        "job",
+        request.jobId,
+      );
+      const failed = read(request.jobId);
+      if (!failed) throw new Error(`Failed durable job ${request.jobId} disappeared`);
+      return failed;
+    });
+  };
+
+  const cancel = async (jobId: string, now: string): Promise<DurableJobRecord | undefined> =>
+    database.transaction(() => {
+      const current = read(jobId);
+      if (!current) return undefined;
+      if (current.status === "scheduled" || current.status === "running") {
+        db.prepare(
+          `UPDATE jobs SET status = 'cancelled', lease_owner = NULL, lease_token = NULL,
+            lease_until = NULL, updated_at = ?, completed_at = ? WHERE job_id = ?`,
+        ).run(now, now, jobId);
+        recordActivity(actor, "coordinator.job_cancelled", "job", jobId);
+      }
+      return read(jobId);
+    });
+
+  const retry = async (request: {
+    readonly jobId: string;
+    readonly now: string;
+    readonly additionalBudget?: number;
+  }): Promise<DurableJobRecord> => {
+    const additionalBudget = request.additionalBudget ?? 0;
+    if (!Number.isFinite(additionalBudget) || additionalBudget < 0)
+      throw new Error("Additional retry budget must be non-negative");
+    return database.transaction(() => {
+      const current = read(request.jobId);
+      if (!current) throw new Error(`Unknown durable job ${request.jobId}`);
+      if (current.status !== "failed" && current.status !== "budget_exhausted")
+        throw new Error(`Only failed or budget-exhausted jobs can be retried: ${request.jobId}`);
+      const budget = current.budgetRemaining + additionalBudget;
+      if (budget < current.estimatedCost)
+        throw new Error(`Retry budget is below the estimated cost for ${request.jobId}`);
+      db.prepare(
+        `UPDATE jobs SET status = 'scheduled', not_before = ?, max_attempts = MAX(max_attempts, attempt + 1),
+          budget_remaining = ?, last_error_json = NULL, completed_at = NULL, updated_at = ?
+         WHERE job_id = ?`,
+      ).run(request.now, budget, request.now, request.jobId);
+      recordActivity(actor, "coordinator.job_manual_retry", "job", request.jobId);
+      const retried = read(request.jobId);
+      if (!retried) throw new Error(`Retried durable job ${request.jobId} disappeared`);
+      return retried;
+    });
+  };
+
+  return Object.freeze({
+    enqueue,
+    get: async (jobId: string) => read(jobId),
+    list,
+    claim,
+    renew,
+    complete,
+    fail,
+    cancel,
+    retry,
+  });
+}
+
+function decodeDurableJob(row: unknown): DurableJobRecord {
+  const leaseOwner = optionalString(row, "lease_owner");
+  const leaseToken = optionalString(row, "lease_token");
+  const leaseUntil = optionalString(row, "lease_until");
+  const result = optionalString(row, "result_json");
+  const lastError = optionalString(row, "last_error_json");
+  const completedAt = optionalString(row, "completed_at");
+  return Object.freeze({
+    jobId: requiredString(row, "job_id"),
+    kind: requiredString(row, "kind"),
+    payload: JsonValueSchema.parse(parseJson(requiredString(row, "payload_json"))),
+    payloadRefs: Object.freeze(
+      z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "payload_refs_json"))),
+    ),
+    operationId: requiredString(row, "operation_id"),
+    idempotencyKey: requiredString(row, "idempotency_key"),
+    status: JobStatusSchema.parse(requiredString(row, "status")),
+    notBefore: requiredString(row, "not_before"),
+    ...(leaseOwner === undefined ? {} : { leaseOwner }),
+    ...(leaseToken === undefined ? {} : { leaseToken }),
+    ...(leaseUntil === undefined ? {} : { leaseUntil }),
+    attempt: requiredNumber(row, "attempt"),
+    maxAttempts: requiredNumber(row, "max_attempts"),
+    estimatedCost: requiredNumber(row, "estimated_cost"),
+    budgetRemaining: requiredNumber(row, "budget_remaining"),
+    ...(result === undefined ? {} : { result: JsonValueSchema.parse(parseJson(result)) }),
+    ...(lastError === undefined ? {} : { lastError: JobFailureSchema.parse(parseJson(lastError)) }),
+    createdAt: requiredString(row, "created_at"),
+    updatedAt: requiredString(row, "updated_at"),
+    ...(completedAt === undefined ? {} : { completedAt }),
+  });
+}

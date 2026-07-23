@@ -14,9 +14,11 @@ import { createId } from "@noesis/domain";
 import { createLearningEngine } from "@noesis/learning";
 import { createDurableScheduler, createNoesisRuntime, type NoesisRuntime } from "@noesis/runtime";
 import {
+  createFakeAgentRoleRunner,
   createPiModelServices,
   createFakeAgentRuntime,
   createPiAgentRuntime,
+  createPiAgentRoleRunner,
   type NoesisAuthEvent,
   type NoesisAuthLoginCallbacks,
   type NoesisAuthPrompt,
@@ -29,6 +31,7 @@ import {
   runFirstLaunchOnboarding,
   shouldAutoOnboard,
 } from "./onboarding.ts";
+import { createApplicationRuntimeComposition, type ApplicationRuntime } from "./runtime-composition.ts";
 
 interface CliInput {
   readonly args: readonly string[];
@@ -216,18 +219,40 @@ The latest session is ordered by last activity, then full trail ID ascending on 
 A session still marked running is not recovered or resumed automatically.
 Unknown options, conflicting startup arguments, and trailing operands are rejected.`;
 
-async function createRuntime(config: ResolvedNoesisConfig, forceFake = false): Promise<NoesisRuntime> {
+async function createRuntime(config: ResolvedNoesisConfig, forceFake = false): Promise<ApplicationRuntime> {
   const settings = forceFake
     ? { provider: "fake", model: "noesis-fake-1", thinkingLevel: "off" as const }
     : config.agent;
-  if (forceFake || config.agent.runtime === "fake")
-    return await createNoesisRuntime(config.home, createFakeAgentRuntime(), settings);
+  if (forceFake || config.agent.runtime === "fake") {
+    const runtime = await createNoesisRuntime(config.home, createFakeAgentRuntime(), settings);
+    return await createApplicationRuntimeComposition({
+      config,
+      runtime,
+      createRoleRunner: (configurations) =>
+        createFakeAgentRoleRunner({
+          variants: configurations,
+          respond: (request) => {
+            if (request.systemPrompt.includes("role: reflector"))
+              return Object.freeze({
+                text: JSON.stringify({ decision: "no_change", reason: "fake role found no change" }),
+              });
+            throw new Error(`No scripted fake response for ${request.systemPrompt.split("\n")[0]}`);
+          },
+        }),
+    });
+  }
   const services = createPiModelServices(config.home);
-  return await createNoesisRuntime(
+  const runtime = await createNoesisRuntime(
     config.home,
     createPiAgentRuntime(process.cwd(), services.models),
     settings,
   );
+  return await createApplicationRuntimeComposition({
+    config,
+    runtime,
+    createRoleRunner: (configurations) =>
+      createPiAgentRoleRunner(process.cwd(), services.models, configurations),
+  });
 }
 
 async function runDemo(runtime: NoesisRuntime): Promise<void> {
@@ -498,33 +523,37 @@ async function main(): Promise<void> {
     );
   const config = await resolveNoesisConfig({ home: input.home, cli: input.overrides });
   const runtime = await createRuntime(config, input.command === "demo");
-  if (input.command === "demo") await runDemo(runtime);
-  else if (input.command === "rebuild") {
-    await runtime.ledger.rebuildProjection();
-    console.log(`Rebuilt ${runtime.ledger.paths.projection}`);
-  } else if (input.command === "inspect")
-    console.log(
-      JSON.stringify(
-        {
-          trails: runtime.listTrails(),
-          activeCapabilities: runtime.capabilities.listActive(),
-          events: runtime.ledger.readAll().length,
-        },
-        null,
-        2,
-      ),
-    );
-  else if (input.command === "tui")
-    await startNoesisTui(runtime, {
-      provider: config.agent.provider,
-      model: config.agent.model,
-      thinkingLevel: config.agent.thinkingLevel,
-      session: input.session,
-    });
-  else
-    throw new Error(
-      `Unknown command ${input.command}. Use tui, onboard, demo, inspect, rebuild, config, or auth.`,
-    );
+  try {
+    if (input.command === "demo") await runDemo(runtime);
+    else if (input.command === "rebuild") {
+      await runtime.ledger.rebuildProjection();
+      console.log(`Rebuilt ${runtime.ledger.paths.projection}`);
+    } else if (input.command === "inspect")
+      console.log(
+        JSON.stringify(
+          {
+            trails: runtime.listTrails(),
+            activeCapabilities: runtime.capabilities.listActive(),
+            events: runtime.ledger.readAll().length,
+          },
+          null,
+          2,
+        ),
+      );
+    else if (input.command === "tui")
+      await startNoesisTui(runtime, {
+        provider: config.agent.provider,
+        model: config.agent.model,
+        thinkingLevel: config.agent.thinkingLevel,
+        session: input.session,
+      });
+    else
+      throw new Error(
+        `Unknown command ${input.command}. Use tui, onboard, demo, inspect, rebuild, config, or auth.`,
+      );
+  } finally {
+    await runtime.shutdown();
+  }
 }
 
 await main().catch((error: unknown) => {
