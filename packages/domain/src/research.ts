@@ -2,10 +2,15 @@ export const DATABASE_TABLES = [
   "sessions",
   "messages",
   "tool_calls",
+  "outcomes",
   "jobs",
   "experiments",
   "experiment_trials",
   "feedback_signals",
+  "experiment_observations",
+  "experiment_research_runs",
+  "experiment_outcomes",
+  "successor_lineage_inputs",
   "preflight_plans",
   "preflight_reports",
   "evaluations",
@@ -264,6 +269,8 @@ export interface EvaluationComparison {
   readonly summary: string;
 }
 
+export type PreflightDecision = "pass" | "block" | "inconclusive" | "approval_required";
+
 export interface PreflightReport {
   readonly preflightId: string;
   readonly experimentId: string;
@@ -276,7 +283,7 @@ export interface PreflightReport {
   readonly appliedCriteria: readonly AppliedCriterionRef[];
   readonly railChecks: readonly RailCheckResult[];
   readonly comparison: EvaluationComparison;
-  readonly decision: "pass" | "block" | "inconclusive";
+  readonly decision: PreflightDecision;
   readonly reportEvidence: EvidenceRevisionRef<"report">;
 }
 

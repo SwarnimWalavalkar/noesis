@@ -17,6 +17,7 @@ export * from "./pi-role-backend.ts";
 export * from "./role-context.ts";
 export * from "./role-runner.ts";
 export * from "./role-types.ts";
+export * from "./session-tool-registration.ts";
 export type {
   AgentCompletedStopReason,
   AgentContextUsage,

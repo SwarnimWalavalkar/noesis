@@ -56,6 +56,10 @@ function createFakeResearchState(): ResearchStatePort {
   return Object.freeze({
     experiments: Object.freeze({
       getExperiment: async (experimentId: string) => experiments.get(experimentId),
+      listExperiments: async (request: Parameters<ResearchStatePort["experiments"]["listExperiments"]>[0]) =>
+        [...experiments.values()]
+          .filter((experiment) => request.status === undefined || experiment.status === request.status)
+          .slice(0, request.limit),
       putExperiment: async (experiment: Experiment) => {
         const existing = experiments.get(experiment.experimentId);
         if (
@@ -88,6 +92,20 @@ function createFakeResearchState(): ResearchStatePort {
       putPreflightReport: async (report: PreflightReport) => {
         reports.set(report.preflightId, report);
         return row("preflight_reports", report.preflightId);
+      },
+      completePreflight: async ({
+        report,
+        evaluation,
+      }: {
+        readonly report: PreflightReport;
+        readonly evaluation: EvaluationRecord;
+      }) => {
+        reports.set(report.preflightId, report);
+        evaluations.set(evaluation.evaluationId, evaluation);
+        return {
+          report: row("preflight_reports", report.preflightId),
+          evaluation: row("evaluations", evaluation.evaluationId),
+        };
       },
     }),
     evaluations: Object.freeze({
@@ -214,6 +232,23 @@ function createFakeWorkspaceStore(): WorkspaceStore {
       }),
     }),
     research: createFakeResearchState(),
+    jobs: Object.freeze({
+      enqueue: async () => {
+        throw new Error("unused fake job store");
+      },
+      get: async () => undefined,
+      list: async () => [],
+      claim: async () => undefined,
+      renew: async () => false,
+      complete: async () => false,
+      fail: async () => {
+        throw new Error("unused fake job store");
+      },
+      cancel: async () => undefined,
+      retry: async () => {
+        throw new Error("unused fake job store");
+      },
+    }),
     declaredAuthority: declaredAuthorityFor,
   });
 }

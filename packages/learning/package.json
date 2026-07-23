@@ -7,8 +7,15 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@noesis/agent-types": "workspace:*",
     "@noesis/capabilities": "workspace:*",
+    "@noesis/config": "workspace:*",
     "@noesis/domain": "workspace:*",
-    "@noesis/ledger": "workspace:*"
+    "@noesis/intelligence": "workspace:*",
+    "@noesis/ledger": "workspace:*",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@noesis/workspace": "workspace:*"
   }
 }

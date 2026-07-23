@@ -41,6 +41,9 @@ importers:
       '@noesis/evals':
         specifier: workspace:*
         version: link:../../packages/evals
+      '@noesis/intelligence':
+        specifier: workspace:*
+        version: link:../../packages/intelligence
       '@noesis/learning':
         specifier: workspace:*
         version: link:../../packages/learning
@@ -56,6 +59,12 @@ importers:
       '@noesis/tui':
         specifier: workspace:*
         version: link:../../packages/tui
+      '@noesis/workspace':
+        specifier: workspace:*
+        version: link:../../packages/workspace
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
 
   packages/agent-types:
     dependencies:
@@ -119,33 +128,74 @@ importers:
 
   packages/evals:
     dependencies:
+      '@noesis/agent-types':
+        specifier: workspace:*
+        version: link:../agent-types
       '@noesis/capabilities':
         specifier: workspace:*
         version: link:../capabilities
+      '@noesis/config':
+        specifier: workspace:*
+        version: link:../config
       '@noesis/domain':
         specifier: workspace:*
         version: link:../domain
       '@noesis/ledger':
         specifier: workspace:*
         version: link:../ledger
-
-  packages/intelligence:
-    dependencies:
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@noesis/learning':
+        specifier: workspace:*
+        version: link:../learning
+      '@noesis/runtime-pi':
+        specifier: workspace:*
+        version: link:../runtime-pi
       '@noesis/workspace':
         specifier: workspace:*
         version: link:../workspace
 
-  packages/learning:
+  packages/intelligence:
     dependencies:
-      '@noesis/capabilities':
-        specifier: workspace:*
-        version: link:../capabilities
       '@noesis/domain':
         specifier: workspace:*
         version: link:../domain
+      '@noesis/workspace':
+        specifier: workspace:*
+        version: link:../workspace
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+
+  packages/learning:
+    dependencies:
+      '@noesis/agent-types':
+        specifier: workspace:*
+        version: link:../agent-types
+      '@noesis/capabilities':
+        specifier: workspace:*
+        version: link:../capabilities
+      '@noesis/config':
+        specifier: workspace:*
+        version: link:../config
+      '@noesis/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@noesis/intelligence':
+        specifier: workspace:*
+        version: link:../intelligence
       '@noesis/ledger':
         specifier: workspace:*
         version: link:../ledger
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@noesis/workspace':
+        specifier: workspace:*
+        version: link:../workspace
 
   packages/ledger:
     dependencies:
@@ -182,6 +232,9 @@ importers:
       '@noesis/capabilities':
         specifier: workspace:*
         version: link:../capabilities
+      '@noesis/config':
+        specifier: workspace:*
+        version: link:../config
       '@noesis/context':
         specifier: workspace:*
         version: link:../context
@@ -191,6 +244,12 @@ importers:
       '@noesis/evals':
         specifier: workspace:*
         version: link:../evals
+      '@noesis/intelligence':
+        specifier: workspace:*
+        version: link:../intelligence
+      '@noesis/learning':
+        specifier: workspace:*
+        version: link:../learning
       '@noesis/ledger':
         specifier: workspace:*
         version: link:../ledger
@@ -200,10 +259,12 @@ importers:
       '@noesis/policy':
         specifier: workspace:*
         version: link:../policy
-    devDependencies:
-      '@noesis/learning':
+      '@noesis/workspace':
         specifier: workspace:*
-        version: link:../learning
+        version: link:../workspace
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
 
   packages/runtime-pi:
     dependencies:
@@ -219,6 +280,9 @@ importers:
       '@noesis/domain':
         specifier: workspace:*
         version: link:../domain
+      '@noesis/intelligence':
+        specifier: workspace:*
+        version: link:../intelligence
       zod:
         specifier: 4.4.3
         version: 4.4.3

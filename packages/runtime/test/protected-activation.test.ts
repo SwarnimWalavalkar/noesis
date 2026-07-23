@@ -106,6 +106,8 @@ describe("protected activation contract", () => {
     ).resolves.toBe(false);
     reports.set(report.preflightId, { ...report, decision: "block" });
     await expect(activationIsBoundToPreflight(request, preflights)).resolves.toBe(false);
+    reports.set(report.preflightId, { ...report, decision: "approval_required" });
+    await expect(activationIsBoundToPreflight(request, preflights)).resolves.toBe(false);
   });
 
   test("rejects non-report evidence at the storage boundary", async () => {

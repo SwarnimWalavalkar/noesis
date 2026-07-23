@@ -105,7 +105,7 @@ describe("WorkspaceStore", () => {
       .all()
       .map((row) => Reflect.get(row, "version"));
     database.close();
-    expect(versions).toEqual([1, 2, 3, 4]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
   });
 
   test("rolls back repository activity when a foreign-key write fails", async () => {
@@ -339,6 +339,9 @@ describe("WorkspaceStore", () => {
     await store.research.experiments.putExperiment(completed);
 
     expect(await store.research.experiments.getExperiment(experiment.experimentId)).toEqual(completed);
+    expect(await store.research.experiments.listExperiments({ status: "completed", limit: 10 })).toEqual([
+      completed,
+    ]);
     expect(await store.research.preflights.getPreflightReport(report.preflightId)).toEqual(report);
     expect(await store.research.evaluations.listEvaluations(experiment.experimentId)).toHaveLength(1);
     expect(await store.research.feedbackSignals.getFeedbackSignal("feedback-1")).toMatchObject({

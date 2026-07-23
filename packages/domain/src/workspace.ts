@@ -214,6 +214,10 @@ export interface ArtifactFilePort {
 
 export interface ExperimentStorePort {
   readonly getExperiment: (experimentId: string) => Promise<Experiment | undefined>;
+  readonly listExperiments: (request: {
+    readonly status?: Experiment["status"];
+    readonly limit: number;
+  }) => Promise<readonly Experiment[]>;
   readonly putExperiment: (experiment: Experiment) => Promise<DatabaseRowRef<"experiments">>;
 }
 
@@ -228,6 +232,13 @@ export interface PreflightStorePort {
   readonly putPreflightPlan: (plan: PreflightPlan) => Promise<DatabaseRowRef<"preflight_plans">>;
   readonly getPreflightReport: (preflightId: string) => Promise<PreflightReport | undefined>;
   readonly putPreflightReport: (report: PreflightReport) => Promise<DatabaseRowRef<"preflight_reports">>;
+  readonly completePreflight: (input: {
+    readonly report: PreflightReport;
+    readonly evaluation: EvaluationRecord;
+  }) => Promise<{
+    readonly report: DatabaseRowRef<"preflight_reports">;
+    readonly evaluation: DatabaseRowRef<"evaluations">;
+  }>;
 }
 
 export interface EvaluationStorePort {
@@ -239,6 +250,105 @@ export interface EvaluationStorePort {
 export interface FeedbackSignalStorePort {
   readonly getFeedbackSignal: (signalId: string) => Promise<FeedbackSignal | undefined>;
   readonly recordFeedbackSignal: (signal: FeedbackSignal) => Promise<DatabaseRowRef<"feedback_signals">>;
+}
+
+export type DurableJobStatus =
+  | "scheduled"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "budget_exhausted";
+
+export interface DurableJobRecord {
+  readonly jobId: string;
+  readonly kind: string;
+  readonly payload: unknown;
+  readonly payloadRefs: readonly EvidenceRef[];
+  readonly operationId: string;
+  readonly idempotencyKey: string;
+  readonly status: DurableJobStatus;
+  readonly notBefore: string;
+  readonly leaseOwner?: string;
+  readonly leaseToken?: string;
+  readonly leaseUntil?: string;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  readonly estimatedCost: number;
+  readonly budgetRemaining: number;
+  readonly result?: unknown;
+  readonly lastError?: {
+    readonly code: string;
+    readonly message: string;
+    readonly retryable: boolean;
+    readonly ambiguous: boolean;
+  };
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly completedAt?: string;
+}
+
+export interface DurableJobEnqueueRequest {
+  readonly jobId: string;
+  readonly kind: string;
+  readonly payload: unknown;
+  readonly payloadRefs: readonly EvidenceRef[];
+  readonly operationId: string;
+  readonly idempotencyKey: string;
+  readonly notBefore: string;
+  readonly maxAttempts: number;
+  readonly estimatedCost: number;
+  readonly budget: number;
+}
+
+export interface DurableJobFailure {
+  readonly code: string;
+  readonly message: string;
+  readonly retryable: boolean;
+  readonly ambiguous: boolean;
+}
+
+/** Atomic SQLite-backed scheduling primitives. Runtime owns job meanings and retry decisions. */
+export interface DurableJobStorePort {
+  readonly enqueue: (request: DurableJobEnqueueRequest) => Promise<DurableJobRecord>;
+  readonly get: (jobId: string) => Promise<DurableJobRecord | undefined>;
+  readonly list: (request?: {
+    readonly status?: DurableJobStatus;
+    readonly kind?: string;
+    readonly limit?: number;
+  }) => Promise<readonly DurableJobRecord[]>;
+  readonly claim: (request: {
+    readonly workerId: string;
+    readonly now: string;
+    readonly leaseUntil: string;
+    readonly maximumCost: number;
+    readonly kinds?: readonly string[];
+  }) => Promise<DurableJobRecord | undefined>;
+  readonly renew: (request: {
+    readonly jobId: string;
+    readonly leaseToken: string;
+    readonly now: string;
+    readonly leaseUntil: string;
+  }) => Promise<boolean>;
+  readonly complete: (request: {
+    readonly jobId: string;
+    readonly leaseToken: string;
+    readonly now: string;
+    readonly result?: unknown;
+  }) => Promise<boolean>;
+  readonly fail: (request: {
+    readonly jobId: string;
+    readonly leaseToken: string;
+    readonly now: string;
+    readonly retryAt: string;
+    readonly failure: DurableJobFailure;
+  }) => Promise<DurableJobRecord>;
+  readonly cancel: (jobId: string, now: string) => Promise<DurableJobRecord | undefined>;
+  readonly retry: (request: {
+    readonly jobId: string;
+    readonly now: string;
+    readonly additionalBudget?: number;
+  }) => Promise<DurableJobRecord>;
 }
 
 export interface ResearchStatePort {
@@ -262,5 +372,6 @@ export interface WorkspaceStore {
   readonly evidence: EvidenceFilePort;
   readonly artifacts: ArtifactFilePort;
   readonly research: ResearchStatePort;
+  readonly jobs: DurableJobStorePort;
   readonly declaredAuthority: typeof declaredAuthorityFor;
 }
