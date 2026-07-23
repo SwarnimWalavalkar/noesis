@@ -2,7 +2,7 @@
 
 ## Architecture
 
-- Read `noesis-first-complete-iteration.html` and `noesis-autonomous-compounding-implementation-plan.html` before changing package ownership or protected boundaries. The autonomous-compounding plan supersedes the older plan's storage and ledger architecture.
+- Read `plans/noesis-first-complete-iteration.html` and `plans/noesis-autonomous-compounding-implementation-plan.html` before changing package ownership or protected boundaries. The autonomous-compounding plan supersedes the older plan's storage and ledger architecture.
 - Pi executes turns only. Only `packages/runtime-pi` may import Pi agent/runtime types. Do not introduce `createAgentSession` or Pi `InteractiveMode` as a product root.
 - The TUI uses `@earendil-works/pi-tui` directly and renders read models. UI components never own durable state.
 - `WorkspaceStore` owns persistence boundaries. SQLite is authoritative for operational state; ordinary editable workspace files are authoritative for declarative definitions.
@@ -26,6 +26,7 @@
 ## Local workflow
 
 - Node >= 22.19, TypeScript strict ESM, exact direct dependency pins.
+- Keep all planning artifacts under `plans/`.
 - Prefer immutable values, pure decision functions, typed results/errors, and dependency injection at I/O boundaries.
 - Do not use `any`. Avoid assertions; validate unknown durable data at the boundary.
 - Read a source file fully before a broad edit. Keep public package APIs narrow and add abstractions only with a consumer in this iteration.
