@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
+import type { CapabilityRevision, CapabilityRevisionRef } from "./research.ts";
 
 export const SCHEMA_VERSION = 1 as const;
 const ISO_DATE_TIME_PATTERN = "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$";
@@ -10,12 +11,19 @@ export type Result<T, E> =
 export const ok = <T>(value: T): Result<T, never> => ({ ok: true, value });
 export const err = <E>(error: E): Result<never, E> => ({ ok: false, error });
 
-const PrincipalSchema = z.enum(["foreground", "reflector", "evaluator", "promoter", "scheduler", "system"]);
+export const PrincipalSchema = z.enum([
+  "foreground",
+  "reflector",
+  "evaluator",
+  "promoter",
+  "scheduler",
+  "system",
+]);
 export type Principal = z.infer<typeof PrincipalSchema>;
 export type TrailStatus = "idle" | "running" | "aborted" | "failed" | "completed";
 export type ProposalKind = "memory" | "knowledge" | "workflow";
 export type CapabilityStatus = "candidate" | "active" | "rejected" | "rolled_back";
-const EffectClassSchema = z.enum(["read", "write", "execute", "network", "promote", "schedule"]);
+export const EffectClassSchema = z.enum(["read", "write", "execute", "network", "promote", "schedule"]);
 export type EffectClass = z.infer<typeof EffectClassSchema>;
 
 export const EventTypeSchema = z.enum([
@@ -133,6 +141,19 @@ export function canonicalJson(value: unknown): string {
 export const sha256 = (value: string | Uint8Array): string =>
   createHash("sha256").update(value).digest("hex");
 
+export function capabilityRevisionDigest(revision: CapabilityRevision): string {
+  return sha256(canonicalJson(revision));
+}
+
+export function capabilityRevisionRef(revision: CapabilityRevision): CapabilityRevisionRef {
+  return Object.freeze({
+    kind: "capability_revision",
+    capabilityId: revision.capabilityId,
+    capabilityRevisionId: revision.capabilityRevisionId,
+    bundleDigest: capabilityRevisionDigest(revision),
+  });
+}
+
 export function assertLedgerEvent(value: unknown): asserts value is LedgerEvent {
   const parsed = LedgerEventSchema.safeParse(value);
   if (parsed.success) return;
@@ -147,3 +168,37 @@ export function assertGrant(value: unknown): asserts value is Grant {
 export function eventChecksum(event: Omit<LedgerEvent, "checksum">): string {
   return sha256(canonicalJson(event));
 }
+
+export const StableEffectOperationIdentitySchema = z.strictObject({
+  operationId: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  principal: PrincipalSchema,
+  effect: EffectClassSchema,
+  resource: z.string().min(1),
+  requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
+});
+export type StableEffectOperationIdentity = Readonly<z.infer<typeof StableEffectOperationIdentitySchema>>;
+
+export const StableEffectOperationAttemptSchema = z.strictObject({
+  identity: StableEffectOperationIdentitySchema,
+  estimatedCost: z.number().nonnegative(),
+  attempt: z.number().int().positive(),
+});
+export type StableEffectOperationAttempt = Readonly<z.infer<typeof StableEffectOperationAttemptSchema>>;
+
+export function effectOperationFingerprint(identity: StableEffectOperationIdentity): string {
+  return sha256(
+    canonicalJson({
+      operationId: identity.operationId,
+      idempotencyKey: identity.idempotencyKey,
+      principal: identity.principal,
+      effect: identity.effect,
+      resource: identity.resource,
+      requestDigest: identity.requestDigest,
+    }),
+  );
+}
+
+export * from "./research.ts";
+export * from "./storage-schemas.ts";
+export * from "./workspace.ts";

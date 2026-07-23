@@ -10,6 +10,8 @@ import { LedgerConflictError, type ExperienceLedger } from "@noesis/ledger";
 import type { AuthorityReceipt, AuthorityReceiptVerifier } from "@noesis/policy";
 import { z } from "zod";
 
+export * from "./atomic.ts";
+
 export interface PermissionManifest {
   readonly effects: readonly EffectClass[];
   readonly resourcePrefixes: readonly string[];

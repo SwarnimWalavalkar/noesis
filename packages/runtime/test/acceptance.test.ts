@@ -4,14 +4,14 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { renderContext } from "@noesis/context";
 import { createLearningEngine } from "@noesis/learning";
-import {
-  createFakeAgentRuntime,
-  type AgentRuntimeEvent,
-  type AgentRuntimeRequest,
-  type AgentRuntimeResult,
-  type NoesisAgentRuntime,
-} from "@noesis/runtime-pi";
+import type {
+  AgentRuntimeEvent,
+  AgentRuntimeRequest,
+  AgentRuntimeResult,
+  NoesisAgentRuntime,
+} from "@noesis/agent-types";
 import { createDurableScheduler, createNoesisRuntime, SESSION_PICKER_LIMIT } from "../src/index.ts";
+import { createFakeAgentRuntime } from "./fake-runtime.ts";
 
 describe("integrated compounding loop", () => {
   test("isolates state across independent runtime factories", async () => {

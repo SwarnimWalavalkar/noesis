@@ -2,24 +2,26 @@
 
 ## Architecture
 
-- Read `noesis-first-complete-iteration.html` before changing package ownership or protected boundaries.
+- Read `noesis-first-complete-iteration.html` and `noesis-autonomous-compounding-implementation-plan.html` before changing package ownership or protected boundaries. The autonomous-compounding plan supersedes the older plan's storage and ledger architecture.
 - Pi executes turns only. Only `packages/runtime-pi` may import Pi agent/runtime types. Do not introduce `createAgentSession` or Pi `InteractiveMode` as a product root.
 - The TUI uses `@earendil-works/pi-tui` directly and renders read models. UI components never own durable state.
-- JSONL is the source of truth. SQLite and Markdown are rebuildable projections. Every durable schema is versioned and validated.
-- Serialize the complete ledger append operation. Cooperating processes must honor the journal writer lock; never calculate a sequence or checksum outside that ownership window.
-- Every meaningful transition appends an event. Never rewrite past events or make SQLite the only copy of history.
-- Artifacts are content-addressed and immutable. Keep lineage in ledger events.
+- `WorkspaceStore` owns persistence boundaries. SQLite is authoritative for operational state; ordinary editable workspace files are authoritative for declarative definitions.
+- Recorded definition revisions and evaluation pins resolve to immutable, byte-stable snapshots. Experiments, turns, activation, inspection, and revert never depend on mutable working-file bytes.
+- FTS, embedding, search-document, and UI read-model data are rebuildable indexes or projections. Derived data must cite an authoritative SQLite row or recorded file revision.
+- Every persisted datum has exactly one declared authority. Do not dual-write competing canonical copies or reconstruct current operational state from activity history.
+- SQLite transactions, constraints, migrations, integrity checks, and backups govern operational recovery. Activity and file-revision records preserve provenance and debugging history; they are not a universal recovery journal.
+- Large outputs remain ordinary artifact files with SQLite metadata. Evaluation evidence is revisioned and append-only once used by a decision; credentials remain only in the protected credential store or process environment.
 - Context fragments have provenance and hard per-fragment and total bounds. Capability versions are frozen at turn start.
 
 ## Protected control plane
 
 - Reflection may propose memory, knowledge, workflows, cases, or candidates. It must never promote executable behavior.
-- Permission, evaluation, ledger integrity, promotion, and rollback rules stay outside generated or self-modifiable content.
+- Permission, evaluation, workspace integrity, activation, promotion, and rollback rules stay outside generated or self-modifiable content.
 - All side effects and protected promotion, rollback, and scheduling transitions go through `AuthorityBoundary` and `EffectGateway`. Ordinary callers never install grants or mint receipts.
-- Reserve grant use and cost durably before execution. Rehydrate reservations and completions from JSONL and fail closed when a reservation has no unambiguous outcome.
-- Retries require stable idempotency keys. Never retry an incomplete effect by assuming it failed.
+- Reserve grant use and cost durably in authoritative operational state before execution. Rehydrate reservations and completions from SQLite and fail closed when a reservation has no unambiguous outcome.
+- Effectful retries require stable operation identities and idempotency keys bound to principal, effect class, resource, and request identity. Never retry an incomplete effect by assuming it failed.
 - Background jobs receive scheduler-specific grants that cannot widen themselves.
-- Candidate authors provide source cases only. The evaluation package owns held-out cases separately; reports and promotions must bind the canonical candidate digest and protected suite digest. Retain failed evaluations and regression evidence.
+- Candidate authors provide source cases only and cannot see judge decisions or protected cases. Evaluation owns comparison evidence; activation binds the exact candidate revision and preflight evidence. Retain failed evaluations and regression evidence.
 
 ## Local workflow
 

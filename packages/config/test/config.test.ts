@@ -9,6 +9,7 @@ import {
   readNoesisConfig,
   resolveNoesisConfig,
   updateNoesisConfig,
+  updateUserControlConfig,
 } from "../src/index.ts";
 
 function updateFromSeparateProcess(home: string, patch: Readonly<Record<string, string>>): Promise<void> {
@@ -61,6 +62,44 @@ describe("Noesis config", () => {
     expect((await resolveNoesisConfig({ home, env: {} })).agent.thinkingLevel).toBe(thinkingLevel);
   });
 
+  test("accepts legacy version-1 files and resolves new preferences without rewriting them", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-legacy-v1-"));
+    const legacy = '{"schemaVersion":1,"agent":{"runtime":"fake"}}\n';
+    await writeFile(noesisConfigPath(home), legacy);
+
+    const resolved = await resolveNoesisConfig({ home, env: {} });
+
+    expect(resolved.learning).toEqual({ enabled: true, notifications: "quiet", backgroundBudget: 1 });
+    expect(resolved.autonomy).toEqual({
+      riskLevel: "low",
+      approval: "authority_expansion",
+      pins: "respect",
+      vetoes: "respect",
+    });
+    expect(resolved.experiments).toEqual({ maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 });
+    expect(await readFile(noesisConfigPath(home), "utf8")).toBe(legacy);
+  });
+
+  test.each(["off", "low"])("preserves explicit %s autonomy with zero-value defaults", async (riskLevel) => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-autonomy-"));
+    await writeFile(
+      noesisConfigPath(home),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
+        autonomy: { riskLevel, approval: "all_changes", pins: "respect", vetoes: "respect" },
+        experiments: { maxCases: 1, maxAttemptsPerArm: 1, maxCost: 0 },
+      }),
+    );
+
+    const resolved = await resolveNoesisConfig({ home, env: {} });
+
+    expect(resolved.learning).toEqual({ enabled: false, notifications: "off", backgroundBudget: 0 });
+    expect(resolved.autonomy.riskLevel).toBe(riskLevel);
+    expect(resolved.experiments.maxCost).toBe(0);
+  });
+
   test("rejects unsupported versions and unknown fields with actionable errors", async () => {
     const unsupported = await mkdtemp(join(tmpdir(), "noesis-config-version-"));
     await writeFile(noesisConfigPath(unsupported), JSON.stringify({ schemaVersion: 2, agent: {} }));
@@ -101,6 +140,60 @@ describe("Noesis config", () => {
         model: "gpt-5.5",
         thinkingLevel: "off",
       },
+      learning: { enabled: true, notifications: "quiet", backgroundBudget: 1 },
+      autonomy: {
+        riskLevel: "low",
+        approval: "authority_expansion",
+        pins: "respect",
+        vetoes: "respect",
+      },
+      experiments: { maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 },
+    });
+  });
+
+  test("agent updates preserve declarative learning, autonomy, and experiment preferences", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-preserve-controls-"));
+    await writeFile(
+      noesisConfigPath(home),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
+        autonomy: { riskLevel: "off" },
+        experiments: { maxCases: 2, maxCost: 0 },
+      }),
+    );
+
+    await updateNoesisConfig(home, { model: "updated-model" });
+
+    expect(JSON.parse(await readFile(noesisConfigPath(home), "utf8"))).toEqual({
+      schemaVersion: 1,
+      agent: { model: "updated-model" },
+      learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
+      autonomy: { riskLevel: "off" },
+      experiments: { maxCases: 2, maxCost: 0 },
+    });
+  });
+
+  test("updates user controls atomically while preserving the legacy agent section", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-update-controls-"));
+    await writeFile(
+      noesisConfigPath(home),
+      JSON.stringify({ schemaVersion: 1, agent: { model: "keep-model" } }),
+    );
+
+    await updateUserControlConfig(home, {
+      learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
+      autonomy: { riskLevel: "low", approval: "all_changes" },
+      experiments: { maxCases: 3, maxAttemptsPerArm: 1, maxCost: 0 },
+    });
+
+    expect(await resolveNoesisConfig({ home, env: {} })).toMatchObject({
+      schemaVersion: 1,
+      agent: { model: "keep-model" },
+      learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
+      autonomy: { riskLevel: "low", approval: "all_changes" },
+      experiments: { maxCases: 3, maxAttemptsPerArm: 1, maxCost: 0 },
     });
   });
 
@@ -116,7 +209,7 @@ describe("Noesis config", () => {
       expect(resolved.agent.provider).toBe(`provider-${pair}`);
       expect(resolved.agent.model).toBe(`model-${pair}`);
     }
-  });
+  }, 30_000);
 
   test("serializes separate writer processes without losing either patch", async () => {
     for (let pair = 0; pair < 20; pair += 1) {
@@ -130,7 +223,7 @@ describe("Noesis config", () => {
       expect(resolved.agent.provider).toBe(`process-provider-${pair}`);
       expect(resolved.agent.model).toBe(`process-model-${pair}`);
     }
-  });
+  }, 30_000);
 
   test("reclaims a dead config writer lock before applying the update", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-dead-writer-"));

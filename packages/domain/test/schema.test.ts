@@ -1,5 +1,12 @@
 import { describe, expect, test } from "vitest";
-import { GrantSchema, LedgerEventSchema, assertLedgerEvent, toJsonValue } from "../src/index.ts";
+import {
+  GrantSchema,
+  LedgerEventSchema,
+  StableEffectOperationAttemptSchema,
+  assertLedgerEvent,
+  effectOperationFingerprint,
+  toJsonValue,
+} from "../src/index.ts";
 
 const ledgerEvent = {
   schemaVersion: 1,
@@ -41,5 +48,27 @@ describe("domain Zod schemas", () => {
     });
     expect(() => toJsonValue({ value: undefined })).toThrow();
     expect(() => toJsonValue(Number.POSITIVE_INFINITY)).toThrow();
+  });
+
+  test("binds stable effect-operation identity to the request authority tuple", () => {
+    const attempt = StableEffectOperationAttemptSchema.parse({
+      identity: {
+        operationId: "operation-1",
+        idempotencyKey: "send:message-1",
+        principal: "foreground",
+        effect: "network",
+        resource: "provider:messages",
+        requestDigest: "b".repeat(64),
+      },
+      estimatedCost: 1,
+      attempt: 1,
+    });
+    const fingerprint = effectOperationFingerprint(attempt.identity);
+
+    expect(fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(effectOperationFingerprint({ ...attempt.identity, resource: "provider:other-account" })).not.toBe(
+      fingerprint,
+    );
+    expect(StableEffectOperationAttemptSchema.safeParse({ ...attempt, attempt: 0 }).success).toBe(false);
   });
 });

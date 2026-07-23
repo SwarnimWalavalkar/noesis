@@ -10,6 +10,7 @@
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
     "noPropertyAccessFromIndexSignature": true,
+    "noEmit": true,
     "verbatimModuleSyntax": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
@@ -17,18 +18,22 @@
     "types": ["node", "vitest/globals"],
     "baseUrl": ".",
     "paths": {
+      "@noesis/agent-types": ["packages/agent-types/src/index.ts"],
       "@noesis/capabilities": ["packages/capabilities/src/index.ts"],
       "@noesis/config": ["packages/config/src/index.ts"],
       "@noesis/context": ["packages/context/src/index.ts"],
       "@noesis/domain": ["packages/domain/src/index.ts"],
       "@noesis/evals": ["packages/evals/src/index.ts"],
+      "@noesis/intelligence": ["packages/intelligence/src/index.ts"],
       "@noesis/learning": ["packages/learning/src/index.ts"],
       "@noesis/ledger": ["packages/ledger/src/index.ts"],
       "@noesis/memory": ["packages/memory/src/index.ts"],
       "@noesis/policy": ["packages/policy/src/index.ts"],
       "@noesis/runtime": ["packages/runtime/src/index.ts"],
       "@noesis/runtime-pi": ["packages/runtime-pi/src/index.ts"],
-      "@noesis/tui": ["packages/tui/src/index.ts"]
+      "@noesis/tool-runtime": ["packages/tool-runtime/src/index.ts"],
+      "@noesis/tui": ["packages/tui/src/index.ts"],
+      "@noesis/workspace": ["packages/workspace/src/index.ts"]
     }
   },
   "include": ["apps/**/*.ts", "packages/**/*.ts", "vitest.config.ts"]
