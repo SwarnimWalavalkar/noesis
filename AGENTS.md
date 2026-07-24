@@ -1,5 +1,16 @@
 # Noesis engineering invariants
 
+## Product contract
+
+- Read `docs/product-thesis.md`, `docs/product-experience.md`, and `plans/compounding-partnership-product-loop.md` before changing product behavior.
+- Deliver immediate value first. Preserve a future advantage only when the evidence supports a credible future use.
+- Infer collaboration posture. Ambiguous intellectual work defaults toward `work_with_me`, while explicit execution defaults toward `do_for_me`. A conversational instruction overrides the inference.
+- Start new learning at the narrowest plausible scope. Every durable learning names its anticipated future use, and recurring evidence is required before its scope broadens.
+- Run reflection ambiently after useful work. `no_change` is a valid result, and not every session must compound.
+- Keep every adaptation inspectable, contestable, and revertible. Normal workflows stay conversational instead of becoming approval dialogs.
+- Generated content may propose a change, but protected promotion remains outside generated or self-modifiable content.
+- Keep durable product doctrine under `docs/`. Keep implementation plans under `plans/`.
+
 ## Architecture
 
 - Read `plans/noesis-first-complete-iteration.html` and `plans/noesis-autonomous-compounding-implementation-plan.html` before changing package ownership or protected boundaries. The autonomous-compounding plan supersedes the older plan's storage and ledger architecture.
