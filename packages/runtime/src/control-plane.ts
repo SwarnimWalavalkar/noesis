@@ -108,14 +108,17 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
   };
 
   const reconcileActivations = async (): Promise<readonly ActivationReconciliation[]> => {
+    if (stopped) return Object.freeze([]);
     const experiments = await options.workspace.research.experiments.listExperiments({
       status: "preflight",
       limit: 1_000,
     });
+    if (stopped) return Object.freeze([]);
     const reconciled: ActivationReconciliation[] = [];
     for (const experiment of experiments.filter(isPreflightExperiment)) {
+      if (stopped) break;
       const handoff = await options.coordinator.getPreflightActivationHandoff(experiment.experimentId);
-      if (!handoff) continue;
+      if (!handoff || stopped) continue;
       const result = await options.activation.activateFromPreflight(handoff);
       reconciled.push(Object.freeze({ experimentId: experiment.experimentId, result }));
     }
@@ -127,7 +130,9 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     if (running) return running;
     const next = (async () => {
       await options.coordinator.runAvailable();
+      if (stopped) return Object.freeze([]);
       await options.feedback.runAvailable();
+      if (stopped) return Object.freeze([]);
       return await reconcileActivations();
     })().finally(() => {
       if (running === next) running = undefined;
@@ -136,6 +141,25 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     running = next;
     return next;
   }
+
+  const idle = async (): Promise<readonly ActivationReconciliation[]> => {
+    const reconciled: ActivationReconciliation[] = [];
+    for (;;) {
+      reconciled.push(...(await runAvailable()));
+      const timestamp = now().getTime();
+      const runnable = (await options.workspace.jobs.list({ limit: 1_000 })).some(
+        (job) =>
+          (job.kind === "runtime.reflect_turn" ||
+            job.kind === "runtime.author_revision" ||
+            job.kind === "runtime.preflight" ||
+            job.kind === "runtime.outcome_judge") &&
+          ((job.status === "scheduled" && new Date(job.notBefore).getTime() <= timestamp) ||
+            (job.status === "running" &&
+              (job.leaseUntil === undefined || new Date(job.leaseUntil).getTime() <= timestamp))),
+      );
+      if (!runnable) return Object.freeze(reconciled);
+    }
+  };
 
   const observeCompletedTurn = async (input: CompletedNormalTurn): Promise<CoordinatorJobView> => {
     if (stopped) throw new Error("Runtime control plane is stopped");
@@ -148,9 +172,9 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
   const stop = async (): Promise<void> => {
     stopped = true;
     clearWake();
-    await options.coordinator.stop();
-    await options.feedback.stop();
-    await running;
+    const coordinatorStop = options.coordinator.stop();
+    const feedbackStop = options.feedback.stop();
+    await Promise.all([coordinatorStop, feedbackStop, running]);
   };
 
   const controlPlane = Object.freeze({
@@ -159,7 +183,7 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     feedback: options.feedback,
     observeCompletedTurn,
     runAvailable,
-    idle: runAvailable,
+    idle,
     reconcileActivations,
     stop,
   });

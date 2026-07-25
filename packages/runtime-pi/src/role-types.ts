@@ -6,7 +6,7 @@ import type {
   AgentTrace,
   AgentUsage,
 } from "@noesis/agent-types";
-import type { CapabilityRevisionRef, ExperimentVariantRef, JsonValue } from "@noesis/domain";
+import type { CapabilityRevisionRef, ExperimentVariantRef } from "@noesis/domain";
 
 export type RoleReasoningLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -119,14 +119,6 @@ export interface RuntimePiStructuredInferencePort {
   }>;
 }
 
-export interface FakeRoleResponse {
-  readonly text: string;
-  readonly stopReason?: RoleStopReason;
-  readonly usage?: AgentUsage;
-  readonly latencyMs?: number;
-  readonly error?: string;
-}
-
 export interface ComparableRoleVariantFixture {
   readonly baseline: RuntimePiAgentRunRequest;
   readonly candidate: RuntimePiAgentRunRequest;
@@ -136,9 +128,4 @@ export interface ComparableRoleVariantFixture {
 export interface BlindedJudgeFixture {
   readonly messages: readonly AgentMessage[];
   readonly labels: Readonly<Record<"A" | "B", "first" | "second">>;
-}
-
-export interface GeneratedToolTransportRequest {
-  readonly payload: JsonValue;
-  readonly signal?: AbortSignal;
 }

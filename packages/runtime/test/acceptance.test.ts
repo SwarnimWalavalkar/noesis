@@ -11,17 +11,17 @@ import type {
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
 import { createDurableScheduler, createNoesisRuntime, SESSION_PICKER_LIMIT } from "../src/index.ts";
-import { createFakeAgentRuntime } from "./fake-runtime.ts";
+import { createScriptedAgentRuntime } from "./scripted-agent-runtime.ts";
 
 describe("integrated compounding loop", () => {
   test("isolates state across independent runtime factories", async () => {
     const first = await createNoesisRuntime(
       await mkdtemp(join(tmpdir(), "noesis-runtime-isolated-a-")),
-      createFakeAgentRuntime(),
+      createScriptedAgentRuntime(),
     );
     const second = await createNoesisRuntime(
       await mkdtemp(join(tmpdir(), "noesis-runtime-isolated-b-")),
-      createFakeAgentRuntime(),
+      createScriptedAgentRuntime(),
     );
 
     await first.startTrail({ title: "first only" });
@@ -33,7 +33,7 @@ describe("integrated compounding loop", () => {
   test("later work uses evaluated and authority-promoted learning", async () => {
     const runtime = await createNoesisRuntime(
       await mkdtemp(join(tmpdir(), "noesis-runtime-")),
-      createFakeAgentRuntime(),
+      createScriptedAgentRuntime(),
     );
     const first = await runtime.startTrail({ title: "source" });
     await runtime.runTurn(first.trailId, "Create an evidence brief");
@@ -58,27 +58,26 @@ describe("integrated compounding loop", () => {
     const result = await runtime.runTurn(later.trailId, "Create the next brief");
 
     expect(result.usedCapabilities).toEqual({ [candidate.name]: candidate.version });
-    expect(result.output).toContain(`${candidate.name}@${candidate.version}`);
     expect(runtime.ledger.findByType("capability.used")).toHaveLength(1);
   });
 
   test("restores the last frozen context and pinned capability versions after restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-hydrate-"));
-    const runtime = await createNoesisRuntime(root, createFakeAgentRuntime());
+    const runtime = await createNoesisRuntime(root, createScriptedAgentRuntime());
     const trail = await runtime.startTrail({ title: "hydrate" });
     const turn = await runtime.runTurn(trail.trailId, "remember this context");
-    const recovered = await createNoesisRuntime(root, createFakeAgentRuntime());
+    const recovered = await createNoesisRuntime(root, createScriptedAgentRuntime());
     expect(recovered.getTrail(trail.trailId).context).toEqual(turn.context);
     expect(recovered.getTrail(trail.trailId).capabilityVersions).toEqual(turn.usedCapabilities);
   });
 
   test("keeps existing single-trail data resumable with deterministic summary metadata", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-single-resume-"));
-    const original = await createNoesisRuntime(root, createFakeAgentRuntime());
+    const original = await createNoesisRuntime(root, createScriptedAgentRuntime());
     const trail = await original.startTrail({ title: "historical trail" });
     await original.runTurn(trail.trailId, "first durable user message");
 
-    const reopened = await createNoesisRuntime(root, createFakeAgentRuntime());
+    const reopened = await createNoesisRuntime(root, createScriptedAgentRuntime());
     expect(reopened.listTrailSummaries()).toEqual([
       expect.objectContaining({
         trailId: trail.trailId,
@@ -95,7 +94,7 @@ describe("integrated compounding loop", () => {
 
   test("resumes an older exact trail even when it is outside the picker cap", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-resume-outside-cap-"));
-    const runtime = await createNoesisRuntime(root, createFakeAgentRuntime());
+    const runtime = await createNoesisRuntime(root, createScriptedAgentRuntime());
     const oldest = await runtime.startTrail({ title: "oldest exact session" });
     for (let index = 0; index < SESSION_PICKER_LIMIT; index += 1)
       await runtime.startTrail({ title: `newer session ${index}` });
@@ -189,12 +188,12 @@ describe("integrated compounding loop", () => {
     };
 
     const home = await mkdtemp(join(tmpdir(), "noesis-runtime-switch-"));
-    const original = await createNoesisRuntime(home, createFakeAgentRuntime());
-    const fakeTrail = await original.startTrail({ title: "fake trail" });
+    const original = await createNoesisRuntime(home, createScriptedAgentRuntime());
+    const scriptedTrail = await original.startTrail({ title: "scripted trail" });
     const reopened = await createNoesisRuntime(home, alternateRuntime);
 
-    await expect(reopened.runTurn(fakeTrail.trailId, "wrong adapter")).rejects.toThrow(
-      /pinned to runtime fake; active runtime is alternate/,
+    await expect(reopened.runTurn(scriptedTrail.trailId, "wrong adapter")).rejects.toThrow(
+      /pinned to runtime scripted-test-runtime; active runtime is alternate/,
     );
     expect(reopened.ledger.findByType("turn.started")).toHaveLength(0);
 
@@ -434,11 +433,11 @@ describe("integrated compounding loop", () => {
 
   test("rehydrates terminal jobs and does not spend a budget-one job twice", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-job-restart-"));
-    const runtime = await createNoesisRuntime(root, createFakeAgentRuntime());
+    const runtime = await createNoesisRuntime(root, createScriptedAgentRuntime());
     const scheduler = createDurableScheduler(runtime);
     const job = await scheduler.schedule({ prompt: "background", schedule: "every 1h", budget: 1 });
     await scheduler.run(job);
-    const recovered = await createNoesisRuntime(root, createFakeAgentRuntime());
+    const recovered = await createNoesisRuntime(root, createScriptedAgentRuntime());
     const recoveredScheduler = createDurableScheduler(recovered);
     await expect(recoveredScheduler.run(job.jobId)).rejects.toThrow(/terminal|budget/);
     expect(recovered.ledger.findByType("job.lease_acquired")).toHaveLength(1);

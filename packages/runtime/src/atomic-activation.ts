@@ -20,13 +20,13 @@ import {
   type CapabilityRevisionRef,
   type FileRevisionRef,
 } from "@noesis/domain";
-import type { AuthorityBoundary } from "@noesis/policy";
 import type {
   ActivationEvidenceBinding,
   ActivationOperationRecord,
   NoesisWorkspaceStore,
   TurnActivationPinRecord,
 } from "@noesis/workspace";
+import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
 import { z } from "zod";
 import type { PreflightActivationHandoff } from "./coordinator-contracts.ts";
 import {
@@ -69,7 +69,7 @@ export interface ActivationCandidateResolver {
 
 export interface AtomicActivationControllerOptions {
   readonly workspace: NoesisWorkspaceStore;
-  readonly authority: AuthorityBoundary;
+  readonly protectedRuntime: ProtectedWorkspaceRuntime;
   readonly candidates: ActivationCandidateResolver;
   readonly autonomy: ActivationAutonomyPolicy;
   readonly classifyRisk?: (input: {
@@ -358,10 +358,20 @@ export function createAtomicActivationController(
           resolved !== undefined && sameCapabilityRevisionRef(capabilityRevisionRef(resolved), reference)
         );
       });
+    const currentActivation = await options.protectedRuntime.activations.current();
+    const currentBaseline =
+      currentActivation?.activeCapabilityRevisions[experiment.baselineRevision.capabilityId];
+    const currentCandidateSlot = currentActivation?.activeCapabilityRevisions[candidateRef.capabilityId];
+    const createsNewSlot =
+      candidate.capabilityId !== baseline.capabilityId &&
+      candidate.predecessorRevisionId === undefined &&
+      currentCandidateSlot === undefined &&
+      currentBaseline?.kind === "capability_revision" &&
+      sameCapabilityRevisionRef(currentBaseline, experiment.baselineRevision);
     const scopeBound =
-      candidate.capabilityId === baseline.capabilityId &&
       candidate.capabilityId === candidateRef.capabilityId &&
-      candidate.activationPolicy.scope === experiment.scope;
+      candidate.activationPolicy.scope === experiment.scope &&
+      (candidate.capabilityId === baseline.capabilityId || createsNewSlot);
     const binding = Object.freeze({
       experimentId: experiment.experimentId,
       candidateRevision: candidateRef,
@@ -407,26 +417,20 @@ export function createAtomicActivationController(
     operation: ActivationOperationRecord,
     policy?: PreflightPolicyDecision,
   ): Promise<ActivationAttemptResult> => {
-    const decision = await options.authority.promote(
-      `activation:${operation.activationId}:commit`,
-      operation.idempotencyKey,
-      async () => {
-        await options.workspace.protectedActivations.commit({
-          operationId: operation.operationId,
-          bindingDigest: operation.bindingDigest,
-        });
-        return null;
-      },
-    );
-    if (!decision.ok)
+    try {
+      await options.protectedRuntime.activations.commit({
+        operationId: operation.operationId,
+        bindingDigest: operation.bindingDigest,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       return Object.freeze({
         ok: false,
-        code: /CAS conflict|snapshot changed/iu.test(decision.reason)
-          ? "activation_conflict"
-          : "authority_denied",
-        message: decision.reason,
+        code: /CAS conflict|snapshot changed/iu.test(message) ? "activation_conflict" : "authority_denied",
+        message,
       });
-    const committed = await options.workspace.protectedActivations.getOperation(operation.operationId);
+    }
+    const committed = await options.protectedRuntime.activations.getOperation(operation.operationId);
     if (!committed || committed.status !== "committed")
       return Object.freeze({
         ok: false,
@@ -462,7 +466,7 @@ export function createAtomicActivationController(
     retriesRemaining: number,
   ): Promise<ActivationAttemptResult> => {
     try {
-      const recovered = (await options.workspace.protectedActivations.listOperations(1_000)).find(
+      const recovered = (await options.protectedRuntime.activations.listOperations(1_000)).find(
         (operation) =>
           operation.status === "committed" &&
           operation.binding.experimentId === handoff.experiment.experimentId &&
@@ -518,13 +522,13 @@ export function createAtomicActivationController(
         allRailsPassed: validated.allRailsPassed,
       });
       const policyDigest = sha256(canonicalJson(policySnapshot));
-      const current = await options.workspace.protectedActivations.current();
+      const current = await options.protectedRuntime.activations.current();
       const expectedActivation = Object.freeze({
         activationId: current?.activationId ?? null,
         revision: current?.revision ?? 0,
       });
       const identities = operationIdentity(validated.binding, policyDigest, expectedActivation);
-      const staleAttempts = (await options.workspace.protectedActivations.listOperations(1_000)).filter(
+      const staleAttempts = (await options.protectedRuntime.activations.listOperations(1_000)).filter(
         (operation) =>
           operation.binding.experimentId === handoff.experiment.experimentId &&
           sameCapabilityRevisionRef(operation.binding.candidateRevision, handoff.candidateRevision) &&
@@ -535,11 +539,11 @@ export function createAtomicActivationController(
             operation.previousActivationId !== expectedActivation.activationId),
       );
       for (const stale of staleAttempts)
-        await options.workspace.protectedActivations.supersede({
+        await options.protectedRuntime.activations.supersede({
           operationId: stale.operationId,
           supersededByOperationId: identities.operationId,
         });
-      const existing = await options.workspace.protectedActivations.getOperation(identities.operationId);
+      const existing = await options.protectedRuntime.activations.getOperation(identities.operationId);
       if (existing) {
         if (existing.status === "committed")
           return Object.freeze({ ok: true, status: "activated", operation: existing, policy });
@@ -582,7 +586,7 @@ export function createAtomicActivationController(
         }
       }
       const bindingDigest = sha256(canonicalJson(validated.binding));
-      const operation = await options.workspace.protectedActivations.prepare({
+      const operation = await options.protectedRuntime.activations.prepare({
         operationId: identities.operationId,
         idempotencyKey: identities.idempotencyKey,
         activationId: identities.activationId,
@@ -629,19 +633,19 @@ export function createAtomicActivationController(
     readonly bindingDigest: string;
   }): Promise<ActivationAttemptResult> => {
     try {
-      const existing = await options.workspace.protectedActivations.getOperation(request.operationId);
+      const existing = await options.protectedRuntime.activations.getOperation(request.operationId);
       if (!existing) throw new Error(`Unknown activation operation ${request.operationId}`);
       if (existing.approvalId !== request.approvalId || existing.bindingDigest !== request.bindingDigest)
         throw new Error("Activation approval request does not match its exact pending binding");
       if (existing.status === "committed") return await commitWithAuthority(existing);
       if (existing.status === "rejected")
         return Object.freeze({ ok: true, status: "rejected", operation: existing });
-      const current = await options.workspace.protectedActivations.current();
+      const current = await options.protectedRuntime.activations.current();
       if (
         existing.expectedActivationRevision !== (current?.revision ?? 0) ||
         existing.previousActivationId !== (current?.activationId ?? null)
       ) {
-        await options.workspace.protectedActivations.supersede({
+        await options.protectedRuntime.activations.supersede({
           operationId: existing.operationId,
           supersededByOperationId: `activation_revalidation_${sha256(
             `${existing.operationId}:${current?.revision ?? 0}:${current?.activationId ?? "none"}`,
@@ -649,21 +653,12 @@ export function createAtomicActivationController(
         });
         throw new Error("Activation approval is bound to a stale expected activation snapshot");
       }
-      const authority = await options.authority.promote(
-        `activation-approval:${request.approvalId}:approve`,
-        `activation-approval:${request.approvalId}:approve:${request.bindingDigest}`,
-        async () => {
-          await options.workspace.protectedActivations.decideApproval({
-            ...request,
-            decision: "approved",
-            actorId,
-          });
-          return null;
-        },
-      );
-      if (!authority.ok)
-        return Object.freeze({ ok: false, code: "authority_denied", message: authority.reason });
-      const approved = await options.workspace.protectedActivations.getOperation(request.operationId);
+      await options.protectedRuntime.activations.decideApproval({
+        ...request,
+        decision: "approved",
+        actorId,
+      });
+      const approved = await options.protectedRuntime.activations.getOperation(request.operationId);
       if (!approved) throw new Error(`Activation operation ${request.operationId} disappeared`);
       return await commitWithAuthority(approved);
     } catch (error) {
@@ -677,7 +672,7 @@ export function createAtomicActivationController(
     readonly bindingDigest: string;
   }): Promise<ActivationAttemptResult> => {
     try {
-      const existing = await options.workspace.protectedActivations.getOperation(request.operationId);
+      const existing = await options.protectedRuntime.activations.getOperation(request.operationId);
       if (
         !existing ||
         existing.approvalId !== request.approvalId ||
@@ -687,21 +682,12 @@ export function createAtomicActivationController(
       if (existing.status === "rejected")
         return Object.freeze({ ok: true, status: "rejected", operation: existing });
       if (existing.status === "committed") throw new Error("Committed activation cannot be rejected");
-      const authority = await options.authority.promote(
-        `activation-approval:${request.approvalId}:reject`,
-        `activation-approval:${request.approvalId}:reject:${request.bindingDigest}`,
-        async () => {
-          await options.workspace.protectedActivations.decideApproval({
-            ...request,
-            decision: "rejected",
-            actorId,
-          });
-          return null;
-        },
-      );
-      if (!authority.ok)
-        return Object.freeze({ ok: false, code: "authority_denied", message: authority.reason });
-      const rejected = await options.workspace.protectedActivations.getOperation(request.operationId);
+      await options.protectedRuntime.activations.decideApproval({
+        ...request,
+        decision: "rejected",
+        actorId,
+      });
+      const rejected = await options.protectedRuntime.activations.getOperation(request.operationId);
       if (!rejected || rejected.status !== "rejected")
         throw new Error("Protected rejection did not persist its exact operation state");
       return Object.freeze({ ok: true, status: "rejected", operation: rejected });
@@ -714,8 +700,8 @@ export function createAtomicActivationController(
     activateFromPreflight,
     approve,
     reject,
-    getOperation: options.workspace.protectedActivations.getOperation,
+    getOperation: options.protectedRuntime.activations.getOperation,
     pinTurnActivation: async (sessionId: string, turnId: string) =>
-      await options.workspace.protectedActivations.pinTurn({ sessionId, turnId }),
+      await options.protectedRuntime.activations.pinTurn({ sessionId, turnId }),
   });
 }

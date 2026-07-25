@@ -26,13 +26,15 @@ import { describe, expect, test } from "vitest";
 import {
   createAutomaticLearningOrgan,
   createInMemoryExperimentBriefStore,
-  createScriptedLearningInferencePort,
   AutomaticLearningConfigSchema,
   RevisionAuthorOutputSchema,
   type AutomaticLearningConfig,
   type ExperimentBriefStore,
-  type ScriptedLearningInferenceStep,
 } from "../src/index.ts";
+import {
+  createScriptedLearningInferencePort,
+  type ScriptedLearningInferenceStep,
+} from "./support/scripted-learning-inference.ts";
 
 const capability: Capability = Object.freeze({
   capabilityId: "writing-assistance",
@@ -74,7 +76,7 @@ const config: AutomaticLearningConfig = Object.freeze({
         configurationRefs: Object.freeze([reflectorPrompt]),
       }),
       promptRevision: reflectorPrompt,
-      model: "fake-reflector-1",
+      model: "scripted-reflector-1",
       reasoning: "medium",
     }),
     revisionAuthor: Object.freeze({
@@ -84,7 +86,7 @@ const config: AutomaticLearningConfig = Object.freeze({
         configurationRefs: Object.freeze([authorPrompt]),
       }),
       promptRevision: authorPrompt,
-      model: "fake-author-1",
+      model: "scripted-author-1",
       reasoning: "high",
     }),
     revisionAgent: Object.freeze({
@@ -94,7 +96,7 @@ const config: AutomaticLearningConfig = Object.freeze({
         configurationRefs: Object.freeze([revisionPrompt]),
       }),
       promptRevision: revisionPrompt,
-      model: "fake-reviser-1",
+      model: "scripted-reviser-1",
       reasoning: "xhigh",
     }),
   }),
@@ -464,6 +466,53 @@ describe("automatic learning organ", () => {
     });
   });
 
+  test("authors a narrow reflection as a new capability slot without claiming genesis lineage", async () => {
+    const narrowReflection = Object.freeze({
+      role: "reflector" as const,
+      value: Object.freeze({
+        decision: "experiment" as const,
+        title: "Research brief evidence",
+        hypothesis: "Research briefs should separate evidence from inference",
+        scope: "research brief",
+        capabilityName: "Research brief evidence",
+        capabilityIntent: "Make research briefs evidence-grounded and explicit about inference",
+        sourceCases: Object.freeze([
+          Object.freeze({
+            title: "Correct a research brief",
+            input: "Prepare a research brief",
+            expectedBehavior: "Separate sourced evidence from inference",
+          }),
+        ]),
+      }),
+    }) satisfies ScriptedLearningInferenceStep;
+    const harness = createHarness({
+      steps: [narrowReflection, authorStep],
+      citations: [citation(1)],
+    });
+    const observed = await harness.organ.observeTurn({
+      turn: turn({ correction: "No, in a research brief separate evidence from inference." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+    if (observed.status !== "experiment") throw new Error("Expected a narrow experiment brief");
+
+    expect(observed.brief.capability).toMatchObject({
+      capabilityId: expect.stringMatching(/^learned-research-brief-evidence-[a-f0-9]{12}$/u),
+      name: "Research brief evidence",
+      scope: "research brief",
+      intent: "Make research briefs evidence-grounded and explicit about inference",
+    });
+    expect(observed.brief.capability.capabilityId).not.toBe(capability.capabilityId);
+
+    const authored = await harness.organ.authorExperimentRevision({ brief: observed.brief });
+    expect(authored.revision.capabilityId).toBe(observed.brief.capability.capabilityId);
+    expect(authored.revision.predecessorRevisionId).toBeUndefined();
+    expect(authored.experiment.baselineRevision).toEqual(harness.baseline);
+    expect(
+      harness.candidates.requests().every((request) => request.predecessorRevisionId === undefined),
+    ).toBe(true);
+  });
+
   test("creates exactly one scoped criterion only for explicitly normative feedback", async () => {
     const harness = createHarness({ steps: [reflectionStep], citations: [citation(1)] });
     const result = await harness.organ.observeTurn({
@@ -640,6 +689,28 @@ describe("automatic learning organ", () => {
     expect("activate" in harness.registry).toBe(false);
   });
 
+  test("keeps coordinator cancellation transient while forwarding it to reflector and author roles", async () => {
+    const harness = createHarness({ steps: [reflectionStep, authorStep], citations: [citation(1)] });
+    const controller = new AbortController();
+    const observed = await harness.organ.observeTurn({
+      turn: turn({ correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+      signal: controller.signal,
+    });
+    if (observed.status !== "experiment") throw new Error("Expected an experiment brief");
+
+    await harness.organ.authorExperimentRevision({
+      brief: observed.brief,
+      signal: controller.signal,
+    });
+
+    const requests = harness.inference.requests();
+    expect(requests.map((request) => request.signal)).toEqual([controller.signal, controller.signal]);
+    expect(JSON.stringify(observed.brief)).not.toContain('"signal":');
+    expect(JSON.stringify(harness.experiments())).not.toContain('"signal":');
+  });
+
   test("isolates reflector and author inputs from protected control-plane context", async () => {
     const harness = createHarness({ steps: [reflectionStep, authorStep], citations: [citation(1)] });
     const observed = await harness.organ.observeTurn({
@@ -701,7 +772,7 @@ describe("automatic learning organ", () => {
     expect(result.authorRun.role).toBe("revision_agent");
     expect(result.authorRun.research).toMatchObject({
       promptRevision: revisionPrompt,
-      model: "fake-reviser-1",
+      model: "scripted-reviser-1",
       reasoning: "xhigh",
     });
     expect(harness.inference.requests()[0]?.messages.map((message) => message.name)).toEqual([
@@ -710,7 +781,7 @@ describe("automatic learning organ", () => {
     ]);
   });
 
-  test("records deterministic fake prompt, model, reasoning, and trace metadata", async () => {
+  test("records deterministic scripted prompt, model, reasoning, and trace metadata", async () => {
     const harness = createHarness({ steps: [reflectionStep], citations: [citation(1)] });
     const result = await harness.organ.observeTurn({
       turn: turn({ correction: "Use primary sources." }),
@@ -723,18 +794,18 @@ describe("automatic learning organ", () => {
       role: "reflector",
       research: {
         promptRevision: reflectorPrompt,
-        model: "fake-reflector-1",
+        model: "scripted-reflector-1",
         reasoning: "medium",
       },
       trace: {
-        traceId: "fake-learning-trace-1",
+        traceId: "scripted-learning-trace-1",
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCost: 0 },
       },
     });
     expect(harness.inference.remaining()).toBe(0);
   });
 
-  test("the scripted fake rejects role drift deterministically", async () => {
+  test("the scripted inference rejects role drift deterministically", async () => {
     const inference = createScriptedLearningInferencePort({ steps: [reflectionStep] });
     const request: AgentRunRequest = Object.freeze({
       runId: "wrong-role",

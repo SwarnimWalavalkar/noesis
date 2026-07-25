@@ -33,6 +33,7 @@ import {
   type LearningRoleConfiguration,
   type LearningSourceCase,
   type LearningTurnInput,
+  type ReflectorOutput,
   type RevisionAuthorOutput,
   type RoleResearchMetadata,
 } from "./schemas.ts";
@@ -177,6 +178,7 @@ export interface ObserveLearningTurnRequest {
   readonly turn: unknown;
   readonly baselineRevision: CapabilityRevisionRef;
   readonly capability: Capability;
+  readonly signal?: AbortSignal;
   readonly activeCapabilities?: readonly Capability[];
   readonly userPreferences?: readonly {
     readonly criterionId: string;
@@ -189,6 +191,7 @@ export interface ObserveLearningTurnRequest {
 export interface AuthorExperimentRevisionRequest {
   readonly brief: ExperimentBrief;
   readonly predecessorRevision?: CapabilityRevisionRef;
+  readonly signal?: AbortSignal;
 }
 
 export interface AuthorFollowUpRevisionRequest {
@@ -197,6 +200,7 @@ export interface AuthorFollowUpRevisionRequest {
   readonly failureSummary: string;
   readonly judgmentEvidenceRefs: readonly EvidenceRef[];
   readonly citations?: readonly LearningCitation[];
+  readonly signal?: AbortSignal;
 }
 
 export interface AutomaticLearningOrgan {
@@ -333,6 +337,7 @@ function roleRequest(input: {
   readonly configuration: LearningRoleConfiguration;
   readonly messages: readonly AgentMessage[];
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly signal?: AbortSignal;
 }): AgentRunRequest {
   return Object.freeze({
     runId: input.runId,
@@ -341,6 +346,7 @@ function roleRequest(input: {
     messages: Object.freeze(input.messages.map((message) => Object.freeze({ ...message }))),
     evidenceRefs: cloneEvidenceRefs(input.evidenceRefs),
     availableTools: Object.freeze([]),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
 }
 
@@ -360,7 +366,21 @@ function researchRun(
       model: configuration.model,
       reasoning: configuration.reasoning,
     }),
-    trace,
+    trace: Object.freeze({
+      traceId: trace.traceId,
+      role: trace.role,
+      variant: Object.freeze({
+        ...trace.variant,
+        configurationRefs: Object.freeze(
+          trace.variant.configurationRefs.map((reference) => Object.freeze({ ...reference })),
+        ),
+      }),
+      startedAt: trace.startedAt,
+      completedAt: trace.completedAt,
+      usage: Object.freeze({ ...trace.usage }),
+      evidenceRefs: Object.freeze(trace.evidenceRefs.map((reference) => Object.freeze({ ...reference }))),
+      artifactRefs: Object.freeze(trace.artifactRefs.map((reference) => Object.freeze({ ...reference }))),
+    }),
   });
 }
 
@@ -371,6 +391,49 @@ function normalizedHypothesisKey(scope: string, hypothesis: string): string {
       hypothesis: hypothesis.trim().toLocaleLowerCase().replaceAll(/\s+/gu, " "),
     }),
   );
+}
+
+function normalizedCapabilityScope(scope: string): string {
+  return scope.trim().toLocaleLowerCase().replaceAll(/\s+/gu, " ");
+}
+
+function learnedCapabilityId(input: {
+  readonly name: string;
+  readonly scope: string;
+  readonly intent: string;
+}): string {
+  const slug =
+    input.name
+      .trim()
+      .toLocaleLowerCase()
+      .replaceAll(/[^a-z0-9]+/gu, "-")
+      .replaceAll(/^-+|-+$/gu, "")
+      .slice(0, 48) || "capability";
+  return `learned-${slug}-${sha256(
+    canonicalJson({
+      name: input.name.trim(),
+      scope: normalizedCapabilityScope(input.scope),
+      intent: input.intent.trim(),
+    }),
+  ).slice(0, 12)}`;
+}
+
+function capabilityFromReflection(
+  current: Capability,
+  reflection: Extract<ReflectorOutput, { readonly decision: "experiment" }>,
+): Capability {
+  if (normalizedCapabilityScope(reflection.scope) === normalizedCapabilityScope(current.scope)) {
+    return Object.freeze({ ...current });
+  }
+  const authored = Object.freeze({
+    name: reflection.capabilityName.trim(),
+    scope: reflection.scope.trim(),
+    intent: reflection.capabilityIntent.trim(),
+  });
+  return Object.freeze({
+    capabilityId: learnedCapabilityId(authored),
+    ...authored,
+  });
 }
 
 function safeComponentPath(path: string): string {
@@ -586,6 +649,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         configuration: config.roles.reflector,
         messages,
         evidenceRefs: harvest.evidenceRefs,
+        ...(request.signal ? { signal: request.signal } : {}),
       }),
       ReflectorOutputSchema,
     );
@@ -603,7 +667,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
 
     const experimentId = nextId("experiment");
     const dedupeKey = normalizedHypothesisKey(reflected.value.scope, reflected.value.hypothesis);
-    const capability = Object.freeze({ ...request.capability });
+    const capability = capabilityFromReflection(request.capability, reflected.value);
     const brief = freezeBrief({
       experimentId,
       title: reflected.value.title,
@@ -727,12 +791,12 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     readonly role: "revision_author" | "revision_agent";
     readonly configuration: LearningRoleConfiguration;
     readonly messages: readonly AgentMessage[];
+    readonly signal?: AbortSignal;
   }): Promise<AuthorRevisionResult> => {
-    if (input.predecessorRevision.capabilityId !== input.brief.capability.capabilityId) {
-      throw new Error("Capability revision predecessor must belong to the experiment capability");
-    }
     const predecessor = options.capabilities.getRevision(input.predecessorRevision);
     if (!predecessor) throw new Error("Capability revision predecessor is unknown or digest-mismatched");
+    const revisesExistingCapability =
+      input.predecessorRevision.capabilityId === input.brief.capability.capabilityId;
     options.capabilities.registerCapability(input.brief.capability);
     const runId = nextId(input.role === "revision_author" ? "author" : "revise");
     const authored = await options.inference.run(
@@ -742,6 +806,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         configuration: input.configuration,
         messages: input.messages,
         evidenceRefs: input.brief.evidenceRefs,
+        ...(input.signal ? { signal: input.signal } : {}),
       }),
       RevisionAuthorOutputSchema,
     );
@@ -753,7 +818,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       area: "prompts",
       files: authored.value.promptModules,
       evidenceRefs: input.brief.evidenceRefs,
-      predecessors: predecessor.promptModules,
+      predecessors: revisesExistingCapability ? predecessor.promptModules : Object.freeze([]),
     });
     const skills = await materializeList({
       capabilityId: input.brief.capability.capabilityId,
@@ -761,7 +826,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       area: "skills",
       files: authored.value.skills,
       evidenceRefs: input.brief.evidenceRefs,
-      predecessors: predecessor.skills,
+      predecessors: revisesExistingCapability ? predecessor.skills : Object.freeze([]),
     });
     const tools = await materializeList({
       capabilityId: input.brief.capability.capabilityId,
@@ -769,7 +834,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       area: "tools",
       files: authored.value.tools,
       evidenceRefs: input.brief.evidenceRefs,
-      predecessors: predecessor.tools,
+      predecessors: revisesExistingCapability ? predecessor.tools : Object.freeze([]),
     });
     const routerRevision = await recordCandidateFile({
       capabilityId: input.brief.capability.capabilityId,
@@ -778,7 +843,9 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       path: authored.value.router.path,
       content: authored.value.router.content,
       evidenceRefs: input.brief.evidenceRefs,
-      predecessorRevisionId: predecessor.toolset.routerRevision.revisionId,
+      ...(revisesExistingCapability
+        ? { predecessorRevisionId: predecessor.toolset.routerRevision.revisionId }
+        : {}),
     });
     const sourceEvaluationDefinitions = await materializeList({
       capabilityId: input.brief.capability.capabilityId,
@@ -786,7 +853,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       area: "evals",
       files: authored.value.sourceEvaluationDefinitions,
       evidenceRefs: input.brief.evidenceRefs,
-      predecessors: predecessor.sourceEvaluationDefinitions,
+      predecessors: revisesExistingCapability ? predecessor.sourceEvaluationDefinitions : Object.freeze([]),
     });
     const dependencyLock = authored.value.dependencyLock
       ? await recordCandidateFile({
@@ -796,7 +863,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
           path: authored.value.dependencyLock.path,
           content: authored.value.dependencyLock.content,
           evidenceRefs: input.brief.evidenceRefs,
-          ...(predecessor.dependencyLock
+          ...(revisesExistingCapability && predecessor.dependencyLock
             ? { predecessorRevisionId: predecessor.dependencyLock.revisionId }
             : {}),
         })
@@ -805,7 +872,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       definitionState: "candidate",
       capabilityRevisionId,
       capabilityId: input.brief.capability.capabilityId,
-      predecessorRevisionId: predecessor.capabilityRevisionId,
+      ...(revisesExistingCapability ? { predecessorRevisionId: predecessor.capabilityRevisionId } : {}),
       promptModules,
       skills,
       tools,
@@ -840,6 +907,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       predecessorRevision,
       role: "revision_author",
       configuration: config.roles.revisionAuthor,
+      ...(request.signal ? { signal: request.signal } : {}),
       messages: [
         {
           role: "user",
@@ -911,6 +979,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       predecessorRevision,
       role: "revision_agent",
       configuration: config.roles.revisionAgent,
+      ...(request.signal ? { signal: request.signal } : {}),
       messages: [
         {
           role: "user",

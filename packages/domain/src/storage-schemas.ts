@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type {
   Capability,
+  CompoundingReplayRecord,
   EvaluationRecord,
   ExperimentTrial,
   PreflightPlan,
@@ -83,6 +84,64 @@ export const CapabilityRevisionRefSchema = z.strictObject({
   capabilityRevisionId: z.string().min(1),
   bundleDigest: ContentDigestSchema,
 });
+
+const CorrectionExposureSchema = z.strictObject({
+  signature: z.string().min(1),
+  related: z.boolean(),
+  correctionOccurred: z.boolean(),
+  phase: z.enum(["pre_activation", "post_activation"]),
+  servedRevisions: z.array(CapabilityRevisionRefSchema),
+});
+
+const CompoundingReplayRecordBaseShape = {
+  replayId: z.string().min(1),
+  planId: z.string().min(1),
+  sessionId: z.string().min(1),
+  turnId: z.string().min(1),
+  occurredAt: z.string().min(1),
+  scope: z.string().min(1),
+  modelCohort: z.string().min(1),
+  servedRevisions: z.array(CapabilityRevisionRefSchema),
+  baselineRevisions: z.array(CapabilityRevisionRefSchema),
+  scopeRelated: z.boolean(),
+  correctionExposures: z.array(CorrectionExposureSchema),
+};
+
+export const CompoundingReplayRecordSchema = z.discriminatedUnion("status", [
+  z.strictObject({
+    ...CompoundingReplayRecordBaseShape,
+    status: z.literal("excluded"),
+    exclusionReason: z.enum([
+      "unsettled_outcome",
+      "aborted_turn",
+      "unknown_legacy_baseline",
+      "missing_provenance_classification",
+      "secret_data",
+      "private_data_unauthorized",
+      "incomplete_tool_result",
+      "identity_mismatch",
+      "budget_exhausted",
+      "unresolved_reservation",
+      "role_failed",
+      "unexpected_effect",
+    ]),
+    exclusionDetail: z.string().min(1),
+  }),
+  z.strictObject({
+    ...CompoundingReplayRecordBaseShape,
+    status: z.literal("paired"),
+    winner: z.enum(["served", "baseline", "tie", "inconclusive"]),
+    railsPassed: z.boolean(),
+    servedOutputEvidence: OutputEvidenceRevisionRefSchema,
+    baselineOutputEvidence: OutputEvidenceRevisionRefSchema,
+    judgmentEvidence: JudgmentEvidenceRevisionRefSchema,
+    servedInputTokens: z.number().int().nonnegative(),
+    baselineInputTokens: z.number().int().nonnegative(),
+    injectedContextTokens: z.number().int().nonnegative(),
+    servedPromptLayerBytes: z.number().int().nonnegative(),
+    baselinePromptLayerBytes: z.number().int().nonnegative(),
+  }),
+]) satisfies z.ZodType<CompoundingReplayRecord>;
 
 const PermissionManifestSchema = z.strictObject({
   effects: z.array(z.string()),

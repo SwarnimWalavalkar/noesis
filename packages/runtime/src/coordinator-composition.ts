@@ -7,8 +7,8 @@ import {
   createLearningPreflightInput,
   type DynamicEvaluationConfig,
   type DynamicEvaluationLaboratory,
-  type EvaluationCase,
   type EvaluationCriterionSet,
+  type ProtectedEvaluationSuiteRevision,
 } from "@noesis/evals";
 import {
   capabilityRevisionRef,
@@ -18,6 +18,7 @@ import {
   type CapabilityRevisionRef,
 } from "@noesis/domain";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
+import type { AuthorityBoundary } from "@noesis/policy";
 import {
   coordinatorOperationError,
   type AuthorRevisionJobPayload,
@@ -43,7 +44,7 @@ export interface CoordinatorPreflightPreparation {
     readonly signal: AbortSignal;
   }) => Promise<{
     readonly criteria: EvaluationCriterionSet;
-    readonly protectedCases: readonly EvaluationCase[];
+    readonly protectedSuite: ProtectedEvaluationSuiteRevision;
     readonly budget: {
       readonly maxCases: number;
       readonly maxAttemptsPerArm: number;
@@ -55,6 +56,7 @@ export interface CoordinatorPreflightPreparation {
 
 export interface RuntimeCoordinatorCompositionOptions {
   readonly workspace: NoesisWorkspaceStore;
+  readonly authority: AuthorityBoundary;
   readonly learning: AutomaticLearningOrgan;
   readonly evaluation: DynamicEvaluationLaboratory;
   readonly baselineRevisions: CapabilityRevisionResolverPort;
@@ -129,6 +131,7 @@ export function createRuntimeCoordinatorComposition(
           ? {}
           : { activeCapabilities: payload.activeCapabilities }),
         ...(payload.userPreferences === undefined ? {} : { userPreferences: payload.userPreferences }),
+        signal,
       });
       cancelled(signal);
       if (observed.status === "no_change")
@@ -168,7 +171,7 @@ export function createRuntimeCoordinatorComposition(
     author: async (payload: AuthorRevisionJobPayload, signal: AbortSignal) => {
       cancelled(signal);
       const brief = briefFor(await briefs.findByDedupeKey(payload.hypothesisDedupeKey), payload.experimentId);
-      const authored = await options.learning.authorExperimentRevision({ brief });
+      const authored = await options.learning.authorExperimentRevision({ brief, signal });
       cancelled(signal);
       const exact = await manifests.rehydrate(payload.experimentId);
       if (
@@ -225,7 +228,7 @@ export function createRuntimeCoordinatorComposition(
         },
         baselineRevision: baseline,
         criteria: prepared.criteria,
-        protectedCases: prepared.protectedCases,
+        protectedSuite: prepared.protectedSuite,
         budget: prepared.budget,
         config: prepared.config,
         signal,
@@ -282,6 +285,7 @@ export function createRuntimeCoordinatorComposition(
 
   return createRuntimeCoordinator({
     workspace: options.workspace,
+    authority: options.authority,
     research,
     ...(options.config === undefined ? {} : { config: options.config }),
     ...(options.workerId === undefined ? {} : { workerId: options.workerId }),

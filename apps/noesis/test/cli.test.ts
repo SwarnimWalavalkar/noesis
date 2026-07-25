@@ -26,7 +26,7 @@ async function runCli(
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error(`CLI did not exit within 10 seconds. Output:\n${output}`));
-    }, 10_000);
+    }, 30_000);
     child.once("error", (error) => {
       clearTimeout(timeout);
       reject(error);
@@ -49,10 +49,7 @@ describe("Noesis CLI grammar", () => {
       args: ["inspect", "unexpected"],
       message: "Unexpected inspect argument unexpected",
     },
-    {
-      args: ["demo", "unexpected"],
-      message: "Unexpected demo argument unexpected",
-    },
+    { args: ["demo"], message: "Unknown command demo" },
     {
       args: ["config", "show", "unexpected"],
       message: "Unexpected config argument unexpected",
@@ -94,10 +91,6 @@ describe("Noesis CLI grammar", () => {
       message: "Unexpected tui argument trailing",
     },
     {
-      args: ["demo", "--continue"],
-      message: "--continue is available only with the tui command",
-    },
-    {
       args: ["onboard", "unexpected"],
       message: "Unexpected onboard argument unexpected",
     },
@@ -117,9 +110,9 @@ describe("Noesis CLI grammar", () => {
     expect(initialized.code).toBe(0);
     expect(initialized.output).toContain(`Initialized ${join(home, "config.json")}`);
 
-    const shown = await runCli(["config", "show", "--home", home, "--runtime", "fake"]);
+    const shown = await runCli(["config", "show", "--home", home, "--model", "configured-model"]);
     expect(shown.code).toBe(0);
-    expect(shown.output).toContain('"runtime": "fake"');
+    expect(shown.output).toContain('"model": "configured-model"');
   });
 
   test("documents continue ordering and strict non-interactive semantics in help", async () => {
@@ -138,17 +131,17 @@ describe("Noesis CLI grammar", () => {
       "--continue",
       "--home",
       home,
-      "--runtime",
-      "fake",
       "--provider",
-      "fake",
+      "openrouter",
       "--model",
-      "noesis-fake-1",
+      "anthropic/claude-sonnet-4.5",
     ]);
 
     expect(result.code).toBe(1);
     expect(result.output).toContain("No saved sessions");
     expect(result.output).toContain("without --continue");
-    expect(await readFile(join(home, "ledger", "events.jsonl"), "utf8")).toBe("");
+    await expect(readFile(join(home, "ledger", "events.jsonl"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 });

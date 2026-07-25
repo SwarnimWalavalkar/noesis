@@ -2,6 +2,7 @@ import codecs
 import fcntl
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -9,6 +10,7 @@ import sys
 import termios
 import time
 import unicodedata
+import urllib.request
 
 
 class VirtualScreen:
@@ -126,12 +128,35 @@ def main() -> int:
     rows = int(sys.argv[3])
     command = sys.argv[4:]
     followup_writes = []
+    onboarding_writes = []
+    oauth_callback_pending = False
     if action == "quit-lf":
         exit_input = b"/quit\n"
-        ready_marker = "● IDLE".encode()
+        ready_marker = b"? help"
     elif action == "ctrl-c":
         exit_input = b"\x03"
+        ready_marker = b"? help"
+    elif action in ("first-launch-quit-lf", "first-launch-ctrl-c"):
+        exit_input = b"/quit\n" if action == "first-launch-quit-lf" else b"\x03"
         ready_marker = "● IDLE".encode()
+        onboarding_writes = [
+            (b"Choose an AI provider", b"2\n"),
+            (b"OpenRouter model ID", b"\n"),
+            (b"Choose a reasoning level", b"\n"),
+            (b"Authenticate and create this configuration?", b"\n"),
+            (b"Enter OpenRouter API key", b"test-openrouter-key\n"),
+        ]
+    elif action in ("first-launch-oauth-quit-lf", "first-launch-oauth-ctrl-c"):
+        exit_input = b"/quit\n" if action == "first-launch-oauth-quit-lf" else b"\x03"
+        ready_marker = "● IDLE".encode()
+        onboarding_writes = [
+            (b"Choose an AI provider", b"\n"),
+            (b"Choose a Codex model", b"\n"),
+            (b"Choose a reasoning level", b"\n"),
+            (b"Authenticate and create this configuration?", b"\n"),
+            (b"Select OpenAI Codex login method:", b"browser\n"),
+        ]
+        oauth_callback_pending = True
     elif action == "picker-cancel":
         exit_input = b"\x1b"
         ready_marker = b"resume a session"
@@ -140,16 +165,19 @@ def main() -> int:
         ready_marker = b"resume a session"
     elif action == "prompt-quit":
         exit_input = b"show the polished shell\r"
-        ready_marker = "● IDLE".encode()
+        ready_marker = b"? help"
+    elif action in ("completed-turn-quit-lf", "completed-turn-ctrl-c"):
+        exit_input = b"No, keep this research brief concise.\r"
+        ready_marker = b"? help"
     elif action == "backspace-del-quit":
         exit_input = b"abc\x7f\r"
-        ready_marker = "● IDLE".encode()
+        ready_marker = b"? help"
     elif action == "backspace-bs-quit":
         exit_input = b"abc\x08\r"
-        ready_marker = "● IDLE".encode()
+        ready_marker = b"? help"
     elif action == "backspace-grapheme-quit":
         exit_input = "a👨‍👩‍👧‍👦".encode() + b"\x7f\r"
-        ready_marker = "● IDLE".encode()
+        ready_marker = b"? help"
     elif action == "resize-main-quit":
         exit_input = b""
         ready_marker = "███╗   ██╗ ██████╗".encode()
@@ -182,12 +210,12 @@ def main() -> int:
         )
         exit_input = b"\x1b[200~" + mixed.encode() + b"\x1b[201~"
         followup_writes = [(0.175, b"\r", "genuine-enter")]
-        ready_marker = "● IDLE".encode()
+        ready_marker = b"? help"
     elif action == "paste-controls-quit":
         hostile = "Unicode 界面\tline\n\x1b[2J\x07\u009b31m\u009dtitle\u009c\x7f end"
         exit_input = b"\x1b[200~" + hostile.encode() + b"\x1b[201~"
         followup_writes = [(0.175, b"\r", "genuine-enter")]
-        ready_marker = "● IDLE".encode()
+        ready_marker = b"? help"
     elif action == "fragmented-hostile-paste-quit":
         exit_input = b"\x1b[20"
         hostile_tail = "0~safe\x1b[201~\rBAD\x1b[2J\x07\u009b31m\x7f\x1b[201~".encode()
@@ -195,7 +223,7 @@ def main() -> int:
             (0.025, hostile_tail, "hostile-tail"),
             (0.175, b"\r", "genuine-enter"),
         ]
-        ready_marker = "● IDLE".encode()
+        ready_marker = b"? help"
     else:
         raise ValueError(f"Unknown PTY exit action: {action}")
 
@@ -216,7 +244,7 @@ def main() -> int:
         while time.monotonic() < deadline:
             if sent_exit and followup_writes and next_write_at is not None and time.monotonic() >= next_write_at:
                 _, next_input, label = followup_writes.pop(0)
-                if label == "genuine-enter" and b"Fake completion for:" in output:
+                if label == "genuine-enter" and b"Controlled Pi completion for:" in output:
                     os.write(sys.stdout.fileno(), b"\n__NOESIS_PREMATURE_SUBMIT__\n")
                 os.write(master, next_input)
                 last_write_label = label
@@ -235,7 +263,23 @@ def main() -> int:
                     output += chunk
                     screen.feed(chunk)
                     os.write(sys.stdout.fileno(), chunk)
-                    if not sent_exit and ready_marker in output:
+                    if onboarding_writes and onboarding_writes[0][0] in output:
+                        _, onboarding_input = onboarding_writes.pop(0)
+                        os.write(master, onboarding_input)
+                        output = b""
+                    elif oauth_callback_pending and b"Complete login in your browser" in output:
+                        state_match = re.search(rb"[?&]state=([^&\s]+)", output)
+                        if not state_match:
+                            raise RuntimeError("OAuth authorization URL did not contain state")
+                        callback = (
+                            b"http://127.0.0.1:1455/auth/callback?code=test-code&state="
+                            + state_match.group(1)
+                        )
+                        with urllib.request.urlopen(callback.decode(), timeout=1) as response:
+                            response.read()
+                        oauth_callback_pending = False
+                        output = b""
+                    elif not sent_exit and ready_marker in output:
                         if action == "resize-main-quit":
                             os.write(sys.stdout.fileno(), b"\n__NOESIS_RESIZED__\n")
                             fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 9, 50, 0, 0))
@@ -260,17 +304,34 @@ def main() -> int:
                         "backspace-del-quit",
                         "backspace-bs-quit",
                         "backspace-grapheme-quit",
-                    ) and sent_exit and b"Fake completion for:" in output:
+                    ) and sent_exit and b"Controlled Pi completion for:" in output and "● IDLE".encode() in output:
                         os.write(master, b"/quit\n")
                         action = "prompt-selected"
-                    elif action == "paste-controls-quit" and sent_exit and b"Fake completion for:" in output:
+                    elif (
+                        action in ("completed-turn-quit-lf", "completed-turn-ctrl-c")
+                        and sent_exit
+                        and b"Controlled Pi completion for:" in output
+                        and "● IDLE".encode() in output
+                    ):
+                        os.write(
+                            master,
+                            b"/quit\n" if action == "completed-turn-quit-lf" else b"\x03",
+                        )
+                        action = "completed-turn-finished"
+                    elif (
+                        action == "paste-controls-quit"
+                        and sent_exit
+                        and b"Controlled Pi completion for:" in output
+                        and "● IDLE".encode() in output
+                    ):
                         os.write(master, b"/quit\n")
                         action = "paste-controls-finished"
                     elif (
                         action == "fragmented-hostile-paste-quit"
                         and sent_exit
                         and last_write_label == "genuine-enter"
-                        and b"Fake completion for:" in output
+                        and b"Controlled Pi completion for:" in output
+                        and "● IDLE".encode() in output
                     ):
                         os.write(master, b"/quit\n")
                         action = "fragmented-hostile-paste-finished"
@@ -280,10 +341,15 @@ def main() -> int:
                     elif action == "resize-picker-cancel" and sent_exit and b"resume a session" in output:
                         os.write(master, b"\x1b")
                         action = "picker-resized"
-                    elif action == "mixed-resize-quit" and sent_exit and b"Fake completion for:" in output:
-                        assistant = output.split(b"Fake completion for:", 1)[-1]
-                        if assistant.count(b"```" ) != 1:
-                            continue
+                    elif (
+                        action == "mixed-resize-quit"
+                        and sent_exit
+                        and last_write_label == "genuine-enter"
+                        and "● IDLE".encode() in output
+                        and b"ctx   0%" in output
+                        and b"1t" in output
+                        and b"MIXED-END" in output
+                    ):
                         os.write(sys.stdout.fileno(), b"\n__NOESIS_MIXED_RESIZED__\n")
                         fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 22, 70, 0, 0))
                         screen.resize(70, 22)

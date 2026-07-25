@@ -1,7 +1,12 @@
 import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createModels, type CredentialStore } from "@earendil-works/pi-ai";
+import {
+  createModels,
+  fauxAssistantMessage,
+  fauxProvider,
+  type CredentialStore,
+} from "@earendil-works/pi-ai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { describe, expect, test } from "vitest";
@@ -179,6 +184,70 @@ describe("Pi authentication", () => {
     await expect(first).rejects.toThrow("OPENROUTER_API_KEY");
     await expect(runtime.run(request, () => undefined)).rejects.toThrow("OPENROUTER_API_KEY");
     expect(reads).toBe(2);
+  });
+
+  test("latches foreground abort while delayed auth resolves before AgentHarness exists", async () => {
+    let releaseAuth: (() => void) | undefined;
+    const authGate = new Promise<void>((resolve) => {
+      releaseAuth = resolve;
+    });
+    let markAuthStarted: (() => void) | undefined;
+    const authStarted = new Promise<void>((resolve) => {
+      markAuthStarted = resolve;
+    });
+    const credentials: CredentialStore = {
+      async read() {
+        markAuthStarted?.();
+        await authGate;
+        return { type: "api_key", key: "controlled-delayed-auth" };
+      },
+      async modify(_providerId, update) {
+        return await update(undefined);
+      },
+      async delete() {},
+    };
+    const models = createModels({ credentials, authContext: emptyAuthContext });
+    const provider = fauxProvider({
+      provider: "delayed-auth-provider",
+      models: [{ id: "delayed-auth-model", contextWindow: 8_000, maxTokens: 1_000 }],
+    });
+    let providerPrompts = 0;
+    provider.setResponses([
+      () => {
+        providerPrompts += 1;
+        return fauxAssistantMessage("must not complete");
+      },
+    ]);
+    models.setProvider(provider.provider);
+    const runtime = createPiAgentRuntime(process.cwd(), models);
+    const events: string[] = [];
+    const running = runtime.run(
+      {
+        trailId: "trail-delayed-auth-abort",
+        provider: "delayed-auth-provider",
+        model: "delayed-auth-model",
+        thinkingLevel: "off",
+        systemPrompt: "test",
+        prompt: "must not reach AgentHarness",
+        activeCapabilities: [],
+      },
+      (event) => {
+        if (event.type === "status") events.push(event.status);
+      },
+    );
+
+    await authStarted;
+    await runtime.abort("trail-delayed-auth-abort");
+    await runtime.abort("trail-delayed-auth-abort");
+    releaseAuth?.();
+
+    await expect(running).resolves.toMatchObject({
+      outcome: "aborted",
+      stopReason: "aborted",
+      text: "",
+    });
+    expect(events).toEqual(["aborted"]);
+    expect(providerPrompts).toBe(0);
   });
 
   test("serializes concurrent credential modifications", async () => {

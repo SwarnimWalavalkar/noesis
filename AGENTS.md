@@ -2,7 +2,7 @@
 
 ## Product contract
 
-- Read `docs/product-thesis.md`, `docs/product-experience.md`, and `plans/compounding-partnership-product-loop.md` before changing product behavior.
+- Read `docs/product-thesis.md`, `docs/product-experience.md`, and `plans/compounding-partnership-product-loop.html` before changing product behavior.
 - Deliver immediate value first. Preserve a future advantage only when the evidence supports a credible future use.
 - Infer collaboration posture. Ambiguous intellectual work defaults toward `work_with_me`, while explicit execution defaults toward `do_for_me`. A conversational instruction overrides the inference.
 - Start new learning at the narrowest plausible scope. Every durable learning names its anticipated future use, and recurring evidence is required before its scope broadens.
@@ -42,5 +42,5 @@
 - Do not use `any`. Avoid assertions; validate unknown durable data at the boundary.
 - Read a source file fully before a broad edit. Keep public package APIs narrow and add abstractions only with a consumer in this iteration.
 - Run `pnpm format`, `pnpm lint`, `pnpm typecheck`, and `pnpm test` after code changes. `pnpm check` runs the full set.
-- Use the fake runtime for tests and acceptance work. Never require paid model calls in CI.
+- Use Pi AgentHarness with a credential-free controlled provider for integration and acceptance work. Keep scripted runtime doubles test-only and limited to narrow unit seams. Never require credentials, network access, or paid model calls in CI.
 - Do not edit the local Pi, Hermes, or Codex reference clones. Do not commit unless explicitly asked.

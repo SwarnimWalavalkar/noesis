@@ -7,8 +7,7 @@ import {
   createBlindedJudgeFixture,
   createComparableRoleVariantFixture,
   createDefaultRoleContextPolicy,
-  createFakeAgentRoleRunner,
-  createFakeRoleModelBackend,
+  createRestrictedRoleContextPolicy,
   createStructuredInferencePort,
   isRoleRunError,
   type RoleBackendRequest,
@@ -16,6 +15,10 @@ import {
   type RoleVariantConfiguration,
   type RuntimePiAgentRunRequest,
 } from "../src/index.ts";
+import {
+  createScriptedAgentRoleRunner,
+  createScriptedRoleModelBackend,
+} from "./support/scripted-role-runner.ts";
 
 const promptRevision = (revisionId: string): FileRevisionRef => ({
   kind: "file_revision",
@@ -49,8 +52,8 @@ function configuration(role: AgentRole, variantId: string): RoleVariantConfigura
   return {
     variant: roleVariant(variantId),
     role,
-    provider: "fake-provider",
-    model: `fake-${variantId}`,
+    provider: "scripted-provider",
+    model: `scripted-${variantId}`,
     reasoning: "medium",
     systemPrompt: `${role} system prompt`,
     contextPolicy: createDefaultRoleContextPolicy(role),
@@ -99,7 +102,7 @@ describe("adapter-neutral role runner", () => {
       { text: '```json\n{"answer":"repaired"}\n```', usage: usage(12, 4, 0.02) },
     ];
     const prompts: string[] = [];
-    const runner = createFakeAgentRoleRunner({
+    const runner = createScriptedAgentRoleRunner({
       respond(backendRequest) {
         prompts.push(backendRequest.prompt);
         const response = responses.shift();
@@ -125,7 +128,7 @@ describe("adapter-neutral role runner", () => {
   });
 
   test("retains failure telemetry when output stays malformed", async () => {
-    const backend = createFakeRoleModelBackend({ respond: () => ({ text: "not json" }) });
+    const backend = createScriptedRoleModelBackend({ respond: () => ({ text: "not json" }) });
     const runner = createAgentRoleRunner({
       backend,
       variants: [configuration("case_generator", "cases-v1")],
@@ -162,7 +165,7 @@ describe("adapter-neutral role runner", () => {
     "toolUse",
   ] satisfies readonly RoleStopReason[])("preserves successful %s stop reason and reported usage", async (stopReason) => {
     const reportedUsage = usage(30, 9, 0.42);
-    const backend = createFakeRoleModelBackend({
+    const backend = createScriptedRoleModelBackend({
       respond: () => ({ text: "done", stopReason, usage: reportedUsage }),
     });
     const runner = createAgentRoleRunner({
@@ -183,7 +186,7 @@ describe("adapter-neutral role runner", () => {
 
   test("surfaces provider errors with stop, usage, and failure telemetry", async () => {
     const reportedUsage = usage(6, 2, 0.04);
-    const backend = createFakeRoleModelBackend({
+    const backend = createScriptedRoleModelBackend({
       respond: () => ({ text: "", stopReason: "error", usage: reportedUsage, error: "rate limited" }),
     });
     const runner = createAgentRoleRunner({
@@ -214,7 +217,7 @@ describe("adapter-neutral role runner", () => {
     const startedPromise = new Promise<void>((resolve) => {
       started = resolve;
     });
-    const backend = createFakeRoleModelBackend({
+    const backend = createScriptedRoleModelBackend({
       respond: async (backendRequest) => {
         started?.();
         await new Promise<void>((resolve) => {
@@ -244,7 +247,7 @@ describe("adapter-neutral role runner", () => {
 
   test("runs comparable variants against identical bounded inputs", async () => {
     const prompts: RoleBackendRequest[] = [];
-    const backend = createFakeRoleModelBackend({
+    const backend = createScriptedRoleModelBackend({
       respond(backendRequest) {
         prompts.push(backendRequest);
         return { text: JSON.stringify({ model: backendRequest.model }) };
@@ -288,8 +291,8 @@ describe("adapter-neutral role runner", () => {
     ]);
   });
 
-  test("runs one two-variant fixture through swappable fake trial and judge roles with stable capability identity", async () => {
-    const runner = createFakeAgentRoleRunner({
+  test("runs one two-variant fixture through swappable scripted trial and judge roles with stable capability identity", async () => {
+    const runner = createScriptedAgentRoleRunner({
       variants: [
         configuration("trial", "trial-baseline"),
         configuration("trial", "trial-candidate"),
@@ -338,9 +341,36 @@ describe("adapter-neutral role runner", () => {
 });
 
 describe("research role isolation", () => {
+  test("derives custom isolated-role policies without weakening the default whitelist", () => {
+    const policy = createRestrictedRoleContextPolicy("judge_critic", {
+      policyId: "application-judge-v1",
+      maxMessages: 12,
+      forbiddenContent: /authority[_-]?token/iu,
+    });
+
+    expect(policy.allowedMessageNames).toEqual(["rubric", "arm_A", "arm_B", "relevant_traces"]);
+    expect(policy.includeCapabilityRevisions).toBe(false);
+    expect(policy.maxMessages).toBe(12);
+    expect(() =>
+      createRestrictedRoleContextPolicy("judge_critic", {
+        maxTotalCharacters: 64_000,
+      }),
+    ).toThrow("cannot widen maxTotalCharacters");
+    expect(() =>
+      createRestrictedRoleContextPolicy("judge_critic", {
+        allowedMessageNames: ["rubric", "candidate_identity"],
+      }),
+    ).toThrow("cannot add undeclared message names");
+    expect(() =>
+      createRestrictedRoleContextPolicy("judge_critic", {
+        includeCapabilityRevisions: true,
+      }),
+    ).toThrow("cannot expose capability revisions");
+  });
+
   test("passes only declared bounded reflector inputs and strips tools", async () => {
     let capturedPrompt = "";
-    const backend = createFakeRoleModelBackend({
+    const backend = createScriptedRoleModelBackend({
       respond(backendRequest) {
         capturedPrompt = backendRequest.prompt;
         return { text: "ok" };
@@ -368,7 +398,7 @@ describe("research role isolation", () => {
   });
 
   test("rejects undeclared revision-author context", async () => {
-    const backend = createFakeRoleModelBackend({ respond: () => ({ text: "unused" }) });
+    const backend = createScriptedRoleModelBackend({ respond: () => ({ text: "unused" }) });
     const runner = createAgentRoleRunner({
       backend,
       variants: [configuration("revision_author", "author-v1")],
@@ -385,7 +415,7 @@ describe("research role isolation", () => {
 
   test("blinds judge arm labels and excludes capability identity from model context", async () => {
     let capturedPrompt = "";
-    const backend = createFakeRoleModelBackend({
+    const backend = createScriptedRoleModelBackend({
       respond(backendRequest) {
         capturedPrompt = backendRequest.prompt;
         return { text: '{"winner":"A"}' };

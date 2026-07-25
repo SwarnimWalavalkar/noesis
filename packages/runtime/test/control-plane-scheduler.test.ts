@@ -135,4 +135,80 @@ describe("runtime control-plane resident scheduling", () => {
     expect([...scheduled.values()].filter((timer) => !timer.cancelled)).toHaveLength(0);
     workspace.close();
   });
+
+  test("stop prevents later lifecycle stages when coordinator draining settles afterward", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-control-plane-stop-"));
+    roots.push(root);
+    const workspace = await createWorkspaceStore(root);
+    let markCoordinatorStarted: (() => void) | undefined;
+    const coordinatorStarted = new Promise<void>((resolve) => {
+      markCoordinatorStarted = resolve;
+    });
+    let releaseCoordinator: (() => void) | undefined;
+    const coordinatorBlocked = new Promise<void>((resolve) => {
+      releaseCoordinator = resolve;
+    });
+    let coordinatorStops = 0;
+    let feedbackRuns = 0;
+    let feedbackStops = 0;
+    let activationAttempts = 0;
+    const coordinator: RuntimeCoordinator = Object.freeze({
+      observeCompletedTurn: async () => unsupported(),
+      runAvailable: async () => {
+        markCoordinatorStarted?.();
+        await coordinatorBlocked;
+      },
+      idle: async () => undefined,
+      cancel: async () => undefined,
+      retry: async () => unsupported(),
+      getJob: async () => undefined,
+      listJobs: async () => Object.freeze([]),
+      getPreflightActivationHandoff: async () => undefined,
+      stop: async () => {
+        coordinatorStops += 1;
+      },
+    });
+    const activation: AtomicActivationController = Object.freeze({
+      activateFromPreflight: async () => {
+        activationAttempts += 1;
+        return unsupported();
+      },
+      approve: async () => unsupported(),
+      reject: async () => unsupported(),
+      getOperation: async () => undefined,
+      pinTurnActivation: async () => unsupported(),
+    });
+    const feedback: ContinuousFeedbackController = Object.freeze({
+      observeTurnOutcome: async () => unsupported(),
+      evaluateExperiment: async () => undefined,
+      experimentComparison: async () => unsupported(),
+      capabilityHealth: async () => unsupported(),
+      runAvailable: async () => {
+        feedbackRuns += 1;
+      },
+      cancel: async () => undefined,
+      stop: async () => {
+        feedbackStops += 1;
+      },
+    });
+    const controlPlane = createRuntimeControlPlane({
+      workspace,
+      coordinator,
+      activation,
+      feedback,
+      autoStart: false,
+    });
+
+    const running = controlPlane.runAvailable();
+    await coordinatorStarted;
+    const stopping = controlPlane.stop();
+    releaseCoordinator?.();
+    await Promise.all([running, stopping]);
+
+    expect(coordinatorStops).toBe(1);
+    expect(feedbackStops).toBe(1);
+    expect(feedbackRuns).toBe(0);
+    expect(activationAttempts).toBe(0);
+    workspace.close();
+  });
 });

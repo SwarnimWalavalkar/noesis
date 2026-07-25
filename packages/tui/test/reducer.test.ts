@@ -96,7 +96,7 @@ describe("Noesis TUI reducer", () => {
         fragments: [],
         capabilityVersions: { research: 2 },
       },
-      capabilities: { research: 2 },
+      capabilityVersions: { research: 2 },
       turnCount: 1,
     });
     const transcript = renderNoesisState(state, 100, 30).join("\n");

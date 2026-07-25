@@ -1,7 +1,10 @@
 import type {
   ActorRef,
   ArtifactFileRef,
+  CompoundingReplayRecord,
+  CompoundingReplayRole,
   EvidenceRef,
+  EvidenceRevisionRef,
   Experiment,
   DatabaseRowRef,
   FileRevisionRef,
@@ -10,6 +13,7 @@ import type {
   DataSensitivity,
   PermissionManifest,
 } from "@noesis/domain";
+import type { FrozenTurnPlan } from "@noesis/agent-types";
 
 export type Sensitivity = DataSensitivity;
 export type SessionStatus = "idle" | "running" | "completed" | "aborted" | "failed";
@@ -356,6 +360,12 @@ export interface ProtectedActivationStore {
     readonly turnId: string;
   }) => Promise<TurnActivationPinRecord>;
   readonly getTurnPin: (sessionId: string, turnId: string) => Promise<TurnActivationPinRecord | undefined>;
+  readonly admitTurnPlan: (plan: FrozenTurnPlan) => Promise<FrozenTurnPlan>;
+  readonly getTurnPlan: (sessionId: string, turnId: string) => Promise<FrozenTurnPlan | undefined>;
+  readonly bootstrapGenesis: (request: {
+    readonly capabilityRevision: CapabilityRevisionRef;
+    readonly activeDefinitions: Readonly<Record<string, FileRevisionRef>>;
+  }) => Promise<ActivationRecord>;
   readonly recoverCommittedPublications: () => Promise<number>;
 }
 
@@ -369,6 +379,26 @@ export interface SearchConfiguration {
 }
 
 export interface OperationalRepositories {
+  readonly foregroundTurns: {
+    readonly get: (turnId: string) => Promise<
+      | {
+          readonly turnId: string;
+          readonly sessionId: string;
+          readonly planId: string;
+          readonly status: "running" | "completed" | "aborted" | "failed";
+          readonly outcomeId?: string;
+          readonly admittedAt: string;
+          readonly settledAt?: string;
+        }
+      | undefined
+    >;
+    readonly settle: (request: {
+      readonly turnId: string;
+      readonly outcomeId: string;
+      readonly status: "completed" | "aborted" | "failed";
+      readonly settledAt: string;
+    }) => Promise<void>;
+  };
   readonly sessions: {
     readonly get: (sessionId: string) => Promise<SessionRecord | undefined>;
     readonly sensitivity: (sessionId: string) => Promise<Sensitivity | undefined>;
@@ -511,13 +541,78 @@ export interface LegacyImportReport {
   readonly warnings: readonly string[];
 }
 
+export interface OperationalCutoverReport {
+  readonly cutoverName: "workspace-operational-authority";
+  readonly cutoverVersion: 1;
+  readonly sourceDigest: string;
+  readonly alreadyCompleted: boolean;
+  readonly legacyImport: LegacyImportReport;
+}
+
+export interface CompoundingReplayBudgetRecord {
+  readonly budgetId: string;
+  readonly maximumCalls: number;
+  readonly maximumTokens: number;
+  readonly maximumCost: number;
+  readonly reservedCalls: number;
+  readonly reservedTokens: number;
+  readonly reservedCost: number;
+  readonly createdAt: string;
+}
+
+export interface CompoundingReplayRoleReservation {
+  readonly operationId: string;
+  readonly replayId: string;
+  readonly role: CompoundingReplayRole;
+  readonly requestDigest: string;
+  readonly maximumTokens: number;
+  readonly maximumCost: number;
+}
+
+export type CompoundingReplayReservationResult =
+  | { readonly status: "reserved" }
+  | { readonly status: "denied"; readonly reason: "budget_exhausted" }
+  | { readonly status: "unresolved" }
+  | {
+      readonly status: "completed";
+      readonly resultEvidence: EvidenceRevisionRef<"output" | "judgment">;
+    }
+  | { readonly status: "failed"; readonly failure: string };
+
+/**
+ * Protected coordinator persistence for shadow measurement. Generated roles receive neither this
+ * interface nor the workspace store.
+ */
+export interface CompoundingMeasurementStore {
+  readonly putBudget: (request: {
+    readonly budgetId: string;
+    readonly maximumCalls: number;
+    readonly maximumTokens: number;
+    readonly maximumCost: number;
+  }) => Promise<CompoundingReplayBudgetRecord>;
+  readonly getBudget: (budgetId: string) => Promise<CompoundingReplayBudgetRecord | undefined>;
+  readonly beginReplay: (request: {
+    readonly replayId: string;
+    readonly planId: string;
+    readonly budgetId: string;
+  }) => Promise<void>;
+  readonly reserveRole: (
+    request: CompoundingReplayRoleReservation,
+  ) => Promise<CompoundingReplayReservationResult>;
+  readonly completeRole: (request: {
+    readonly operationId: string;
+    readonly resultEvidence: EvidenceRevisionRef<"output" | "judgment">;
+    readonly usedTokens: number;
+    readonly actualCost: number;
+  }) => Promise<void>;
+  readonly failRole: (operationId: string, failure: string) => Promise<void>;
+  readonly record: (record: CompoundingReplayRecord) => Promise<void>;
+  readonly list: () => Promise<readonly CompoundingReplayRecord[]>;
+}
+
 export interface NoesisWorkspaceStore extends WorkspaceStore {
   readonly paths: WorkspacePaths;
   readonly operational: OperationalRepositories;
-  /** Protected runtime composition only; never pass this surface to generated roles. */
-  readonly protectedActivations: ProtectedActivationStore;
-  /** Protected runtime composition only; never pass this surface to generated or reflection roles. */
-  readonly protectedFeedback: ProtectedFeedbackStore;
   readonly search: SearchIndexPort;
   readonly recordDirectEdit: (
     workingPath: string,
@@ -530,6 +625,10 @@ export interface NoesisWorkspaceStore extends WorkspaceStore {
   readonly inspectIntegrity: () => Promise<IntegrityReport>;
   readonly backup: (backupRoot: string) => Promise<BackupReport>;
   readonly importLegacyWorkspace: (legacyRoot: string, actor: ActorRef) => Promise<LegacyImportReport>;
+  readonly cutoverLegacyOperationalAuthority: (
+    legacyRoot: string,
+    actor: ActorRef,
+  ) => Promise<OperationalCutoverReport>;
   readonly close: () => void;
   readonly unsafeDatabasePathForTesting: string;
   readonly getArtifactMetadata: (artifactId: string) => Promise<ArtifactFileRef | undefined>;

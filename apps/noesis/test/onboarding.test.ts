@@ -87,7 +87,6 @@ describe("first-launch onboarding", () => {
     expect(result.config).toEqual({
       schemaVersion: 1,
       agent: {
-        runtime: "pi",
         provider: "openai-codex",
         model: "gpt-5.5",
         thinkingLevel: "medium",
@@ -107,7 +106,6 @@ describe("first-launch onboarding", () => {
     const result = await runFirstLaunchOnboarding({ home, prompts, auth, authCallbacks });
 
     expect(result.config.agent).toEqual({
-      runtime: "pi",
       provider: "openrouter",
       model: "anthropic/claude-sonnet-4",
       thinkingLevel: "low",

@@ -4,5 +4,4 @@ These documents define the product direction that should guide implementation an
 
 - [Product thesis](product-thesis.md) — the problem, primary persona, differentiated value, principles, and non-goals.
 - [Product experience](product-experience.md) — the collaboration model, compounding loop, legible adaptation, and representative user flows.
-
-Implementation sequencing lives in [the compounding partnership build plan](../plans/compounding-partnership-product-loop.md). Architecture authority and protected-boundary rules remain in the repository plans and `AGENTS.md`.
+The completed correction work is captured in the [high-leverage correction plan](../plans/noesis-high-leverage-correction-plan.html). The [compounding partnership product loop](../plans/compounding-partnership-product-loop.html) defines the next implementation sequence.

@@ -116,7 +116,7 @@ async function createRuntime(agent: {
 describe("Noesis TUI lifecycle", () => {
   test("two plain launches create distinct fresh sessions without prior conversation", async () => {
     const runtime = await createRuntime({
-      name: "fresh-fake",
+      name: "fresh-scripted",
       async run(request) {
         return {
           text: `reply:${request.prompt}`,
@@ -161,7 +161,7 @@ describe("Noesis TUI lifecycle", () => {
 
   test("direct resume restores only the selected session history", async () => {
     const runtime = await createRuntime({
-      name: "resume-fake",
+      name: "resume-scripted",
       async run(request) {
         return {
           text: `reply:${request.prompt}`,
@@ -200,7 +200,7 @@ describe("Noesis TUI lifecycle", () => {
       releaseTool = resolve;
     });
     const runtime = await createRuntime({
-      name: "telemetry-fake",
+      name: "telemetry-scripted",
       async run(request, emit) {
         emit({ type: "model", provider: request.provider, model: request.model, contextWindow: 4_000 });
         emit({ type: "status", status: "started" });
@@ -246,7 +246,7 @@ describe("Noesis TUI lifecycle", () => {
   test("reconciles tool-loop streaming to authoritative output and ignores late turn events", async () => {
     let emitLate: (() => void) | undefined;
     const runtime = await createRuntime({
-      name: "tool-loop-late-fake",
+      name: "tool-loop-late-scripted",
       async run(request, emit) {
         emit({ type: "status", status: "started" });
         emit({ type: "delta", text: "intermediate reasoning" });
@@ -288,7 +288,7 @@ describe("Noesis TUI lifecycle", () => {
   test("sanitizes bracketed C0, C1, ESC, and DEL paste before rendering or runtime submission", async () => {
     let submitted = "";
     const runtime = await createRuntime({
-      name: "paste-safe-fake",
+      name: "paste-safe-scripted",
       async run(request) {
         submitted = request.prompt;
         return {
@@ -324,7 +324,7 @@ describe("Noesis TUI lifecycle", () => {
 
   test("records provider error outcomes as failed and keeps the TUI in ERROR", async () => {
     const runtime = await createRuntime({
-      name: "provider-error-fake",
+      name: "provider-error-scripted",
       async run(request, emit) {
         const error = "Provider rejected the request: invalid offline fixture";
         emit({ type: "status", status: "started" });
@@ -352,7 +352,10 @@ describe("Noesis TUI lifecycle", () => {
     expect(terminal.output).toContain("Provider rejected the request: invalid offline fixture");
     await vi.waitFor(() => expect(runtime.ledger.findByType("turn.failed")).toHaveLength(1));
     expect(runtime.ledger.findByType("turn.completed")).toHaveLength(0);
-    expect(runtime.getTrail(runtime.listTrails()[0]!.trailId).status).toBe("failed");
+    const failedTrail = runtime.listTrails()[0];
+    expect(failedTrail).toBeDefined();
+    if (!failedTrail) throw new Error("Failed trail fixture was not recorded");
+    expect(runtime.getTrail(failedTrail.trailId).status).toBe("failed");
 
     terminal.type("/quit\n");
     await running;
@@ -365,7 +368,7 @@ describe("Noesis TUI lifecycle", () => {
       releaseBlocked?.();
     });
     const runtime = await createRuntime({
-      name: "abortable-fake",
+      name: "abortable-scripted",
       async run(request, emit) {
         runs += 1;
         emit({ type: "status", status: "started" });
@@ -426,7 +429,7 @@ describe("Noesis TUI lifecycle", () => {
 
   test("reflows the main shell and picker from current terminal dimensions", async () => {
     const runtime = await createRuntime({
-      name: "resize-fake",
+      name: "resize-scripted",
       async run(request) {
         return {
           text: "done",
@@ -465,7 +468,7 @@ describe("Noesis TUI lifecycle", () => {
 
   test("keeps command help discoverable without a permanent command wall", async () => {
     const runtime = await createRuntime({
-      name: "help-fake",
+      name: "help-scripted",
       async run(request) {
         return {
           text: "done",
@@ -485,7 +488,10 @@ describe("Noesis TUI lifecycle", () => {
     expect(terminal.output).not.toContain("/learn · /evaluate");
 
     terminal.type("?\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("/learn · /evaluate"));
+    await vi.waitFor(() =>
+      expect(terminal.output).toContain("learning, experiments, activation, and revert run ambiently"),
+    );
+    expect(terminal.output).not.toContain("/learn · /evaluate");
     expect(terminal.output).toContain("/model provider/model");
 
     terminal.type("/quit\n");
@@ -494,7 +500,7 @@ describe("Noesis TUI lifecycle", () => {
 
   test("continue resumes the most recently active session without creating or leaking trails", async () => {
     const runtime = await createRuntime({
-      name: "continue-fake",
+      name: "continue-scripted",
       async run(request) {
         return {
           text: `reply:${request.prompt}`,
@@ -539,7 +545,7 @@ describe("Noesis TUI lifecycle", () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-tui-continue-corrupt-"));
     homes.push(home);
     const agent = {
-      name: "continue-corrupt-fake",
+      name: "continue-corrupt-scripted",
       async run(request: Parameters<NoesisRuntime["agent"]["run"]>[0]) {
         return {
           text: `reply:${request.prompt}`,
@@ -571,7 +577,7 @@ describe("Noesis TUI lifecycle", () => {
 
   test("picker selects the requested session and Escape cancels through normal cleanup", async () => {
     const runtime = await createRuntime({
-      name: "picker-fake",
+      name: "picker-scripted",
       async run(request) {
         return {
           text: `reply:${request.prompt}`,
@@ -611,7 +617,7 @@ describe("Noesis TUI lifecycle", () => {
 
   test("invalid direct session IDs fail actionably without starting the terminal", async () => {
     const runtime = await createRuntime({
-      name: "missing-fake",
+      name: "missing-scripted",
       async run(request) {
         return {
           text: "done",
@@ -635,7 +641,7 @@ describe("Noesis TUI lifecycle", () => {
 
   test("an empty resume picker fails with a safe, actionable message", async () => {
     const runtime = await createRuntime({
-      name: "empty-fake",
+      name: "empty-scripted",
       async run(request) {
         return {
           text: "done",
@@ -659,7 +665,7 @@ describe("Noesis TUI lifecycle", () => {
 
   test("continue on an empty home fails actionably without starting or creating a trail", async () => {
     const runtime = await createRuntime({
-      name: "empty-continue-fake",
+      name: "empty-continue-scripted",
       async run(request) {
         return {
           text: "done",
@@ -737,7 +743,7 @@ describe("Noesis TUI lifecycle", () => {
         ? continueResult.reason.message
         : "";
     expect(continueMessage).toBe(directMessage);
-    expect(continueMessage).toContain("Relaunch with --runtime original-runtime");
+    expect(continueMessage).toContain("Runtime provenance is immutable; start a new session instead.");
     expect(directTerminal.starts).toBe(0);
     expect(continueTerminal.starts).toBe(0);
   });
@@ -838,7 +844,7 @@ describe("Noesis TUI lifecycle", () => {
 
   test("treats LF after /quit as shutdown and stops the terminal once", async () => {
     const runtime = await createRuntime({
-      name: "lifecycle-fake",
+      name: "lifecycle-scripted",
       async run(request) {
         return {
           text: "done",
@@ -875,7 +881,7 @@ describe("Noesis TUI lifecycle", () => {
     });
     let emitLate: (() => void) | undefined;
     const runtime = await createRuntime({
-      name: "blocking-fake",
+      name: "blocking-scripted",
       async run(request, emit) {
         emitLate = () => emit({ type: "delta", text: "SHUTDOWN-LATE-DELTA" });
         markStarted?.();
@@ -917,7 +923,7 @@ describe("Noesis TUI lifecycle", () => {
     });
     const abort = vi.fn(async () => undefined);
     const runtime = await createRuntime({
-      name: "stuck-fake",
+      name: "stuck-scripted",
       async run() {
         markStarted?.();
         return await new Promise<never>(() => undefined);

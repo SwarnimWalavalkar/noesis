@@ -14,6 +14,7 @@ import type {
   DynamicPreflightInput,
   EvaluationCase,
   EvaluationCriterionSet,
+  ProtectedEvaluationSuiteRevision,
 } from "./dynamic-contracts.ts";
 
 export interface LearningAuthoredCandidate {
@@ -41,7 +42,7 @@ export interface LearningPreflightCompositionRequest {
   readonly authored: LearningAuthoredCandidate;
   readonly baselineRevision: CapabilityRevision;
   readonly criteria: EvaluationCriterionSet;
-  readonly protectedCases: readonly EvaluationCase[];
+  readonly protectedSuite: ProtectedEvaluationSuiteRevision;
   readonly budget: DynamicPreflightInput["budget"];
   readonly config: DynamicEvaluationConfig;
   readonly signal?: AbortSignal;
@@ -73,8 +74,8 @@ export function createLearningPreflightInput(
   request: LearningPreflightCompositionRequest,
 ): LearningPreflightCompositionResult {
   const { authored } = request;
-  if (authored.experiment.status !== "authoring")
-    return identityFailure("Learning handoff requires an authoring experiment");
+  if (authored.experiment.status !== "authoring" && authored.experiment.status !== "preflight")
+    return identityFailure("Learning handoff requires an authoring or preflight experiment");
   if (
     authored.brief.experimentId !== authored.experiment.experimentId ||
     authored.brief.scope !== authored.experiment.scope ||
@@ -98,8 +99,13 @@ export function createLearningPreflightInput(
     return identityFailure(
       "Candidate CapabilityRevisionRef does not match the authored experiment and bytes",
     );
-  if (authored.brief.baselineRevision.capabilityId !== authored.revisionRef.capabilityId)
-    return identityFailure("Baseline and candidate revisions belong to different capabilities");
+  if (
+    authored.brief.baselineRevision.capabilityId !== authored.revisionRef.capabilityId &&
+    authored.revision.predecessorRevisionId !== undefined
+  )
+    return identityFailure(
+      "A candidate may cross capability identity only when it creates a new slot without a predecessor",
+    );
   if (!sameCapabilityRevisionRef(request.criteria.candidateRevision, authored.revisionRef))
     return identityFailure("Criterion snapshot is not pinned to the authored candidate revision");
   if (request.criteria.scope !== authored.brief.scope)
@@ -160,22 +166,26 @@ export function createLearningPreflightInput(
       }),
       criteria: request.criteria,
       sourceCases: Object.freeze(evaluationCases),
-      protectedCases: Object.freeze(
-        request.protectedCases.map((evaluationCase) =>
-          Object.freeze({
-            ...evaluationCase,
-            evidenceRefs: Object.freeze(
-              evaluationCase.evidenceRefs.map((reference) => Object.freeze({ ...reference })),
-            ),
-            ...(evaluationCase.definitionRevision
-              ? { definitionRevision: Object.freeze({ ...evaluationCase.definitionRevision }) }
-              : {}),
-            criterionRefs: Object.freeze(
-              evaluationCase.criterionRefs.map((criterion) => Object.freeze({ ...criterion })),
-            ),
-          }),
+      protectedSuite: Object.freeze({
+        ...request.protectedSuite,
+        definitionRevision: Object.freeze({ ...request.protectedSuite.definitionRevision }),
+        cases: Object.freeze(
+          request.protectedSuite.cases.map((evaluationCase) =>
+            Object.freeze({
+              ...evaluationCase,
+              evidenceRefs: Object.freeze(
+                evaluationCase.evidenceRefs.map((reference) => Object.freeze({ ...reference })),
+              ),
+              ...(evaluationCase.definitionRevision
+                ? { definitionRevision: Object.freeze({ ...evaluationCase.definitionRevision }) }
+                : {}),
+              criterionRefs: Object.freeze(
+                evaluationCase.criterionRefs.map((criterion) => Object.freeze({ ...criterion })),
+              ),
+            }),
+          ),
         ),
-      ),
+      }),
       budget: Object.freeze({ ...request.budget }),
       config: request.config,
       ...(request.signal ? { signal: request.signal } : {}),

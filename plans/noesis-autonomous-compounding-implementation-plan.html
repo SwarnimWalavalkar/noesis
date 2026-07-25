@@ -931,7 +931,7 @@ Result: +21% judged quality · no regressions · same permissions</pre>
           <dt>Depends</dt><dd>Genesis.</dd>
           <dt>Owns</dt><dd><code>AGENTS.md</code>, supersession notice/storage sections in <code>plans/noesis-first-complete-iteration.html</code>, <code>packages/domain</code>, the minimal <code>packages/agent-types</code> shell, WorkspaceStore interfaces, experiment metadata, architecture tests, root manifests, workspace, lockfile.</dd>
           <dt>Deliverables</dt><dd>Before parallel work, replace only the old storage instructions in active repo guidance and mark the older plan superseded by this WorkspaceStore plan. Preserve Pi-only runtime ownership, TUI read-model state, authority/effect and credential boundaries, provenance, functional TypeScript style, tests, and workflow invariants. Also deliver evolvable internal types; minimal shared agent types; the one-authority matrix; SQLite/file/revision/evidence/artifact ports; boundary validation; stable effect-operation identities.</dd>
-          <dt>Gate</dt><dd>Active repo instructions contain no contradictory storage model; architecture tests reject competing authorities; generated roles cannot update activation or permission tables; one fake experiment records comparable DB rows and evidence files.</dd>
+          <dt>Gate</dt><dd>Active repo instructions contain no contradictory storage model; architecture tests reject competing authorities; generated roles cannot update activation or permission tables; one credential-free controlled Pi experiment records comparable DB rows and evidence files.</dd>
           <dt>Conflict</dt><dd>Only AC-00 edits root metadata in this wave. <code>agent-types</code> is the only new shell it creates, justified by AC-01/02/03 consumers; all other packages remain owner-created when consumed.</dd>
         </dl>
       </article>
@@ -954,7 +954,7 @@ Result: +21% judged quality · no regressions · same permissions</pre>
         <dl>
           <dt>Depends</dt><dd>AC-00.</dd>
           <dt>Owns</dt><dd>Isolated implementation modules under <code>packages/runtime-pi</code>; it consumes the AC-00 <code>agent-types</code> package.</dd>
-          <dt>Deliverables</dt><dd>Configurable foreground/role runners; swappable role prompts, models, reasoning and judges; boundary output repair; telemetry; fake runner; generated-tool adapter seam. Any newly proven shared type is proposed to the Barrier F metadata owner rather than added concurrently.</dd>
+          <dt>Deliverables</dt><dd>Configurable foreground/role runners; swappable role prompts, models, reasoning and judges; boundary output repair; telemetry; credential-free controlled Pi provider fixtures; generated-tool adapter seam. Any newly proven shared type is proposed to the Barrier F metadata owner rather than added concurrently.</dd>
           <dt>Gate</dt><dd>No Pi types escape runtime-pi; two role variants can run against the same fixture and produce comparable traces.</dd>
           <dt>Conflict</dt><dd>Session tools and role execution use separate files; no policy decisions here.</dd>
         </dl>
@@ -1100,7 +1100,7 @@ Result: +21% judged quality · no regressions · same permissions</pre>
         <dl>
           <dt>Depends</dt><dd>AC-13 fixes.</dd>
           <dt>Owns</dt><dd>Acceptance fixtures, focused failure tests, README, architecture plan, research guide, progressive-hardening backlog.</dd>
-          <dt>Deliverables</dt><dd>End-to-end fake-model journey, one-time workspace import proof, SQLite backup/restore proof, editable-file round trip, experiment cookbook, honest preview threat model, user guide, verified full check. Reproducible builds, SBOMs, hardened OS backends, exhaustive fuzz/property suites, and multi-model judge panels remain explicit follow-on policies unless evidence makes one necessary now.</dd>
+          <dt>Deliverables</dt><dd>End-to-end credential-free controlled Pi journey, one-time workspace import proof, SQLite backup/restore proof, editable-file round trip, experiment cookbook, honest preview threat model, user guide, verified full check. Reproducible builds, SBOMs, hardened OS backends, exhaustive fuzz/property suites, and multi-model judge panels remain explicit follow-on policies unless evidence makes one necessary now.</dd>
           <dt>Gate</dt><dd>Definition-of-done journey passes and <code>pnpm check</code> is green without paid model calls.</dd>
           <dt>Conflict</dt><dd>Root manifest/lock changes remain centralized through the integration owner.</dd>
         </dl>
@@ -1158,7 +1158,7 @@ worker C                         → AC-03 → AC-04     → AC-07              
         <article class="card wide">
           <h3>CI rules</h3>
           <ul>
-            <li>Fake role runner and fake generated-tool backend cover the core loop.</li>
+            <li>Pi AgentHarness with a credential-free controlled provider covers the core loop; scripted test runtimes are limited to narrow unit seams.</li>
             <li>No provider login or paid call is required.</li>
             <li>Run format, lint, typecheck, tests, and architecture checks.</li>
             <li>Workspace fixtures prove SQLite/file authority, migration, evidence revisions, and backup restore.</li>
@@ -1182,7 +1182,7 @@ worker C                         → AC-03 → AC-04     → AC-07              
         <li>Real-world feedback is attributed to the active revision and open experiment; a seeded regression resolves it as <code>revert</code> and automatically restores the prior activation pointer, while a separate fixture proves <code>revise</code> creates linked successor revision and experiment.</li>
         <li>A direct user edit remains the canonical working file, creates a new stable revision without changing prior pinned bytes, refreshes rebuildable search indexes, and invalidates stale evaluations without copying definition content into SQLite.</li>
         <li>SQLite backup/restore recovers sessions, jobs, experiments, evaluations, search configuration, and activation pointers; FTS/embedding/search-document indexes rebuild from canonical DB rows and file revisions.</li>
-        <li>The entire journey passes with fake models and tools in CI, followed by a green <code>pnpm check</code>.</li>
+        <li>The entire journey passes through Pi AgentHarness with credential-free controlled providers and tools in CI, followed by a green <code>pnpm check</code>.</li>
       </ol>
       <div class="callout good">
         The user experiences a capable agent that quietly becomes better. The system retains enough evidence to explain exactly

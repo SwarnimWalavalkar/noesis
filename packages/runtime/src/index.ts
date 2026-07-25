@@ -1,4 +1,4 @@
-import { createId, toJsonValue, type TrailStatus } from "@noesis/domain";
+import { canonicalJson, createId, sha256, toJsonValue, type TrailStatus } from "@noesis/domain";
 import {
   compileContext,
   decodeContextSnapshot,
@@ -22,8 +22,10 @@ import type {
   AgentContextUsage,
   AgentRuntimeEvent,
   AgentThinkingLevel,
+  FrozenTurnPlan,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
+import { validateFrozenTurnPlan } from "@noesis/agent-types";
 
 export { compareTrailRecency } from "@noesis/ledger";
 export * from "./coordinator-contracts.ts";
@@ -33,7 +35,11 @@ export * from "./preflight-policy.ts";
 export * from "./atomic-activation.ts";
 export * from "./protected-activation.ts";
 export * from "./continuous-feedback.ts";
+export * from "./compounding-metrics.ts";
 export * from "./control-plane.ts";
+export * from "./turn-intelligence.ts";
+export * from "./turn-settlement.ts";
+export * from "./scheduled-execution.ts";
 
 export interface TrailState {
   readonly trailId: string;
@@ -76,6 +82,7 @@ export interface StartTrailInput {
 export interface RunTurnOptions {
   readonly onEvent?: (event: AgentRuntimeEvent) => void;
   readonly thinkingLevel?: AgentThinkingLevel;
+  readonly frozenTurnPlan?: FrozenTurnPlan;
 }
 
 export interface RuntimeAgentDefaults {
@@ -85,9 +92,9 @@ export interface RuntimeAgentDefaults {
 }
 
 const DEFAULT_AGENT_SETTINGS: RuntimeAgentDefaults = {
-  provider: "fake",
-  model: "noesis-fake-1",
-  thinkingLevel: "off",
+  provider: "openai-codex",
+  model: "gpt-5.5",
+  thinkingLevel: "medium",
 };
 
 const RESUME_ATTEMPTS = 3;
@@ -110,6 +117,7 @@ export interface TurnResult {
   readonly context: ContextSnapshot;
   readonly usedCapabilities: Readonly<Record<string, number>>;
   readonly contextUsage?: AgentContextUsage;
+  readonly frozenTurnPlan?: FrozenTurnPlan;
 }
 
 export interface NoesisRuntime {
@@ -259,7 +267,7 @@ export async function createNoesisRuntime(
       const trail = getTrail(trailId);
       if (trail.runtime !== agent.name)
         throw new Error(
-          `Session ${trailId} uses runtime ${trail.runtime}, but the active runtime is ${agent.name}. Relaunch with --runtime ${trail.runtime} to resume it.`,
+          `Session ${trailId} was recorded by runtime ${trail.runtime}, but this Pi-only build uses ${agent.name}. Runtime provenance is immutable; start a new session instead.`,
         );
       if (trail.status === "running") {
         await ledger.refresh();
@@ -318,6 +326,10 @@ export async function createNoesisRuntime(
   }
 
   async function runTurn(trailId: string, input: string, options: RunTurnOptions = {}): Promise<TurnResult> {
+    const frozenTurnPlan =
+      options.frozenTurnPlan === undefined ? undefined : validateFrozenTurnPlan(options.frozenTurnPlan);
+    if (frozenTurnPlan && frozenTurnPlan.sessionId !== trailId)
+      throw new Error("Frozen turn plan session does not match the executing trail");
     const admitTurn = async () => {
       for (;;) {
         const expectedSequence = ledger.readAll().length;
@@ -327,7 +339,7 @@ export async function createNoesisRuntime(
             `Trail ${trailId} is pinned to runtime ${trail.runtime}; active runtime is ${agent.name}. Start or fork a trail for the active runtime.`,
           );
         if (trail.status === "running") throw new Error("Trail is already running");
-        const active = capabilities.listActive();
+        const active = frozenTurnPlan ? Object.freeze([]) : capabilities.listActive();
         const latestCompaction = ledger
           .eventsForTrail(trailId)
           .filter((event) => event.type === "trail.compacted")
@@ -387,7 +399,16 @@ export async function createNoesisRuntime(
             priority: 90,
           },
         ];
-        const versions = capabilities.activeVersions();
+        const versions = frozenTurnPlan
+          ? Object.freeze(
+              Object.fromEntries(
+                frozenTurnPlan.selectedCapabilities.map((selection) => [
+                  selection.capabilityId,
+                  frozenTurnPlan.activationRevision,
+                ]),
+              ),
+            )
+          : capabilities.activeVersions();
         const context = compileContext(fragments, versions, {
           maxTokens: 8_000,
           maxFragmentTokens: 2_000,
@@ -405,6 +426,12 @@ export async function createNoesisRuntime(
                 context: toJsonValue(context),
                 capabilityVersions: versions,
                 thinkingLevel,
+                ...(frozenTurnPlan
+                  ? {
+                      frozenTurnPlanId: frozenTurnPlan.planId,
+                      frozenTurnPlanDigest: frozenTurnPlan.canonicalDigest,
+                    }
+                  : {}),
               },
             },
             expectedSequence,
@@ -425,12 +452,18 @@ export async function createNoesisRuntime(
           provider: trail.provider,
           model: trail.model,
           thinkingLevel,
-          systemPrompt: renderContext(context),
+          systemPrompt: frozenTurnPlan?.renderedSystemPrompt ?? renderContext(context),
           prompt: input,
-          activeCapabilities: active.map((item) => ({
-            name: item.name,
-            version: item.version,
-          })),
+          activeCapabilities:
+            frozenTurnPlan?.selectedCapabilities.map((item) => ({
+              name: item.name,
+              version: frozenTurnPlan.activationRevision,
+            })) ??
+            active.map((item) => ({
+              name: item.name,
+              version: item.version,
+            })),
+          ...(frozenTurnPlan ? { frozenTurnPlan } : {}),
         },
         options.onEvent ?? (() => undefined),
       );
@@ -448,6 +481,7 @@ export async function createNoesisRuntime(
           context,
           usedCapabilities: versions,
           ...(result.contextUsage ? { contextUsage: result.contextUsage } : {}),
+          ...(frozenTurnPlan ? { frozenTurnPlan } : {}),
         };
       }
       const completed = await ledger.append({
@@ -471,6 +505,7 @@ export async function createNoesisRuntime(
         context,
         usedCapabilities: versions,
         ...(result.contextUsage ? { contextUsage: result.contextUsage } : {}),
+        ...(frozenTurnPlan ? { frozenTurnPlan } : {}),
       };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -606,7 +641,8 @@ export async function createNoesisRuntime(
       new Date(leaseUntil) <= new Date()
     )
       throw new Error("Scheduled execution requires the current active fenced lease");
-    const decision = await authority.runScheduled(jobId, runNumber, async () => {
+    const operationFingerprint = sha256(canonicalJson({ jobId, runNumber, prompt }));
+    const decision = await authority.runScheduled(jobId, runNumber, operationFingerprint, async () => {
       const trail = await startTrail({ title: `Job ${jobId}` });
       return (await runTurn(trail.trailId, prompt)).output;
     });

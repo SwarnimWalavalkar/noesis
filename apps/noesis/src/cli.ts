@@ -10,13 +10,8 @@ import {
   type ResolvedNoesisConfig,
   updateNoesisConfig,
 } from "@noesis/config";
-import { createId } from "@noesis/domain";
-import { createLearningEngine } from "@noesis/learning";
-import { createDurableScheduler, createNoesisRuntime, type NoesisRuntime } from "@noesis/runtime";
 import {
-  createFakeAgentRoleRunner,
   createPiModelServices,
-  createFakeAgentRuntime,
   createPiAgentRuntime,
   createPiAgentRoleRunner,
   type NoesisAuthEvent,
@@ -49,10 +44,10 @@ interface CliInput {
 
 type SessionStartup = CliInput["session"];
 
-const COMMANDS = new Set(["tui", "onboard", "demo", "inspect", "rebuild", "config", "auth", "help"]);
+const COMMANDS = new Set(["tui", "onboard", "inspect", "rebuild", "config", "auth", "help"]);
 const CONFIG_COMMANDS = new Set(["show", "init", "set"]);
 const AUTH_COMMANDS = new Set(["status", "login", "logout"]);
-const AGENT_OPTIONS = ["--runtime", "--provider", "--model", "--thinking-level"] as const;
+const AGENT_OPTIONS = ["--provider", "--model", "--thinking-level"] as const;
 const VALUE_OPTIONS = ["--home", ...AGENT_OPTIONS] as const;
 
 function parseSessionStartup(
@@ -109,9 +104,7 @@ function parseArgs(argv: readonly string[]): CliInput {
   const args = argv[0] === "--" ? argv.slice(1) : argv;
   const command = args[0] === undefined || args[0].startsWith("--") ? "tui" : args[0];
   if (!COMMANDS.has(command))
-    throw new Error(
-      `Unknown command ${command}. Use tui, onboard, demo, inspect, rebuild, config, auth, or help.`,
-    );
+    throw new Error(`Unknown command ${command}. Use tui, onboard, inspect, rebuild, config, auth, or help.`);
   const commandIndex = command === "tui" && args[0]?.startsWith("--") ? -1 : 0;
   const consumed = new Set<number>();
   if (commandIndex === 0) consumed.add(0);
@@ -172,7 +165,6 @@ function parseArgs(argv: readonly string[]): CliInput {
     }
   }
   const home = resolve(optionValues.get("--home") ?? process.env["NOESIS_HOME"] ?? ".noesis");
-  const runtime = optionValues.get("--runtime");
   const provider = optionValues.get("--provider");
   const model = optionValues.get("--model");
   const thinkingLevel = optionValues.get("--thinking-level");
@@ -184,7 +176,6 @@ function parseArgs(argv: readonly string[]): CliInput {
     home,
     session: startup.session,
     overrides: {
-      ...(runtime !== undefined ? { runtime } : {}),
       ...(provider !== undefined ? { provider } : {}),
       ...(model !== undefined ? { model } : {}),
       ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
@@ -199,7 +190,6 @@ Usage:
   noesis [tui] --continue [--home PATH] [agent options]
   noesis [tui] --resume [SESSION_ID] [--home PATH] [agent options]
   noesis onboard [--home PATH]
-  noesis demo [--home PATH]
   noesis inspect|rebuild [--home PATH] [agent options]
   noesis config init [--home PATH]
   noesis config show|set [--home PATH] [agent options]
@@ -213,96 +203,20 @@ Session startup:
   noesis --resume SESSION_ID   Resume that exact prior session
 
 Agent options:
-  --runtime fake|pi  --provider ID  --model ID  --thinking-level LEVEL
+  --provider ID  --model ID  --thinking-level LEVEL
 
 The latest session is ordered by last activity, then full trail ID ascending on ties.
 A session still marked running is not recovered or resumed automatically.
 Unknown options, conflicting startup arguments, and trailing operands are rejected.`;
 
-async function createRuntime(config: ResolvedNoesisConfig, forceFake = false): Promise<ApplicationRuntime> {
-  const settings = forceFake
-    ? { provider: "fake", model: "noesis-fake-1", thinkingLevel: "off" as const }
-    : config.agent;
-  if (forceFake || config.agent.runtime === "fake") {
-    const runtime = await createNoesisRuntime(config.home, createFakeAgentRuntime(), settings);
-    return await createApplicationRuntimeComposition({
-      config,
-      runtime,
-      createRoleRunner: (configurations) =>
-        createFakeAgentRoleRunner({
-          variants: configurations,
-          respond: (request) => {
-            if (request.systemPrompt.includes("role: reflector"))
-              return Object.freeze({
-                text: JSON.stringify({ decision: "no_change", reason: "fake role found no change" }),
-              });
-            throw new Error(`No scripted fake response for ${request.systemPrompt.split("\n")[0]}`);
-          },
-        }),
-    });
-  }
+async function createRuntime(config: ResolvedNoesisConfig): Promise<ApplicationRuntime> {
   const services = createPiModelServices(config.home);
-  const runtime = await createNoesisRuntime(
-    config.home,
-    createPiAgentRuntime(process.cwd(), services.models),
-    settings,
-  );
   return await createApplicationRuntimeComposition({
     config,
-    runtime,
+    createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), services.models, { sessionTools }),
     createRoleRunner: (configurations) =>
       createPiAgentRoleRunner(process.cwd(), services.models, configurations),
   });
-}
-
-async function runDemo(runtime: NoesisRuntime): Promise<void> {
-  const trail = await runtime.startTrail({ title: "Acceptance journey" });
-  const first = await runtime.runTurn(trail.trailId, "Prepare a concise recurring research brief");
-  const learning = createLearningEngine(runtime.ledger);
-  const proposals = await learning.reflect(trail.trailId);
-  const workflow = proposals.find((proposal) => proposal.kind === "workflow");
-  if (!workflow) throw new Error("Workflow proposal missing");
-  const cases = [
-    {
-      caseId: createId("case"),
-      source: "source" as const,
-      input: "research brief",
-      expectedIncludes: ["evidenced", "completion"],
-      baselineScore: 0.5,
-    },
-  ];
-  const candidateInput = learning.candidateFromWorkflow(workflow, cases);
-  const candidate = await runtime.capabilities.createCandidate(candidateInput);
-  const report = await runtime.evaluateCandidate(candidate.capabilityId, candidate.version);
-  if (!report.passed) throw new Error("Generated candidate did not pass deterministic evaluation");
-  await runtime.promoteCandidate(candidate.capabilityId, candidate.version);
-  const later = await runtime.startTrail({ title: "Promoted learning use" });
-  const second = await runtime.runTurn(later.trailId, "Prepare this week's research brief");
-  await runtime.rollbackCapability(candidate.capabilityId, candidate.version, "acceptance rollback");
-  const scheduler = createDurableScheduler(runtime);
-  const job = await scheduler.schedule({
-    prompt: "Run the recurring research brief",
-    schedule: "every 1h",
-    budget: 2,
-  });
-  const background = await scheduler.run(job);
-  console.log(
-    JSON.stringify(
-      {
-        home: runtime.ledger.paths.root,
-        trail: trail.trailId,
-        firstOutput: first.output,
-        proposals: proposals.map((proposal) => proposal.kind),
-        candidate: `${candidate.name}@${candidate.version}`,
-        evaluationPassed: report.passed,
-        laterUsedCapabilities: second.usedCapabilities,
-        backgroundOutput: background,
-        events: runtime.ledger.readAll().length,
-      },
-      null,
-      2,
-    ),
-  );
 }
 
 function visiblePrompt(message: string, signal?: AbortSignal): Promise<string> {
@@ -420,7 +334,7 @@ const terminalOnboardingPrompts: OnboardingPrompts = {
 function hasExplicitAgentSettings(input: CliInput): boolean {
   return (
     Object.values(input.overrides).some((value) => value !== undefined) ||
-    ["NOESIS_RUNTIME", "NOESIS_PROVIDER", "NOESIS_MODEL", "NOESIS_THINKING_LEVEL"].some(
+    ["NOESIS_PROVIDER", "NOESIS_MODEL", "NOESIS_THINKING_LEVEL"].some(
       (name) => process.env[name] !== undefined,
     )
   );
@@ -522,19 +436,17 @@ async function main(): Promise<void> {
       "No Noesis config found. Run `noesis onboard` in an interactive terminal or `noesis config init` for non-interactive setup.",
     );
   const config = await resolveNoesisConfig({ home: input.home, cli: input.overrides });
-  const runtime = await createRuntime(config, input.command === "demo");
+  const runtime = await createRuntime(config);
   try {
-    if (input.command === "demo") await runDemo(runtime);
-    else if (input.command === "rebuild") {
-      await runtime.ledger.rebuildProjection();
-      console.log(`Rebuilt ${runtime.ledger.paths.projection}`);
+    if (input.command === "rebuild") {
+      const documents = await runtime.debug.workspace.search.rebuildDocuments();
+      console.log(`Rebuilt ${documents.length} SQLite search documents`);
     } else if (input.command === "inspect")
       console.log(
         JSON.stringify(
           {
             trails: runtime.listTrails(),
-            activeCapabilities: runtime.capabilities.listActive(),
-            events: runtime.ledger.readAll().length,
+            activation: await runtime.debug.adaptations.activations.current(),
           },
           null,
           2,
@@ -549,7 +461,7 @@ async function main(): Promise<void> {
       });
     else
       throw new Error(
-        `Unknown command ${input.command}. Use tui, onboard, demo, inspect, rebuild, config, or auth.`,
+        `Unknown command ${input.command}. Use tui, onboard, inspect, rebuild, config, or auth.`,
       );
   } finally {
     await runtime.shutdown();

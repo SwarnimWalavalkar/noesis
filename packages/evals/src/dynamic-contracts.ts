@@ -106,6 +106,24 @@ export const EvaluationCaseSchema = z.strictObject({
   ),
 }) satisfies z.ZodType<EvaluationCase>;
 
+export interface ProtectedEvaluationSuiteRevision {
+  readonly suiteId: string;
+  readonly revision: number;
+  readonly scope: string;
+  readonly definitionRevision: FileRevisionRef;
+  readonly cases: readonly EvaluationCase[];
+  readonly snapshotDigest: string;
+}
+
+export const ProtectedEvaluationSuiteRevisionSchema = z.strictObject({
+  suiteId: z.string().min(1),
+  revision: z.number().int().positive(),
+  scope: z.string().min(1),
+  definitionRevision: FileRevisionRefSchema,
+  cases: z.array(EvaluationCaseSchema).min(1),
+  snapshotDigest: DigestSchema,
+}) satisfies z.ZodType<ProtectedEvaluationSuiteRevision>;
+
 export interface GeneratedCaseOutput {
   readonly cases: readonly {
     readonly caseId: string;
@@ -272,7 +290,7 @@ export interface DynamicPreflightInput {
   };
   readonly criteria: EvaluationCriterionSet;
   readonly sourceCases: readonly EvaluationCase[];
-  readonly protectedCases: readonly EvaluationCase[];
+  readonly protectedSuite: ProtectedEvaluationSuiteRevision;
   readonly budget: {
     readonly maxCases: number;
     readonly maxAttemptsPerArm: number;
@@ -355,10 +373,18 @@ export interface AggregatedComparison {
   readonly candidateWins: number;
   readonly baselineWins: number;
   readonly ties: number;
+  readonly inconclusive: number;
+  readonly decisiveDisagreements: number;
+  readonly comparisonEvidenceRefs: readonly EvidenceRevisionRef<"judgment">[];
 }
 
 export interface EvaluationRailResult {
-  readonly rail: "capability_identity" | "source_regression" | "artifact_validity" | "unexpected_effects";
+  readonly rail:
+    | "capability_identity"
+    | "source_regression"
+    | "protected_case_regression"
+    | "artifact_validity"
+    | "unexpected_effects";
   readonly passed: boolean;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly details: readonly string[];
@@ -374,6 +400,7 @@ export interface DynamicPreflightReport {
   readonly canonicalCandidateDigest: string;
   readonly suiteDigest: string;
   readonly criterionSnapshot: EvaluationCriterionSet;
+  readonly protectedSuite: ProtectedEvaluationSuiteRevision;
   readonly cases: readonly EvaluationCase[];
   readonly caseEvidence: readonly EvidenceRevisionRef<"input">[];
   readonly trials: readonly TrialResult[];
@@ -456,7 +483,7 @@ export const DynamicPreflightInputBoundarySchema = z.strictObject({
   candidate: z.strictObject({ ref: CapabilityRevisionRefSchema, revision: CapabilityRevisionSchema }),
   criteria: EvaluationCriterionSetSchema,
   sourceCases: z.array(EvaluationCaseSchema).min(1),
-  protectedCases: z.array(EvaluationCaseSchema),
+  protectedSuite: ProtectedEvaluationSuiteRevisionSchema,
   budget: z.strictObject({
     maxCases: z.number().int().positive(),
     maxAttemptsPerArm: z.number().int().positive(),
@@ -484,6 +511,7 @@ export function allReportEvidenceRefs(
       criterion.definitionRevision,
       ...criterion.evidenceRefs,
     ]),
+    report.protectedSuite.definitionRevision,
     ...report.cases.flatMap((evaluationCase) => [
       ...(evaluationCase.definitionRevision ? [evaluationCase.definitionRevision] : []),
       ...evaluationCase.evidenceRefs,
