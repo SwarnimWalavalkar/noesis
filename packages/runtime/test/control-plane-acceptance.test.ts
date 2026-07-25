@@ -325,6 +325,7 @@ interface AcceptanceHarness {
   readonly protectedRuntime: ProtectedWorkspaceRuntime;
   readonly resolver: ActivationCandidateResolver;
   readonly baseline: CapabilityRevision;
+  readonly baselineActivationId: string;
   readonly baselineActiveDefinitions: Readonly<Record<string, FileRevisionRef>>;
   readonly candidate: CapabilityRevision;
   readonly experimentId: string;
@@ -570,6 +571,7 @@ async function createHarness(
     protectedRuntime,
     resolver,
     baseline,
+    baselineActivationId: baselineSnapshot.activationId,
     baselineActiveDefinitions,
     candidate,
     experimentId,
@@ -740,7 +742,7 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
     const candidateOperation = (await harness.protectedRuntime.activations.listOperations()).find(
       (operation) => operation.binding.experimentId === harness.experimentId,
     );
-    expect(candidateOperation?.previousActivationId).toEqual(expect.any(String));
+    expect(candidateOperation?.previousActivationId).toBe(harness.baselineActivationId);
     await harness.controlPlane.activation.pinTurnActivation("session-correction", "turn-hard");
     const result = await harness.controlPlane.feedback.observeTurnOutcome(
       outcomeInput("turn-hard", {
