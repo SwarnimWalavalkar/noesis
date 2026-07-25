@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import { dirname, extname, relative, resolve } from "node:path";
 import * as ts from "typescript";
 import { describe, expect, test } from "vitest";
@@ -13,8 +13,6 @@ const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const allowedErrorClasses = new Set([
   "apps/noesis/src/onboarding.ts:OnboardingCancelledError",
   "packages/config/src/index.ts:NoesisConfigError",
-  "packages/ledger/src/index.ts:LedgerConflictError",
-  "packages/ledger/src/index.ts:LedgerIntegrityError",
 ]);
 
 async function filesBelow(directory: string): Promise<readonly string[]> {
@@ -80,7 +78,7 @@ function moduleSpecifiers(sourceFile: ts.SourceFile): readonly string[] {
 }
 
 describe("first-party architecture boundaries", () => {
-  test("keeps exactly the four native Error subclasses as first-party classes", async () => {
+  test("keeps exactly the declared native Error subclasses as first-party classes", async () => {
     const files = (await firstPartyFiles()).filter((path) => /\.tsx?$/.test(path));
     const found = new Set<string>();
     const violations: string[] = [];
@@ -278,6 +276,78 @@ describe("first-party architecture boundaries", () => {
       expect(PERSISTED_AUTHORITIES).toContain(authority);
       expect(Array.isArray(authority)).toBe(false);
     }
+  });
+
+  test("keeps one production implementation for runtime, authority, scheduling, and activation", async () => {
+    for (const removedManifest of ["packages/ledger/package.json", "packages/memory/package.json"])
+      await expect(access(resolve(repositoryRoot, removedManifest))).rejects.toThrow();
+
+    const sourceFiles = (await firstPartyFiles()).filter(
+      (path) => path.includes("/src/") && /\.tsx?$/.test(path),
+    );
+    const sourceEntries = await Promise.all(
+      sourceFiles.map(async (path) => ({
+        path: relativePath(path),
+        source: await readFile(path, "utf8"),
+      })),
+    );
+    const forbiddenFactories = [
+      "createNoesisRuntime",
+      "createExperienceLedger",
+      "createMemoryRepository",
+      "createCapabilityRegistry",
+      "createLearningEngine",
+      "createEvaluationLab",
+      "createAuthorityBoundary",
+      "createEffectGateway",
+    ];
+    const duplicateFactories = sourceEntries.flatMap(({ path, source }) =>
+      forbiddenFactories
+        .filter((factory) => new RegExp(`\\b${factory}\\b`, "u").test(source))
+        .map((factory) => `${path}:${factory}`),
+    );
+    const durableAuthorityDeclarations = sourceEntries.filter(({ source }) =>
+      /\bfunction createDurableAuthorityBoundary\b/u.test(source),
+    );
+    const appComposition = await readFile(
+      resolve(repositoryRoot, "apps/noesis/src/runtime-composition.ts"),
+      "utf8",
+    );
+    const workspaceTypes = await readFile(resolve(repositoryRoot, "packages/workspace/src/types.ts"), "utf8");
+    const workspaceDomain = await readFile(
+      resolve(repositoryRoot, "packages/domain/src/workspace.ts"),
+      "utf8",
+    );
+    const operationalRepositoriesStart = workspaceTypes.indexOf("export interface OperationalRepositories");
+    const operationalRepositoriesEnd = workspaceTypes.indexOf("export interface StagedDefinition");
+    expect(operationalRepositoriesStart).toBeGreaterThanOrEqual(0);
+    expect(operationalRepositoriesEnd).toBeGreaterThan(operationalRepositoriesStart);
+    const operationalRepositories = workspaceTypes.slice(
+      operationalRepositoriesStart,
+      operationalRepositoriesEnd,
+    );
+    const manifests = [
+      resolve(repositoryRoot, "package.json"),
+      ...(await firstPartyFiles()).filter((path) => path.endsWith("package.json")),
+    ];
+    const removedDependencyReferences: string[] = [];
+    for (const path of manifests) {
+      const manifest = await readFile(path, "utf8");
+      for (const dependency of ["@noesis/ledger", "@noesis/memory"])
+        if (manifest.includes(dependency))
+          removedDependencyReferences.push(`${relativePath(path)}:${dependency}`);
+    }
+
+    expect(duplicateFactories).toEqual([]);
+    expect(durableAuthorityDeclarations.map(({ path }) => path)).toEqual([
+      "packages/policy/src/durable-authority.ts",
+    ]);
+    expect(appComposition).toContain("createWorkspaceStore");
+    expect(appComposition).toContain("NoesisAgentRuntime");
+    expect(workspaceDomain).toContain("readonly jobs: DurableJobStorePort");
+    expect(operationalRepositories).not.toContain("readonly jobs:");
+    expect(operationalRepositories).not.toContain("readonly activations:");
+    expect(removedDependencyReferences).toEqual([]);
   });
 
   test("builds the TypeScript-source workspace without emitting beside sources", async () => {

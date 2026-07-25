@@ -20,7 +20,6 @@ import {
   sha256,
 } from "@noesis/domain";
 import { z } from "zod";
-import type { CandidateSkill } from "./index.ts";
 
 export interface CapabilityRevisionConstruction {
   /** Candidate definitions are materialized separately; this registry never accepts active working bytes. */
@@ -575,48 +574,5 @@ export function createAtomicCapabilityRegistry(
     veto,
     readControls,
     read,
-  });
-}
-
-export interface LegacyCapabilityMaterialization {
-  readonly construction: Omit<
-    CapabilityRevisionConstruction,
-    "capabilityId" | "capabilityRevisionId" | "predecessorRevisionId"
-  >;
-}
-
-export interface LegacyCapabilityMigration {
-  readonly migrate: (
-    candidate: CandidateSkill,
-    capability: Capability,
-    capabilityRevisionId: string,
-    predecessorRevisionId?: string,
-  ) => Promise<CapabilityRevisionRef>;
-}
-
-/** Explicit seam for materializing legacy ledger candidates into byte-stable AC-03 definitions. */
-export function createLegacyCapabilityMigration(
-  registry: AtomicCapabilityRegistry,
-  materialize: (candidate: CandidateSkill) => Promise<LegacyCapabilityMaterialization>,
-): LegacyCapabilityMigration {
-  return Object.freeze({
-    migrate: async (
-      candidate: CandidateSkill,
-      capability: Capability,
-      capabilityRevisionId: string,
-      predecessorRevisionId?: string,
-    ): Promise<CapabilityRevisionRef> => {
-      if (candidate.capabilityId !== capability.capabilityId) {
-        throw new Error("Legacy candidate and stable capability identities differ");
-      }
-      registry.registerCapability(capability);
-      const materialized = await materialize(candidate);
-      return registry.constructRevision({
-        ...materialized.construction,
-        capabilityId: capability.capabilityId,
-        capabilityRevisionId,
-        ...(predecessorRevisionId ? { predecessorRevisionId } : {}),
-      });
-    },
   });
 }

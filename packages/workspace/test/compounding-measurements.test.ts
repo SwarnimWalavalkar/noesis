@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { frozenTurnPlanDigest, type FrozenTurnPlan } from "@noesis/agent-types";
 import { sha256 } from "@noesis/domain";
 import { afterEach, describe, expect, test } from "vitest";
@@ -21,7 +20,7 @@ describe("durable compounding measurement reservations", () => {
       planId: `plan-${turnId}`,
       sessionId: "session-1",
       turnId,
-      activationId: "activation-1",
+      activationId: "activation_genesis",
       activationRevision: 1,
       selectedCapabilities: [],
       renderedSystemPrompt: "Noesis baseline",
@@ -41,22 +40,15 @@ describe("durable compounding measurement reservations", () => {
     roots.push(root);
     const store = await createWorkspaceStore(root);
     const protectedRuntime = createWorkspaceRuntimeInternals(store).protectedRuntime;
-    await store.operational.activations.put({
-      activationId: "activation-1",
-      revision: 1,
-      previousActivationId: null,
+    await protectedRuntime.activations.bootstrapGenesis({
+      capabilityRevision: {
+        kind: "capability_revision",
+        capabilityId: "general-collaboration",
+        capabilityRevisionId: "general-collaboration-genesis-v1",
+        bundleDigest: "a".repeat(64),
+      },
       activeDefinitions: {},
-      activeCapabilityRevisions: {},
-      createdAt: "2026-07-25T00:00:00.000Z",
     });
-    const database = new DatabaseSync(store.unsafeDatabasePathForTesting);
-    database
-      .prepare(
-        `INSERT INTO activation_state(state_id, activation_id, revision, updated_at)
-         VALUES ('current', 'activation-1', 1, '2026-07-25T00:00:00.000Z')`,
-      )
-      .run();
-    database.close();
     const admitted = await protectedRuntime.activations.admitTurnPlan(createPlan("turn-1"));
     await protectedRuntime.measurements.putBudget({
       budgetId: "budget-1",

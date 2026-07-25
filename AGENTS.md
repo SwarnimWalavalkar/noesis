@@ -21,6 +21,7 @@
 - FTS, embedding, search-document, and UI read-model data are rebuildable indexes or projections. Derived data must cite an authoritative SQLite row or recorded file revision.
 - Every persisted datum has exactly one declared authority. Do not dual-write competing canonical copies or reconstruct current operational state from activity history.
 - SQLite transactions, constraints, migrations, integrity checks, and backups govern operational recovery. Activity and file-revision records preserve provenance and debugging history; they are not a universal recovery journal.
+- Legacy JSONL support is import-only inside the workspace cutover. Do not recreate a runtime ledger, ledger package, or second operational authority around it.
 - Large outputs remain ordinary artifact files with SQLite metadata. Evaluation evidence is revisioned and append-only once used by a decision; credentials remain only in the protected credential store or process environment.
 - Context fragments have provenance and hard per-fragment and total bounds. Capability versions are frozen at turn start.
 

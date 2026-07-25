@@ -2,7 +2,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveNoesisConfig } from "@noesis/config";
-import { createNoesisRuntime } from "@noesis/runtime";
 import { createPiAgentRoleRunner, createPiAgentRuntime } from "@noesis/runtime-pi";
 import { afterEach, describe, expect, test } from "vitest";
 import {
@@ -32,14 +31,8 @@ describe("credential-free Pi application acceptance", () => {
       respond: researchLoopControlledResponse,
       responseBudget: 200,
     });
-    const foreground = await createNoesisRuntime(
-      home,
-      createPiAgentRuntime(process.cwd(), controlled.models),
-      config.agent,
-    );
     const runtime = await createApplicationRuntimeComposition({
       config,
-      runtime: foreground,
       createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),

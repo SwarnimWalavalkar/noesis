@@ -1,7 +1,6 @@
 import {
   CapabilityRevisionRefSchema,
   CapabilitySchema,
-  EvidenceRefSchema,
   type CapabilityRevisionRef,
   type DatabaseRowRef,
   type DurableJobRecord,

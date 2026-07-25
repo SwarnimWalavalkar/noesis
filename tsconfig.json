@@ -26,8 +26,6 @@
       "@noesis/evals": ["packages/evals/src/index.ts"],
       "@noesis/intelligence": ["packages/intelligence/src/index.ts"],
       "@noesis/learning": ["packages/learning/src/index.ts"],
-      "@noesis/ledger": ["packages/ledger/src/index.ts"],
-      "@noesis/memory": ["packages/memory/src/index.ts"],
       "@noesis/policy": ["packages/policy/src/index.ts"],
       "@noesis/runtime": ["packages/runtime/src/index.ts"],
       "@noesis/runtime-pi": ["packages/runtime-pi/src/index.ts"],

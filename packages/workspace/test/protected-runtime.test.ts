@@ -6,15 +6,13 @@ import type { CapabilityRevisionRef, FileRevisionRef } from "@noesis/domain";
 import {
   type AuthorityReceipt,
   authorityOperationFields,
-  createAuthorityBoundary,
   createDurableAuthorityBoundary,
   type DurableAuthorityOperation,
   type DurableAuthorityReservation,
   type DurableAuthorityStatePort,
 } from "@noesis/policy";
 import { afterEach, describe, expect, test } from "vitest";
-import { createExperienceLedger } from "../../ledger/src/index.ts";
-import { createWorkspaceStore } from "../src/index.ts";
+import { createWorkspaceStore, type NoesisWorkspaceStore } from "../src/index.ts";
 import {
   createProtectedWorkspaceRuntime,
   createReceiptGuardedProtectedMutations,
@@ -22,8 +20,10 @@ import {
 } from "../src/protected-runtime.ts";
 
 const roots: string[] = [];
+const stores: NoesisWorkspaceStore[] = [];
 
 afterEach(async () => {
+  for (const store of stores.splice(0)) store.close();
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
 });
 
@@ -64,9 +64,9 @@ function mutationPorts(onPin: () => void) {
 }
 
 async function authorityAt(path: string) {
-  const ledger = createExperienceLedger(path);
-  await ledger.initialize();
-  return createAuthorityBoundary(ledger);
+  const workspace = await createWorkspaceStore(path);
+  stores.push(workspace);
+  return createWorkspaceRuntimeInternals(workspace).authority;
 }
 
 async function captureReceipt(

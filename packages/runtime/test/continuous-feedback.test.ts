@@ -130,6 +130,7 @@ interface FeedbackFixture {
   readonly revisions: Map<string, CapabilityRevision>;
   readonly capabilityId: string;
   readonly baseline: CapabilityRevision;
+  readonly baselineActiveDefinitions: Readonly<Record<string, FileRevisionRef>>;
   readonly candidate: CapabilityRevision;
   readonly experimentId: string;
 }
@@ -305,6 +306,9 @@ async function createFixture(
   const candidate = await revision(workspace, capabilityId, "r2", "r1", options.candidateEffects ?? ["read"]);
   const partial = { workspace, protectedRuntime, resolver, revisions };
   await activate(partial, "experiment-baseline-materialization", rootRevision, baseline);
+  const baselineSnapshot = await protectedRuntime.activations.current();
+  if (!baselineSnapshot) throw new Error("Baseline activation snapshot is missing");
+  const baselineActiveDefinitions = Object.freeze({ ...baselineSnapshot.activeDefinitions });
   const experimentId = "experiment-feedback";
   await activate(partial, experimentId, baseline, candidate);
   return Object.freeze({
@@ -316,6 +320,7 @@ async function createFixture(
     revisions,
     capabilityId,
     baseline,
+    baselineActiveDefinitions,
     candidate,
     experimentId,
   });
@@ -545,9 +550,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     const priorOperation = (await fixture.protectedRuntime.activations.listOperations(100)).find(
       (operation) => operation.binding.experimentId === fixture.experimentId,
     );
-    const prior = await fixture.workspace.operational.activations.get(
-      priorOperation?.previousActivationId ?? "missing",
-    );
+    expect(priorOperation?.previousActivationId).toEqual(expect.any(String));
     await pinTurn(fixture, "turn-hard");
     const result = await controller(fixture, judge("keep"), config(3)).observeTurnOutcome(
       observationInput(fixture, "turn-hard", {
@@ -558,8 +561,10 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     );
     expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "revert" } });
     const restored = await fixture.protectedRuntime.activations.current();
-    expect(restored?.activeDefinitions).toEqual(prior?.activeDefinitions);
-    expect(restored?.activeCapabilityRevisions).toEqual(prior?.activeCapabilityRevisions);
+    expect(restored?.activeDefinitions).toEqual(fixture.baselineActiveDefinitions);
+    expect(restored?.activeCapabilityRevisions[fixture.capabilityId]).toEqual(
+      capabilityRevisionRef(fixture.baseline),
+    );
     const restoredRevision = restored?.revision;
     fixture.workspace.close();
     const reopened = await createWorkspaceStore(fixture.root);
@@ -717,6 +722,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       revisions,
       capabilityId: "single",
       baseline: base,
+      baselineActiveDefinitions: Object.freeze({}),
       candidate,
       experimentId: "single-experiment",
     });

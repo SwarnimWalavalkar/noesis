@@ -166,7 +166,7 @@ The persistence model is:
 - Large outputs remain files under `artifacts/` with SQLite metadata.
 - Search data and UI read models are rebuildable projections.
 
-Existing `<NOESIS_HOME>/ledger/events.jsonl` data is strictly validated, backed up, and imported through a versioned cutover whose marker is written last. After cutover, production turns do not append operational state to JSONL. The old journal and `<NOESIS_HOME>/projections/noesis.sqlite` remain read-only compatibility and provenance surfaces; `noesis rebuild` rebuilds that legacy projection only.
+Existing `<NOESIS_HOME>/ledger/events.jsonl` data is strictly validated, backed up, and imported through a versioned cutover whose marker is written last. After cutover, production turns do not append operational state to JSONL. Compatibility code is limited to that import boundary; there is no legacy runtime, general ledger package, or second operational authority. The imported files remain read-only provenance artifacts, and `noesis rebuild` rebuilds WorkspaceStore search projections from authoritative SQLite and recorded revisions.
 
 Important package boundaries include:
 
@@ -177,6 +177,8 @@ Important package boundaries include:
 - `packages/intelligence`, `packages/learning`, and `packages/evals` own retrieval, reflection and candidate creation, and comparison evidence.
 - `packages/policy` and `packages/capabilities` own protected effects and exact capability revisions.
 - `packages/tui` owns terminal rendering and input handling.
+
+There is no second production turn executor, operational ledger, memory repository, capability-promotion registry, or scheduler. Test adapters implement only narrow public seams and never become product composition roots.
 
 Generated reflection and candidate authorship never receive promotion authority. All protected promotion, rollback, scheduling, and external effects go through the authority and effect boundaries. A generated tool cannot approve or widen its own permissions.
 

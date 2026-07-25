@@ -13,10 +13,8 @@ import type {
   ActivationApprovalRecord,
   ActivationMaterializationRecord,
   ActivationOperationRecord,
-  ActivationPointerRecord,
   ActivationRecord,
   CanonicalSearchSource,
-  JobRecord,
   MessageRecord,
   OutcomeRecord,
   SearchConfiguration,
@@ -133,23 +131,6 @@ export function decodeOutcome(row: unknown): OutcomeRecord {
   };
 }
 
-export function decodeJob(row: unknown): JobRecord {
-  const leaseOwner = optionalString(row, "lease_owner");
-  const leaseUntil = optionalString(row, "lease_until");
-  return {
-    jobId: requiredString(row, "job_id"),
-    kind: requiredString(row, "kind"),
-    payload: parseJson(requiredString(row, "payload_json")),
-    status: requiredString(row, "status") as JobRecord["status"],
-    ...(leaseOwner === undefined ? {} : { leaseOwner }),
-    ...(leaseUntil === undefined ? {} : { leaseUntil }),
-    attempt: requiredNumber(row, "attempt"),
-    budgetRemaining: requiredNumber(row, "budget_remaining"),
-    createdAt: requiredString(row, "created_at"),
-    updatedAt: requiredString(row, "updated_at"),
-  };
-}
-
 export function decodeActivation(row: unknown): ActivationRecord {
   const preflightId = optionalString(row, "preflight_id");
   const storedCapabilityRevisions = z
@@ -180,28 +161,6 @@ export function decodeActivation(row: unknown): ActivationRecord {
     activeCapabilityRevisions,
     ...(preflightId === undefined ? {} : { preflightId }),
     createdAt: requiredString(row, "created_at"),
-  };
-}
-
-export function decodeActivationPointer(row: unknown): ActivationPointerRecord {
-  const capabilityId = requiredString(row, "capability_id");
-  const encoded = optionalString(row, "capability_revision_json");
-  const capabilityRevision =
-    encoded === undefined
-      ? {
-          kind: "legacy_capability_revision" as const,
-          capabilityId,
-          capabilityRevisionId: requiredString(row, "capability_revision_id"),
-        }
-      : CapabilityRevisionRefSchema.parse(parseJson(encoded));
-  if (capabilityRevision.capabilityId !== capabilityId)
-    throw new Error("Stored activation pointer capability identity is mismatched");
-  return {
-    pointerId: requiredString(row, "pointer_id"),
-    capabilityId,
-    activationId: requiredString(row, "activation_id"),
-    capabilityRevision,
-    updatedAt: requiredString(row, "updated_at"),
   };
 }
 

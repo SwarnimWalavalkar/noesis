@@ -9,14 +9,11 @@
   "dependencies": {
     "@noesis/agent-types": "workspace:*",
     "@noesis/capabilities": "workspace:*",
-    "@noesis/config": "workspace:*",
     "@noesis/context": "workspace:*",
     "@noesis/domain": "workspace:*",
     "@noesis/evals": "workspace:*",
     "@noesis/intelligence": "workspace:*",
     "@noesis/learning": "workspace:*",
-    "@noesis/ledger": "workspace:*",
-    "@noesis/memory": "workspace:*",
     "@noesis/policy": "workspace:*",
     "@noesis/workspace": "workspace:*",
     "zod": "4.4.3"
