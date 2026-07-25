@@ -318,9 +318,13 @@ describe("first-party architecture boundaries", () => {
       resolve(repositoryRoot, "packages/domain/src/workspace.ts"),
       "utf8",
     );
+    const operationalRepositoriesStart = workspaceTypes.indexOf("export interface OperationalRepositories");
+    const operationalRepositoriesEnd = workspaceTypes.indexOf("export interface StagedDefinition");
+    expect(operationalRepositoriesStart).toBeGreaterThanOrEqual(0);
+    expect(operationalRepositoriesEnd).toBeGreaterThan(operationalRepositoriesStart);
     const operationalRepositories = workspaceTypes.slice(
-      workspaceTypes.indexOf("export interface OperationalRepositories"),
-      workspaceTypes.indexOf("export interface StagedDefinition"),
+      operationalRepositoriesStart,
+      operationalRepositoriesEnd,
     );
     const manifests = [
       resolve(repositoryRoot, "package.json"),

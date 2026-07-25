@@ -14,6 +14,15 @@ interface StoredOperation {
   reason?: string;
 }
 
+function receiptOperationId(value: unknown): string {
+  return typeof value === "object" &&
+    value !== null &&
+    "operationId" in value &&
+    typeof value.operationId === "string"
+    ? value.operationId
+    : "";
+}
+
 function createInMemoryDurableAuthorityState(): DurableAuthorityStatePort {
   const grants = new Map<string, Grant>();
   const operations = new Map<string, StoredOperation>();
@@ -137,26 +146,14 @@ describe("durable authority boundary", () => {
       first.receiptVerifier.verify(firstReceipt, {
         effect: "promote",
         resource: "capability:one",
-        operationId:
-          typeof firstReceipt === "object" &&
-          firstReceipt !== null &&
-          "operationId" in firstReceipt &&
-          typeof firstReceipt.operationId === "string"
-            ? firstReceipt.operationId
-            : "",
+        operationId: receiptOperationId(firstReceipt),
       }),
     ).toBe(true);
     expect(
       second.receiptVerifier.verify(firstReceipt, {
         effect: "promote",
         resource: "capability:one",
-        operationId:
-          typeof firstReceipt === "object" &&
-          firstReceipt !== null &&
-          "operationId" in firstReceipt &&
-          typeof firstReceipt.operationId === "string"
-            ? firstReceipt.operationId
-            : "",
+        operationId: receiptOperationId(firstReceipt),
       }),
     ).toBe(false);
   });

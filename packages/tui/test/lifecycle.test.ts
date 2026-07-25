@@ -344,6 +344,37 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
+  test("surfaces unexpected agent errors and permits a later turn", async () => {
+    const unexpected = new Error("unexpected adapter failure");
+    let runs = 0;
+    const runtime = await createRuntime({
+      name: "throwing-scripted",
+      async run(request) {
+        runs += 1;
+        if (runs === 1) throw unexpected;
+        return {
+          text: "recovered",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    const trail = await runtime.startTrail({ title: "unexpected failure" });
+
+    await expect(runtime.runTurn(trail.trailId, "first")).rejects.toBe(unexpected);
+    expect(runtime.getTrail(trail.trailId).status).toBe("idle");
+    await expect(runtime.runTurn(trail.trailId, "second")).resolves.toMatchObject({
+      outcome: "completed",
+      output: "recovered",
+    });
+    expect(runtime.getTrail(trail.trailId).turns).toEqual([{ input: "second", output: "recovered" }]);
+  });
+
   test("submits /abort during a blocked turn and remains usable without concurrent turns", async () => {
     let releaseBlocked: (() => void) | undefined;
     let runs = 0;

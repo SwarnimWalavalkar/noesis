@@ -112,18 +112,25 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
       stored.state.capabilityVersions,
       { maxTokens: 4_000, maxFragmentTokens: 4_000 },
     );
-    const result = await agent.run(
-      {
-        trailId,
-        provider: stored.state.provider,
-        model: stored.state.model,
-        thinkingLevel: options.thinkingLevel ?? "off",
-        systemPrompt: "",
-        prompt: input,
-        activeCapabilities: [],
-      },
-      (event) => options.onEvent?.(event),
-    );
+    const result = await (async () => {
+      try {
+        return await agent.run(
+          {
+            trailId,
+            provider: stored.state.provider,
+            model: stored.state.model,
+            thinkingLevel: options.thinkingLevel ?? "off",
+            systemPrompt: "",
+            prompt: input,
+            activeCapabilities: [],
+          },
+          (event) => options.onEvent?.(event),
+        );
+      } catch (error) {
+        replaceState(stored, Object.freeze({ ...stored.state, status: "idle" }));
+        throw error;
+      }
+    })();
     if (result.outcome === "failed") {
       failedTurnCount += 1;
       replaceState(stored, Object.freeze({ ...stored.state, status: "failed" }));

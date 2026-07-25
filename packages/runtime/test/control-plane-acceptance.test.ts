@@ -325,6 +325,7 @@ interface AcceptanceHarness {
   readonly protectedRuntime: ProtectedWorkspaceRuntime;
   readonly resolver: ActivationCandidateResolver;
   readonly baseline: CapabilityRevision;
+  readonly baselineActiveDefinitions: Readonly<Record<string, FileRevisionRef>>;
   readonly candidate: CapabilityRevision;
   readonly experimentId: string;
   readonly roleInputs: readonly object[];
@@ -396,6 +397,9 @@ async function createHarness(
   if (!baselineActivation.ok || baselineActivation.status !== "activated") {
     throw new Error(`Could not seed baseline activation: ${canonicalJson(baselineActivation)}`);
   }
+  const baselineSnapshot = await protectedRuntime.activations.current();
+  if (!baselineSnapshot) throw new Error("Baseline activation snapshot is missing");
+  const baselineActiveDefinitions = Object.freeze({ ...baselineSnapshot.activeDefinitions });
 
   await workspace.operational.sessions.put(
     Object.freeze({
@@ -566,6 +570,7 @@ async function createHarness(
     protectedRuntime,
     resolver,
     baseline,
+    baselineActiveDefinitions,
     candidate,
     experimentId,
     roleInputs,
@@ -746,6 +751,7 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
     );
     expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "revert" } });
     const restored = await harness.protectedRuntime.activations.current();
+    expect(restored?.activeDefinitions).toEqual(harness.baselineActiveDefinitions);
     expect(restored?.activeCapabilityRevisions["writing"]).toEqual(capabilityRevisionRef(harness.baseline));
     const restoredRevision = restored?.revision;
     harness.workspace.close();

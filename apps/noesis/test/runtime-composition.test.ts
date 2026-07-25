@@ -22,7 +22,10 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
 });
 
-async function writeLegacyCompletedTurn(home: string): Promise<{
+async function writeLegacyCompletedTurn(
+  home: string,
+  runtimeIdentity: string,
+): Promise<{
   readonly trailId: string;
   readonly input: string;
   readonly output: string;
@@ -42,7 +45,7 @@ async function writeLegacyCompletedTurn(home: string): Promise<{
       title: "Legacy import",
       provider: CONTROLLED_PI_PROVIDER,
       model: CONTROLLED_PI_MODEL,
-      runtime: "pi-agent-harness-0.80.6",
+      runtime: runtimeIdentity,
     },
     previousChecksum: null,
   };
@@ -111,7 +114,8 @@ describe("apps/noesis production control-plane composition", () => {
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
     const controlled = createControlledPiModels();
-    const legacy = await writeLegacyCompletedTurn(home);
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const legacy = await writeLegacyCompletedTurn(home, runtimeIdentity);
 
     const runtime = await createApplicationRuntimeComposition({
       config,
@@ -138,8 +142,9 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const controlled = createControlledPiModels();
     const noOp = async (): Promise<void> => undefined;
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
     const abortedAgent: NoesisAgentRuntime = Object.freeze({
-      name: "pi-agent-harness-0.80.6",
+      name: runtimeIdentity,
       run: async (request: AgentRuntimeRequest) =>
         Object.freeze({
           outcome: "aborted" as const,
@@ -217,6 +222,7 @@ describe("apps/noesis production control-plane composition", () => {
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
     const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
     const requests: AgentRuntimeRequest[] = [];
     const seenConfigurations: unknown[] = [];
     const runtime = await createApplicationRuntimeComposition({
@@ -244,7 +250,7 @@ describe("apps/noesis production control-plane composition", () => {
     expect(config.schemaVersion).toBe(1);
     expect(await runtime.debug.workspace.operational.sessions.get(trail.trailId)).toMatchObject({
       sessionId: trail.trailId,
-      runtime: "pi-agent-harness-0.80.6",
+      runtime: runtimeIdentity,
     });
     const messages = await runtime.debug.workspace.operational.messages.listForSession(trail.trailId);
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);

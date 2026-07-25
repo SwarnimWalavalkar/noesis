@@ -46,6 +46,7 @@ import {
   type ExperimentOutcomeProposal,
   type NoesisRuntime,
   type RuntimeControlPlane,
+  compareTrailRecency,
   SESSION_PICKER_LIMIT,
   type TrailState,
   type TrailSummary,
@@ -856,10 +857,7 @@ export async function createApplicationRuntimeComposition(
             preview: latest?.output ?? latest?.input ?? "",
           });
         })
-        .sort(
-          (left, right) =>
-            right.updatedAt.localeCompare(left.updatedAt) || left.trailId.localeCompare(right.trailId),
-        )
+        .sort(compareTrailRecency)
         .slice(0, SESSION_PICKER_LIMIT),
     );
   const startTrail: NoesisRuntime["startTrail"] = async (input) =>
