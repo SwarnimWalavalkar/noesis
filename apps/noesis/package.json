@@ -9,6 +9,7 @@
   "dependencies": {
     "@noesis/capabilities": "workspace:*",
     "@noesis/config": "workspace:*",
+    "@noesis/context": "workspace:*",
     "@noesis/domain": "workspace:*",
     "@noesis/evals": "workspace:*",
     "@noesis/learning": "workspace:*",

@@ -13,6 +13,8 @@ import {
 } from "@noesis/domain";
 import { LedgerConflictError, type ExperienceLedger } from "@noesis/ledger";
 
+export * from "./durable-authority.ts";
+
 export interface EffectRequest<T extends JsonValue> {
   readonly operationId: string;
   readonly principal: Principal;
@@ -82,7 +84,7 @@ function storedOperationMatches(
   );
 }
 
-function internalOperationFields(
+export function authorityOperationFields(
   principal: Principal,
   effect: EffectClass,
   resource: string,
@@ -96,6 +98,8 @@ function internalOperationFields(
   };
 }
 
+const internalOperationFields = authorityOperationFields;
+
 export interface GrantHandle {
   readonly grantId: string;
 }
@@ -103,6 +107,7 @@ export interface GrantHandle {
 export interface AuthorityReceipt {
   readonly effect: EffectClass;
   readonly resource: string;
+  readonly operationId: string;
 }
 
 export interface AuthorityReceiptVerifier {
@@ -112,11 +117,19 @@ export interface AuthorityReceiptVerifier {
     resource: string,
     ledger: ExperienceLedger,
   ) => value is AuthorityReceipt;
+  readonly verify: (
+    value: unknown,
+    expected: {
+      readonly effect: EffectClass;
+      readonly resource: string;
+      readonly operationId: string;
+    },
+  ) => value is AuthorityReceipt;
 }
 
 interface AuthorityTokens {
   readonly createHandle: (grantId: string) => GrantHandle;
-  readonly createReceipt: (effect: EffectClass, resource: string) => AuthorityReceipt;
+  readonly createReceipt: (effect: EffectClass, resource: string, operationId: string) => AuthorityReceipt;
   readonly ownsHandle: (value: unknown) => value is GrantHandle;
   readonly verifier: AuthorityReceiptVerifier;
 }
@@ -131,8 +144,8 @@ function createAuthorityTokens(ownerLedger: ExperienceLedger): AuthorityTokens {
     return handle;
   };
 
-  const createReceipt = (effect: EffectClass, resource: string): AuthorityReceipt => {
-    const receipt: AuthorityReceipt = Object.freeze({ effect, resource });
+  const createReceipt = (effect: EffectClass, resource: string, operationId: string): AuthorityReceipt => {
+    const receipt: AuthorityReceipt = Object.freeze({ effect, resource, operationId });
     receipts.add(receipt);
     return receipt;
   };
@@ -155,11 +168,29 @@ function createAuthorityTokens(ownerLedger: ExperienceLedger): AuthorityTokens {
     value.effect === effect &&
     value.resource === resource;
 
+  const verify = (
+    value: unknown,
+    expected: {
+      readonly effect: EffectClass;
+      readonly resource: string;
+      readonly operationId: string;
+    },
+  ): value is AuthorityReceipt =>
+    typeof value === "object" &&
+    value !== null &&
+    receipts.has(value) &&
+    "effect" in value &&
+    "resource" in value &&
+    "operationId" in value &&
+    value.effect === expected.effect &&
+    value.resource === expected.resource &&
+    value.operationId === expected.operationId;
+
   return Object.freeze({
     createHandle,
     createReceipt,
     ownsHandle,
-    verifier: Object.freeze({ isReceipt }),
+    verifier: Object.freeze({ isReceipt, verify }),
   });
 }
 
@@ -334,7 +365,9 @@ function createOwnedEffectGateway(ledger: ExperienceLedger, tokens: AuthorityTok
     }
 
     try {
-      const value = await request.execute(tokens.createReceipt(request.effect, request.resource));
+      const value = await request.execute(
+        tokens.createReceipt(request.effect, request.resource, operation.identity.operationId),
+      );
       await ledger.append({
         type: "effect.completed",
         principal: request.principal,

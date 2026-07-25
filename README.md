@@ -20,11 +20,10 @@ Read the short product documents for the full reasoning:
 
 - [Product thesis](docs/product-thesis.md)
 - [Product experience](docs/product-experience.md)
-- [Compounding partnership product loop build plan](plans/compounding-partnership-product-loop.md)
 
 ## Research preview status
 
-Noesis is a local research preview. The repository has substantial foundations, but it does not yet deliver the complete product loop above.
+Noesis is a local research preview. Its first causal compounding loop now runs end to end, while the broader collaboration experience remains active research.
 
 What works now:
 
@@ -32,17 +31,18 @@ What works now:
 - Pi executes model turns behind `packages/runtime-pi`. A deterministic fake runtime supports tests and demos without credentials.
 - Provider setup supports OpenAI Codex OAuth, OpenRouter, and the Anthropic provider exposed through Pi.
 - `WorkspaceStore` provides SQLite operational records and editable definitions. It also provides immutable revisions, evidence, artifacts, search, durable jobs, activation state, feedback state, integrity checks, and backups.
-- The learning and evaluation packages implement tested reflection, candidate, and comparison parts. Other tested packages cover capabilities, generated tools, protected authority, activation, and feedback.
+- Every foreground turn admits one digest-validated `FrozenTurnPlan` before execution. The exact immutable capability bytes, routing decision, permissions, provider, model, reasoning level, and baseline lineage delivered to Pi are the bytes recorded in SQLite.
+- A fresh workspace bootstraps an immutable general-collaboration baseline. Ambient reflection can author and evaluate a narrow new capability, activate it, serve it only on related work, and restore the complete prior activation after feedback.
+- The deterministic demo exercises correction, reflection, authorship, protected evaluation, atomic activation, related serving, unrelated abstention, and protected revert without credentials.
+- Effect-free paired replay and compounding read models measure served-revision wins, scope leakage, context tax, correction recurrence, exclusions, and evidence coverage under durable call, token, and cost budgets.
 
-The current application is still in transition:
+The research preview deliberately remains incomplete:
 
-- Foreground turns still run through the legacy JSONL trail, memory, capability, policy, and scheduler path.
-- The application also records sessions, messages, outcomes, activation, learning, evaluation, and feedback data through `WorkspaceStore`. This is a temporary split authority path.
-- A pinned workspace activation does not yet determine the prompt and tools served to the foreground model.
-- Fresh workspaces do not yet enter the complete ambient learning loop.
-- The TUI still exposes the manual `/learn`, `/evaluate`, `/promote`, and `/rollback` workflow. Collaboration posture, adaptation history, and conversational contest or revert are planned work.
+- Collaboration posture, anticipated future use, adaptation history, and conversational contest or revert are not yet productized in the TUI.
+- Ambient paired replay has an implementation and durable store, but its post-settlement scheduling policy is not yet wired into ordinary use.
+- Generated-tool execution remains deliberately absent until a real foreground consumer justifies restoring it.
 
-The [next product loop plan](plans/compounding-partnership-product-loop.md) first moves foreground and protected operational authority to SQLite. Later work adds collaboration posture and selective learning with anticipated future use. It then serves exact active revisions and tools, exposes adaptation history and conversational controls, and proves the complete path with the fake runtime.
+The completed [high-leverage correction plan](plans/noesis-high-leverage-correction-plan.html) removed unproven scope, made the compounding claim measurable, closed the minimal causal loop, and moved foreground and protected operational authority to SQLite. The [product loop plan](plans/compounding-partnership-product-loop.html) is next: it adds collaboration posture and selective learning with anticipated future use, serves exact active revisions and tools, exposes adaptation history and conversational controls, and proves the complete path with the fake runtime.
 
 ## Quick start
 
@@ -127,9 +127,8 @@ pnpm start -- --continue --home ./.noesis
 The TUI uses `@earendil-works/pi-tui` directly. It streams turns and supports:
 
 ```text
-/model provider/model  /context       /capabilities  /fork
-/compact               /abort         /learn         /evaluate
-/promote               /rollback      /job prompt    /quit
+/model provider/model  /context  /capabilities  /fork
+/compact               /abort    /quit
 ```
 
 Enter `?` or `/help` to see the command list. Use `/quit` or Ctrl+C to exit. `NO_COLOR` and `TERM=dumb` disable styling.
@@ -163,16 +162,16 @@ Agent settings use this precedence:
 
 Pi executes turns. Noesis owns the product and control plane around those turns. Only `packages/runtime-pi` imports Pi agent and runtime types. The TUI renders runtime read models and never owns durable state.
 
-The settled persistence model is:
+The persistence model is:
 
 - `WorkspaceStore` owns persistence boundaries.
-- `<NOESIS_HOME>/database/noesis.sqlite` is authoritative for operational state that has moved to the workspace path.
+- `<NOESIS_HOME>/database/noesis.sqlite` is authoritative for foreground sessions, turns, messages, outcomes, frozen plans, jobs, activation, evaluation, feedback, grants, reservations, budgets, effect outcomes, and idempotency.
 - Ordinary files under `<NOESIS_HOME>/definitions/` are authoritative for editable definitions.
 - Immutable snapshots under `revisions/` and `evidence/` preserve exact recorded bytes.
 - Large outputs remain files under `artifacts/` with SQLite metadata.
 - Search data and UI read models are rebuildable projections.
 
-The current foreground path has not completed that move. It still uses `<NOESIS_HOME>/ledger/events.jsonl` for legacy trail and protected operational state, with `<NOESIS_HOME>/projections/noesis.sqlite` as its rebuildable projection. `noesis rebuild` rebuilds that legacy projection only. JSONL activity is provenance during the transition. It is not the universal authority in the target architecture, and new code must not treat it as a recovery journal for workspace operational state.
+Existing `<NOESIS_HOME>/ledger/events.jsonl` data is strictly validated, backed up, and imported through a versioned cutover whose marker is written last. After cutover, production turns do not append operational state to JSONL. The old journal and `<NOESIS_HOME>/projections/noesis.sqlite` remain read-only compatibility and provenance surfaces; `noesis rebuild` rebuilds that legacy projection only.
 
 Important package boundaries include:
 
@@ -182,7 +181,6 @@ Important package boundaries include:
 - `packages/runtime-pi` is the only Pi runtime boundary.
 - `packages/intelligence`, `packages/learning`, and `packages/evals` own retrieval, reflection and candidate creation, and comparison evidence.
 - `packages/policy` and `packages/capabilities` own protected effects and exact capability revisions.
-- `packages/tool-runtime` runs generated tools in a separate process.
 - `packages/tui` owns terminal rendering and input handling.
 
 Generated reflection and candidate authorship never receive promotion authority. All protected promotion, rollback, scheduling, and external effects go through the authority and effect boundaries. A generated tool cannot approve or widen its own permissions.
@@ -201,9 +199,8 @@ This runs formatting checks, lint, type checking, and tests. Tests and acceptanc
 
 ## Current limitations
 
-- The shipped foreground turn does not yet use one workspace backed intelligence plan. It can pin a workspace activation without serving that exact revision to the model.
-- The Pi foreground runtime currently registers only immutable snapshot inspection. Session retrieval and generated tool adapters exist but are not wired into the application turn.
-- Ambient learning does not start from an empty workspace activation. The shipped fake application reflection path only returns `no_change`.
+- The Pi foreground runtime currently registers only immutable snapshot inspection. The session-retrieval adapter exists but is not wired into the application turn.
 - Collaboration posture, anticipated future use, adaptation history, and conversational contest or revert are not implemented in the TUI.
-- Generated tools use a bounded local child process for research preview testing. This is not a production security boundary.
+- Ambient compounding replay is not yet scheduled from ordinary post-settlement work.
+- Generated-tool execution is deliberately absent until a real foreground consumer justifies restoring a bounded runtime.
 - A session left `running` after its executor ends cannot be recovered safely until Noesis has durable executor ownership evidence.

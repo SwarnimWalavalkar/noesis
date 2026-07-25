@@ -1,0 +1,1362 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Noesis High-Leverage Correction — Plan</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0e14;
+        --panel: #121722;
+        --panel-2: #171d2a;
+        --text: #eef2f7;
+        --muted: #9ba7b8;
+        --line: #2a3445;
+        --accent: #90e0c1;
+        --accent-2: #9db9ff;
+        --warn: #ffd58a;
+        --danger: #ff9f9f;
+        --good: #a9e99f;
+        --radius: 12px;
+        --measure: 78rem;
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 15px;
+        line-height: 1.58;
+      }
+      a {
+        color: var(--accent-2);
+      }
+      a:focus-visible,
+      summary:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+        border-radius: 3px;
+      }
+      code {
+        color: var(--accent);
+        overflow-wrap: anywhere;
+      }
+      pre {
+        margin: 0;
+        padding: 1rem;
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #090c11;
+        color: #dce5f1;
+      }
+      h1,
+      h2,
+      h3 {
+        line-height: 1.2;
+        text-wrap: balance;
+      }
+      h1 {
+        margin: 0;
+        font-size: clamp(2rem, 6vw, 4.8rem);
+        letter-spacing: -0.06em;
+      }
+      h2 {
+        margin-top: 0;
+        font-size: clamp(1.4rem, 3vw, 2.1rem);
+      }
+      h3 {
+        margin-bottom: 0.4rem;
+        font-size: 1rem;
+        color: var(--accent);
+      }
+      p {
+        max-width: 76ch;
+      }
+      ul,
+      ol {
+        padding-left: 1.3rem;
+      }
+      li + li {
+        margin-top: 0.3rem;
+      }
+      header,
+      main,
+      footer {
+        width: min(calc(100% - 2rem), var(--measure));
+        margin-inline: auto;
+      }
+      header {
+        padding: clamp(3rem, 8vw, 7rem) 0 2rem;
+      }
+      main {
+        padding-bottom: 5rem;
+      }
+      footer {
+        padding: 2rem 0 4rem;
+        color: var(--muted);
+        border-top: 1px solid var(--line);
+      }
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-block: 1px solid var(--line);
+        background: color-mix(in srgb, var(--bg) 94%, transparent);
+        backdrop-filter: blur(10px);
+      }
+      nav ul {
+        width: min(calc(100% - 2rem), var(--measure));
+        margin: 0 auto;
+        padding: 0.75rem 0;
+        display: flex;
+        gap: 1rem;
+        list-style: none;
+        overflow-x: auto;
+      }
+      nav a {
+        white-space: nowrap;
+        text-decoration: none;
+        color: var(--muted);
+      }
+      nav a:hover {
+        color: var(--text);
+      }
+      section {
+        margin-top: 1.25rem;
+        padding: clamp(1.1rem, 3vw, 2rem);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+        scroll-margin-top: 5rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 0.7rem;
+        text-align: left;
+        vertical-align: top;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--accent);
+        font-size: 0.82rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .eyebrow {
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        font-weight: 700;
+      }
+      .lede {
+        max-width: 66ch;
+        color: var(--muted);
+        font-size: clamp(1rem, 2vw, 1.25rem);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        gap: 1rem;
+      }
+      .card {
+        grid-column: span 4;
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--panel-2);
+      }
+      .card p {
+        margin-bottom: 0;
+        color: var(--muted);
+      }
+      .wide {
+        grid-column: span 6;
+      }
+      .full {
+        grid-column: 1 / -1;
+      }
+      .pill {
+        display: inline-block;
+        margin: 0.15rem 0.2rem 0.15rem 0;
+        padding: 0.15rem 0.5rem;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+      .callout {
+        padding: 1rem;
+        border-left: 3px solid var(--accent);
+        background: var(--panel-2);
+      }
+      .warning {
+        border-left-color: var(--warn);
+      }
+      .danger {
+        border-left-color: var(--danger);
+      }
+      .good {
+        border-left-color: var(--good);
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .phase {
+        color: var(--accent-2);
+        font-weight: 700;
+      }
+      .task {
+        padding: 1rem 0;
+        border-top: 1px solid var(--line);
+      }
+      .task:first-of-type {
+        border-top: 0;
+      }
+      .task h3 {
+        display: flex;
+        gap: 0.7rem;
+        align-items: baseline;
+        color: var(--text);
+      }
+      .task-id {
+        color: var(--accent);
+        min-width: 4rem;
+      }
+      .task dl {
+        display: grid;
+        grid-template-columns: 8rem 1fr;
+        gap: 0.35rem 1rem;
+      }
+      .task dt {
+        color: var(--muted);
+      }
+      .task dd {
+        margin: 0;
+      }
+      details {
+        border-top: 1px solid var(--line);
+        padding: 0.8rem 0;
+      }
+      summary {
+        cursor: pointer;
+        color: var(--accent-2);
+      }
+      .scroll {
+        overflow-x: auto;
+      }
+      @media (max-width: 820px) {
+        .card,
+        .wide {
+          grid-column: 1 / -1;
+        }
+        .task dl {
+          grid-template-columns: 1fr;
+        }
+        .task dt {
+          margin-top: 0.5rem;
+        }
+        table {
+          min-width: 48rem;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+      @media print {
+        :root {
+          color-scheme: light;
+          --bg: white;
+          --panel: white;
+          --panel-2: #f5f5f5;
+          --text: #111;
+          --muted: #444;
+          --line: #bbb;
+        }
+        nav {
+          display: none;
+        }
+        section {
+          break-inside: avoid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="eyebrow">Noesis · correction plan</div>
+      <h1>Earn the thesis</h1>
+      <p class="lede">
+        Noesis has accumulated a large, well-built capability surface without
+        producing a single piece of evidence that earlier work made later work
+        better. This plan subtracts unproven scope, makes the compounding claim
+        measurable, closes the causal loop end to end, and only then repays the
+        structural debt.
+      </p>
+      <span class="pill">subtract before adding</span>
+      <span class="pill">falsifiable compounding</span>
+      <span class="pill">one authority</span>
+      <span class="pill">protection by construction</span>
+    </header>
+
+    <nav aria-label="Plan sections">
+      <ul>
+        <li><a href="#premise">Premise</a></li>
+        <li><a href="#measure">The measurement</a></li>
+        <li><a href="#p0">P0 · Subtract</a></li>
+        <li><a href="#p1">P1 · Causal spine</a></li>
+        <li><a href="#p2">P2 · One authority</a></li>
+        <li><a href="#p3">P3 · Protection</a></li>
+        <li><a href="#p4">P4 · Shape</a></li>
+        <li><a href="#order">Sequencing</a></li>
+        <li><a href="#verification">Verification</a></li>
+        <li><a href="#nongoals">Non-goals</a></li>
+        <li><a href="#done">Done</a></li>
+      </ul>
+    </nav>
+
+    <main>
+      <section id="premise">
+        <h2>Premise</h2>
+        <div class="callout danger">
+          <strong>Noesis does not currently pass its own review.</strong>
+          The product doctrine requires every durable learning to cite evidence,
+          name an anticipated future use, and begin at the narrowest plausible
+          scope. The codebase contains a generated-tool runtime with no caller,
+          session tools registered in no turn, three declared-but-unimplemented
+          TUI panes, a stub protected-authority port, and a full evaluation
+          laboratory that has never judged a real turn — all built at maximum
+          scope, up front, on zero evidence. Reflection run over this
+          repository's own development would classify most of it as un-evidenced
+          scope broadening.
+        </div>
+        <div class="grid">
+          <article class="card">
+            <h3>The good part is real</h3>
+            <p>
+              Reserve-before-execute with fail-closed ambiguous reservations,
+              unforgeable <code>WeakSet</code> receipts, blind judging with
+              deterministic label swap, and import-scanning boundary tests are
+              genuinely strong. Nothing here proposes discarding them.
+            </p>
+          </article>
+          <article class="card">
+            <h3>The problem is ratio</h3>
+            <p>
+              Machinery for activation, evaluation, and feedback is complete.
+              The single link that makes any of it matter — an activated
+              revision demonstrably changing a later turn — is absent.
+              Capability was built before the thing capability serves.
+            </p>
+          </article>
+          <article class="card">
+            <h3>The fix is order</h3>
+            <p>
+              The existing plan opens with authority unification, which is
+              architecturally correct and product-wrong: it puts more weeks
+              between the project and its first real evidence, which is the
+              scarcest resource and the one principle 9 says should be steering.
+            </p>
+          </article>
+        </div>
+        <h3>What this plan changes about the existing plan</h3>
+        <p>
+          It does not replace
+          <a href="compounding-partnership-product-loop.html"
+            >the compounding partnership product loop</a>. It corrects its
+          foundation and adds what it is missing. WS1
+          executes exactly once as HL-11/HL-12 in Phase 2, using the product-loop
+          WS1 section as its complete acceptance contract. Two things happen
+          first: deletion of genuinely unproven scope, and one vertical causal
+          spine that makes the central claim executable and measurable.
+        </p>
+        <div class="callout warning">
+          <strong>Evidence gates product choices, not correctness.</strong>
+          Dogfooding begins as soon as the causal spine runs and continues
+          through the correction. Its four-week readout gates posture
+          heuristics, scope/threshold policy, metric interpretation, and claims
+          of product success. It does not delay the frozen-plan authority,
+          single-store cutover, protected-control-plane repairs, or their
+          correctness tests. No phase may add a new dual-write path.
+        </div>
+      </section>
+
+      <section id="measure">
+        <h2>The measurement that does not exist</h2>
+        <div class="callout">
+          <strong
+            >The entire thesis is one sentence: later work is better because
+            earlier work happened.</strong>
+          There is no metric for that sentence anywhere in the documents or the
+          code. Until there is, compounding is unfalsifiable and a
+          well-instrumented placebo is indistinguishable from success.
+        </div>
+        <h3>Effect-free paired shadow replay</h3>
+        <p>
+          Parts of the mechanism already exist and are pointed at the wrong
+          target.
+          <code>packages/evals/src/dynamic-lab.ts</code> runs paired
+          baseline/candidate trials with blind judging against
+          <em>generated</em> trial artifacts; it does not execute a frozen
+          foreground request. Reuse its blind labeling, judging, rails, evidence
+          recording, and aggregation behind a separate effect-free foreground
+          replay port. For eligible settled turns, materialize contemporaneous
+          served and baseline arms from the authoritative frozen plan, replay
+          recorded tool results, and judge the pair blind. Never rerun a live
+          effect.
+        </p>
+        <pre>
+eligible settled turn (served revision R, baseline B on its frozen plan)
+  → enforce sensitivity/provider policy and reserve call/token/cost budget
+  → sample by policy (rate-limited, scope-stratified, model-cohorted)
+  → materialize R and B from the same immutable turn plan
+  → replay both arms with recorded tool results; exclude effectful gaps
+  → existing blind judge + existing protected rails
+  → rolling paired estimate for R over B, per scope and model cohort</pre>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Definition</th>
+                <th>Thesis is alive when</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Served-revision win rate</strong></td>
+                <td>
+                  Blind-judged paired wins of the served revision over its
+                  pinned baseline on contemporaneous replays, reported per
+                  scope, model/runtime cohort, and rolling window.
+                </td>
+                <td>
+                  Durably above chance with rails passing. At chance, the
+                  adaptation is decoration.
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Scope leakage rate</strong></td>
+                <td>
+                  Share of turns where an adaptation was served whose scope was
+                  unrelated to the turn.
+                </td>
+                <td>
+                  Trends toward zero. Guards against compounding degenerating
+                  into inject-everything.
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Context tax</strong></td>
+                <td>
+                  Report injected-context tokens, prompt-layer bytes, and
+                  marginal served-minus-baseline input tokens separately.
+                </td>
+                <td>
+                  Flat or falling. Advantage bought with a monotonically growing
+                  prompt is accumulation.
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Correction recurrence</strong></td>
+                <td>
+                  Rate at which the same correction signature recurs per
+                  relevant exposure, with pre/post activation and served
+                  revision recorded.
+                </td>
+                <td>
+                  Falls after activation. This is the only metric a human
+                  directly feels.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="muted">
+          Every metric exposes numerator, denominator, exclusions, replay
+          coverage, model/runtime cohort, scope, and time window. Secret turns
+          are never replayed. Private turns require an authorized provider/data
+          handling policy. Redaction creates a different input and is never
+          reported as an exact replay.
+        </p>
+        <div class="callout good">
+          <strong>A null result is a result.</strong>
+          If the win rate sits at chance after a month of real use, that is a
+          genuine finding about the thesis, not a failure of the build, and the
+          product doctrine should be revised rather than the metric. Record it
+          the same way a negative experiment outcome is recorded today.
+        </div>
+      </section>
+
+      <section id="p0">
+        <h2><span class="phase">Phase 0</span> · Subtract, then instrument</h2>
+        <p class="muted">
+          Days, not weeks. Highest leverage per hour in the entire plan. Nothing
+          here requires new architecture.
+        </p>
+
+        <div class="task">
+          <h3><span class="task-id">HL-01</span> Delete unproven scope</h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              <code>packages/tool-runtime</code>,
+              <code>packages/policy/src/protected-authority.ts</code>,
+              <code>packages/tui/src/index.ts:30</code> pane union, and
+              generated-tool-only satellite contracts, exports, tests, and
+              manifest entries proven unreachable from production
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Remove the generated-tool runtime, the unwired protected-authority
+              stub port, the declared-but-unrendered <code>memory</code> /
+              <code>evaluations</code> / <code>jobs</code> panes, and only
+              adapters proven unreachable by a production symbol/import scan.
+              Preserve <code>AgentToolDescriptor</code> and
+              <code>runtime-pi/session-tool-registration.ts</code>: real role
+              execution and the later frozen-plan serving path consume those
+              seams. Git history retains deleted generated-tool work for a
+              future evidence-backed restoration.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              Roughly a fifth of the surface exists to satisfy a specification
+              section rather than a caller. It costs review attention, typecheck
+              time, refactor blast radius, and — worst — it makes the repository
+              look further along than it is. The doctrine already forbids adding
+              an abstraction without a consumer in this iteration; this applies
+              it retroactively.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              <code>pnpm check</code> passes with no test deletions other than
+              tests for removed modules. Total production TypeScript falls
+              measurably. No remaining exported module has zero non-test
+              importers.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3>
+              <span class="task-id">HL-02</span> Specify the causal-spine
+              acceptance
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              application composition tests,
+              <code>packages/runtime/test/acceptance.test.ts:33-63</code>,
+              and <code>packages/runtime/test/fake-runtime.ts:26-27</code>
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Remove the fake's capability-identity echo. Define one decisive
+              acceptance contract at the application composition seam: the
+              immutable plan admitted by WorkspaceStore must be byte-for-byte
+              the plan handed to the execution adapter, and unrelated scope
+              must exclude the adaptation. Add fixture preparation now; land
+              the non-vacuous assertion in the same vertical slice as HL-03 and
+              HL-05, because the current runtime request cannot carry the data
+              required to make it meaningful.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              This test is the primary in-repo evidence for the product's
+              central claim, and it is load-bearing in the README. A tautology
+              in that position is worse than no test, because it retires the
+              question.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              The fake cannot satisfy the assertion by echoing metadata.
+              Completed with HL-03/HL-05: the application test fails when
+              activation is bypassed, immutable bytes are changed, the runtime
+              reconstructs from the legacy registry, or an unrelated turn
+              receives the adaptation.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-03</span> Make the frozen turn plan
+            authoritative
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              <code>packages/workspace/migrations/</code>,
+              <code>turn_activation_pins</code>,
+              <code>packages/runtime/src/atomic-activation.ts</code>,
+              and adapter-neutral turn contracts in
+              <code>packages/agent-types</code>
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Persist one schema-versioned SQLite-authoritative
+              <code>FrozenTurnPlan</code> before model execution. It contains a
+              stable turn ID; selected capability subset and reason; complete
+              immutable prompt, skill, router, and tool revision references;
+              provider/model/reasoning; permission snapshot; retrieval
+              citations; routing decision; a per-served-revision baseline
+              mapping tied to its experiment/activation; and a canonical digest.
+              Baselines use explicit <code>genesis</code> or
+              <code>unknown_legacy</code> markers. JSONL may reference the plan
+              ID but never duplicate canonical plan data.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              A digest authenticates bytes but cannot reconstruct them. Serving,
+              inspection, restart, and replay need the same authoritative,
+              replayable value. This is the minimal SQLite-authority slice
+              required before the full HL-11 cutover and prevents another dual
+              write.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              Admission writes one complete plan atomically. Every served
+              revision has a baseline reference, <code>genesis</code>, or
+              <code>unknown_legacy</code>. Unknown legacy plans remain
+              inspectable but are excluded from causal metrics. The forward-only
+              migration is idempotent and atomic, with verified backup/restore;
+              it does not claim SQL down-migration reversibility.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-04</span> Correct the documents to match
+            the code
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              <code>README.md</code>, <code>docs/product-thesis.md</code>,
+              <code>AGENTS.md</code>
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Preserve product doctrine and AGENTS invariants as normative.
+              Add one time-bounded known-nonconformities register naming the
+              exact seam, impact, prohibited expansion, and closure task for:
+              raw legacy <code>capability.promoted</code> events affecting
+              serving; protected workspace mutation ports accepting no
+              verifiable receipt; the foreground dual write; and production
+              preflight passing <code>protectedCases: []</code>. Do not weaken
+              each invariant by scattering inline exceptions through doctrine.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              These documents are the project's strongest asset and the reason
+              40k generated lines stayed coherent. An invariant that is
+              documented but unenforced silently converts into an assumption
+              other code relies on. The README already models the right honesty;
+              extend it to the invariants.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              Each shipped nonconformity appears once in the register with a
+              closure task and no permission for new callers or expansion.
+              Normative doctrine remains unqualified.
+            </dd>
+          </dl>
+        </div>
+      </section>
+
+      <section id="p1">
+        <h2>
+          <span class="phase">Phase 1</span> · The causal spine, then daily use
+        </h2>
+        <div class="callout">
+          <strong
+            >Goal: the narrowest path on which a correction in one session
+            provably changes a later session, running on your real work every
+            day.</strong>
+          Build nothing in this phase that is not on that path. Temporary
+          reliance on the legacy store is acceptable;
+          <em>new</em> dual-write is not.
+        </div>
+
+        <div class="task">
+          <h3><span class="task-id">HL-05</span> Serve the pinned revision</h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              new <code>packages/runtime/src/turn-intelligence.ts</code>,
+              <code>apps/noesis/src/runtime-composition.ts</code>,
+              <code>packages/agent-types</code>, and
+              <code>packages/runtime-pi</code>
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Complete the HL-02/HL-03 vertical slice. Resolve activation and
+              scope into the authoritative <code>FrozenTurnPlan</code>, then
+              pass that exact plan through the adapter-neutral runtime request.
+              Runtime-pi adapts the plan's turn-scoped tool registrations to Pi;
+              it does not reconstruct product state. The wrapped runtime may not
+              rebuild prompts from <code>capabilities.listActive()</code>.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              This single missing edge is why the product does not yet exist.
+              Every other subsystem is downstream of it.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              HL-02 passes at the application seam. The plan ID, canonical
+              digest, immutable prompt bytes, and tool revision registrations
+              received by the runtime equal the admitted plan. Missing bytes,
+              digest mismatch, or incompatible permissions fail before model
+              execution. Generated-tool execution remains out of scope after
+              HL-01; prompt and existing session-tool serving still prove the
+              identity path.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-06</span> Genesis baseline so a fresh
+            workspace can learn
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd><code>apps/noesis/src/runtime-composition.ts:492</code></dd>
+            <dt>Change</dt>
+            <dd>
+              Add an idempotent protected bootstrap that publishes one complete,
+              immutable, file-backed <code>general-collaboration</code>
+              baseline manifest, activates it, and rehydrates it independently
+              of generated experiment manifests. Remove the
+              <code>serving.length === 0</code> early return that currently
+              makes a fresh workspace incapable of entering reflection.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              Today the first correction a new user makes is recorded and
+              discarded. The loop cannot start from an empty activation, which
+              means it cannot start at all.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              A correction on the first turn of a fresh home queues reflection
+              against the immutable baseline. Repeated startup is idempotent;
+              deleting generated experiment fixtures does not make the baseline
+              unresolvable.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-07</span> Move turn settlement out of the
+            composition root
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              new <code>packages/runtime/src/turn-settlement.ts</code>,
+              <code>apps/noesis/src/runtime-composition.ts:443-548</code>
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Extract the <code>runTurn</code> wrapper into a tested runtime
+              module. Stop monkey-patching the runtime object by
+              spread-and-override. Move correction detection out of the inline
+              regex at line 460 into a pure, tested function in
+              <code>packages/learning</code> — it is a product decision about
+              what counts as user dissatisfaction, and it currently lives in the
+              app as five characters of regex.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              The most consequential integration point in the system has one
+              test and is expressed as a patch over another object, so callers
+              cannot tell from a type what they received.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              Composition constructs and injects; it holds no turn logic.
+              Settlement has direct tests for accepted, corrected, failed, and
+              aborted paths. Abort is durably distinguishable—either a dedicated
+              outcome or <code>failed</code> with <code>aborted: true</code>—
+              and is excluded from reflection and replay by default.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-08</span> Real reflection on the fake path
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              <code>apps/noesis/src/cli.ts:235-239</code>,
+              <code>runDemo</code>, and application acceptance tests
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              The fake role runner returns <code>no_change</code> for the
+              reflector and throws for every other role, so author, case
+              generator, trial, and judge are never exercised in the path a user
+              actually runs. Script deterministic outputs for the full role set
+              so the shipped fake journey traverses reflect, author, evaluate,
+              activate, serve, and protected revert. Replace the current demo's
+              manual legacy learn/evaluate/promote choreography with this
+              application path.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              Package acceptance tests prove the organs in isolation. Nothing
+              proves they compose in the binary. Until the fake path can
+              complete a loop, no regression in the loop is detectable.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              <code>pnpm demo</code> from an empty home completes a correction,
+              waits for control-plane idle, inspects atomic activation, proves
+              related use and unrelated abstention, and performs a protected
+              revert with no credentials.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-09</span> Start dogfooding and let it hurt
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>you</dd>
+            <dt>Change</dt>
+            <dd>
+              Begin using Noesis as the primary interface for real work against
+              the Pi runtime. Keep a friction log outside the system so the
+              system cannot filter it. Record a four-week readout, but let
+              correctness and architecture work continue during the window.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              Every design decision so far has been validated against a persona
+              derived from its author, with no usage evidence. The persona may
+              be right; nothing yet distinguishes right from flattering. This is
+              the cheapest experiment available and the only one that can
+              falsify the thesis.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              The protocol and external friction log are active before this
+              plan hands off. At four weeks, publish the recurring frictions and
+              evidence coverage. That readout gates evidence-dependent product
+              choices and validation claims, not HL-10 instrumentation or the
+              HL-11/HL-12 correctness cutover.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-10</span> Shadow baseline replay and the
+            compounding read model
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              a new effect-free foreground replay port, selected reusable
+              machinery in <code>packages/evals/src/dynamic-lab.ts</code>, and
+              new <code>packages/runtime/src/compounding-metrics.ts</code>
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Implement the measurement above without treating a generated
+              <code>TrialArtifact</code> as a foreground replay. Enforce
+              eligibility from all plan provenance: never replay secret data;
+              require authorized provider/data handling for private data; replay
+              recorded tool results or exclude the turn; never rerun effects.
+              Reserve call, token, and cost budget durably before every role
+              with stable operation IDs. Persist exclusion reasons, coverage,
+              and paired R/B evidence.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              It makes the thesis falsifiable, and it does so by re-aiming
+              machinery that is already built and already tested rather than by
+              adding a subsystem.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              The read model is live as soon as eligible turns exist. A seeded
+              regression lowers paired win rate. An unrelated-scope injection
+              raises scope leakage. Token and byte taxes are separate.
+              Correction recurrence uses signatures per relevant exposure.
+              Every result reports numerator, denominator, exclusions,
+              coverage, scope, cohort, and window.
+            </dd>
+          </dl>
+        </div>
+      </section>
+
+      <section id="p2">
+        <h2><span class="phase">Phase 2</span> · One authority</h2>
+        <p class="muted">
+          HL-11/HL-12 execute WS1 from the product-loop plan exactly once.
+          Correctness proceeds while dogfooding runs; the full WS1 acceptance
+          contract, corrected below, is the only completion gate.
+        </p>
+
+        <div class="task">
+          <h3><span class="task-id">HL-11</span> Collapse the dual store</h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              <code>packages/runtime/src/index.ts</code>,
+              <code>packages/ledger</code>,
+              <code>packages/workspace/src/importer.ts</code>,
+              <code>apps/noesis/src/runtime-composition.ts</code>
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Make SQLite the sole authority for sessions, turns, messages,
+              outcomes, pins, grants, reservations, completions, receipts, and
+              budgets. Introduce a versioned operational cutover protocol
+              separate from the existing source-import marker. Import the full
+              protected graph transactionally, write the cutover marker last,
+              and keep JSONL operational writes active if any step fails. After
+              success, stop appending operational state to JSONL and retain it
+              only as historical provenance. Rehydrate receipt lineage and
+              completion state, not process-local <code>WeakSet</code> objects.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              Every turn currently writes both stores with no transaction
+              linking them, so a crash between them produces divergence with no
+              reconciliation path. Two job writers share one
+              <code>jobs</code> table with different semantics. This is the
+              largest structural debt and it grows per turn.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              The corrected full WS1 acceptance set: fault before admission produces
+              no visible turn; fault after admission leaves one unambiguous
+              running turn with its frozen plan; a settled turn produces no
+              legacy append; restart preserves budgets, rejects idempotency-key
+              collisions, replays completed operations without re-running
+              effects, and treats an unresolved reservation as fail-closed.
+              Tests cover an already-imported v1 home, failure before and after
+              marker write, malformed history, completed and failed effect
+              replay, unresolved reservations, and backup/restore. Passing this
+              contract marks product-loop WS1 complete; it must not run again.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-12</span> Retire the legacy promotion path
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd><code>packages/capabilities/src/index.ts:163,247</code></dd>
+            <dt>Change</dt>
+            <dd>
+              Delete ledger-derived capability promotion. Atomic activation
+              becomes the only way a capability serves a turn. In the same
+              cutover, retire or reroute TUI <code>/promote</code> and
+              <code>/rollback</code> commands through a narrow runtime command
+              port; no UI path may call the legacy registry or raw ledger.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              Two promotion systems mean the protected one can be correct while
+              the product uses the other. Guarding both costs more than deleting
+              one.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              No code path or retired command can promote without an activation
+              commit. Appending <code>capability.promoted</code> to the ledger
+              has no effect on serving. Application regression tests exercise
+              both the synthetic event and the retired command path.
+            </dd>
+          </dl>
+        </div>
+      </section>
+
+      <section id="p3">
+        <h2><span class="phase">Phase 3</span> · Protection by construction</h2>
+        <div class="callout warning">
+          <strong>Today the chokepoint is not a chokepoint.</strong>
+          Authority is genuinely unforgeable at the receipt layer —
+          closure-private <code>WeakSet</code> membership is a good mechanism.
+          But the storage ports beneath it accept calls with no receipt at all.
+          Anyone holding <code>NoesisWorkspaceStore</code> can call
+          <code>protectedActivations.commit</code> directly; pin and veto mutate
+          durable control state with no authority wrapper
+          (<code>packages/capabilities/src/atomic.ts:464-516</code>). The
+          invariant is real one layer up and imaginary where the bytes land.
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-13</span> Narrow the protected runtime seam
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              <code>packages/workspace/src/types.ts</code>,
+              <code>packages/capabilities/src/atomic.ts</code>, and a deep
+              protected-runtime adapter
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Capture raw protected workspace ports inside one deep adapter and
+              expose operation-shaped controllers for activation, outcome, pin,
+              veto, and revert. Extend <code>AuthorityBoundary</code> with the
+              matching operations. Do not classify all definition publication
+              as protected: criteria and learning briefs remain declarative;
+              only live protected mutation and active-definition promotion use
+              the protected seam.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              Narrowing capability first prevents a receipt parameter from
+              becoming security theater on a broad store that cannot verify it.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              Ordinary workspace, generated-role, and TUI callers cannot name
+              raw protected ports. Only the protected adapter holds them, and
+              the adapter exposes no generic mutation method.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-14</span> Verify receipts at the deep adapter
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              protected-runtime adapter, <code>AuthorityBoundary</code>, and
+              receipt verification tests
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Require an <code>AuthorityReceipt</code> for every live protected
+              mutation and verify its issuing boundary, effect, resource, and
+              operation before calling the captured raw port. Keep receipt
+              authenticity closure-private; do not make a structurally typed
+              receipt or WorkspaceStore method pretend it can verify itself.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              The receipt matters only where the verifier and the mutation are
+              inseparable. The deep adapter provides that locality.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              Forged, foreign-boundary, wrong-effect, wrong-resource, and stale
+              receipts fail without mutation. A valid matching receipt commits
+              exactly once. Architecture tests prove ordinary consumers cannot
+              bypass the adapter.
+            </dd>
+          </dl>
+        </div>
+      </section>
+
+      <section id="p4">
+        <h2><span class="phase">Phase 4</span> · Shape and evidence quality</h2>
+        <p class="muted">
+          Deferred deliberately. None of this blocks the thesis; all of it
+          becomes cheaper once Phase 2 removes a store and Phase 0 removes a
+          fifth of the surface.
+        </p>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-15</span> Split the two god files along
+            existing seams
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              <code>packages/workspace/src/store.ts</code> (3711),
+              <code>packages/tui/src/index.ts</code> (1628)
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Extract <code>activation-store.ts</code> (~735 lines),
+              <code>feedback-store.ts</code> (~645) and
+              <code>decoders.ts</code> from the store;
+              <code>jobs.ts</code> already proves the pattern. Split TUI
+              lifecycle from rendering around the narrow
+              <code>TuiRuntimePort</code> established during HL-12. The port
+              exposes read models and operation-shaped commands, never ledger,
+              registry, workspace, or scheduler internals.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              Both files have visible seams and the store's decomposition
+              pattern is already established. The TUI reading ledger internals
+              is the one place UI genuinely couples to durable representation.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              Owned modules targeted by this split are under roughly 800 lines.
+              An architecture test forbids TUI imports and member access for
+              ledger, raw registry, workspace, and scheduler surfaces; merely
+              avoiding a ledger event type is insufficient.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">HL-16</span> Make protected evaluation
+            actually protected
+          </h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              <code>apps/noesis/src/runtime-composition.ts:348</code>, role
+              context policy at <code>:147-156</code>
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Add immutable evaluator-owned protected-suite revisions. Preflight
+              fails closed when the suite is absent or mismatched, and
+              <code>protected_case_regression</code> is a hard rail rather than
+              another score in the aggregate. Apply the same
+              <code>allowedMessageNames</code> whitelist the
+              <code>runtime-pi</code> default policy uses, which the app's
+              custom policy currently omits — role isolation is stronger in the
+              library than in the binary.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              The rails are doing the safety work that the documents attribute
+              to the evidence. With an empty held-out suite, a candidate is
+              judged only against cases its own author's evidence produced.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              A candidate that overfits its source cases is blocked regardless
+              of aggregate quality. Missing or stale protected suites block.
+              The app derives role policies from the default and a test proves
+              the result is at least as restrictive.
+            </dd>
+          </dl>
+        </div>
+
+        <div class="task">
+          <h3><span class="task-id">HL-17</span> Calibrate judge abstention</h3>
+          <dl>
+            <dt>Owns</dt>
+            <dd>
+              <code>packages/evals/src/dynamic-strategies.ts:123-144</code>
+            </dd>
+            <dt>Change</dt>
+            <dd>
+              Preserve the existing <code>inconclusive</code> judge contract and
+              aggregation behavior. Improve role instructions and fixtures so
+              the judge knows when to return it, and expose disagreement counts
+              and evidence references. Change aggregation only if HL-10 later
+              shows that the current rule diverges from real-turn outcomes.
+            </dd>
+            <dt>Why</dt>
+            <dd>
+              Abstention already exists; the missing work is calibration and
+              evidence that the shipped role actually uses it. Do not replace a
+              working contract to satisfy stale plan language.
+            </dd>
+            <dt>Accept</dt>
+            <dd>
+              A deliberately ambiguous fixture produces abstention, not a coin
+              flip, and the abstention is recorded as evidence.
+            </dd>
+          </dl>
+        </div>
+      </section>
+
+      <section id="order">
+        <h2>Sequencing</h2>
+        <pre>
+P0  HL-01 narrow subtraction ∥ HL-04 known-nonconformities register
+                          │
+                          ▼
+P1  HL-02 acceptance ─→ HL-03 authoritative FrozenTurnPlan ─→ HL-05 serve it
+                          │                  ├─→ HL-06 bootstrap baseline
+                          │                  ├─→ HL-07 settlement + abort
+                          │                  └─→ HL-08 fake application loop
+                          ├─→ HL-09 dogfood protocol (four-week evidence window continues)
+                          └─→ HL-10 effect-free replay + trustworthy metrics
+                                             │
+P2                    HL-11 versioned cutover ─→ HL-12 retire legacy + TUI path
+                                             │
+P3                    HL-13 narrow protected seam ─→ HL-14 verify receipts
+                                             │
+P4                    HL-15 shape ∥ HL-16 protected gate ∥ HL-17 calibration</pre>
+        <div class="grid">
+          <article class="card">
+            <h3>Correctness does not wait</h3>
+            <p>
+              HL-11/HL-12 begin when the causal-spine contract is green. The
+              four-week dogfood readout gates posture heuristics, learning
+              scope/threshold policy, metric interpretation, and validation
+              claims—not the single-authority cutover.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Hard gate during P1</h3>
+            <p>
+              No task may introduce a new dual-write path. Riding the existing
+              legacy store is temporarily acceptable; widening it is not.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Parallelism</h3>
+            <p>
+              HL-01 and HL-04 are independent. HL-02/03/05 are one serial
+              vertical slice; HL-06/07/08 branch once its contracts stabilize.
+              HL-09 and HL-10 then run alongside correctness work. P4 tasks are
+              mutually independent after the protected/TUI cutovers they consume.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section id="verification">
+        <h2>Verification</h2>
+        <pre>
+pnpm format
+pnpm lint
+pnpm typecheck
+pnpm test</pre>
+        <p>
+          The final gate remains <code>pnpm check</code>. Required additions to
+          the focused test classes:
+        </p>
+        <ul>
+          <li>
+            served-plan identity: the authoritative plan ID, digest, immutable
+            prompt bytes, and tool revisions equal what the runtime received,
+            and an unrelated turn's plan excludes the adaptation;
+          </li>
+          <li>
+            genesis: a first-turn correction on an empty workspace queues
+            reflection against the immutable baseline;
+          </li>
+          <li>
+            turn settlement: accepted, corrected, failed, and aborted paths
+            tested directly rather than through composition;
+          </li>
+          <li>
+            protected seam: forged, foreign, wrong-effect, and wrong-resource
+            receipts cannot reach a raw protected mutation;
+          </li>
+          <li>
+            protected-case efficacy: a candidate overfitted to its source cases
+            fails the held-out suite;
+          </li>
+          <li>judge inconclusive calibration on an ambiguous fixture;</li>
+          <li>
+            compounding metrics: a seeded regression lowers paired win rate; an
+            unrelated-scope injection raises leakage; all denominators,
+            exclusions, and coverage remain inspectable.
+          </li>
+        </ul>
+        <div class="callout">
+          <strong>Standing rule.</strong>
+          A test whose assertion the fake runtime can satisfy without the
+          mechanism under test being present is not evidence. HL-02 exists
+          because that rule was violated in the most important test in the
+          repository; apply it to every test added by this plan.
+        </div>
+      </section>
+
+      <section id="nongoals">
+        <h2>Non-goals</h2>
+        <ul>
+          <li>
+            Rewriting the control plane. The reserve, receipt, and rail
+            mechanisms are good and stay.
+          </li>
+          <li>
+            Rebuilding the evaluation laboratory. It gets re-aimed at real
+            turns, not replaced.
+          </li>
+          <li>
+            Adding statistical ceremony, judge panels, or new aggregation policy
+            before HL-10 produces evidence that the current rule is wrong.
+          </li>
+          <li>
+            Restoring the generated-tool runtime until a foreground turn
+            genuinely needs it and can pay for real isolation.
+          </li>
+          <li>Any new interface, channel, or persona expansion.</li>
+          <li>
+            New abstractions without a caller in the phase that introduces them.
+            This is the failure being corrected; repeating it inside the
+            correction would be the worst outcome available.
+          </li>
+        </ul>
+      </section>
+
+      <section id="done">
+        <h2>Definition of done</h2>
+        <div class="callout good">
+          <p>
+            The dogfood protocol is running and its evidence remains an explicit
+            gate on evidence-dependent product decisions. A correction made in
+            one session demonstrably
+            changes a later relevant session and demonstrably does not change an
+            unrelated one. The served plan is the inspected plan. Every new turn
+            has one SQLite authority. No protected mutation compiles without a
+            verifiable receipt at the deep protected adapter. The four
+            compounding metrics are live over eligible real turns, with honest
+            coverage and exclusions. The four-week readout may still conclude
+            that the central claim is unsupported; product-loop decisions that
+            depend on it wait for that evidence.
+          </p>
+        </div>
+        <p class="muted">
+          The success condition is not that the win rate is high. It is that the
+          number exists and is trustworthy. A well-measured null result would
+          still be the most valuable thing this repository has produced.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        Noesis · high-leverage correction plan · derived from the repository
+        review of 2026-07-25.
+      </p>
+      <p class="muted">
+        Companion to
+        <a href="compounding-partnership-product-loop.html"
+          >the compounding partnership product loop</a>, which it reorders
+        rather than replaces.
+      </p>
+    </footer>
+  </body>
+</html>

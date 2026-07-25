@@ -32,6 +32,43 @@ export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPoli
   });
 }
 
+export function createRestrictedRoleContextPolicy(
+  role: AgentRole,
+  overrides: Partial<RoleContextPolicy> = {},
+): RoleContextPolicy {
+  const base = createDefaultRoleContextPolicy(role);
+  const boundedValues = [
+    ["maxMessages", overrides.maxMessages, base.maxMessages],
+    ["maxCharactersPerMessage", overrides.maxCharactersPerMessage, base.maxCharactersPerMessage],
+    ["maxTotalCharacters", overrides.maxTotalCharacters, base.maxTotalCharacters],
+    ["maxEvidenceRefs", overrides.maxEvidenceRefs, base.maxEvidenceRefs],
+    ["maxTools", overrides.maxTools, base.maxTools],
+  ] as const;
+  for (const [name, requested, maximum] of boundedValues) {
+    if (requested !== undefined && requested > maximum)
+      throw new Error(`Restricted role context cannot widen ${name} beyond ${maximum}`);
+  }
+  if (!base.includeCapabilityRevisions && overrides.includeCapabilityRevisions === true)
+    throw new Error("Restricted role context cannot expose capability revisions");
+
+  let allowedMessageNames = base.allowedMessageNames;
+  if (base.allowedMessageNames && overrides.allowedMessageNames) {
+    const baseNames = new Set(base.allowedMessageNames);
+    if (overrides.allowedMessageNames.some((name) => !baseNames.has(name)))
+      throw new Error("Restricted role context cannot add undeclared message names");
+    allowedMessageNames = Object.freeze([...overrides.allowedMessageNames]);
+  } else if (!base.allowedMessageNames && overrides.allowedMessageNames) {
+    allowedMessageNames = Object.freeze([...overrides.allowedMessageNames]);
+  }
+
+  return Object.freeze({
+    ...base,
+    ...overrides,
+    ...(allowedMessageNames ? { allowedMessageNames } : {}),
+    includeCapabilityRevisions: overrides.includeCapabilityRevisions ?? base.includeCapabilityRevisions,
+  });
+}
+
 function isCapabilityRevisionRef(revision: unknown): revision is CapabilityRevisionRef {
   return (
     revision !== null &&

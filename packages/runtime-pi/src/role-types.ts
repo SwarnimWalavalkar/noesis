@@ -6,7 +6,7 @@ import type {
   AgentTrace,
   AgentUsage,
 } from "@noesis/agent-types";
-import type { CapabilityRevisionRef, ExperimentVariantRef, JsonValue } from "@noesis/domain";
+import type { CapabilityRevisionRef, ExperimentVariantRef } from "@noesis/domain";
 
 export type RoleReasoningLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -136,9 +136,4 @@ export interface ComparableRoleVariantFixture {
 export interface BlindedJudgeFixture {
   readonly messages: readonly AgentMessage[];
   readonly labels: Readonly<Record<"A" | "B", "first" | "second">>;
-}
-
-export interface GeneratedToolTransportRequest {
-  readonly payload: JsonValue;
-  readonly signal?: AbortSignal;
 }

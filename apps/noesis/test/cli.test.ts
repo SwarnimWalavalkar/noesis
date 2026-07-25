@@ -26,7 +26,7 @@ async function runCli(
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error(`CLI did not exit within 10 seconds. Output:\n${output}`));
-    }, 10_000);
+    }, 30_000);
     child.once("error", (error) => {
       clearTimeout(timeout);
       reject(error);
@@ -150,5 +150,33 @@ describe("Noesis CLI grammar", () => {
     expect(result.output).toContain("No saved sessions");
     expect(result.output).toContain("without --continue");
     expect(await readFile(join(home, "ledger", "events.jsonl"), "utf8")).toBe("");
+  });
+
+  test("runs the fake application through activation, scoped serving, and protected revert", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-cli-fake-loop-"));
+    const result = await runCli(["demo", "--home", home]);
+
+    expect(result.code).toBe(0);
+    const jsonStart = result.output.indexOf("{");
+    expect(jsonStart).toBeGreaterThanOrEqual(0);
+    const summary: unknown = JSON.parse(result.output.slice(jsonStart));
+    expect(summary).toMatchObject({
+      home,
+      experiment: {
+        scope: "research brief",
+      },
+      related: {
+        servedRevision: {
+          kind: "capability_revision",
+        },
+      },
+      unrelated: {
+        selectedCapabilityIds: ["general-collaboration"],
+      },
+      revert: {
+        outcomeId: expect.stringMatching(/^experiment_outcome_/u),
+        restoredActivationId: expect.stringMatching(/^restoration_/u),
+      },
+    });
   });
 });

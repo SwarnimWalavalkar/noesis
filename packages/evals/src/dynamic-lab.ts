@@ -41,6 +41,8 @@ import {
   type GeneratedCaseOutput,
   GeneratedCaseOutputSchema,
   type RoleInvocationConfiguration,
+  type ProtectedEvaluationSuiteRevision,
+  ProtectedEvaluationSuiteRevisionSchema,
   type TrialArtifact,
   TrialArtifactSchema,
   type TrialResult,
@@ -177,6 +179,53 @@ export function createCandidateAuthorCaseView(cases: readonly EvaluationCase[]):
   });
 }
 
+function protectedSuiteSnapshotValue(
+  suite: Omit<ProtectedEvaluationSuiteRevision, "snapshotDigest">,
+): object {
+  return Object.freeze({
+    suiteId: suite.suiteId,
+    revision: suite.revision,
+    scope: suite.scope,
+    definitionRevision: suite.definitionRevision,
+    cases: suite.cases,
+  });
+}
+
+export function protectedEvaluationSuiteDigest(
+  suite: Omit<ProtectedEvaluationSuiteRevision, "snapshotDigest">,
+): string {
+  return sha256(canonicalJson(protectedSuiteSnapshotValue(suite)));
+}
+
+export function createProtectedEvaluationSuiteRevision(
+  suite: Omit<ProtectedEvaluationSuiteRevision, "snapshotDigest">,
+): ProtectedEvaluationSuiteRevision {
+  const parsed = ProtectedEvaluationSuiteRevisionSchema.parse({
+    ...suite,
+    snapshotDigest: protectedEvaluationSuiteDigest(suite),
+  });
+  return Object.freeze({
+    ...parsed,
+    definitionRevision: Object.freeze({ ...parsed.definitionRevision }),
+    cases: Object.freeze(
+      parsed.cases.map((evaluationCase) =>
+        Object.freeze({
+          ...evaluationCase,
+          evidenceRefs: Object.freeze(
+            evaluationCase.evidenceRefs.map((reference) => Object.freeze({ ...reference })),
+          ),
+          ...(evaluationCase.definitionRevision
+            ? { definitionRevision: Object.freeze({ ...evaluationCase.definitionRevision }) }
+            : {}),
+          criterionRefs: Object.freeze(
+            evaluationCase.criterionRefs.map((criterion) => Object.freeze({ ...criterion })),
+          ),
+        }),
+      ),
+    ),
+  });
+}
+
 function failure(input: EvaluationFailure): DynamicPreflightResult {
   return err(Object.freeze(input));
 }
@@ -281,19 +330,23 @@ function validateCaseOwnership(input: DynamicPreflightInput): string | undefined
     )
   )
     return "Source cases must be immutable author-visible source definitions";
+  if (input.protectedSuite.scope !== input.scope)
+    return "Protected suite scope must match the evaluation scope";
+  if (input.protectedSuite.snapshotDigest !== protectedEvaluationSuiteDigest(input.protectedSuite))
+    return "Protected suite revision digest does not match its immutable contents";
   if (
-    input.protectedCases.some(
+    input.protectedSuite.cases.some(
       (evaluationCase) => evaluationCase.kind !== "protected" || evaluationCase.owner !== "evaluator",
     )
   )
     return "Protected cases must remain evaluator-owned";
-  if (!uniqueById([...input.sourceCases, ...input.protectedCases], (item) => item.caseId))
+  if (!uniqueById([...input.sourceCases, ...input.protectedSuite.cases], (item) => item.caseId))
     return "Evaluation case IDs must be unique";
   const selectedCriteria = new Set(
     input.criteria.criteria.map((criterion) => `${criterion.criterionId}@${criterion.revision}`),
   );
   if (
-    [...input.sourceCases, ...input.protectedCases].some((evaluationCase) =>
+    [...input.sourceCases, ...input.protectedSuite.cases].some((evaluationCase) =>
       evaluationCase.criterionRefs.some(
         (criterion) => !selectedCriteria.has(`${criterion.criterionId}@${criterion.revision}`),
       ),
@@ -311,6 +364,7 @@ function suiteDigest(input: DynamicPreflightInput, cases: readonly EvaluationCas
       baselineRevision: input.baseline.ref,
       candidateRevision: input.candidate.ref,
       criterionSnapshot: input.criteria,
+      protectedSuite: input.protectedSuite,
       cases,
       budget: input.budget,
       config: input.config,
@@ -428,10 +482,14 @@ function approvalRequired(input: DynamicPreflightInput): boolean {
 function railChecks(
   input: DynamicPreflightInput,
   trials: readonly TrialResult[],
+  comparisons: readonly CaseComparison[],
 ): readonly EvaluationRailResult[] {
   const candidateTrials = trials.filter((trial) => trial.arm === "candidate");
   const sourceCaseIds = new Set(input.sourceCases.map((evaluationCase) => evaluationCase.caseId));
   const sourceTrials = candidateTrials.filter((trial) => sourceCaseIds.has(trial.caseId));
+  const protectedCaseIds = new Set(input.protectedSuite.cases.map((evaluationCase) => evaluationCase.caseId));
+  const protectedTrials = candidateTrials.filter((trial) => protectedCaseIds.has(trial.caseId));
+  const protectedComparisons = comparisons.filter((comparison) => protectedCaseIds.has(comparison.caseId));
   const identityFailures = trials.filter(
     (trial) =>
       !artifactMatchesRevision(
@@ -449,6 +507,19 @@ function railChecks(
     (trial) => !trial.artifact.valid || trial.artifact.invalidArtifacts.length > 0,
   );
   const effectTrials = candidateTrials.filter((trial) => trial.artifact.unexpectedEffects.length > 0);
+  const missingProtectedTrials = input.protectedSuite.cases.filter(
+    (evaluationCase) => !protectedTrials.some((trial) => trial.caseId === evaluationCase.caseId),
+  );
+  const missingProtectedComparisons = input.protectedSuite.cases.filter(
+    (evaluationCase) =>
+      !protectedComparisons.some((comparison) => comparison.caseId === evaluationCase.caseId),
+  );
+  const invalidProtectedTrials = protectedTrials.filter(
+    (trial) => !trial.artifact.valid || trial.artifact.invalidArtifacts.length > 0,
+  );
+  const protectedRegressions = protectedComparisons.filter(
+    (comparison) => comparison.winner === "baseline" || comparison.winner === "inconclusive",
+  );
   return Object.freeze([
     Object.freeze({
       rail: "capability_identity" as const,
@@ -469,6 +540,28 @@ function railChecks(
       details: Object.freeze([
         ...sourceFailures.map((assertion) => assertion.assertionId),
         ...missingSourceAssertions.map((trial) => `${trial.caseId}:missing-source-assertion`),
+      ]),
+    }),
+    Object.freeze({
+      rail: "protected_case_regression" as const,
+      passed:
+        missingProtectedTrials.length === 0 &&
+        missingProtectedComparisons.length === 0 &&
+        invalidProtectedTrials.length === 0 &&
+        protectedRegressions.length === 0,
+      evidenceRefs: Object.freeze([
+        ...protectedTrials.map((trial) => trial.outputEvidence),
+        ...protectedComparisons.map((comparison) => comparison.judgmentEvidence),
+      ]),
+      details: Object.freeze([
+        ...missingProtectedTrials.map((evaluationCase) => `${evaluationCase.caseId}:missing-candidate-trial`),
+        ...missingProtectedComparisons.map((evaluationCase) => `${evaluationCase.caseId}:missing-comparison`),
+        ...invalidProtectedTrials.flatMap((trial) =>
+          trial.artifact.invalidArtifacts.length > 0
+            ? trial.artifact.invalidArtifacts.map((artifact) => `${trial.caseId}:invalid:${artifact}`)
+            : [`${trial.caseId}:candidate-artifact-invalid`],
+        ),
+        ...protectedRegressions.map((comparison) => `${comparison.caseId}:${comparison.winner}`),
       ]),
     }),
     Object.freeze({
@@ -572,8 +665,13 @@ export function createDynamicEvaluationLaboratory(
       rawInput.candidate.ref.bundleDigest !== canonicalCandidateDigest
     )
       identityDetails.push("Candidate CapabilityRevisionRef does not match complete materialized bytes");
-    if (rawInput.baseline.ref.capabilityId !== rawInput.candidate.ref.capabilityId)
-      identityDetails.push("Baseline and candidate belong to different capabilities");
+    if (
+      rawInput.baseline.ref.capabilityId !== rawInput.candidate.ref.capabilityId &&
+      rawInput.candidate.revision.predecessorRevisionId !== undefined
+    )
+      identityDetails.push(
+        "A candidate may cross capability identity only when it creates a new slot without a predecessor",
+      );
     if (identityDetails.length > 0)
       return failure({
         code: "identity_mismatch",
@@ -591,7 +689,7 @@ export function createDynamicEvaluationLaboratory(
 
     const maxGeneratedCases = Math.max(
       0,
-      rawInput.budget.maxCases - rawInput.sourceCases.length - rawInput.protectedCases.length,
+      rawInput.budget.maxCases - rawInput.sourceCases.length - rawInput.protectedSuite.cases.length,
     );
     if (maxGeneratedCases === 0)
       return failure({
@@ -719,7 +817,11 @@ export function createDynamicEvaluationLaboratory(
         }),
       );
     }
-    const cases = Object.freeze([...rawInput.sourceCases, ...generatedCases, ...rawInput.protectedCases]);
+    const cases = Object.freeze([
+      ...rawInput.sourceCases,
+      ...generatedCases,
+      ...rawInput.protectedSuite.cases,
+    ]);
     if (!uniqueById(cases, (item) => item.caseId))
       return failure({
         code: "malformed_role_output",
@@ -1092,7 +1194,7 @@ export function createDynamicEvaluationLaboratory(
         message: `Evaluation cost ${estimatedCost} exceeded budget ${rawInput.budget.maxCost}`,
         stage: "judgment",
       });
-    const rails = railChecks(rawInput, trials);
+    const rails = railChecks(rawInput, trials, comparisons);
     const decision = decisionFromEvaluation({
       approvalRequired: approvalRequired(rawInput),
       railsPassed: rails.every((rail) => rail.passed),
@@ -1109,6 +1211,7 @@ export function createDynamicEvaluationLaboratory(
       canonicalCandidateDigest,
       suiteDigest: suiteDigest(rawInput, cases),
       criterionSnapshot: rawInput.criteria,
+      protectedSuite: rawInput.protectedSuite,
       cases,
       caseEvidence: Object.freeze(caseEvidence),
       trials: Object.freeze(trials),

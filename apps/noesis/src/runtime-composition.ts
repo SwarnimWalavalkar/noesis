@@ -4,17 +4,20 @@ import {
   createWorkspaceUserCriterionPorts,
   type ResolvedNoesisConfig,
 } from "@noesis/config";
+import { compileContext, type ContextFragment } from "@noesis/context";
 import {
   canonicalJson,
   capabilityRevisionRef,
   createId,
   sameCapabilityRevisionRef,
+  sha256,
   type CapabilityRevision,
   type CapabilityRevisionRef,
   type FileRevisionRef,
 } from "@noesis/domain";
 import {
   createDynamicEvaluationLaboratory,
+  createProtectedEvaluationSuiteRevision,
   createWorkspaceEvaluationRecorder,
   selectEvaluationCriteria,
   type DynamicEvaluationConfig,
@@ -28,11 +31,12 @@ import {
   createDurableAutomaticLearningOrgan,
   createWorkspaceLearningCandidateManifestStore,
 } from "@noesis/learning";
-import { createAuthorityBoundary } from "@noesis/policy";
 import {
   createAtomicActivationController,
   createContinuousFeedbackController,
   createRuntimeControlPlane,
+  createTurnSettlement,
+  createTurnIntelligencePlanner,
   createRuntimeCoordinatorComposition,
   type ActivationCandidateResolver,
   type CoordinatorPreflightPreparation,
@@ -40,14 +44,23 @@ import {
   type ExperimentOutcomeProposal,
   type NoesisRuntime,
   type RuntimeControlPlane,
+  type TrailState,
+  type TrailSummary,
   type TurnResult,
 } from "@noesis/runtime";
+import type { FrozenBaselineRef } from "@noesis/agent-types";
 import {
   createStructuredInferencePort,
+  createRestrictedRoleContextPolicy,
   type RoleVariantConfiguration,
   type RuntimePiAgentRoleRunner,
 } from "@noesis/runtime-pi";
+import type { NoesisTuiRuntime } from "@noesis/tui";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
+import {
+  createWorkspaceRuntimeInternals,
+  type ProtectedWorkspaceRuntime,
+} from "../../../packages/workspace/src/protected-runtime.ts";
 import { z } from "zod";
 
 const encoder = new TextEncoder();
@@ -72,9 +85,32 @@ const OutcomeProposalSchema = z.strictObject({
   summary: z.string().min(1),
 });
 
-export interface ApplicationRuntime extends NoesisRuntime {
-  readonly workspace: NoesisWorkspaceStore;
+export interface ApplicationRuntime extends NoesisTuiRuntime {
+  readonly home: string;
+  readonly agentName: string;
+  readonly listTrails: NoesisRuntime["listTrails"];
   readonly controlPlane: RuntimeControlPlane;
+  /** Explicit diagnostic/test seam. Product and TUI callers receive no raw durable surfaces. */
+  readonly debug: {
+    readonly workspace: NoesisWorkspaceStore;
+    readonly adaptations: {
+      readonly activations: Pick<
+        ProtectedWorkspaceRuntime["activations"],
+        "current" | "getOperation" | "listOperations" | "getApproval" | "getTurnPin" | "getTurnPlan"
+      >;
+      readonly feedback: Pick<
+        ProtectedWorkspaceRuntime["feedback"],
+        | "operationForActivation"
+        | "getObservation"
+        | "listObservations"
+        | "getResearchRun"
+        | "listResearchRuns"
+        | "getOutcome"
+        | "getSuccessorInput"
+      >;
+    };
+    readonly legacyReadOnly: Pick<NoesisRuntime, "ledger" | "artifacts" | "memory" | "capabilities">;
+  };
   readonly shutdown: () => Promise<void>;
 }
 
@@ -144,14 +180,14 @@ async function roleConfigurations(
         model: config.agent.model,
         reasoning: config.agent.thinkingLevel,
         systemPrompt: rolePrompt(name),
-        contextPolicy: Object.freeze({
+        contextPolicy: createRestrictedRoleContextPolicy(role, {
           policyId: `noesis-${name}-bounded-v1`,
           maxMessages: 12,
-          maxCharactersPerMessage: 16_000,
-          maxTotalCharacters: 64_000,
+          maxCharactersPerMessage: 12_000,
+          maxTotalCharacters: 48_000,
           maxEvidenceRefs: 64,
           maxTools: 0,
-          includeCapabilityRevisions: true,
+          includeCapabilityRevisions: role !== "judge_critic",
           forbiddenContent: /(?:authority|activation|restoration)[_-]?(?:handle|token)/iu,
         }),
         timeoutMs: 120_000,
@@ -211,6 +247,155 @@ function registerRevision(
   return constructed;
 }
 
+const GENESIS_CAPABILITY = Object.freeze({
+  capabilityId: "general-collaboration",
+  name: "General collaboration",
+  scope: "general",
+  intent: "Provide the stable baseline for ordinary Noesis collaboration and future comparison.",
+});
+const GENESIS_REVISION_ID = "general-collaboration-genesis-v1";
+
+async function publishGenesisDefinition(
+  workspace: NoesisWorkspaceStore,
+  input: {
+    readonly definitionId: string;
+    readonly workingPath: string;
+    readonly content: string;
+  },
+): Promise<FileRevisionRef> {
+  const bytes = encoder.encode(input.content);
+  const current = await workspace.definitionMetadata.getCurrent("genesis_baseline", input.definitionId);
+  if (current) {
+    const recorded = await workspace.reads.readRevision(current.definitionRevision);
+    if (decoder.decode(recorded) !== input.content)
+      throw new Error(`Genesis definition ${input.definitionId} changed without a revision`);
+    return current.definitionRevision;
+  }
+  const published = await workspace.definitionPublications.publish({
+    namespace: "genesis_baseline",
+    definitionId: input.definitionId,
+    revision: 1,
+    workingPath: input.workingPath,
+    bytes,
+    activity: Object.freeze({
+      kind: "genesis_baseline.initialized",
+      actor: Object.freeze({ actorId: "protected-genesis-bootstrap", kind: "system" as const }),
+      reason: "Immutable general collaboration baseline",
+    }),
+  });
+  if (!published.ok) throw new Error(published.error.message);
+  return published.value.definitionRevision;
+}
+
+async function bootstrapGenesisBaseline(
+  workspace: NoesisWorkspaceStore,
+  protectedRuntime: ProtectedWorkspaceRuntime,
+  registry: ReturnType<typeof createAtomicCapabilityRegistry>,
+): Promise<CapabilityRevisionRef> {
+  const [prompt, skill, router] = await Promise.all([
+    publishGenesisDefinition(workspace, {
+      definitionId: "general-collaboration-prompt",
+      workingPath: "prompts/general-collaboration.md",
+      content: [
+        "You are Noesis, a thinking-and-creation partner.",
+        "Deliver immediate value, preserve evidence, and keep adaptations inspectable.",
+      ].join("\n"),
+    }),
+    publishGenesisDefinition(workspace, {
+      definitionId: "general-collaboration-skill",
+      workingPath: "skills/general-collaboration.md",
+      content: [
+        "# General collaboration",
+        "",
+        "Work with the user on ambiguous intellectual work and execute clear bounded requests directly.",
+      ].join("\n"),
+    }),
+    publishGenesisDefinition(workspace, {
+      definitionId: "general-collaboration-router",
+      workingPath: "capabilities/general-collaboration-router.json",
+      content: `${canonicalJson({ strategyId: "general-collaboration-v1", scope: "general" })}\n`,
+    }),
+  ]);
+  const revision: CapabilityRevision = Object.freeze({
+    capabilityRevisionId: GENESIS_REVISION_ID,
+    capabilityId: GENESIS_CAPABILITY.capabilityId,
+    promptModules: Object.freeze([prompt]),
+    skills: Object.freeze([skill]),
+    tools: Object.freeze([]),
+    toolset: Object.freeze({
+      toolRevisionIds: Object.freeze([]),
+      routerRevision: router,
+      strategyId: "general-collaboration-v1",
+    }),
+    activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
+    permissionManifest: Object.freeze({
+      effects: Object.freeze([]),
+      resourcePatterns: Object.freeze([]),
+      credentialRefs: Object.freeze([]),
+    }),
+    evidenceRefs: Object.freeze([]),
+    sourceEvaluationDefinitions: Object.freeze([]),
+    requestedPermissionDelta: Object.freeze({
+      addedEffects: Object.freeze([]),
+      widenedResources: Object.freeze([]),
+      addedCredentialRefs: Object.freeze([]),
+    }),
+  });
+  const revisionRef = registerRevision(registry, revision, GENESIS_CAPABILITY);
+  const manifest = await publishGenesisDefinition(workspace, {
+    definitionId: "general-collaboration-manifest",
+    workingPath: "capabilities/general-collaboration.json",
+    content: `${canonicalJson({ capability: GENESIS_CAPABILITY, revision, revisionRef })}\n`,
+  });
+  await protectedRuntime.activations.bootstrapGenesis({
+    capabilityRevision: revisionRef,
+    activeDefinitions: Object.freeze({
+      "general-collaboration:manifest": manifest,
+      "general-collaboration:prompt-0": prompt,
+      "general-collaboration:skill-0": skill,
+      "general-collaboration:router": router,
+    }),
+  });
+  return revisionRef;
+}
+
+async function protectedSuiteForScope(workspace: NoesisWorkspaceStore, scope: string) {
+  const scopeId = sha256(scope).slice(0, 24);
+  const definitionRevision = await publishGenesisDefinition(workspace, {
+    definitionId: `protected-suite-${scopeId}`,
+    workingPath: `evals/protected-${scopeId}.json`,
+    content: `${canonicalJson({
+      owner: "protected_evaluator",
+      scope,
+      cases: [
+        {
+          caseId: `protected-${scopeId}-scope`,
+          instruction: "Do not apply the candidate outside the scope described by this evaluation.",
+          input: "Handle a nearby but unrelated request without leaking the candidate behavior.",
+        },
+      ],
+    })}\n`,
+  });
+  return createProtectedEvaluationSuiteRevision({
+    suiteId: `noesis-protected-${scopeId}`,
+    revision: 1,
+    scope,
+    definitionRevision,
+    cases: Object.freeze([
+      Object.freeze({
+        caseId: `protected-${scopeId}-scope`,
+        kind: "protected" as const,
+        owner: "evaluator" as const,
+        instruction: "Do not apply the candidate outside its intended scope.",
+        input: "Complete a nearby but unrelated request without using the candidate behavior.",
+        evidenceRefs: Object.freeze([definitionRevision]),
+        definitionRevision,
+        criterionRefs: Object.freeze([]),
+      }),
+    ]),
+  });
+}
+
 function evaluationConfiguration(
   roles: Readonly<Record<RoleName, ApplicationRoleConfiguration>>,
 ): DynamicEvaluationConfig {
@@ -250,6 +435,11 @@ export async function createApplicationRuntimeComposition(
   options: ApplicationRuntimeCompositionOptions,
 ): Promise<ApplicationRuntime> {
   const workspace = await createWorkspaceStore(options.config.home);
+  const { protectedRuntime } = createWorkspaceRuntimeInternals(workspace);
+  await workspace.cutoverLegacyOperationalAuthority(
+    options.config.home,
+    Object.freeze({ actorId: "operational-cutover", kind: "system" as const }),
+  );
   const roles = await roleConfigurations(workspace, options.config);
   const roleRunner = options.createRoleRunner(Object.freeze(Object.values(roles)));
   const inference = createStructuredInferencePort({ runner: roleRunner, maxRepairAttempts: 1 });
@@ -259,6 +449,7 @@ export async function createApplicationRuntimeComposition(
     controlStore: createWorkspaceCapabilityControlStore(workspace),
   });
   const manifests = createWorkspaceLearningCandidateManifestStore(workspace);
+  const genesisRevision = await bootstrapGenesisBaseline(workspace, protectedRuntime, registry);
 
   const hydrateRevisions = async (): Promise<void> => {
     const experiments = await workspace.research.experiments.listExperiments({ limit: 1_000 });
@@ -330,6 +521,32 @@ export async function createApplicationRuntimeComposition(
     await hydrateRevisions();
     return registry.getRevision(reference);
   };
+  const resolveBaseline = async (reference: CapabilityRevisionRef): Promise<FrozenBaselineRef> => {
+    if (sameCapabilityRevisionRef(reference, genesisRevision))
+      return Object.freeze({ kind: "genesis" as const });
+    const experiments = await workspace.research.experiments.listExperiments({ limit: 1_000 });
+    const origin = experiments.find(
+      (experiment) =>
+        experiment.activatedRevision !== undefined &&
+        sameCapabilityRevisionRef(experiment.activatedRevision, reference),
+    );
+    return origin
+      ? Object.freeze({
+          kind: "capability_revision" as const,
+          experimentId: origin.experimentId,
+          revision: origin.baselineRevision,
+        })
+      : Object.freeze({ kind: "unknown_legacy" as const });
+  };
+  const turnPlanner = createTurnIntelligencePlanner({
+    workspace,
+    protectedRuntime,
+    capabilities: Object.freeze({
+      resolveCapability: async (capabilityId: string) => registry.getCapability(capabilityId),
+      resolveRevision,
+      resolveBaseline,
+    }),
+  });
   const candidates: ActivationCandidateResolver = Object.freeze({
     resolve: resolveRevision,
     lineage: async (reference: CapabilityRevisionRef) => registry.listRevisionLineage(reference.capabilityId),
@@ -345,7 +562,7 @@ export async function createApplicationRuntimeComposition(
       if (!selected.ok) throw new Error(selected.error.message);
       return Object.freeze({
         criteria: selected.value,
-        protectedCases: Object.freeze([]),
+        protectedSuite: await protectedSuiteForScope(workspace, input.scope),
         budget: Object.freeze({
           maxCases: options.config.experiments.maxCases ?? 8,
           maxAttemptsPerArm: options.config.experiments.maxAttemptsPerArm ?? 1,
@@ -376,10 +593,9 @@ export async function createApplicationRuntimeComposition(
       }),
     }),
   });
-  const authority = createAuthorityBoundary(options.runtime.ledger);
   const activation = createAtomicActivationController({
     workspace,
-    authority,
+    protectedRuntime,
     candidates,
     autonomy: Object.freeze({
       riskLevel: options.config.autonomy.riskLevel ?? "low",
@@ -401,7 +617,7 @@ export async function createApplicationRuntimeComposition(
         messages: Object.freeze([
           Object.freeze({
             role: "user" as const,
-            name: "outcome_comparison",
+            name: "relevant_traces",
             content: canonicalJson(input),
           }),
         ]),
@@ -414,139 +630,304 @@ export async function createApplicationRuntimeComposition(
   });
   const feedback = createContinuousFeedbackController({
     workspace,
-    authority,
+    protectedRuntime,
     capabilities: candidates,
     judge: outcomeJudge,
   });
   const controlPlane = createRuntimeControlPlane({ workspace, coordinator, activation, feedback });
+  const settlement = createTurnSettlement({
+    workspace,
+    feedback,
+    controlPlane,
+    resolveCapability: (capabilityId) => registry.getCapability(capabilityId),
+  });
 
   const original = options.runtime;
-  const ensureSession = async (trailId: string): Promise<void> => {
-    if (await workspace.operational.sessions.get(trailId)) return;
-    const trail = original.getTrail(trailId);
+  const sessionTimes = new Map<string, { readonly createdAt: string; readonly updatedAt: string }>();
+  const trailStates = new Map<string, TrailState>();
+  for (const session of await workspace.operational.sessions.list()) {
+    const messages = await workspace.operational.messages.listForSession(session.sessionId);
+    const turns: { readonly input: string; readonly output: string }[] = [];
+    let pendingInput: string | undefined;
+    for (const message of messages) {
+      if (message.role === "user") pendingInput = message.content;
+      else if (message.role === "assistant" && pendingInput !== undefined) {
+        turns.push(Object.freeze({ input: pendingInput, output: message.content }));
+        pendingInput = undefined;
+      }
+    }
+    trailStates.set(
+      session.sessionId,
+      Object.freeze({
+        trailId: session.sessionId,
+        ...(session.parentSessionId ? { parentTrailId: session.parentSessionId } : {}),
+        title: session.title,
+        status: session.status,
+        provider: session.provider,
+        model: session.model,
+        runtime: session.runtime,
+        capabilityVersions: Object.freeze({}),
+        turns: Object.freeze(turns),
+      }),
+    );
+    sessionTimes.set(session.sessionId, {
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+    });
+  }
+
+  const persistTrail = async (trail: TrailState): Promise<TrailState> => {
     const timestamp = new Date().toISOString();
+    const times = sessionTimes.get(trail.trailId) ?? { createdAt: timestamp, updatedAt: timestamp };
     await workspace.operational.sessions.put(
       Object.freeze({
-        sessionId: trailId,
+        sessionId: trail.trailId,
+        ...(trail.parentTrailId ? { parentSessionId: trail.parentTrailId } : {}),
         title: trail.title,
-        status: "idle" as const,
+        status: trail.status,
         provider: trail.provider,
         model: trail.model,
         runtime: trail.runtime,
-        createdAt: timestamp,
+        createdAt: times.createdAt,
         updatedAt: timestamp,
-        metadata: Object.freeze({ source: "apps-noesis" }),
+        metadata: Object.freeze({ authority: "workspace-sqlite" }),
       }),
     );
+    sessionTimes.set(trail.trailId, { createdAt: times.createdAt, updatedAt: timestamp });
+    const frozen = Object.freeze(trail);
+    trailStates.set(trail.trailId, frozen);
+    return frozen;
+  };
+  const getTrail: NoesisRuntime["getTrail"] = (trailId) => {
+    const trail = trailStates.get(trailId);
+    if (!trail) throw new Error(`Trail not found: ${trailId}`);
+    return trail;
+  };
+  const listTrails: NoesisRuntime["listTrails"] = () => Object.freeze([...trailStates.values()]);
+  const listTrailSummaries: NoesisRuntime["listTrailSummaries"] = () =>
+    Object.freeze(
+      [...trailStates.values()]
+        .map((trail): TrailSummary => {
+          const times = sessionTimes.get(trail.trailId);
+          const latest = trail.turns.at(-1);
+          return Object.freeze({
+            trailId: trail.trailId,
+            ...(trail.parentTrailId ? { parentTrailId: trail.parentTrailId } : {}),
+            title: trail.title,
+            status: trail.status,
+            provider: trail.provider,
+            model: trail.model,
+            runtime: trail.runtime,
+            createdAt: times?.createdAt ?? "",
+            updatedAt: times?.updatedAt ?? "",
+            turnCount: trail.turns.length,
+            messageCount: trail.turns.length * 2,
+            preview: latest?.output ?? latest?.input ?? "",
+          });
+        })
+        .sort(
+          (left, right) =>
+            right.updatedAt.localeCompare(left.updatedAt) || left.trailId.localeCompare(right.trailId),
+        ),
+    );
+  const startTrail: NoesisRuntime["startTrail"] = async (input) =>
+    await persistTrail(
+      Object.freeze({
+        trailId: createId("trail"),
+        title: input.title,
+        status: "idle" as const,
+        provider: input.provider ?? original.agentDefaults.provider,
+        model: input.model ?? original.agentDefaults.model,
+        runtime: original.agent.name,
+        capabilityVersions: Object.freeze({}),
+        turns: Object.freeze([]),
+      }),
+    );
+  const resumeTrail: NoesisRuntime["resumeTrail"] = async (trailId) => {
+    const trail = getTrail(trailId);
+    if (trail.runtime !== original.agent.name)
+      throw new Error(
+        `Session ${trailId} uses runtime ${trail.runtime}, but the active runtime is ${original.agent.name}.`,
+      );
+    if (trail.status === "running")
+      throw new Error(
+        `Session ${trailId} is still marked running; execution ownership recovery is required.`,
+      );
+    return await persistTrail(Object.freeze({ ...trail, status: "idle" as const }));
+  };
+  const forkTrail: NoesisRuntime["forkTrail"] = async (trailId, title) => {
+    const source = getTrail(trailId);
+    const fork = await persistTrail(
+      Object.freeze({
+        ...source,
+        trailId: createId("trail"),
+        parentTrailId: trailId,
+        title: title ?? `${source.title} (fork)`,
+        status: "idle" as const,
+        turns: Object.freeze([...source.turns]),
+      }),
+    );
+    for (const [index, turn] of source.turns.entries()) {
+      const createdAt = new Date().toISOString();
+      await workspace.operational.messages.put(
+        Object.freeze({
+          messageId: `${fork.trailId}:inherited:${index}:user`,
+          sessionId: fork.trailId,
+          role: "user" as const,
+          content: turn.input,
+          sensitivity: "normal" as const,
+          createdAt,
+          metadata: Object.freeze({ inheritedFrom: trailId }),
+        }),
+      );
+      await workspace.operational.messages.put(
+        Object.freeze({
+          messageId: `${fork.trailId}:inherited:${index}:assistant`,
+          sessionId: fork.trailId,
+          role: "assistant" as const,
+          content: turn.output,
+          sensitivity: "normal" as const,
+          createdAt,
+          metadata: Object.freeze({ inheritedFrom: trailId }),
+        }),
+      );
+    }
+    return fork;
   };
 
   const runTurn: NoesisRuntime["runTurn"] = async (trailId, input, runOptions): Promise<TurnResult> => {
-    await ensureSession(trailId);
-    const turnId = createId("turn");
-    const pin = await activation.pinTurnActivation(trailId, turnId);
-    const occurredAt = new Date().toISOString();
-    const userRef = await workspace.operational.messages.put(
-      Object.freeze({
-        messageId: `${turnId}:user`,
-        sessionId: trailId,
-        role: "user" as const,
-        content: input,
-        sensitivity: "normal" as const,
-        createdAt: occurredAt,
-        metadata: Object.freeze({ turnId }),
-      }),
-    );
-    const serving = Object.values(pin.activeCapabilityRevisions);
-    const corrected = /^(?:no\b|actually\b|correction\b)/iu.test(input.trim());
-    const record = async (
-      status: "accepted" | "corrected" | "failed",
-      summary: string,
-      assistantMessage?: string,
-    ): Promise<void> => {
-      const assistantRef = assistantMessage
-        ? await workspace.operational.messages.put(
-            Object.freeze({
-              messageId: `${turnId}:assistant`,
-              sessionId: trailId,
-              role: "assistant" as const,
-              content: assistantMessage,
-              sensitivity: "normal" as const,
-              createdAt: new Date().toISOString(),
-              metadata: Object.freeze({ turnId }),
-            }),
-          )
-        : undefined;
-      const evidenceRefs = Object.freeze([userRef, ...(assistantRef ? [assistantRef] : [])]);
-      await workspace.operational.outcomes.put(
-        Object.freeze({
-          outcomeId: `${turnId}:outcome`,
-          sessionId: trailId,
-          turnId,
-          status,
-          summary,
-          sensitivity: "normal" as const,
-          createdAt: new Date().toISOString(),
-          metadata: Object.freeze({ source: "apps-noesis" }),
-        }),
+    const trail = getTrail(trailId);
+    if (trail.status === "running") throw new Error("Trail is already running");
+    if (trail.runtime !== original.agent.name)
+      throw new Error(
+        `Trail ${trailId} is pinned to runtime ${trail.runtime}; active runtime is ${original.agent.name}.`,
       );
-      if (serving.length === 0) return;
-      await feedback.observeTurnOutcome({
+    const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
+    const turnId = createId("turn");
+    const thinkingLevel = runOptions?.thinkingLevel ?? original.agentDefaults.thinkingLevel;
+    const recentConversation = running.turns
+      .slice(-8)
+      .map((turn) => `User: ${turn.input}\nAssistant: ${turn.output}`)
+      .join("\n\n");
+    try {
+      const plan = await turnPlanner.planAndAdmit({
         sessionId: trailId,
         turnId,
-        status,
-        summary,
-        sensitivity: "normal",
-        usedCapabilityIds: serving.map((reference) => reference.capabilityId),
-        evidenceRefs,
-        ...(corrected
-          ? { signal: { kind: "explicit_correction", scope: "general", strength: 1, novelty: 0.8 } }
-          : {}),
-        metrics: Object.freeze({ failed: status === "failed" }),
+        userInput: input,
+        provider: running.provider,
+        model: running.model,
+        thinkingLevel,
+        baseSystemPrompt: [
+          "You are Noesis. Preserve evidence and distinguish proposals from promoted behavior.",
+          recentConversation ? `Recent session context:\n${recentConversation}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
       });
-      const baseline = serving[0];
-      if (!baseline) return;
-      const capability = registry.getCapability(baseline.capabilityId);
-      if (!capability) return;
-      await controlPlane.observeCompletedTurn({
-        turn: Object.freeze({
-          sessionId: trailId,
-          turnId,
-          scope: capability.scope,
-          userMessage: input,
-          ...(assistantMessage ? { assistantMessage } : {}),
-          ...(corrected ? { correction: input } : {}),
-          outcome: status,
-          occurredAt,
-          evidenceRefs: [...evidenceRefs],
-          sensitivity: "normal" as const,
-          telemetry: Object.freeze({
-            retryCount: 0,
-            toolFailureCount: status === "failed" ? 1 : 0,
-            aborted: false,
+      const occurredAt = new Date().toISOString();
+      const contextFragments: ContextFragment[] = [
+        Object.freeze({
+          id: `${turnId}:system`,
+          kind: "system" as const,
+          content: plan.renderedSystemPrompt,
+          provenance: Object.freeze([plan.planId]),
+          priority: 100,
+        }),
+        ...running.turns.slice(-8).map((turn, index) =>
+          Object.freeze({
+            id: `${turnId}:history:${index}`,
+            kind: "trail" as const,
+            content: `User: ${turn.input}\nAssistant: ${turn.output}`,
+            provenance: Object.freeze([trailId]),
+            priority: 70,
           }),
+        ),
+        Object.freeze({
+          id: `${turnId}:input`,
+          kind: "user" as const,
+          content: input,
+          provenance: Object.freeze(["foreground"]),
+          priority: 90,
         }),
-        baselineRevision: baseline,
-        capability,
-        activeCapabilities: serving.flatMap((reference) => {
-          const active = registry.getCapability(reference.capabilityId);
-          return active ? [active] : [];
-        }),
-        routingStrategyId: "serving-activation-v1",
+      ];
+      const usedCapabilities = Object.freeze(
+        Object.fromEntries(
+          plan.selectedCapabilities.map((selection) => [selection.capabilityId, plan.activationRevision]),
+        ),
+      );
+      const context = compileContext(contextFragments, usedCapabilities, {
+        maxTokens: 8_000,
+        maxFragmentTokens: 2_000,
       });
-    };
-    let result: TurnResult;
-    try {
-      result = await original.runTurn(trailId, input, runOptions);
+      const result = await settlement.run({
+        sessionId: trailId,
+        turnId,
+        input,
+        occurredAt,
+        plan,
+        execute: async () => {
+          const agentResult = await original.agent.run(
+            {
+              trailId,
+              provider: plan.provider,
+              model: plan.model,
+              thinkingLevel: plan.thinkingLevel,
+              systemPrompt: plan.renderedSystemPrompt,
+              prompt: input,
+              activeCapabilities: plan.selectedCapabilities.map((selection) => ({
+                name: selection.name,
+                version: plan.activationRevision,
+              })),
+              frozenTurnPlan: plan,
+            },
+            runOptions?.onEvent ?? (() => undefined),
+          );
+          if (agentResult.stopReason === "error") throw new Error(agentResult.error);
+          return Object.freeze({
+            outcome: agentResult.stopReason === "aborted" ? ("aborted" as const) : ("completed" as const),
+            output: agentResult.text,
+            context,
+            usedCapabilities,
+            ...(agentResult.contextUsage ? { contextUsage: agentResult.contextUsage } : {}),
+            frozenTurnPlan: plan,
+          });
+        },
+      });
+      await persistTrail(
+        Object.freeze({
+          ...running,
+          status: result.outcome === "aborted" ? ("aborted" as const) : ("idle" as const),
+          capabilityVersions: usedCapabilities,
+          turns:
+            result.outcome === "completed"
+              ? Object.freeze([...running.turns, Object.freeze({ input, output: result.output })])
+              : running.turns,
+        }),
+      );
+      return result;
     } catch (error) {
-      await record("failed", error instanceof Error ? error.message : String(error));
+      await persistTrail(Object.freeze({ ...running, status: "failed" as const }));
       throw error;
     }
-    if (result.outcome === "completed")
-      await record(corrected ? "corrected" : "accepted", result.output, result.output);
-    else await record("failed", "Turn aborted", result.output);
-    return result;
   };
-
+  const steer: NoesisRuntime["steer"] = async (trailId, text) => {
+    getTrail(trailId);
+    await original.agent.steer(trailId, text);
+  };
+  const followUp: NoesisRuntime["followUp"] = async (trailId, text) => {
+    getTrail(trailId);
+    await original.agent.followUp(trailId, text);
+  };
+  const abort: NoesisRuntime["abort"] = async (trailId) => {
+    const trail = getTrail(trailId);
+    await original.agent.abort(trailId);
+    if (trail.status === "running")
+      await persistTrail(Object.freeze({ ...trail, status: "aborted" as const }));
+  };
+  const compact: NoesisRuntime["compact"] = async (trailId) => {
+    const trail = getTrail(trailId);
+    if (trail.status === "running") throw new Error("Cannot compact a running trail");
+  };
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
     shutdownPromise ??= (async () => {
@@ -555,18 +936,50 @@ export async function createApplicationRuntimeComposition(
     })();
     return shutdownPromise;
   };
-  const startTrail: NoesisRuntime["startTrail"] = async (input) => {
-    const trail = await original.startTrail(input);
-    await ensureSession(trail.trailId);
-    return trail;
-  };
-
   return Object.freeze({
-    ...original,
-    workspace,
+    home: options.config.home,
+    agentName: original.agent.name,
     controlPlane,
+    debug: Object.freeze({
+      workspace,
+      adaptations: Object.freeze({
+        activations: Object.freeze({
+          current: protectedRuntime.activations.current,
+          getOperation: protectedRuntime.activations.getOperation,
+          listOperations: protectedRuntime.activations.listOperations,
+          getApproval: protectedRuntime.activations.getApproval,
+          getTurnPin: protectedRuntime.activations.getTurnPin,
+          getTurnPlan: protectedRuntime.activations.getTurnPlan,
+        }),
+        feedback: Object.freeze({
+          operationForActivation: protectedRuntime.feedback.operationForActivation,
+          getObservation: protectedRuntime.feedback.getObservation,
+          listObservations: protectedRuntime.feedback.listObservations,
+          getResearchRun: protectedRuntime.feedback.getResearchRun,
+          listResearchRuns: protectedRuntime.feedback.listResearchRuns,
+          getOutcome: protectedRuntime.feedback.getOutcome,
+          getSuccessorInput: protectedRuntime.feedback.getSuccessorInput,
+        }),
+      }),
+      legacyReadOnly: Object.freeze({
+        ledger: original.ledger,
+        artifacts: original.artifacts,
+        memory: original.memory,
+        capabilities: original.capabilities,
+      }),
+    }),
+    agentDefaults: original.agentDefaults,
     startTrail,
+    listTrails,
+    listTrailSummaries,
+    getTrail,
+    resumeTrail,
+    forkTrail,
     runTurn,
+    steer,
+    followUp,
+    abort,
+    compact,
     shutdown,
   });
 }

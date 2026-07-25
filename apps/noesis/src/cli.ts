@@ -10,9 +10,13 @@ import {
   type ResolvedNoesisConfig,
   updateNoesisConfig,
 } from "@noesis/config";
-import { createId } from "@noesis/domain";
-import { createLearningEngine } from "@noesis/learning";
-import { createDurableScheduler, createNoesisRuntime, type NoesisRuntime } from "@noesis/runtime";
+import {
+  CapabilityRevisionRefSchema,
+  EvidenceRefSchema,
+  type CapabilityRevisionRef,
+  type EvidenceRef,
+} from "@noesis/domain";
+import { createNoesisRuntime } from "@noesis/runtime";
 import {
   createFakeAgentRoleRunner,
   createPiModelServices,
@@ -25,6 +29,7 @@ import {
   type PiAuthOperations,
 } from "@noesis/runtime-pi";
 import { startNoesisTui } from "@noesis/tui";
+import { z } from "zod";
 import {
   type OnboardingChoice,
   type OnboardingPrompts,
@@ -54,6 +59,209 @@ const CONFIG_COMMANDS = new Set(["show", "init", "set"]);
 const AUTH_COMMANDS = new Set(["status", "login", "logout"]);
 const AGENT_OPTIONS = ["--runtime", "--provider", "--model", "--thinking-level"] as const;
 const VALUE_OPTIONS = ["--home", ...AGENT_OPTIONS] as const;
+
+const FakeRolePromptSchema = z.object({
+  role: z.enum(["reflector", "revision_author", "revision_agent", "case_generator", "trial", "judge_critic"]),
+  messages: z.array(
+    z.object({
+      name: z.string().optional(),
+      content: z.string(),
+    }),
+  ),
+  capabilityRevisions: z.array(CapabilityRevisionRefSchema),
+});
+
+type FakeRolePrompt = Readonly<z.infer<typeof FakeRolePromptSchema>>;
+
+function parseFakeRolePrompt(prompt: string): FakeRolePrompt {
+  return FakeRolePromptSchema.parse(JSON.parse(prompt));
+}
+
+function namedFakeMessage(prompt: FakeRolePrompt, name: string): string {
+  const message = prompt.messages.find((candidate) => candidate.name === name);
+  if (!message) throw new Error(`Fake ${prompt.role} role is missing message ${name}`);
+  return message.content;
+}
+
+function parsedFakeMessage(prompt: FakeRolePrompt, name: string): unknown {
+  return JSON.parse(namedFakeMessage(prompt, name));
+}
+
+function fakeSourceEvidence(prompt: FakeRolePrompt): EvidenceRef {
+  const cases = z
+    .array(z.object({ evidenceRefs: z.array(EvidenceRefSchema).min(1) }))
+    .min(1)
+    .parse(parsedFakeMessage(prompt, "evidence"));
+  const reference = cases[0]?.evidenceRefs[0];
+  if (!reference) throw new Error("Fake case generator received no source evidence");
+  return reference;
+}
+
+function fakeTrialRevision(prompt: FakeRolePrompt): CapabilityRevisionRef {
+  const revision = prompt.capabilityRevisions[0];
+  if (!revision) throw new Error("Fake trial received no pinned capability revision");
+  return revision;
+}
+
+function scriptedFakeRoleResponse(request: { readonly systemPrompt: string; readonly prompt: string }): {
+  readonly text: string;
+} {
+  const prompt = parseFakeRolePrompt(request.prompt);
+  if (request.systemPrompt.includes("role: outcome_judge")) {
+    const comparisonMessage = prompt.messages.some((message) => message.name === "outcome_comparison")
+      ? "outcome_comparison"
+      : "relevant_traces";
+    const observationIds = [
+      ...namedFakeMessage(prompt, comparisonMessage).matchAll(/"observationId"\s*:\s*"([^"]+)"/gu),
+    ].flatMap((match) => (match[1] ? [match[1]] : []));
+    if (observationIds.length === 0)
+      throw new Error("Fake outcome judge received no experiment observations");
+    return Object.freeze({
+      text: JSON.stringify({
+        proposal: "revert",
+        citedObservationIds: [...new Set(observationIds)],
+        summary: "The scripted correction evidence requests a protected revert.",
+      }),
+    });
+  }
+  if (prompt.role === "reflector")
+    return Object.freeze({
+      text: JSON.stringify({
+        decision: "experiment",
+        title: "Evidence-grounded research briefs",
+        hypothesis: "Research briefs improve when cited evidence is separated from inference",
+        scope: "research brief",
+        capabilityName: "Research brief evidence",
+        capabilityIntent: "Separate cited evidence from inference in research briefs",
+        sourceCases: [
+          {
+            title: "Prepare an evidence-grounded brief",
+            input: "Prepare a research brief about the current question.",
+            expectedBehavior: "Clearly separate cited evidence from inference.",
+          },
+        ],
+      }),
+    });
+  if (prompt.role === "revision_author" || prompt.role === "revision_agent")
+    return Object.freeze({
+      text: JSON.stringify({
+        promptModules: [
+          {
+            path: "evidence.md",
+            content: "For research briefs, clearly label sourced evidence and distinguish it from inference.",
+          },
+        ],
+        skills: [
+          {
+            path: "SKILL.md",
+            content: "Produce concise research briefs with explicit evidence, inference, and uncertainty.",
+          },
+        ],
+        tools: [
+          {
+            path: "research-brief.mjs",
+            content: "export const formatResearchBrief = (evidence, inference) => ({ evidence, inference });",
+          },
+        ],
+        router: {
+          path: "router.json",
+          content: JSON.stringify({ allTerms: ["research", "brief"] }),
+          strategyId: "research-brief-scope-v1",
+        },
+        activationPolicy: {
+          mode: "automatic_low_risk",
+          scope: "research brief",
+        },
+        permissionManifest: {
+          effects: [],
+          resourcePatterns: [],
+          credentialRefs: [],
+        },
+        sourceEvaluationDefinitions: [
+          {
+            path: "source-case.json",
+            content: JSON.stringify({
+              behavior: "Separate cited evidence from inference in a research brief",
+            }),
+          },
+        ],
+        requestedPermissionDelta: {
+          addedEffects: [],
+          widenedResources: [],
+          addedCredentialRefs: [],
+        },
+      }),
+    });
+  if (prompt.role === "case_generator")
+    return Object.freeze({
+      text: JSON.stringify({
+        cases: [
+          {
+            caseId: "research-brief-transfer",
+            kind: "generated_transfer",
+            instruction: "Transfer the evidence/inference distinction to another research brief.",
+            input: "Prepare a research brief on a related topic.",
+            sourceEvidenceRefs: [fakeSourceEvidence(prompt)],
+            criterionRefs: [],
+          },
+        ],
+      }),
+    });
+  if (prompt.role === "trial") {
+    const revision = fakeTrialRevision(prompt);
+    const candidate = revision.capabilityId.startsWith("learned-");
+    return Object.freeze({
+      text: JSON.stringify({
+        content: candidate
+          ? "Candidate adaptation: cited evidence is separate from explicit inference."
+          : "Baseline response: a concise research summary.",
+        valid: true,
+        invalidArtifacts: [],
+        unexpectedEffects: [],
+        sourceAssertions: [
+          {
+            assertionId: "evidence-inference-separation",
+            passed: true,
+            evidence: candidate
+              ? "The candidate explicitly separates evidence and inference."
+              : "The baseline remains a valid comparison artifact.",
+          },
+        ],
+        identity: {
+          capabilityId: revision.capabilityId,
+          capabilityRevisionId: revision.capabilityRevisionId,
+          bundleDigest: revision.bundleDigest,
+        },
+      }),
+    });
+  }
+  if (prompt.role === "judge_critic") {
+    const armA = z.object({ content: z.string() }).parse(parsedFakeMessage(prompt, "arm_A"));
+    const rubric = z
+      .object({
+        criteria: z.array(
+          z.object({
+            criterionId: z.string().min(1),
+            revision: z.number().int().positive(),
+          }),
+        ),
+      })
+      .parse(parsedFakeMessage(prompt, "rubric"));
+    return Object.freeze({
+      text: JSON.stringify({
+        winner: armA.content.startsWith("Candidate adaptation:") ? "A" : "B",
+        confidence: 0.99,
+        reasons: ["The candidate explicitly satisfies the bounded behavioral objective."],
+        violations: [],
+        appliedCriteria: rubric.criteria.map(({ criterionId, revision }) => ({
+          criterionId,
+          revision,
+        })),
+      }),
+    });
+  }
+  throw new Error(`No scripted fake response for role ${prompt.role}`);
+}
 
 function parseSessionStartup(
   args: readonly string[],
@@ -231,13 +439,7 @@ async function createRuntime(config: ResolvedNoesisConfig, forceFake = false): P
       createRoleRunner: (configurations) =>
         createFakeAgentRoleRunner({
           variants: configurations,
-          respond: (request) => {
-            if (request.systemPrompt.includes("role: reflector"))
-              return Object.freeze({
-                text: JSON.stringify({ decision: "no_change", reason: "fake role found no change" }),
-              });
-            throw new Error(`No scripted fake response for ${request.systemPrompt.split("\n")[0]}`);
-          },
+          respond: scriptedFakeRoleResponse,
         }),
     });
   }
@@ -255,49 +457,105 @@ async function createRuntime(config: ResolvedNoesisConfig, forceFake = false): P
   });
 }
 
-async function runDemo(runtime: NoesisRuntime): Promise<void> {
-  const trail = await runtime.startTrail({ title: "Acceptance journey" });
-  const first = await runtime.runTurn(trail.trailId, "Prepare a concise recurring research brief");
-  const learning = createLearningEngine(runtime.ledger);
-  const proposals = await learning.reflect(trail.trailId);
-  const workflow = proposals.find((proposal) => proposal.kind === "workflow");
-  if (!workflow) throw new Error("Workflow proposal missing");
-  const cases = [
-    {
-      caseId: createId("case"),
-      source: "source" as const,
-      input: "research brief",
-      expectedIncludes: ["evidenced", "completion"],
-      baselineScore: 0.5,
-    },
-  ];
-  const candidateInput = learning.candidateFromWorkflow(workflow, cases);
-  const candidate = await runtime.capabilities.createCandidate(candidateInput);
-  const report = await runtime.evaluateCandidate(candidate.capabilityId, candidate.version);
-  if (!report.passed) throw new Error("Generated candidate did not pass deterministic evaluation");
-  await runtime.promoteCandidate(candidate.capabilityId, candidate.version);
-  const later = await runtime.startTrail({ title: "Promoted learning use" });
-  const second = await runtime.runTurn(later.trailId, "Prepare this week's research brief");
-  await runtime.rollbackCapability(candidate.capabilityId, candidate.version, "acceptance rollback");
-  const scheduler = createDurableScheduler(runtime);
-  const job = await scheduler.schedule({
-    prompt: "Run the recurring research brief",
-    schedule: "every 1h",
-    budget: 2,
-  });
-  const background = await scheduler.run(job);
+async function runDemo(runtime: ApplicationRuntime): Promise<void> {
+  const genesis = await runtime.debug.adaptations.activations.current();
+  if (!genesis) throw new Error("Demo requires the immutable genesis activation");
+  const correctionSession = await runtime.startTrail({ title: "Learning correction" });
+  const correction = await runtime.runTurn(
+    correctionSession.trailId,
+    "No, for every research brief separate cited evidence from inference.",
+  );
+  await runtime.controlPlane.idle();
+  const experiments = await runtime.debug.workspace.research.experiments.listExperiments({ limit: 100 });
+  const experiment = experiments.find(
+    (candidate) =>
+      candidate.status === "observing" &&
+      candidate.scope === "research brief" &&
+      candidate.activatedRevision !== undefined,
+  );
+  if (!experiment?.activatedRevision)
+    throw new Error("Fake application loop did not activate its research-brief experiment");
+  const candidateRevision = experiment.activatedRevision;
+  const activated = await runtime.debug.adaptations.activations.current();
+  const activatedCandidate = activated?.activeCapabilityRevisions[candidateRevision.capabilityId];
+  if (
+    !activated ||
+    activatedCandidate?.kind !== "capability_revision" ||
+    activatedCandidate.bundleDigest !== candidateRevision.bundleDigest
+  )
+    throw new Error("Atomic activation did not publish the exact candidate revision");
+
+  const relatedSession = await runtime.startTrail({ title: "Related return" });
+  const related = await runtime.runTurn(
+    relatedSession.trailId,
+    "Prepare a research brief about continual learning.",
+  );
+  const relatedSelection = related.frozenTurnPlan?.selectedCapabilities.find(
+    (selection) => selection.capabilityId === candidateRevision.capabilityId,
+  );
+  if (!relatedSelection || relatedSelection.revision.bundleDigest !== candidateRevision.bundleDigest)
+    throw new Error("Related turn did not serve the exact activated revision");
+
+  const unrelatedSession = await runtime.startTrail({ title: "Unrelated return" });
+  const unrelated = await runtime.runTurn(unrelatedSession.trailId, "Draft a meeting agenda.");
+  if (
+    unrelated.frozenTurnPlan?.selectedCapabilities.some(
+      (selection) => selection.capabilityId === candidateRevision.capabilityId,
+    )
+  )
+    throw new Error("Unrelated turn received the scoped research-brief adaptation");
+
+  for (const input of [
+    "No, revise this research brief and keep evidence distinct from inference.",
+    "No, undo that adaptation for this research brief.",
+  ])
+    await runtime.runTurn(relatedSession.trailId, input);
+  await runtime.controlPlane.idle();
+  const outcome = await runtime.debug.adaptations.feedback.getOutcome(experiment.experimentId);
+  if (outcome?.decision !== "revert" || !outcome.restoredActivationId)
+    throw new Error("Fake application loop did not complete a protected revert");
+  const restored = await runtime.debug.adaptations.activations.current();
+  if (
+    !restored ||
+    restored.activeCapabilityRevisions[candidateRevision.capabilityId] !== undefined ||
+    JSON.stringify(restored.activeCapabilityRevisions) !== JSON.stringify(genesis.activeCapabilityRevisions)
+  )
+    throw new Error("Protected revert did not restore the full prior genesis activation");
+
   console.log(
     JSON.stringify(
       {
-        home: runtime.ledger.paths.root,
-        trail: trail.trailId,
-        firstOutput: first.output,
-        proposals: proposals.map((proposal) => proposal.kind),
-        candidate: `${candidate.name}@${candidate.version}`,
-        evaluationPassed: report.passed,
-        laterUsedCapabilities: second.usedCapabilities,
-        backgroundOutput: background,
-        events: runtime.ledger.readAll().length,
+        home: runtime.home,
+        correction: {
+          sessionId: correctionSession.trailId,
+          output: correction.output,
+        },
+        experiment: {
+          experimentId: experiment.experimentId,
+          scope: experiment.scope,
+          candidateRevision,
+          preflight: experiment.preflightRef,
+        },
+        activation: {
+          activationId: activated.activationId,
+          revision: activated.revision,
+        },
+        related: {
+          sessionId: relatedSession.trailId,
+          servedRevision: relatedSelection.revision,
+          frozenTurnPlanId: related.frozenTurnPlan?.planId,
+          frozenTurnPlanDigest: related.frozenTurnPlan?.canonicalDigest,
+        },
+        unrelated: {
+          sessionId: unrelatedSession.trailId,
+          selectedCapabilityIds:
+            unrelated.frozenTurnPlan?.selectedCapabilities.map((selection) => selection.capabilityId) ?? [],
+        },
+        revert: {
+          outcomeId: outcome.operationId,
+          restoredActivationId: outcome.restoredActivationId,
+          restoredRevision: restored.revision,
+        },
       },
       null,
       2,
@@ -526,15 +784,15 @@ async function main(): Promise<void> {
   try {
     if (input.command === "demo") await runDemo(runtime);
     else if (input.command === "rebuild") {
-      await runtime.ledger.rebuildProjection();
-      console.log(`Rebuilt ${runtime.ledger.paths.projection}`);
+      await runtime.debug.legacyReadOnly.ledger.rebuildProjection();
+      console.log(`Rebuilt ${runtime.debug.legacyReadOnly.ledger.paths.projection}`);
     } else if (input.command === "inspect")
       console.log(
         JSON.stringify(
           {
             trails: runtime.listTrails(),
-            activeCapabilities: runtime.capabilities.listActive(),
-            events: runtime.ledger.readAll().length,
+            activeCapabilities: runtime.debug.legacyReadOnly.capabilities.listActive(),
+            events: runtime.debug.legacyReadOnly.ledger.readAll().length,
           },
           null,
           2,

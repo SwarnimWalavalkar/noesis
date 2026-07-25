@@ -352,7 +352,10 @@ describe("Noesis TUI lifecycle", () => {
     expect(terminal.output).toContain("Provider rejected the request: invalid offline fixture");
     await vi.waitFor(() => expect(runtime.ledger.findByType("turn.failed")).toHaveLength(1));
     expect(runtime.ledger.findByType("turn.completed")).toHaveLength(0);
-    expect(runtime.getTrail(runtime.listTrails()[0]!.trailId).status).toBe("failed");
+    const failedTrail = runtime.listTrails()[0];
+    expect(failedTrail).toBeDefined();
+    if (!failedTrail) throw new Error("Failed trail fixture was not recorded");
+    expect(runtime.getTrail(failedTrail.trailId).status).toBe("failed");
 
     terminal.type("/quit\n");
     await running;
@@ -485,7 +488,10 @@ describe("Noesis TUI lifecycle", () => {
     expect(terminal.output).not.toContain("/learn · /evaluate");
 
     terminal.type("?\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("/learn · /evaluate"));
+    await vi.waitFor(() =>
+      expect(terminal.output).toContain("learning, experiments, activation, and revert run ambiently"),
+    );
+    expect(terminal.output).not.toContain("/learn · /evaluate");
     expect(terminal.output).toContain("/model provider/model");
 
     terminal.type("/quit\n");

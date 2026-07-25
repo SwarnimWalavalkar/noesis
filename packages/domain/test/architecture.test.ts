@@ -207,6 +207,48 @@ describe("first-party architecture boundaries", () => {
     expect(protectedAliases).toEqual([]);
   });
 
+  test("keeps the TUI behind its narrow runtime port", async () => {
+    const tuiRoot = resolve(repositoryRoot, "packages/tui");
+    const forbiddenModules = new Set([
+      "@noesis/capabilities",
+      "@noesis/ledger",
+      "@noesis/learning",
+      "@noesis/policy",
+      "@noesis/workspace",
+    ]);
+    const forbiddenMembers = new Set([
+      "artifacts",
+      "capabilities",
+      "ledger",
+      "memory",
+      "scheduler",
+      "workspace",
+    ]);
+    const violations: string[] = [];
+    for (const path of (await filesBelow(resolve(tuiRoot, "src"))).filter((file) => /\.tsx?$/.test(file))) {
+      const sourceFile = parseSource(path, await readFile(path, "utf8"));
+      for (const specifier of moduleSpecifiers(sourceFile))
+        if (forbiddenModules.has(specifier)) violations.push(`${relativePath(path)}:import:${specifier}`);
+      const visit = (node: ts.Node): void => {
+        if (ts.isPropertyAccessExpression(node) && forbiddenMembers.has(node.name.text)) {
+          const position = sourceFile.getLineAndCharacterOfPosition(node.name.getStart(sourceFile));
+          violations.push(
+            `${relativePath(path)}:member:${node.name.text}:${position.line + 1}:${position.character + 1}`,
+          );
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(sourceFile);
+    }
+    const manifest = JSON.parse(await readFile(resolve(tuiRoot, "package.json"), "utf8")) as {
+      readonly dependencies?: Readonly<Record<string, string>>;
+    };
+    for (const name of Object.keys(manifest.dependencies ?? {}))
+      if (forbiddenModules.has(name)) violations.push(`packages/tui/package.json:dependency:${name}`);
+
+    expect(violations).toEqual([]);
+  });
+
   test("keeps adapter-neutral runtime independent from the Pi adapter package", async () => {
     const runtimeRoot = resolve(repositoryRoot, "packages/runtime");
     const sourceViolations: string[] = [];

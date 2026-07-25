@@ -9,6 +9,7 @@ import {
   createDefaultRoleContextPolicy,
   createFakeAgentRoleRunner,
   createFakeRoleModelBackend,
+  createRestrictedRoleContextPolicy,
   createStructuredInferencePort,
   isRoleRunError,
   type RoleBackendRequest,
@@ -338,6 +339,33 @@ describe("adapter-neutral role runner", () => {
 });
 
 describe("research role isolation", () => {
+  test("derives custom isolated-role policies without weakening the default whitelist", () => {
+    const policy = createRestrictedRoleContextPolicy("judge_critic", {
+      policyId: "application-judge-v1",
+      maxMessages: 12,
+      forbiddenContent: /authority[_-]?token/iu,
+    });
+
+    expect(policy.allowedMessageNames).toEqual(["rubric", "arm_A", "arm_B", "relevant_traces"]);
+    expect(policy.includeCapabilityRevisions).toBe(false);
+    expect(policy.maxMessages).toBe(12);
+    expect(() =>
+      createRestrictedRoleContextPolicy("judge_critic", {
+        maxTotalCharacters: 64_000,
+      }),
+    ).toThrow("cannot widen maxTotalCharacters");
+    expect(() =>
+      createRestrictedRoleContextPolicy("judge_critic", {
+        allowedMessageNames: ["rubric", "candidate_identity"],
+      }),
+    ).toThrow("cannot add undeclared message names");
+    expect(() =>
+      createRestrictedRoleContextPolicy("judge_critic", {
+        includeCapabilityRevisions: true,
+      }),
+    ).toThrow("cannot expose capability revisions");
+  });
+
   test("passes only declared bounded reflector inputs and strips tools", async () => {
     let capturedPrompt = "";
     const backend = createFakeRoleModelBackend({

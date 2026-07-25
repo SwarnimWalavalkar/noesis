@@ -12,13 +12,15 @@ import {
   type FileRevisionRef,
   type PreflightDecision,
 } from "@noesis/domain";
-import { createExperienceLedger } from "@noesis/ledger";
-import { createAuthorityBoundary } from "@noesis/policy";
 import {
   createWorkspaceStore,
   type NoesisWorkspaceStore,
   type WorkspaceStoreOptions,
 } from "@noesis/workspace";
+import {
+  createWorkspaceRuntimeInternals,
+  type ProtectedWorkspaceRuntime,
+} from "../../workspace/src/protected-runtime.ts";
 import { afterEach, describe, expect, test } from "vitest";
 import { z } from "zod";
 import {
@@ -78,12 +80,6 @@ const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
 });
-
-async function authorityFor(home: string) {
-  const ledger = createExperienceLedger(home);
-  await ledger.initialize();
-  return createAuthorityBoundary(ledger);
-}
 
 async function definition(
   workspace: NoesisWorkspaceStore,
@@ -326,6 +322,7 @@ async function recordPreflight(input: {
 interface AcceptanceHarness {
   readonly root: string;
   readonly workspace: NoesisWorkspaceStore;
+  readonly protectedRuntime: ProtectedWorkspaceRuntime;
   readonly resolver: ActivationCandidateResolver;
   readonly baseline: CapabilityRevision;
   readonly candidate: CapabilityRevision;
@@ -347,7 +344,7 @@ async function createHarness(
   const root = await mkdtemp(join(tmpdir(), "noesis-barrier-c-"));
   roots.push(root);
   const workspace = await createWorkspaceStore(root, options.storeOptions);
-  const authority = await authorityFor(join(root, "authority"));
+  const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
   const capabilityId = "writing";
   const rootRevision = await revision({ workspace, capabilityId, revisionId: "writing-r0" });
   const baseline = await revision({
@@ -381,7 +378,7 @@ async function createHarness(
   });
   const activation = createAtomicActivationController({
     workspace,
-    authority,
+    protectedRuntime,
     candidates: resolver,
     autonomy,
   });
@@ -531,7 +528,7 @@ async function createHarness(
   };
   const feedback = createContinuousFeedbackController({
     workspace,
-    authority,
+    protectedRuntime,
     capabilities: resolver,
     judge: outcomeJudge,
     config: feedbackConfig(options.minimumEvidence),
@@ -563,6 +560,7 @@ async function createHarness(
   return Object.freeze({
     root,
     workspace,
+    protectedRuntime,
     resolver,
     baseline,
     candidate,
@@ -614,9 +612,9 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
       activatedRevision: capabilityRevisionRef(harness.candidate),
       preflightRef: { table: "preflight_reports" },
     });
-    const current = await harness.workspace.protectedActivations.current();
+    const current = await harness.protectedRuntime.activations.current();
     expect(current?.activeCapabilityRevisions["writing"]).toEqual(capabilityRevisionRef(harness.candidate));
-    const operation = (await harness.workspace.protectedActivations.listOperations()).find(
+    const operation = (await harness.protectedRuntime.activations.listOperations()).find(
       (candidate) => candidate.binding.experimentId === harness.experimentId,
     );
     expect(operation?.materializations).toHaveLength(5);
@@ -644,13 +642,13 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
       permissionExpansion: true,
     });
     await harness.controlPlane.idle();
-    const pending = (await harness.workspace.protectedActivations.listOperations()).find(
+    const pending = (await harness.protectedRuntime.activations.listOperations()).find(
       (operation) => operation.binding.experimentId === harness.experimentId,
     );
     expect(pending).toMatchObject({ status: "pending_approval", approvalId: expect.any(String) });
     if (!pending?.approvalId) throw new Error("Expected approval");
     expect(
-      (await harness.workspace.protectedActivations.current())?.activeCapabilityRevisions["writing"],
+      (await harness.protectedRuntime.activations.current())?.activeCapabilityRevisions["writing"],
     ).toEqual(capabilityRevisionRef(harness.baseline));
     await expect(
       harness.controlPlane.activation.approve({
@@ -667,7 +665,7 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
       }),
     ).resolves.toMatchObject({ ok: true, status: "rejected" });
     expect(
-      (await harness.workspace.protectedActivations.current())?.activeCapabilityRevisions["writing"],
+      (await harness.protectedRuntime.activations.current())?.activeCapabilityRevisions["writing"],
     ).toEqual(capabilityRevisionRef(harness.baseline));
   });
 
@@ -675,27 +673,27 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
     const harness = await createHarness({ judgeProposal: "revise", minimumEvidence: 1 });
     await harness.controlPlane.idle();
     expect(
-      (await harness.workspace.protectedActivations.current())?.activeCapabilityRevisions["writing"],
+      (await harness.protectedRuntime.activations.current())?.activeCapabilityRevisions["writing"],
     ).toEqual(capabilityRevisionRef(harness.candidate));
     const pin = await harness.controlPlane.activation.pinTurnActivation("session-correction", "turn-revise");
-    const before = await harness.workspace.protectedActivations.current();
+    const before = await harness.protectedRuntime.activations.current();
     const result = await harness.controlPlane.feedback.observeTurnOutcome(outcomeInput("turn-revise"));
 
     expect(result[0]).toMatchObject({
       status: "resolved",
       outcome: { decision: "revise", successorExperimentId: expect.any(String) },
     });
-    const outcome = await harness.workspace.protectedFeedback.getOutcome(harness.experimentId);
-    const successor = await harness.workspace.protectedFeedback.getSuccessorInput(harness.experimentId);
+    const outcome = await harness.protectedRuntime.feedback.getOutcome(harness.experimentId);
+    const successor = await harness.protectedRuntime.feedback.getSuccessorInput(harness.experimentId);
     expect(successor).toMatchObject({
       predecessorExperimentId: harness.experimentId,
       predecessorActivationId: pin.activationId,
       predecessorRevision: capabilityRevisionRef(harness.candidate),
     });
     expect(successor?.evidenceRefs).toEqual(outcome?.evidenceRefs);
-    expect(await harness.workspace.protectedActivations.current()).toEqual(before);
+    expect(await harness.protectedRuntime.activations.current()).toEqual(before);
     expect(
-      (await harness.workspace.protectedActivations.listOperations()).some(
+      (await harness.protectedRuntime.activations.listOperations()).some(
         (operation) => operation.binding.experimentId === successor?.successorExperimentId,
       ),
     ).toBe(false);
@@ -729,9 +727,9 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
     });
     await harness.controlPlane.idle();
     expect(
-      (await harness.workspace.protectedActivations.current())?.activeCapabilityRevisions["writing"],
+      (await harness.protectedRuntime.activations.current())?.activeCapabilityRevisions["writing"],
     ).toEqual(capabilityRevisionRef(harness.candidate));
-    const candidateOperation = (await harness.workspace.protectedActivations.listOperations()).find(
+    const candidateOperation = (await harness.protectedRuntime.activations.listOperations()).find(
       (operation) => operation.binding.experimentId === harness.experimentId,
     );
     const prior = await harness.workspace.operational.activations.get(
@@ -746,7 +744,7 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
       }),
     );
     expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "revert" } });
-    const restored = await harness.workspace.protectedActivations.current();
+    const restored = await harness.protectedRuntime.activations.current();
     expect(restored?.activeDefinitions).toEqual(prior?.activeDefinitions);
     expect(restored?.activeCapabilityRevisions).toEqual(prior?.activeCapabilityRevisions);
     const restoredRevision = restored?.revision;
@@ -755,7 +753,7 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
     const reopened = await createWorkspaceStore(harness.root);
     const restarted = createContinuousFeedbackController({
       workspace: reopened,
-      authority: await authorityFor(join(harness.root, "restart-authority")),
+      protectedRuntime: createWorkspaceRuntimeInternals(reopened).protectedRuntime,
       capabilities: harness.resolver,
       judge: Object.freeze({
         run: async () => {
@@ -768,9 +766,10 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
       status: "resolved",
       outcome: { decision: "revert" },
     });
-    expect((await reopened.protectedActivations.current())?.revision).toBe(restoredRevision);
-    expect(await reopened.protectedActivations.recoverCommittedPublications()).toBe(0);
-    expect(await reopened.protectedFeedback.getOutcome(harness.experimentId)).toMatchObject({
+    const reopenedProtected = createWorkspaceRuntimeInternals(reopened).protectedRuntime;
+    expect((await reopenedProtected.activations.current())?.revision).toBe(restoredRevision);
+    expect(await reopenedProtected.activations.recoverCommittedPublications()).toBe(0);
+    expect(await reopenedProtected.feedback.getOutcome(harness.experimentId)).toMatchObject({
       decision: "revert",
       restoredActivationId: restored?.activationId,
     });

@@ -137,6 +137,25 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     return next;
   }
 
+  const idle = async (): Promise<readonly ActivationReconciliation[]> => {
+    const reconciled: ActivationReconciliation[] = [];
+    for (;;) {
+      reconciled.push(...(await runAvailable()));
+      const timestamp = now().getTime();
+      const runnable = (await options.workspace.jobs.list({ limit: 1_000 })).some(
+        (job) =>
+          (job.kind === "runtime.reflect_turn" ||
+            job.kind === "runtime.author_revision" ||
+            job.kind === "runtime.preflight" ||
+            job.kind === "runtime.outcome_judge") &&
+          ((job.status === "scheduled" && new Date(job.notBefore).getTime() <= timestamp) ||
+            (job.status === "running" &&
+              (job.leaseUntil === undefined || new Date(job.leaseUntil).getTime() <= timestamp))),
+      );
+      if (!runnable) return Object.freeze(reconciled);
+    }
+  };
+
   const observeCompletedTurn = async (input: CompletedNormalTurn): Promise<CoordinatorJobView> => {
     if (stopped) throw new Error("Runtime control plane is stopped");
     const job = await options.coordinator.observeCompletedTurn(input);
@@ -159,7 +178,7 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     feedback: options.feedback,
     observeCompletedTurn,
     runAvailable,
-    idle: runAvailable,
+    idle,
     reconcileActivations,
     stop,
   });

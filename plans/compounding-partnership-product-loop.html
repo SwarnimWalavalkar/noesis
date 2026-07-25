@@ -1,0 +1,1747 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Compounding Partnership Product Loop — Build Plan</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0e14;
+        --panel: #121722;
+        --panel-2: #171d2a;
+        --text: #eef2f7;
+        --muted: #9ba7b8;
+        --line: #2a3445;
+        --accent: #90e0c1;
+        --accent-2: #9db9ff;
+        --warn: #ffd58a;
+        --danger: #ff9f9f;
+        --good: #a9e99f;
+        --radius: 12px;
+        --measure: 78rem;
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 15px;
+        line-height: 1.58;
+      }
+      a {
+        color: var(--accent-2);
+      }
+      a:focus-visible,
+      summary:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 3px;
+        border-radius: 3px;
+      }
+      code {
+        color: var(--accent);
+        overflow-wrap: anywhere;
+      }
+      pre {
+        margin: 0;
+        padding: 1rem;
+        overflow-x: auto;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #090c11;
+        color: #dce5f1;
+      }
+      h1,
+      h2,
+      h3 {
+        line-height: 1.2;
+        text-wrap: balance;
+      }
+      h1 {
+        margin: 0;
+        font-size: clamp(2rem, 6vw, 4.8rem);
+        letter-spacing: -0.06em;
+      }
+      h2 {
+        margin-top: 0;
+        font-size: clamp(1.4rem, 3vw, 2.1rem);
+      }
+      h3 {
+        margin-bottom: 0.4rem;
+        font-size: 1rem;
+        color: var(--accent);
+      }
+      p {
+        max-width: 76ch;
+      }
+      ul,
+      ol {
+        padding-left: 1.3rem;
+      }
+      li + li {
+        margin-top: 0.3rem;
+      }
+      header,
+      main,
+      footer {
+        width: min(calc(100% - 2rem), var(--measure));
+        margin-inline: auto;
+      }
+      header {
+        padding: clamp(3rem, 8vw, 7rem) 0 2rem;
+      }
+      main {
+        padding-bottom: 5rem;
+      }
+      footer {
+        padding: 2rem 0 4rem;
+        color: var(--muted);
+        border-top: 1px solid var(--line);
+      }
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-block: 1px solid var(--line);
+        background: color-mix(in srgb, var(--bg) 94%, transparent);
+        backdrop-filter: blur(10px);
+      }
+      nav ul {
+        width: min(calc(100% - 2rem), var(--measure));
+        margin: 0 auto;
+        padding: 0.75rem 0;
+        display: flex;
+        gap: 1rem;
+        list-style: none;
+        overflow-x: auto;
+      }
+      nav a {
+        white-space: nowrap;
+        text-decoration: none;
+        color: var(--muted);
+      }
+      nav a:hover {
+        color: var(--text);
+      }
+      section {
+        margin-top: 1.25rem;
+        padding: clamp(1.1rem, 3vw, 2rem);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+        scroll-margin-top: 5rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 0.7rem;
+        text-align: left;
+        vertical-align: top;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--accent);
+        font-size: 0.82rem;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .eyebrow {
+        color: var(--accent);
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        font-weight: 700;
+      }
+      .lede {
+        max-width: 66ch;
+        color: var(--muted);
+        font-size: clamp(1rem, 2vw, 1.25rem);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        gap: 1rem;
+      }
+      .card {
+        grid-column: span 4;
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--panel-2);
+      }
+      .card p {
+        margin-bottom: 0;
+        color: var(--muted);
+      }
+      .wide {
+        grid-column: span 6;
+      }
+      .full {
+        grid-column: 1 / -1;
+      }
+      .pill {
+        display: inline-block;
+        margin: 0.15rem 0.2rem 0.15rem 0;
+        padding: 0.15rem 0.5rem;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+      .callout {
+        padding: 1rem;
+        border-left: 3px solid var(--accent);
+        background: var(--panel-2);
+      }
+      .warning {
+        border-left-color: var(--warn);
+      }
+      .danger {
+        border-left-color: var(--danger);
+      }
+      .good {
+        border-left-color: var(--good);
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .phase {
+        color: var(--accent-2);
+        font-weight: 700;
+      }
+      .task {
+        padding: 1rem 0;
+        border-top: 1px solid var(--line);
+      }
+      .task:first-of-type {
+        border-top: 0;
+      }
+      .task h3 {
+        display: flex;
+        gap: 0.7rem;
+        align-items: baseline;
+        color: var(--text);
+      }
+      .task-id {
+        color: var(--accent);
+        min-width: 4rem;
+      }
+      .task dl {
+        display: grid;
+        grid-template-columns: 8rem 1fr;
+        gap: 0.35rem 1rem;
+      }
+      .task dt {
+        color: var(--muted);
+      }
+      .task dd {
+        margin: 0;
+      }
+      details {
+        border-top: 1px solid var(--line);
+        padding: 0.8rem 0;
+      }
+      summary {
+        cursor: pointer;
+        color: var(--accent-2);
+      }
+      .scroll {
+        overflow-x: auto;
+      }
+      @media (max-width: 820px) {
+        .card,
+        .wide {
+          grid-column: 1 / -1;
+        }
+        .task dl {
+          grid-template-columns: 1fr;
+        }
+        .task dt {
+          margin-top: 0.5rem;
+        }
+        table {
+          min-width: 48rem;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+      }
+      @media print {
+        :root {
+          color-scheme: light;
+          --bg: white;
+          --panel: white;
+          --panel-2: #f5f5f5;
+          --text: #111;
+          --muted: #444;
+          --line: #bbb;
+        }
+        nav {
+          display: none;
+        }
+        section {
+          break-inside: avoid;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="eyebrow">Noesis · product loop blueprint</div>
+      <h1>Compounding partnership</h1>
+      <p class="lede">
+        Build the first user-visible Noesis loop: a foreground turn infers a
+        corrigible collaboration posture, executes from one immutable
+        workspace-backed plan, finishes useful work before ambient reflection,
+        proposes only narrow evidence-linked learnings with an anticipated
+        future use, activates them through protected authority, demonstrably
+        serves the exact active revision later, and stays conversationally
+        inspectable, contestable, and revertible throughout.
+      </p>
+      <span class="pill">sequenced after the correction plan</span>
+      <span class="pill">posture without modes</span>
+      <span class="pill">anticipated future use</span>
+      <span class="pill">conversation-first legibility</span>
+    </header>
+
+    <nav aria-label="Plan sections">
+      <ul>
+        <li><a href="#outcome">Outcome</a></li>
+        <li><a href="#handoff">Handoff contract</a></li>
+        <li><a href="#decisions">Settled decisions</a></li>
+        <li><a href="#deferred">Deferred questions</a></li>
+        <li><a href="#conflicts">Conflict register</a></li>
+        <li><a href="#loop">The loop</a></li>
+        <li><a href="#conventions">Conventions</a></li>
+        <li><a href="#ws1">WS1</a></li>
+        <li><a href="#ws2">WS2</a></li>
+        <li><a href="#ws3">WS3</a></li>
+        <li><a href="#ws4">WS4</a></li>
+        <li><a href="#ws5">WS5</a></li>
+        <li><a href="#ws6">WS6</a></li>
+        <li><a href="#waves">Waves</a></li>
+        <li><a href="#verification">Verification</a></li>
+        <li><a href="#nongoals">Non-goals</a></li>
+        <li><a href="#done">Done</a></li>
+      </ul>
+    </nav>
+
+    <main>
+      <section id="outcome">
+        <h2>Outcome</h2>
+        <p>Build the first user-visible Noesis loop in which:</p>
+        <ol>
+          <li>a foreground turn infers a corrigible collaboration posture;</li>
+          <li>
+            the turn executes from one immutable, workspace-backed intelligence
+            plan;
+          </li>
+          <li>useful work is completed before ambient reflection begins;</li>
+          <li>
+            reflection either makes no change or proposes the narrowest
+            evidence-linked learning with an anticipated future use;
+          </li>
+          <li>
+            a candidate is evaluated and activated through the protected control
+            plane;
+          </li>
+          <li>
+            a later relevant turn demonstrably serves the exact active revision;
+            and
+          </li>
+          <li>
+            the user can understand, contest, and revert the adaptation through
+            a conversational experience backed by precise inspection.
+          </li>
+        </ol>
+        <div class="callout">
+          <strong>Position in the sequence.</strong>
+          This plan runs <em>after</em>
+          <a href="noesis-high-leverage-correction-plan.html"
+            >the high-leverage correction plan</a>
+          and builds on the architecture in
+          <a href="noesis-autonomous-compounding-implementation-plan.html"
+            >the autonomous compounding plan</a>. The correction plan already
+          delivers outcome items 2, 5, and 6 in
+          their minimal form (HL-05 serving, HL-11 single authority, HL-13/14
+          protected adapter); this plan completes them and delivers items 1, 3, 4, and 7
+          in full. One exception to strict ordering: <a href="#ws1">WS1</a> is
+          the implementation specification for the correction plan's HL-11/HL-12
+          and executes inside that plan's Phase 2, not here.
+        </div>
+      </section>
+
+      <section id="handoff">
+        <h2>Handoff contract</h2>
+        <p>
+          Every workstream below assumes the correction plan's postconditions
+          hold. Verify this list before starting Wave 1. If any item fails, stop
+          and finish the correction plan first; do not compensate for a missing
+          postcondition inside this plan's workstreams.
+        </p>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Postcondition</th>
+                <th>Established by</th>
+                <th>Verify with</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  Unproven scope is gone: no generated-tool runtime, no stub
+                  protected-authority port, no declared-but-unrendered TUI
+                  panes, no exported module with zero non-test importers.
+                </td>
+                <td>HL-01</td>
+                <td>Import scan; <code>pnpm check</code></td>
+              </tr>
+              <tr>
+                <td>
+                  The compounding acceptance test asserts served-plan identity
+                  (prompt digest and tool revisions), not output echo.
+                </td>
+                <td>HL-02</td>
+                <td>Revert serving wiring locally; test must go red</td>
+              </tr>
+              <tr>
+                <td>
+                  Every admitted turn has one SQLite-authoritative, replayable
+                  <code>FrozenTurnPlan</code> with immutable bytes,
+                  per-served-revision baselines, and a canonical digest.
+                </td>
+                <td>HL-03</td>
+                <td>
+                  Plans carry baseline refs, genesis, or unknown-legacy markers
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  Normative invariants remain intact and one time-bounded
+                  known-nonconformities register matches the code.
+                </td>
+                <td>HL-04</td>
+                <td>Read <code>AGENTS.md</code> and <code>README.md</code></td>
+              </tr>
+              <tr>
+                <td>
+                  The activation pin determines the prompt and tools served to
+                  the model; mismatches fail before execution.
+                </td>
+                <td>HL-05</td>
+                <td>Served-plan identity tests</td>
+              </tr>
+              <tr>
+                <td>
+                  A fresh workspace has an active immutable
+                  <code>general-collaboration</code> baseline and a first-turn
+                  correction queues reflection.
+                </td>
+                <td>HL-06</td>
+                <td>Genesis acceptance test</td>
+              </tr>
+              <tr>
+                <td>
+                  Turn settlement lives in <code>packages/runtime</code> with
+                  direct tests; correction detection is a pure tested function
+                  in <code>packages/learning</code>; the composition root only
+                  constructs and injects.
+                </td>
+                <td>HL-07</td>
+                <td>Settlement tests; composition holds no turn logic</td>
+              </tr>
+              <tr>
+                <td>
+                  The fake application path completes reflect → author →
+                  evaluate → activate → serve → revert with no credentials.
+                </td>
+                <td>HL-08</td>
+                <td><code>pnpm demo</code> from an empty home</td>
+              </tr>
+              <tr>
+                <td>
+                  The external dogfood protocol and friction log are active;
+                  its four-week readout gates only evidence-dependent choices
+                  and validation claims.
+                </td>
+                <td>HL-09</td>
+                <td>The dated protocol and external friction log exist</td>
+              </tr>
+              <tr>
+                <td>
+                  Effect-free paired replay computes win rate, scope leakage,
+                  separate context taxes, and correction recurrence with
+                  privacy, budget, exclusions, and coverage visible.
+                </td>
+                <td>HL-10</td>
+                <td>Metrics read model has real values</td>
+              </tr>
+              <tr>
+                <td>
+                  SQLite is the sole authority for new operational and protected
+                  state; no new JSONL appends; the legacy promotion path is
+                  deleted.
+                </td>
+                <td>HL-11 / HL-12</td>
+                <td>WS1 acceptance below</td>
+              </tr>
+              <tr>
+                <td>
+                  Ordinary consumers cannot name raw protected ports; the deep
+                  adapter verifies issuer, effect, resource, and operation on
+                  every mutation receipt.
+                </td>
+                <td>HL-13 / HL-14</td>
+                <td>Architecture tests</td>
+              </tr>
+              <tr>
+                <td>
+                  Targeted god files are split; TUI has a narrow runtime port
+                  and cannot import or access ledger, raw registry, workspace,
+                  or scheduler surfaces.
+                </td>
+                <td>HL-15</td>
+                <td>Line audit; import scan</td>
+              </tr>
+              <tr>
+                <td>
+                  Production preflight fail-closes on an immutable protected
+                  suite and treats regression as a hard rail; the app policy is
+                  at least as restrictive as the default; inconclusive is
+                  calibrated.
+                </td>
+                <td>HL-16 / HL-17</td>
+                <td>Overfit fixture fails; ambiguous fixture abstains</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout warning">
+          <strong>Evidence steers scope without blocking correctness.</strong>
+          The HL-09 readout and HL-10 metrics gate WS2's non-obvious posture
+          heuristics, WS3's scope/threshold choices, metric interpretation, and
+          product validation claims. Package-local correctness may proceed
+          while the window runs; evidence-dependent choices may not invent an
+          answer before the readout.
+        </div>
+      </section>
+
+      <section id="decisions">
+        <h2>Settled product decisions</h2>
+        <ul>
+          <li>
+            Ambiguous intellectual work defaults toward
+            <strong>work with me</strong>.
+          </li>
+          <li>
+            Explicit execution defaults toward <strong>do for me</strong>.
+          </li>
+          <li>
+            Collaboration posture is inferred with conversational override;
+            users do not operate mandatory modes.
+          </li>
+          <li>
+            New learning starts at the narrowest plausible scope and broadens
+            only through recurring evidence.
+          </li>
+          <li>
+            Every durable learning names an anticipated future use and the
+            behavior it should improve there.
+          </li>
+          <li>
+            Not every session must compound. <code>No change</code> is a
+            successful reflection outcome.
+          </li>
+          <li>Reflection and evaluation are ambient and automatic.</li>
+          <li>
+            Self-improvement should feel magical but never mysterious: every
+            change has an inspectable adaptation history and an easy path to
+            contest or revert.
+          </li>
+          <li>
+            Normal workflows stay conversational. Only genuine authority
+            expansion interrupts with explicit approval.
+          </li>
+          <li>
+            Generated content may propose memories, knowledge, workflows, cases,
+            prompts, skills, tools, and routing changes. Protected permission,
+            evaluation integrity, activation, promotion, and rollback remain
+            outside generated content.
+          </li>
+          <li>
+            <em>Added by the correction plan:</em> the compounding claim stays
+            measurable. Shadow baseline replay and its four metrics keep running
+            through and after this plan; a change that breaks the measurement is
+            a regression.
+          </li>
+        </ul>
+      </section>
+
+      <section id="deferred">
+        <h2>Deliberately deferred learning questions</h2>
+        <p>
+          The following are not sufficiently settled to encode as final product
+          rules:
+        </p>
+        <ul>
+          <li>
+            whether the compounding-practitioner persona generalizes beyond the
+            initial user;
+          </li>
+          <li>
+            the real frequency of builder, philosopher, learner, and researcher
+            orientations;
+          </li>
+          <li>
+            the final detection policy or exact UX for collaboration posture;
+          </li>
+          <li>
+            the ideal granularity of continuity across artifacts, decisions,
+            questions, explanations, summaries, and raw sessions;
+          </li>
+          <li>the exact inference policy for implicit feedback;</li>
+          <li>
+            final thresholds for automatic reflection, evaluation, activation,
+            revision, and rollback;
+          </li>
+          <li>
+            interface or communication-channel expansion beyond the current TUI;
+          </li>
+          <li>
+            final product metrics, scoring rubrics, judge panels, evaluator
+            aggregation, or statistical ceremony beyond the four provisional
+            compounding metrics already running.
+          </li>
+        </ul>
+        <p>
+          The implementation should preserve evidence that helps answer these
+          questions. It should not pretend to answer them in advance. Unlike the
+          original draft of this plan, the correction plan has started an
+          evidence program (HL-09/HL-10). Consult whatever matured evidence
+          exists at the decision point; treat four weeks of one user as
+          directional, not final.
+        </p>
+      </section>
+
+      <section id="conflicts">
+        <h2>Conflict register</h2>
+        <p>
+          Every place where the original draft of this plan would collide with
+          work the correction plan already did, and the resolution. Agents
+          implementing a workstream must check this table before writing code.
+        </p>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Original instruction</th>
+                <th>Collision</th>
+                <th>Resolution</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  WS1: move foreground and protected authority to SQLite as Wave
+                  0.
+                </td>
+                <td>
+                  Executed as HL-11/HL-12 in the correction plan's Phase 2,
+                  using <a href="#ws1">WS1 below</a> as its specification.
+                </td>
+                <td>
+                  <strong>Do not re-execute.</strong> Verify WS1 acceptance as a
+                  handoff check. WS1 remains in this document as the
+                  authoritative spec and regression contract.
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  WS2: publish and activate a
+                  <code>general-collaboration</code> baseline at workspace
+                  initialization.
+                </td>
+                <td>Done by HL-06.</td>
+                <td>
+                  WS2 keeps only the posture resolver. Treat baseline
+                  publication as an existing behavior to test against, not to
+                  build.
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  WS3: replace the small correction regex and fixed
+                  <code>"general"</code> signal scope.
+                </td>
+                <td>
+                  HL-07 already moved correction detection into a pure tested
+                  function in <code>packages/learning</code>.
+                </td>
+                <td>
+                  WS3 extends that function and its tests. Do not reintroduce
+                  detection logic in the composition root.
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  WS4: register generated-tool executors through
+                  <code>packages/tool-runtime</code> and its broker.
+                </td>
+                <td>
+                  HL-01 deleted <code>packages/tool-runtime</code> as unproven
+                  scope.
+                </td>
+                <td>
+                  Generated-tool serving is <strong>conditional</strong>:
+                  restore the package from git history only when a foreground
+                  turn has a proven need, as its own reviewed step. WS4's
+                  unconditional scope is prompts, skills, routing, and session
+                  retrieval.
+                </td>
+              </tr>
+              <tr>
+                <td>WS4: make atomic activation causally affect later work.</td>
+                <td>
+                  HL-05 already serves the pinned prompt and tool revisions
+                  minimally; HL-02 already tests served-plan identity.
+                </td>
+                <td>
+                  WS4 completes resolution (skills, routing, retrieval
+                  executors, permission snapshots) on top of HL-05. Extend the
+                  HL-02 tests; do not duplicate them.
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  WS5: render ambient status and adaptation history in the TUI;
+                  remove the manual <code>/learn</code>, <code>/evaluate</code>,
+                  <code>/promote</code>, <code>/rollback</code> flow.
+                </td>
+                <td>
+                  HL-15 already split the TUI and moved control-plane calls
+                  behind a runtime command port; the UI no longer reads ledger
+                  event shapes.
+                </td>
+                <td>
+                  WS5 builds on the command port and read models. TUI code must
+                  not regain knowledge of durable representations.
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  WS5: adaptation history composes experiments, evidence,
+                  preflights, activations, feedback, criteria, and provenance.
+                </td>
+                <td>
+                  HL-10 added a compounding-metrics read model that did not
+                  exist when this plan was drafted.
+                </td>
+                <td>
+                  Adaptation history additionally surfaces the four compounding
+                  metrics, per scope, so "what have you learned" can be answered
+                  with measured advantage, not only lineage.
+                </td>
+              </tr>
+              <tr>
+                <td>WS6: prove the shipped path with fake-runtime journeys.</td>
+                <td>
+                  HL-08 already delivers a single full-loop fake journey; HL-02
+                  established the standing rule that a fake-satisfiable
+                  assertion is not evidence.
+                </td>
+                <td>
+                  WS6 expands to the seven journeys below and applies the
+                  standing rule to every new assertion.
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  Verification: policy/effect restart tests over the experience
+                  ledger.
+                </td>
+                <td>
+                  HL-11 made SQLite the sole authority; HL-13 changed protected
+                  port signatures.
+                </td>
+                <td>
+                  All restart and authority tests target the SQLite-backed ports
+                  with receipt parameters. No new test may consult operational
+                  JSONL.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="loop">
+        <h2>Coherent next product loop</h2>
+        <pre>
+user message
+  → resolve collaboration posture and conversational override
+  → freeze activation, selected definitions, retrieval, prompt, tools, permissions
+  → execute one foreground turn through runtime-pi
+  → persist outcome and useful evidence in WorkspaceStore
+  → ambient disposition: no_change | narrow learning proposal
+  → author → evaluate → protected activate
+  → quiet adaptation-history entry
+  → later relevant turn pins and serves the exact revision
+  → conversational explain, contest, or revert</pre>
+        <div class="callout">
+          <strong>Core implementation rule.</strong>
+          The plan inspected after a turn must be the plan that actually served
+          that turn. There must not be a second registry, prompt reconstruction,
+          or mutable working-file lookup on the execution path. HL-05
+          established this rule for prompts and tools; every workstream here
+          preserves it as it widens what a turn plan contains.
+        </div>
+      </section>
+
+      <section id="conventions">
+        <h2>Functional and domain conventions</h2>
+        <ul>
+          <li>
+            Use pure functions for posture defaults, scope narrowing/broadening
+            decisions, prompt-layer selection, and user-facing read-model
+            derivation.
+          </li>
+          <li>
+            Use closure-based <code>create*</code> factories for stateful
+            orchestration and dependency injection at I/O seams.
+          </li>
+          <li>
+            Return typed results for expected conflicts, denials, stale
+            revisions, and ambiguous outcomes.
+          </li>
+          <li>
+            Validate unknown SQLite rows, files, IPC, tool payloads, and model
+            outputs with Zod at the boundary.
+          </li>
+          <li>
+            Keep immutable revision references in every turn, learning,
+            evaluation, activation, and explanation record.
+          </li>
+          <li>
+            Add a module or package only when this iteration has a real caller.
+            Prefer package-local modules behind existing interfaces.
+          </li>
+          <li>
+            Keep Pi execution types inside <code>packages/runtime-pi</code>.
+            <code>apps/noesis</code> remains the composition root — and after
+            HL-07, it constructs and injects only; turn logic lives in
+            <code>packages/runtime</code>.
+          </li>
+          <li>
+            Keep TUI state ephemeral. It consumes runtime read models and
+            invokes protected operations through the HL-12 command port; it
+            never owns durable policy.
+          </li>
+          <li>
+            Protected mutations use the HL-13/HL-14 deep adapter, which verifies
+            a matching <code>AuthorityReceipt</code> before reaching captured
+            raw workspace ports.
+          </li>
+        </ul>
+      </section>
+
+      <section id="ws1">
+        <h2>WS1 — One authoritative foreground turn</h2>
+        <div class="callout danger">
+          <strong>Executes inside the correction plan.</strong>
+          This workstream is the implementation specification for HL-11 and
+          HL-12 (correction plan Phase 2) and runs there once the causal-spine
+          correctness contract is green; it does not wait for the four-week
+          dogfood readout. It is preserved here because this is the
+          authoritative specification and regression contract for everything
+          later workstreams assume. If
+          the correction plan is complete, verify the acceptance list and move
+          on; re-executing any part of this workstream is an error.
+        </div>
+
+        <div class="task">
+          <h3>
+            <span class="task-id">WS1</span> Replace the wrapper/mirror path
+            with a workspace-backed turn module whose durable state, prompt, and
+            served activation agree
+          </h3>
+          <dl>
+            <dt>Ownership</dt>
+            <dd>
+              <ul>
+                <li>
+                  <code>packages/runtime/src/index.ts</code>: narrow the
+                  existing public runtime interface around the workspace-backed
+                  implementation while preserving session
+                  start/resume/fork/abort behavior.
+                </li>
+                <li>
+                  Package-local runtime modules such as
+                  <code>packages/runtime/src/foreground-turn.ts</code> and
+                  <code>packages/runtime/src/turn-intelligence.ts</code>: own
+                  the deep foreground-turn interface, frozen plan construction,
+                  and turn settlement (settlement seeded by HL-07).
+                </li>
+                <li>
+                  <code>packages/workspace/migrations/</code>,
+                  <code>packages/workspace/src/store.ts</code>, and the
+                  WorkspaceStore state ports: add the operational rows and
+                  transactional interfaces needed for turn intelligence, prompt
+                  snapshots, posture, settlement, grants, reservations,
+                  completions, receipts, budgets, and operation-identity
+                  collisions.
+                </li>
+                <li>
+                  <code>packages/policy</code>: move durable grant and effect
+                  state behind the WorkspaceStore interfaces while preserving
+                  <code>AuthorityBoundary</code> and
+                  <code>EffectGateway</code> as the only authority and
+                  side-effect entry points.
+                </li>
+                <li>
+                  <code>packages/context/src/index.ts</code>: compile the
+                  selected immutable prompt layers and bounded context with
+                  provenance.
+                </li>
+                <li>
+                  <code>apps/noesis/src/runtime-composition.ts</code>: compose
+                  the runtime directly from <code>WorkspaceStore</code>, role
+                  inference, Pi/fake execution, control plane, and protected
+                  authority.
+                </li>
+                <li>
+                  <code>packages/workspace/src/importer.ts</code>: reuse the
+                  existing one-time import seam for legacy trails and protected
+                  operational records; record a cutover marker and stop
+                  appending new turn, authority, grant, reservation, receipt,
+                  budget, and effect-completion state to the JSONL ledger after
+                  successful migration.
+                </li>
+              </ul>
+            </dd>
+            <dt>Behavior</dt>
+            <dd>
+              <ul>
+                <li>
+                  SQLite is authoritative for new sessions, turns, messages,
+                  outcomes, activation pins, grants, reserved uses and costs,
+                  effect completions/failures, authority receipts, budgets, and
+                  idempotency bindings.
+                </li>
+                <li>
+                  The turn freezes one activation ID, posture decision, selected
+                  definition revisions, retrieval citations, prompt snapshot,
+                  tool revisions, permission snapshot, and routing decision
+                  before model execution.
+                </li>
+                <li>
+                  Turn execution reads only the frozen plan and immutable
+                  revision bytes.
+                </li>
+                <li>
+                  Grant use and estimated cost are reserved transactionally
+                  before execution. Stable operation identity binds the
+                  idempotency key to principal, effect class, resource, and
+                  request identity; a reused key with a different binding is a
+                  durable collision and is rejected.
+                </li>
+                <li>
+                  Restart rehydrates grants, reservations, completions,
+                  receipts, and remaining budgets from SQLite. A completed
+                  matching operation replays its recorded outcome, while a
+                  reservation without one unambiguous completion or failure
+                  remains unresolved and fails closed.
+                </li>
+                <li>
+                  Protected activation, rollback, and scheduling use the same
+                  SQLite-backed authority and effect interfaces. Ordinary
+                  callers still cannot install grants, mint receipts, or infer
+                  that an incomplete effect failed.
+                </li>
+                <li>
+                  Interrupted turns remain fail-closed and recoverable through
+                  explicit ownership/lease evidence; do not infer completion
+                  from absence.
+                </li>
+                <li>
+                  Existing workspace homes migrate once and retain their prior
+                  evidence. No new dual write is introduced.
+                </li>
+              </ul>
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              <ul>
+                <li>
+                  A fault injected before admission produces no visible turn.
+                </li>
+                <li>
+                  A fault after admission leaves one unambiguous running turn
+                  with its frozen plan.
+                </li>
+                <li>
+                  A settled turn has one SQLite authority and no new legacy
+                  event append.
+                </li>
+                <li>
+                  Inspecting the recorded prompt digest, tools, activation, and
+                  citations reproduces exactly what the fake runtime received.
+                </li>
+                <li>
+                  Restart preserves grant-use and cost budgets, rejects
+                  idempotency-key collisions, and cannot spend a reservation
+                  twice.
+                </li>
+                <li>
+                  Restart replays an exact completed operation without rerunning
+                  its effect and returns the recorded completion and receipt
+                  lineage.
+                </li>
+                <li>
+                  Restart treats a reserved operation with no unambiguous
+                  outcome as unresolved and fails closed instead of retrying or
+                  refunding it.
+                </li>
+              </ul>
+            </dd>
+          </dl>
+        </div>
+      </section>
+
+      <section id="ws2">
+        <h2>WS2 — Collaboration posture</h2>
+        <div class="task">
+          <h3>
+            <span class="task-id">WS2</span> Give every turn a conservative,
+            corrigible collaboration posture
+          </h3>
+          <dl>
+            <dt>Consumed</dt>
+            <dd>
+              The genesis baseline half of this workstream is done: HL-06
+              publishes and activates the immutable
+              <code>general-collaboration</code> baseline at workspace
+              initialization, and a first-turn correction already queues
+              reflection against it. What remains is the posture resolver.
+            </dd>
+            <dt>Ownership</dt>
+            <dd>
+              <ul>
+                <li>
+                  New
+                  <code>packages/runtime/src/collaboration-posture.ts</code>:
+                  own the posture resolver interface, pure default decision,
+                  override application, and explanation read model.
+                </li>
+                <li>
+                  <code>packages/agent-types/src/index.ts</code>: extend
+                  adapter-neutral structured inference only if the posture
+                  resolver needs a shared role request/result contract used by
+                  both runtime and <code>runtime-pi</code>.
+                </li>
+                <li>
+                  <code>packages/runtime-pi/src/role-runner.ts</code>: provide
+                  the Pi adapter for ambiguous posture interpretation without
+                  owning the product decision.
+                </li>
+              </ul>
+            </dd>
+            <dt>Behavior</dt>
+            <dd>
+              <ul>
+                <li>
+                  Clear execution requests resolve to <code>do_for_me</code>.
+                </li>
+                <li>
+                  Ambiguous intellectual requests resolve conservatively to
+                  <code>work_with_me</code>.
+                </li>
+                <li>
+                  Explicit conversational instructions override inference
+                  immediately and cite the user message.
+                </li>
+                <li>
+                  A posture may change during a session; each turn records its
+                  own decision and reason on the frozen turn plan.
+                </li>
+                <li>
+                  The first resolver is intentionally replaceable. It must be
+                  good enough for clear fixtures and honest about uncertainty;
+                  it is not the final mode-detection policy. Seed its heuristics
+                  from the HL-09 friction list — the recorded moments where the
+                  wrong posture was felt — rather than from invented fixtures
+                  alone.
+                </li>
+              </ul>
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              <ul>
+                <li>
+                  "Implement this exact patch" resolves to
+                  <code>do_for_me</code>.
+                </li>
+                <li>
+                  "I am not sure what this means; think it through with me"
+                  resolves to <code>work_with_me</code>.
+                </li>
+                <li>
+                  "Just do it" and "teach me instead" override the prior posture
+                  without a mode command.
+                </li>
+                <li>
+                  <code>/why</code>-equivalent runtime inspection explains the
+                  decision from its pinned evidence.
+                </li>
+                <li>
+                  Regression: a correction on the first session still queues
+                  reflection against the immutable baseline (HL-06 behavior
+                  preserved).
+                </li>
+              </ul>
+            </dd>
+          </dl>
+        </div>
+      </section>
+
+      <section id="ws3">
+        <h2>WS3 — Selective learning with anticipated future use</h2>
+        <div class="task">
+          <h3>
+            <span class="task-id">WS3</span> Make every durable learning earn
+            its place and stay narrowly scoped
+          </h3>
+          <dl>
+            <dt>Builds on</dt>
+            <dd>
+              HL-07 moved correction detection into a pure tested function in
+              <code>packages/learning</code>; extend it there. HL-10's metrics
+              read model consumes the fields this workstream adds: anticipated
+              future use becomes part of what shadow replay reports per
+              learning.
+            </dd>
+            <dt>Ownership</dt>
+            <dd>
+              <ul>
+                <li>
+                  <code>packages/domain/src/research.ts</code> and
+                  <code>packages/domain/src/storage-schemas.ts</code>: extend
+                  shared learning and experiment contracts only for fields
+                  consumed by learning, workspace, evaluation, runtime, and
+                  inspection.
+                </li>
+                <li>
+                  <code>packages/learning/src/schemas.ts</code> and
+                  <code>packages/learning/src/organ.ts</code>: require the
+                  reflector to return either <code>no_change</code> or an
+                  evidence-linked proposal with anticipated future use, narrow
+                  scope, scope rationale, expected behavior, and
+                  stale/contradiction conditions.
+                </li>
+                <li>
+                  <code>packages/learning/src/durable.ts</code>: preserve these
+                  fields in immutable briefs and candidate manifests.
+                </li>
+                <li>
+                  <code>packages/runtime/src/coordinator-contracts.ts</code>:
+                  carry the exact learning disposition through durable jobs
+                  without giving generated roles activation handles.
+                </li>
+              </ul>
+            </dd>
+            <dt>Behavior</dt>
+            <dd>
+              <ul>
+                <li>
+                  Reflection happens after useful turn settlement and never
+                  blocks the foreground response.
+                </li>
+                <li>
+                  <code>No change</code> remains first class and produces no
+                  memory, criterion, experiment, or capability merely to prove
+                  activity.
+                </li>
+                <li>
+                  Explicit normative statements may still create criteria, but
+                  only at the narrowest plausible scope.
+                </li>
+                <li>
+                  Scope broadening requires new recurring evidence from distinct
+                  relevant contexts and creates a new attributable revision.
+                </li>
+                <li>
+                  Every experiment and durable learning exposes its anticipated
+                  future use to evaluation, to later inspection, and to the
+                  compounding-metrics read model.
+                </li>
+                <li>
+                  Existing implicit-signal heuristics remain provisional. This
+                  work records evidence; it does not claim a final
+                  implicit-feedback policy. Threshold choices cite HL-09/HL-10
+                  evidence where it exists.
+                </li>
+              </ul>
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              <ul>
+                <li>
+                  An ordinary successful execution can end in
+                  <code>no_change</code> with no durable learning object.
+                </li>
+                <li>
+                  A repository-specific correction cannot silently become a
+                  global rule.
+                </li>
+                <li>
+                  A repeated correction across distinct scopes can propose a
+                  broader successor while preserving the narrower revision and
+                  evidence.
+                </li>
+                <li>
+                  A candidate missing anticipated future use or evidence fails
+                  boundary validation.
+                </li>
+                <li>Secret turns do not enter learning or retrieval.</li>
+              </ul>
+            </dd>
+          </dl>
+        </div>
+      </section>
+
+      <section id="ws4">
+        <h2>WS4 — Serve the full active revision</h2>
+        <div class="task">
+          <h3>
+            <span class="task-id">WS4</span> Complete the causal path from
+            activation to served behavior
+          </h3>
+          <dl>
+            <dt>Builds on</dt>
+            <dd>
+              HL-05 already makes the pin determine the prompt and tool list,
+              with identity verified by the HL-02 tests. This workstream widens
+              the frozen plan to skills, routing, permission snapshots, and
+              session retrieval, and keeps the identity guarantee as it widens.
+            </dd>
+            <dt>Consumed</dt>
+            <dd>
+              <strong>Generated tools are out of unconditional scope.</strong>
+              HL-01 deleted <code>packages/tool-runtime</code> as capability
+              without a caller. If — and only if — foreground work in this wave
+              demonstrates a real need for generated tools, restore the package
+              from git history as its own reviewed step, wire it behind the
+              existing <code>EffectGateway</code>, and inherit the correction
+              plan's honesty rule: the local child process is not a production
+              security boundary.
+            </dd>
+            <dt>Ownership</dt>
+            <dd>
+              <ul>
+                <li>
+                  <code>packages/runtime/src/turn-intelligence.ts</code>:
+                  resolve selected active capability revisions into exact
+                  prompt, skill, router, and tool revisions for one turn.
+                </li>
+                <li>
+                  <code>packages/agent-types/src/index.ts</code>: add the
+                  smallest adapter-neutral frozen-tool invocation interface
+                  needed by both runtime and <code>runtime-pi</code>.
+                </li>
+                <li>
+                  <code>apps/noesis/src/runtime-composition.ts</code>: as the
+                  composition root, construct turn-scoped retrieval executors
+                  from the frozen turn plan and WorkspaceStore artifact/evidence
+                  ports, then inject adapter-neutral registrations into
+                  <code>runtime-pi</code>.
+                </li>
+                <li>
+                  <code>packages/runtime-pi/src/index.ts</code> and
+                  <code
+                    >packages/runtime-pi/src/session-tool-registration.ts</code>:
+                  adapt the supplied turn-scoped registrations to Pi tools
+                  without constructing product executors, selecting authority,
+                  or owning broker policy.
+                </li>
+              </ul>
+            </dd>
+            <dt>Behavior</dt>
+            <dd>
+              <ul>
+                <li>
+                  A later turn uses only the prompt, skill, router, and tool
+                  revisions named by its activation pin.
+                </li>
+                <li>
+                  The composition root derives all retrieval executors from the
+                  frozen plan and injects them through adapter-neutral
+                  registrations; <code>runtime-pi</code> performs Pi adaptation
+                  only.
+                </li>
+                <li>
+                  Session retrieval stays bounded, citation-bearing, and
+                  untrusted.
+                </li>
+                <li>
+                  Missing, digest-mismatched, or permission-incompatible
+                  material fails before model execution.
+                </li>
+                <li>
+                  Capability versions are never inferred from mutable working
+                  files or activity history.
+                </li>
+              </ul>
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              <ul>
+                <li>
+                  The fake runtime proves that a promoted prompt revision
+                  changes the next relevant completion and an unrelated turn
+                  does not select it (extends the HL-02 tests; does not
+                  duplicate them).
+                </li>
+                <li>
+                  Deleting rebuildable search indexes and rebuilding them
+                  preserves authoritative citations.
+                </li>
+                <li>
+                  A broader effect produces a protected approval requirement; no
+                  generated role can approve itself.
+                </li>
+                <li>
+                  The application-level fake journey proves the composition root
+                  injects only the frozen turn's registrations, records
+                  artifacts through WorkspaceStore, and never lets
+                  <code>runtime-pi</code> construct or widen authority.
+                </li>
+                <li>
+                  If generated tools were restored: a fixture proves the exact
+                  active source revision, permission manifest, trace, and
+                  result, mediated by <code>EffectGateway</code>.
+                </li>
+              </ul>
+            </dd>
+          </dl>
+        </div>
+      </section>
+
+      <section id="ws5">
+        <h2>WS5 — Adaptation history and conversation-first controls</h2>
+        <div class="task">
+          <h3>
+            <span class="task-id">WS5</span> Turn the control plane into a
+            legible product experience
+          </h3>
+          <dl>
+            <dt>Builds on</dt>
+            <dd>
+              HL-15's TUI split and runtime command port (the manual
+              ledger-coupled <code>/learn</code> flow is already gone), and
+              HL-10's compounding-metrics read model, which adaptation history
+              must surface per scope so "what have you learned about this
+              project" can answer with measured advantage, not only lineage.
+            </dd>
+            <dt>Ownership</dt>
+            <dd>
+              <ul>
+                <li>
+                  New <code>packages/runtime/src/adaptation-history.ts</code>:
+                  compose immutable user-facing read models from experiments,
+                  evidence, preflights, activations, feedback outcomes,
+                  criteria, compounding metrics, and activity provenance.
+                </li>
+                <li>
+                  <code>packages/runtime/src/control-plane.ts</code>: expose
+                  narrow inspect, contest, approve, pin, veto, and revert
+                  operations backed by existing protected controllers, with
+                  receipt-bearing signatures per HL-13.
+                </li>
+                <li>
+                  <code>packages/tui/src/index.ts</code>: render ambient
+                  learning status, quiet completion notices, adaptation history,
+                  and conversation results from runtime read models, through the
+                  HL-15 command port.
+                </li>
+                <li>
+                  <code>apps/noesis/src/cli.ts</code>: add non-interactive
+                  inspection/export commands only when they reuse the same
+                  runtime read models.
+                </li>
+              </ul>
+            </dd>
+            <dt>Behavior</dt>
+            <dd>
+              <ul>
+                <li>
+                  Normal text remains a normal conversation. There is no
+                  mandatory mode picker or learning wizard.
+                </li>
+                <li>
+                  The foreground model can answer conversational questions about
+                  the active posture, retrieved context, and adaptations from
+                  bounded inspection tools or prompt context.
+                </li>
+                <li>
+                  Expert shortcuts include <code>/why</code>,
+                  <code>/changes</code>, <code>/change &lt;id&gt;</code>,
+                  criterion inspection/lifecycle, pin, veto, approval, and
+                  revert. They are precise shortcuts, not a second product
+                  model.
+                </li>
+                <li>
+                  Only authority expansion uses an interrupting approval. Other
+                  activity is ambient or opened by the user.
+                </li>
+                <li>
+                  Contesting creates a durable correction or narrower/retired
+                  revision. It never erases evidence.
+                </li>
+                <li>Revert restores the prior complete activation snapshot.</li>
+              </ul>
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              <ul>
+                <li>
+                  A quiet notification names what changed, why, scope,
+                  anticipated future use, and whether authority changed.
+                </li>
+                <li>
+                  "Why did you do that?", "What have you learned about this
+                  project?", and "Undo that adaptation" work conversationally in
+                  the fake acceptance journey — the second answering with
+                  metric-backed advantage where replay data exists.
+                </li>
+                <li>
+                  Exact evidence, candidate diff, preflight, active revision,
+                  later feedback, and prior activation are inspectable.
+                </li>
+                <li>
+                  TUI reducer tests prove that restart reconstructs the same
+                  view from runtime read models and that no durable policy lives
+                  in UI state.
+                </li>
+              </ul>
+            </dd>
+          </dl>
+        </div>
+      </section>
+
+      <section id="ws6">
+        <h2>WS6 — Fake-runtime product acceptance and evidence capture</h2>
+        <div class="task">
+          <h3>
+            <span class="task-id">WS6</span> Prove the shipped application path,
+            not only independent organs
+          </h3>
+          <dl>
+            <dt>Builds on</dt>
+            <dd>
+              HL-08's single full-loop fake journey is the seed; this workstream
+              expands it to the seven journeys below.
+            </dd>
+            <dt>Ownership</dt>
+            <dd>
+              <ul>
+                <li>
+                  <code>apps/noesis/test/</code> for complete application
+                  journeys.
+                </li>
+                <li>Focused package tests beside each owning module.</li>
+                <li>
+                  <code>apps/noesis/src/runtime-composition.ts</code> for
+                  deterministic fake role scripts covering posture, reflection,
+                  authorship, evaluation, activation, explanation, and outcome.
+                </li>
+              </ul>
+            </dd>
+            <dt>Journeys</dt>
+            <dd>
+              <ol>
+                <li>
+                  <strong>Work with me:</strong> an ambiguous architecture
+                  question selects collaborative posture, preserves alternatives
+                  and uncertainty, and makes no durable change when no reusable
+                  advantage is credible.
+                </li>
+                <li>
+                  <strong>Do for me:</strong> an explicit bounded edit executes
+                  directly and remains free of visible learning machinery.
+                </li>
+                <li>
+                  <strong>First correction:</strong> a fresh workspace
+                  correction produces a narrow proposal with anticipated future
+                  use, runs ambient authoring and evaluation, and activates a
+                  low-risk revision.
+                </li>
+                <li>
+                  <strong>Return:</strong> a related later session retrieves
+                  exact evidence and serves the exact active revision; an
+                  unrelated session does not.
+                </li>
+                <li>
+                  <strong>Legibility:</strong> a conversational why query and
+                  expert view show the complete adaptation history.
+                </li>
+                <li>
+                  <strong>Contest and revert:</strong> a correction narrows the
+                  learning; a seeded hard regression restores the prior
+                  activation exactly.
+                </li>
+                <li>
+                  <strong>Authority expansion:</strong> a candidate requesting a
+                  broader effect remains pending until protected explicit
+                  approval.
+                </li>
+              </ol>
+            </dd>
+            <dt>Rule</dt>
+            <dd>
+              The correction plan's standing rule applies to every journey: a
+              test whose assertion the fake runtime can satisfy without the
+              mechanism under test being present is not evidence. Assert on
+              served-plan identity, recorded decisions, and durable state —
+              never on output echo. No paid model call is required in CI.
+            </dd>
+          </dl>
+        </div>
+      </section>
+
+      <section id="waves">
+        <h2>Dependency and parallelization order</h2>
+        <pre>
+Wave 0   verify the handoff contract (correction plan complete; WS1 spec
+         consumed by HL-11/HL-12; friction list and metrics in hand)
+             ▼
+Wave 1   WS2 posture resolver  ∥  WS4 turn-intelligence modules
+         (package-local; neither owner edits runtime-composition.ts;
+          then one composition owner wires both serially)
+             ▼
+Wave 2   WS3 anticipated-use contract  ∥  WS5 read models
+         (learning writes the new evidence; adaptation history reads it)
+             ▼
+Wave 3   WS4 foreground registration + WS5 TUI/CLI controls
+         against the real Wave 2 read models
+             ▼
+Wave 4   WS6 seven journeys, then one focused review</pre>
+        <div class="grid">
+          <article class="card">
+            <h3>Wave 0 is a gate, not work</h3>
+            <p>
+              The original Wave 0 (the WS1 authority barrier) already ran inside
+              the correction plan. Here, Wave 0 only verifies the
+              <a href="#handoff">handoff contract</a>. Any failed postcondition
+              returns work to the correction plan; it is not patched here.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Composition serialization</h3>
+            <p>
+              In Wave 1, parallel owners build package-local modules only. After
+              both interfaces stabilize, one owner serially wires baseline
+              lookup, posture inference, retrieval executors, WorkspaceStore
+              artifacts, and <code>runtime-pi</code> registrations in
+              <code>runtime-composition.ts</code>. Changes to
+              <code>packages/agent-types</code>, <code>packages/domain</code>,
+              manifests, or the lockfile merge through a shared-contract
+              barrier.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Wave 4 review scope</h3>
+            <p>
+              Single-authority turn persistence; exact served activation and
+              prompt identity; baseline/candidate separation; protected
+              promotion and approval; scope-broadening evidence;
+              conversation-first UX; restart recovery; and honest local-preview
+              limitations. Fix material findings in the owning module, then run
+              the full repository check.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section id="verification">
+        <h2>Verification</h2>
+        <pre>
+pnpm format
+pnpm lint
+pnpm typecheck
+pnpm test</pre>
+        <p>
+          After each code-changing wave; the final gate is
+          <code>pnpm check</code>. Required focused test classes:
+        </p>
+        <ul>
+          <li>
+            pure posture, override, scope, and prompt-selection decision tests;
+          </li>
+          <li>
+            WorkspaceStore transaction, migration, cutover, backup/restore, and
+            recovery tests;
+          </li>
+          <li>
+            policy/effect restart tests for grant and cost budgets,
+            idempotency-key collisions, exact completed replay, receipt lineage,
+            and unresolved reservations failing closed — all against the
+            SQLite-backed, receipt-bearing ports (no test consults operational
+            JSONL);
+          </li>
+          <li>
+            immutable prompt/revision identity tests, extending the HL-02
+            served-plan assertions;
+          </li>
+          <li>
+            fake Pi adapter tests for session tools (and generated tools only if
+            restored under the WS4 condition);
+          </li>
+          <li>
+            application-level fake composition tests proving turn-scoped
+            retrieval injection, WorkspaceStore artifact recording, and
+            protected mediation;
+          </li>
+          <li>
+            automatic no-change, narrow-learning, broadening, and secret-data
+            tests;
+          </li>
+          <li>
+            baseline/candidate paired preflight and protected-rail tests, with
+            the held-out protected suite populated (HL-16) and judge abstention
+            exercised (HL-17);
+          </li>
+          <li>
+            first-turn activation, later-turn use, unrelated-turn abstention,
+            and revert tests;
+          </li>
+          <li>
+            compounding-metrics regression: the four HL-10 metrics keep
+            producing values through every wave, and a seeded regression still
+            lowers the win rate;
+          </li>
+          <li>
+            TUI reducer, rendering, terminal-width, shutdown, and
+            conversation-control tests;
+          </li>
+          <li>
+            fault injection around admission, role timeout, queue lease,
+            activation publication, and effect reservation.
+          </li>
+        </ul>
+      </section>
+
+      <section id="nongoals">
+        <h2>Explicit non-goals</h2>
+        <ul>
+          <li>Finalizing persona segmentation or claiming broad market fit.</li>
+          <li>Building mode-selection screens or requiring mode commands.</li>
+          <li>
+            Finalizing implicit-feedback classifiers or universal
+            collaboration-posture heuristics.
+          </li>
+          <li>
+            Choosing a permanent continuity unit or injecting all prior context.
+          </li>
+          <li>
+            Finalizing activation thresholds, quality metrics, evaluation
+            rubrics, judge ensembles, or statistical policies beyond the four
+            provisional compounding metrics already running.
+          </li>
+          <li>Adding web, mobile, messaging, voice, or other interfaces.</li>
+          <li>
+            Replacing Pi as the turn executor or allowing Pi types outside
+            <code>packages/runtime-pi</code>.
+          </li>
+          <li>
+            Making the TUI, generated content, or activity history
+            authoritative.
+          </li>
+          <li>
+            Moving protected promotion, permission, evaluation integrity, or
+            rollback into prompts or generated code.
+          </li>
+          <li>
+            Restoring <code>packages/tool-runtime</code> without a proven
+            foreground consumer, or claiming its local child process is a
+            production security boundary if restored.
+          </li>
+          <li>
+            Broadening scheduler surfaces or unrelated platform capabilities.
+          </li>
+          <li>
+            Re-executing any correction-plan task, or weakening any
+            correction-plan postcondition (verified receipts at the deep
+            protected adapter, single authority, metric continuity) in the
+            course of implementing a workstream.
+          </li>
+        </ul>
+      </section>
+
+      <section id="done">
+        <h2>Definition of done</h2>
+        <div class="callout good">
+          <p>
+            The iteration is done when the fake application begins from a fresh
+            workspace, resolves collaboration posture without a mandatory mode,
+            completes useful work, ambiently chooses between no change and a
+            narrow anticipated-use learning, activates a passing low-risk
+            revision through protected authority, serves that exact revision in
+            a later relevant turn, and lets the user understand, contest, and
+            revert the change conversationally.
+          </p>
+        </div>
+        <p>At the same time:</p>
+        <ul>
+          <li>every new operational turn has one SQLite authority;</li>
+          <li>
+            every served behavior resolves to immutable revisions pinned before
+            execution;
+          </li>
+          <li>fresh and resumed work use the same path;</li>
+          <li>unrelated turns do not receive the adaptation;</li>
+          <li>
+            no generated role can activate, approve, mint authority, or rewrite
+            evidence;
+          </li>
+          <li>failure and restart tests preserve unambiguous outcomes;</li>
+          <li>
+            the four compounding metrics still compute over real turns, so the
+            product's central claim remains measurable after every change this
+            plan makes; and
+          </li>
+          <li>
+            <code>pnpm check</code> passes without credentials or paid model
+            calls.
+          </li>
+        </ul>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        Noesis · compounding partnership product loop · supersedes the markdown
+        draft of this plan.
+      </p>
+      <p class="muted">
+        Sequenced after
+        <a href="noesis-high-leverage-correction-plan.html"
+          >the high-leverage correction plan</a>; builds on
+        <a href="noesis-autonomous-compounding-implementation-plan.html"
+          >the autonomous compounding implementation plan</a>.
+      </p>
+    </footer>
+  </body>
+</html>

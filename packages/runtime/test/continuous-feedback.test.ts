@@ -11,14 +11,16 @@ import {
   type EvidenceRevisionRef,
   type FileRevisionRef,
 } from "@noesis/domain";
-import { createExperienceLedger } from "@noesis/ledger";
-import { createAuthorityBoundary, type AuthorityBoundary } from "@noesis/policy";
 import {
   createWorkspaceStore,
   type NoesisWorkspaceStore,
   type WorkspaceStoreOptions,
 } from "@noesis/workspace";
-import { describe, expect, test, vi } from "vitest";
+import {
+  createWorkspaceRuntimeInternals,
+  type ProtectedWorkspaceRuntime,
+} from "../../workspace/src/protected-runtime.ts";
+import { describe, expect, test } from "vitest";
 import {
   createAtomicActivationController,
   createContinuousFeedbackController,
@@ -50,12 +52,6 @@ const config = (minimumEvidence = 3): ContinuousFeedbackConfig =>
       failedOutcome: true,
     }),
   });
-
-async function authorityFor(path: string): Promise<AuthorityBoundary> {
-  const ledger = createExperienceLedger(path);
-  await ledger.initialize();
-  return createAuthorityBoundary(ledger);
-}
 
 async function definition(
   workspace: NoesisWorkspaceStore,
@@ -128,7 +124,7 @@ async function revision(
 interface FeedbackFixture {
   readonly root: string;
   readonly workspace: NoesisWorkspaceStore;
-  readonly authority: AuthorityBoundary;
+  readonly protectedRuntime: ProtectedWorkspaceRuntime;
   readonly resolver: ActivationCandidateResolver;
   readonly revisions: Map<string, CapabilityRevision>;
   readonly capabilityId: string;
@@ -138,7 +134,7 @@ interface FeedbackFixture {
 }
 
 async function activate(
-  fixture: Pick<FeedbackFixture, "workspace" | "authority" | "resolver" | "revisions">,
+  fixture: Pick<FeedbackFixture, "workspace" | "protectedRuntime" | "resolver" | "revisions">,
   experimentId: string,
   baseline: CapabilityRevision,
   candidate: CapabilityRevision,
@@ -264,7 +260,7 @@ async function activate(
   });
   const controller = createAtomicActivationController({
     workspace,
-    authority: fixture.authority,
+    protectedRuntime: fixture.protectedRuntime,
     candidates: fixture.resolver,
     autonomy,
   });
@@ -282,7 +278,7 @@ async function createFixture(
 ): Promise<FeedbackFixture> {
   const root = await mkdtemp(join(tmpdir(), "noesis-ac-10-"));
   const workspace = await createWorkspaceStore(root, options.storeOptions);
-  const authority = await authorityFor(join(root, "authority"));
+  const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
   const revisions = new Map<string, CapabilityRevision>();
   const resolver: ActivationCandidateResolver = Object.freeze({
     resolve: async (reference: CapabilityRevisionRef) => revisions.get(canonicalJson(reference)),
@@ -305,14 +301,14 @@ async function createFixture(
   );
   const baseline = await revision(workspace, capabilityId, "r1", "r0", options.baselineEffects ?? ["read"]);
   const candidate = await revision(workspace, capabilityId, "r2", "r1", options.candidateEffects ?? ["read"]);
-  const partial = { workspace, authority, resolver, revisions };
+  const partial = { workspace, protectedRuntime, resolver, revisions };
   await activate(partial, "experiment-baseline-materialization", rootRevision, baseline);
   const experimentId = "experiment-feedback";
   await activate(partial, experimentId, baseline, candidate);
   return Object.freeze({
     root,
     workspace,
-    authority,
+    protectedRuntime,
     resolver,
     revisions,
     capabilityId,
@@ -336,7 +332,7 @@ async function pinTurn(fixture: FeedbackFixture, turnId: string): Promise<void> 
       metadata: Object.freeze({}),
     }),
   );
-  await fixture.workspace.protectedActivations.pinTurn({
+  await fixture.protectedRuntime.activations.pinTurn({
     sessionId: "session-feedback",
     turnId,
   });
@@ -361,7 +357,7 @@ function controller(
 ) {
   return createContinuousFeedbackController({
     workspace: fixture.workspace,
-    authority: fixture.authority,
+    protectedRuntime: fixture.protectedRuntime,
     capabilities: fixture.resolver,
     judge: outcomeJudge,
     config: feedbackConfig,
@@ -396,9 +392,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     expect(first[0]).toMatchObject({ status: "observing", experimentId: fixture.experimentId });
     const duplicate = await feedback.observeTurnOutcome(observationInput(fixture, "turn-1"));
     expect(duplicate[0]).toMatchObject({ status: "observing" });
-    expect(await fixture.workspace.protectedFeedback.listObservations(fixture.experimentId, 8)).toHaveLength(
-      1,
-    );
+    expect(await fixture.protectedRuntime.feedback.listObservations(fixture.experimentId, 8)).toHaveLength(1);
     await pinTurn(fixture, "turn-unrelated");
     await expect(
       feedback.observeTurnOutcome(
@@ -426,16 +420,14 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     );
     expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "keep" } });
     expect(
-      (await fixture.workspace.protectedActivations.current())?.activeCapabilityRevisions[
-        fixture.capabilityId
-      ],
+      (await fixture.protectedRuntime.activations.current())?.activeCapabilityRevisions[fixture.capabilityId],
     ).toEqual(capabilityRevisionRef(fixture.candidate));
   });
 
   test("revise creates a durable successor lineage input without activation", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-revise");
-    const before = await fixture.workspace.protectedActivations.current();
+    const before = await fixture.protectedRuntime.activations.current();
     const result = await controller(fixture, judge("revise"), config(1)).observeTurnOutcome(
       observationInput(fixture, "turn-revise"),
     );
@@ -443,7 +435,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       status: "resolved",
       outcome: { decision: "revise", successorExperimentId: expect.any(String) },
     });
-    const lineage = await fixture.workspace.protectedFeedback.getSuccessorInput(fixture.experimentId);
+    const lineage = await fixture.protectedRuntime.feedback.getSuccessorInput(fixture.experimentId);
     expect(lineage).toMatchObject({
       predecessorExperimentId: fixture.experimentId,
       predecessorRevision: capabilityRevisionRef(fixture.candidate),
@@ -456,7 +448,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       candidateRevisions: [],
       baselineRevision: capabilityRevisionRef(fixture.candidate),
     });
-    expect(await fixture.workspace.protectedActivations.current()).toEqual(before);
+    expect(await fixture.protectedRuntime.activations.current()).toEqual(before);
   });
 
   test("explicit correction overrides a judge keep proposal", async () => {
@@ -479,7 +471,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
 
   test("a hard regression automatically reverts to the exact prior snapshot and restart is idempotent", async () => {
     const fixture = await createFixture();
-    const priorOperation = (await fixture.workspace.protectedActivations.listOperations(100)).find(
+    const priorOperation = (await fixture.protectedRuntime.activations.listOperations(100)).find(
       (operation) => operation.binding.experimentId === fixture.experimentId,
     );
     const prior = await fixture.workspace.operational.activations.get(
@@ -494,7 +486,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       }),
     );
     expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "revert" } });
-    const restored = await fixture.workspace.protectedActivations.current();
+    const restored = await fixture.protectedRuntime.activations.current();
     expect(restored?.activeDefinitions).toEqual(prior?.activeDefinitions);
     expect(restored?.activeCapabilityRevisions).toEqual(prior?.activeCapabilityRevisions);
     const restoredRevision = restored?.revision;
@@ -502,7 +494,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     const reopened = await createWorkspaceStore(fixture.root);
     const restarted = createContinuousFeedbackController({
       workspace: reopened,
-      authority: await authorityFor(join(fixture.root, "restart-authority")),
+      protectedRuntime: createWorkspaceRuntimeInternals(reopened).protectedRuntime,
       capabilities: fixture.resolver,
       judge: judge(),
       config: config(),
@@ -511,7 +503,9 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       status: "resolved",
       outcome: { decision: "revert" },
     });
-    expect((await reopened.protectedActivations.current())?.revision).toBe(restoredRevision);
+    expect(
+      (await createWorkspaceRuntimeInternals(reopened).protectedRuntime.activations.current())?.revision,
+    ).toBe(restoredRevision);
   });
 
   test.each([
@@ -533,7 +527,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     ],
   ] as const)("%s-transaction failure exposes neither outcome nor partial restore", async (_name, storeOptions) => {
     const fixture = await createFixture({ storeOptions });
-    const candidateActivation = await fixture.workspace.protectedActivations.current();
+    const candidateActivation = await fixture.protectedRuntime.activations.current();
     await pinTurn(fixture, `turn-${_name}`);
     await expect(
       controller(fixture).observeTurnOutcome(
@@ -544,8 +538,8 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
         }),
       ),
     ).rejects.toThrow();
-    expect(await fixture.workspace.protectedFeedback.getOutcome(fixture.experimentId)).toBeUndefined();
-    expect(await fixture.workspace.protectedActivations.current()).toEqual(candidateActivation);
+    expect(await fixture.protectedRuntime.feedback.getOutcome(fixture.experimentId)).toBeUndefined();
+    expect(await fixture.protectedRuntime.activations.current()).toEqual(candidateActivation);
     expect(await fixture.workspace.research.experiments.getExperiment(fixture.experimentId)).toMatchObject({
       status: "observing",
     });
@@ -569,7 +563,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     );
     expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "revert" } });
     expect(
-      (await fixture.workspace.protectedActivations.listOperations()).filter(
+      (await fixture.protectedRuntime.activations.listOperations()).filter(
         (operation) => operation.binding.experimentId === fixture.experimentId,
       ),
     ).toHaveLength(1);
@@ -581,7 +575,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     const otherRoot = await revision(fixture.workspace, "other-capability", "other-r0", undefined);
     const otherCandidate = await revision(fixture.workspace, "other-capability", "other-r1", "other-r0");
     await activate(fixture, "experiment-other", otherRoot, otherCandidate);
-    const unrelated = await fixture.workspace.protectedActivations.current();
+    const unrelated = await fixture.protectedRuntime.activations.current();
     const result = await controller(fixture).observeTurnOutcome(
       observationInput(fixture, "turn-stale", {
         status: "failed",
@@ -590,7 +584,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       }),
     );
     expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "revert" } });
-    const restored = await fixture.workspace.protectedActivations.current();
+    const restored = await fixture.protectedRuntime.activations.current();
     expect(restored?.activeCapabilityRevisions[fixture.capabilityId]).toEqual(
       capabilityRevisionRef(fixture.baseline),
     );
@@ -624,7 +618,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
 
     const root = await mkdtemp(join(tmpdir(), "noesis-ac-10-unrecorded-"));
     const workspace = await createWorkspaceStore(root);
-    const authority = await authorityFor(join(root, "authority"));
+    const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
     const revisions = new Map<string, CapabilityRevision>();
     const resolver: ActivationCandidateResolver = Object.freeze({
       resolve: async (reference: CapabilityRevisionRef) => revisions.get(canonicalJson(reference)),
@@ -634,11 +628,16 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     });
     const base = await revision(workspace, "single", "single-r0", undefined);
     const candidate = await revision(workspace, "single", "single-r1", "single-r0");
-    await activate({ workspace, authority, resolver, revisions }, "single-experiment", base, candidate);
+    await activate(
+      { workspace, protectedRuntime, resolver, revisions },
+      "single-experiment",
+      base,
+      candidate,
+    );
     const single = Object.freeze({
       root,
       workspace,
-      authority,
+      protectedRuntime,
       resolver,
       revisions,
       capabilityId: "single",
@@ -715,20 +714,17 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       first.observeTurnOutcome(observationInput(fixture, "turn-ambiguous-lease")),
     ).resolves.toMatchObject([{ status: "research_failed" }]);
     const job = (await fixture.workspace.jobs.list({ kind: "runtime.outcome_judge" }))[0];
-    const run = (await fixture.workspace.protectedFeedback.listResearchRuns(fixture.experimentId))[0];
+    const run = (await fixture.protectedRuntime.feedback.listResearchRuns(fixture.experimentId))[0];
     if (!job || !run) throw new Error("Expected durable outcome job and research run");
-    await fixture.workspace.protectedFeedback.putResearchRun({
-      runId: run.runId,
-      experimentId: run.experimentId,
-      strategyId: run.strategyId,
-      inputDigest: run.inputDigest,
-      status: "running",
-      citedObservationIds: Object.freeze([]),
-      evidenceRefs: Object.freeze([]),
-      attempt: 1,
-      retryable: false,
-    });
     const database = new DatabaseSync(fixture.workspace.unsafeDatabasePathForTesting);
+    database
+      .prepare(
+        `UPDATE experiment_research_runs
+         SET status = 'running', proposal = NULL, failure_message = NULL,
+             retryable = 0, attempt = 1
+         WHERE run_id = ?`,
+      )
+      .run(run.runId);
     database
       .prepare(
         `UPDATE jobs SET status = 'running', lease_owner = 'crashed-worker',

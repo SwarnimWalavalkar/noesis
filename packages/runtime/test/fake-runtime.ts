@@ -5,6 +5,7 @@ import type {
   AgentRuntimeResult,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
+import { validateFrozenTurnPlan } from "@noesis/agent-types";
 
 /** Adapter-neutral deterministic runtime used by the runtime package's acceptance suite. */
 export function createFakeAgentRuntime(): NoesisAgentRuntime {
@@ -13,6 +14,11 @@ export function createFakeAgentRuntime(): NoesisAgentRuntime {
     request: AgentRuntimeRequest,
     emit: (event: AgentRuntimeEvent) => void,
   ): Promise<AgentRuntimeResult> => {
+    if (request.frozenTurnPlan) {
+      const plan = validateFrozenTurnPlan(request.frozenTurnPlan);
+      if (plan.sessionId !== request.trailId || plan.renderedSystemPrompt !== request.systemPrompt)
+        throw new Error(`Runtime request does not match frozen turn plan ${plan.planId}`);
+    }
     if (active.has(request.trailId)) throw new Error(`Trail ${request.trailId} is already active`);
     const controller = new AbortController();
     active.set(request.trailId, controller);
@@ -20,11 +26,7 @@ export function createFakeAgentRuntime(): NoesisAgentRuntime {
       const contextWindow = 8_000;
       emit({ type: "model", provider: "fake", model: request.model, contextWindow });
       emit({ type: "status", status: "started" });
-      const skills =
-        request.activeCapabilities.length === 0
-          ? "no promoted skills"
-          : `skills ${request.activeCapabilities.map((item) => `${item.name}@${item.version}`).join(", ")}`;
-      const text = `Fake completion for: ${request.prompt} [using ${skills}]`;
+      const text = `Fake completion for: ${request.prompt}`;
       let rendered = "";
       for (const word of text.split(" ")) {
         if (controller.signal.aborted) {

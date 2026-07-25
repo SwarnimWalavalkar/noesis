@@ -58,7 +58,6 @@ describe("integrated compounding loop", () => {
     const result = await runtime.runTurn(later.trailId, "Create the next brief");
 
     expect(result.usedCapabilities).toEqual({ [candidate.name]: candidate.version });
-    expect(result.output).toContain(`${candidate.name}@${candidate.version}`);
     expect(runtime.ledger.findByType("capability.used")).toHaveLength(1);
   });
 

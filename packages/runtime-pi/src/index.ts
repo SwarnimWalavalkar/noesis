@@ -8,11 +8,11 @@ import type {
   AgentRuntimeResult,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
+import { validateFrozenTurnPlan } from "@noesis/agent-types";
 import { z } from "zod";
 
 export * from "./auth.ts";
 export * from "./experiment-fixtures.ts";
-export * from "./generated-tool-broker.ts";
 export * from "./pi-role-backend.ts";
 export * from "./role-context.ts";
 export * from "./role-runner.ts";
@@ -36,6 +36,19 @@ function assistantText(message: { readonly content: readonly unknown[] }): strin
       return typeof part.text === "string" ? [part.text] : [];
     })
     .join("");
+}
+
+function verifyFrozenRequest(request: AgentRuntimeRequest): void {
+  if (!request.frozenTurnPlan) return;
+  const plan = validateFrozenTurnPlan(request.frozenTurnPlan);
+  if (
+    plan.sessionId !== request.trailId ||
+    plan.provider !== request.provider ||
+    plan.model !== request.model ||
+    plan.thinkingLevel !== request.thinkingLevel ||
+    plan.renderedSystemPrompt !== request.systemPrompt
+  )
+    throw new Error(`Runtime request does not match frozen turn plan ${plan.planId}`);
 }
 
 export interface AssistantDeltaAggregator {
@@ -76,6 +89,7 @@ export function createFakeAgentRuntime(): FakeAgentRuntime {
     request: AgentRuntimeRequest,
     emit: (event: AgentRuntimeEvent) => void,
   ): Promise<AgentRuntimeResult> => {
+    verifyFrozenRequest(request);
     if (active.has(request.trailId)) throw new Error(`Trail ${request.trailId} is already active`);
     const controller = new AbortController();
     active.set(request.trailId, controller);
@@ -83,11 +97,7 @@ export function createFakeAgentRuntime(): FakeAgentRuntime {
       const contextWindow = 8_000;
       emit({ type: "model", provider: "fake", model: request.model, contextWindow });
       emit({ type: "status", status: "started" });
-      const skills =
-        request.activeCapabilities.length === 0
-          ? "no promoted skills"
-          : `skills ${request.activeCapabilities.map((item) => `${item.name}@${item.version}`).join(", ")}`;
-      const text = `Fake completion for: ${request.prompt} [using ${skills}]`;
+      const text = `Fake completion for: ${request.prompt}`;
       let rendered = "";
       for (const word of text.split(" ")) {
         if (controller.signal.aborted) {
@@ -173,6 +183,7 @@ export function createPiAgentRuntime(cwd: string, models: MutableModels): PiAgen
     request: AgentRuntimeRequest,
     emit: (event: AgentRuntimeEvent) => void,
   ): Promise<AgentRuntimeResult> => {
+    verifyFrozenRequest(request);
     if (active.has(request.trailId)) throw new Error(`Trail ${request.trailId} is already active`);
     const execution: ActivePiExecution = {};
     active.set(request.trailId, execution);

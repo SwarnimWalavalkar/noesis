@@ -5,7 +5,6 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   ArtifactFileRefSchema,
   CapabilityRevisionRefSchema,
-  canonicalJson,
   declaredAuthorityFor,
   EvaluationRecordSchema,
   EvidenceRefSchema,
@@ -13,6 +12,8 @@ import {
   ExperimentTrialSchema,
   FeedbackSignalSchema,
   FileRevisionRefSchema,
+  GrantSchema,
+  LedgerEventSchema,
   isExperimentTransitionAllowed,
   PreflightPlanSchema,
   preflightReportMatchesPlan,
@@ -40,11 +41,15 @@ import {
   type ExperimentTrial,
   type FeedbackSignal,
   type FileRevisionRef,
+  type LedgerEvent,
   type PreflightPlan,
   type PreflightReport,
 } from "@noesis/domain";
 import { z } from "zod";
+import { createProtectedActivationStore } from "./activation-store.ts";
 import { createBackup, inspectWorkspaceIntegrity } from "./backup.ts";
+import { createWorkspaceAuthorityBoundary } from "./authority-state.ts";
+import { createCompoundingMeasurementStore } from "./compounding-measurements.ts";
 import {
   openWorkspaceDatabase,
   optionalString,
@@ -53,6 +58,27 @@ import {
   requiredString,
   type WorkspaceDatabase,
 } from "./database.ts";
+import {
+  decodeActivation,
+  decodeActivationPointer,
+  decodeExperiment,
+  decodeFeedbackSignal,
+  decodeFileRevisionRef,
+  decodeJob,
+  decodeMessage,
+  decodeOptional,
+  decodeOutcome,
+  decodeSearchConfiguration,
+  decodeSearchDocument,
+  decodeSession,
+  decodeStored,
+  decodeToolCall,
+  decodeVector,
+  JsonRecordSchema,
+  SearchConfigurationSchema,
+  SensitivitySchema,
+} from "./decoders.ts";
+import { createProtectedFeedbackStore } from "./feedback-store.ts";
 import { importLegacyWorkspace } from "./importer.ts";
 import { createDurableJobStore } from "./jobs.ts";
 import {
@@ -62,22 +88,16 @@ import {
   workspacePaths,
   workspaceRelative,
 } from "./paths.ts";
+import { createProtectedWorkspaceRuntime, registerWorkspaceRuntimeInternals } from "./protected-runtime.ts";
 import type {
-  ActivationApprovalRecord,
-  ActivationEvidenceBinding,
-  ActivationMaterializationRecord,
-  ActivationOperationRecord,
   ActivationPointerRecord,
   ActivationRecord,
   CanonicalSearchSource,
-  CommitExperimentOutcomeRequest,
-  ExperimentObservationRecord,
-  ExperimentOutcomeOperationRecord,
-  ExperimentResearchRunRecord,
   JobRecord,
   MessageRecord,
   NoesisWorkspaceStore,
   OutcomeRecord,
+  OperationalCutoverReport,
   SearchCandidate,
   SearchConfiguration,
   SearchDocument,
@@ -85,8 +105,6 @@ import type {
   StageDefinitionRequest,
   StagedDefinition,
   ToolCallRecord,
-  TurnActivationPinRecord,
-  SuccessorLineageInputRecord,
   WorkspacePaths,
 } from "./types.ts";
 
@@ -102,45 +120,11 @@ export interface WorkspaceStoreOptions {
   readonly afterOutcomeCommitForTesting?: () => void;
 }
 
-const JsonRecordSchema = z.record(z.string(), z.unknown());
 const ActorSchema = z.strictObject({
   actorId: z.string().min(1),
   kind: z.enum(["user", "noesis", "external_system", "system"]),
 });
-const SearchConfigurationSchema = z.strictObject({
-  lexicalLimit: z.number().int().min(1).max(1000),
-  semanticLimit: z.number().int().min(0).max(1000),
-  rerankLimit: z.number().int().min(0).max(100),
-  maxExcerptChars: z.number().int().min(32).max(8000),
-  includePrivate: z.boolean(),
-  updatedAt: z.string().min(1),
-});
-const SensitivitySchema = z.enum(["normal", "private", "secret"]);
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-const ActivationEvidenceBindingSchema = z.strictObject({
-  experimentId: z.string().min(1),
-  candidateRevision: CapabilityRevisionRefSchema,
-  manifestRevision: FileRevisionRefSchema,
-  preflightId: z.string().min(1),
-  planId: z.string().min(1),
-  candidateDigest: DigestSchema,
-  manifestDigest: DigestSchema,
-  suiteDigest: DigestSchema,
-  preflightDigest: DigestSchema,
-  reportDigest: DigestSchema,
-  definitionSetDigest: DigestSchema,
-  controlRevisionId: z.string().min(1).nullable(),
-});
-const ActivationPolicyDecisionSchema = z.enum(["block", "approval_required", "eligible_auto_activate"]);
-const ActivationOperationStatusSchema = z.enum([
-  "blocked",
-  "staged",
-  "pending_approval",
-  "approved",
-  "rejected",
-  "committed",
-]);
-const ActivationPolicySnapshotSchema = z.record(z.string(), z.unknown());
 
 const databaseRef = <Table extends DatabaseTable>(table: Table, rowId: string): DatabaseRowRef<Table> => ({
   kind: "database_row",
@@ -224,6 +208,7 @@ export async function createWorkspaceStore(
   const createId = options.createId ?? ((prefix: string) => `${prefix}_${randomUUID()}`);
   const database = await openWorkspaceDatabase(paths, now);
   const db = database.connection;
+  const authority = createWorkspaceAuthorityBoundary(database, now);
 
   const recordActivity = (
     actor: ActorRef,
@@ -675,6 +660,7 @@ export async function createWorkspaceStore(
   const jobs = createDurableJobStore(database, recordActivity, (reference) =>
     assertStoredReference(db, reference),
   );
+  const compoundingMeasurements = createCompoundingMeasurementStore(database, now);
   const definitionMetadataRepository = createDefinitionMetadataRepository(database, recordActivity, now);
   const definitionMetadata: DefinitionMetadataPort = Object.freeze({
     getCurrent: definitionMetadataRepository.getCurrent,
@@ -892,1364 +878,210 @@ export async function createWorkspaceStore(
         });
   };
 
-  const decodeActivationApproval = (row: unknown): ActivationApprovalRecord => {
-    const decidedAt = optionalString(row, "decided_at");
-    const decisionActor = optionalString(row, "decision_actor");
-    return Object.freeze({
-      approvalId: requiredString(row, "approval_id"),
-      operationId: requiredString(row, "operation_id"),
-      bindingDigest: DigestSchema.parse(requiredString(row, "binding_digest")),
-      policyDigest: DigestSchema.parse(requiredString(row, "policy_digest")),
-      status: z.enum(["pending", "approved", "rejected"]).parse(requiredString(row, "status")),
-      requestedAt: requiredString(row, "requested_at"),
-      ...(decidedAt === undefined ? {} : { decidedAt }),
-      ...(decisionActor === undefined ? {} : { decisionActor }),
-    });
-  };
-
-  const materializationsFor = (operationId: string): readonly ActivationMaterializationRecord[] =>
-    Object.freeze(
-      db
-        .prepare(
-          `SELECT slot_key, stage_id, source_revision_json, active_revision_json, published
-           FROM activation_materializations WHERE operation_id = ? ORDER BY slot_key`,
-        )
-        .all(operationId)
-        .map((row) =>
-          Object.freeze({
-            slotKey: requiredString(row, "slot_key"),
-            stageId: requiredString(row, "stage_id"),
-            sourceRevision: FileRevisionRefSchema.parse(
-              parseJson(requiredString(row, "source_revision_json")),
-            ),
-            activeRevision: FileRevisionRefSchema.parse(
-              parseJson(requiredString(row, "active_revision_json")),
-            ),
-            published: requiredNumber(row, "published") === 1,
-          }),
-        ),
-    );
-
-  const decodeActivationOperation = (row: unknown): ActivationOperationRecord => {
-    const operationId = requiredString(row, "operation_id");
-    const approvalId = optionalString(row, "approval_id");
-    const committedAt = optionalString(row, "committed_at");
-    const supersededByOperationId = optionalString(row, "superseded_by_operation_id");
-    return Object.freeze({
-      operationId,
-      idempotencyKey: requiredString(row, "idempotency_key"),
-      activationId: requiredString(row, "activation_id"),
-      binding: ActivationEvidenceBindingSchema.parse(
-        parseJson(requiredString(row, "binding_json")),
-      ) as ActivationEvidenceBinding,
-      bindingDigest: DigestSchema.parse(requiredString(row, "binding_digest")),
-      policySnapshot: Object.freeze(
-        ActivationPolicySnapshotSchema.parse(parseJson(requiredString(row, "policy_snapshot_json"))),
-      ),
-      policyDigest: DigestSchema.parse(requiredString(row, "policy_digest")),
-      decision: ActivationPolicyDecisionSchema.parse(requiredString(row, "decision")),
-      status: ActivationOperationStatusSchema.parse(requiredString(row, "status")),
-      expectedActivationRevision: requiredNumber(row, "expected_activation_revision"),
-      previousActivationId: optionalString(row, "previous_activation_id") ?? null,
-      ...(approvalId === undefined ? {} : { approvalId }),
-      ...(supersededByOperationId === undefined ? {} : { supersededByOperationId }),
-      materializations: materializationsFor(operationId),
-      createdAt: requiredString(row, "created_at"),
-      updatedAt: requiredString(row, "updated_at"),
-      ...(committedAt === undefined ? {} : { committedAt }),
-    });
-  };
-
-  const getActivationOperation = async (
-    operationId: string,
-  ): Promise<ActivationOperationRecord | undefined> =>
-    decodeOptional(
-      db.prepare("SELECT * FROM activation_operations WHERE operation_id = ?").get(operationId),
-      decodeActivationOperation,
-    );
-
-  const currentActivation = async (): Promise<ActivationRecord | undefined> => {
-    const state = db.prepare("SELECT activation_id FROM activation_state WHERE state_id = 'current'").get();
-    if (state === undefined) return undefined;
-    return decodeOptional(
-      db
-        .prepare("SELECT * FROM activations WHERE activation_id = ?")
-        .get(requiredString(state, "activation_id")),
-      decodeActivation,
-    );
-  };
-
-  const currentActivationIdentity = (): {
-    readonly revision: number;
-    readonly activationId: string | null;
-  } => {
-    const state = db
-      .prepare("SELECT activation_id, revision FROM activation_state WHERE state_id = 'current'")
-      .get();
-    return state === undefined
-      ? Object.freeze({ revision: 0, activationId: null })
-      : Object.freeze({
-          revision: requiredNumber(state, "revision"),
-          activationId: requiredString(state, "activation_id"),
-        });
-  };
-
-  const currentCapabilityControlRevision = (capabilityId: string): string | undefined => {
-    const row = db
-      .prepare(
-        `SELECT definition_revision_id FROM definition_current_pointers
-         WHERE namespace = 'capability_control' AND definition_id = ?`,
-      )
-      .get(capabilityId);
-    return row === undefined ? undefined : requiredString(row, "definition_revision_id");
-  };
-
-  const materializeActivationStage = async (input: {
-    readonly operationId: string;
-    readonly slotKey: string;
-    readonly stageId: string;
-    readonly sourceRevision: FileRevisionRef;
-  }): Promise<ActivationMaterializationRecord> => {
-    FileRevisionRefSchema.parse(input.sourceRevision);
-    assertStoredReference(db, input.sourceRevision);
-    const row = db.prepare("SELECT * FROM staged_definitions WHERE stage_id = ?").get(input.stageId);
-    if (row === undefined) throw new Error(`Unknown activation stage ${input.stageId}`);
-    if (requiredString(row, "target_area") !== "active")
-      throw new Error(`Activation stage ${input.stageId} is not inert active material`);
-    const bytes = await readVerifiedFile(
-      requiredString(row, "staged_path"),
-      requiredString(row, "content_digest"),
-    );
-    const sourceBytes = await readVerifiedFile(
-      input.sourceRevision.snapshotPath,
-      input.sourceRevision.contentDigest,
-    );
-    if (sha256(bytes) !== sha256(sourceBytes))
-      throw new Error(`Activation stage ${input.stageId} differs from its pinned source revision`);
-    const registered = optionalString(row, "registered_revision_id");
-    const activeRevision = registered
-      ? await resolveRevision(registered)
-      : await recordDefinitionBytes(
-          {
-            workingPath: requiredString(row, "relative_path"),
-            bytes,
-            actor: ActorSchema.parse({
-              actorId: requiredString(row, "actor_id"),
-              kind: requiredString(row, "actor_kind"),
-            }),
-            reason: `AC-09 inert materialization for ${input.operationId}`,
-            sensitivity: "normal",
-            provenanceRefs: Object.freeze([input.sourceRevision]),
-          },
-          "active",
-          "active",
-          false,
-          input.stageId,
-        );
-    if (!activeRevision || activeRevision.contentDigest !== input.sourceRevision.contentDigest)
-      throw new Error(`Activation stage ${input.stageId} did not materialize exact immutable bytes`);
-    return Object.freeze({
-      slotKey: input.slotKey,
-      stageId: input.stageId,
-      sourceRevision: Object.freeze({ ...input.sourceRevision }),
-      activeRevision: Object.freeze({ ...activeRevision }),
-      published: false,
-    });
-  };
-
-  const publishCommittedOperation = async (operationId: string): Promise<number> => {
-    const operation = await getActivationOperation(operationId);
-    if (!operation || operation.status !== "committed") return 0;
-    let published = 0;
-    for (const materialization of operation.materializations) {
-      if (materialization.published) continue;
-      const bytes = await readVerifiedFile(
-        materialization.activeRevision.snapshotPath,
-        materialization.activeRevision.contentDigest,
-      );
-      await persistAtomically(pathsForDefinition(materialization.activeRevision.workingPath).absolute, bytes);
-      database.transaction(() => {
-        db.prepare(
-          `UPDATE activation_materializations SET published = 1
-           WHERE operation_id = ? AND slot_key = ?`,
-        ).run(operationId, materialization.slotKey);
-      });
-      published += 1;
-    }
-    return published;
-  };
-
-  const prepareActivation = async (
-    request: Parameters<NoesisWorkspaceStore["protectedActivations"]["prepare"]>[0],
-  ): Promise<ActivationOperationRecord> => {
-    const binding = ActivationEvidenceBindingSchema.parse(request.binding);
-    const policySnapshot = ActivationPolicySnapshotSchema.parse(request.policySnapshot);
-    const decision = ActivationPolicyDecisionSchema.parse(request.decision);
-    if (request.bindingDigest !== sha256(canonicalJson(binding)))
-      throw new Error("Activation binding digest does not match its canonical evidence binding");
-    if (request.policyDigest !== sha256(canonicalJson(policySnapshot)))
-      throw new Error("Activation policy digest does not match its immutable snapshot");
-    if (
-      binding.candidateDigest !== binding.candidateRevision.bundleDigest ||
-      binding.manifestDigest !== binding.manifestRevision.contentDigest
-    )
-      throw new Error("Activation evidence binding contains a mismatched candidate or manifest digest");
-    const existing = await getActivationOperation(request.operationId);
-    if (existing) {
-      if (
-        existing.idempotencyKey !== request.idempotencyKey ||
-        existing.bindingDigest !== request.bindingDigest ||
-        existing.policyDigest !== request.policyDigest ||
-        existing.decision !== decision
-      )
-        throw new Error(`Activation operation ${request.operationId} was reused with different input`);
-      return existing;
-    }
-    const current = currentActivationIdentity();
-    if (
-      current.revision !== request.expectedActivationRevision ||
-      current.activationId !== request.previousActivationId
-    )
-      throw new Error("Activation snapshot changed before staging (CAS conflict)");
-    const currentControlRevision = currentCapabilityControlRevision(binding.candidateRevision.capabilityId);
-    if ((currentControlRevision ?? null) !== binding.controlRevisionId)
-      throw new Error("Capability pin/veto controls changed before staging (CAS conflict)");
-    const slots = new Set<string>();
-    for (const staged of request.stagedDefinitions) {
-      if (!staged.slotKey || slots.has(staged.slotKey))
-        throw new Error(`Activation definition slot is missing or duplicated: ${staged.slotKey}`);
-      slots.add(staged.slotKey);
-    }
-    if (decision === "block" && request.stagedDefinitions.length !== 0)
-      throw new Error("Blocked activation decisions cannot materialize active definitions");
-    if (decision === "approval_required" && request.approvalId === undefined)
-      throw new Error("Approval-required activation is missing its stable approval identity");
-    if (decision !== "approval_required" && request.approvalId !== undefined)
-      throw new Error("Only approval-required activation may create an approval record");
-    const materializations: ActivationMaterializationRecord[] = [];
-    for (const staged of request.stagedDefinitions)
-      materializations.push(
-        await materializeActivationStage({
-          operationId: request.operationId,
-          slotKey: staged.slotKey,
-          stageId: staged.stageId,
-          sourceRevision: staged.sourceRevision,
-        }),
-      );
-    if (decision !== "block" && materializations.length === 0)
-      throw new Error("An activatable capability must materialize a complete non-empty definition set");
-    if (
-      decision !== "block" &&
-      sha256(
-        canonicalJson(materializations.map(({ slotKey, sourceRevision }) => ({ slotKey, sourceRevision }))),
-      ) !== binding.definitionSetDigest
-    )
-      throw new Error("Materialized activation slots do not match the complete bound definition set");
-    const createdAt = now();
-    const status =
-      decision === "block" ? "blocked" : decision === "approval_required" ? "pending_approval" : "staged";
-    database.transaction(() => {
-      const committedControlRevision = currentCapabilityControlRevision(
-        binding.candidateRevision.capabilityId,
-      );
-      if ((committedControlRevision ?? null) !== binding.controlRevisionId)
-        throw new Error("Capability pin/veto controls changed during staging (CAS conflict)");
-      assertStoredReference(db, binding.manifestRevision);
-      assertStoredReference(db, databaseRef("preflight_reports", binding.preflightId));
-      assertStoredReference(db, databaseRef("preflight_plans", binding.planId));
-      db.prepare(
-        `INSERT INTO activation_operations(
-          operation_id, idempotency_key, activation_id, experiment_id,
-          candidate_revision_json, manifest_revision_json, preflight_id, plan_id,
-          binding_json, binding_digest, policy_snapshot_json, policy_digest,
-          decision, status, expected_activation_revision, previous_activation_id,
-          approval_id, created_at, updated_at, committed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-      ).run(
-        request.operationId,
-        request.idempotencyKey,
-        request.activationId,
-        binding.experimentId,
-        JSON.stringify(binding.candidateRevision),
-        JSON.stringify(binding.manifestRevision),
-        binding.preflightId,
-        binding.planId,
-        JSON.stringify(binding),
-        request.bindingDigest,
-        JSON.stringify(policySnapshot),
-        request.policyDigest,
-        decision,
-        status,
-        request.expectedActivationRevision,
-        request.previousActivationId,
-        request.approvalId ?? null,
-        createdAt,
-        createdAt,
-      );
-      for (const materialization of materializations)
-        db.prepare(
-          `INSERT INTO activation_materializations(
-            operation_id, slot_key, stage_id, source_revision_json, active_revision_json, published
-          ) VALUES (?, ?, ?, ?, ?, 0)`,
-        ).run(
-          request.operationId,
-          materialization.slotKey,
-          materialization.stageId,
-          JSON.stringify(materialization.sourceRevision),
-          JSON.stringify(materialization.activeRevision),
-        );
-      if (request.approvalId)
-        db.prepare(
-          `INSERT INTO activation_approvals(
-            approval_id, operation_id, binding_digest, policy_digest, status,
-            requested_at, decided_at, decision_actor
-          ) VALUES (?, ?, ?, ?, 'pending', ?, NULL, NULL)`,
-        ).run(
-          request.approvalId,
-          request.operationId,
-          request.bindingDigest,
-          request.policyDigest,
-          createdAt,
-        );
-      recordActivity(
-        { actorId: "protected-activation", kind: "system" },
-        status === "blocked" ? "activation.blocked" : "activation.staged",
-        "activation_operation",
-        request.operationId,
-        [
-          binding.candidateRevision,
-          binding.manifestRevision,
-          databaseRef("preflight_reports", binding.preflightId),
-        ],
-      );
-    });
-    const prepared = await getActivationOperation(request.operationId);
-    if (!prepared) throw new Error(`Activation operation ${request.operationId} was not recorded`);
-    return prepared;
-  };
-
-  const decideActivationApproval = async (
-    request: Parameters<NoesisWorkspaceStore["protectedActivations"]["decideApproval"]>[0],
-  ): Promise<ActivationOperationRecord> => {
-    database.transaction(() => {
-      const approvalRow = db
-        .prepare("SELECT * FROM activation_approvals WHERE approval_id = ?")
-        .get(request.approvalId);
-      if (approvalRow === undefined) throw new Error(`Unknown activation approval ${request.approvalId}`);
-      const approval = decodeActivationApproval(approvalRow);
-      if (approval.operationId !== request.operationId || approval.bindingDigest !== request.bindingDigest)
-        throw new Error("Activation approval request does not match its exact pending binding");
-      if (approval.status !== "pending") {
-        if (approval.status !== request.decision)
-          throw new Error(`Activation approval ${request.approvalId} is already ${approval.status}`);
-        return;
-      }
-      const operationRow = db
-        .prepare("SELECT status, binding_digest FROM activation_operations WHERE operation_id = ?")
-        .get(request.operationId);
-      if (
-        operationRow === undefined ||
-        requiredString(operationRow, "status") !== "pending_approval" ||
-        requiredString(operationRow, "binding_digest") !== request.bindingDigest
-      )
-        throw new Error("Pending activation operation no longer matches its approval");
-      const decidedAt = now();
-      db.prepare(
-        `UPDATE activation_approvals SET status = ?, decided_at = ?, decision_actor = ?
-         WHERE approval_id = ?`,
-      ).run(request.decision, decidedAt, request.actorId, request.approvalId);
-      db.prepare(`UPDATE activation_operations SET status = ?, updated_at = ? WHERE operation_id = ?`).run(
-        request.decision,
-        decidedAt,
-        request.operationId,
-      );
-      recordActivity(
-        { actorId: request.actorId, kind: "user" },
-        `activation.approval_${request.decision}`,
-        "activation_approval",
-        request.approvalId,
-      );
-    });
-    const operation = await getActivationOperation(request.operationId);
-    if (!operation) throw new Error(`Activation operation ${request.operationId} disappeared`);
-    return operation;
-  };
-
-  const supersedeActivationOperation = async (request: {
-    readonly operationId: string;
-    readonly supersededByOperationId: string;
-  }): Promise<ActivationOperationRecord> => {
-    if (!request.supersededByOperationId)
-      throw new Error("A superseded activation operation requires its successor identity");
-    database.transaction(() => {
-      const row = db
-        .prepare(
-          "SELECT status, approval_id, superseded_by_operation_id FROM activation_operations WHERE operation_id = ?",
-        )
-        .get(request.operationId);
-      if (row === undefined) throw new Error(`Unknown activation operation ${request.operationId}`);
-      const status = ActivationOperationStatusSchema.parse(requiredString(row, "status"));
-      const priorSuccessor = optionalString(row, "superseded_by_operation_id");
-      if (priorSuccessor !== undefined) {
-        if (priorSuccessor !== request.supersededByOperationId)
-          throw new Error(`Activation operation ${request.operationId} has a different successor`);
-        return;
-      }
-      if (status === "committed" || status === "blocked" || status === "rejected")
-        throw new Error(`Activation operation ${request.operationId} cannot be superseded from ${status}`);
-      const timestamp = now();
-      db.prepare(
-        `UPDATE activation_operations
-         SET status = 'rejected', superseded_by_operation_id = ?, updated_at = ?
-         WHERE operation_id = ?`,
-      ).run(request.supersededByOperationId, timestamp, request.operationId);
-      const approvalId = optionalString(row, "approval_id");
-      if (approvalId)
-        db.prepare(
-          `UPDATE activation_approvals
-           SET status = 'rejected', decided_at = ?, decision_actor = 'protected-activation:stale-cas'
-           WHERE approval_id = ? AND status != 'rejected'`,
-        ).run(timestamp, approvalId);
-      recordActivity(
-        { actorId: "protected-activation", kind: "system" },
-        "activation.superseded",
-        "activation_operation",
-        request.operationId,
-        [request.supersededByOperationId],
-      );
-    });
-    const superseded = await getActivationOperation(request.operationId);
-    if (!superseded) throw new Error(`Superseded activation operation ${request.operationId} disappeared`);
-    return superseded;
-  };
-
-  const commitActivation = async (
-    request: Parameters<NoesisWorkspaceStore["protectedActivations"]["commit"]>[0],
-  ): Promise<ActivationOperationRecord> => {
-    const before = await getActivationOperation(request.operationId);
-    if (!before) throw new Error(`Unknown activation operation ${request.operationId}`);
-    if (before.bindingDigest !== request.bindingDigest)
-      throw new Error("Activation commit does not match the staged evidence binding");
-    if (before.status === "committed") return before;
-    if (before.status !== "staged" && before.status !== "approved")
-      throw new Error(`Activation operation ${request.operationId} cannot commit from ${before.status}`);
-    options.beforeActivationCommitForTesting?.();
-    database.transaction(() => {
-      const row = db
-        .prepare("SELECT * FROM activation_operations WHERE operation_id = ?")
-        .get(request.operationId);
-      if (row === undefined) throw new Error(`Unknown activation operation ${request.operationId}`);
-      const status = ActivationOperationStatusSchema.parse(requiredString(row, "status"));
-      if (status === "committed") return;
-      if (status !== "staged" && status !== "approved")
-        throw new Error(`Activation operation ${request.operationId} changed to ${status}`);
-      if (requiredString(row, "binding_digest") !== request.bindingDigest)
-        throw new Error("Activation binding changed before commit");
-      const current = currentActivationIdentity();
-      const expectedRevision = requiredNumber(row, "expected_activation_revision");
-      const expectedPrevious = optionalString(row, "previous_activation_id") ?? null;
-      if (current.revision !== expectedRevision || current.activationId !== expectedPrevious)
-        throw new Error("Activation snapshot changed during atomic commit (CAS conflict)");
-      const previous =
-        current.activationId === null
-          ? undefined
-          : decodeActivation(
-              db.prepare("SELECT * FROM activations WHERE activation_id = ?").get(current.activationId),
-            );
-      const previousDefinitions = previous?.activeDefinitions ?? {};
-      const previousCapabilities = z
-        .record(z.string(), CapabilityRevisionRefSchema)
-        .parse(previous?.activeCapabilityRevisions ?? {});
-      const binding = ActivationEvidenceBindingSchema.parse(parseJson(requiredString(row, "binding_json")));
-      const experimentRow = db
-        .prepare("SELECT status, data_json FROM experiments WHERE experiment_id = ?")
-        .get(binding.experimentId);
-      if (experimentRow === undefined)
-        throw new Error(`Activation experiment ${binding.experimentId} is missing`);
-      const activationExperiment = ExperimentSchema.parse(
-        parseJson(requiredString(experimentRow, "data_json")),
-      );
-      if (
-        activationExperiment.status !== "preflight" ||
-        activationExperiment.preflightRef?.rowId !== binding.preflightId ||
-        activationExperiment.candidateRevisions.length !== 1 ||
-        activationExperiment.candidateRevisions[0] === undefined ||
-        !sameCapabilityRevisionRef(activationExperiment.candidateRevisions[0], binding.candidateRevision)
-      )
-        throw new Error("Activation experiment changed before atomic commit (CAS conflict)");
-      const currentControlRevision = currentCapabilityControlRevision(binding.candidateRevision.capabilityId);
-      if ((currentControlRevision ?? null) !== binding.controlRevisionId)
-        throw new Error("Capability pin/veto controls changed during activation (CAS conflict)");
-      const materializations = materializationsFor(request.operationId);
-      if (materializations.length === 0)
-        throw new Error("Activation operation has no materialized definitions");
-      const definitionPrefix = `${sha256(binding.candidateRevision.capabilityId)}:`;
-      const activeDefinitions = Object.freeze({
-        ...Object.fromEntries(
-          Object.entries(previousDefinitions).filter(([key]) => !key.startsWith(definitionPrefix)),
-        ),
-        ...Object.fromEntries(
-          materializations.map((item) => [`${definitionPrefix}${item.slotKey}`, item.activeRevision]),
-        ),
-      });
-      const activeCapabilityRevisions = Object.freeze({
-        ...previousCapabilities,
-        [binding.candidateRevision.capabilityId]: binding.candidateRevision,
-      });
-      const committedAt = now();
-      const activationRevision = expectedRevision + 1;
-      const activationId = requiredString(row, "activation_id");
-      db.prepare(
-        `INSERT INTO activations(
-          activation_id, revision, previous_activation_id, definitions_json,
-          capability_revisions_json, preflight_id, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        activationId,
-        activationRevision,
-        expectedPrevious,
-        JSON.stringify(activeDefinitions),
-        JSON.stringify(activeCapabilityRevisions),
-        binding.preflightId,
-        committedAt,
-      );
-      options.duringActivationCommitForTesting?.();
-      const pointerId = `activation_pointer_${sha256(binding.candidateRevision.capabilityId).slice(0, 32)}`;
-      db.prepare(
-        `INSERT INTO activation_pointers(
-          pointer_id, capability_id, activation_id, capability_revision_id, updated_at,
-          capability_revision_json
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(capability_id) DO UPDATE SET
-          pointer_id = excluded.pointer_id, activation_id = excluded.activation_id,
-          capability_revision_id = excluded.capability_revision_id,
-          capability_revision_json = excluded.capability_revision_json,
-          updated_at = excluded.updated_at`,
-      ).run(
-        pointerId,
-        binding.candidateRevision.capabilityId,
-        activationId,
-        binding.candidateRevision.capabilityRevisionId,
-        committedAt,
-        JSON.stringify(binding.candidateRevision),
-      );
-      db.prepare(
-        `INSERT INTO activation_state(state_id, activation_id, revision, updated_at)
-         VALUES ('current', ?, ?, ?)
-         ON CONFLICT(state_id) DO UPDATE SET
-           activation_id = excluded.activation_id, revision = excluded.revision,
-           updated_at = excluded.updated_at`,
-      ).run(activationId, activationRevision, committedAt);
-      const observingExperiment = ExperimentSchema.parse({
-        ...activationExperiment,
-        status: "observing",
-        activatedRevision: binding.candidateRevision,
-      });
-      db.prepare(
-        "UPDATE experiments SET status = 'observing', data_json = ?, updated_at = ? WHERE experiment_id = ?",
-      ).run(JSON.stringify(observingExperiment), committedAt, binding.experimentId);
-      db.prepare(
-        `UPDATE activation_operations SET status = 'committed', updated_at = ?, committed_at = ?
-         WHERE operation_id = ?`,
-      ).run(committedAt, committedAt, request.operationId);
-      recordActivity(
-        { actorId: "protected-activation", kind: "system" },
-        "activation.committed",
-        "activation",
-        activationId,
-        [databaseRef("preflight_reports", binding.preflightId), binding.candidateRevision],
-      );
-    });
-    options.afterActivationCommitForTesting?.();
-    await publishCommittedOperation(request.operationId);
-    const committed = await getActivationOperation(request.operationId);
-    if (!committed || committed.status !== "committed")
-      throw new Error(`Activation operation ${request.operationId} did not commit`);
-    return committed;
-  };
-
-  const decodeTurnActivationPin = (row: unknown): TurnActivationPinRecord =>
-    Object.freeze({
-      turnKey: requiredString(row, "turn_key"),
-      sessionId: requiredString(row, "session_id"),
-      turnId: requiredString(row, "turn_id"),
-      activationId: requiredString(row, "activation_id"),
-      activationRevision: requiredNumber(row, "activation_revision"),
-      activeDefinitions: z
-        .record(z.string(), FileRevisionRefSchema)
-        .parse(parseJson(requiredString(row, "definitions_json"))),
-      activeCapabilityRevisions: z
-        .record(z.string(), CapabilityRevisionRefSchema)
-        .parse(parseJson(requiredString(row, "capability_revisions_json"))),
-      pinnedAt: requiredString(row, "pinned_at"),
-    });
-
-  const getTurnActivationPin = async (
-    sessionId: string,
-    turnId: string,
-  ): Promise<TurnActivationPinRecord | undefined> =>
-    decodeOptional(
-      db
-        .prepare("SELECT * FROM turn_activation_pins WHERE session_id = ? AND turn_id = ?")
-        .get(sessionId, turnId),
-      decodeTurnActivationPin,
-    );
-
-  const pinTurnActivation = async (request: {
-    readonly sessionId: string;
-    readonly turnId: string;
-  }): Promise<TurnActivationPinRecord> => {
-    if (!request.sessionId || !request.turnId) throw new Error("Turn activation pin requires stable IDs");
-    const existing = await getTurnActivationPin(request.sessionId, request.turnId);
-    if (existing) return existing;
-    let current = await currentActivation();
-    if (!current) {
-      const createdAt = now();
-      database.transaction(() => {
-        const identity = currentActivationIdentity();
-        if (identity.activationId !== null || identity.revision !== 0) return;
-        db.prepare(
-          `INSERT INTO activations(
-            activation_id, revision, previous_activation_id, definitions_json,
-            capability_revisions_json, preflight_id, created_at
-          ) VALUES ('activation_genesis', 1, NULL, '{}', '{}', NULL, ?)`,
-        ).run(createdAt);
-        db.prepare(
-          `INSERT INTO activation_state(state_id, activation_id, revision, updated_at)
-           VALUES ('current', 'activation_genesis', 1, ?)`,
-        ).run(createdAt);
-        recordActivity(
-          { actorId: "protected-activation", kind: "system" },
-          "activation.genesis_initialized",
-          "activation",
-          "activation_genesis",
-        );
-      });
-      current = await currentActivation();
-    }
-    if (!current) throw new Error("No activation snapshot exists to pin for this turn");
-    const activeCapabilityRevisions = z
-      .record(z.string(), CapabilityRevisionRefSchema)
-      .parse(current.activeCapabilityRevisions);
-    const turnKey = `turn_activation_${sha256(`${request.sessionId}:${request.turnId}`).slice(0, 32)}`;
-    const pinnedAt = now();
-    database.transaction(() => {
-      db.prepare(
-        `INSERT OR IGNORE INTO turn_activation_pins(
-          turn_key, session_id, turn_id, activation_id, activation_revision,
-          definitions_json, capability_revisions_json, pinned_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        turnKey,
-        request.sessionId,
-        request.turnId,
-        current.activationId,
-        current.revision,
-        JSON.stringify(current.activeDefinitions),
-        JSON.stringify(activeCapabilityRevisions),
-        pinnedAt,
-      );
-      recordActivity(
-        { actorId: "protected-activation", kind: "system" },
-        "activation.turn_pinned",
-        "turn_activation_pin",
-        turnKey,
-        [current.activationId],
-      );
-    });
-    const pinned = await getTurnActivationPin(request.sessionId, request.turnId);
-    if (!pinned) throw new Error(`Turn activation pin ${turnKey} was not recorded`);
-    return pinned;
-  };
-
-  const recoverCommittedActivationPublications = async (): Promise<number> => {
-    const rows = db
-      .prepare(
-        `SELECT DISTINCT operation_id FROM activation_operations
-         WHERE status = 'committed' AND operation_id IN (
-           SELECT operation_id FROM activation_materializations WHERE published = 0
-         ) ORDER BY operation_id`,
-      )
-      .all();
-    let recovered = 0;
-    for (const row of rows) recovered += await publishCommittedOperation(requiredString(row, "operation_id"));
-    return recovered;
-  };
-
-  const protectedActivations = Object.freeze({
-    prepare: prepareActivation,
-    getOperation: getActivationOperation,
-    listOperations: async (limit = 100) => {
-      if (!Number.isInteger(limit) || limit < 1 || limit > 1_000)
-        throw new Error("Activation operation list limit must be between 1 and 1000");
-      return Object.freeze(
-        db
-          .prepare("SELECT * FROM activation_operations ORDER BY created_at DESC, operation_id LIMIT ?")
-          .all(limit)
-          .map(decodeActivationOperation),
-      );
-    },
-    getApproval: async (approvalId: string) =>
-      decodeOptional(
-        db.prepare("SELECT * FROM activation_approvals WHERE approval_id = ?").get(approvalId),
-        decodeActivationApproval,
-      ),
-    supersede: supersedeActivationOperation,
-    decideApproval: decideActivationApproval,
-    commit: commitActivation,
-    current: currentActivation,
-    pinTurn: pinTurnActivation,
-    getTurnPin: getTurnActivationPin,
-    recoverCommittedPublications: recoverCommittedActivationPublications,
+  const protectedActivations = await createProtectedActivationStore({
+    database,
+    now,
+    ...(options.beforeActivationCommitForTesting === undefined
+      ? {}
+      : { beforeActivationCommitForTesting: options.beforeActivationCommitForTesting }),
+    ...(options.duringActivationCommitForTesting === undefined
+      ? {}
+      : { duringActivationCommitForTesting: options.duringActivationCommitForTesting }),
+    ...(options.afterActivationCommitForTesting === undefined
+      ? {}
+      : { afterActivationCommitForTesting: options.afterActivationCommitForTesting }),
+    recordActivity,
+    assertStoredReference: (reference) => assertStoredReference(db, reference),
+    readVerifiedFile,
+    persistAtomically,
+    pathsForDefinition,
+    resolveRevision,
+    recordDefinitionBytes,
   });
-  await recoverCommittedActivationPublications();
-
-  const decodeObservation = (row: unknown): ExperimentObservationRecord => {
-    const userDecision = optionalString(row, "user_decision");
-    return Object.freeze({
-      observationId: requiredString(row, "observation_id"),
-      dedupeKey: requiredString(row, "dedupe_key"),
-      experimentId: requiredString(row, "experiment_id"),
-      signalId: requiredString(row, "signal_id"),
-      outcomeId: requiredString(row, "outcome_id"),
-      preflightId: requiredString(row, "preflight_id"),
-      experimentActivationId: requiredString(row, "experiment_activation_id"),
-      servingActivationId: requiredString(row, "serving_activation_id"),
-      activationRevision: requiredNumber(row, "activation_revision"),
-      sessionId: requiredString(row, "session_id"),
-      turnId: requiredString(row, "turn_id"),
-      capabilityRevision: CapabilityRevisionRefSchema.parse(
-        parseJson(requiredString(row, "capability_revision_json")),
-      ),
-      metrics: z
-        .strictObject({
-          quality: z.number().min(0).max(1).nullable(),
-          baselineQuality: z.number().min(0).max(1).nullable(),
-          latencyMs: z.number().nonnegative().nullable(),
-          baselineLatencyMs: z.number().nonnegative().nullable(),
-          cost: z.number().nonnegative().nullable(),
-          baselineCost: z.number().nonnegative().nullable(),
-          failed: z.boolean(),
-          protectedRailViolation: z.boolean(),
-        })
-        .parse(parseJson(requiredString(row, "metrics_json"))),
-      evidenceRefs: z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "evidence_refs_json"))),
-      precedence: z
-        .enum(["none", "correction", "preference", "user_veto"])
-        .parse(requiredString(row, "precedence")),
-      ...(userDecision === undefined
-        ? {}
-        : { userDecision: z.enum(["keep", "revise", "revert"]).parse(userDecision) }),
-      hardRegression: requiredNumber(row, "hard_regression") === 1,
-      createdAt: requiredString(row, "created_at"),
-    });
-  };
-
-  const decodeResearchRun = (row: unknown): ExperimentResearchRunRecord => {
-    const proposal = optionalString(row, "proposal");
-    const failureMessage = optionalString(row, "failure_message");
-    return Object.freeze({
-      runId: requiredString(row, "run_id"),
-      experimentId: requiredString(row, "experiment_id"),
-      strategyId: requiredString(row, "strategy_id"),
-      inputDigest: requiredString(row, "input_digest"),
-      status: z.enum(["running", "completed", "failed"]).parse(requiredString(row, "status")),
-      ...(proposal === undefined ? {} : { proposal: z.enum(["keep", "revise", "revert"]).parse(proposal) }),
-      citedObservationIds: z
-        .array(z.string().min(1))
-        .parse(parseJson(requiredString(row, "cited_observation_ids_json"))),
-      evidenceRefs: z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "evidence_refs_json"))),
-      attempt: requiredNumber(row, "attempt"),
-      ...(failureMessage === undefined ? {} : { failureMessage }),
-      retryable: requiredNumber(row, "retryable") === 1,
-      createdAt: requiredString(row, "created_at"),
-      updatedAt: requiredString(row, "updated_at"),
-    });
-  };
-
-  const decodeExperimentOutcome = (row: unknown): ExperimentOutcomeOperationRecord => {
-    const researchRunId = optionalString(row, "research_run_id");
-    const restoreSourceActivationId = optionalString(row, "restore_source_activation_id");
-    const restoredActivationId = optionalString(row, "restored_activation_id");
-    const successorExperimentId = optionalString(row, "successor_experiment_id");
-    return Object.freeze({
-      operationId: requiredString(row, "operation_id"),
-      idempotencyKey: requiredString(row, "idempotency_key"),
-      experimentId: requiredString(row, "experiment_id"),
-      decision: z.enum(["keep", "revise", "revert"]).parse(requiredString(row, "decision")),
-      strategyId: requiredString(row, "strategy_id"),
-      ...(researchRunId === undefined ? {} : { researchRunId }),
-      expectedActivationId: requiredString(row, "expected_activation_id"),
-      expectedActivationRevision: requiredNumber(row, "expected_activation_revision"),
-      ...(restoreSourceActivationId === undefined ? {} : { restoreSourceActivationId }),
-      ...(restoredActivationId === undefined ? {} : { restoredActivationId }),
-      ...(successorExperimentId === undefined ? {} : { successorExperimentId }),
-      evidenceRefs: z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "evidence_refs_json"))),
-      operationDigest: requiredString(row, "operation_digest"),
-      committedAt: requiredString(row, "committed_at"),
-    });
-  };
-
-  const decodeSuccessorInput = (row: unknown): SuccessorLineageInputRecord =>
-    Object.freeze({
-      inputId: requiredString(row, "input_id"),
-      predecessorExperimentId: requiredString(row, "predecessor_experiment_id"),
-      successorExperimentId: requiredString(row, "successor_experiment_id"),
-      predecessorActivationId: requiredString(row, "predecessor_activation_id"),
-      predecessorRevision: CapabilityRevisionRefSchema.parse(
-        parseJson(requiredString(row, "predecessor_revision_json")),
-      ),
-      baselineRevision: CapabilityRevisionRefSchema.parse(
-        parseJson(requiredString(row, "baseline_revision_json")),
-      ),
-      evidenceRefs: z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "evidence_refs_json"))),
-      createdAt: requiredString(row, "created_at"),
-    });
-
-  const operationForActivation = async (
-    activationId: string,
-  ): Promise<ActivationOperationRecord | undefined> =>
-    decodeOptional(
-      db
-        .prepare("SELECT * FROM activation_operations WHERE activation_id = ? AND status = 'committed'")
-        .get(activationId),
-      decodeActivationOperation,
-    );
-
-  const getObservation = async (observationId: string): Promise<ExperimentObservationRecord | undefined> =>
-    decodeOptional(
-      db.prepare("SELECT * FROM experiment_observations WHERE observation_id = ?").get(observationId),
-      decodeObservation,
-    );
-
-  const recordObservation = async (
-    record: Omit<ExperimentObservationRecord, "createdAt">,
-    maximumObservations: number,
-  ): Promise<ExperimentObservationRecord | undefined> => {
-    if (!Number.isInteger(maximumObservations) || maximumObservations < 1 || maximumObservations > 1_000)
-      throw new Error("Observation window must be an integer between 1 and 1000");
-    const existingRow = db
-      .prepare("SELECT * FROM experiment_observations WHERE dedupe_key = ?")
-      .get(record.dedupeKey);
-    if (existingRow !== undefined) {
-      const existing = decodeObservation(existingRow);
-      if (existing.observationId !== record.observationId || existing.experimentId !== record.experimentId)
-        throw new Error("Observation dedupe identity was reused with different input");
-      return existing;
-    }
-    let inserted = false;
-    database.transaction(() => {
-      const count = requiredNumber(
-        db
-          .prepare("SELECT count(*) AS count FROM experiment_observations WHERE experiment_id = ?")
-          .get(record.experimentId),
-        "count",
-      );
-      if (count >= maximumObservations) return;
-      const experimentRow = db
-        .prepare("SELECT data_json FROM experiments WHERE experiment_id = ?")
-        .get(record.experimentId);
-      if (experimentRow === undefined)
-        throw new Error(`Observation experiment ${record.experimentId} is missing`);
-      const experiment = ExperimentSchema.parse(parseJson(requiredString(experimentRow, "data_json")));
-      if (
-        experiment.status !== "observing" ||
-        !experiment.activatedRevision ||
-        !sameCapabilityRevisionRef(experiment.activatedRevision, record.capabilityRevision) ||
-        experiment.preflightRef?.rowId !== record.preflightId
-      )
-        throw new Error("Observation is not bound to the exact open activated experiment");
-      const pinRow = db
-        .prepare("SELECT * FROM turn_activation_pins WHERE session_id = ? AND turn_id = ?")
-        .get(record.sessionId, record.turnId);
-      if (pinRow === undefined) throw new Error("Observation has no authoritative turn activation pin");
-      const pin = decodeTurnActivationPin(pinRow);
-      const pinnedRevision = pin.activeCapabilityRevisions[record.capabilityRevision.capabilityId];
-      if (
-        pin.activationId !== record.servingActivationId ||
-        pin.activationRevision !== record.activationRevision ||
-        !pinnedRevision ||
-        !sameCapabilityRevisionRef(pinnedRevision, record.capabilityRevision)
-      )
-        throw new Error("Observation serving identity does not match its turn pin");
-      const activationOperationRow = db
-        .prepare("SELECT * FROM activation_operations WHERE activation_id = ? AND status = 'committed'")
-        .get(record.experimentActivationId);
-      if (activationOperationRow === undefined)
-        throw new Error("Observation references an uncommitted experiment activation");
-      const activationOperation = decodeActivationOperation(activationOperationRow);
-      if (
-        activationOperation.binding.experimentId !== record.experimentId ||
-        activationOperation.binding.preflightId !== record.preflightId ||
-        !sameCapabilityRevisionRef(activationOperation.binding.candidateRevision, record.capabilityRevision)
-      )
-        throw new Error("Observation activation lineage does not match its experiment");
-      const signalRow = db
-        .prepare("SELECT data_json FROM feedback_signals WHERE signal_id = ?")
-        .get(record.signalId);
-      const signal = signalRow
-        ? FeedbackSignalSchema.parse(parseJson(requiredString(signalRow, "data_json")))
-        : undefined;
-      if (
-        !signal ||
-        signal.experimentId !== record.experimentId ||
-        signal.capabilityRevisionId !== record.capabilityRevision.capabilityRevisionId
-      )
-        throw new Error("Observation feedback signal is not exactly attributed");
-      const outcomeRow = db
-        .prepare("SELECT session_id, turn_id FROM outcomes WHERE outcome_id = ?")
-        .get(record.outcomeId);
-      if (
-        outcomeRow === undefined ||
-        requiredString(outcomeRow, "session_id") !== record.sessionId ||
-        optionalString(outcomeRow, "turn_id") !== record.turnId
-      )
-        throw new Error("Observation outcome does not match its session and turn");
-      for (const ref of record.evidenceRefs) assertStoredReference(db, ref);
-      db.prepare(
-        `INSERT INTO experiment_observations(
-          observation_id, dedupe_key, experiment_id, signal_id, outcome_id, preflight_id,
-          experiment_activation_id, serving_activation_id, activation_revision, session_id,
-          turn_id, capability_id, capability_revision_json, metrics_json, evidence_refs_json,
-          precedence, user_decision, hard_regression, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        record.observationId,
-        record.dedupeKey,
-        record.experimentId,
-        record.signalId,
-        record.outcomeId,
-        record.preflightId,
-        record.experimentActivationId,
-        record.servingActivationId,
-        record.activationRevision,
-        record.sessionId,
-        record.turnId,
-        record.capabilityRevision.capabilityId,
-        JSON.stringify(record.capabilityRevision),
-        JSON.stringify(record.metrics),
-        JSON.stringify(record.evidenceRefs),
-        record.precedence,
-        record.userDecision ?? null,
-        record.hardRegression ? 1 : 0,
-        now(),
-      );
-      const feedbackSignalIds = experiment.feedbackSignalIds.includes(record.signalId)
-        ? experiment.feedbackSignalIds
-        : Object.freeze([...experiment.feedbackSignalIds, record.signalId]);
-      db.prepare("UPDATE experiments SET data_json = ?, updated_at = ? WHERE experiment_id = ?").run(
-        JSON.stringify({ ...experiment, feedbackSignalIds }),
-        now(),
-        experiment.experimentId,
-      );
-      recordActivity(
-        { actorId: "protected-feedback", kind: "system" },
-        "experiment.observed",
-        "experiment_observation",
-        record.observationId,
-        record.evidenceRefs,
-      );
-      inserted = true;
-    });
-    return inserted ? await getObservation(record.observationId) : undefined;
-  };
-
-  const getResearchRun = async (runId: string): Promise<ExperimentResearchRunRecord | undefined> =>
-    decodeOptional(
-      db.prepare("SELECT * FROM experiment_research_runs WHERE run_id = ?").get(runId),
-      decodeResearchRun,
-    );
-
-  const putResearchRun = async (
-    record: Omit<ExperimentResearchRunRecord, "createdAt" | "updatedAt">,
-  ): Promise<ExperimentResearchRunRecord> => {
-    for (const ref of record.evidenceRefs) assertStoredReference(db, ref);
-    const timestamp = now();
-    database.transaction(() => {
-      const existing = db
-        .prepare(
-          `SELECT experiment_id, strategy_id, input_digest, created_at
-           FROM experiment_research_runs WHERE run_id = ?`,
-        )
-        .get(record.runId);
-      if (
-        existing !== undefined &&
-        (requiredString(existing, "experiment_id") !== record.experimentId ||
-          requiredString(existing, "strategy_id") !== record.strategyId ||
-          requiredString(existing, "input_digest") !== record.inputDigest)
-      )
-        throw new Error(`Research run identity ${record.runId} was reused with different input`);
-      if (existing === undefined)
-        db.prepare(
-          `INSERT INTO experiment_research_runs(
-            run_id, experiment_id, strategy_id, input_digest, status, proposal,
-            cited_observation_ids_json, evidence_refs_json, attempt, failure_message,
-            retryable, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          record.runId,
-          record.experimentId,
-          record.strategyId,
-          record.inputDigest,
-          record.status,
-          record.proposal ?? null,
-          JSON.stringify(record.citedObservationIds),
-          JSON.stringify(record.evidenceRefs),
-          record.attempt,
-          record.failureMessage ?? null,
-          record.retryable ? 1 : 0,
-          timestamp,
-          timestamp,
-        );
-      else
-        db.prepare(
-          `UPDATE experiment_research_runs SET status = ?, proposal = ?,
-            cited_observation_ids_json = ?, evidence_refs_json = ?, attempt = ?,
-            failure_message = ?, retryable = ?, updated_at = ? WHERE run_id = ?`,
-        ).run(
-          record.status,
-          record.proposal ?? null,
-          JSON.stringify(record.citedObservationIds),
-          JSON.stringify(record.evidenceRefs),
-          record.attempt,
-          record.failureMessage ?? null,
-          record.retryable ? 1 : 0,
-          timestamp,
-          record.runId,
-        );
-      recordActivity(
-        { actorId: "feedback-judge", kind: "system" },
-        `experiment.research_${record.status}`,
-        "experiment_research_run",
-        record.runId,
-        record.evidenceRefs,
-      );
-    });
-    const stored = await getResearchRun(record.runId);
-    if (!stored) throw new Error(`Research run ${record.runId} was not recorded`);
-    return stored;
-  };
-
-  const getExperimentOutcome = async (
-    experimentId: string,
-  ): Promise<ExperimentOutcomeOperationRecord | undefined> =>
-    decodeOptional(
-      db.prepare("SELECT * FROM experiment_outcomes WHERE experiment_id = ?").get(experimentId),
-      decodeExperimentOutcome,
-    );
-
-  const permissionSubset = (
-    restored: CommitExperimentOutcomeRequest["restore"] extends infer Value
-      ? Value extends { readonly restoredPermissionManifest: infer Manifest }
-        ? Manifest
-        : never
-      : never,
-    current: CommitExperimentOutcomeRequest["restore"] extends infer Value
-      ? Value extends { readonly currentPermissionManifest: infer Manifest }
-        ? Manifest
-        : never
-      : never,
-  ): boolean => {
-    const contains = (haystack: readonly string[], needles: readonly string[]) =>
-      needles.every((value) => haystack.includes(value));
-    return (
-      contains(current.effects, restored.effects) &&
-      contains(current.resourcePatterns, restored.resourcePatterns) &&
-      contains(current.credentialRefs, restored.credentialRefs)
-    );
-  };
-
-  const commitExperimentOutcome = async (
-    request: CommitExperimentOutcomeRequest,
-  ): Promise<ExperimentOutcomeOperationRecord> => {
-    const digestInput = {
-      operationId: request.operationId,
-      idempotencyKey: request.idempotencyKey,
-      experimentId: request.experimentId,
-      decision: request.decision,
-      strategyId: request.strategyId,
-      researchRunId: request.researchRunId ?? null,
-      expectedActivationId: request.expectedActivationId,
-      expectedActivationRevision: request.expectedActivationRevision,
-      evidenceRefs: request.evidenceRefs,
-      restore: request.restore ?? null,
-      successor: request.successor ?? null,
-    };
-    if (request.operationDigest !== sha256(canonicalJson(digestInput)))
-      throw new Error("Experiment outcome digest does not match its canonical protected request");
-    const existing = await getExperimentOutcome(request.experimentId);
-    if (existing) {
-      if (
-        existing.operationId !== request.operationId ||
-        existing.idempotencyKey !== request.idempotencyKey ||
-        existing.operationDigest !== request.operationDigest
-      )
-        throw new Error(`Experiment ${request.experimentId} already has a different outcome operation`);
-      return existing;
-    }
-    options.beforeOutcomeCommitForTesting?.();
-    database.transaction(() => {
-      const currentIdentity = currentActivationIdentity();
-      if (
-        currentIdentity.activationId !== request.expectedActivationId ||
-        currentIdentity.revision !== request.expectedActivationRevision
-      )
-        throw new Error("Experiment outcome activation snapshot changed (CAS conflict)");
-      const currentActivationRow = db
-        .prepare("SELECT * FROM activations WHERE activation_id = ?")
-        .get(request.expectedActivationId);
-      const currentActivation = decodeActivation(currentActivationRow);
-      if (!currentActivation) throw new Error("Expected current activation snapshot is missing");
-      const experimentRow = db
-        .prepare("SELECT data_json FROM experiments WHERE experiment_id = ?")
-        .get(request.experimentId);
-      if (experimentRow === undefined) throw new Error(`Experiment ${request.experimentId} is missing`);
-      const experiment = ExperimentSchema.parse(parseJson(requiredString(experimentRow, "data_json")));
-      if (experiment.status !== "observing" || !experiment.activatedRevision)
-        throw new Error(`Experiment ${request.experimentId} is not observing`);
-      const currentServingRevision = z
-        .record(z.string(), CapabilityRevisionRefSchema)
-        .parse(currentActivation.activeCapabilityRevisions)[experiment.activatedRevision.capabilityId];
-      if (
-        !currentServingRevision ||
-        !sameCapabilityRevisionRef(currentServingRevision, experiment.activatedRevision)
-      )
-        throw new Error("Experiment outcome no longer targets the active capability revision");
-      for (const ref of request.evidenceRefs) assertStoredReference(db, ref);
-      if (request.researchRunId) {
-        const run = db
-          .prepare("SELECT status, proposal FROM experiment_research_runs WHERE run_id = ?")
-          .get(request.researchRunId);
-        if (
-          run === undefined ||
-          requiredString(run, "status") !== "completed" ||
-          requiredString(run, "proposal") !== request.decision
-        )
-          throw new Error("Experiment outcome is not bound to its completed research proposal");
-      }
-      const committedAt = now();
-      let restoredActivationId: string | undefined;
-      let successorExperimentId: string | undefined;
-      if (request.decision === "revert") {
-        if (!request.restore || request.successor)
-          throw new Error("Revert requires one exact prior snapshot and no successor input");
-        if (
-          !permissionSubset(
-            request.restore.restoredPermissionManifest,
-            request.restore.currentPermissionManifest,
-          )
-        )
-          throw new Error("Restoration would widen the current permission manifest");
-        const originOperationRow = db
-          .prepare("SELECT * FROM activation_operations WHERE experiment_id = ? AND status = 'committed'")
-          .get(request.experimentId);
-        if (originOperationRow === undefined)
-          throw new Error("Revert cannot restore an experiment without a committed activation");
-        const originOperation = decodeActivationOperation(originOperationRow);
-        if (originOperation.previousActivationId !== request.restore.sourceActivationId)
-          throw new Error("Revert target is not the prior snapshot recorded by AC-09");
-        const source = decodeActivation(
-          db
-            .prepare("SELECT * FROM activations WHERE activation_id = ?")
-            .get(request.restore.sourceActivationId),
-        );
-        if (!source) throw new Error("Recorded prior activation snapshot is missing");
-        const sourceCapabilities = z
-          .record(z.string(), CapabilityRevisionRefSchema)
-          .parse(source.activeCapabilityRevisions);
-        const targetCapabilityId = experiment.activatedRevision.capabilityId;
-        const restoredRevision = sourceCapabilities[targetCapabilityId];
-        if (!restoredRevision || !sameCapabilityRevisionRef(restoredRevision, experiment.baselineRevision))
-          throw new Error("Recorded prior snapshot does not restore the experiment baseline revision");
-        const definitionPrefix = `${sha256(targetCapabilityId)}:`;
-        const restoredDefinitions = Object.freeze({
-          ...Object.fromEntries(
-            Object.entries(currentActivation.activeDefinitions).filter(
-              ([slotKey]) => !slotKey.startsWith(definitionPrefix),
-            ),
-          ),
-          ...Object.fromEntries(
-            Object.entries(source.activeDefinitions).filter(([slotKey]) =>
-              slotKey.startsWith(definitionPrefix),
-            ),
-          ),
-        });
-        const currentCapabilities = z
-          .record(z.string(), CapabilityRevisionRefSchema)
-          .parse(currentActivation.activeCapabilityRevisions);
-        const restoredCapabilities = Object.freeze({
-          ...currentCapabilities,
-          [targetCapabilityId]: restoredRevision,
-        });
-        restoredActivationId = `restoration_${sha256(request.operationId).slice(0, 32)}`;
-        db.prepare(
-          `INSERT INTO activations(
-            activation_id, revision, previous_activation_id, definitions_json,
-            capability_revisions_json, preflight_id, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          restoredActivationId,
-          request.expectedActivationRevision + 1,
-          request.expectedActivationId,
-          JSON.stringify(restoredDefinitions),
-          JSON.stringify(restoredCapabilities),
-          currentActivation.preflightId ?? null,
-          committedAt,
-        );
-        db.prepare(
-          `INSERT INTO activation_pointers(
-            pointer_id, capability_id, activation_id, capability_revision_id, updated_at,
-            capability_revision_json
-          ) VALUES (?, ?, ?, ?, ?, ?)
-          ON CONFLICT(capability_id) DO UPDATE SET
-            pointer_id = excluded.pointer_id, activation_id = excluded.activation_id,
-            capability_revision_id = excluded.capability_revision_id,
-            capability_revision_json = excluded.capability_revision_json,
-            updated_at = excluded.updated_at`,
-        ).run(
-          `activation_pointer_${sha256(targetCapabilityId).slice(0, 32)}`,
-          targetCapabilityId,
-          restoredActivationId,
-          restoredRevision.capabilityRevisionId,
-          committedAt,
-          JSON.stringify(restoredRevision),
-        );
-        db.prepare(
-          `UPDATE activation_state SET activation_id = ?, revision = ?, updated_at = ?
-           WHERE state_id = 'current'`,
-        ).run(restoredActivationId, request.expectedActivationRevision + 1, committedAt);
-      } else if (request.decision === "revise") {
-        if (!request.successor || request.restore)
-          throw new Error("Revise requires one successor lineage input and no restoration");
-        const successor = ExperimentSchema.parse(request.successor.experiment);
-        const lineage = request.successor.lineage;
-        if (
-          successor.status !== "hypothesis" ||
-          successor.candidateRevisions.length !== 0 ||
-          !sameCapabilityRevisionRef(successor.baselineRevision, experiment.activatedRevision) ||
-          lineage.predecessorExperimentId !== experiment.experimentId ||
-          lineage.successorExperimentId !== successor.experimentId ||
-          lineage.predecessorActivationId !== request.expectedActivationId ||
-          !sameCapabilityRevisionRef(lineage.predecessorRevision, experiment.activatedRevision) ||
-          !sameCapabilityRevisionRef(lineage.baselineRevision, experiment.baselineRevision)
-        )
-          throw new Error("Successor lineage input is not bound to the exact predecessor experiment");
-        for (const ref of lineage.evidenceRefs) assertStoredReference(db, ref);
-        db.prepare("INSERT INTO experiments VALUES (?, 'hypothesis', ?, ?, ?)").run(
-          successor.experimentId,
-          JSON.stringify(successor),
-          committedAt,
-          committedAt,
-        );
-        db.prepare(
-          `INSERT INTO successor_lineage_inputs(
-            input_id, predecessor_experiment_id, successor_experiment_id,
-            predecessor_activation_id, predecessor_revision_json, baseline_revision_json,
-            evidence_refs_json, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          lineage.inputId,
-          lineage.predecessorExperimentId,
-          lineage.successorExperimentId,
-          lineage.predecessorActivationId,
-          JSON.stringify(lineage.predecessorRevision),
-          JSON.stringify(lineage.baselineRevision),
-          JSON.stringify(lineage.evidenceRefs),
-          committedAt,
-        );
-        successorExperimentId = successor.experimentId;
-      } else if (request.restore || request.successor) {
-        throw new Error("Keep cannot restore activation state or create a successor");
-      }
-      const completed = ExperimentSchema.parse({
-        ...experiment,
-        status: "completed",
-        outcome: request.decision,
-        ...(successorExperimentId ? { followUpExperimentId: successorExperimentId } : {}),
-      });
-      db.prepare(
-        "UPDATE experiments SET status = 'completed', data_json = ?, updated_at = ? WHERE experiment_id = ?",
-      ).run(JSON.stringify(completed), committedAt, experiment.experimentId);
-      options.duringOutcomeCommitForTesting?.();
-      db.prepare(
-        `INSERT INTO experiment_outcomes(
-          operation_id, idempotency_key, experiment_id, decision, strategy_id,
-          research_run_id, expected_activation_id, expected_activation_revision,
-          restore_source_activation_id, restored_activation_id, successor_experiment_id,
-          evidence_refs_json, operation_digest, committed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        request.operationId,
-        request.idempotencyKey,
-        request.experimentId,
-        request.decision,
-        request.strategyId,
-        request.researchRunId ?? null,
-        request.expectedActivationId,
-        request.expectedActivationRevision,
-        request.restore?.sourceActivationId ?? null,
-        restoredActivationId ?? null,
-        successorExperimentId ?? null,
-        JSON.stringify(request.evidenceRefs),
-        request.operationDigest,
-        committedAt,
-      );
-      recordActivity(
-        { actorId: "protected-feedback", kind: "system" },
-        `experiment.${request.decision}`,
-        "experiment_outcome",
-        request.operationId,
-        request.evidenceRefs,
-      );
-    });
-    options.afterOutcomeCommitForTesting?.();
-    const committed = await getExperimentOutcome(request.experimentId);
-    if (!committed) throw new Error(`Experiment outcome ${request.operationId} did not commit`);
-    return committed;
-  };
-
-  const protectedFeedback = Object.freeze({
-    operationForActivation,
-    recordObservation,
-    getObservation,
-    listObservations: async (experimentId: string, limit: number) => {
-      if (!Number.isInteger(limit) || limit < 1 || limit > 1_000)
-        throw new Error("Observation query limit must be an integer between 1 and 1000");
-      return Object.freeze(
-        db
-          .prepare(
-            `SELECT * FROM experiment_observations WHERE experiment_id = ?
-             ORDER BY created_at DESC, observation_id DESC LIMIT ?`,
-          )
-          .all(experimentId, limit)
-          .map(decodeObservation)
-          .reverse(),
-      );
-    },
-    putResearchRun,
-    getResearchRun,
-    listResearchRuns: async (experimentId: string) =>
-      Object.freeze(
-        db
-          .prepare(
-            `SELECT * FROM experiment_research_runs WHERE experiment_id = ?
-             ORDER BY created_at, run_id`,
-          )
-          .all(experimentId)
-          .map(decodeResearchRun),
-      ),
-    getOutcome: getExperimentOutcome,
-    commitOutcome: commitExperimentOutcome,
-    getSuccessorInput: async (predecessorExperimentId: string) =>
-      decodeOptional(
-        db
-          .prepare("SELECT * FROM successor_lineage_inputs WHERE predecessor_experiment_id = ?")
-          .get(predecessorExperimentId),
-        decodeSuccessorInput,
-      ),
+  const protectedFeedback = createProtectedFeedbackStore({
+    database,
+    now,
+    ...(options.beforeOutcomeCommitForTesting === undefined
+      ? {}
+      : { beforeOutcomeCommitForTesting: options.beforeOutcomeCommitForTesting }),
+    ...(options.duringOutcomeCommitForTesting === undefined
+      ? {}
+      : { duringOutcomeCommitForTesting: options.duringOutcomeCommitForTesting }),
+    ...(options.afterOutcomeCommitForTesting === undefined
+      ? {}
+      : { afterOutcomeCommitForTesting: options.afterOutcomeCommitForTesting }),
+    recordActivity,
+    assertStoredReference: (reference) => assertStoredReference(db, reference),
   });
 
-  return Object.freeze({
+  const cutoverLegacyOperationalAuthority = async (
+    legacyRoot: string,
+    actor: ActorRef,
+  ): Promise<OperationalCutoverReport> => {
+    const cutoverName = "workspace-operational-authority" as const;
+    const cutoverVersion = 1 as const;
+    let journalBytes: Uint8Array;
+    try {
+      journalBytes = await readFile(join(legacyRoot, "ledger", "events.jsonl"));
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      journalBytes = new Uint8Array();
+    }
+    const journalText = new TextDecoder("utf8", { fatal: true }).decode(journalBytes);
+    const legacyEvents: LedgerEvent[] = [];
+    for (const [index, line] of journalText.split(/\r?\n/u).entries()) {
+      if (!line.trim()) continue;
+      try {
+        legacyEvents.push(LedgerEventSchema.parse(JSON.parse(line)));
+      } catch (error) {
+        throw new Error(`Operational cutover rejected malformed legacy journal line ${index + 1}`, {
+          cause: error,
+        });
+      }
+    }
+    const sourceDigest = sha256(journalBytes);
+    const existing = db
+      .prepare(
+        `SELECT source_digest FROM operational_cutovers
+         WHERE cutover_name = ? AND cutover_version = ?`,
+      )
+      .get(cutoverName, cutoverVersion);
+    if (existing === undefined)
+      await createBackup(paths, db, join(paths.root, "backups", "pre-operational-cutover-v1"), now());
+    const legacyImport = await importLegacyWorkspace({
+      legacyRoot,
+      actor,
+      paths,
+      database,
+      now,
+      createId,
+      recordDefinitionBytes,
+      writeArtifact,
+    });
+    if (existing !== undefined)
+      return Object.freeze({
+        cutoverName,
+        cutoverVersion,
+        sourceDigest: requiredString(existing, "source_digest"),
+        alreadyCompleted: true,
+        legacyImport,
+      });
+    const malformedWarning = legacyImport.warnings.find((warning) =>
+      warning.startsWith("Skipped invalid legacy journal line"),
+    );
+    if (malformedWarning) throw new Error(`Operational cutover rejected legacy import: ${malformedWarning}`);
+    database.transaction(() => {
+      for (const event of legacyEvents) {
+        if (event.type === "authority.grant_issued") {
+          const grant = GrantSchema.parse(event.payload["grant"]);
+          db.prepare(
+            `INSERT OR IGNORE INTO authority_grants(
+              grant_id, principal, effects_json, resource_prefixes_json, expires_at,
+              max_uses, max_cost, issued_at, source_event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run(
+            grant.grantId,
+            grant.principal,
+            JSON.stringify(grant.effects),
+            JSON.stringify(grant.resourcePrefixes),
+            grant.expiresAt,
+            grant.maxUses,
+            grant.maxCost,
+            event.occurredAt,
+            event.eventId,
+          );
+          continue;
+        }
+        if (
+          event.type !== "effect.reserved" &&
+          event.type !== "effect.completed" &&
+          event.type !== "effect.failed" &&
+          event.type !== "effect.denied"
+        )
+          continue;
+        const operationId = z.string().min(1).parse(event.payload["operationId"]);
+        const idempotencyKey = z.string().min(1).parse(event.payload["idempotencyKey"]);
+        const fingerprint = DigestSchema.parse(event.payload["operationFingerprint"]);
+        const principal = z.string().min(1).parse(event.payload["principal"]);
+        const effect = z.string().min(1).parse(event.payload["effect"]);
+        const resource = z.string().min(1).parse(event.payload["resource"]);
+        const requestDigest = DigestSchema.parse(event.payload["requestDigest"]);
+        const estimatedCost = z.number().nonnegative().parse(event.payload["estimatedCost"]);
+        const grantId =
+          event.payload["grantId"] === undefined ? null : z.string().min(1).parse(event.payload["grantId"]);
+        const status =
+          event.type === "effect.completed"
+            ? "completed"
+            : event.type === "effect.failed"
+              ? "failed"
+              : event.type === "effect.denied"
+                ? "denied"
+                : "reserved";
+        const resultJson =
+          event.type === "effect.completed" ? JSON.stringify(event.payload["result"] ?? null) : null;
+        const failure =
+          event.type === "effect.failed" || event.type === "effect.denied"
+            ? z.string().min(1).parse(event.payload["reason"])
+            : null;
+        const lineage =
+          event.type === "effect.completed" || event.type === "effect.failed"
+            ? `legacy_receipt_${sha256(event.eventId).slice(0, 32)}`
+            : null;
+        const existingOperation = db
+          .prepare("SELECT operation_fingerprint, status FROM authority_operations WHERE operation_id = ?")
+          .get(operationId);
+        if (existingOperation !== undefined) {
+          if (requiredString(existingOperation, "operation_fingerprint") !== fingerprint)
+            throw new Error(`Legacy authority operation ${operationId} changed identity`);
+          if (status === "completed" || status === "failed")
+            db.prepare(
+              `UPDATE authority_operations
+               SET status = ?, result_json = ?, failure = ?, receipt_lineage_id = ?, updated_at = ?
+               WHERE operation_id = ? AND status = 'reserved'`,
+            ).run(status, resultJson, failure, lineage, event.occurredAt, operationId);
+          continue;
+        }
+        db.prepare(
+          `INSERT INTO authority_operations(
+            operation_id, idempotency_key, operation_fingerprint, principal, effect, resource,
+            request_digest, estimated_cost, grant_id, status, result_json, failure,
+            receipt_lineage_id, source_event_id, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          operationId,
+          idempotencyKey,
+          fingerprint,
+          principal,
+          effect,
+          resource,
+          requestDigest,
+          estimatedCost,
+          grantId,
+          status,
+          resultJson,
+          failure,
+          lineage,
+          event.eventId,
+          event.occurredAt,
+          event.occurredAt,
+        );
+      }
+      db.prepare(
+        `INSERT INTO operational_cutovers(
+          cutover_name, cutover_version, source_digest, completed_at
+        ) VALUES (?, ?, ?, ?)`,
+      ).run(cutoverName, cutoverVersion, sourceDigest, now());
+    });
+    return Object.freeze({
+      cutoverName,
+      cutoverVersion,
+      sourceDigest,
+      alreadyCompleted: false,
+      legacyImport,
+    });
+  };
+
+  const workspace: NoesisWorkspaceStore = Object.freeze({
     paths,
     reads: Object.freeze({
       readDatabaseRow,
@@ -2313,8 +1145,6 @@ export async function createWorkspaceStore(
     jobs,
     declaredAuthority: declaredAuthorityFor,
     operational,
-    protectedActivations,
-    protectedFeedback,
     search,
     recordDirectEdit,
     stageDefinition,
@@ -2333,10 +1163,25 @@ export async function createWorkspaceStore(
         recordDefinitionBytes,
         writeArtifact,
       }),
+    cutoverLegacyOperationalAuthority,
     close: () => database.close(),
     unsafeDatabasePathForTesting: paths.database,
     getArtifactMetadata,
   });
+  registerWorkspaceRuntimeInternals(
+    workspace,
+    Object.freeze({
+      authority,
+      protectedRuntime: createProtectedWorkspaceRuntime({
+        workspaceRoot: paths.root,
+        authority,
+        activations: protectedActivations,
+        feedback: protectedFeedback,
+        measurements: compoundingMeasurements,
+      }),
+    }),
+  );
+  return workspace;
 }
 
 interface DefinitionMetadataRepository extends DefinitionMetadataPort {
@@ -2794,6 +1639,62 @@ function createOperationalRepositories(
   };
 
   return Object.freeze({
+    foregroundTurns: Object.freeze({
+      get: async (turnId: string) => {
+        const row = db.prepare("SELECT * FROM foreground_turns WHERE turn_id = ?").get(turnId);
+        if (row === undefined) return undefined;
+        const outcomeId = optionalString(row, "outcome_id");
+        const settledAt = optionalString(row, "settled_at");
+        return Object.freeze({
+          turnId: requiredString(row, "turn_id"),
+          sessionId: requiredString(row, "session_id"),
+          planId: requiredString(row, "plan_id"),
+          status: z.enum(["running", "completed", "aborted", "failed"]).parse(requiredString(row, "status")),
+          ...(outcomeId ? { outcomeId } : {}),
+          admittedAt: requiredString(row, "admitted_at"),
+          ...(settledAt ? { settledAt } : {}),
+        });
+      },
+      settle: async (
+        request: Parameters<NoesisWorkspaceStore["operational"]["foregroundTurns"]["settle"]>[0],
+      ) => {
+        database.transaction(() => {
+          const turn = db
+            .prepare("SELECT session_id, status FROM foreground_turns WHERE turn_id = ?")
+            .get(request.turnId);
+          // Isolated package tests may settle a synthetic plan without admission. Production
+          // always has the row because plan admission and the running marker share a transaction.
+          if (turn === undefined) return;
+          if (requiredString(turn, "status") !== "running")
+            throw new Error(`Foreground turn ${request.turnId} is already terminal`);
+          const outcome = db
+            .prepare("SELECT session_id FROM outcomes WHERE outcome_id = ? AND turn_id = ?")
+            .get(request.outcomeId, request.turnId);
+          if (
+            outcome === undefined ||
+            requiredString(outcome, "session_id") !== requiredString(turn, "session_id")
+          )
+            throw new Error(`Foreground turn ${request.turnId} has no matching durable outcome`);
+          db.prepare(
+            `UPDATE foreground_turns
+             SET status = ?, outcome_id = ?, settled_at = ?
+             WHERE turn_id = ? AND status = 'running'`,
+          ).run(request.status, request.outcomeId, request.settledAt, request.turnId);
+          db.prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ?").run(
+            request.status === "completed" ? "idle" : request.status === "aborted" ? "aborted" : "failed",
+            request.settledAt,
+            requiredString(turn, "session_id"),
+          );
+          recordActivity(
+            systemActor,
+            `foreground_turn.${request.status}`,
+            "foreground_turn",
+            request.turnId,
+            [request.outcomeId],
+          );
+        });
+      },
+    }),
     sessions: Object.freeze({
       get: async (sessionId: string) =>
         decodeOptional(
@@ -3467,214 +2368,6 @@ async function openCanonicalSource(
     .prepare(`SELECT ${expression} AS body FROM ${source.table} WHERE ${table.key} = ?`)
     .get(source.rowId);
   return row === undefined ? undefined : requiredString(row, "body");
-}
-
-function decodeFileRevisionRef(row: unknown): FileRevisionRef {
-  return FileRevisionRefSchema.parse({
-    kind: "file_revision",
-    revisionId: requiredString(row, "revision_id"),
-    workingPath: requiredString(row, "working_path"),
-    snapshotPath: requiredString(row, "snapshot_path"),
-    contentDigest: requiredString(row, "content_digest"),
-  });
-}
-
-function decodeSession(row: unknown): SessionRecord {
-  const parentSessionId = optionalString(row, "parent_session_id");
-  return {
-    sessionId: requiredString(row, "session_id"),
-    ...(parentSessionId === undefined ? {} : { parentSessionId }),
-    title: requiredString(row, "title"),
-    status: requiredString(row, "status") as SessionRecord["status"],
-    provider: requiredString(row, "provider"),
-    model: requiredString(row, "model"),
-    runtime: requiredString(row, "runtime"),
-    createdAt: requiredString(row, "created_at"),
-    updatedAt: requiredString(row, "updated_at"),
-    metadata: JsonRecordSchema.parse(parseJson(requiredString(row, "metadata_json"))),
-  };
-}
-
-function decodeMessage(row: unknown): MessageRecord {
-  return {
-    messageId: requiredString(row, "message_id"),
-    sessionId: requiredString(row, "session_id"),
-    role: requiredString(row, "role") as MessageRecord["role"],
-    content: requiredString(row, "content"),
-    sensitivity: requiredString(row, "sensitivity") as MessageRecord["sensitivity"],
-    createdAt: requiredString(row, "created_at"),
-    metadata: JsonRecordSchema.parse(parseJson(requiredString(row, "metadata_json"))),
-  };
-}
-
-function decodeToolCall(row: unknown): ToolCallRecord {
-  const response = optionalString(row, "response_json");
-  const messageId = optionalString(row, "message_id");
-  const completedAt = optionalString(row, "completed_at");
-  return {
-    toolCallId: requiredString(row, "tool_call_id"),
-    sessionId: requiredString(row, "session_id"),
-    ...(messageId === undefined ? {} : { messageId }),
-    toolName: requiredString(row, "tool_name"),
-    request: parseJson(requiredString(row, "request_json")),
-    ...(response === undefined ? {} : { response: parseJson(response) }),
-    status: requiredString(row, "status") as ToolCallRecord["status"],
-    sensitivity: requiredString(row, "sensitivity") as ToolCallRecord["sensitivity"],
-    createdAt: requiredString(row, "created_at"),
-    ...(completedAt === undefined ? {} : { completedAt }),
-  };
-}
-
-function decodeOutcome(row: unknown): OutcomeRecord {
-  const turnId = optionalString(row, "turn_id");
-  return {
-    outcomeId: requiredString(row, "outcome_id"),
-    sessionId: requiredString(row, "session_id"),
-    ...(turnId === undefined ? {} : { turnId }),
-    status: requiredString(row, "status") as OutcomeRecord["status"],
-    summary: requiredString(row, "summary"),
-    sensitivity: requiredString(row, "sensitivity") as OutcomeRecord["sensitivity"],
-    createdAt: requiredString(row, "created_at"),
-    metadata: JsonRecordSchema.parse(parseJson(requiredString(row, "metadata_json"))),
-  };
-}
-
-function decodeJob(row: unknown): JobRecord {
-  const leaseOwner = optionalString(row, "lease_owner");
-  const leaseUntil = optionalString(row, "lease_until");
-  return {
-    jobId: requiredString(row, "job_id"),
-    kind: requiredString(row, "kind"),
-    payload: parseJson(requiredString(row, "payload_json")),
-    status: requiredString(row, "status") as JobRecord["status"],
-    ...(leaseOwner === undefined ? {} : { leaseOwner }),
-    ...(leaseUntil === undefined ? {} : { leaseUntil }),
-    attempt: requiredNumber(row, "attempt"),
-    budgetRemaining: requiredNumber(row, "budget_remaining"),
-    createdAt: requiredString(row, "created_at"),
-    updatedAt: requiredString(row, "updated_at"),
-  };
-}
-
-function decodeActivation(row: unknown): ActivationRecord {
-  const preflightId = optionalString(row, "preflight_id");
-  const storedCapabilityRevisions = z
-    .record(z.string(), z.unknown())
-    .parse(parseJson(requiredString(row, "capability_revisions_json")));
-  const activeCapabilityRevisions = Object.fromEntries(
-    Object.entries(storedCapabilityRevisions).map(([capabilityId, value]) => {
-      const revision =
-        typeof value === "string"
-          ? {
-              kind: "legacy_capability_revision" as const,
-              capabilityId,
-              capabilityRevisionId: value,
-            }
-          : CapabilityRevisionRefSchema.parse(value);
-      if (revision.capabilityId !== capabilityId)
-        throw new Error(`Stored activation capability key ${capabilityId} is mismatched`);
-      return [capabilityId, revision];
-    }),
-  );
-  return {
-    activationId: requiredString(row, "activation_id"),
-    revision: requiredNumber(row, "revision"),
-    previousActivationId: optionalString(row, "previous_activation_id") ?? null,
-    activeDefinitions: z
-      .record(z.string(), FileRevisionRefSchema)
-      .parse(parseJson(requiredString(row, "definitions_json"))),
-    activeCapabilityRevisions,
-    ...(preflightId === undefined ? {} : { preflightId }),
-    createdAt: requiredString(row, "created_at"),
-  };
-}
-
-function decodeActivationPointer(row: unknown): ActivationPointerRecord {
-  const capabilityId = requiredString(row, "capability_id");
-  const encoded = optionalString(row, "capability_revision_json");
-  const capabilityRevision =
-    encoded === undefined
-      ? {
-          kind: "legacy_capability_revision" as const,
-          capabilityId,
-          capabilityRevisionId: requiredString(row, "capability_revision_id"),
-        }
-      : CapabilityRevisionRefSchema.parse(parseJson(encoded));
-  if (capabilityRevision.capabilityId !== capabilityId)
-    throw new Error("Stored activation pointer capability identity is mismatched");
-  return {
-    pointerId: requiredString(row, "pointer_id"),
-    capabilityId,
-    activationId: requiredString(row, "activation_id"),
-    capabilityRevision,
-    updatedAt: requiredString(row, "updated_at"),
-  };
-}
-
-function decodeSearchConfiguration(row: unknown): SearchConfiguration {
-  return SearchConfigurationSchema.parse({
-    lexicalLimit: requiredNumber(row, "lexical_limit"),
-    semanticLimit: requiredNumber(row, "semantic_limit"),
-    rerankLimit: requiredNumber(row, "rerank_limit"),
-    maxExcerptChars: requiredNumber(row, "max_excerpt_chars"),
-    includePrivate: requiredNumber(row, "include_private") === 1,
-    updatedAt: requiredString(row, "updated_at"),
-  });
-}
-
-function decodeSearchDocument(row: unknown): SearchDocument {
-  const source = z
-    .discriminatedUnion("kind", [
-      z.strictObject({
-        kind: z.literal("database_row"),
-        table: z.enum(["sessions", "messages", "tool_calls", "outcomes"]),
-        rowId: z.string(),
-        field: z.string(),
-      }),
-      z.strictObject({
-        kind: z.literal("file_revision"),
-        revisionId: z.string(),
-        field: z.literal("bytes"),
-      }),
-    ])
-    .parse(parseJson(requiredString(row, "citation_json"))) as CanonicalSearchSource;
-  const sessionId = optionalString(row, "session_id");
-  return {
-    documentId: requiredString(row, "document_id"),
-    source,
-    ...(sessionId === undefined ? {} : { sessionId }),
-    sensitivity: requiredString(row, "sensitivity") as SearchDocument["sensitivity"],
-    occurredAt: requiredString(row, "occurred_at"),
-    body: requiredString(row, "body"),
-  };
-}
-
-function decodeOptional<T>(row: unknown, decode: (value: unknown) => T): T | undefined {
-  return row === undefined ? undefined : decode(row);
-}
-
-function decodeStored<T>(row: unknown, schema: z.ZodType<T>): T | undefined {
-  return row === undefined ? undefined : schema.parse(parseJson(requiredString(row, "data_json")));
-}
-
-function decodeExperiment(row: unknown): Experiment | undefined {
-  if (row === undefined) return undefined;
-  const parsed = ExperimentSchema.safeParse(parseJson(requiredString(row, "data_json")));
-  if (!parsed.success) throw parsed.error;
-  // Zod's optional-property inference includes explicit undefined while the domain uses exact optionals.
-  return parsed.data as Experiment;
-}
-
-function decodeFeedbackSignal(row: unknown): FeedbackSignal | undefined {
-  if (row === undefined) return undefined;
-  const parsed = FeedbackSignalSchema.safeParse(parseJson(requiredString(row, "data_json")));
-  if (!parsed.success) throw parsed.error;
-  // Zod's optional-property inference includes explicit undefined while the domain uses exact optionals.
-  return parsed.data as FeedbackSignal;
-}
-
-function decodeVector(value: string): readonly number[] {
-  return z.array(z.number().finite()).min(1).parse(JSON.parse(value));
 }
 
 function cosineSimilarity(left: readonly number[], right: readonly number[]): number {

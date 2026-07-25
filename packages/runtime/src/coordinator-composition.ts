@@ -7,8 +7,8 @@ import {
   createLearningPreflightInput,
   type DynamicEvaluationConfig,
   type DynamicEvaluationLaboratory,
-  type EvaluationCase,
   type EvaluationCriterionSet,
+  type ProtectedEvaluationSuiteRevision,
 } from "@noesis/evals";
 import {
   capabilityRevisionRef,
@@ -43,7 +43,7 @@ export interface CoordinatorPreflightPreparation {
     readonly signal: AbortSignal;
   }) => Promise<{
     readonly criteria: EvaluationCriterionSet;
-    readonly protectedCases: readonly EvaluationCase[];
+    readonly protectedSuite: ProtectedEvaluationSuiteRevision;
     readonly budget: {
       readonly maxCases: number;
       readonly maxAttemptsPerArm: number;
@@ -225,7 +225,7 @@ export function createRuntimeCoordinatorComposition(
         },
         baselineRevision: baseline,
         criteria: prepared.criteria,
-        protectedCases: prepared.protectedCases,
+        protectedSuite: prepared.protectedSuite,
         budget: prepared.budget,
         config: prepared.config,
         signal,

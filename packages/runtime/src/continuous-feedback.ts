@@ -13,8 +13,8 @@ import {
   type FeedbackSignal,
   type LearningSignalKind,
 } from "@noesis/domain";
-import type { AuthorityBoundary } from "@noesis/policy";
 import type {
+  CommitExperimentOutcomeRequest,
   ExperimentObservationRecord,
   ExperimentOutcomeOperationRecord,
   ExperimentResearchRunRecord,
@@ -22,6 +22,7 @@ import type {
   ObservationMetrics,
   OutcomeRecord,
 } from "@noesis/workspace";
+import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
 import { z } from "zod";
 
 const OutcomeStatusSchema = z.enum(["accepted", "corrected", "failed", "unknown"]);
@@ -232,7 +233,7 @@ export interface ContinuousFeedbackController {
 
 export interface ContinuousFeedbackControllerOptions {
   readonly workspace: NoesisWorkspaceStore;
-  readonly authority: AuthorityBoundary;
+  readonly protectedRuntime: ProtectedWorkspaceRuntime;
   readonly capabilities: FeedbackCapabilityResolver;
   readonly judge: ExperimentOutcomeJudge;
   readonly config?: ContinuousFeedbackConfig;
@@ -365,7 +366,7 @@ export function createContinuousFeedbackController(
   const experimentComparison = async (experimentId: string): Promise<ExperimentComparisonReadModel> => {
     const experiment = await options.workspace.research.experiments.getExperiment(experimentId);
     if (!experiment) throw new Error(`Experiment ${experimentId} is missing`);
-    const observations = await options.workspace.protectedFeedback.listObservations(
+    const observations = await options.protectedRuntime.feedback.listObservations(
       experimentId,
       config.observationWindow,
     );
@@ -375,8 +376,8 @@ export function createContinuousFeedbackController(
     const trials = await options.workspace.research.trials.listTrials(experimentId);
     const baselineTrials = trials.filter((trial) => trial.arm === "baseline");
     const candidateTrials = trials.filter((trial) => trial.arm === "candidate");
-    const outcome = await options.workspace.protectedFeedback.getOutcome(experimentId);
-    const researchRuns = await options.workspace.protectedFeedback.listResearchRuns(experimentId);
+    const outcome = await options.protectedRuntime.feedback.getOutcome(experimentId);
+    const researchRuns = await options.protectedRuntime.feedback.listResearchRuns(experimentId);
     return Object.freeze({
       experimentId,
       status: experiment.status,
@@ -414,12 +415,12 @@ export function createContinuousFeedbackController(
     readonly observations: readonly ExperimentObservationRecord[];
     readonly researchRunId?: string;
   }): Promise<ExperimentOutcomeOperationRecord> => {
-    const existing = await options.workspace.protectedFeedback.getOutcome(input.experiment.experimentId);
+    const existing = await options.protectedRuntime.feedback.getOutcome(input.experiment.experimentId);
     if (existing) return existing;
     if (input.experiment.status !== "observing" || !input.experiment.activatedRevision)
       throw new Error("Observing experiment has no activated revision identity");
     const activatedRevision = input.experiment.activatedRevision;
-    const current = await options.workspace.protectedActivations.current();
+    const current = await options.protectedRuntime.activations.current();
     if (!current) throw new Error("No current activation exists for experiment outcome");
     if (
       input.observations.some(
@@ -447,9 +448,9 @@ export function createContinuousFeedbackController(
       expectedActivationRevision: current.revision,
       evidenceRefs,
     };
-    let protectedAction: Parameters<NoesisWorkspaceStore["protectedFeedback"]["commitOutcome"]>[0];
+    let protectedAction: CommitExperimentOutcomeRequest;
     if (input.decision === "revert") {
-      const origin = (await options.workspace.protectedActivations.listOperations(1_000)).find(
+      const origin = (await options.protectedRuntime.activations.listOperations(1_000)).find(
         (operation) => operation.binding.experimentId === input.experiment.experimentId,
       );
       if (!origin || origin.status !== "committed" || !origin.previousActivationId)
@@ -521,20 +522,9 @@ export function createContinuousFeedbackController(
         operationDigest: sha256(canonicalJson(digestInput)),
       });
     }
-    const resource = `experiment:${input.experiment.experimentId}:${input.decision}`;
-    const authorityDecision =
-      input.decision === "revert"
-        ? await options.authority.rollback(resource, protectedAction.idempotencyKey, async () => {
-            await options.workspace.protectedFeedback.commitOutcome(protectedAction);
-            return null;
-          })
-        : await options.authority.promote(resource, protectedAction.idempotencyKey, async () => {
-            await options.workspace.protectedFeedback.commitOutcome(protectedAction);
-            return null;
-          });
-    const committed = await options.workspace.protectedFeedback.getOutcome(input.experiment.experimentId);
+    await options.protectedRuntime.feedback.commitOutcome(protectedAction);
+    const committed = await options.protectedRuntime.feedback.getOutcome(input.experiment.experimentId);
     if (committed) return committed;
-    if (!authorityDecision.ok) throw new Error(authorityDecision.reason);
     throw new Error("Protected experiment outcome completed without a committed operation");
   };
 
@@ -562,7 +552,7 @@ export function createContinuousFeedbackController(
       const experiment = await options.workspace.research.experiments.getExperiment(payload.experimentId);
       if (!experiment || experiment.status !== "observing" || !experiment.activatedRevision)
         throw new Error(`Outcome job experiment ${payload.experimentId} is no longer observing`);
-      const observations = await options.workspace.protectedFeedback.listObservations(
+      const observations = await options.protectedRuntime.feedback.listObservations(
         payload.experimentId,
         config.observationWindow,
       );
@@ -580,7 +570,7 @@ export function createContinuousFeedbackController(
         }),
         comparison,
       });
-      const prior = await options.workspace.protectedFeedback.getResearchRun(payload.runId);
+      const prior = await options.protectedRuntime.feedback.getResearchRun(payload.runId);
       let proposed: ExperimentOutcomeProposal | undefined;
       if (prior?.status === "completed") {
         await options.workspace.jobs.complete({
@@ -598,7 +588,7 @@ export function createContinuousFeedbackController(
             "Outcome judge lease expired with an ambiguous provider outcome; exact operation rehydration is unavailable",
           );
       } else {
-        await options.workspace.protectedFeedback.putResearchRun({
+        await options.protectedRuntime.feedback.putResearchRun({
           runId: payload.runId,
           experimentId: payload.experimentId,
           strategyId: payload.strategyId,
@@ -616,7 +606,7 @@ export function createContinuousFeedbackController(
       }
       if (controller.signal.aborted) throw new Error("Outcome judge lost its durable lease");
       const validated = validateProposal(proposed, observations);
-      const run = await options.workspace.protectedFeedback.putResearchRun({
+      const run = await options.protectedRuntime.feedback.putResearchRun({
         runId: payload.runId,
         experimentId: payload.experimentId,
         strategyId: payload.strategyId,
@@ -641,7 +631,7 @@ export function createContinuousFeedbackController(
     } catch (error) {
       const current = await options.workspace.jobs.get(job.jobId);
       const message = error instanceof Error ? error.message : String(error);
-      await options.workspace.protectedFeedback.putResearchRun({
+      await options.protectedRuntime.feedback.putResearchRun({
         runId: payload.runId,
         experimentId: payload.experimentId,
         strategyId: payload.strategyId,
@@ -702,7 +692,7 @@ export function createContinuousFeedbackController(
     experimentId: string,
     requestedStrategyId = config.researchStrategyId,
   ): Promise<ObservationResolution | undefined> => {
-    const existing = await options.workspace.protectedFeedback.getOutcome(experimentId);
+    const existing = await options.protectedRuntime.feedback.getOutcome(experimentId);
     if (existing) {
       const observationRef = existing.evidenceRefs.find(
         (ref): ref is DatabaseRowRef<"experiment_observations"> =>
@@ -717,7 +707,7 @@ export function createContinuousFeedbackController(
     }
     const experiment = await options.workspace.research.experiments.getExperiment(experimentId);
     if (!experiment || experiment.status !== "observing" || !experiment.activatedRevision) return undefined;
-    const observations = await options.workspace.protectedFeedback.listObservations(
+    const observations = await options.protectedRuntime.feedback.listObservations(
       experimentId,
       config.observationWindow,
     );
@@ -772,7 +762,7 @@ export function createContinuousFeedbackController(
       budget: 2,
     });
     await runAvailable();
-    const run = await options.workspace.protectedFeedback.getResearchRun(runId);
+    const run = await options.protectedRuntime.feedback.getResearchRun(runId);
     if (!run)
       return Object.freeze({ status: "observing", experimentId, observationId: latest.observationId });
     if (run.status === "failed")
@@ -808,7 +798,7 @@ export function createContinuousFeedbackController(
   ): Promise<readonly ObservationResolution[]> => {
     const input = TurnOutcomeInputSchema.parse(rawInput);
     const evidenceRefs = z.array(z.unknown()).parse(input.evidenceRefs) as readonly EvidenceRef[];
-    const pin = await options.workspace.protectedActivations.getTurnPin(input.sessionId, input.turnId);
+    const pin = await options.protectedRuntime.activations.getTurnPin(input.sessionId, input.turnId);
     if (!pin) return Object.freeze([{ status: "excluded", reason: "turn has no activation pin" }]);
     const uniqueCapabilityIds = Object.freeze([...new Set(input.usedCapabilityIds)]);
     const pinned = uniqueCapabilityIds.flatMap((capabilityId) => {
@@ -851,8 +841,8 @@ export function createContinuousFeedbackController(
         (candidate) =>
           candidate.activatedRevision && sameCapabilityRevisionRef(candidate.activatedRevision, revision),
       );
-      if (!experiment || !experiment.preflightRef) continue;
-      const origin = (await options.workspace.protectedActivations.listOperations(1_000)).find(
+      if (!experiment?.preflightRef) continue;
+      const origin = (await options.protectedRuntime.activations.listOperations(1_000)).find(
         (operation) =>
           operation.status === "committed" && operation.binding.experimentId === experiment.experimentId,
       );
@@ -881,7 +871,7 @@ export function createContinuousFeedbackController(
             ? "preference"
             : "none";
       const observationId = `observation_${sha256(signalId).slice(0, 32)}`;
-      const observation = await options.workspace.protectedFeedback.recordObservation(
+      const observation = await options.protectedRuntime.feedback.recordObservation(
         Object.freeze({
           observationId,
           dedupeKey: `observe:${experiment.experimentId}:${input.sessionId}:${input.turnId}:${revision.bundleDigest}`,
@@ -928,12 +918,15 @@ export function createContinuousFeedbackController(
   };
 
   const capabilityHealth = async (capabilityId: string): Promise<CapabilityHealthReadModel> => {
-    const current = await options.workspace.protectedActivations.current();
+    const current = await options.protectedRuntime.activations.current();
     const activeStored = current?.activeCapabilityRevisions[capabilityId];
     const activeRevision = activeStored?.kind === "capability_revision" ? activeStored : null;
     const experiments = await options.workspace.research.experiments.listExperiments({ limit: 1_000 });
     const related = experiments.filter(
-      (experiment) => experiment.baselineRevision.capabilityId === capabilityId,
+      (experiment) =>
+        experiment.baselineRevision.capabilityId === capabilityId ||
+        experiment.candidateRevisions.some((revision) => revision.capabilityId === capabilityId) ||
+        experiment.activatedRevision?.capabilityId === capabilityId,
     );
     const open = await Promise.all(
       related
@@ -943,7 +936,7 @@ export function createContinuousFeedbackController(
     const outcomes = (
       await Promise.all(
         related.map(
-          async (experiment) => await options.workspace.protectedFeedback.getOutcome(experiment.experimentId),
+          async (experiment) => await options.protectedRuntime.feedback.getOutcome(experiment.experimentId),
         ),
       )
     ).filter((outcome): outcome is ExperimentOutcomeOperationRecord => outcome !== undefined);

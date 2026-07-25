@@ -297,6 +297,70 @@ export interface EvaluationRecord {
   readonly status: "running" | "completed" | "failed";
 }
 
+export type CompoundingReplayRole = "served_arm" | "baseline_arm" | "judge";
+
+export type CompoundingReplayExclusionReason =
+  | "unsettled_outcome"
+  | "aborted_turn"
+  | "unknown_legacy_baseline"
+  | "missing_provenance_classification"
+  | "secret_data"
+  | "private_data_unauthorized"
+  | "incomplete_tool_result"
+  | "identity_mismatch"
+  | "budget_exhausted"
+  | "unresolved_reservation"
+  | "role_failed"
+  | "unexpected_effect";
+
+export interface CorrectionExposure {
+  readonly signature: string;
+  readonly related: boolean;
+  readonly correctionOccurred: boolean;
+  readonly phase: "pre_activation" | "post_activation";
+  readonly servedRevisions: readonly CapabilityRevisionRef[];
+}
+
+export interface CompoundingReplayRecordBase {
+  readonly replayId: string;
+  readonly planId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly occurredAt: string;
+  readonly scope: string;
+  readonly modelCohort: string;
+  readonly servedRevisions: readonly CapabilityRevisionRef[];
+  readonly baselineRevisions: readonly CapabilityRevisionRef[];
+  readonly scopeRelated: boolean;
+  readonly correctionExposures: readonly CorrectionExposure[];
+}
+
+export interface ExcludedCompoundingReplayRecord extends CompoundingReplayRecordBase {
+  readonly status: "excluded";
+  readonly exclusionReason: CompoundingReplayExclusionReason;
+  readonly exclusionDetail: string;
+}
+
+export interface PairedCompoundingReplayRecord extends CompoundingReplayRecordBase {
+  readonly status: "paired";
+  readonly winner: "served" | "baseline" | "tie" | "inconclusive";
+  readonly railsPassed: boolean;
+  readonly servedOutputEvidence: EvidenceRevisionRef<"output">;
+  readonly baselineOutputEvidence: EvidenceRevisionRef<"output">;
+  readonly judgmentEvidence: EvidenceRevisionRef<"judgment">;
+  readonly servedInputTokens: number;
+  readonly baselineInputTokens: number;
+  readonly injectedContextTokens: number;
+  readonly servedPromptLayerBytes: number;
+  readonly baselinePromptLayerBytes: number;
+}
+
+/**
+ * One settled foreground turn considered by compounding measurement. Exclusions are durable data,
+ * not discarded control flow, so every aggregate can expose its actual coverage.
+ */
+export type CompoundingReplayRecord = ExcludedCompoundingReplayRecord | PairedCompoundingReplayRecord;
+
 export function preflightPlanMatchesExperiment(experiment: Experiment, plan: PreflightPlan): boolean {
   return (
     plan.experimentId === experiment.experimentId &&

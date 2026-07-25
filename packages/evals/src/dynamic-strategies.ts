@@ -71,7 +71,7 @@ export const DEFAULT_JUDGE_STRATEGY: EvaluationJudgeStrategy = {
   renderRubric: (input) =>
     canonicalJson({
       instruction:
-        "Compare anonymous arms A and B. Critique both against the case and cited criteria, then choose a winner. Do not guess arm identity.",
+        "Compare anonymous arms A and B against the case and cited criteria. Return tie only when the evidence supports equivalent quality. Return inconclusive when evidence is missing, contradictory, equally compatible with different outcomes, or would require guessing; never force a winner or guess arm identity.",
       behaviorObjective: input.behaviorObjective,
       evaluationCase: {
         caseId: input.evaluationCase.caseId,
@@ -89,7 +89,7 @@ export const ALTERNATIVE_JUDGE_STRATEGY: EvaluationJudgeStrategy = {
   renderRubric: (input) =>
     canonicalJson({
       instruction:
-        "Compare anonymous arms A and B. First enumerate criterion and artifact violations, then compare useful quality only among valid arms. Do not infer arm identity.",
+        "Compare anonymous arms A and B. First enumerate criterion and artifact violations, then compare useful quality only among valid arms. Return tie only when the evidence supports equivalent quality. Return inconclusive when evidence is missing, contradictory, equally compatible with different outcomes, or would require guessing; never force a winner or infer arm identity.",
       behaviorObjective: input.behaviorObjective,
       evaluationCase: {
         caseId: input.evaluationCase.caseId,
@@ -120,6 +120,17 @@ function comparisonSummary(strategyId: string, counts: ReturnType<typeof countCo
   return `${strategyId}: candidate=${counts.candidateWins}, baseline=${counts.baselineWins}, tie=${counts.ties}, inconclusive=${counts.inconclusive}`;
 }
 
+function comparisonEvidence(
+  comparisons: readonly CaseComparison[],
+  counts: ReturnType<typeof countComparisons>,
+) {
+  return Object.freeze({
+    inconclusive: counts.inconclusive,
+    decisiveDisagreements: Math.min(counts.candidateWins, counts.baselineWins),
+    comparisonEvidenceRefs: Object.freeze(comparisons.map((comparison) => comparison.judgmentEvidence)),
+  });
+}
+
 export const DEFAULT_AGGREGATION_STRATEGY: EvaluationAggregationStrategy = {
   strategyId: "majority-with-confidence-v1",
   aggregate: (comparisons, config): AggregatedComparison => {
@@ -140,6 +151,7 @@ export const DEFAULT_AGGREGATION_STRATEGY: EvaluationAggregationStrategy = {
       candidateWins: counts.candidateWins,
       baselineWins: counts.baselineWins,
       ties: counts.ties,
+      ...comparisonEvidence(comparisons, counts),
     });
   },
 };
@@ -170,6 +182,7 @@ export const ALTERNATIVE_AGGREGATION_STRATEGY: EvaluationAggregationStrategy = {
       candidateWins: counts.candidateWins,
       baselineWins: counts.baselineWins,
       ties: counts.ties,
+      ...comparisonEvidence(comparisons, counts),
     });
   },
 };

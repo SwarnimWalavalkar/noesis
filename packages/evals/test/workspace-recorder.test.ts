@@ -263,6 +263,24 @@ function report(input: {
       sourceSnapshotDigest: sha256("criteria-source"),
       snapshotDigest: sha256("criteria"),
     },
+    protectedSuite: {
+      suiteId: "protected-production",
+      revision: 1,
+      scope: "research",
+      definitionRevision: input.definition,
+      cases: [
+        {
+          caseId: "protected",
+          kind: "protected",
+          owner: "evaluator",
+          instruction: "Preserve citations on unseen work",
+          input: "Unseen research",
+          evidenceRefs: [input.definition],
+          criterionRefs: [{ criterionId: "criterion", revision: 1 }],
+        },
+      ],
+      snapshotDigest: sha256("protected-suite"),
+    },
     cases: [
       {
         caseId: "source",
@@ -348,6 +366,9 @@ function report(input: {
       candidateWins: 1,
       baselineWins: 0,
       ties: 0,
+      inconclusive: 0,
+      decisiveDisagreements: 0,
+      comparisonEvidenceRefs: [input.judgment],
     },
     railChecks: [{ rail: "capability_identity", passed: true, evidenceRefs: [input.output], details: [] }],
     config,

@@ -1,11 +1,20 @@
 import type {
   ArtifactFileRef,
+  CapabilityRevisionRef,
   EvidenceRef,
   EvidenceRevisionRef,
   ExperimentVariantRef,
+  FileRevisionRef,
   JsonValue,
+  PermissionManifest,
 } from "@noesis/domain";
-import { JsonValueSchema } from "@noesis/domain";
+import {
+  CapabilityRevisionRefSchema,
+  EvidenceRefSchema,
+  FileRevisionRefSchema,
+  canonicalJson,
+  sha256,
+} from "@noesis/domain";
 import { z } from "zod";
 
 export type AgentRole =
@@ -72,6 +81,124 @@ export interface AgentContextUsage {
 
 export type AgentCompletedStopReason = "stop" | "length" | "toolUse";
 
+export type FrozenBaselineRef =
+  | { readonly kind: "genesis" }
+  | { readonly kind: "unknown_legacy" }
+  | {
+      readonly kind: "capability_revision";
+      readonly experimentId: string;
+      readonly revision: CapabilityRevisionRef;
+    };
+
+export interface FrozenRevisionMaterial {
+  readonly revision: FileRevisionRef;
+  /** Exact UTF-8 bytes decoded from the immutable revision at planning time. */
+  readonly content: string;
+}
+
+export interface FrozenCapabilitySelection {
+  readonly capabilityId: string;
+  readonly name: string;
+  readonly scope: string;
+  readonly selectionReason: string;
+  readonly revision: CapabilityRevisionRef;
+  readonly baseline: FrozenBaselineRef;
+  readonly promptModules: readonly FrozenRevisionMaterial[];
+  readonly skills: readonly FrozenRevisionMaterial[];
+  readonly tools: readonly FrozenRevisionMaterial[];
+  readonly router: FrozenRevisionMaterial;
+  readonly permissionManifest: PermissionManifest;
+}
+
+/** The complete SQLite-authoritative input to one foreground execution. */
+export interface FrozenTurnPlan {
+  readonly schemaVersion: 1;
+  readonly planId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly activationId: string;
+  readonly activationRevision: number;
+  readonly selectedCapabilities: readonly FrozenCapabilitySelection[];
+  readonly renderedSystemPrompt: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly thinkingLevel: AgentThinkingLevel;
+  readonly permissionSnapshot: PermissionManifest;
+  readonly retrievalCitations: readonly EvidenceRef[];
+  readonly routing: {
+    readonly strategyId: string;
+    readonly reason: string;
+  };
+  readonly createdAt: string;
+  readonly canonicalDigest: string;
+}
+
+const PermissionManifestSchema = z.strictObject({
+  effects: z.array(z.string()),
+  resourcePatterns: z.array(z.string()),
+  credentialRefs: z.array(z.string()),
+});
+const FrozenRevisionMaterialSchema = z.strictObject({
+  revision: FileRevisionRefSchema,
+  content: z.string(),
+});
+const FrozenBaselineRefSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("genesis") }),
+  z.strictObject({ kind: z.literal("unknown_legacy") }),
+  z.strictObject({
+    kind: z.literal("capability_revision"),
+    experimentId: z.string().min(1),
+    revision: CapabilityRevisionRefSchema,
+  }),
+]);
+const FrozenCapabilitySelectionSchema = z.strictObject({
+  capabilityId: z.string().min(1),
+  name: z.string().min(1),
+  scope: z.string().min(1),
+  selectionReason: z.string().min(1),
+  revision: CapabilityRevisionRefSchema,
+  baseline: FrozenBaselineRefSchema,
+  promptModules: z.array(FrozenRevisionMaterialSchema),
+  skills: z.array(FrozenRevisionMaterialSchema),
+  tools: z.array(FrozenRevisionMaterialSchema),
+  router: FrozenRevisionMaterialSchema,
+  permissionManifest: PermissionManifestSchema,
+});
+
+export const FrozenTurnPlanSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  planId: z.string().min(1),
+  sessionId: z.string().min(1),
+  turnId: z.string().min(1),
+  activationId: z.string().min(1),
+  activationRevision: z.number().int().positive(),
+  selectedCapabilities: z.array(FrozenCapabilitySelectionSchema),
+  renderedSystemPrompt: z.string().min(1),
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+  permissionSnapshot: PermissionManifestSchema,
+  retrievalCitations: z.array(EvidenceRefSchema),
+  routing: z.strictObject({
+    strategyId: z.string().min(1),
+    reason: z.string().min(1),
+  }),
+  createdAt: z.string().min(1),
+  canonicalDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+});
+
+export function frozenTurnPlanDigest(plan: Omit<FrozenTurnPlan, "canonicalDigest">): string {
+  return sha256(canonicalJson(plan));
+}
+
+export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
+  const plan = FrozenTurnPlanSchema.parse(value);
+  const { canonicalDigest, ...unsigned } = plan;
+  if (frozenTurnPlanDigest(unsigned) !== canonicalDigest)
+    throw new Error(`Frozen turn plan ${plan.planId} failed canonical digest verification`);
+  return plan;
+}
+
 export interface AgentRuntimeRequest {
   readonly trailId: string;
   readonly provider: string;
@@ -83,6 +210,8 @@ export interface AgentRuntimeRequest {
     readonly name: string;
     readonly version: number;
   }[];
+  /** Present on the product application path; legacy package tests may omit it until HL-11. */
+  readonly frozenTurnPlan?: FrozenTurnPlan;
 }
 
 export type AgentRuntimeEvent =
@@ -148,34 +277,6 @@ export interface AgentToolDescriptor {
   readonly inputSchemaId: string;
   readonly outputSchemaId: string;
   readonly permissionManifestRef: string;
-}
-
-export const ToolBrokerRequestSchema = z.strictObject({
-  requestId: z.string().min(1),
-  operationId: z.string().min(1),
-  toolName: z.string().min(1),
-  input: JsonValueSchema,
-});
-export type ToolBrokerRequest = Readonly<z.infer<typeof ToolBrokerRequestSchema>>;
-
-export const ToolBrokerResultSchema = z.discriminatedUnion("ok", [
-  z.strictObject({
-    ok: z.literal(true),
-    requestId: z.string().min(1),
-    output: JsonValueSchema,
-    evidenceRefs: z.array(z.string().min(1)),
-  }),
-  z.strictObject({
-    ok: z.literal(false),
-    requestId: z.string().min(1),
-    code: z.enum(["invalid_input", "denied", "failed", "timeout"]),
-    reason: z.string().min(1),
-  }),
-]);
-export type ToolBrokerResult = Readonly<z.infer<typeof ToolBrokerResultSchema>>;
-
-export interface ToolBrokerPort {
-  readonly invoke: (request: ToolBrokerRequest) => Promise<ToolBrokerResult>;
 }
 
 /** One execution child of the canonical domain Experiment lifecycle. */

@@ -12,13 +12,15 @@ import {
   type FileRevisionRef,
   type PreflightDecision,
 } from "@noesis/domain";
-import { createExperienceLedger } from "@noesis/ledger";
-import { createAuthorityBoundary } from "@noesis/policy";
 import {
   createWorkspaceStore,
   type NoesisWorkspaceStore,
   type WorkspaceStoreOptions,
 } from "@noesis/workspace";
+import {
+  createWorkspaceRuntimeInternals,
+  type ProtectedWorkspaceRuntime,
+} from "../../workspace/src/protected-runtime.ts";
 import { describe, expect, test } from "vitest";
 import {
   createAtomicActivationController,
@@ -35,6 +37,8 @@ const autonomy = Object.freeze({
   pins: "respect" as const,
   vetoes: "respect" as const,
 });
+const protectedRuntime = (workspace: NoesisWorkspaceStore): ProtectedWorkspaceRuntime =>
+  createWorkspaceRuntimeInternals(workspace).protectedRuntime;
 
 interface FixtureOptions {
   readonly suffix?: string;
@@ -48,6 +52,8 @@ interface FixtureOptions {
   readonly root?: string;
   readonly workspace?: NoesisWorkspaceStore;
   readonly authorityHome?: string;
+  readonly newSlot?: boolean;
+  readonly claimedCrossCapabilityPredecessor?: boolean;
 }
 
 interface Fixture {
@@ -93,15 +99,10 @@ async function evidence<Kind extends "input" | "output" | "judgment" | "report">
   });
 }
 
-async function authorityFor(home: string) {
-  const ledger = createExperienceLedger(home);
-  await ledger.initialize();
-  return createAuthorityBoundary(ledger);
-}
-
 async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const suffix = options.suffix ?? "one";
   const capabilityId = options.capabilityId ?? `capability-${suffix}`;
+  const baselineCapabilityId = options.newSlot ? `genesis-${suffix}` : capabilityId;
   const root = options.root ?? (await mkdtemp(join(tmpdir(), `noesis-ac-09-${suffix}-`)));
   const workspace = options.workspace ?? (await createWorkspaceStore(root, options.storeOptions ?? {}));
   const authorityHome = options.authorityHome ?? join(root, `authority-${suffix}`);
@@ -111,8 +112,8 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const baselineRouter = await definition(workspace, `${suffix}/baseline-router.json`, "baseline router");
   const baselineEval = await definition(workspace, `${suffix}/baseline-eval.json`, "baseline eval");
   const baseline: CapabilityRevision = Object.freeze({
-    capabilityRevisionId: `${capabilityId}-r1`,
-    capabilityId,
+    capabilityRevisionId: `${baselineCapabilityId}-r1`,
+    capabilityId: baselineCapabilityId,
     promptModules: Object.freeze([baselinePrompt]),
     skills: Object.freeze([baselineSkill]),
     tools: Object.freeze([baselineTool]),
@@ -149,7 +150,9 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const candidate: CapabilityRevision = Object.freeze({
     capabilityRevisionId: `${capabilityId}-r2`,
     capabilityId,
-    predecessorRevisionId: baseline.capabilityRevisionId,
+    ...(!options.newSlot || options.claimedCrossCapabilityPredecessor
+      ? { predecessorRevisionId: baseline.capabilityRevisionId }
+      : {}),
     promptModules: Object.freeze([prompt]),
     skills: Object.freeze([skill]),
     tools: Object.freeze([tool, ...(extraTool ? [extraTool] : [])]),
@@ -306,12 +309,24 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const controls = options.controls ?? Object.freeze({ capabilityId, pin: null, vetoes: Object.freeze([]) });
   const resolver: ActivationCandidateResolver = Object.freeze({
     resolve: async (reference: CapabilityRevisionRef) => revisions.get(refKey(reference)),
-    lineage: async () => Object.freeze([baselineRef, candidateRef]),
+    lineage: async () =>
+      options.newSlot ? Object.freeze([candidateRef]) : Object.freeze([baselineRef, candidateRef]),
     controls: async () => controls,
   });
+  if (options.newSlot) {
+    await protectedRuntime(workspace).activations.bootstrapGenesis({
+      capabilityRevision: baselineRef,
+      activeDefinitions: Object.freeze({
+        [`${baselineCapabilityId}:prompt`]: baselinePrompt,
+        [`${baselineCapabilityId}:skill`]: baselineSkill,
+        [`${baselineCapabilityId}:tool`]: baselineTool,
+        [`${baselineCapabilityId}:router`]: baselineRouter,
+      }),
+    });
+  }
   const controller = createAtomicActivationController({
     workspace,
-    authority: await authorityFor(authorityHome),
+    protectedRuntime: protectedRuntime(workspace),
     candidates: resolver,
     autonomy,
   });
@@ -393,7 +408,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     const result = await fixture.controller.activateFromPreflight(fixture.handoff);
     if (!result.ok) throw new Error(result.message);
     expect(result).toMatchObject({ ok: true, status: "activated" });
-    const current = await fixture.workspace.protectedActivations.current();
+    const current = await protectedRuntime(fixture.workspace).activations.current();
     expect(current?.revision).toBe(1);
     expect(current?.previousActivationId).toBeNull();
     expect(current?.activeCapabilityRevisions[fixture.candidateRef.capabilityId]).toEqual(
@@ -409,6 +424,37 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
         ),
       ).toBe(true);
     }
+  });
+
+  test("adds a no-predecessor scoped capability while preserving the active genesis fallback", async () => {
+    const fixture = await createFixture({ suffix: "new-slot", newSlot: true });
+    const before = await protectedRuntime(fixture.workspace).activations.current();
+    const result = await fixture.controller.activateFromPreflight(fixture.handoff);
+
+    expect(result).toMatchObject({ ok: true, status: "activated" });
+    const current = await protectedRuntime(fixture.workspace).activations.current();
+    expect(current?.revision).toBe((before?.revision ?? 0) + 1);
+    expect(current?.activeCapabilityRevisions[fixture.baselineRef.capabilityId]).toEqual(fixture.baselineRef);
+    expect(current?.activeCapabilityRevisions[fixture.candidateRef.capabilityId]).toEqual(
+      fixture.candidateRef,
+    );
+  });
+
+  test("rejects a cross-capability candidate that claims predecessor lineage", async () => {
+    const fixture = await createFixture({
+      suffix: "cross-capability-predecessor",
+      newSlot: true,
+      claimedCrossCapabilityPredecessor: true,
+    });
+
+    await expect(fixture.controller.activateFromPreflight(fixture.handoff)).resolves.toMatchObject({
+      ok: true,
+      status: "blocked",
+      policy: { reasonCodes: expect.arrayContaining(["scope_mismatch"]) },
+    });
+    const current = await protectedRuntime(fixture.workspace).activations.current();
+    expect(current?.activeCapabilityRevisions[fixture.candidateRef.capabilityId]).toBeUndefined();
+    expect(current?.activeCapabilityRevisions[fixture.baselineRef.capabilityId]).toEqual(fixture.baselineRef);
   });
 
   test.each([
@@ -427,7 +473,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
         bindingDigest: "0".repeat(64),
       }),
     ).resolves.toMatchObject({ ok: false, code: "validation_failed" });
-    expect(await fixture.workspace.protectedActivations.current()).toBeUndefined();
+    expect(await protectedRuntime(fixture.workspace).activations.current()).toBeUndefined();
     const approved = await fixture.controller.approve({
       approvalId: pending.approvalId,
       operationId: pending.operation.operationId,
@@ -446,7 +492,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       bindingDigest: pending.bindingDigest,
     });
     expect(rejected).toMatchObject({ ok: true, status: "rejected" });
-    expect(await fixture.workspace.protectedActivations.current()).toBeUndefined();
+    expect(await protectedRuntime(fixture.workspace).activations.current()).toBeUndefined();
     await expect(
       fixture.controller.approve({
         approvalId: pending.approvalId,
@@ -481,7 +527,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
         bindingDigest: pending.bindingDigest,
       }),
     ).resolves.toMatchObject({ ok: false, code: "activation_conflict" });
-    expect(await fixture.workspace.protectedActivations.current()).toBeUndefined();
+    expect(await protectedRuntime(fixture.workspace).activations.current()).toBeUndefined();
   });
 
   test("block, complete-ref veto, and stale report mismatch never activate", async () => {
@@ -490,7 +536,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       ok: true,
       status: "blocked",
     });
-    expect(await blocked.workspace.protectedActivations.current()).toBeUndefined();
+    expect(await protectedRuntime(blocked.workspace).activations.current()).toBeUndefined();
 
     const vetoBase = await createFixture({ suffix: "veto-base" });
     const vetoedControls: CapabilityControlReadModel = Object.freeze({
@@ -506,7 +552,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     });
     const vetoController = createAtomicActivationController({
       workspace: vetoBase.workspace,
-      authority: await authorityFor(join(vetoBase.root, "veto-authority")),
+      protectedRuntime: protectedRuntime(vetoBase.workspace),
       candidates: Object.freeze({
         ...vetoBase.resolver,
         controls: async () => vetoedControls,
@@ -517,7 +563,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       ok: true,
       status: "blocked",
     });
-    expect(await vetoBase.workspace.protectedActivations.current()).toBeUndefined();
+    expect(await protectedRuntime(vetoBase.workspace).activations.current()).toBeUndefined();
 
     const mismatched = await createFixture({ suffix: "mismatch" });
     const stale = Object.freeze({
@@ -534,7 +580,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       ok: false,
       code: "validation_failed",
     });
-    expect(await mismatched.workspace.protectedActivations.current()).toBeUndefined();
+    expect(await protectedRuntime(mismatched.workspace).activations.current()).toBeUndefined();
   });
 
   test("failure before the SQLite transaction leaves an inert, recoverable stage", async () => {
@@ -551,19 +597,19 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     });
     const first = await fixture.controller.activateFromPreflight(fixture.handoff);
     expect(first).toMatchObject({ ok: false, code: "authority_denied" });
-    const operations = await fixture.workspace.protectedActivations.listOperations();
+    const operations = await protectedRuntime(fixture.workspace).activations.listOperations();
     expect(operations[0]).toMatchObject({ status: "staged" });
     expect(operations[0]?.materializations.every((item) => !item.published)).toBe(true);
-    expect(await fixture.workspace.protectedActivations.current()).toBeUndefined();
+    expect(await protectedRuntime(fixture.workspace).activations.current()).toBeUndefined();
     fixture.workspace.close();
     fail = false;
     const reopened = await createWorkspaceStore(root);
-    const committed = await reopened.protectedActivations.commit({
+    const committed = await protectedRuntime(reopened).activations.commit({
       operationId: operations[0]?.operationId ?? "missing",
       bindingDigest: operations[0]?.bindingDigest ?? "missing",
     });
     expect(committed.status).toBe("committed");
-    expect((await reopened.protectedActivations.current())?.revision).toBe(1);
+    expect((await protectedRuntime(reopened).activations.current())?.revision).toBe(1);
   });
 
   test("failure during the transaction rolls back; failure after commit recovers unambiguously", async () => {
@@ -581,8 +627,8 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       ok: false,
       code: "authority_denied",
     });
-    expect(await during.workspace.protectedActivations.current()).toBeUndefined();
-    expect((await during.workspace.protectedActivations.listOperations())[0]?.status).toBe("staged");
+    expect(await protectedRuntime(during.workspace).activations.current()).toBeUndefined();
+    expect((await protectedRuntime(during.workspace).activations.listOperations())[0]?.status).toBe("staged");
 
     const afterRoot = await mkdtemp(join(tmpdir(), "noesis-ac-09-after-"));
     const after = await createFixture({
@@ -598,22 +644,22 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       ok: false,
       code: "authority_denied",
     });
-    const committedBeforeRestart = (await after.workspace.protectedActivations.listOperations())[0];
+    const committedBeforeRestart = (await protectedRuntime(after.workspace).activations.listOperations())[0];
     expect(committedBeforeRestart?.status).toBe("committed");
-    expect((await after.workspace.protectedActivations.current())?.activeDefinitions).toBeDefined();
+    expect((await protectedRuntime(after.workspace).activations.current())?.activeDefinitions).toBeDefined();
     expect(committedBeforeRestart?.materializations.every((item) => !item.published)).toBe(true);
     after.workspace.close();
 
     const reopened = await createWorkspaceStore(afterRoot);
-    const recovered = await reopened.protectedActivations.getOperation(
+    const recovered = await protectedRuntime(reopened).activations.getOperation(
       committedBeforeRestart?.operationId ?? "missing",
     );
     expect(recovered?.status).toBe("committed");
     expect(recovered?.materializations.every((item) => item.published)).toBe(true);
-    expect((await reopened.protectedActivations.current())?.revision).toBe(1);
+    expect((await protectedRuntime(reopened).activations.current())?.revision).toBe(1);
     const recoveredController = createAtomicActivationController({
       workspace: reopened,
-      authority: await authorityFor(join(afterRoot, "recovery-authority")),
+      protectedRuntime: protectedRuntime(reopened),
       candidates: after.resolver,
       autonomy,
     });
@@ -622,7 +668,9 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       status: "activated",
     });
     expect(
-      (await reopened.protectedActivations.listOperations()).filter((item) => item.status === "committed"),
+      (await protectedRuntime(reopened).activations.listOperations()).filter(
+        (item) => item.status === "committed",
+      ),
     ).toHaveLength(1);
   });
 
@@ -646,10 +694,12 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       ok: true,
       status: "activated",
     });
-    const current = await first.workspace.protectedActivations.current();
+    const current = await protectedRuntime(first.workspace).activations.current();
     expect(current?.revision).toBe(2);
     expect(current?.previousActivationId).toBe(turnPin.activationId);
-    expect(await first.workspace.protectedActivations.getTurnPin("session-1", "turn-1")).toEqual(turnPin);
+    expect(await protectedRuntime(first.workspace).activations.getTurnPin("session-1", "turn-1")).toEqual(
+      turnPin,
+    );
     expect(turnPin.activeCapabilityRevisions["turn-capability"]).toEqual(first.candidateRef);
     expect(Object.keys(turnPin.activeDefinitions)).toHaveLength(6);
     expect(current?.activeCapabilityRevisions["turn-capability"]).toEqual(second.candidateRef);
@@ -693,7 +743,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     ]);
     expect(results.filter((result) => result.ok && result.status === "activated")).toHaveLength(1);
     expect(results.filter((result) => !result.ok && result.code === "activation_conflict")).toHaveLength(1);
-    const current = await workspace.protectedActivations.current();
+    const current = await protectedRuntime(workspace).activations.current();
     expect(current?.revision).toBe(1);
     expect(Object.keys(current?.activeCapabilityRevisions ?? {})).toHaveLength(1);
     expect(Object.keys(current?.activeDefinitions ?? {})).toHaveLength(5);
@@ -707,12 +757,12 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     expect(fresh.operation.operationId).not.toBe(stalePending.operation.operationId);
     expect(fresh.approvalId).not.toBe(stalePending.approvalId);
     expect(
-      await workspace.protectedActivations.getOperation(stalePending.operation.operationId),
+      await protectedRuntime(workspace).activations.getOperation(stalePending.operation.operationId),
     ).toMatchObject({
       status: "rejected",
       supersededByOperationId: fresh.operation.operationId,
     });
-    expect(await workspace.protectedActivations.getApproval(stalePending.approvalId)).toMatchObject({
+    expect(await protectedRuntime(workspace).activations.getApproval(stalePending.approvalId)).toMatchObject({
       status: "rejected",
       decisionActor: "protected-activation:stale-cas",
     });
@@ -723,7 +773,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
         bindingDigest: fresh.bindingDigest,
       }),
     ).resolves.toMatchObject({ ok: true, status: "activated" });
-    expect((await workspace.protectedActivations.current())?.revision).toBe(2);
+    expect((await protectedRuntime(workspace).activations.current())?.revision).toBe(2);
   });
 
   test("controller leaks no authority handle to candidate resolvers or generated content", async () => {
@@ -745,7 +795,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     });
     const controller = createAtomicActivationController({
       workspace: fixture.workspace,
-      authority: await authorityFor(join(fixture.root, "no-leak-authority")),
+      protectedRuntime: protectedRuntime(fixture.workspace),
       candidates: resolver,
       autonomy,
     });

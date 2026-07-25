@@ -464,6 +464,53 @@ describe("automatic learning organ", () => {
     });
   });
 
+  test("authors a narrow reflection as a new capability slot without claiming genesis lineage", async () => {
+    const narrowReflection = Object.freeze({
+      role: "reflector" as const,
+      value: Object.freeze({
+        decision: "experiment" as const,
+        title: "Research brief evidence",
+        hypothesis: "Research briefs should separate evidence from inference",
+        scope: "research brief",
+        capabilityName: "Research brief evidence",
+        capabilityIntent: "Make research briefs evidence-grounded and explicit about inference",
+        sourceCases: Object.freeze([
+          Object.freeze({
+            title: "Correct a research brief",
+            input: "Prepare a research brief",
+            expectedBehavior: "Separate sourced evidence from inference",
+          }),
+        ]),
+      }),
+    }) satisfies ScriptedLearningInferenceStep;
+    const harness = createHarness({
+      steps: [narrowReflection, authorStep],
+      citations: [citation(1)],
+    });
+    const observed = await harness.organ.observeTurn({
+      turn: turn({ correction: "No, in a research brief separate evidence from inference." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+    if (observed.status !== "experiment") throw new Error("Expected a narrow experiment brief");
+
+    expect(observed.brief.capability).toMatchObject({
+      capabilityId: expect.stringMatching(/^learned-research-brief-evidence-[a-f0-9]{12}$/u),
+      name: "Research brief evidence",
+      scope: "research brief",
+      intent: "Make research briefs evidence-grounded and explicit about inference",
+    });
+    expect(observed.brief.capability.capabilityId).not.toBe(capability.capabilityId);
+
+    const authored = await harness.organ.authorExperimentRevision({ brief: observed.brief });
+    expect(authored.revision.capabilityId).toBe(observed.brief.capability.capabilityId);
+    expect(authored.revision.predecessorRevisionId).toBeUndefined();
+    expect(authored.experiment.baselineRevision).toEqual(harness.baseline);
+    expect(
+      harness.candidates.requests().every((request) => request.predecessorRevisionId === undefined),
+    ).toBe(true);
+  });
+
   test("creates exactly one scoped criterion only for explicitly normative feedback", async () => {
     const harness = createHarness({ steps: [reflectionStep], citations: [citation(1)] });
     const result = await harness.organ.observeTurn({

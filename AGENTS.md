@@ -2,7 +2,7 @@
 
 ## Product contract
 
-- Read `docs/product-thesis.md`, `docs/product-experience.md`, and `plans/compounding-partnership-product-loop.md` before changing product behavior.
+- Read `docs/product-thesis.md`, `docs/product-experience.md`, and `plans/compounding-partnership-product-loop.html` before changing product behavior.
 - Deliver immediate value first. Preserve a future advantage only when the evidence supports a credible future use.
 - Infer collaboration posture. Ambiguous intellectual work defaults toward `work_with_me`, while explicit execution defaults toward `do_for_me`. A conversational instruction overrides the inference.
 - Start new learning at the narrowest plausible scope. Every durable learning names its anticipated future use, and recurring evidence is required before its scope broadens.

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import {
   eventChecksum,
+  effectOperationFingerprint,
   SCHEMA_VERSION,
   type CapabilityRevisionRef,
   type Experiment,
@@ -12,12 +13,15 @@ import {
   type PreflightPlan,
   type PreflightReport,
 } from "@noesis/domain";
+import type { AuthorityReceipt } from "@noesis/policy";
 import { createWorkspaceStore, restoreWorkspaceBackup, type NoesisWorkspaceStore } from "../src/index.ts";
+import { createWorkspaceRuntimeInternals } from "../src/protected-runtime.ts";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 const actor = { actorId: "test-user", kind: "user" as const };
 const text = (value: string): Uint8Array => Buffer.from(value);
 const digest = (character: string): string => character.repeat(64);
+const authority = (store: NoesisWorkspaceStore) => createWorkspaceRuntimeInternals(store).authority;
 
 describe("WorkspaceStore", () => {
   let roots: string[] = [];
@@ -105,7 +109,172 @@ describe("WorkspaceStore", () => {
       .all()
       .map((row) => Reflect.get(row, "version"));
     database.close();
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(versions).toEqual(Array.from({ length: versions.length }, (_, index) => index + 1));
+    expect(versions.at(-1)).toBeGreaterThanOrEqual(9);
+  });
+
+  test("keeps authority grants, reservations, completions, and replay in SQLite", async () => {
+    const root = await temporary("durable-authority");
+    const first = await createWorkspaceStore(root);
+    await authority(first).schedule("job:durable:schedule", "schedule:durable", async (receipt) => {
+      await authority(first).issueSchedulerGrant(
+        "durable",
+        2,
+        new Date(Date.now() + 60_000).toISOString(),
+        receipt,
+      );
+      return null;
+    });
+    let executions = 0;
+    await expect(
+      authority(first).runScheduled("durable", 1, async () => {
+        executions += 1;
+        return "finished";
+      }),
+    ).resolves.toMatchObject({ ok: true, replayed: false, value: "finished" });
+    first.close();
+
+    const recovered = await createWorkspaceStore(root);
+    await expect(
+      authority(recovered).runScheduled("durable", 1, async () => {
+        executions += 1;
+        return "duplicate";
+      }),
+    ).resolves.toMatchObject({ ok: true, replayed: true, value: "finished" });
+    expect(executions).toBe(1);
+    await expect(
+      authority(recovered).runScheduled("durable", 2, async () => {
+        executions += 1;
+        return "second";
+      }),
+    ).resolves.toMatchObject({ ok: true, replayed: false, value: "second" });
+    await expect(
+      authority(recovered).runScheduled("durable", 3, async () => {
+        executions += 1;
+        return "over-budget";
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "denied" });
+    expect(executions).toBe(2);
+
+    const database = new DatabaseSync(recovered.unsafeDatabasePathForTesting, { readOnly: true });
+    expect(
+      database
+        .prepare(
+          `SELECT status, receipt_lineage_id FROM authority_operations
+           WHERE principal = 'scheduler' AND effect = 'execute'`,
+        )
+        .get(),
+    ).toMatchObject({
+      status: "completed",
+      receipt_lineage_id: expect.stringMatching(/^receipt_/u),
+    });
+    database.close();
+    recovered.close();
+  });
+
+  test("fails closed for durable collisions, failures, and unresolved reservations", async () => {
+    const store = await createWorkspaceStore(await temporary("authority-fail-closed"));
+    await expect(
+      authority(store).promote("capability:first", "shared-key", async () => "first"),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      authority(store).promote("capability:other", "shared-key", async () => "must-not-run"),
+    ).resolves.toMatchObject({ ok: false, code: "collision" });
+
+    let failedExecutions = 0;
+    await expect(
+      authority(store).promote("capability:failure", "failure-key", async () => {
+        failedExecutions += 1;
+        throw new Error("durable failure");
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "failed" });
+    await expect(
+      authority(store).promote("capability:failure", "failure-key", async () => {
+        failedExecutions += 1;
+        return null;
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "failed" });
+    expect(failedExecutions).toBe(1);
+
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let started: (() => void) | undefined;
+    const executing = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const first = authority(store).promote("capability:inflight", "inflight-key", async () => {
+      started?.();
+      await blocked;
+      return "settled";
+    });
+    await executing;
+    await expect(
+      authority(store).promote("capability:inflight", "inflight-key", async () => "duplicate"),
+    ).resolves.toMatchObject({ ok: false, code: "ambiguous" });
+    release?.();
+    await expect(first).resolves.toMatchObject({ ok: true, value: "settled" });
+    store.close();
+  });
+
+  test("rejects forged and stale receipts at the exact operation boundary", async () => {
+    const store = await createWorkspaceStore(await temporary("receipt-binding"));
+    let firstReceipt: AuthorityReceipt | undefined;
+    await authority(store).promote("capability:first:activate", "activate:first", async (receipt) => {
+      firstReceipt = receipt;
+      expect(
+        authority(store).receiptVerifier.verify(receipt, {
+          effect: "promote",
+          resource: "capability:first:activate",
+          operationId: receipt.operationId,
+        }),
+      ).toBe(true);
+      expect(
+        authority(store).receiptVerifier.verify(
+          {
+            effect: receipt.effect,
+            resource: receipt.resource,
+            operationId: receipt.operationId,
+          },
+          {
+            effect: "promote",
+            resource: "capability:first:activate",
+            operationId: receipt.operationId,
+          },
+        ),
+      ).toBe(false);
+      return null;
+    });
+    await authority(store).promote("capability:second:activate", "activate:second", async (receipt) => {
+      expect(firstReceipt).toBeDefined();
+      expect(
+        authority(store).receiptVerifier.verify(firstReceipt, {
+          effect: "promote",
+          resource: "capability:second:activate",
+          operationId: receipt.operationId,
+        }),
+      ).toBe(false);
+      return null;
+    });
+    store.close();
+  });
+
+  test("writes the operational cutover marker only after strict legacy validation", async () => {
+    const root = await temporary("strict-cutover");
+    await mkdir(join(root, "ledger"), { recursive: true });
+    await writeFile(join(root, "ledger", "events.jsonl"), "{ definitely-not-json }\n");
+    const store = await createWorkspaceStore(root);
+
+    await expect(store.cutoverLegacyOperationalAuthority(root, actor)).rejects.toThrow(
+      "malformed legacy journal line 1",
+    );
+    const database = new DatabaseSync(store.unsafeDatabasePathForTesting, { readOnly: true });
+    expect(database.prepare("SELECT count(*) AS count FROM operational_cutovers").get()).toMatchObject({
+      count: 0,
+    });
+    database.close();
+    store.close();
   });
 
   test("rolls back repository activity when a foreign-key write fails", async () => {
@@ -356,6 +525,9 @@ describe("WorkspaceStore", () => {
     const restoreRoot = await temporary("backup-restore");
     const store = await createWorkspaceStore(sourceRoot);
     await store.operational.sessions.put(session("session-backup"));
+    await expect(
+      authority(store).promote("capability:backup", "backup-operation", async () => "durable"),
+    ).resolves.toMatchObject({ ok: true, value: "durable" });
     const revisionRef = await store.definitions.recordWorkingDefinition({
       workingPath: "skills/research.md",
       bytes: text("skill bytes"),
@@ -389,6 +561,14 @@ describe("WorkspaceStore", () => {
     });
     expect(Buffer.from(await restoredStore.reads.readRevision(revisionRef)).toString()).toBe("skill bytes");
     expect(Buffer.from(await restoredStore.reads.readArtifact(artifact)).toString()).toBe("artifact bytes");
+    let replayExecutions = 0;
+    await expect(
+      authority(restoredStore).promote("capability:backup", "backup-operation", async () => {
+        replayExecutions += 1;
+        return "duplicate";
+      }),
+    ).resolves.toMatchObject({ ok: true, replayed: true, value: "durable" });
+    expect(replayExecutions).toBe(0);
     await unlink(join(restoredStore.paths.root, artifact.path));
     expect((await restoredStore.inspectIntegrity()).missingFiles).toContain(artifact.path);
     const missingBackup = await restoredStore.backup(await temporary("backup-missing"));
@@ -422,6 +602,50 @@ describe("WorkspaceStore", () => {
     expect(await readFile(join(store.paths.definitions, "profile-memory", "memory.md"), "utf8")).toContain(
       "Preserve this",
     );
+    store.close();
+  });
+
+  test("cuts over the full legacy authority graph before writing its independent marker", async () => {
+    const legacyRoot = await temporary("legacy-authority");
+    const workspaceRoot = await temporary("authority-cutover");
+    await mkdir(join(legacyRoot, "ledger"), { recursive: true });
+    const events = legacyAuthorityEvents();
+    await writeFile(
+      join(legacyRoot, "ledger", "events.jsonl"),
+      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    );
+    const store = await createWorkspaceStore(workspaceRoot);
+    const first = await store.cutoverLegacyOperationalAuthority(legacyRoot, actor);
+    const second = await store.cutoverLegacyOperationalAuthority(legacyRoot, actor);
+
+    expect(first).toMatchObject({
+      cutoverVersion: 1,
+      alreadyCompleted: false,
+    });
+    expect(second).toMatchObject({
+      cutoverVersion: 1,
+      alreadyCompleted: true,
+      sourceDigest: first.sourceDigest,
+    });
+    const database = new DatabaseSync(store.unsafeDatabasePathForTesting, { readOnly: true });
+    expect(
+      database.prepare("SELECT principal FROM authority_grants WHERE grant_id = 'grant-legacy'").get(),
+    ).toMatchObject({ principal: "scheduler" });
+    expect(
+      database
+        .prepare(
+          "SELECT status, result_json, receipt_lineage_id FROM authority_operations WHERE operation_id = 'operation-legacy'",
+        )
+        .get(),
+    ).toMatchObject({
+      status: "completed",
+      result_json: '"legacy-result"',
+      receipt_lineage_id: expect.stringMatching(/^legacy_receipt_/u),
+    });
+    expect(database.prepare("SELECT count(*) AS count FROM operational_cutovers").get()).toMatchObject({
+      count: 1,
+    });
+    database.close();
     store.close();
   });
 });
@@ -504,4 +728,71 @@ function legacyEvents(): readonly LedgerEvent[] {
     previousChecksum: start.checksum,
   };
   return [start, { ...unsignedTurn, checksum: eventChecksum(unsignedTurn) }];
+}
+
+function legacyAuthorityEvents(): readonly LedgerEvent[] {
+  const identity = {
+    operationId: "operation-legacy",
+    idempotencyKey: "legacy-run-1",
+    principal: "scheduler" as const,
+    effect: "execute" as const,
+    resource: "job:legacy:runtime",
+    requestDigest: digest("a"),
+  };
+  const events: LedgerEvent[] = [];
+  const append = (
+    input: Pick<LedgerEvent, "eventId" | "occurredAt" | "principal" | "type" | "payload">,
+  ): void => {
+    const previous = events.at(-1);
+    const unsigned: Omit<LedgerEvent, "checksum"> = {
+      schemaVersion: SCHEMA_VERSION,
+      eventId: input.eventId,
+      sequence: events.length + 1,
+      occurredAt: input.occurredAt,
+      principal: input.principal,
+      type: input.type,
+      payload: input.payload,
+      previousChecksum: previous?.checksum ?? null,
+    };
+    events.push({ ...unsigned, checksum: eventChecksum(unsigned) });
+  };
+  append({
+    eventId: "event-grant",
+    occurredAt: "2026-01-01T00:00:00.000Z",
+    principal: "system",
+    type: "authority.grant_issued",
+    payload: {
+      grant: {
+        schemaVersion: 1,
+        grantId: "grant-legacy",
+        principal: "scheduler",
+        effects: ["execute"],
+        resourcePrefixes: ["job:legacy:"],
+        expiresAt: "2027-01-01T00:00:00.000Z",
+        maxUses: 2,
+        maxCost: 2,
+      },
+    },
+  });
+  const operation = {
+    ...identity,
+    operationFingerprint: effectOperationFingerprint(identity),
+    estimatedCost: 1,
+    grantId: "grant-legacy",
+  };
+  append({
+    eventId: "event-reserved",
+    occurredAt: "2026-01-01T00:01:00.000Z",
+    principal: "scheduler",
+    type: "effect.reserved",
+    payload: { ...operation, reservationId: "reservation-legacy" },
+  });
+  append({
+    eventId: "event-completed",
+    occurredAt: "2026-01-01T00:02:00.000Z",
+    principal: "scheduler",
+    type: "effect.completed",
+    payload: { ...operation, result: "legacy-result" },
+  });
+  return Object.freeze(events);
 }
