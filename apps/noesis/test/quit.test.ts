@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveNoesisConfig } from "@noesis/config";
-import { createNoesisRuntime } from "@noesis/runtime";
 import { createPiAgentRoleRunner, createPiAgentRuntime } from "@noesis/runtime-pi";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
@@ -32,14 +31,8 @@ async function createTestRuntime(home: string) {
       thinkingLevel: "off",
     }),
   });
-  const foreground = await createNoesisRuntime(
-    home,
-    createPiAgentRuntime(repositoryRoot, controlled.models),
-    config.agent,
-  );
   return await createApplicationRuntimeComposition({
     config,
-    runtime: foreground,
     createAgent: (sessionTools) => createPiAgentRuntime(repositoryRoot, controlled.models, { sessionTools }),
     createRoleRunner: (configurations) =>
       createPiAgentRoleRunner(repositoryRoot, controlled.models, configurations),
@@ -277,7 +270,8 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(cancelled.output).toContain("resume a session");
     expect(cancelled.result).toEqual({ code: 0, signal: null });
     const reopened = await createTestRuntime(cancelled.home);
-    expect(reopened.debug.legacyReadOnly?.ledger.findByType("trail.resumed")).toHaveLength(0);
+    expect(reopened.listTrails()).toMatchObject([{ title: "cancel me", status: "idle" }]);
+    await reopened.shutdown();
   }, 12_000);
 
   test("captures a wide 120x35 fresh shell with the full identity", async () => {

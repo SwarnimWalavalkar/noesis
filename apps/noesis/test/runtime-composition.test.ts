@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentRuntimeEvent, AgentRuntimeRequest, NoesisAgentRuntime } from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
-import { createNoesisRuntime } from "@noesis/runtime";
+import { eventChecksum, type LedgerEvent } from "@noesis/domain";
 import { createPiAgentRoleRunner, createPiAgentRuntime } from "@noesis/runtime-pi";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
@@ -21,6 +21,51 @@ const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
 });
+
+async function writeLegacyCompletedTurn(home: string): Promise<{
+  readonly trailId: string;
+  readonly input: string;
+  readonly output: string;
+}> {
+  const trailId = "trail-legacy-import";
+  const input = "Preserve this legitimate history";
+  const output = "Imported legacy completion";
+  const unsignedStart: Omit<LedgerEvent, "checksum"> = {
+    schemaVersion: 1,
+    eventId: "event-legacy-start",
+    sequence: 1,
+    occurredAt: "2026-01-01T00:00:00.000Z",
+    principal: "foreground",
+    type: "trail.started",
+    trailId,
+    payload: {
+      title: "Legacy import",
+      provider: CONTROLLED_PI_PROVIDER,
+      model: CONTROLLED_PI_MODEL,
+      runtime: "pi-agent-harness-0.80.6",
+    },
+    previousChecksum: null,
+  };
+  const start: LedgerEvent = { ...unsignedStart, checksum: eventChecksum(unsignedStart) };
+  const unsignedTurn: Omit<LedgerEvent, "checksum"> = {
+    schemaVersion: 1,
+    eventId: "event-legacy-turn",
+    sequence: 2,
+    occurredAt: "2026-01-01T00:01:00.000Z",
+    principal: "foreground",
+    type: "turn.completed",
+    trailId,
+    payload: { input, output },
+    previousChecksum: start.checksum,
+  };
+  const turn: LedgerEvent = { ...unsignedTurn, checksum: eventChecksum(unsignedTurn) };
+  await mkdir(join(home, "ledger"), { recursive: true });
+  await writeFile(
+    join(home, "ledger", "events.jsonl"),
+    `${[start, turn].map((event) => JSON.stringify(event)).join("\n")}\n`,
+  );
+  return Object.freeze({ trailId, input, output });
+}
 
 describe("apps/noesis production control-plane composition", () => {
   test("starts from marked SQLite authority without parsing corrupted abandoned JSONL", async () => {
@@ -66,13 +111,7 @@ describe("apps/noesis production control-plane composition", () => {
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
     const controlled = createControlledPiModels();
-    const legacy = await createNoesisRuntime(
-      home,
-      createPiAgentRuntime(process.cwd(), controlled.models),
-      config.agent,
-    );
-    const trail = await legacy.startTrail({ title: "Legacy import" });
-    const completed = await legacy.runTurn(trail.trailId, "Preserve this legitimate history");
+    const legacy = await writeLegacyCompletedTurn(home);
 
     const runtime = await createApplicationRuntimeComposition({
       config,
@@ -80,10 +119,10 @@ describe("apps/noesis production control-plane composition", () => {
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
-    expect(runtime.getTrail(trail.trailId).turns).toEqual([
+    expect(runtime.getTrail(legacy.trailId).turns).toEqual([
       {
-        input: "Preserve this legitimate history",
-        output: completed.output,
+        input: legacy.input,
+        output: legacy.output,
       },
     ]);
     await runtime.shutdown();
@@ -179,16 +218,9 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const controlled = createControlledPiModels();
     const requests: AgentRuntimeRequest[] = [];
-    const legacy = await createNoesisRuntime(
-      home,
-      createPiAgentRuntime(process.cwd(), controlled.models),
-      config.agent,
-    );
-    const legacyEventCount = legacy.ledger.readAll().length;
     const seenConfigurations: unknown[] = [];
     const runtime = await createApplicationRuntimeComposition({
       config,
-      runtime: legacy,
       createAgent: (sessionTools) => {
         const pi = createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools });
         const capturingAgent: NoesisAgentRuntime = Object.freeze({
@@ -209,7 +241,6 @@ describe("apps/noesis production control-plane composition", () => {
     const trail = await runtime.startTrail({ title: "Composition acceptance" });
     const result = await runtime.runTurn(trail.trailId, "Record this ordinary turn");
     expect(result.outcome).toBe("completed");
-    expect(legacy.ledger.readAll()).toHaveLength(legacyEventCount);
     expect(config.schemaVersion).toBe(1);
     expect(await runtime.debug.workspace.operational.sessions.get(trail.trailId)).toMatchObject({
       sessionId: trail.trailId,
@@ -258,13 +289,6 @@ describe("apps/noesis production control-plane composition", () => {
     expect(JSON.stringify(seenConfigurations)).not.toMatch(
       /protectedActivations|protectedFeedback|authorityBoundary|restorationHandle/iu,
     );
-    const activeBeforeLegacyNoise = await runtime.debug.adaptations.activations.current();
-    await legacy.ledger.append({
-      type: "capability.promoted",
-      principal: "promoter",
-      payload: { capabilityId: "legacy-only", version: 99 },
-    });
-    expect(await runtime.debug.adaptations.activations.current()).toEqual(activeBeforeLegacyNoise);
     expect("promoteCandidate" in runtime).toBe(false);
 
     await runtime.shutdown();
@@ -296,14 +320,8 @@ describe("apps/noesis production control-plane composition", () => {
         });
       },
     });
-    const legacy = await createNoesisRuntime(
-      home,
-      createPiAgentRuntime(process.cwd(), controlled.models),
-      config.agent,
-    );
     const runtime = await createApplicationRuntimeComposition({
       config,
-      runtime: legacy,
       createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
@@ -334,11 +352,6 @@ describe("apps/noesis production control-plane composition", () => {
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
     const controlled = createControlledPiModels();
-    const legacy = await createNoesisRuntime(
-      home,
-      createPiAgentRuntime(process.cwd(), controlled.models),
-      config.agent,
-    );
     let markReflectionStarted: (() => void) | undefined;
     const reflectionStarted = new Promise<void>((resolve) => {
       markReflectionStarted = resolve;
@@ -349,7 +362,6 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      runtime: legacy,
       createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -409,11 +421,6 @@ describe("apps/noesis production control-plane composition", () => {
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
     const controlled = createControlledPiModels();
-    const legacy = await createNoesisRuntime(
-      home,
-      createPiAgentRuntime(process.cwd(), controlled.models),
-      config.agent,
-    );
     let markReflectionStarted: (() => void) | undefined;
     const reflectionStarted = new Promise<void>((resolve) => {
       markReflectionStarted = resolve;
@@ -428,7 +435,6 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      runtime: legacy,
       createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({

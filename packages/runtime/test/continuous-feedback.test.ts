@@ -545,9 +545,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     const priorOperation = (await fixture.protectedRuntime.activations.listOperations(100)).find(
       (operation) => operation.binding.experimentId === fixture.experimentId,
     );
-    const prior = await fixture.workspace.operational.activations.get(
-      priorOperation?.previousActivationId ?? "missing",
-    );
+    expect(priorOperation?.previousActivationId).toEqual(expect.any(String));
     await pinTurn(fixture, "turn-hard");
     const result = await controller(fixture, judge("keep"), config(3)).observeTurnOutcome(
       observationInput(fixture, "turn-hard", {
@@ -558,8 +556,9 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     );
     expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "revert" } });
     const restored = await fixture.protectedRuntime.activations.current();
-    expect(restored?.activeDefinitions).toEqual(prior?.activeDefinitions);
-    expect(restored?.activeCapabilityRevisions).toEqual(prior?.activeCapabilityRevisions);
+    expect(restored?.activeCapabilityRevisions[fixture.capabilityId]).toEqual(
+      capabilityRevisionRef(fixture.baseline),
+    );
     const restoredRevision = restored?.revision;
     fixture.workspace.close();
     const reopened = await createWorkspaceStore(fixture.root);

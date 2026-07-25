@@ -46,6 +46,7 @@ import {
   type ExperimentOutcomeProposal,
   type NoesisRuntime,
   type RuntimeControlPlane,
+  SESSION_PICKER_LIMIT,
   type TrailState,
   type TrailSummary,
   type TurnResult,
@@ -113,14 +114,12 @@ export interface ApplicationRuntime extends NoesisTuiRuntime {
         | "getSuccessorInput"
       >;
     };
-    readonly legacyReadOnly?: Pick<NoesisRuntime, "ledger" | "artifacts" | "memory" | "capabilities">;
   };
   readonly shutdown: () => Promise<void>;
 }
 
 export interface ApplicationRuntimeCompositionOptions {
   readonly config: ResolvedNoesisConfig;
-  readonly runtime?: NoesisRuntime;
   readonly agent?: NoesisAgentRuntime;
   readonly createAgent?: (sessionTools: FrozenSessionToolResolver) => NoesisAgentRuntime;
   readonly createRoleRunner: (
@@ -511,7 +510,7 @@ function configurationPrompt(configuration: ApplicationRoleConfiguration): FileR
 export async function createApplicationRuntimeComposition(
   options: ApplicationRuntimeCompositionOptions,
 ): Promise<ApplicationRuntime> {
-  const agentDefaults = options.runtime?.agentDefaults ?? options.config.agent;
+  const agentDefaults = options.config.agent;
   const workspace = await createWorkspaceStore(options.config.home);
   const { authority, protectedRuntime } = createWorkspaceRuntimeInternals(workspace);
   await workspace.cutoverLegacyOperationalAuthority(
@@ -607,7 +606,7 @@ export async function createApplicationRuntimeComposition(
       });
     },
   });
-  const agent = options.createAgent?.(sessionTools) ?? options.agent ?? options.runtime?.agent;
+  const agent = options.createAgent?.(sessionTools) ?? options.agent;
   if (!agent) throw new Error("Application runtime composition requires a Pi execution adapter");
   const learning = createDurableAutomaticLearningOrgan({
     workspace,
@@ -784,7 +783,6 @@ export async function createApplicationRuntimeComposition(
     resolveCapability: (capabilityId) => registry.getCapability(capabilityId),
   });
 
-  const legacyReadOnly = options.runtime;
   const sessionTimes = new Map<string, { readonly createdAt: string; readonly updatedAt: string }>();
   const trailStates = new Map<string, TrailState>();
   for (const session of await workspace.operational.sessions.list()) {
@@ -861,7 +859,8 @@ export async function createApplicationRuntimeComposition(
         .sort(
           (left, right) =>
             right.updatedAt.localeCompare(left.updatedAt) || left.trailId.localeCompare(right.trailId),
-        ),
+        )
+        .slice(0, SESSION_PICKER_LIMIT),
     );
   const startTrail: NoesisRuntime["startTrail"] = async (input) =>
     await persistTrail(
@@ -1117,16 +1116,6 @@ export async function createApplicationRuntimeComposition(
           getSuccessorInput: protectedRuntime.feedback.getSuccessorInput,
         }),
       }),
-      ...(legacyReadOnly
-        ? {
-            legacyReadOnly: Object.freeze({
-              ledger: legacyReadOnly.ledger,
-              artifacts: legacyReadOnly.artifacts,
-              memory: legacyReadOnly.memory,
-              capabilities: legacyReadOnly.capabilities,
-            }),
-          }
-        : {}),
     }),
     agentDefaults,
     startTrail,

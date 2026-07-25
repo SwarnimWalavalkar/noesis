@@ -11,7 +11,6 @@ import {
   type JsonValue,
   type Principal,
 } from "@noesis/domain";
-import type { ExperienceLedger } from "@noesis/ledger";
 import type {
   AuthorityBoundary,
   AuthorityReceipt,
@@ -77,7 +76,7 @@ function operationFromRequest<T extends JsonValue>(request: EffectRequest<T>): D
   });
 }
 
-function internalOperationFields(
+export function authorityOperationFields(
   principal: Principal,
   effect: EffectClass,
   resource: string,
@@ -122,14 +121,6 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     return Object.freeze({ receipt, lineageId });
   };
   const verifier: AuthorityReceiptVerifier = Object.freeze({
-    // Legacy capability projections additionally bind receipts to their owning JSONL instance.
-    // Durable production mutations use verify(), which binds the exact operation instead.
-    isReceipt: (
-      _value: unknown,
-      _effect: EffectClass,
-      _resource: string,
-      _ledger: ExperienceLedger,
-    ): _value is AuthorityReceipt => false,
     verify: (
       value: unknown,
       expected: {
@@ -225,7 +216,7 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     });
     return await run(
       {
-        ...internalOperationFields(principal, effect, resource, cost, idempotencyKey),
+        ...authorityOperationFields(principal, effect, resource, cost, idempotencyKey),
         principal,
         effect,
         resource,
@@ -272,12 +263,6 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     });
   };
 
-  const schedulerHandle: AuthorityBoundary["schedulerHandle"] = (jobId) => {
-    // Rehydration is asynchronous in SQLite, so runScheduled resolves a fresh handle. Keep the
-    // synchronous compatibility method intentionally empty on the production implementation.
-    void jobId;
-    return undefined;
-  };
   const runScheduled: AuthorityBoundary["runScheduled"] = async (
     jobId,
     runNumber,
@@ -293,7 +278,7 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     const idempotencyKey = `job:${jobId}:run:${runNumber}`;
     return await run(
       {
-        ...internalOperationFields(principal, effect, resource, estimatedCost, idempotencyKey),
+        ...authorityOperationFields(principal, effect, resource, estimatedCost, idempotencyKey),
         principal,
         effect,
         resource,
@@ -311,7 +296,6 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     rollback,
     schedule,
     issueSchedulerGrant,
-    schedulerHandle,
     runScheduled,
   });
 }

@@ -7,7 +7,6 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@noesis/domain": "workspace:*",
-    "@noesis/ledger": "workspace:*"
+    "@noesis/domain": "workspace:*"
   }
 }

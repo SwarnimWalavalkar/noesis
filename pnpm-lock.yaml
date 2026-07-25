@@ -83,12 +83,6 @@ importers:
       '@noesis/domain':
         specifier: workspace:*
         version: link:../domain
-      '@noesis/ledger':
-        specifier: workspace:*
-        version: link:../ledger
-      '@noesis/policy':
-        specifier: workspace:*
-        version: link:../policy
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -134,18 +128,12 @@ importers:
       '@noesis/agent-types':
         specifier: workspace:*
         version: link:../agent-types
-      '@noesis/capabilities':
-        specifier: workspace:*
-        version: link:../capabilities
       '@noesis/config':
         specifier: workspace:*
         version: link:../config
       '@noesis/domain':
         specifier: workspace:*
         version: link:../domain
-      '@noesis/ledger':
-        specifier: workspace:*
-        version: link:../ledger
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -189,9 +177,6 @@ importers:
       '@noesis/intelligence':
         specifier: workspace:*
         version: link:../intelligence
-      '@noesis/ledger':
-        specifier: workspace:*
-        version: link:../ledger
       zod:
         specifier: 4.4.3
         version: 4.4.3
@@ -200,32 +185,11 @@ importers:
         specifier: workspace:*
         version: link:../workspace
 
-  packages/ledger:
-    dependencies:
-      '@noesis/domain':
-        specifier: workspace:*
-        version: link:../domain
-
-  packages/memory:
-    dependencies:
-      '@noesis/domain':
-        specifier: workspace:*
-        version: link:../domain
-      '@noesis/ledger':
-        specifier: workspace:*
-        version: link:../ledger
-      zod:
-        specifier: 4.4.3
-        version: 4.4.3
-
   packages/policy:
     dependencies:
       '@noesis/domain':
         specifier: workspace:*
         version: link:../domain
-      '@noesis/ledger':
-        specifier: workspace:*
-        version: link:../ledger
 
   packages/runtime:
     dependencies:
@@ -235,9 +199,6 @@ importers:
       '@noesis/capabilities':
         specifier: workspace:*
         version: link:../capabilities
-      '@noesis/config':
-        specifier: workspace:*
-        version: link:../config
       '@noesis/context':
         specifier: workspace:*
         version: link:../context
@@ -253,12 +214,6 @@ importers:
       '@noesis/learning':
         specifier: workspace:*
         version: link:../learning
-      '@noesis/ledger':
-        specifier: workspace:*
-        version: link:../ledger
-      '@noesis/memory':
-        specifier: workspace:*
-        version: link:../memory
       '@noesis/policy':
         specifier: workspace:*
         version: link:../policy
@@ -301,6 +256,10 @@ importers:
       '@noesis/runtime':
         specifier: workspace:*
         version: link:../runtime
+    devDependencies:
+      '@noesis/agent-types':
+        specifier: workspace:*
+        version: link:../agent-types
 
   packages/workspace:
     dependencies:

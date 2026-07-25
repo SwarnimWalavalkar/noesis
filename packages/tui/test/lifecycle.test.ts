@@ -1,10 +1,8 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Terminal } from "@earendil-works/pi-tui";
-import { createNoesisRuntime, type NoesisRuntime } from "@noesis/runtime";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import type { NoesisAgentRuntime } from "@noesis/agent-types";
+import { describe, expect, test, vi } from "vitest";
 import { startNoesisTui } from "../src/index.ts";
+import { createInMemoryTestRuntime, type TestNoesisRuntime } from "./support/in-memory-runtime.ts";
 
 interface TestTerminal extends Terminal {
   readonly starts: number;
@@ -83,8 +81,6 @@ function createTestTerminal(): TestTerminal {
   };
 }
 
-const homes: string[] = [];
-
 const containsUnsafeTextControl = (text: string): boolean =>
   [...text].some((character) => {
     const code = character.codePointAt(0) ?? 0;
@@ -97,20 +93,8 @@ const containsC1 = (text: string): boolean =>
     return code >= 128 && code <= 159;
   });
 
-afterEach(async () => {
-  await Promise.all(homes.splice(0).map(async (home) => await rm(home, { recursive: true, force: true })));
-});
-
-async function createRuntime(agent: {
-  readonly name: string;
-  run: Parameters<typeof createNoesisRuntime>[1]["run"];
-  steer: Parameters<typeof createNoesisRuntime>[1]["steer"];
-  followUp: Parameters<typeof createNoesisRuntime>[1]["followUp"];
-  abort: Parameters<typeof createNoesisRuntime>[1]["abort"];
-}): Promise<NoesisRuntime> {
-  const home = await mkdtemp(join(tmpdir(), "noesis-tui-lifecycle-"));
-  homes.push(home);
-  return await createNoesisRuntime(home, agent);
+async function createRuntime(agent: NoesisAgentRuntime): Promise<TestNoesisRuntime> {
+  return createInMemoryTestRuntime(agent);
 }
 
 describe("Noesis TUI lifecycle", () => {
@@ -191,7 +175,7 @@ describe("Noesis TUI lifecycle", () => {
     terminal.type("/quit\n");
     await running;
 
-    expect(runtime.ledger.findByType("trail.resumed").at(-1)?.trailId).toBe(selected.trailId);
+    expect(runtime.resumedTrailIds.at(-1)).toBe(selected.trailId);
   });
 
   test("renders lifecycle and usage updates from real runtime events", async () => {
@@ -350,8 +334,7 @@ describe("Noesis TUI lifecycle", () => {
 
     await vi.waitFor(() => expect(terminal.output).toContain("● ERROR"));
     expect(terminal.output).toContain("Provider rejected the request: invalid offline fixture");
-    await vi.waitFor(() => expect(runtime.ledger.findByType("turn.failed")).toHaveLength(1));
-    expect(runtime.ledger.findByType("turn.completed")).toHaveLength(0);
+    await vi.waitFor(() => expect(runtime.failedTurnCount).toBe(1));
     const failedTrail = runtime.listTrails()[0];
     expect(failedTrail).toBeDefined();
     if (!failedTrail) throw new Error("Failed trail fixture was not recorded");
@@ -420,7 +403,7 @@ describe("Noesis TUI lifecycle", () => {
     terminal.type("a usable follow-up\r");
     await vi.waitFor(() => expect(terminal.output).toContain("usable again"));
     expect(runs).toBe(2);
-    await vi.waitFor(() => expect(runtime.ledger.findByType("turn.completed")).toHaveLength(1));
+    await vi.waitFor(() => expect(runtime.listTrails()[0]?.turns).toHaveLength(1));
 
     terminal.type("/quit\n");
     await running;
@@ -526,7 +509,7 @@ describe("Noesis TUI lifecycle", () => {
     });
     await runtime.runTurn(other.trailId, "other-history");
     await runtime.runTurn(selected.trailId, "selected-latest-history");
-    const startsBefore = runtime.ledger.findByType("trail.started").length;
+    const startsBefore = runtime.listTrails().length;
     const terminal = createTestTerminal();
 
     const running = startNoesisTui(runtime, { session: { mode: "continue" } }, terminal);
@@ -537,42 +520,8 @@ describe("Noesis TUI lifecycle", () => {
     terminal.type("/quit\n");
     await running;
 
-    expect(runtime.ledger.findByType("trail.started")).toHaveLength(startsBefore);
-    expect(runtime.ledger.findByType("trail.resumed").at(-1)?.trailId).toBe(selected.trailId);
-  });
-
-  test("continue resolves from authoritative JSONL after a corrupt SQLite restart", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-tui-continue-corrupt-"));
-    homes.push(home);
-    const agent = {
-      name: "continue-corrupt-scripted",
-      async run(request: Parameters<NoesisRuntime["agent"]["run"]>[0]) {
-        return {
-          text: `reply:${request.prompt}`,
-          provider: request.provider,
-          model: request.model,
-          outcome: "completed" as const,
-          stopReason: "stop" as const,
-        };
-      },
-      async steer() {},
-      async followUp() {},
-      async abort() {},
-    };
-    const original = await createNoesisRuntime(home, agent);
-    const older = await original.startTrail({ title: "older" });
-    await original.runTurn(older.trailId, "older-history");
-    const latest = await original.startTrail({ title: "latest" });
-    await original.runTurn(latest.trailId, "authoritative-latest-history");
-    await writeFile(original.ledger.paths.projection, Uint8Array.from([0, 1, 2, 3, 255]));
-
-    const reopened = await createNoesisRuntime(home, agent);
-    const terminal = createTestTerminal();
-    const running = startNoesisTui(reopened, { session: { mode: "continue" } }, terminal);
-    await vi.waitFor(() => expect(terminal.output).toContain("authoritative-latest-history"));
-    expect(terminal.output).toContain(`session ${latest.trailId.slice(6, 14)}`);
-    terminal.type("/quit\n");
-    await running;
+    expect(runtime.listTrails()).toHaveLength(startsBefore);
+    expect(runtime.resumedTrailIds.at(-1)).toBe(selected.trailId);
   });
 
   test("picker selects the requested session and Escape cancels through normal cleanup", async () => {
@@ -604,7 +553,7 @@ describe("Noesis TUI lifecycle", () => {
     expect(terminal.output).toContain("older-history");
     terminal.type("/quit\n");
     await running;
-    expect(runtime.ledger.findByType("trail.resumed").at(-1)?.trailId).toBe(older.trailId);
+    expect(runtime.resumedTrailIds.at(-1)).toBe(older.trailId);
 
     const cancelledTerminal = createTestTerminal();
     const cancelled = startNoesisTui(runtime, { session: { mode: "pick" } }, cancelledTerminal);
@@ -686,160 +635,6 @@ describe("Noesis TUI lifecycle", () => {
     );
     expect(terminal.starts).toBe(0);
     expect(runtime.listTrails()).toEqual([]);
-  });
-
-  test("continue reports the same runtime mismatch guidance as direct resume", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-tui-continue-runtime-"));
-    homes.push(home);
-    const original = await createNoesisRuntime(home, {
-      name: "original-runtime",
-      async run(request) {
-        return {
-          text: "done",
-          provider: request.provider,
-          model: request.model,
-          outcome: "completed",
-          stopReason: "stop",
-        };
-      },
-      async steer() {},
-      async followUp() {},
-      async abort() {},
-    });
-    const latest = await original.startTrail({ title: "incompatible latest" });
-    const reopened = await createNoesisRuntime(home, {
-      name: "active-runtime",
-      async run(request) {
-        return {
-          text: "done",
-          provider: request.provider,
-          model: request.model,
-          outcome: "completed",
-          stopReason: "stop",
-        };
-      },
-      async steer() {},
-      async followUp() {},
-      async abort() {},
-    });
-    const directTerminal = createTestTerminal();
-    const continueTerminal = createTestTerminal();
-
-    const direct = startNoesisTui(
-      reopened,
-      { session: { mode: "resume", trailId: latest.trailId } },
-      directTerminal,
-    );
-    const continued = startNoesisTui(reopened, { session: { mode: "continue" } }, continueTerminal);
-    const [directResult, continueResult] = await Promise.allSettled([direct, continued]);
-    expect(directResult.status).toBe("rejected");
-    expect(continueResult.status).toBe("rejected");
-    const directMessage =
-      directResult.status === "rejected" && directResult.reason instanceof Error
-        ? directResult.reason.message
-        : "";
-    const continueMessage =
-      continueResult.status === "rejected" && continueResult.reason instanceof Error
-        ? continueResult.reason.message
-        : "";
-    expect(continueMessage).toBe(directMessage);
-    expect(continueMessage).toContain("Runtime provenance is immutable; start a new session instead.");
-    expect(directTerminal.starts).toBe(0);
-    expect(continueTerminal.starts).toBe(0);
-  });
-
-  test("exact resume and continue fail closed on another runtime's in-flight turn", async () => {
-    let releaseExecution: (() => void) | undefined;
-    const blocked = new Promise<void>((resolve) => {
-      releaseExecution = resolve;
-    });
-    let markStarted: (() => void) | undefined;
-    const started = new Promise<void>((resolve) => {
-      markStarted = resolve;
-    });
-    const agent = {
-      name: "two-runtime-tui",
-      async run(request: Parameters<NoesisRuntime["agent"]["run"]>[0]) {
-        markStarted?.();
-        await blocked;
-        return {
-          text: `reply:${request.prompt}`,
-          provider: request.provider,
-          model: request.model,
-          outcome: "completed" as const,
-          stopReason: "stop" as const,
-        };
-      },
-      async steer() {},
-      async followUp() {},
-      async abort() {},
-    };
-    const home = await mkdtemp(join(tmpdir(), "noesis-tui-two-runtime-"));
-    homes.push(home);
-    const executor = await createNoesisRuntime(home, agent);
-    const liveTrail = await executor.startTrail({ title: "live trail" });
-    const activeTurn = executor.runTurn(liveTrail.trailId, "live in-flight history");
-    await started;
-
-    const observer = await createNoesisRuntime(home, agent);
-    const exactTerminal = createTestTerminal();
-    const continueTerminal = createTestTerminal();
-    try {
-      const exact = startNoesisTui(
-        observer,
-        { session: { mode: "resume", trailId: liveTrail.trailId } },
-        exactTerminal,
-      );
-      const continued = startNoesisTui(observer, { session: { mode: "continue" } }, continueTerminal);
-      const [exactResult, continueResult] = await Promise.allSettled([exact, continued]);
-      expect(exactResult.status).toBe("rejected");
-      expect(continueResult.status).toBe("rejected");
-      const exactMessage =
-        exactResult.status === "rejected" && exactResult.reason instanceof Error
-          ? exactResult.reason.message
-          : "";
-      const continueMessage =
-        continueResult.status === "rejected" && continueResult.reason instanceof Error
-          ? continueResult.reason.message
-          : "";
-      expect(continueMessage).toBe(exactMessage);
-      expect(continueMessage).toMatch(/still marked running.*automatic recovery is unavailable/);
-      expect(exactTerminal.starts).toBe(0);
-      expect(continueTerminal.starts).toBe(0);
-      expect(observer.ledger.findByType("trail.recovered")).toHaveLength(0);
-      expect(observer.ledger.findByType("trail.resumed")).toHaveLength(0);
-      await expect(observer.runTurn(liveTrail.trailId, "second turn forbidden")).rejects.toThrow(
-        "already running",
-      );
-
-      const freshTerminal = createTestTerminal();
-      const fresh = startNoesisTui(observer, {}, freshTerminal);
-      await vi.waitFor(() => expect(freshTerminal.output).toContain("● IDLE"));
-      expect(freshTerminal.output).not.toContain(`session ${liveTrail.trailId.slice(6, 14)}`);
-      freshTerminal.type("/quit\n");
-      await fresh;
-      expect(observer.getTrail(liveTrail.trailId).status).toBe("running");
-      expect(observer.ledger.findByType("trail.recovered")).toHaveLength(0);
-    } finally {
-      releaseExecution?.();
-      await activeTurn;
-    }
-
-    const resumedTerminal = createTestTerminal();
-    const resumed = startNoesisTui(
-      observer,
-      { session: { mode: "resume", trailId: liveTrail.trailId } },
-      resumedTerminal,
-    );
-    await vi.waitFor(() => expect(resumedTerminal.output).toContain("live in-flight history"));
-    resumedTerminal.type("/quit\n");
-    await resumed;
-
-    const continuedTerminal = createTestTerminal();
-    const continued = startNoesisTui(observer, { session: { mode: "continue" } }, continuedTerminal);
-    await vi.waitFor(() => expect(continuedTerminal.output).toContain("live in-flight history"));
-    continuedTerminal.type("/quit\n");
-    await continued;
   });
 
   test("treats LF after /quit as shutdown and stops the terminal once", async () => {

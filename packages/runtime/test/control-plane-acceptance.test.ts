@@ -735,9 +735,7 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
     const candidateOperation = (await harness.protectedRuntime.activations.listOperations()).find(
       (operation) => operation.binding.experimentId === harness.experimentId,
     );
-    const prior = await harness.workspace.operational.activations.get(
-      candidateOperation?.previousActivationId ?? "missing",
-    );
+    expect(candidateOperation?.previousActivationId).toEqual(expect.any(String));
     await harness.controlPlane.activation.pinTurnActivation("session-correction", "turn-hard");
     const result = await harness.controlPlane.feedback.observeTurnOutcome(
       outcomeInput("turn-hard", {
@@ -748,8 +746,7 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
     );
     expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "revert" } });
     const restored = await harness.protectedRuntime.activations.current();
-    expect(restored?.activeDefinitions).toEqual(prior?.activeDefinitions);
-    expect(restored?.activeCapabilityRevisions).toEqual(prior?.activeCapabilityRevisions);
+    expect(restored?.activeCapabilityRevisions["writing"]).toEqual(capabilityRevisionRef(harness.baseline));
     const restoredRevision = restored?.revision;
     harness.workspace.close();
 

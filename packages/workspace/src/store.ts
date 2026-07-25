@@ -6,7 +6,6 @@ import {
   type ActorRef,
   type ArtifactFileRef,
   ArtifactFileRefSchema,
-  CapabilityRevisionRefSchema,
   type DatabaseRowRef,
   type DatabaseTable,
   type DataSensitivity,
@@ -59,12 +58,9 @@ import {
   type WorkspaceDatabase,
 } from "./database.ts";
 import {
-  decodeActivation,
-  decodeActivationPointer,
   decodeExperiment,
   decodeFeedbackSignal,
   decodeFileRevisionRef,
-  decodeJob,
   decodeMessage,
   decodeOptional,
   decodeOutcome,
@@ -90,10 +86,7 @@ import {
 } from "./paths.ts";
 import { createProtectedWorkspaceRuntime, registerWorkspaceRuntimeInternals } from "./protected-runtime.ts";
 import type {
-  ActivationPointerRecord,
-  ActivationRecord,
   CanonicalSearchSource,
-  JobRecord,
   MessageRecord,
   NoesisWorkspaceStore,
   OperationalCutoverReport,
@@ -1615,102 +1608,6 @@ function createOperationalRepositories(
       recordActivity(systemActor, "outcome.record", "outcome", record.outcomeId);
     });
   };
-  const putJob = async (record: JobRecord): Promise<DatabaseRowRef> => {
-    database.transaction(() => {
-      const current = db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(record.jobId);
-      if (current !== undefined) {
-        const from = requiredString(current, "status");
-        const allowed: Readonly<Record<string, readonly JobRecord["status"][]>> = {
-          scheduled: ["running", "failed", "cancelled", "budget_exhausted"],
-          running: ["completed", "failed", "cancelled", "budget_exhausted"],
-          completed: [],
-          failed: [],
-          cancelled: [],
-          budget_exhausted: [],
-        };
-        if (from !== record.status && !allowed[from]?.includes(record.status))
-          throw new Error(`Invalid job transition ${from} -> ${record.status}`);
-        if (allowed[from]?.length === 0 && JSON.stringify(decodeJob(current)) !== JSON.stringify(record))
-          throw new Error(`Terminal job ${record.jobId} is immutable`);
-      }
-      db.prepare(
-        `INSERT INTO jobs(
-          job_id, kind, payload_json, status, lease_owner, lease_until, attempt,
-          budget_remaining, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(job_id) DO UPDATE SET
-          payload_json = excluded.payload_json, status = excluded.status,
-          lease_owner = excluded.lease_owner, lease_until = excluded.lease_until,
-          attempt = excluded.attempt, budget_remaining = excluded.budget_remaining,
-          updated_at = excluded.updated_at`,
-      ).run(
-        record.jobId,
-        record.kind,
-        JSON.stringify(record.payload),
-        record.status,
-        record.leaseOwner ?? null,
-        record.leaseUntil ?? null,
-        record.attempt,
-        record.budgetRemaining,
-        record.createdAt,
-        record.updatedAt,
-      );
-      recordActivity(systemActor, "job.put", "job", record.jobId);
-    });
-    return databaseRef("jobs", record.jobId);
-  };
-  const putActivation = async (record: ActivationRecord): Promise<void> => {
-    const completeCapabilityRevisions = z
-      .record(z.string(), CapabilityRevisionRefSchema)
-      .parse(record.activeCapabilityRevisions);
-    for (const [capabilityId, revision] of Object.entries(completeCapabilityRevisions))
-      if (revision.capabilityId !== capabilityId)
-        throw new Error(`Activation capability key ${capabilityId} does not match its revision identity`);
-    database.transaction(() => {
-      db.prepare(
-        `INSERT INTO activations(
-          activation_id, revision, previous_activation_id, definitions_json,
-          capability_revisions_json, preflight_id, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        record.activationId,
-        record.revision,
-        record.previousActivationId,
-        JSON.stringify(record.activeDefinitions),
-        JSON.stringify(completeCapabilityRevisions),
-        record.preflightId ?? null,
-        record.createdAt,
-      );
-      recordActivity(systemActor, "activation.record", "activation", record.activationId);
-    });
-  };
-  const putPointer = async (record: ActivationPointerRecord): Promise<DatabaseRowRef> => {
-    const capabilityRevision = CapabilityRevisionRefSchema.parse(record.capabilityRevision);
-    if (capabilityRevision.capabilityId !== record.capabilityId)
-      throw new Error("Activation pointer capability does not match its revision identity");
-    database.transaction(() => {
-      db.prepare(
-        `INSERT INTO activation_pointers(
-          pointer_id, capability_id, activation_id, capability_revision_id, updated_at,
-          capability_revision_json
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(capability_id) DO UPDATE SET
-          pointer_id = excluded.pointer_id, activation_id = excluded.activation_id,
-          capability_revision_id = excluded.capability_revision_id,
-          capability_revision_json = excluded.capability_revision_json,
-          updated_at = excluded.updated_at`,
-      ).run(
-        record.pointerId,
-        record.capabilityId,
-        record.activationId,
-        capabilityRevision.capabilityRevisionId,
-        record.updatedAt,
-        JSON.stringify(capabilityRevision),
-      );
-      recordActivity(systemActor, "activation.pointer_put", "activation_pointer", record.pointerId);
-    });
-    return databaseRef("activation_pointers", record.pointerId);
-  };
   const putSearchConfiguration = async (configuration: SearchConfiguration): Promise<DatabaseRowRef> => {
     SearchConfigurationSchema.parse(configuration);
     database.transaction(() => {
@@ -1837,25 +1734,6 @@ function createOperationalRepositories(
           .prepare("SELECT * FROM outcomes WHERE session_id = ? ORDER BY created_at, outcome_id")
           .all(sessionId)
           .map(decodeOutcome),
-    }),
-    jobs: Object.freeze({
-      get: async (jobId: string) =>
-        decodeOptional(db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId), decodeJob),
-      put: putJob,
-    }),
-    activations: Object.freeze({
-      get: async (activationId: string) =>
-        decodeOptional(
-          db.prepare("SELECT * FROM activations WHERE activation_id = ?").get(activationId),
-          decodeActivation,
-        ),
-      put: putActivation,
-      getPointer: async (capabilityId: string) =>
-        decodeOptional(
-          db.prepare("SELECT * FROM activation_pointers WHERE capability_id = ?").get(capabilityId),
-          decodeActivationPointer,
-        ),
-      putPointer,
     }),
     searchConfiguration: Object.freeze({
       get: async () =>

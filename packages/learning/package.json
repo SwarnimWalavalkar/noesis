@@ -12,7 +12,6 @@
     "@noesis/config": "workspace:*",
     "@noesis/domain": "workspace:*",
     "@noesis/intelligence": "workspace:*",
-    "@noesis/ledger": "workspace:*",
     "zod": "4.4.3"
   },
   "devDependencies": {

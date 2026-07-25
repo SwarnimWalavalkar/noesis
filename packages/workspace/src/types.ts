@@ -77,19 +77,6 @@ export interface OutcomeRecord {
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 
-export interface JobRecord {
-  readonly jobId: string;
-  readonly kind: string;
-  readonly payload: unknown;
-  readonly status: "scheduled" | "running" | "completed" | "failed" | "cancelled" | "budget_exhausted";
-  readonly leaseOwner?: string;
-  readonly leaseUntil?: string;
-  readonly attempt: number;
-  readonly budgetRemaining: number;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
 export interface ActivationRecord {
   readonly activationId: string;
   readonly revision: number;
@@ -107,14 +94,6 @@ export interface LegacyCapabilityRevisionRef {
 }
 
 export type StoredCapabilityRevisionRef = CapabilityRevisionRef | LegacyCapabilityRevisionRef;
-
-export interface ActivationPointerRecord {
-  readonly pointerId: string;
-  readonly capabilityId: string;
-  readonly activationId: string;
-  readonly capabilityRevision: StoredCapabilityRevisionRef;
-  readonly updatedAt: string;
-}
 
 export type ActivationPolicyDecision = "block" | "approval_required" | "eligible_auto_activate";
 export type ActivationOperationStatus =
@@ -419,16 +398,6 @@ export interface OperationalRepositories {
     readonly get: (outcomeId: string) => Promise<OutcomeRecord | undefined>;
     readonly put: (record: OutcomeRecord) => Promise<void>;
     readonly listForSession: (sessionId: string) => Promise<readonly OutcomeRecord[]>;
-  };
-  readonly jobs: {
-    readonly get: (jobId: string) => Promise<JobRecord | undefined>;
-    readonly put: (record: JobRecord) => Promise<DatabaseRowRef>;
-  };
-  readonly activations: {
-    readonly get: (activationId: string) => Promise<ActivationRecord | undefined>;
-    readonly put: (record: ActivationRecord) => Promise<void>;
-    readonly getPointer: (capabilityId: string) => Promise<ActivationPointerRecord | undefined>;
-    readonly putPointer: (record: ActivationPointerRecord) => Promise<DatabaseRowRef>;
   };
   readonly searchConfiguration: {
     readonly get: () => Promise<SearchConfiguration>;
