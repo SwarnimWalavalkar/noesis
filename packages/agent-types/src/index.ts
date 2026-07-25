@@ -194,6 +194,15 @@ export function frozenTurnPlanDigest(plan: Omit<FrozenTurnPlan, "canonicalDigest
 
 export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
   const plan = FrozenTurnPlanSchema.parse(value);
+  for (const selection of plan.selectedCapabilities) {
+    const materials = [...selection.promptModules, ...selection.skills, ...selection.tools, selection.router];
+    for (const material of materials) {
+      if (sha256(material.content) !== material.revision.contentDigest)
+        throw new Error(
+          `Frozen turn plan ${plan.planId} material ${material.revision.revisionId} failed content digest verification`,
+        );
+    }
+  }
   const { canonicalDigest, ...unsigned } = plan;
   if (frozenTurnPlanDigest(unsigned) !== canonicalDigest)
     throw new Error(`Frozen turn plan ${plan.planId} failed canonical digest verification`);

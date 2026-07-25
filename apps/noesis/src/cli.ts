@@ -10,7 +10,6 @@ import {
   type ResolvedNoesisConfig,
   updateNoesisConfig,
 } from "@noesis/config";
-import { createNoesisRuntime } from "@noesis/runtime";
 import {
   createPiModelServices,
   createPiAgentRuntime,
@@ -212,14 +211,9 @@ Unknown options, conflicting startup arguments, and trailing operands are reject
 
 async function createRuntime(config: ResolvedNoesisConfig): Promise<ApplicationRuntime> {
   const services = createPiModelServices(config.home);
-  const runtime = await createNoesisRuntime(
-    config.home,
-    createPiAgentRuntime(process.cwd(), services.models),
-    config.agent,
-  );
   return await createApplicationRuntimeComposition({
     config,
-    runtime,
+    createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), services.models, { sessionTools }),
     createRoleRunner: (configurations) =>
       createPiAgentRoleRunner(process.cwd(), services.models, configurations),
   });
@@ -445,15 +439,14 @@ async function main(): Promise<void> {
   const runtime = await createRuntime(config);
   try {
     if (input.command === "rebuild") {
-      await runtime.debug.legacyReadOnly.ledger.rebuildProjection();
-      console.log(`Rebuilt ${runtime.debug.legacyReadOnly.ledger.paths.projection}`);
+      const documents = await runtime.debug.workspace.search.rebuildDocuments();
+      console.log(`Rebuilt ${documents.length} SQLite search documents`);
     } else if (input.command === "inspect")
       console.log(
         JSON.stringify(
           {
             trails: runtime.listTrails(),
-            activeCapabilities: runtime.debug.legacyReadOnly.capabilities.listActive(),
-            events: runtime.debug.legacyReadOnly.ledger.readAll().length,
+            activation: await runtime.debug.adaptations.activations.current(),
           },
           null,
           2,

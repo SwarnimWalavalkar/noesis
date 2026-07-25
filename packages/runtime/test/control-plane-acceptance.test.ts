@@ -344,7 +344,8 @@ async function createHarness(
   const root = await mkdtemp(join(tmpdir(), "noesis-barrier-c-"));
   roots.push(root);
   const workspace = await createWorkspaceStore(root, options.storeOptions);
-  const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
+  const internals = createWorkspaceRuntimeInternals(workspace);
+  const protectedRuntime = internals.protectedRuntime;
   const capabilityId = "writing";
   const rootRevision = await revision({ workspace, capabilityId, revisionId: "writing-r0" });
   const baseline = await revision({
@@ -510,6 +511,7 @@ async function createHarness(
   };
   const coordinator = createRuntimeCoordinator({
     workspace,
+    authority: internals.authority,
     research,
     config: coordinatorConfig,
     workerId: "barrier-c-worker",
@@ -529,6 +531,7 @@ async function createHarness(
   const feedback = createContinuousFeedbackController({
     workspace,
     protectedRuntime,
+    authority: internals.authority,
     capabilities: resolver,
     judge: outcomeJudge,
     config: feedbackConfig(options.minimumEvidence),
@@ -751,9 +754,11 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
     harness.workspace.close();
 
     const reopened = await createWorkspaceStore(harness.root);
+    const reopenedInternals = createWorkspaceRuntimeInternals(reopened);
     const restarted = createContinuousFeedbackController({
       workspace: reopened,
-      protectedRuntime: createWorkspaceRuntimeInternals(reopened).protectedRuntime,
+      protectedRuntime: reopenedInternals.protectedRuntime,
+      authority: reopenedInternals.authority,
       capabilities: harness.resolver,
       judge: Object.freeze({
         run: async () => {
@@ -766,7 +771,7 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
       status: "resolved",
       outcome: { decision: "revert" },
     });
-    const reopenedProtected = createWorkspaceRuntimeInternals(reopened).protectedRuntime;
+    const reopenedProtected = reopenedInternals.protectedRuntime;
     expect((await reopenedProtected.activations.current())?.revision).toBe(restoredRevision);
     expect(await reopenedProtected.activations.recoverCommittedPublications()).toBe(0);
     expect(await reopenedProtected.feedback.getOutcome(harness.experimentId)).toMatchObject({

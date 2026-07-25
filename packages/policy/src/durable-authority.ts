@@ -278,12 +278,17 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     void jobId;
     return undefined;
   };
-  const runScheduled: AuthorityBoundary["runScheduled"] = async (jobId, runNumber, execute) => {
+  const runScheduled: AuthorityBoundary["runScheduled"] = async (
+    jobId,
+    runNumber,
+    operationFingerprint,
+    execute,
+  ) => {
     const grant = await state.findSchedulerGrant(jobId);
     const handle = grant ? createHandle(grant.grantId) : undefined;
     const principal = "scheduler" as const;
     const effect = "execute" as const;
-    const resource = `job:${jobId}:runtime`;
+    const resource = `job:${jobId}:runtime:${operationFingerprint}`;
     const estimatedCost = 1;
     const idempotencyKey = `job:${jobId}:run:${runNumber}`;
     return await run(

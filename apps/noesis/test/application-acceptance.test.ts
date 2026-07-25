@@ -40,6 +40,7 @@ describe("credential-free Pi application acceptance", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       runtime: foreground,
+      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
@@ -82,6 +83,9 @@ describe("credential-free Pi application acceptance", () => {
       );
       expect(relatedSelection?.revision).toEqual(candidateRevision);
       expect(related.frozenTurnPlan?.canonicalDigest).toMatch(/^[a-f0-9]{64}$/u);
+      expect(related.output).toBe(
+        "Served immutable research-brief behavior through the pinned search_sessions tool.",
+      );
 
       const unrelatedSession = await runtime.startTrail({ title: "Unrelated return" });
       const unrelated = await runtime.runTurn(unrelatedSession.trailId, "Draft a meeting agenda.");

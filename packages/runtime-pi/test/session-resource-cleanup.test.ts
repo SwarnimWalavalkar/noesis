@@ -263,6 +263,70 @@ describe("Pi session resource ownership", () => {
     }
   });
 
+  test("a foreground abort during asynchronous session setup releases the session without prompting", async () => {
+    const { models, provider } = createRealShapedModels();
+    let providerPrompts = 0;
+    provider.setResponses([
+      () => {
+        providerPrompts += 1;
+        return fauxAssistantMessage("should not run");
+      },
+    ]);
+    const cleanedSessionIds: string[] = [];
+    unregisterCleanups.push(
+      registerSessionResourceCleanup((sessionId) => {
+        if (sessionId) cleanedSessionIds.push(sessionId);
+      }),
+    );
+    let markSessionSetupStarted: (() => void) | undefined;
+    const sessionSetupStarted = new Promise<void>((resolve) => {
+      markSessionSetupStarted = resolve;
+    });
+    let releaseSessionSetup: (() => void) | undefined;
+    const sessionSetupGate = new Promise<void>((resolve) => {
+      releaseSessionSetup = resolve;
+    });
+    const originalGetMetadata = Session.prototype.getMetadata;
+    const getMetadata = vi.spyOn(Session.prototype, "getMetadata").mockImplementationOnce(async function (
+      this: Session,
+    ) {
+      markSessionSetupStarted?.();
+      await sessionSetupGate;
+      return originalGetMetadata.call(this);
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), models);
+
+    try {
+      const running = runtime.run(
+        {
+          trailId: "foreground-abort-during-session-setup",
+          provider: "local-session-resource",
+          model: "local-streaming-model",
+          thinkingLevel: "off",
+          systemPrompt: "Complete one local streaming turn.",
+          prompt: "finish",
+          activeCapabilities: [],
+        },
+        () => undefined,
+      );
+      await sessionSetupStarted;
+      await runtime.abort("foreground-abort-during-session-setup");
+      await runtime.abort("foreground-abort-during-session-setup");
+      releaseSessionSetup?.();
+
+      await expect(running).resolves.toMatchObject({
+        outcome: "aborted",
+        stopReason: "aborted",
+        text: "",
+      });
+      expect(providerPrompts).toBe(0);
+      expect(cleanedSessionIds).toHaveLength(1);
+    } finally {
+      releaseSessionSetup?.();
+      getMetadata.mockRestore();
+    }
+  });
+
   test("releases session resources and active ownership even when another cleanup rejects", async () => {
     registerTrackedSessionCleanup();
     const { models, provider } = createRealShapedModels();

@@ -18,6 +18,7 @@ import {
   type CapabilityRevisionRef,
 } from "@noesis/domain";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
+import type { AuthorityBoundary } from "@noesis/policy";
 import {
   coordinatorOperationError,
   type AuthorRevisionJobPayload,
@@ -55,6 +56,7 @@ export interface CoordinatorPreflightPreparation {
 
 export interface RuntimeCoordinatorCompositionOptions {
   readonly workspace: NoesisWorkspaceStore;
+  readonly authority: AuthorityBoundary;
   readonly learning: AutomaticLearningOrgan;
   readonly evaluation: DynamicEvaluationLaboratory;
   readonly baselineRevisions: CapabilityRevisionResolverPort;
@@ -283,6 +285,7 @@ export function createRuntimeCoordinatorComposition(
 
   return createRuntimeCoordinator({
     workspace: options.workspace,
+    authority: options.authority,
     research,
     ...(options.config === undefined ? {} : { config: options.config }),
     ...(options.workerId === undefined ? {} : { workerId: options.workerId }),

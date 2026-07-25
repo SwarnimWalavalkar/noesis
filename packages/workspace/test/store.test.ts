@@ -127,7 +127,7 @@ describe("WorkspaceStore", () => {
     });
     let executions = 0;
     await expect(
-      authority(first).runScheduled("durable", 1, async () => {
+      authority(first).runScheduled("durable", 1, "durable-fingerprint", async () => {
         executions += 1;
         return "finished";
       }),
@@ -136,20 +136,20 @@ describe("WorkspaceStore", () => {
 
     const recovered = await createWorkspaceStore(root);
     await expect(
-      authority(recovered).runScheduled("durable", 1, async () => {
+      authority(recovered).runScheduled("durable", 1, "durable-fingerprint", async () => {
         executions += 1;
         return "duplicate";
       }),
     ).resolves.toMatchObject({ ok: true, replayed: true, value: "finished" });
     expect(executions).toBe(1);
     await expect(
-      authority(recovered).runScheduled("durable", 2, async () => {
+      authority(recovered).runScheduled("durable", 2, "durable-fingerprint", async () => {
         executions += 1;
         return "second";
       }),
     ).resolves.toMatchObject({ ok: true, replayed: false, value: "second" });
     await expect(
-      authority(recovered).runScheduled("durable", 3, async () => {
+      authority(recovered).runScheduled("durable", 3, "durable-fingerprint", async () => {
         executions += 1;
         return "over-budget";
       }),

@@ -6,14 +6,23 @@ import type {
   AgentRuntimeEvent,
   AgentRuntimeRequest,
   AgentRuntimeResult,
+  FrozenTurnPlan,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
 import { validateFrozenTurnPlan } from "@noesis/agent-types";
 import { z } from "zod";
+import { resolveFrozenSessionTools, type FrozenSessionToolResolver } from "./frozen-session-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
 
 export * from "./auth.ts";
 export * from "./experiment-fixtures.ts";
+export { frozenPlanMaterialUses } from "./frozen-session-tools.ts";
+export type {
+  FrozenPlanMaterialKind,
+  FrozenPlanMaterialUse,
+  FrozenSessionToolResolution,
+  FrozenSessionToolResolver,
+} from "./frozen-session-tools.ts";
 export * from "./pi-role-backend.ts";
 export * from "./role-context.ts";
 export * from "./role-runner.ts";
@@ -39,8 +48,8 @@ function assistantText(message: { readonly content: readonly unknown[] }): strin
     .join("");
 }
 
-function verifyFrozenRequest(request: AgentRuntimeRequest): void {
-  if (!request.frozenTurnPlan) return;
+function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | undefined {
+  if (!request.frozenTurnPlan) return undefined;
   const plan = validateFrozenTurnPlan(request.frozenTurnPlan);
   if (
     plan.sessionId !== request.trailId ||
@@ -50,6 +59,16 @@ function verifyFrozenRequest(request: AgentRuntimeRequest): void {
     plan.renderedSystemPrompt !== request.systemPrompt
   )
     throw new Error(`Runtime request does not match frozen turn plan ${plan.planId}`);
+  for (const selection of plan.selectedCapabilities) {
+    for (const prompt of selection.promptModules) {
+      const content = prompt.content.trim();
+      if (content && !plan.renderedSystemPrompt.includes(content))
+        throw new Error(
+          `Frozen turn plan ${plan.planId} does not serve prompt material ${prompt.revision.revisionId}`,
+        );
+    }
+  }
+  return plan;
 }
 
 export interface AssistantDeltaAggregator {
@@ -88,10 +107,22 @@ export interface PiAgentRuntime extends NoesisAgentRuntime {
   readonly name: "pi-agent-harness-0.80.6";
 }
 
-export function createPiAgentRuntime(cwd: string, models: MutableModels): PiAgentRuntime {
+export interface CreatePiAgentRuntimeOptions {
+  readonly sessionTools?: FrozenSessionToolResolver;
+}
+
+export function createPiAgentRuntime(
+  cwd: string,
+  models: MutableModels,
+  options: CreatePiAgentRuntimeOptions = {},
+): PiAgentRuntime {
   interface ActivePiExecution {
+    readonly controller: AbortController;
     harness?: AgentHarness;
     sessionId?: string;
+    requestHarnessAbort?: () => Promise<void>;
+    abortError?: unknown;
+    abortStatusEmitted?: boolean;
   }
 
   const active = new Map<string, ActivePiExecution>();
@@ -100,11 +131,25 @@ export function createPiAgentRuntime(cwd: string, models: MutableModels): PiAgen
     request: AgentRuntimeRequest,
     emit: (event: AgentRuntimeEvent) => void,
   ): Promise<AgentRuntimeResult> => {
-    verifyFrozenRequest(request);
+    const plan = verifyFrozenRequest(request);
     if (active.has(request.trailId)) throw new Error(`Trail ${request.trailId} is already active`);
-    const execution: ActivePiExecution = {};
+    const execution: ActivePiExecution = { controller: new AbortController() };
     active.set(request.trailId, execution);
+    const abortedBeforePrompt = (): AgentRuntimeResult => {
+      if (!execution.abortStatusEmitted) {
+        execution.abortStatusEmitted = true;
+        emit({ type: "status", status: "aborted" });
+      }
+      return Object.freeze({
+        text: "",
+        provider: request.provider,
+        model: request.model,
+        outcome: "aborted" as const,
+        stopReason: "aborted" as const,
+      });
+    };
     try {
+      if (execution.controller.signal.aborted) return abortedBeforePrompt();
       const model = models.getModel(request.provider, request.model);
       if (!model) throw new Error(`Pi model not found: ${request.provider}/${request.model}`);
       emit({
@@ -113,7 +158,12 @@ export function createPiAgentRuntime(cwd: string, models: MutableModels): PiAgen
         model: model.id,
         contextWindow: model.contextWindow,
       });
+      const sessionTools = plan
+        ? await resolveFrozenSessionTools(plan, options.sessionTools, execution.controller.signal)
+        : Object.freeze([]);
+      if (execution.controller.signal.aborted) return abortedBeforePrompt();
       const auth = await models.getAuth(model);
+      if (execution.controller.signal.aborted) return abortedBeforePrompt();
       if (!auth) {
         if (request.provider === "openai-codex")
           throw new Error(
@@ -149,16 +199,31 @@ export function createPiAgentRuntime(cwd: string, models: MutableModels): PiAgen
         };
       const { session, sessionId } = await createEphemeralPiSession();
       execution.sessionId = sessionId;
+      if (execution.controller.signal.aborted) return abortedBeforePrompt();
       const harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),
         session,
         models,
         model,
-        tools: [inspectTool],
+        tools: [inspectTool, ...sessionTools],
         thinkingLevel: request.thinkingLevel,
         systemPrompt: request.systemPrompt,
       });
       execution.harness = harness;
+      let abortPromise: Promise<void> | undefined;
+      const requestHarnessAbort = (): Promise<void> => {
+        abortPromise ??= harness.abort().then(
+          () => undefined,
+          (error: unknown) => {
+            execution.abortError = error;
+          },
+        );
+        return abortPromise;
+      };
+      execution.requestHarnessAbort = requestHarnessAbort;
+      const abortHarness = () => requestHarnessAbort();
+      execution.controller.signal.addEventListener("abort", abortHarness, { once: true });
+      if (execution.controller.signal.aborted) await requestHarnessAbort();
       const assistantDeltas = createAssistantDeltaAggregator();
       const unsubscribe = harness.subscribe((event) => {
         if (event.type === "message_start" && event.message.role === "assistant") {
@@ -208,8 +273,13 @@ export function createPiAgentRuntime(cwd: string, models: MutableModels): PiAgen
         emit({ type: "status", status: "completed" });
         return { ...base, outcome: "completed", stopReason: message.stopReason };
       } finally {
+        execution.controller.signal.removeEventListener("abort", abortHarness);
         unsubscribe();
+        await abortPromise;
       }
+    } catch (error) {
+      if (execution.controller.signal.aborted && !execution.harness) return abortedBeforePrompt();
+      throw error;
     } finally {
       try {
         try {
@@ -236,7 +306,11 @@ export function createPiAgentRuntime(cwd: string, models: MutableModels): PiAgen
   };
 
   const abort = async (trailId: string): Promise<void> => {
-    await active.get(trailId)?.harness?.abort();
+    const execution = active.get(trailId);
+    if (!execution) return;
+    execution.controller.abort();
+    await execution.requestHarnessAbort?.();
+    if (execution.abortError) throw execution.abortError;
   };
 
   return Object.freeze({ name: "pi-agent-harness-0.80.6", run, steer, followUp, abort });

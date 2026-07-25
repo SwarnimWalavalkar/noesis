@@ -1,9 +1,9 @@
-import { sha256, type JsonValue } from "@noesis/domain";
+import { type JsonValue, sha256 } from "@noesis/domain";
 import {
-  authorityOperationFields,
   type AuthorityBoundary,
   type AuthorityReceipt,
   type AuthorityReceiptVerifier,
+  authorityOperationFields,
   type EffectDecision,
 } from "@noesis/policy";
 import type {
@@ -173,7 +173,6 @@ async function runAuthorized<Result>(
   mutation: ProtectedMutationBinding,
   rehydrate: () => Promise<Result | undefined>,
   acceptRehydrated: (result: Result) => boolean = () => true,
-  recoveryAttempt = 0,
   recoverCurrentFailure = false,
   authorityAction: "promote" | "rollback" = "promote",
 ): Promise<Result> {
@@ -189,23 +188,14 @@ async function runAuthorized<Result>(
   });
   if (!decision.ok) {
     if (!callbackStarted || recoverCurrentFailure) {
-      const recovered = await rehydrate();
-      if (recovered !== undefined && acceptRehydrated(recovered)) return recovered;
+      try {
+        const recovered = await rehydrate();
+        if (recovered !== undefined && acceptRehydrated(recovered)) return recovered;
+      } catch {
+        // Preserve the original fail-closed authority decision when authoritative state
+        // cannot be rehydrated.
+      }
     }
-    if (!callbackStarted && recoveryAttempt < 8)
-      return await runAuthorized(
-        authority,
-        guarded,
-        Object.freeze({
-          ...mutation,
-          idempotencyKey: `${mutation.idempotencyKey}:recovery:${recoveryAttempt + 1}`,
-        }),
-        rehydrate,
-        acceptRehydrated,
-        recoveryAttempt + 1,
-        recoverCurrentFailure,
-        authorityAction,
-      );
     throw decisionFailure(decision);
   }
   if (!completed) {
@@ -379,7 +369,6 @@ export function createProtectedWorkspaceRuntime(
         ),
         async () => await options.feedback.getOutcome(request.experimentId),
         (outcome) => outcome.operationId === request.operationId,
-        0,
         true,
         request.decision === "revert" ? "rollback" : "promote",
       ),

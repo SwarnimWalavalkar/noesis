@@ -2,6 +2,7 @@ import {
   createModels,
   fauxAssistantMessage,
   fauxProvider,
+  fauxToolCall,
   type AssistantMessage,
   type Context,
 } from "@earendil-works/pi-ai";
@@ -21,6 +22,14 @@ export interface CreateControlledPiModelsOptions {
   ) => string | AssistantMessage | Promise<string | AssistantMessage>;
   readonly responseBudget?: number;
   readonly tokensPerSecond?: number;
+}
+
+export function controlledToolCallResponse(
+  name: string,
+  input: Readonly<Record<string, unknown>>,
+  id: string,
+): AssistantMessage {
+  return fauxAssistantMessage(fauxToolCall(name, input, { id }), { stopReason: "toolUse" });
 }
 
 function contentText(content: Context["messages"][number]["content"]): string {

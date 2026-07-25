@@ -1,4 +1,4 @@
-import type { FrozenBaselineRef } from "@noesis/agent-types";
+import type { FrozenBaselineRef, FrozenTurnPlan, NoesisAgentRuntime } from "@noesis/agent-types";
 import { createAtomicCapabilityRegistry, createWorkspaceCapabilityControlStore } from "@noesis/capabilities";
 import {
   createUserCriterionRepository,
@@ -27,6 +27,7 @@ import {
   createDeterministicEmbeddingPort,
   createDeterministicRerankPort,
   createHistoryPort,
+  createSessionSearchTools,
 } from "@noesis/intelligence";
 import {
   createDurableAutomaticLearningOrgan,
@@ -52,6 +53,8 @@ import {
 import {
   createRestrictedRoleContextPolicy,
   createStructuredInferencePort,
+  frozenPlanMaterialUses,
+  type FrozenSessionToolResolver,
   type RoleVariantConfiguration,
   type RuntimePiAgentRoleRunner,
 } from "@noesis/runtime-pi";
@@ -110,17 +113,90 @@ export interface ApplicationRuntime extends NoesisTuiRuntime {
         | "getSuccessorInput"
       >;
     };
-    readonly legacyReadOnly: Pick<NoesisRuntime, "ledger" | "artifacts" | "memory" | "capabilities">;
+    readonly legacyReadOnly?: Pick<NoesisRuntime, "ledger" | "artifacts" | "memory" | "capabilities">;
   };
   readonly shutdown: () => Promise<void>;
 }
 
 export interface ApplicationRuntimeCompositionOptions {
   readonly config: ResolvedNoesisConfig;
-  readonly runtime: NoesisRuntime;
+  readonly runtime?: NoesisRuntime;
+  readonly agent?: NoesisAgentRuntime;
+  readonly createAgent?: (sessionTools: FrozenSessionToolResolver) => NoesisAgentRuntime;
   readonly createRoleRunner: (
     configurations: readonly RoleVariantConfiguration[],
   ) => RuntimePiAgentRoleRunner;
+}
+
+async function replayEligibleTurns(
+  workspace: NoesisWorkspaceStore,
+  sessionId: string,
+): Promise<readonly { readonly input: string; readonly output: string }[]> {
+  const [messages, outcomes] = await Promise.all([
+    workspace.operational.messages.listForSession(sessionId),
+    workspace.operational.outcomes.listForSession(sessionId),
+  ]);
+  const messagesByTurn = new Map<
+    string,
+    { user?: (typeof messages)[number]; assistant?: (typeof messages)[number] }
+  >();
+  for (const message of messages) {
+    const turnId =
+      typeof message.metadata["turnId"] === "string"
+        ? message.metadata["turnId"]
+        : typeof message.metadata["legacyEventId"] === "string"
+          ? message.metadata["legacyEventId"]
+          : undefined;
+    if (!turnId) continue;
+    const pair = messagesByTurn.get(turnId) ?? {};
+    if (message.role === "user" && pair.user === undefined) pair.user = message;
+    if (message.role === "assistant" && pair.assistant === undefined) pair.assistant = message;
+    messagesByTurn.set(turnId, pair);
+  }
+  const replayable: Array<{
+    readonly occurredAt: string;
+    readonly turnId: string;
+    readonly input: string;
+    readonly output: string;
+  }> = [];
+  for (const outcome of outcomes) {
+    if (!outcome.turnId) continue;
+    const pair = messagesByTurn.get(outcome.turnId);
+    if (!pair?.user || !pair.assistant) continue;
+    const legacyCompleted =
+      typeof outcome.metadata["legacyEventId"] === "string" && outcome.status === "unknown";
+    const modernReplayEligible =
+      outcome.metadata["replayEligible"] === true &&
+      outcome.metadata["aborted"] !== true &&
+      (outcome.status === "accepted" || outcome.status === "corrected");
+    if (!legacyCompleted && !modernReplayEligible) continue;
+    if (modernReplayEligible) {
+      const turn = await workspace.operational.foregroundTurns.get(outcome.turnId);
+      if (
+        !turn ||
+        turn.sessionId !== sessionId ||
+        turn.status !== "completed" ||
+        turn.outcomeId !== outcome.outcomeId
+      )
+        continue;
+    }
+    replayable.push(
+      Object.freeze({
+        occurredAt: pair.user.createdAt,
+        turnId: outcome.turnId,
+        input: pair.user.content,
+        output: pair.assistant.content,
+      }),
+    );
+  }
+  return Object.freeze(
+    replayable
+      .sort(
+        (left, right) =>
+          left.occurredAt.localeCompare(right.occurredAt) || left.turnId.localeCompare(right.turnId),
+      )
+      .map(({ input, output }) => Object.freeze({ input, output })),
+  );
 }
 
 function roleKind(name: RoleName): Exclude<RoleName, "outcome_judge"> {
@@ -435,8 +511,9 @@ function configurationPrompt(configuration: ApplicationRoleConfiguration): FileR
 export async function createApplicationRuntimeComposition(
   options: ApplicationRuntimeCompositionOptions,
 ): Promise<ApplicationRuntime> {
+  const agentDefaults = options.runtime?.agentDefaults ?? options.config.agent;
   const workspace = await createWorkspaceStore(options.config.home);
-  const { protectedRuntime } = createWorkspaceRuntimeInternals(workspace);
+  const { authority, protectedRuntime } = createWorkspaceRuntimeInternals(workspace);
   await workspace.cutoverLegacyOperationalAuthority(
     options.config.home,
     Object.freeze({ actorId: "operational-cutover", kind: "system" as const }),
@@ -470,6 +547,68 @@ export async function createApplicationRuntimeComposition(
     embeddings: createDeterministicEmbeddingPort(32, "noesis-hash-32-v1"),
     reranker: createDeterministicRerankPort(),
   });
+  const supportedToolMaterial = z.strictObject({
+    kind: z.literal("noesis_session_tools"),
+    tools: z
+      .array(
+        z.enum([
+          "search_sessions",
+          "open_session_evidence",
+          "find_corrections",
+          "find_similar_tasks",
+          "prior_experiment_outcomes",
+        ]),
+      )
+      .length(5),
+  });
+  const supportedRouterMaterial = z.union([
+    z.strictObject({
+      strategyId: z.string().min(1),
+      scope: z.string().min(1),
+    }),
+    z.strictObject({
+      allTerms: z.array(z.string().min(1)).min(1),
+    }),
+  ]);
+  const sessionTools: FrozenSessionToolResolver = Object.freeze({
+    resolve: async (plan: FrozenTurnPlan, signal: AbortSignal) => {
+      if (signal.aborted)
+        return Object.freeze({
+          planId: plan.planId,
+          canonicalDigest: plan.canonicalDigest,
+          consumedMaterials: Object.freeze([]),
+          definitions: Object.freeze([]),
+        });
+      const requestedToolNames = new Set<string>();
+      for (const selection of plan.selectedCapabilities) {
+        for (const skill of selection.skills) {
+          const content = skill.content.trim();
+          if (content && !plan.renderedSystemPrompt.includes(content))
+            throw new Error(
+              `Frozen skill ${skill.revision.revisionId} is absent from the served system prompt`,
+            );
+        }
+        supportedRouterMaterial.parse(JSON.parse(selection.router.content));
+        for (const tool of selection.tools) {
+          const material = supportedToolMaterial.parse(JSON.parse(tool.content));
+          for (const name of material.tools) requestedToolNames.add(name);
+        }
+      }
+      const definitions = createSessionSearchTools({
+        workspace,
+        history,
+        authorization: Object.freeze({ currentSessionId: plan.sessionId }),
+      }).definitions.filter((definition) => requestedToolNames.has(definition.name));
+      return Object.freeze({
+        planId: plan.planId,
+        canonicalDigest: plan.canonicalDigest,
+        consumedMaterials: frozenPlanMaterialUses(plan),
+        definitions,
+      });
+    },
+  });
+  const agent = options.createAgent?.(sessionTools) ?? options.agent ?? options.runtime?.agent;
+  if (!agent) throw new Error("Application runtime composition requires a Pi execution adapter");
   const learning = createDurableAutomaticLearningOrgan({
     workspace,
     history,
@@ -575,6 +714,7 @@ export async function createApplicationRuntimeComposition(
   });
   const coordinator = createRuntimeCoordinatorComposition({
     workspace,
+    authority,
     learning,
     evaluation,
     baselineRevisions: Object.freeze({ resolve: resolveRevision }),
@@ -632,6 +772,7 @@ export async function createApplicationRuntimeComposition(
   const feedback = createContinuousFeedbackController({
     workspace,
     protectedRuntime,
+    authority,
     capabilities: candidates,
     judge: outcomeJudge,
   });
@@ -643,20 +784,11 @@ export async function createApplicationRuntimeComposition(
     resolveCapability: (capabilityId) => registry.getCapability(capabilityId),
   });
 
-  const original = options.runtime;
+  const legacyReadOnly = options.runtime;
   const sessionTimes = new Map<string, { readonly createdAt: string; readonly updatedAt: string }>();
   const trailStates = new Map<string, TrailState>();
   for (const session of await workspace.operational.sessions.list()) {
-    const messages = await workspace.operational.messages.listForSession(session.sessionId);
-    const turns: { readonly input: string; readonly output: string }[] = [];
-    let pendingInput: string | undefined;
-    for (const message of messages) {
-      if (message.role === "user") pendingInput = message.content;
-      else if (message.role === "assistant" && pendingInput !== undefined) {
-        turns.push(Object.freeze({ input: pendingInput, output: message.content }));
-        pendingInput = undefined;
-      }
-    }
+    const turns = await replayEligibleTurns(workspace, session.sessionId);
     trailStates.set(
       session.sessionId,
       Object.freeze({
@@ -737,18 +869,18 @@ export async function createApplicationRuntimeComposition(
         trailId: createId("trail"),
         title: input.title,
         status: "idle" as const,
-        provider: input.provider ?? original.agentDefaults.provider,
-        model: input.model ?? original.agentDefaults.model,
-        runtime: original.agent.name,
+        provider: input.provider ?? agentDefaults.provider,
+        model: input.model ?? agentDefaults.model,
+        runtime: agent.name,
         capabilityVersions: Object.freeze({}),
         turns: Object.freeze([]),
       }),
     );
   const resumeTrail: NoesisRuntime["resumeTrail"] = async (trailId) => {
     const trail = getTrail(trailId);
-    if (trail.runtime !== original.agent.name)
+    if (trail.runtime !== agent.name)
       throw new Error(
-        `Session ${trailId} uses runtime ${trail.runtime}, but the active runtime is ${original.agent.name}.`,
+        `Session ${trailId} uses runtime ${trail.runtime}, but the active runtime is ${agent.name}.`,
       );
     if (trail.status === "running")
       throw new Error(
@@ -799,13 +931,13 @@ export async function createApplicationRuntimeComposition(
   const runTurn: NoesisRuntime["runTurn"] = async (trailId, input, runOptions): Promise<TurnResult> => {
     const trail = getTrail(trailId);
     if (trail.status === "running") throw new Error("Trail is already running");
-    if (trail.runtime !== original.agent.name)
+    if (trail.runtime !== agent.name)
       throw new Error(
-        `Trail ${trailId} is pinned to runtime ${trail.runtime}; active runtime is ${original.agent.name}.`,
+        `Trail ${trailId} is pinned to runtime ${trail.runtime}; active runtime is ${agent.name}.`,
       );
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
     const turnId = createId("turn");
-    const thinkingLevel = runOptions?.thinkingLevel ?? original.agentDefaults.thinkingLevel;
+    const thinkingLevel = runOptions?.thinkingLevel ?? agentDefaults.thinkingLevel;
     const recentConversation = running.turns
       .slice(-8)
       .map((turn) => `User: ${turn.input}\nAssistant: ${turn.output}`)
@@ -867,7 +999,7 @@ export async function createApplicationRuntimeComposition(
         occurredAt,
         plan,
         execute: async () => {
-          const agentResult = await original.agent.run(
+          const agentResult = await agent.run(
             {
               trailId,
               provider: plan.provider,
@@ -913,15 +1045,15 @@ export async function createApplicationRuntimeComposition(
   };
   const steer: NoesisRuntime["steer"] = async (trailId, text) => {
     getTrail(trailId);
-    await original.agent.steer(trailId, text);
+    await agent.steer(trailId, text);
   };
   const followUp: NoesisRuntime["followUp"] = async (trailId, text) => {
     getTrail(trailId);
-    await original.agent.followUp(trailId, text);
+    await agent.followUp(trailId, text);
   };
   const abort: NoesisRuntime["abort"] = async (trailId) => {
     const trail = getTrail(trailId);
-    await original.agent.abort(trailId);
+    await agent.abort(trailId);
     if (trail.status === "running")
       await persistTrail(Object.freeze({ ...trail, status: "aborted" as const }));
   };
@@ -962,7 +1094,7 @@ export async function createApplicationRuntimeComposition(
   };
   return Object.freeze({
     home: options.config.home,
-    agentName: original.agent.name,
+    agentName: agent.name,
     controlPlane,
     debug: Object.freeze({
       workspace,
@@ -985,14 +1117,18 @@ export async function createApplicationRuntimeComposition(
           getSuccessorInput: protectedRuntime.feedback.getSuccessorInput,
         }),
       }),
-      legacyReadOnly: Object.freeze({
-        ledger: original.ledger,
-        artifacts: original.artifacts,
-        memory: original.memory,
-        capabilities: original.capabilities,
-      }),
+      ...(legacyReadOnly
+        ? {
+            legacyReadOnly: Object.freeze({
+              ledger: legacyReadOnly.ledger,
+              artifacts: legacyReadOnly.artifacts,
+              memory: legacyReadOnly.memory,
+              capabilities: legacyReadOnly.capabilities,
+            }),
+          }
+        : {}),
     }),
-    agentDefaults: original.agentDefaults,
+    agentDefaults,
     startTrail,
     listTrails,
     listTrailSummaries,

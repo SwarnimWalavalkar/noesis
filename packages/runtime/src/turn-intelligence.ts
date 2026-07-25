@@ -134,9 +134,10 @@ export function createTurnIntelligencePlanner(
         }),
       );
     }
-    const promptLayers = selections.flatMap((selection) =>
-      selection.promptModules.map((material) => material.content.trim()),
-    );
+    const promptLayers = selections.flatMap((selection) => [
+      ...selection.promptModules.map((material) => material.content.trim()),
+      ...selection.skills.map((material) => material.content.trim()),
+    ]);
     const unsigned = Object.freeze({
       schemaVersion: 1 as const,
       planId: createPlanId(request.turnId),

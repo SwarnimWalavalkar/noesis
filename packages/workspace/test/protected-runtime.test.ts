@@ -3,11 +3,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import type { CapabilityRevisionRef, FileRevisionRef } from "@noesis/domain";
-import { createExperienceLedger } from "../../ledger/src/index.ts";
-import { authorityOperationFields, createAuthorityBoundary, type AuthorityReceipt } from "@noesis/policy";
+import {
+  type AuthorityReceipt,
+  authorityOperationFields,
+  createAuthorityBoundary,
+  createDurableAuthorityBoundary,
+  type DurableAuthorityOperation,
+  type DurableAuthorityReservation,
+  type DurableAuthorityStatePort,
+} from "@noesis/policy";
 import { afterEach, describe, expect, test } from "vitest";
+import { createExperienceLedger } from "../../ledger/src/index.ts";
 import { createWorkspaceStore } from "../src/index.ts";
 import {
+  createProtectedWorkspaceRuntime,
   createReceiptGuardedProtectedMutations,
   createWorkspaceRuntimeInternals,
 } from "../src/protected-runtime.ts";
@@ -144,6 +153,74 @@ describe("protected workspace runtime", () => {
       }),
     ).resolves.toMatchObject({ activationId: "activation-test" });
     expect(mutations).toBe(1);
+  });
+
+  test("fails closed on an unresolved reservation without minting a recovery identity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-protected-unresolved-"));
+    roots.push(root);
+    const workspace = await createWorkspaceStore(root);
+    const baseRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
+    const attemptedOperations: DurableAuthorityOperation[] = [];
+    let mutationCalls = 0;
+    let terminalWrites = 0;
+    const state: DurableAuthorityStatePort = Object.freeze({
+      issueGrant: async () => undefined,
+      getGrant: async () => undefined,
+      findSchedulerGrant: async () => undefined,
+      reserve: async (operation: DurableAuthorityOperation): Promise<DurableAuthorityReservation> => {
+        attemptedOperations.push(operation);
+        return Object.freeze({
+          status: "unresolved",
+          reason: "A durable reservation exists without an authoritative outcome",
+        });
+      },
+      complete: async () => {
+        terminalWrites += 1;
+      },
+      fail: async () => {
+        terminalWrites += 1;
+      },
+    });
+    const authority = createDurableAuthorityBoundary(state);
+    const activations = Object.freeze({
+      ...baseRuntime.activations,
+      pinTurn: async (request: Parameters<typeof baseRuntime.activations.pinTurn>[0]) => {
+        mutationCalls += 1;
+        return await baseRuntime.activations.pinTurn(request);
+      },
+    });
+    const runtime = createProtectedWorkspaceRuntime({
+      workspaceRoot: root,
+      authority,
+      activations,
+      feedback: baseRuntime.feedback,
+      measurements: baseRuntime.measurements,
+    });
+
+    await expect(
+      runtime.activations.pinTurn({
+        sessionId: "session-unresolved",
+        turnId: "turn-unresolved",
+      }),
+    ).rejects.toThrow(/authority ambiguous.*authoritative outcome/iu);
+
+    expect(attemptedOperations).toHaveLength(1);
+    const attempted = attemptedOperations[0];
+    if (!attempted) throw new Error("Expected the original protected operation attempt");
+    expect(attempted.identity.idempotencyKey).toBe("protected:turn:pin:session-unresolved:turn-unresolved");
+    expect(attempted.identity.operationId).toBe(
+      authorityOperationFields(
+        "promoter",
+        "promote",
+        attempted.identity.resource,
+        0,
+        attempted.identity.idempotencyKey,
+      ).operationId,
+    );
+    expect(mutationCalls).toBe(0);
+    expect(terminalWrites).toBe(0);
+    expect(await baseRuntime.activations.getTurnPin("session-unresolved", "turn-unresolved")).toBeUndefined();
+    workspace.close();
   });
 
   test("public workspace and package index expose no protected mutation or authority surface", async () => {

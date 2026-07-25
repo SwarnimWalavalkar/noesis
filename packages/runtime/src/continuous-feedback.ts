@@ -3,6 +3,7 @@ import {
   canonicalJson,
   sameCapabilityRevisionRef,
   sha256,
+  toJsonValue,
   type CapabilityRevision,
   type CapabilityRevisionRef,
   type DatabaseRowRef,
@@ -22,7 +23,9 @@ import type {
   ObservationMetrics,
   OutcomeRecord,
 } from "@noesis/workspace";
+import type { AuthorityBoundary } from "@noesis/policy";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
+import { authorizeScheduledJob, runScheduledJob } from "./scheduled-execution.ts";
 import { z } from "zod";
 
 const OutcomeStatusSchema = z.enum(["accepted", "corrected", "failed", "unknown"]);
@@ -38,6 +41,11 @@ const SignalKindSchema = z.enum([
   "user_request",
 ]);
 const OutcomeDecisionSchema = z.enum(["keep", "revise", "revert"]);
+const OutcomeProposalSchema = z.strictObject({
+  proposal: OutcomeDecisionSchema,
+  citedObservationIds: z.array(z.string().min(1)).min(1),
+  summary: z.string().min(1),
+});
 const OutcomeJudgeJobPayloadSchema = z.strictObject({
   schemaVersion: z.literal(1),
   experimentId: z.string().min(1),
@@ -234,6 +242,7 @@ export interface ContinuousFeedbackController {
 export interface ContinuousFeedbackControllerOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly protectedRuntime: ProtectedWorkspaceRuntime;
+  readonly authority: AuthorityBoundary;
   readonly capabilities: FeedbackCapabilityResolver;
   readonly judge: ExperimentOutcomeJudge;
   readonly config?: ContinuousFeedbackConfig;
@@ -579,7 +588,6 @@ export function createContinuousFeedbackController(
         comparison,
       });
       const prior = await options.protectedRuntime.feedback.getResearchRun(payload.runId);
-      let proposed: ExperimentOutcomeProposal | undefined;
       if (prior?.status === "completed") {
         await options.workspace.jobs.complete({
           jobId: job.jobId,
@@ -589,13 +597,7 @@ export function createContinuousFeedbackController(
         });
         return;
       }
-      if (prior?.status === "running" && job.attempt > 1) {
-        proposed = await options.judge.rehydrate?.(job.operationId);
-        if (!proposed)
-          throw new Error(
-            "Outcome judge lease expired with an ambiguous provider outcome; exact operation rehydration is unavailable",
-          );
-      } else {
+      if (prior?.status !== "running") {
         await options.protectedRuntime.feedback.putResearchRun({
           runId: payload.runId,
           experimentId: payload.experimentId,
@@ -607,11 +609,35 @@ export function createContinuousFeedbackController(
           attempt: job.attempt,
           retryable: false,
         });
-        proposed = await options.judge.run(input, {
-          operationId: job.operationId,
-          signal: controller.signal,
-        });
       }
+      const scheduled = await runScheduledJob(
+        options.authority,
+        job,
+        sha256(canonicalJson({ operationId: job.operationId, kind: job.kind, payload: job.payload })),
+        async () =>
+          toJsonValue(
+            await options.judge.run(input, {
+              operationId: job.operationId,
+              signal: controller.signal,
+            }),
+          ),
+        { allowFailedAdvance: false },
+      );
+      if (!scheduled.ok) {
+        const originalMessage =
+          scheduled.originalError instanceof Error
+            ? scheduled.originalError.message
+            : scheduled.originalError === undefined
+              ? "Outcome judge attempt is unresolved"
+              : String(scheduled.originalError);
+        const failure = new Error(originalMessage);
+        // Once an external judge attempt starts, a thrown error is not proof that no provider
+        // output crossed the boundary. Preserve the exact scheduled identity and fail closed.
+        Reflect.set(failure, "outcomeJudgeAmbiguous", true);
+        if (scheduled.originalError !== undefined) Reflect.set(failure, "cause", scheduled.originalError);
+        throw failure;
+      }
+      const proposed = OutcomeProposalSchema.parse(scheduled.value);
       if (controller.signal.aborted) throw new Error("Outcome judge lost its durable lease");
       const validated = validateProposal(proposed, observations);
       const run = await options.protectedRuntime.feedback.putResearchRun({
@@ -639,6 +665,7 @@ export function createContinuousFeedbackController(
     } catch (error) {
       const current = await options.workspace.jobs.get(job.jobId);
       const message = error instanceof Error ? error.message : String(error);
+      const ambiguous = error instanceof Error && Reflect.get(error, "outcomeJudgeAmbiguous") === true;
       await options.protectedRuntime.feedback.putResearchRun({
         runId: payload.runId,
         experimentId: payload.experimentId,
@@ -658,10 +685,10 @@ export function createContinuousFeedbackController(
         now: isoNow(),
         retryAt: isoNow(),
         failure: Object.freeze({
-          code: "outcome_judge_ambiguous",
+          code: ambiguous ? "outcome_judge_ambiguous" : "outcome_judge_failed",
           message,
-          retryable: false,
-          ambiguous: true,
+          retryable: !ambiguous,
+          ambiguous,
         }),
       });
     } finally {
@@ -754,8 +781,14 @@ export function createContinuousFeedbackController(
     const inputDigest = outcomeResearchInputDigest(comparison);
     const runId = `outcome_research_${sha256(`${experimentId}:${requestedStrategyId}:${inputDigest}`).slice(0, 32)}`;
     const operationId = `outcome-judge:${experimentId}:${requestedStrategyId}:${inputDigest}`;
+    const jobId = `job_${sha256(operationId).slice(0, 32)}`;
+    await authorizeScheduledJob(options.authority, {
+      jobId,
+      budget: 2,
+      expiresAt: new Date(Math.max(now().getTime(), Date.now()) + 24 * 60 * 60 * 1_000).toISOString(),
+    });
     await options.workspace.jobs.enqueue({
-      jobId: `job_${sha256(operationId).slice(0, 32)}`,
+      jobId,
       kind: OUTCOME_JOB_KIND,
       payload: OutcomeJudgeJobPayloadSchema.parse({
         schemaVersion: 1,

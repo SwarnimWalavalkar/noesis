@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentRuntimeEvent, AgentRuntimeRequest, NoesisAgentRuntime } from "@noesis/agent-types";
@@ -23,6 +23,152 @@ afterEach(async () => {
 });
 
 describe("apps/noesis production control-plane composition", () => {
+  test("starts from marked SQLite authority without parsing corrupted abandoned JSONL", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-marked-corrupt-legacy-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const first = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await first.startTrail({ title: "SQLite-authoritative session" });
+    await first.shutdown();
+
+    await mkdir(join(home, "ledger"), { recursive: true });
+    await writeFile(join(home, "ledger", "events.jsonl"), "{ definitely not valid JSONL\n");
+
+    const reopened = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    expect(reopened.getTrail(trail.trailId)).toMatchObject({
+      trailId: trail.trailId,
+      title: "SQLite-authoritative session",
+    });
+    await reopened.shutdown();
+  });
+
+  test("imports completed pre-marker legacy turns once and retains them for resume", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-pre-marker-import-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const legacy = await createNoesisRuntime(
+      home,
+      createPiAgentRuntime(process.cwd(), controlled.models),
+      config.agent,
+    );
+    const trail = await legacy.startTrail({ title: "Legacy import" });
+    const completed = await legacy.runTurn(trail.trailId, "Preserve this legitimate history");
+
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    expect(runtime.getTrail(trail.trailId).turns).toEqual([
+      {
+        input: "Preserve this legitimate history",
+        output: completed.output,
+      },
+    ]);
+    await runtime.shutdown();
+  });
+
+  test("retains an aborted partial pair for inspection but excludes it after restart and resume", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-aborted-replay-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const noOp = async (): Promise<void> => undefined;
+    const abortedAgent: NoesisAgentRuntime = Object.freeze({
+      name: "pi-agent-harness-0.80.6",
+      run: async (request: AgentRuntimeRequest) =>
+        Object.freeze({
+          outcome: "aborted" as const,
+          stopReason: "aborted" as const,
+          text: "partial answer that must not resume",
+          provider: request.provider,
+          model: request.model,
+        }),
+      steer: noOp,
+      followUp: noOp,
+      abort: noOp,
+    });
+    const first = await createApplicationRuntimeComposition({
+      config,
+      agent: abortedAgent,
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await first.startTrail({ title: "Aborted partial replay" });
+    const aborted = await first.runTurn(trail.trailId, "input attached to an aborted answer");
+    expect(aborted).toMatchObject({
+      outcome: "aborted",
+      output: "partial answer that must not resume",
+    });
+    expect(await first.debug.workspace.operational.messages.listForSession(trail.trailId)).toMatchObject([
+      { role: "user", content: "input attached to an aborted answer" },
+      { role: "assistant", content: "partial answer that must not resume" },
+    ]);
+    expect(await first.debug.workspace.operational.outcomes.listForSession(trail.trailId)).toMatchObject([
+      {
+        status: "failed",
+        metadata: { aborted: true, replayEligible: false },
+      },
+    ]);
+    await first.shutdown();
+
+    const requests: AgentRuntimeRequest[] = [];
+    const resumedAgent: NoesisAgentRuntime = Object.freeze({
+      name: abortedAgent.name,
+      run: async (request: AgentRuntimeRequest) => {
+        requests.push(request);
+        return Object.freeze({
+          outcome: "completed" as const,
+          stopReason: "stop" as const,
+          text: "clean resumed completion",
+          provider: request.provider,
+          model: request.model,
+        });
+      },
+      steer: noOp,
+      followUp: noOp,
+      abort: noOp,
+    });
+    const reopened = await createApplicationRuntimeComposition({
+      config,
+      agent: resumedAgent,
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    expect(reopened.getTrail(trail.trailId).turns).toEqual([]);
+    await reopened.resumeTrail(trail.trailId);
+    await reopened.runTurn(trail.trailId, "continue with clean context");
+    expect(requests[0]?.systemPrompt).not.toContain("partial answer that must not resume");
+    expect(requests[0]?.systemPrompt).not.toContain("input attached to an aborted answer");
+    expect(await reopened.debug.workspace.operational.messages.listForSession(trail.trailId)).toHaveLength(4);
+    await reopened.shutdown();
+  });
+
   test("a real app turn pins admission and records exact durable operational work", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-control-plane-"));
     roots.push(home);
@@ -32,21 +178,28 @@ describe("apps/noesis production control-plane composition", () => {
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
     const controlled = createControlledPiModels();
-    const pi = createPiAgentRuntime(process.cwd(), controlled.models);
     const requests: AgentRuntimeRequest[] = [];
-    const capturingAgent: NoesisAgentRuntime = Object.freeze({
-      ...pi,
-      run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
-        requests.push(request);
-        return await pi.run(request, emit);
-      },
-    });
-    const legacy = await createNoesisRuntime(home, capturingAgent, config.agent);
+    const legacy = await createNoesisRuntime(
+      home,
+      createPiAgentRuntime(process.cwd(), controlled.models),
+      config.agent,
+    );
     const legacyEventCount = legacy.ledger.readAll().length;
     const seenConfigurations: unknown[] = [];
     const runtime = await createApplicationRuntimeComposition({
       config,
       runtime: legacy,
+      createAgent: (sessionTools) => {
+        const pi = createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools });
+        const capturingAgent: NoesisAgentRuntime = Object.freeze({
+          ...pi,
+          run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+            requests.push(request);
+            return await pi.run(request, emit);
+          },
+        });
+        return capturingAgent;
+      },
       createRoleRunner: (configurations) => {
         seenConfigurations.push(...configurations);
         return createPiAgentRoleRunner(process.cwd(), controlled.models, configurations);
@@ -151,6 +304,7 @@ describe("apps/noesis production control-plane composition", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       runtime: legacy,
+      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
@@ -196,6 +350,7 @@ describe("apps/noesis production control-plane composition", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       runtime: legacy,
+      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -274,6 +429,7 @@ describe("apps/noesis production control-plane composition", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       runtime: legacy,
+      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,

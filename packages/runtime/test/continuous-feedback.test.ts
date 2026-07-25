@@ -125,6 +125,7 @@ interface FeedbackFixture {
   readonly root: string;
   readonly workspace: NoesisWorkspaceStore;
   readonly protectedRuntime: ProtectedWorkspaceRuntime;
+  readonly authority: ReturnType<typeof createWorkspaceRuntimeInternals>["authority"];
   readonly resolver: ActivationCandidateResolver;
   readonly revisions: Map<string, CapabilityRevision>;
   readonly capabilityId: string;
@@ -278,7 +279,8 @@ async function createFixture(
 ): Promise<FeedbackFixture> {
   const root = await mkdtemp(join(tmpdir(), "noesis-ac-10-"));
   const workspace = await createWorkspaceStore(root, options.storeOptions);
-  const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
+  const internals = createWorkspaceRuntimeInternals(workspace);
+  const protectedRuntime = internals.protectedRuntime;
   const revisions = new Map<string, CapabilityRevision>();
   const resolver: ActivationCandidateResolver = Object.freeze({
     resolve: async (reference: CapabilityRevisionRef) => revisions.get(canonicalJson(reference)),
@@ -309,6 +311,7 @@ async function createFixture(
     root,
     workspace,
     protectedRuntime,
+    authority: internals.authority,
     resolver,
     revisions,
     capabilityId,
@@ -358,6 +361,7 @@ function controller(
   return createContinuousFeedbackController({
     workspace: fixture.workspace,
     protectedRuntime: fixture.protectedRuntime,
+    authority: fixture.authority,
     capabilities: fixture.resolver,
     judge: outcomeJudge,
     config: feedbackConfig,
@@ -442,6 +446,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     const feedback = createContinuousFeedbackController({
       workspace,
       protectedRuntime: fixture.protectedRuntime,
+      authority: fixture.authority,
       capabilities: fixture.resolver,
       judge: Object.freeze({
         run: async () => {
@@ -558,9 +563,11 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     const restoredRevision = restored?.revision;
     fixture.workspace.close();
     const reopened = await createWorkspaceStore(fixture.root);
+    const reopenedInternals = createWorkspaceRuntimeInternals(reopened);
     const restarted = createContinuousFeedbackController({
       workspace: reopened,
-      protectedRuntime: createWorkspaceRuntimeInternals(reopened).protectedRuntime,
+      protectedRuntime: reopenedInternals.protectedRuntime,
+      authority: reopenedInternals.authority,
       capabilities: fixture.resolver,
       judge: judge(),
       config: config(),
@@ -684,7 +691,8 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
 
     const root = await mkdtemp(join(tmpdir(), "noesis-ac-10-unrecorded-"));
     const workspace = await createWorkspaceStore(root);
-    const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
+    const internals = createWorkspaceRuntimeInternals(workspace);
+    const protectedRuntime = internals.protectedRuntime;
     const revisions = new Map<string, CapabilityRevision>();
     const resolver: ActivationCandidateResolver = Object.freeze({
       resolve: async (reference: CapabilityRevisionRef) => revisions.get(canonicalJson(reference)),
@@ -704,6 +712,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       root,
       workspace,
       protectedRuntime,
+      authority: internals.authority,
       resolver,
       revisions,
       capabilityId: "single",

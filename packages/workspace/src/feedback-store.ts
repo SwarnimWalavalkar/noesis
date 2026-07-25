@@ -1,17 +1,17 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
+  type ActorRef,
   CapabilityRevisionRefSchema,
   canonicalJson,
+  type DatabaseRowRef,
+  type EvidenceRef,
   EvidenceRefSchema,
   ExperimentSchema,
   FeedbackSignalSchema,
+  type FileRevisionRef,
   FileRevisionRefSchema,
   sameCapabilityRevisionRef,
   sha256,
-  type ActorRef,
-  type DatabaseRowRef,
-  type EvidenceRef,
-  type FileRevisionRef,
 } from "@noesis/domain";
 import { z } from "zod";
 import {
@@ -54,11 +54,38 @@ interface CreateProtectedFeedbackStoreOptions {
   readonly afterOutcomeCommitForTesting?: () => void;
   readonly recordActivity: RecordActivity;
   readonly assertStoredReference: (reference: EvidenceRef | DatabaseRowRef | FileRevisionRef) => void;
+  readonly stageActiveRevision: (
+    operationId: string,
+    publicationKey: string,
+    sourceRevision: FileRevisionRef,
+  ) => Promise<{
+    readonly workingPath: string;
+    readonly stagedPath: string;
+    readonly contentDigest: string;
+  }>;
+  readonly publishStagedActiveRevision: (publication: {
+    readonly workingPath: string;
+    readonly stagedPath: string;
+    readonly contentDigest: string;
+    readonly sourceRevision: FileRevisionRef;
+  }) => Promise<void>;
+  readonly deleteActiveDefinition: (workingPath: string) => Promise<void>;
+  readonly normalizeActiveWorkingPath: (workingPath: string) => string;
+  readonly cleanupOutcomePublicationStage: (operationId: string) => Promise<void>;
 }
 
-export function createProtectedFeedbackStore(
+interface OutcomeActivationPublication {
+  readonly publicationKey: string;
+  readonly action: "publish" | "delete";
+  readonly workingPath: string;
+  readonly sourceRevision?: FileRevisionRef;
+  readonly stagedPath?: string;
+  readonly contentDigest?: string;
+}
+
+export async function createProtectedFeedbackStore(
   dependencies: CreateProtectedFeedbackStoreOptions,
-): ProtectedFeedbackStore {
+): Promise<ProtectedFeedbackStore> {
   const database = dependencies.database;
   const db = database.connection;
   const now = dependencies.now;
@@ -194,6 +221,77 @@ export function createProtectedFeedbackStore(
       operationDigest: requiredString(row, "operation_digest"),
       committedAt: requiredString(row, "committed_at"),
     });
+  };
+
+  const pendingOutcomePublications = (operationId: string): readonly OutcomeActivationPublication[] =>
+    Object.freeze(
+      db
+        .prepare(
+          `SELECT publication_key, action, working_path, source_revision_json,
+             staged_path, content_digest
+           FROM outcome_activation_publications
+           WHERE operation_id = ? AND published = 0
+           ORDER BY publication_key`,
+        )
+        .all(operationId)
+        .map((row) => {
+          const action = z.enum(["publish", "delete"]).parse(requiredString(row, "action"));
+          const sourceRevision = optionalString(row, "source_revision_json");
+          const stagedPath = optionalString(row, "staged_path");
+          const contentDigest = optionalString(row, "content_digest");
+          return Object.freeze({
+            publicationKey: requiredString(row, "publication_key"),
+            action,
+            workingPath: requiredString(row, "working_path"),
+            ...(sourceRevision === undefined
+              ? {}
+              : { sourceRevision: FileRevisionRefSchema.parse(parseJson(sourceRevision)) }),
+            ...(stagedPath === undefined ? {} : { stagedPath }),
+            ...(contentDigest === undefined ? {} : { contentDigest }),
+          });
+        }),
+    );
+
+  const publishOutcomeRestoration = async (operationId: string): Promise<number> => {
+    let published = 0;
+    for (const publication of pendingOutcomePublications(operationId)) {
+      if (publication.action === "publish") {
+        if (!publication.stagedPath || !publication.contentDigest || !publication.sourceRevision)
+          throw new Error(`Outcome publication ${publication.publicationKey} is incomplete`);
+        if (publication.sourceRevision.contentDigest !== publication.contentDigest)
+          throw new Error(`Outcome publication ${publication.publicationKey} changed its source digest`);
+        await options.publishStagedActiveRevision({
+          workingPath: publication.workingPath,
+          stagedPath: publication.stagedPath,
+          contentDigest: publication.contentDigest,
+          sourceRevision: publication.sourceRevision,
+        });
+      } else {
+        await options.deleteActiveDefinition(publication.workingPath);
+      }
+      database.transaction(() => {
+        db.prepare(
+          `UPDATE outcome_activation_publications SET published = 1
+           WHERE operation_id = ? AND publication_key = ?`,
+        ).run(operationId, publication.publicationKey);
+      });
+      published += 1;
+    }
+    if (pendingOutcomePublications(operationId).length === 0)
+      await options.cleanupOutcomePublicationStage(operationId);
+    return published;
+  };
+
+  const recoverCommittedOutcomePublications = async (): Promise<number> => {
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT operation_id FROM outcome_activation_publications
+         WHERE published = 0 ORDER BY operation_id`,
+      )
+      .all();
+    let recovered = 0;
+    for (const row of rows) recovered += await publishOutcomeRestoration(requiredString(row, "operation_id"));
+    return recovered;
   };
 
   const decodeSuccessorInput = (row: unknown): SuccessorLineageInputRecord =>
@@ -465,6 +563,88 @@ export function createProtectedFeedbackStore(
     );
   };
 
+  const stageRevertPublications = async (
+    request: CommitExperimentOutcomeRequest,
+  ): Promise<readonly OutcomeActivationPublication[]> => {
+    if (request.decision !== "revert") return Object.freeze([]);
+    if (!request.restore) throw new Error("Revert requires one exact prior snapshot");
+    const current = decodeOptional(
+      db.prepare("SELECT * FROM activations WHERE activation_id = ?").get(request.expectedActivationId),
+      decodeActivation,
+    );
+    const source = decodeOptional(
+      db.prepare("SELECT * FROM activations WHERE activation_id = ?").get(request.restore.sourceActivationId),
+      decodeActivation,
+    );
+    const experimentRow = db
+      .prepare("SELECT data_json FROM experiments WHERE experiment_id = ?")
+      .get(request.experimentId);
+    if (!current || !source || experimentRow === undefined)
+      throw new Error("Revert publication cannot resolve its exact activation snapshots");
+    const experiment = ExperimentSchema.parse(parseJson(requiredString(experimentRow, "data_json")));
+    if (experiment.status !== "observing" || !experiment.activatedRevision)
+      throw new Error(`Experiment ${request.experimentId} is not observing`);
+    const definitionPrefix = `${sha256(experiment.activatedRevision.capabilityId)}:`;
+    const currentDefinitions = Object.entries(current.activeDefinitions).filter(([slotKey]) =>
+      slotKey.startsWith(definitionPrefix),
+    );
+    const sourceDefinitions = Object.entries(source.activeDefinitions).filter(([slotKey]) =>
+      slotKey.startsWith(definitionPrefix),
+    );
+    const publications: OutcomeActivationPublication[] = [];
+    const retainedPaths = new Map<string, FileRevisionRef>();
+    const restoredPaths = new Set<string>();
+    try {
+      for (const [slotKey, reference] of Object.entries(current.activeDefinitions)) {
+        if (slotKey.startsWith(definitionPrefix)) continue;
+        retainedPaths.set(options.normalizeActiveWorkingPath(reference.workingPath), reference);
+      }
+      for (const [slotKey, sourceRevision] of sourceDefinitions) {
+        dependencies.assertStoredReference(sourceRevision);
+        const restoredPath = options.normalizeActiveWorkingPath(sourceRevision.workingPath);
+        const retained = retainedPaths.get(restoredPath);
+        if (retained && retained.contentDigest !== sourceRevision.contentDigest)
+          throw new Error(`Revert contains conflicting active definition path ${restoredPath}`);
+        retainedPaths.set(restoredPath, sourceRevision);
+        if (restoredPaths.has(restoredPath)) continue;
+        restoredPaths.add(restoredPath);
+        const publicationKey = `publish:${slotKey}`;
+        const staged = await options.stageActiveRevision(request.operationId, publicationKey, sourceRevision);
+        if (staged.workingPath !== restoredPath)
+          throw new Error(`Revert staged a mismatched active definition path ${staged.workingPath}`);
+        publications.push(
+          Object.freeze({
+            publicationKey,
+            action: "publish" as const,
+            workingPath: staged.workingPath,
+            sourceRevision,
+            stagedPath: staged.stagedPath,
+            contentDigest: staged.contentDigest,
+          }),
+        );
+      }
+      const deletedPaths = new Set<string>();
+      for (const [, currentRevision] of currentDefinitions) {
+        const workingPath = options.normalizeActiveWorkingPath(currentRevision.workingPath);
+        if (retainedPaths.has(workingPath) || deletedPaths.has(workingPath)) continue;
+        deletedPaths.add(workingPath);
+        publications.push(
+          Object.freeze({
+            publicationKey: `delete:${sha256(workingPath)}`,
+            action: "delete" as const,
+            workingPath,
+          }),
+        );
+      }
+      return Object.freeze(publications);
+    } catch (error) {
+      const committedAfterFailure = await getExperimentOutcome(request.experimentId);
+      if (!committedAfterFailure || committedAfterFailure.operationId !== request.operationId)
+        await options.cleanupOutcomePublicationStage(request.operationId);
+      throw error;
+    }
+  };
+
   const commitExperimentOutcome = async (
     request: CommitExperimentOutcomeRequest,
   ): Promise<ExperimentOutcomeOperationRecord> => {
@@ -494,131 +674,133 @@ export function createProtectedFeedbackStore(
       return existing;
     }
     options.beforeOutcomeCommitForTesting?.();
-    database.transaction(() => {
-      const currentIdentity = currentActivationIdentity();
-      if (
-        currentIdentity.activationId !== request.expectedActivationId ||
-        currentIdentity.revision !== request.expectedActivationRevision
-      )
-        throw new Error("Experiment outcome activation snapshot changed (CAS conflict)");
-      const currentActivationRow = db
-        .prepare("SELECT * FROM activations WHERE activation_id = ?")
-        .get(request.expectedActivationId);
-      const currentActivation = decodeActivation(currentActivationRow);
-      if (!currentActivation) throw new Error("Expected current activation snapshot is missing");
-      const experimentRow = db
-        .prepare("SELECT data_json FROM experiments WHERE experiment_id = ?")
-        .get(request.experimentId);
-      if (experimentRow === undefined) throw new Error(`Experiment ${request.experimentId} is missing`);
-      const experiment = ExperimentSchema.parse(parseJson(requiredString(experimentRow, "data_json")));
-      if (experiment.status !== "observing" || !experiment.activatedRevision)
-        throw new Error(`Experiment ${request.experimentId} is not observing`);
-      const currentServingRevision = z
-        .record(z.string(), CapabilityRevisionRefSchema)
-        .parse(currentActivation.activeCapabilityRevisions)[experiment.activatedRevision.capabilityId];
-      if (
-        !currentServingRevision ||
-        !sameCapabilityRevisionRef(currentServingRevision, experiment.activatedRevision)
-      )
-        throw new Error("Experiment outcome no longer targets the active capability revision");
-      for (const ref of request.evidenceRefs) assertStoredReference(db, ref);
-      if (request.researchRunId) {
-        const run = db
-          .prepare("SELECT status, proposal FROM experiment_research_runs WHERE run_id = ?")
-          .get(request.researchRunId);
+    const revertPublications = await stageRevertPublications(request);
+    try {
+      database.transaction(() => {
+        const currentIdentity = currentActivationIdentity();
         if (
-          run === undefined ||
-          requiredString(run, "status") !== "completed" ||
-          requiredString(run, "proposal") !== request.decision
+          currentIdentity.activationId !== request.expectedActivationId ||
+          currentIdentity.revision !== request.expectedActivationRevision
         )
-          throw new Error("Experiment outcome is not bound to its completed research proposal");
-      }
-      const committedAt = now();
-      let restoredActivationId: string | undefined;
-      let successorExperimentId: string | undefined;
-      if (request.decision === "revert") {
-        if (!request.restore || request.successor)
-          throw new Error("Revert requires one exact prior snapshot and no successor input");
-        if (
-          !permissionSubset(
-            request.restore.restoredPermissionManifest,
-            request.restore.currentPermissionManifest,
-          )
-        )
-          throw new Error("Restoration would widen the current permission manifest");
-        const originOperationRow = db
-          .prepare("SELECT * FROM activation_operations WHERE experiment_id = ? AND status = 'committed'")
+          throw new Error("Experiment outcome activation snapshot changed (CAS conflict)");
+        const currentActivationRow = db
+          .prepare("SELECT * FROM activations WHERE activation_id = ?")
+          .get(request.expectedActivationId);
+        const currentActivation = decodeActivation(currentActivationRow);
+        if (!currentActivation) throw new Error("Expected current activation snapshot is missing");
+        const experimentRow = db
+          .prepare("SELECT data_json FROM experiments WHERE experiment_id = ?")
           .get(request.experimentId);
-        if (originOperationRow === undefined)
-          throw new Error("Revert cannot restore an experiment without a committed activation");
-        const originOperation = decodeActivationOperation(originOperationRow);
-        if (originOperation.previousActivationId !== request.restore.sourceActivationId)
-          throw new Error("Revert target is not the prior snapshot recorded by AC-09");
-        const source = decodeActivation(
-          db
-            .prepare("SELECT * FROM activations WHERE activation_id = ?")
-            .get(request.restore.sourceActivationId),
-        );
-        if (!source) throw new Error("Recorded prior activation snapshot is missing");
-        const sourceCapabilities = z
+        if (experimentRow === undefined) throw new Error(`Experiment ${request.experimentId} is missing`);
+        const experiment = ExperimentSchema.parse(parseJson(requiredString(experimentRow, "data_json")));
+        if (experiment.status !== "observing" || !experiment.activatedRevision)
+          throw new Error(`Experiment ${request.experimentId} is not observing`);
+        const currentServingRevision = z
           .record(z.string(), CapabilityRevisionRefSchema)
-          .parse(source.activeCapabilityRevisions);
-        const targetCapabilityId = experiment.activatedRevision.capabilityId;
-        const restoredRevision = sourceCapabilities[targetCapabilityId];
-        const restoresExistingSlot = experiment.baselineRevision.capabilityId === targetCapabilityId;
+          .parse(currentActivation.activeCapabilityRevisions)[experiment.activatedRevision.capabilityId];
         if (
-          restoresExistingSlot &&
-          (!restoredRevision || !sameCapabilityRevisionRef(restoredRevision, experiment.baselineRevision))
+          !currentServingRevision ||
+          !sameCapabilityRevisionRef(currentServingRevision, experiment.activatedRevision)
         )
-          throw new Error("Recorded prior snapshot does not restore the experiment baseline revision");
-        if (!restoresExistingSlot && restoredRevision)
-          throw new Error("A new capability slot cannot replace a capability in the prior snapshot");
-        const definitionPrefix = `${sha256(targetCapabilityId)}:`;
-        const restoredDefinitions = Object.freeze({
-          ...Object.fromEntries(
-            Object.entries(currentActivation.activeDefinitions).filter(
-              ([slotKey]) => !slotKey.startsWith(definitionPrefix),
-            ),
-          ),
-          ...Object.fromEntries(
-            Object.entries(source.activeDefinitions).filter(([slotKey]) =>
-              slotKey.startsWith(definitionPrefix),
-            ),
-          ),
-        });
-        const currentCapabilities = z
-          .record(z.string(), CapabilityRevisionRefSchema)
-          .parse(currentActivation.activeCapabilityRevisions);
-        const restoredCapabilities = restoresExistingSlot
-          ? Object.freeze({
-              ...currentCapabilities,
-              [targetCapabilityId]: restoredRevision,
-            })
-          : Object.freeze(
-              Object.fromEntries(
-                Object.entries(currentCapabilities).filter(
-                  ([capabilityId]) => capabilityId !== targetCapabilityId,
-                ),
+          throw new Error("Experiment outcome no longer targets the active capability revision");
+        for (const ref of request.evidenceRefs) assertStoredReference(db, ref);
+        if (request.researchRunId) {
+          const run = db
+            .prepare("SELECT status, proposal FROM experiment_research_runs WHERE run_id = ?")
+            .get(request.researchRunId);
+          if (
+            run === undefined ||
+            requiredString(run, "status") !== "completed" ||
+            requiredString(run, "proposal") !== request.decision
+          )
+            throw new Error("Experiment outcome is not bound to its completed research proposal");
+        }
+        const committedAt = now();
+        let restoredActivationId: string | undefined;
+        let successorExperimentId: string | undefined;
+        if (request.decision === "revert") {
+          if (!request.restore || request.successor)
+            throw new Error("Revert requires one exact prior snapshot and no successor input");
+          if (
+            !permissionSubset(
+              request.restore.restoredPermissionManifest,
+              request.restore.currentPermissionManifest,
+            )
+          )
+            throw new Error("Restoration would widen the current permission manifest");
+          const originOperationRow = db
+            .prepare("SELECT * FROM activation_operations WHERE experiment_id = ? AND status = 'committed'")
+            .get(request.experimentId);
+          if (originOperationRow === undefined)
+            throw new Error("Revert cannot restore an experiment without a committed activation");
+          const originOperation = decodeActivationOperation(originOperationRow);
+          if (originOperation.previousActivationId !== request.restore.sourceActivationId)
+            throw new Error("Revert target is not the prior snapshot recorded by AC-09");
+          const source = decodeActivation(
+            db
+              .prepare("SELECT * FROM activations WHERE activation_id = ?")
+              .get(request.restore.sourceActivationId),
+          );
+          if (!source) throw new Error("Recorded prior activation snapshot is missing");
+          const sourceCapabilities = z
+            .record(z.string(), CapabilityRevisionRefSchema)
+            .parse(source.activeCapabilityRevisions);
+          const targetCapabilityId = experiment.activatedRevision.capabilityId;
+          const restoredRevision = sourceCapabilities[targetCapabilityId];
+          const restoresExistingSlot = experiment.baselineRevision.capabilityId === targetCapabilityId;
+          if (
+            restoresExistingSlot &&
+            (!restoredRevision || !sameCapabilityRevisionRef(restoredRevision, experiment.baselineRevision))
+          )
+            throw new Error("Recorded prior snapshot does not restore the experiment baseline revision");
+          if (!restoresExistingSlot && restoredRevision)
+            throw new Error("A new capability slot cannot replace a capability in the prior snapshot");
+          const definitionPrefix = `${sha256(targetCapabilityId)}:`;
+          const restoredDefinitions = Object.freeze({
+            ...Object.fromEntries(
+              Object.entries(currentActivation.activeDefinitions).filter(
+                ([slotKey]) => !slotKey.startsWith(definitionPrefix),
               ),
-            );
-        restoredActivationId = `restoration_${sha256(request.operationId).slice(0, 32)}`;
-        db.prepare(
-          `INSERT INTO activations(
+            ),
+            ...Object.fromEntries(
+              Object.entries(source.activeDefinitions).filter(([slotKey]) =>
+                slotKey.startsWith(definitionPrefix),
+              ),
+            ),
+          });
+          const currentCapabilities = z
+            .record(z.string(), CapabilityRevisionRefSchema)
+            .parse(currentActivation.activeCapabilityRevisions);
+          const restoredCapabilities = restoresExistingSlot
+            ? Object.freeze({
+                ...currentCapabilities,
+                [targetCapabilityId]: restoredRevision,
+              })
+            : Object.freeze(
+                Object.fromEntries(
+                  Object.entries(currentCapabilities).filter(
+                    ([capabilityId]) => capabilityId !== targetCapabilityId,
+                  ),
+                ),
+              );
+          restoredActivationId = `restoration_${sha256(request.operationId).slice(0, 32)}`;
+          db.prepare(
+            `INSERT INTO activations(
             activation_id, revision, previous_activation_id, definitions_json,
             capability_revisions_json, preflight_id, created_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          restoredActivationId,
-          request.expectedActivationRevision + 1,
-          request.expectedActivationId,
-          JSON.stringify(restoredDefinitions),
-          JSON.stringify(restoredCapabilities),
-          currentActivation.preflightId ?? null,
-          committedAt,
-        );
-        if (restoredRevision)
-          db.prepare(
-            `INSERT INTO activation_pointers(
+          ).run(
+            restoredActivationId,
+            request.expectedActivationRevision + 1,
+            request.expectedActivationId,
+            JSON.stringify(restoredDefinitions),
+            JSON.stringify(restoredCapabilities),
+            currentActivation.preflightId ?? null,
+            committedAt,
+          );
+          if (restoredRevision)
+            db.prepare(
+              `INSERT INTO activation_pointers(
               pointer_id, capability_id, activation_id, capability_revision_id, updated_at,
               capability_revision_json
             ) VALUES (?, ?, ?, ?, ?, ?)
@@ -627,104 +809,124 @@ export function createProtectedFeedbackStore(
               capability_revision_id = excluded.capability_revision_id,
               capability_revision_json = excluded.capability_revision_json,
               updated_at = excluded.updated_at`,
-          ).run(
-            `activation_pointer_${sha256(targetCapabilityId).slice(0, 32)}`,
-            targetCapabilityId,
-            restoredActivationId,
-            restoredRevision.capabilityRevisionId,
-            committedAt,
-            JSON.stringify(restoredRevision),
-          );
-        else db.prepare("DELETE FROM activation_pointers WHERE capability_id = ?").run(targetCapabilityId);
-        db.prepare(
-          `UPDATE activation_state SET activation_id = ?, revision = ?, updated_at = ?
+            ).run(
+              `activation_pointer_${sha256(targetCapabilityId).slice(0, 32)}`,
+              targetCapabilityId,
+              restoredActivationId,
+              restoredRevision.capabilityRevisionId,
+              committedAt,
+              JSON.stringify(restoredRevision),
+            );
+          else db.prepare("DELETE FROM activation_pointers WHERE capability_id = ?").run(targetCapabilityId);
+          db.prepare(
+            `UPDATE activation_state SET activation_id = ?, revision = ?, updated_at = ?
            WHERE state_id = 'current'`,
-        ).run(restoredActivationId, request.expectedActivationRevision + 1, committedAt);
-      } else if (request.decision === "revise") {
-        if (!request.successor || request.restore)
-          throw new Error("Revise requires one successor lineage input and no restoration");
-        const successor = ExperimentSchema.parse(request.successor.experiment);
-        const lineage = request.successor.lineage;
-        if (
-          successor.status !== "hypothesis" ||
-          successor.candidateRevisions.length !== 0 ||
-          !sameCapabilityRevisionRef(successor.baselineRevision, experiment.activatedRevision) ||
-          lineage.predecessorExperimentId !== experiment.experimentId ||
-          lineage.successorExperimentId !== successor.experimentId ||
-          lineage.predecessorActivationId !== request.expectedActivationId ||
-          !sameCapabilityRevisionRef(lineage.predecessorRevision, experiment.activatedRevision) ||
-          !sameCapabilityRevisionRef(lineage.baselineRevision, experiment.baselineRevision)
-        )
-          throw new Error("Successor lineage input is not bound to the exact predecessor experiment");
-        for (const ref of lineage.evidenceRefs) assertStoredReference(db, ref);
-        db.prepare("INSERT INTO experiments VALUES (?, 'hypothesis', ?, ?, ?)").run(
-          successor.experimentId,
-          JSON.stringify(successor),
-          committedAt,
-          committedAt,
-        );
-        db.prepare(
-          `INSERT INTO successor_lineage_inputs(
+          ).run(restoredActivationId, request.expectedActivationRevision + 1, committedAt);
+        } else if (request.decision === "revise") {
+          if (!request.successor || request.restore)
+            throw new Error("Revise requires one successor lineage input and no restoration");
+          const successor = ExperimentSchema.parse(request.successor.experiment);
+          const lineage = request.successor.lineage;
+          if (
+            successor.status !== "hypothesis" ||
+            successor.candidateRevisions.length !== 0 ||
+            !sameCapabilityRevisionRef(successor.baselineRevision, experiment.activatedRevision) ||
+            lineage.predecessorExperimentId !== experiment.experimentId ||
+            lineage.successorExperimentId !== successor.experimentId ||
+            lineage.predecessorActivationId !== request.expectedActivationId ||
+            !sameCapabilityRevisionRef(lineage.predecessorRevision, experiment.activatedRevision) ||
+            !sameCapabilityRevisionRef(lineage.baselineRevision, experiment.baselineRevision)
+          )
+            throw new Error("Successor lineage input is not bound to the exact predecessor experiment");
+          for (const ref of lineage.evidenceRefs) assertStoredReference(db, ref);
+          db.prepare("INSERT INTO experiments VALUES (?, 'hypothesis', ?, ?, ?)").run(
+            successor.experimentId,
+            JSON.stringify(successor),
+            committedAt,
+            committedAt,
+          );
+          db.prepare(
+            `INSERT INTO successor_lineage_inputs(
             input_id, predecessor_experiment_id, successor_experiment_id,
             predecessor_activation_id, predecessor_revision_json, baseline_revision_json,
             evidence_refs_json, created_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          lineage.inputId,
-          lineage.predecessorExperimentId,
-          lineage.successorExperimentId,
-          lineage.predecessorActivationId,
-          JSON.stringify(lineage.predecessorRevision),
-          JSON.stringify(lineage.baselineRevision),
-          JSON.stringify(lineage.evidenceRefs),
-          committedAt,
-        );
-        successorExperimentId = successor.experimentId;
-      } else if (request.restore || request.successor) {
-        throw new Error("Keep cannot restore activation state or create a successor");
-      }
-      const completed = ExperimentSchema.parse({
-        ...experiment,
-        status: "completed",
-        outcome: request.decision,
-        ...(successorExperimentId ? { followUpExperimentId: successorExperimentId } : {}),
-      });
-      db.prepare(
-        "UPDATE experiments SET status = 'completed', data_json = ?, updated_at = ? WHERE experiment_id = ?",
-      ).run(JSON.stringify(completed), committedAt, experiment.experimentId);
-      options.duringOutcomeCommitForTesting?.();
-      db.prepare(
-        `INSERT INTO experiment_outcomes(
+          ).run(
+            lineage.inputId,
+            lineage.predecessorExperimentId,
+            lineage.successorExperimentId,
+            lineage.predecessorActivationId,
+            JSON.stringify(lineage.predecessorRevision),
+            JSON.stringify(lineage.baselineRevision),
+            JSON.stringify(lineage.evidenceRefs),
+            committedAt,
+          );
+          successorExperimentId = successor.experimentId;
+        } else if (request.restore || request.successor) {
+          throw new Error("Keep cannot restore activation state or create a successor");
+        }
+        const completed = ExperimentSchema.parse({
+          ...experiment,
+          status: "completed",
+          outcome: request.decision,
+          ...(successorExperimentId ? { followUpExperimentId: successorExperimentId } : {}),
+        });
+        db.prepare(
+          "UPDATE experiments SET status = 'completed', data_json = ?, updated_at = ? WHERE experiment_id = ?",
+        ).run(JSON.stringify(completed), committedAt, experiment.experimentId);
+        options.duringOutcomeCommitForTesting?.();
+        db.prepare(
+          `INSERT INTO experiment_outcomes(
           operation_id, idempotency_key, experiment_id, decision, strategy_id,
           research_run_id, expected_activation_id, expected_activation_revision,
           restore_source_activation_id, restored_activation_id, successor_experiment_id,
           evidence_refs_json, operation_digest, committed_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        request.operationId,
-        request.idempotencyKey,
-        request.experimentId,
-        request.decision,
-        request.strategyId,
-        request.researchRunId ?? null,
-        request.expectedActivationId,
-        request.expectedActivationRevision,
-        request.restore?.sourceActivationId ?? null,
-        restoredActivationId ?? null,
-        successorExperimentId ?? null,
-        JSON.stringify(request.evidenceRefs),
-        request.operationDigest,
-        committedAt,
-      );
-      recordActivity(
-        { actorId: "protected-feedback", kind: "system" },
-        `experiment.${request.decision}`,
-        "experiment_outcome",
-        request.operationId,
-        request.evidenceRefs,
-      );
-    });
+        ).run(
+          request.operationId,
+          request.idempotencyKey,
+          request.experimentId,
+          request.decision,
+          request.strategyId,
+          request.researchRunId ?? null,
+          request.expectedActivationId,
+          request.expectedActivationRevision,
+          request.restore?.sourceActivationId ?? null,
+          restoredActivationId ?? null,
+          successorExperimentId ?? null,
+          JSON.stringify(request.evidenceRefs),
+          request.operationDigest,
+          committedAt,
+        );
+        recordActivity(
+          { actorId: "protected-feedback", kind: "system" },
+          `experiment.${request.decision}`,
+          "experiment_outcome",
+          request.operationId,
+          request.evidenceRefs,
+        );
+        for (const publication of revertPublications)
+          db.prepare(
+            `INSERT INTO outcome_activation_publications(
+              operation_id, publication_key, action, working_path, source_revision_json,
+              staged_path, content_digest, published
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+          ).run(
+            request.operationId,
+            publication.publicationKey,
+            publication.action,
+            publication.workingPath,
+            publication.sourceRevision === undefined ? null : JSON.stringify(publication.sourceRevision),
+            publication.stagedPath ?? null,
+            publication.contentDigest ?? null,
+          );
+      });
+    } catch (error) {
+      await options.cleanupOutcomePublicationStage(request.operationId);
+      throw error;
+    }
     options.afterOutcomeCommitForTesting?.();
+    await publishOutcomeRestoration(request.operationId);
     const committed = await getExperimentOutcome(request.experimentId);
     if (!committed) throw new Error(`Experiment outcome ${request.operationId} did not commit`);
     return committed;
@@ -771,5 +973,6 @@ export function createProtectedFeedbackStore(
       ),
   });
 
+  await recoverCommittedOutcomePublications();
   return protectedFeedback;
 }

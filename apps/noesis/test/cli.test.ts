@@ -140,6 +140,8 @@ describe("Noesis CLI grammar", () => {
     expect(result.code).toBe(1);
     expect(result.output).toContain("No saved sessions");
     expect(result.output).toContain("without --continue");
-    expect(await readFile(join(home, "ledger", "events.jsonl"), "utf8")).toBe("");
+    await expect(readFile(join(home, "ledger", "events.jsonl"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 });

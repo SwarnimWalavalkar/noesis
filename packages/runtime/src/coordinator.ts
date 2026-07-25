@@ -5,14 +5,17 @@ import {
   type Experiment,
   sameCapabilityRevisionRef,
   sha256,
+  toJsonValue,
   type WorkspaceStore,
 } from "@noesis/domain";
 import { selectSessionRetrievalStrategy } from "@noesis/intelligence";
+import type { AuthorityBoundary } from "@noesis/policy";
 import {
   AuthorRevisionJobPayloadSchema,
   type CompletedNormalTurn,
   CompletedNormalTurnSchema,
   type CoordinatorCandidateResult,
+  coordinatorOperationError,
   type CoordinatorJobKind,
   type CoordinatorJobView,
   type CoordinatorPreflightResult,
@@ -25,9 +28,11 @@ import {
   RuntimeCoordinatorConfigSchema,
   type RuntimeCoordinatorResearchPort,
 } from "./coordinator-contracts.ts";
+import { authorizeScheduledJob, runScheduledJob } from "./scheduled-execution.ts";
 
 export interface RuntimeCoordinatorOptions {
   readonly workspace: Pick<WorkspaceStore, "jobs" | "research">;
+  readonly authority: AuthorityBoundary;
   readonly research: RuntimeCoordinatorResearchPort;
   readonly config?: RuntimeCoordinatorConfig;
   readonly workerId?: string;
@@ -123,8 +128,14 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     readonly estimatedCost: number;
     readonly budget: number;
   }): Promise<CoordinatorJobView> => {
+    const jobId = stableJobId(input.operationId);
+    await authorizeScheduledJob(options.authority, {
+      jobId,
+      budget: input.budget,
+      expiresAt: iso(new Date(Math.max(now().getTime(), Date.now()) + 24 * 60 * 60 * 1_000)),
+    });
     const job = await options.workspace.jobs.enqueue({
-      jobId: stableJobId(input.operationId),
+      jobId,
       kind: input.kind,
       payload: input.payload,
       payloadRefs: input.payloadRefs,
@@ -357,17 +368,32 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     heartbeat.unref?.();
     heartbeats.set(job.jobId, heartbeat);
     try {
-      const result =
-        view.kind === "runtime.reflect_turn"
-          ? await runReflect(ReflectTurnJobPayloadSchema.parse(view.payload), controller.signal)
-          : view.kind === "runtime.author_revision"
-            ? await runAuthor(AuthorRevisionJobPayloadSchema.parse(view.payload), controller.signal)
-            : await runPreflight(PreflightJobPayloadSchema.parse(view.payload), controller.signal);
+      const scheduled = await runScheduledJob(
+        options.authority,
+        job,
+        coordinatorOperationFingerprint(view),
+        async () =>
+          toJsonValue(
+            view.kind === "runtime.reflect_turn"
+              ? await runReflect(ReflectTurnJobPayloadSchema.parse(view.payload), controller.signal)
+              : view.kind === "runtime.author_revision"
+                ? await runAuthor(AuthorRevisionJobPayloadSchema.parse(view.payload), controller.signal)
+                : await runPreflight(PreflightJobPayloadSchema.parse(view.payload), controller.signal),
+          ),
+      );
+      if (!scheduled.ok) {
+        if (scheduled.originalError !== undefined) throw scheduled.originalError;
+        throw coordinatorOperationError(scheduled.reason, {
+          code: `scheduled_${scheduled.code}`,
+          retryable: false,
+          ambiguous: scheduled.code === "ambiguous",
+        });
+      }
       await options.workspace.jobs.complete({
         jobId: job.jobId,
         leaseToken,
         now: iso(now()),
-        result,
+        result: scheduled.value,
       });
     } catch (error) {
       const current = await options.workspace.jobs.get(job.jobId);

@@ -431,6 +431,7 @@ export interface AuthorityBoundary {
   runScheduled<T extends JsonValue>(
     jobId: string,
     runNumber: number,
+    operationFingerprint: string,
     execute: (receipt: AuthorityReceipt) => Promise<T>,
   ): Promise<EffectDecision<T>>;
 }
@@ -538,12 +539,13 @@ export function createAuthorityBoundary(ledger: ExperienceLedger): AuthorityBoun
   const runScheduled = async <T extends JsonValue>(
     jobId: string,
     runNumber: number,
+    operationFingerprint: string,
     execute: (receipt: AuthorityReceipt) => Promise<T>,
   ): Promise<EffectDecision<T>> => {
     const handle = schedulerHandle(jobId);
     const principal = "scheduler" as const;
     const effect = "execute" as const;
-    const resource = `job:${jobId}:runtime`;
+    const resource = `job:${jobId}:runtime:${operationFingerprint}`;
     const estimatedCost = 1;
     const idempotencyKey = `job:${jobId}:run:${runNumber}`;
     return await gateway.run(

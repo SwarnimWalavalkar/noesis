@@ -1,4 +1,4 @@
-import { createId, toJsonValue, type TrailStatus } from "@noesis/domain";
+import { canonicalJson, createId, sha256, toJsonValue, type TrailStatus } from "@noesis/domain";
 import {
   compileContext,
   decodeContextSnapshot,
@@ -39,6 +39,7 @@ export * from "./compounding-metrics.ts";
 export * from "./control-plane.ts";
 export * from "./turn-intelligence.ts";
 export * from "./turn-settlement.ts";
+export * from "./scheduled-execution.ts";
 
 export interface TrailState {
   readonly trailId: string;
@@ -640,7 +641,8 @@ export async function createNoesisRuntime(
       new Date(leaseUntil) <= new Date()
     )
       throw new Error("Scheduled execution requires the current active fenced lease");
-    const decision = await authority.runScheduled(jobId, runNumber, async () => {
+    const operationFingerprint = sha256(canonicalJson({ jobId, runNumber, prompt }));
+    const decision = await authority.runScheduled(jobId, runNumber, operationFingerprint, async () => {
       const trail = await startTrail({ title: `Job ${jobId}` });
       return (await runTurn(trail.trailId, prompt)).output;
     });

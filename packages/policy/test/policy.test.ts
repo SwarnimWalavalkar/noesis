@@ -41,7 +41,7 @@ describe("effect policy", () => {
       return null;
     });
     let executions = 0;
-    const first = await authority.runScheduled("job-1", 1, async () => {
+    const first = await authority.runScheduled("job-1", 1, "job-1-fingerprint", async () => {
       executions += 1;
       return "done";
     });
@@ -50,12 +50,12 @@ describe("effect policy", () => {
     const recoveredLedger = createExperienceLedger(root);
     await recoveredLedger.initialize();
     const recovered = createAuthorityBoundary(recoveredLedger);
-    const replay = await recovered.runScheduled("job-1", 1, async () => {
+    const replay = await recovered.runScheduled("job-1", 1, "job-1-fingerprint", async () => {
       executions += 1;
       return "duplicate";
     });
     expect(replay).toMatchObject({ ok: true, replayed: true, value: "done" });
-    const exhausted = await recovered.runScheduled("job-1", 2, async () => {
+    const exhausted = await recovered.runScheduled("job-1", 2, "job-1-fingerprint", async () => {
       executions += 1;
       return "duplicate";
     });
@@ -189,13 +189,13 @@ describe("effect policy", () => {
     const executing = new Promise<void>((resolve) => {
       started = resolve;
     });
-    const first = authority.runScheduled("job-2", 1, async () => {
+    const first = authority.runScheduled("job-2", 1, "job-2-fingerprint", async () => {
       started?.();
       await blocked;
       return "first";
     });
     await executing;
-    const second = await authority.runScheduled("job-2", 1, async () => "duplicate");
+    const second = await authority.runScheduled("job-2", 1, "job-2-fingerprint", async () => "duplicate");
     expect(second).toMatchObject({ ok: false, code: "ambiguous" });
     release?.();
     await expect(first).resolves.toMatchObject({ ok: true, value: "first" });

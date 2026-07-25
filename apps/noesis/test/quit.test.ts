@@ -40,6 +40,7 @@ async function createTestRuntime(home: string) {
   return await createApplicationRuntimeComposition({
     config,
     runtime: foreground,
+    createAgent: (sessionTools) => createPiAgentRuntime(repositoryRoot, controlled.models, { sessionTools }),
     createRoleRunner: (configurations) =>
       createPiAgentRoleRunner(repositoryRoot, controlled.models, configurations),
   });
@@ -276,7 +277,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(cancelled.output).toContain("resume a session");
     expect(cancelled.result).toEqual({ code: 0, signal: null });
     const reopened = await createTestRuntime(cancelled.home);
-    expect(reopened.debug.legacyReadOnly.ledger.findByType("trail.resumed")).toHaveLength(0);
+    expect(reopened.debug.legacyReadOnly?.ledger.findByType("trail.resumed")).toHaveLength(0);
   }, 12_000);
 
   test("captures a wide 120x35 fresh shell with the full identity", async () => {

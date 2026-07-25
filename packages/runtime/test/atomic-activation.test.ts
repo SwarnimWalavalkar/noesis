@@ -583,15 +583,14 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     expect(await protectedRuntime(mismatched.workspace).activations.current()).toBeUndefined();
   });
 
-  test("failure before the SQLite transaction leaves an inert, recoverable stage", async () => {
-    let fail = true;
+  test("failure before the SQLite transaction leaves an inert stage and exact retry fails closed", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-ac-09-before-"));
     const fixture = await createFixture({
       suffix: "before",
       root,
       storeOptions: {
         beforeActivationCommitForTesting: () => {
-          if (fail) throw new Error("injected before activation transaction");
+          throw new Error("injected before activation transaction");
         },
       },
     });
@@ -602,14 +601,15 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     expect(operations[0]?.materializations.every((item) => !item.published)).toBe(true);
     expect(await protectedRuntime(fixture.workspace).activations.current()).toBeUndefined();
     fixture.workspace.close();
-    fail = false;
     const reopened = await createWorkspaceStore(root);
-    const committed = await protectedRuntime(reopened).activations.commit({
-      operationId: operations[0]?.operationId ?? "missing",
-      bindingDigest: operations[0]?.bindingDigest ?? "missing",
-    });
-    expect(committed.status).toBe("committed");
-    expect((await protectedRuntime(reopened).activations.current())?.revision).toBe(1);
+    await expect(
+      protectedRuntime(reopened).activations.commit({
+        operationId: operations[0]?.operationId ?? "missing",
+        bindingDigest: operations[0]?.bindingDigest ?? "missing",
+      }),
+    ).rejects.toThrow("Protected workspace authority failed");
+    expect((await protectedRuntime(reopened).activations.current())?.revision).toBeUndefined();
+    reopened.close();
   });
 
   test("failure during the transaction rolls back; failure after commit recovers unambiguously", async () => {

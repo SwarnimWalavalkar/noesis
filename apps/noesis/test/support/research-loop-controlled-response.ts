@@ -5,7 +5,10 @@ import {
   type EvidenceRef,
 } from "@noesis/domain";
 import { z } from "zod";
-import type { ControlledPiPrompt } from "../../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
+import {
+  controlledToolCallResponse,
+  type ControlledPiPrompt,
+} from "../../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 
 const RolePromptSchema = z.object({
   role: z.enum(["reflector", "revision_author", "revision_agent", "case_generator", "trial", "judge_critic"]),
@@ -45,8 +48,26 @@ function trialRevision(prompt: RolePrompt): CapabilityRevisionRef {
   return revision;
 }
 
-export function researchLoopControlledResponse(input: ControlledPiPrompt): string {
-  if (!input.systemPrompt.includes("role:")) return `Controlled Pi completion for: ${input.lastUserText}`;
+export function researchLoopControlledResponse(
+  input: ControlledPiPrompt,
+): string | ReturnType<typeof controlledToolCallResponse> {
+  if (!input.systemPrompt.includes("role:")) {
+    const immutableSkill =
+      "Produce concise research briefs with explicit evidence, inference, and uncertainty.";
+    if (
+      input.lastUserText.includes("Prepare a research brief") &&
+      input.systemPrompt.includes(immutableSkill)
+    ) {
+      if (!input.context.messages.some((message) => message.role === "toolResult"))
+        return controlledToolCallResponse(
+          "search_sessions",
+          { query: "research brief evidence" },
+          "acceptance-search",
+        );
+      return "Served immutable research-brief behavior through the pinned search_sessions tool.";
+    }
+    return `Controlled Pi completion for: ${input.lastUserText}`;
+  }
   const prompt = parseRolePrompt(input.lastUserText);
   if (input.systemPrompt.includes("role: outcome_judge")) {
     const comparisonMessage = prompt.messages.some((message) => message.name === "outcome_comparison")
@@ -95,8 +116,17 @@ export function researchLoopControlledResponse(input: ControlledPiPrompt): strin
       ],
       tools: [
         {
-          path: "research-brief.mjs",
-          content: "export const formatResearchBrief = (evidence, inference) => ({ evidence, inference });",
+          path: "session-tools.json",
+          content: JSON.stringify({
+            kind: "noesis_session_tools",
+            tools: [
+              "search_sessions",
+              "open_session_evidence",
+              "find_corrections",
+              "find_similar_tasks",
+              "prior_experiment_outcomes",
+            ],
+          }),
         },
       ],
       router: {

@@ -1,27 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, rm, unlink } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import {
-  ArtifactFileRefSchema,
-  CapabilityRevisionRefSchema,
-  declaredAuthorityFor,
-  EvaluationRecordSchema,
-  EvidenceRefSchema,
-  ExperimentSchema,
-  ExperimentTrialSchema,
-  FeedbackSignalSchema,
-  FileRevisionRefSchema,
-  GrantSchema,
-  LedgerEventSchema,
-  isExperimentTransitionAllowed,
-  PreflightPlanSchema,
-  preflightReportMatchesPlan,
-  PreflightReportSchema,
-  sameCapabilityRevisionRef,
-  sha256,
   type ActorRef,
   type ArtifactFileRef,
+  ArtifactFileRefSchema,
+  CapabilityRevisionRefSchema,
   type DatabaseRowRef,
   type DatabaseTable,
   type DataSensitivity,
@@ -31,24 +16,39 @@ import {
   type DefinitionMetadataRecord,
   type DefinitionPublicationRequest,
   type DefinitionWriteRequest,
+  declaredAuthorityFor,
   type EvaluationRecord,
-  type EvidenceRevisionRef,
-  type EvidenceRef,
+  EvaluationRecordSchema,
   type EvidenceKind,
+  type EvidenceRef,
+  EvidenceRefSchema,
+  type EvidenceRevisionRef,
   type EvidenceWriteRequest,
   type Experiment,
+  ExperimentSchema,
   type ExperimentStatus,
   type ExperimentTrial,
+  ExperimentTrialSchema,
   type FeedbackSignal,
+  FeedbackSignalSchema,
   type FileRevisionRef,
+  FileRevisionRefSchema,
+  GrantSchema,
+  isExperimentTransitionAllowed,
   type LedgerEvent,
+  LedgerEventSchema,
   type PreflightPlan,
+  PreflightPlanSchema,
   type PreflightReport,
+  PreflightReportSchema,
+  preflightReportMatchesPlan,
+  sameCapabilityRevisionRef,
+  sha256,
 } from "@noesis/domain";
 import { z } from "zod";
 import { createProtectedActivationStore } from "./activation-store.ts";
-import { createBackup, inspectWorkspaceIntegrity } from "./backup.ts";
 import { createWorkspaceAuthorityBoundary } from "./authority-state.ts";
+import { createBackup, inspectWorkspaceIntegrity } from "./backup.ts";
 import { createCompoundingMeasurementStore } from "./compounding-measurements.ts";
 import {
   openWorkspaceDatabase,
@@ -96,8 +96,8 @@ import type {
   JobRecord,
   MessageRecord,
   NoesisWorkspaceStore,
-  OutcomeRecord,
   OperationalCutoverReport,
+  OutcomeRecord,
   SearchCandidate,
   SearchConfiguration,
   SearchDocument,
@@ -125,6 +125,18 @@ const ActorSchema = z.strictObject({
   kind: z.enum(["user", "noesis", "external_system", "system"]),
 });
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+const LegacyImportReportSchema = z.strictObject({
+  sourceId: z.string().min(1),
+  alreadyImported: z.boolean(),
+  sessions: z.number().int().nonnegative(),
+  messages: z.number().int().nonnegative(),
+  toolCalls: z.number().int().nonnegative(),
+  outcomes: z.number().int().nonnegative(),
+  jobs: z.number().int().nonnegative(),
+  definitions: z.number().int().nonnegative(),
+  artifacts: z.number().int().nonnegative(),
+  warnings: z.array(z.string()),
+});
 
 const databaseRef = <Table extends DatabaseTable>(table: Table, rowId: string): DatabaseRowRef<Table> => ({
   kind: "database_row",
@@ -532,6 +544,60 @@ export async function createWorkspaceStore(
     return bytes;
   };
 
+  const normalizeActiveWorkingPath = (workingPath: string): string =>
+    pathsForDefinition(workingPath, "active").stored;
+
+  const outcomePublicationDirectory = (operationId: string): string =>
+    join(paths.staging, "outcome-publications", sha256(operationId));
+
+  const stageActiveRevision = async (
+    operationId: string,
+    publicationKey: string,
+    sourceRevision: FileRevisionRef,
+  ): Promise<{
+    readonly workingPath: string;
+    readonly stagedPath: string;
+    readonly contentDigest: string;
+  }> => {
+    assertStoredReference(db, sourceRevision);
+    const bytes = await readVerifiedFile(sourceRevision.snapshotPath, sourceRevision.contentDigest);
+    const target = pathsForDefinition(sourceRevision.workingPath, "active");
+    const stagedAbsolute = join(outcomePublicationDirectory(operationId), sha256(publicationKey), "content");
+    await persistAtomically(stagedAbsolute, bytes);
+    return Object.freeze({
+      workingPath: target.stored,
+      stagedPath: workspaceRelative(paths, stagedAbsolute),
+      contentDigest: sourceRevision.contentDigest,
+    });
+  };
+
+  const publishStagedActiveRevision = async (publication: {
+    readonly workingPath: string;
+    readonly stagedPath: string;
+    readonly contentDigest: string;
+    readonly sourceRevision: FileRevisionRef;
+  }): Promise<void> => {
+    let bytes: Uint8Array;
+    try {
+      bytes = await readVerifiedFile(publication.stagedPath, publication.contentDigest);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      bytes = await readVerifiedFile(
+        publication.sourceRevision.snapshotPath,
+        publication.sourceRevision.contentDigest,
+      );
+    }
+    await persistAtomically(pathsForDefinition(publication.workingPath, "active").absolute, bytes);
+  };
+
+  const deleteActiveDefinition = async (workingPath: string): Promise<void> => {
+    await unlink(pathsForDefinition(workingPath, "active").absolute).catch(ignoreMissing);
+  };
+
+  const cleanupOutcomePublicationStage = async (operationId: string): Promise<void> => {
+    await rm(outcomePublicationDirectory(operationId), { recursive: true, force: true });
+  };
+
   const resolveRevision = async (revisionId: string): Promise<FileRevisionRef | undefined> => {
     const row = db
       .prepare(
@@ -898,7 +964,7 @@ export async function createWorkspaceStore(
     resolveRevision,
     recordDefinitionBytes,
   });
-  const protectedFeedback = createProtectedFeedbackStore({
+  const protectedFeedback = await createProtectedFeedbackStore({
     database,
     now,
     ...(options.beforeOutcomeCommitForTesting === undefined
@@ -912,6 +978,11 @@ export async function createWorkspaceStore(
       : { afterOutcomeCommitForTesting: options.afterOutcomeCommitForTesting }),
     recordActivity,
     assertStoredReference: (reference) => assertStoredReference(db, reference),
+    stageActiveRevision,
+    publishStagedActiveRevision,
+    deleteActiveDefinition,
+    normalizeActiveWorkingPath,
+    cleanupOutcomePublicationStage,
   });
 
   const cutoverLegacyOperationalAuthority = async (
@@ -920,6 +991,43 @@ export async function createWorkspaceStore(
   ): Promise<OperationalCutoverReport> => {
     const cutoverName = "workspace-operational-authority" as const;
     const cutoverVersion = 1 as const;
+    const existing = db
+      .prepare(
+        `SELECT source_digest FROM operational_cutovers
+         WHERE cutover_name = ? AND cutover_version = ?`,
+      )
+      .get(cutoverName, cutoverVersion);
+    if (existing !== undefined) {
+      const sourceId = sha256(resolve(legacyRoot));
+      const imported = db.prepare("SELECT report_json FROM import_runs WHERE source_id = ?").get(sourceId);
+      const legacyImport =
+        imported === undefined
+          ? Object.freeze({
+              sourceId,
+              alreadyImported: true,
+              sessions: 0,
+              messages: 0,
+              toolCalls: 0,
+              outcomes: 0,
+              jobs: 0,
+              definitions: 0,
+              artifacts: 0,
+              warnings: Object.freeze([
+                "Operational cutover marker exists without a retained legacy import report",
+              ]),
+            })
+          : Object.freeze({
+              ...LegacyImportReportSchema.parse(JSON.parse(requiredString(imported, "report_json"))),
+              alreadyImported: true,
+            });
+      return Object.freeze({
+        cutoverName,
+        cutoverVersion,
+        sourceDigest: requiredString(existing, "source_digest"),
+        alreadyCompleted: true,
+        legacyImport,
+      });
+    }
     let journalBytes: Uint8Array;
     try {
       journalBytes = await readFile(join(legacyRoot, "ledger", "events.jsonl"));
@@ -940,14 +1048,7 @@ export async function createWorkspaceStore(
       }
     }
     const sourceDigest = sha256(journalBytes);
-    const existing = db
-      .prepare(
-        `SELECT source_digest FROM operational_cutovers
-         WHERE cutover_name = ? AND cutover_version = ?`,
-      )
-      .get(cutoverName, cutoverVersion);
-    if (existing === undefined)
-      await createBackup(paths, db, join(paths.root, "backups", "pre-operational-cutover-v1"), now());
+    await createBackup(paths, db, join(paths.root, "backups", "pre-operational-cutover-v1"), now());
     const legacyImport = await importLegacyWorkspace({
       legacyRoot,
       actor,
@@ -958,14 +1059,6 @@ export async function createWorkspaceStore(
       recordDefinitionBytes,
       writeArtifact,
     });
-    if (existing !== undefined)
-      return Object.freeze({
-        cutoverName,
-        cutoverVersion,
-        sourceDigest: requiredString(existing, "source_digest"),
-        alreadyCompleted: true,
-        legacyImport,
-      });
     const malformedWarning = legacyImport.warnings.find((warning) =>
       warning.startsWith("Skipped invalid legacy journal line"),
     );

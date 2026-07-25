@@ -1,9 +1,11 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { CapabilityRevisionRef, FileRevisionRef, PreflightDecision } from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { describe, expect, test } from "vitest";
+import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
 import {
   type CompletedNormalTurn,
   coordinatorOperationError,
@@ -284,6 +286,7 @@ async function fixture(decision: PreflightDecision = "pass") {
 
   return {
     workspace,
+    authority: createWorkspaceRuntimeInternals(workspace).authority,
     research,
     turn,
     counts: () => ({ reflectCalls, authorCalls, preflightCalls, peakReflects }),
@@ -304,6 +307,7 @@ describe("automatic runtime coordinator", () => {
     const f = await fixture("approval_required");
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
+      authority: f.authority,
       research: f.research,
       config: config(),
     });
@@ -325,6 +329,19 @@ describe("automatic runtime coordinator", () => {
     expect(handoff?.report.decision).toBe("approval_required");
     expect(handoff?.candidateRevision).toEqual(candidate);
     expect(f.counts()).toEqual({ reflectCalls: 1, authorCalls: 1, preflightCalls: 1, peakReflects: 1 });
+    const database = new DatabaseSync(f.workspace.unsafeDatabasePathForTesting, { readOnly: true });
+    const scheduledOperations = database
+      .prepare(
+        `SELECT resource, status FROM authority_operations
+         WHERE principal = 'scheduler' AND effect = 'execute'
+         ORDER BY resource`,
+      )
+      .all() as Array<{ readonly resource: string; readonly status: string }>;
+    expect(scheduledOperations).toHaveLength(3);
+    expect(new Set(scheduledOperations.map(({ resource }) => resource)).size).toBe(3);
+    expect(scheduledOperations.every(({ resource }) => /:runtime:[a-f0-9]{64}$/u.test(resource))).toBe(true);
+    expect(scheduledOperations.every(({ status }) => status === "completed")).toBe(true);
+    database.close();
     f.workspace.close();
   });
 
@@ -332,6 +349,7 @@ describe("automatic runtime coordinator", () => {
     const f = await fixture();
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
+      authority: f.authority,
       research: f.research,
       config: config(),
     });
@@ -349,6 +367,7 @@ describe("automatic runtime coordinator", () => {
     f.setTransientPreflightFailures(1);
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
+      authority: f.authority,
       research: f.research,
       config: config(),
     });
@@ -361,6 +380,7 @@ describe("automatic runtime coordinator", () => {
     second.setTerminalAuthorFailure(true);
     const terminal = createRuntimeCoordinator({
       workspace: second.workspace,
+      authority: second.authority,
       research: second.research,
       config: config(),
     });
@@ -386,6 +406,7 @@ describe("automatic runtime coordinator", () => {
     f.setBlockingReflect(blocked);
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
+      authority: f.authority,
       research: f.research,
       config: config({ maxConcurrency: 1, drainBudget: 2 }),
     });
@@ -400,6 +421,7 @@ describe("automatic runtime coordinator", () => {
     const budget = await fixture();
     const budgeted = createRuntimeCoordinator({
       workspace: budget.workspace,
+      authority: budget.authority,
       research: budget.research,
       config: config({
         jobs: {
@@ -436,6 +458,7 @@ describe("automatic runtime coordinator", () => {
     });
     const coordinator = createRuntimeCoordinator({
       workspace,
+      authority: f.authority,
       research: f.research,
       config: config({ leaseMs: 100, heartbeatMs: 25 }),
     });
@@ -489,6 +512,7 @@ describe("automatic runtime coordinator", () => {
     });
     const coordinator = createRuntimeCoordinator({
       workspace,
+      authority: f.authority,
       research: f.research,
       config: config({ maxConcurrency: 1 }),
     });
@@ -519,6 +543,7 @@ describe("automatic runtime coordinator", () => {
     let current = new Date("2026-07-22T00:00:00.000Z");
     const paused = createRuntimeCoordinator({
       workspace: f.workspace,
+      authority: f.authority,
       research: f.research,
       config: config({ drainBudget: 0 }),
       now: () => current,
@@ -536,6 +561,7 @@ describe("automatic runtime coordinator", () => {
     current = new Date(current.getTime() + 200);
     const resumed = createRuntimeCoordinator({
       workspace: f.workspace,
+      authority: f.authority,
       research: f.research,
       config: config(),
       now: () => current,
