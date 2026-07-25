@@ -32,7 +32,7 @@ function freezeRequest(request: AgentRunRequest): AgentRunRequest {
   });
 }
 
-/** Deterministic adapter-neutral structured role runner for CI and acceptance fixtures. */
+/** Test-only deterministic adapter-neutral structured role runner for narrow unit seams. */
 export function createScriptedLearningInferencePort(
   options: ScriptedLearningInferenceOptions,
 ): ScriptedLearningInferencePort {
@@ -50,7 +50,7 @@ export function createScriptedLearningInferencePort(
     observed.push(frozenRequest);
     const value = outputSchema.parse(toJsonValue(step.value));
     const trace: AgentTrace = Object.freeze({
-      traceId: `fake-learning-trace-${observed.length}`,
+      traceId: `scripted-learning-trace-${observed.length}`,
       role: request.role,
       variant: frozenRequest.variant,
       startedAt,

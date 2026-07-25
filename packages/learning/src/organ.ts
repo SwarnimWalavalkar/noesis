@@ -178,6 +178,7 @@ export interface ObserveLearningTurnRequest {
   readonly turn: unknown;
   readonly baselineRevision: CapabilityRevisionRef;
   readonly capability: Capability;
+  readonly signal?: AbortSignal;
   readonly activeCapabilities?: readonly Capability[];
   readonly userPreferences?: readonly {
     readonly criterionId: string;
@@ -190,6 +191,7 @@ export interface ObserveLearningTurnRequest {
 export interface AuthorExperimentRevisionRequest {
   readonly brief: ExperimentBrief;
   readonly predecessorRevision?: CapabilityRevisionRef;
+  readonly signal?: AbortSignal;
 }
 
 export interface AuthorFollowUpRevisionRequest {
@@ -198,6 +200,7 @@ export interface AuthorFollowUpRevisionRequest {
   readonly failureSummary: string;
   readonly judgmentEvidenceRefs: readonly EvidenceRef[];
   readonly citations?: readonly LearningCitation[];
+  readonly signal?: AbortSignal;
 }
 
 export interface AutomaticLearningOrgan {
@@ -334,6 +337,7 @@ function roleRequest(input: {
   readonly configuration: LearningRoleConfiguration;
   readonly messages: readonly AgentMessage[];
   readonly evidenceRefs: readonly EvidenceRef[];
+  readonly signal?: AbortSignal;
 }): AgentRunRequest {
   return Object.freeze({
     runId: input.runId,
@@ -342,6 +346,7 @@ function roleRequest(input: {
     messages: Object.freeze(input.messages.map((message) => Object.freeze({ ...message }))),
     evidenceRefs: cloneEvidenceRefs(input.evidenceRefs),
     availableTools: Object.freeze([]),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
 }
 
@@ -644,6 +649,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         configuration: config.roles.reflector,
         messages,
         evidenceRefs: harvest.evidenceRefs,
+        ...(request.signal ? { signal: request.signal } : {}),
       }),
       ReflectorOutputSchema,
     );
@@ -785,6 +791,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     readonly role: "revision_author" | "revision_agent";
     readonly configuration: LearningRoleConfiguration;
     readonly messages: readonly AgentMessage[];
+    readonly signal?: AbortSignal;
   }): Promise<AuthorRevisionResult> => {
     const predecessor = options.capabilities.getRevision(input.predecessorRevision);
     if (!predecessor) throw new Error("Capability revision predecessor is unknown or digest-mismatched");
@@ -799,6 +806,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         configuration: input.configuration,
         messages: input.messages,
         evidenceRefs: input.brief.evidenceRefs,
+        ...(input.signal ? { signal: input.signal } : {}),
       }),
       RevisionAuthorOutputSchema,
     );
@@ -899,6 +907,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       predecessorRevision,
       role: "revision_author",
       configuration: config.roles.revisionAuthor,
+      ...(request.signal ? { signal: request.signal } : {}),
       messages: [
         {
           role: "user",
@@ -970,6 +979,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       predecessorRevision,
       role: "revision_agent",
       configuration: config.roles.revisionAgent,
+      ...(request.signal ? { signal: request.signal } : {}),
       messages: [
         {
           role: "user",

@@ -119,14 +119,6 @@ export interface RuntimePiStructuredInferencePort {
   }>;
 }
 
-export interface FakeRoleResponse {
-  readonly text: string;
-  readonly stopReason?: RoleStopReason;
-  readonly usage?: AgentUsage;
-  readonly latencyMs?: number;
-  readonly error?: string;
-}
-
 export interface ComparableRoleVariantFixture {
   readonly baseline: RuntimePiAgentRunRequest;
   readonly candidate: RuntimePiAgentRunRequest;

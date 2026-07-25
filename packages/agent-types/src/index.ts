@@ -59,6 +59,7 @@ export interface AgentRunRequest {
   readonly messages: readonly AgentMessage[];
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly availableTools: readonly AgentToolDescriptor[];
+  readonly signal?: AbortSignal;
 }
 
 export interface AgentRunResult {

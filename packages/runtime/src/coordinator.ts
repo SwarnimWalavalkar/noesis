@@ -1,28 +1,28 @@
 import {
   canonicalJson,
-  sameCapabilityRevisionRef,
-  sha256,
   type DurableJobFailure,
   type DurableJobRecord,
   type Experiment,
+  sameCapabilityRevisionRef,
+  sha256,
   type WorkspaceStore,
 } from "@noesis/domain";
 import { selectSessionRetrievalStrategy } from "@noesis/intelligence";
 import {
   AuthorRevisionJobPayloadSchema,
-  CompletedNormalTurnSchema,
-  DEFAULT_RUNTIME_COORDINATOR_CONFIG,
-  PreflightJobPayloadSchema,
-  ReflectTurnJobPayloadSchema,
-  RuntimeCoordinatorConfigSchema,
-  coordinatorJobPayload,
   type CompletedNormalTurn,
+  CompletedNormalTurnSchema,
   type CoordinatorCandidateResult,
   type CoordinatorJobKind,
   type CoordinatorJobView,
   type CoordinatorPreflightResult,
+  coordinatorJobPayload,
+  DEFAULT_RUNTIME_COORDINATOR_CONFIG,
   type PreflightActivationHandoff,
+  PreflightJobPayloadSchema,
+  ReflectTurnJobPayloadSchema,
   type RuntimeCoordinatorConfig,
+  RuntimeCoordinatorConfigSchema,
   type RuntimeCoordinatorResearchPort,
 } from "./coordinator-contracts.ts";
 
@@ -105,8 +105,15 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
   const now = options.now ?? (() => new Date());
   const workerId = options.workerId ?? `runtime-coordinator:${process.pid}`;
   const active = new Map<string, AbortController>();
+  const heartbeats = new Map<string, NodeJS.Timeout>();
   let draining: Promise<void> | undefined;
   let stopping = false;
+  const clearHeartbeat = (jobId: string): void => {
+    const heartbeat = heartbeats.get(jobId);
+    if (!heartbeat) return;
+    clearInterval(heartbeat);
+    heartbeats.delete(jobId);
+  };
 
   const enqueue = async (input: {
     readonly kind: CoordinatorJobKind;
@@ -347,6 +354,8 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         })
         .catch(() => controller.abort("lease_renewal_failed"));
     }, config.heartbeatMs);
+    heartbeat.unref?.();
+    heartbeats.set(job.jobId, heartbeat);
     try {
       const result =
         view.kind === "runtime.reflect_turn"
@@ -381,7 +390,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         failure,
       });
     } finally {
-      clearInterval(heartbeat);
+      clearHeartbeat(job.jobId);
       active.delete(job.jobId);
     }
   };
@@ -404,18 +413,23 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
           kinds: CoordinatorJobKindValues,
         });
         if (!claimed) break;
+        // stop() may land while the durable claim is awaiting SQLite. The claim is authoritative
+        // once it returns, but execution must not start after shutdown began. Leave the lease
+        // unrenewed so the next runtime can recover it after expiry.
+        if (stopping) return;
         batch.push(claimed);
         claimedCount += 1;
         remainingBudget -= claimed.estimatedCost;
       }
       if (batch.length === 0) break;
+      if (stopping) return;
       await Promise.all(batch.map(execute));
     }
   };
 
   function runAvailable(): Promise<void> {
     if (draining) return draining;
-    stopping = false;
+    if (stopping) return Promise.resolve();
     const next = drain().finally(() => {
       if (draining === next) draining = undefined;
     });
@@ -428,6 +442,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
   };
 
   const cancel = async (jobId: string): Promise<DurableJobRecord | undefined> => {
+    clearHeartbeat(jobId);
     active.get(jobId)?.abort("cancelled");
     return await options.workspace.jobs.cancel(jobId, iso(now()));
   };
@@ -482,6 +497,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
 
   const stop = async (): Promise<void> => {
     stopping = true;
+    for (const jobId of [...heartbeats.keys()]) clearHeartbeat(jobId);
     for (const controller of active.values()) controller.abort("worker_stopped");
     await draining;
   };

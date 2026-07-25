@@ -562,11 +562,11 @@ eligible settled turn (served revision R, baseline B on its frozen plan)
             <dd>
               application composition tests,
               <code>packages/runtime/test/acceptance.test.ts:33-63</code>,
-              and <code>packages/runtime/test/fake-runtime.ts:26-27</code>
+              and the test-only scripted runtime support
             </dd>
             <dt>Change</dt>
             <dd>
-              Remove the fake's capability-identity echo. Define one decisive
+              Remove the scripted double's capability-identity echo. Define one decisive
               acceptance contract at the application composition seam: the
               immutable plan admitted by WorkspaceStore must be byte-for-byte
               the plan handed to the execution adapter, and unrelated scope
@@ -584,7 +584,7 @@ eligible settled turn (served revision R, baseline B on its frozen plan)
             </dd>
             <dt>Accept</dt>
             <dd>
-              The fake cannot satisfy the assertion by echoing metadata.
+              A scripted provider response cannot satisfy the assertion by echoing metadata.
               Completed with HL-03/HL-05: the application test fails when
               activation is bypassed, immutable bytes are changed, the runtime
               reconstructs from the legacy registry, or an unrelated turn
@@ -804,34 +804,33 @@ eligible settled turn (served revision R, baseline B on its frozen plan)
 
         <div class="task">
           <h3>
-            <span class="task-id">HL-08</span> Real reflection on the fake path
+            <span class="task-id">HL-08</span> Real reflection on the controlled Pi path
           </h3>
           <dl>
             <dt>Owns</dt>
             <dd>
-              <code>apps/noesis/src/cli.ts:235-239</code>,
-              <code>runDemo</code>, and application acceptance tests
+              credential-free controlled Pi fixtures and application acceptance tests
             </dd>
             <dt>Change</dt>
             <dd>
-              The fake role runner returns <code>no_change</code> for the
+              The original scripted role runner returned <code>no_change</code> for the
               reflector and throws for every other role, so author, case
               generator, trial, and judge are never exercised in the path a user
               actually runs. Script deterministic outputs for the full role set
-              so the shipped fake journey traverses reflect, author, evaluate,
-              activate, serve, and protected revert. Replace the current demo's
-              manual legacy learn/evaluate/promote choreography with this
-              application path.
+              so the controlled Pi journey must traverse reflect, author,
+              evaluate, activate, serve, and protected revert through
+              <code>AgentHarness</code>. Keep this scenario in application
+              acceptance code, not a production demo or runtime mode.
             </dd>
             <dt>Why</dt>
             <dd>
               Package acceptance tests prove the organs in isolation. Nothing
-              proves they compose in the binary. Until the fake path can
+              proves they compose in the application. Until the controlled Pi path can
               complete a loop, no regression in the loop is detectable.
             </dd>
             <dt>Accept</dt>
             <dd>
-              <code>pnpm demo</code> from an empty home completes a correction,
+              A credential-free application acceptance test from an empty home completes a correction,
               waits for control-plane idle, inspects atomic activation, proves
               related use and unrelated abstention, and performs a protected
               revert with no credentials.
@@ -1206,7 +1205,7 @@ P0  HL-01 narrow subtraction ∥ HL-04 known-nonconformities register
 P1  HL-02 acceptance ─→ HL-03 authoritative FrozenTurnPlan ─→ HL-05 serve it
                           │                  ├─→ HL-06 bootstrap baseline
                           │                  ├─→ HL-07 settlement + abort
-                          │                  └─→ HL-08 fake application loop
+                          │                  └─→ HL-08 controlled Pi application loop
                           ├─→ HL-09 dogfood protocol (four-week evidence window continues)
                           └─→ HL-10 effect-free replay + trustworthy metrics
                                              │
@@ -1286,7 +1285,7 @@ pnpm test</pre>
         </ul>
         <div class="callout">
           <strong>Standing rule.</strong>
-          A test whose assertion the fake runtime can satisfy without the
+          A test whose assertion a scripted provider response can satisfy without the
           mechanism under test being present is not evidence. HL-02 exists
           because that rule was violated in the most important test in the
           repository; apply it to every test added by this plan.

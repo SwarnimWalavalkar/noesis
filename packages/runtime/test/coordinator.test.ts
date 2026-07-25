@@ -1,16 +1,16 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { CapabilityRevisionRef, FileRevisionRef, PreflightDecision } from "@noesis/domain";
+import { createWorkspaceStore } from "@noesis/workspace";
+import { describe, expect, test } from "vitest";
 import {
+  type CompletedNormalTurn,
   coordinatorOperationError,
   createRuntimeCoordinator,
-  type CompletedNormalTurn,
   type RuntimeCoordinatorConfig,
   type RuntimeCoordinatorResearchPort,
 } from "../src/index.ts";
-import type { CapabilityRevisionRef, FileRevisionRef, PreflightDecision } from "@noesis/domain";
-import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
-import { describe, expect, test } from "vitest";
 
 const baseline: CapabilityRevisionRef = Object.freeze({
   kind: "capability_revision",
@@ -414,6 +414,104 @@ describe("automatic runtime coordinator", () => {
     expect((await budgeted.getJob(exhausted.job.jobId))?.job.status).toBe("budget_exhausted");
     f.workspace.close();
     budget.workspace.close();
+  });
+
+  test("stops renewing an active lease before waiting for a non-cooperative job", async () => {
+    const f = await fixture();
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.setBlockingReflect(blocked);
+    let renewCalls = 0;
+    const workspace = Object.freeze({
+      ...f.workspace,
+      jobs: Object.freeze({
+        ...f.workspace.jobs,
+        renew: async (input: Parameters<typeof f.workspace.jobs.renew>[0]) => {
+          renewCalls += 1;
+          return await f.workspace.jobs.renew(input);
+        },
+      }),
+    });
+    const coordinator = createRuntimeCoordinator({
+      workspace,
+      research: f.research,
+      config: config({ leaseMs: 100, heartbeatMs: 25 }),
+    });
+    await coordinator.observeCompletedTurn(f.turn("turn-stop-heartbeat"));
+    for (let attempt = 0; attempt < 20 && f.counts().reflectCalls === 0; attempt += 1)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(f.counts().reflectCalls).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(renewCalls).toBeGreaterThan(0);
+
+    const stopping = coordinator.stop();
+    const renewCallsAtStop = renewCalls;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(renewCalls).toBe(renewCallsAtStop);
+
+    release?.();
+    await stopping;
+    f.workspace.close();
+  });
+
+  test("does not launch a claimed job when stop lands while the claim is pending", async () => {
+    const f = await fixture();
+    let releaseReflection: (() => void) | undefined;
+    f.setBlockingReflect(
+      new Promise<void>((resolve) => {
+        releaseReflection = resolve;
+      }),
+    );
+    let markClaimStarted: (() => void) | undefined;
+    const claimStarted = new Promise<void>((resolve) => {
+      markClaimStarted = resolve;
+    });
+    let releaseClaim: (() => void) | undefined;
+    const claimBlocked = new Promise<void>((resolve) => {
+      releaseClaim = resolve;
+    });
+    let firstClaim = true;
+    const workspace = Object.freeze({
+      ...f.workspace,
+      jobs: Object.freeze({
+        ...f.workspace.jobs,
+        claim: async (input: Parameters<typeof f.workspace.jobs.claim>[0]) => {
+          if (firstClaim) {
+            firstClaim = false;
+            markClaimStarted?.();
+            await claimBlocked;
+          }
+          return await f.workspace.jobs.claim(input);
+        },
+      }),
+    });
+    const coordinator = createRuntimeCoordinator({
+      workspace,
+      research: f.research,
+      config: config({ maxConcurrency: 1 }),
+    });
+
+    try {
+      await coordinator.observeCompletedTurn(f.turn("turn-stop-during-claim"));
+      await claimStarted;
+      const stopping = coordinator.stop();
+      releaseClaim?.();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(f.counts().reflectCalls).toBe(0);
+      await stopping;
+      expect((await coordinator.listJobs())[0]?.job).toMatchObject({
+        status: "running",
+        leaseToken: expect.any(String),
+      });
+    } finally {
+      releaseClaim?.();
+      releaseReflection?.();
+      await coordinator.stop();
+      f.workspace.close();
+    }
   });
 
   test("reclaims a stale lease after restart exactly once without duplicate candidate or preflight", async () => {

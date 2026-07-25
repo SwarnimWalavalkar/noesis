@@ -9,7 +9,6 @@ import { toJsonValue } from "@noesis/domain";
 import { z } from "zod";
 import { applyRoleContextPolicy, renderBoundedRolePrompt, signalOf } from "./role-context.ts";
 import type {
-  FakeRoleResponse,
   RoleBackendRequest,
   RoleBackendResult,
   RoleModelBackend,
@@ -459,68 +458,4 @@ export function createStructuredInferencePort(
   port satisfies RuntimePiStructuredInferencePort;
   port satisfies StructuredInferencePort;
   return port;
-}
-
-export interface CreateFakeRoleModelBackendOptions {
-  readonly respond: (request: RoleBackendRequest) => FakeRoleResponse | Promise<FakeRoleResponse>;
-}
-
-export interface CreateFakeAgentRoleRunnerOptions extends CreateFakeRoleModelBackendOptions {
-  readonly variants: readonly RoleVariantConfiguration[];
-  readonly now?: () => Date;
-  readonly createTraceId?: () => string;
-}
-
-export function createFakeAgentRoleRunner(
-  options: CreateFakeAgentRoleRunnerOptions,
-): RuntimePiAgentRoleRunner {
-  return createAgentRoleRunner({
-    backend: createFakeRoleModelBackend({ respond: options.respond }),
-    variants: options.variants,
-    ...(options.now ? { now: options.now } : {}),
-    ...(options.createTraceId ? { createTraceId: options.createTraceId } : {}),
-  });
-}
-
-export function createFakeRoleModelBackend(options: CreateFakeRoleModelBackendOptions): RoleModelBackend {
-  const active = new Map<string, AbortController>();
-  const abort = async (runId: string): Promise<void> => {
-    active.get(runId)?.abort();
-  };
-  const run = async (request: RoleBackendRequest): Promise<RoleBackendResult> => {
-    if (active.has(request.runId)) throw new Error(`Fake role run ${request.runId} is already active`);
-    const controller = new AbortController();
-    const forwardAbort = () => controller.abort(request.signal.reason);
-    if (request.signal.aborted) forwardAbort();
-    else request.signal.addEventListener("abort", forwardAbort, { once: true });
-    active.set(request.runId, controller);
-    try {
-      const response = await options.respond(request);
-      if (response.latencyMs && response.latencyMs > 0) {
-        await new Promise<void>((resolve) => {
-          const finish = () => {
-            clearTimeout(timer);
-            controller.signal.removeEventListener("abort", finish);
-            resolve();
-          };
-          const timer = setTimeout(finish, response.latencyMs);
-          if (controller.signal.aborted) finish();
-          else controller.signal.addEventListener("abort", finish, { once: true });
-        });
-      }
-      const stopReason = controller.signal.aborted ? "aborted" : (response.stopReason ?? "stop");
-      return Object.freeze({
-        text: response.text,
-        provider: request.provider,
-        model: request.model,
-        stopReason,
-        usage: response.usage ?? ZERO_USAGE,
-        ...(response.error ? { error: response.error } : {}),
-      });
-    } finally {
-      request.signal.removeEventListener("abort", forwardAbort);
-      if (active.get(request.runId) === controller) active.delete(request.runId);
-    }
-  };
-  return Object.freeze({ run, abort });
 }

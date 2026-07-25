@@ -466,11 +466,11 @@
               </tr>
               <tr>
                 <td>
-                  The fake application path completes reflect → author →
+                  The credential-free controlled Pi application path completes reflect → author →
                   evaluate → activate → serve → revert with no credentials.
                 </td>
                 <td>HL-08</td>
-                <td><code>pnpm demo</code> from an empty home</td>
+                <td>Focused application acceptance test from an empty home</td>
               </tr>
               <tr>
                 <td>
@@ -757,10 +757,10 @@
                 </td>
               </tr>
               <tr>
-                <td>WS6: prove the shipped path with fake-runtime journeys.</td>
+                <td>WS6: prove the shipped path with controlled Pi journeys.</td>
                 <td>
-                  HL-08 already delivers a single full-loop fake journey; HL-02
-                  established the standing rule that a fake-satisfiable
+                  HL-08 already delivers a single full-loop controlled Pi journey; HL-02
+                  established the standing rule that a scripted-response-satisfiable
                   assertion is not evidence.
                 </td>
                 <td>
@@ -919,7 +919,7 @@ user message
                 <li>
                   <code>apps/noesis/src/runtime-composition.ts</code>: compose
                   the runtime directly from <code>WorkspaceStore</code>, role
-                  inference, Pi/fake execution, control plane, and protected
+                  inference, Pi execution, control plane, and protected
                   authority.
                 </li>
                 <li>
@@ -998,7 +998,7 @@ user message
                 </li>
                 <li>
                   Inspecting the recorded prompt digest, tools, activation, and
-                  citations reproduces exactly what the fake runtime received.
+                  citations reproduces exactly what Pi AgentHarness received.
                 </li>
                 <li>
                   Restart preserves grant-use and cost budgets, rejects
@@ -1309,7 +1309,7 @@ user message
             <dd>
               <ul>
                 <li>
-                  The fake runtime proves that a promoted prompt revision
+                  Pi AgentHarness with a credential-free controlled provider proves that a promoted prompt revision
                   changes the next relevant completion and an unrelated turn
                   does not select it (extends the HL-02 tests; does not
                   duplicate them).
@@ -1323,7 +1323,7 @@ user message
                   generated role can approve itself.
                 </li>
                 <li>
-                  The application-level fake journey proves the composition root
+                  The application-level controlled Pi journey proves the composition root
                   injects only the frozen turn's registrations, records
                   artifacts through WorkspaceStore, and never lets
                   <code>runtime-pi</code> construct or widen authority.
@@ -1423,7 +1423,7 @@ user message
                 <li>
                   "Why did you do that?", "What have you learned about this
                   project?", and "Undo that adaptation" work conversationally in
-                  the fake acceptance journey — the second answering with
+                  the controlled Pi acceptance journey — the second answering with
                   metric-backed advantage where replay data exists.
                 </li>
                 <li>
@@ -1442,7 +1442,7 @@ user message
       </section>
 
       <section id="ws6">
-        <h2>WS6 — Fake-runtime product acceptance and evidence capture</h2>
+        <h2>WS6 — Controlled Pi product acceptance and evidence capture</h2>
         <div class="task">
           <h3>
             <span class="task-id">WS6</span> Prove the shipped application path,
@@ -1451,7 +1451,7 @@ user message
           <dl>
             <dt>Builds on</dt>
             <dd>
-              HL-08's single full-loop fake journey is the seed; this workstream
+              HL-08's single full-loop controlled Pi journey is the seed; this workstream
               expands it to the seven journeys below.
             </dd>
             <dt>Ownership</dt>
@@ -1464,7 +1464,7 @@ user message
                 <li>Focused package tests beside each owning module.</li>
                 <li>
                   <code>apps/noesis/src/runtime-composition.ts</code> for
-                  deterministic fake role scripts covering posture, reflection,
+                  credential-free controlled provider scripts covering posture, reflection,
                   authorship, evaluation, activation, explanation, and outcome.
                 </li>
               </ul>
@@ -1512,7 +1512,7 @@ user message
             <dt>Rule</dt>
             <dd>
               The correction plan's standing rule applies to every journey: a
-              test whose assertion the fake runtime can satisfy without the
+              test whose assertion a scripted provider response can satisfy without the
               mechanism under test being present is not evidence. Assert on
               served-plan identity, recorded decisions, and durable state —
               never on output echo. No paid model call is required in CI.
@@ -1606,11 +1606,11 @@ pnpm test</pre>
             served-plan assertions;
           </li>
           <li>
-            fake Pi adapter tests for session tools (and generated tools only if
+            credential-free Pi AgentHarness adapter tests for session tools (and generated tools only if
             restored under the WS4 condition);
           </li>
           <li>
-            application-level fake composition tests proving turn-scoped
+            application-level controlled Pi composition tests proving turn-scoped
             retrieval injection, WorkspaceStore artifact recording, and
             protected mediation;
           </li>
@@ -1694,7 +1694,7 @@ pnpm test</pre>
         <h2>Definition of done</h2>
         <div class="callout good">
           <p>
-            The iteration is done when the fake application begins from a fresh
+            The iteration is done when the controlled Pi application begins from a fresh
             workspace, resolves collaboration posture without a mandatory mode,
             completes useful work, ambiently chooses between no change and a
             narrow anticipated-use learning, activates a passing low-risk

@@ -1,4 +1,3 @@
-export * from "./fake-inference.ts";
 export * from "./durable.ts";
 export * from "./legacy.ts";
 export * from "./organ.ts";

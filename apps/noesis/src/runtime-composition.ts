@@ -1,26 +1,27 @@
+import type { FrozenBaselineRef } from "@noesis/agent-types";
 import { createAtomicCapabilityRegistry, createWorkspaceCapabilityControlStore } from "@noesis/capabilities";
 import {
   createUserCriterionRepository,
   createWorkspaceUserCriterionPorts,
   type ResolvedNoesisConfig,
 } from "@noesis/config";
-import { compileContext, type ContextFragment } from "@noesis/context";
+import { type ContextFragment, compileContext } from "@noesis/context";
 import {
+  type CapabilityRevision,
+  type CapabilityRevisionRef,
   canonicalJson,
   capabilityRevisionRef,
   createId,
+  type FileRevisionRef,
   sameCapabilityRevisionRef,
   sha256,
-  type CapabilityRevision,
-  type CapabilityRevisionRef,
-  type FileRevisionRef,
 } from "@noesis/domain";
 import {
   createDynamicEvaluationLaboratory,
   createProtectedEvaluationSuiteRevision,
   createWorkspaceEvaluationRecorder,
-  selectEvaluationCriteria,
   type DynamicEvaluationConfig,
+  selectEvaluationCriteria,
 } from "@noesis/evals";
 import {
   createDeterministicEmbeddingPort,
@@ -32,14 +33,14 @@ import {
   createWorkspaceLearningCandidateManifestStore,
 } from "@noesis/learning";
 import {
+  type ActivationCandidateResolver,
+  type CoordinatorPreflightPreparation,
   createAtomicActivationController,
   createContinuousFeedbackController,
   createRuntimeControlPlane,
-  createTurnSettlement,
-  createTurnIntelligencePlanner,
   createRuntimeCoordinatorComposition,
-  type ActivationCandidateResolver,
-  type CoordinatorPreflightPreparation,
+  createTurnIntelligencePlanner,
+  createTurnSettlement,
   type ExperimentOutcomeJudge,
   type ExperimentOutcomeProposal,
   type NoesisRuntime,
@@ -48,23 +49,23 @@ import {
   type TrailSummary,
   type TurnResult,
 } from "@noesis/runtime";
-import type { FrozenBaselineRef } from "@noesis/agent-types";
 import {
-  createStructuredInferencePort,
   createRestrictedRoleContextPolicy,
+  createStructuredInferencePort,
   type RoleVariantConfiguration,
   type RuntimePiAgentRoleRunner,
 } from "@noesis/runtime-pi";
 import type { NoesisTuiRuntime } from "@noesis/tui";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
+import { z } from "zod";
 import {
   createWorkspaceRuntimeInternals,
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
-import { z } from "zod";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
+const SHUTDOWN_GRACE_MS = 250;
 const roleNames = [
   "reflector",
   "revision_author",
@@ -931,8 +932,31 @@ export async function createApplicationRuntimeComposition(
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
     shutdownPromise ??= (async () => {
-      await controlPlane.stop();
+      const stop = controlPlane.stop();
+      let graceTimer: NodeJS.Timeout | undefined;
+      const settlement = await Promise.race<
+        | { readonly status: "settled" }
+        | { readonly status: "rejected"; readonly error: unknown }
+        | "timed-out"
+      >([
+        stop.then(
+          () => ({ status: "settled" as const }),
+          (error: unknown) => ({ status: "rejected" as const, error }),
+        ),
+        new Promise<"timed-out">((resolve) => {
+          graceTimer = setTimeout(() => resolve("timed-out"), SHUTDOWN_GRACE_MS);
+        }),
+      ]);
+      if (graceTimer) clearTimeout(graceTimer);
+      if (settlement === "timed-out") {
+        // Active work owns a durable lease and has already received an abort signal. Keep the
+        // workspace open until that work settles so it can record a retryable stopped outcome;
+        // if the process exits first, the expired lease is recovered by the next runtime.
+        void stop.finally(() => workspace.close()).catch(() => undefined);
+        return;
+      }
       workspace.close();
+      if (settlement.status === "rejected") throw settlement.error;
     })();
     return shutdownPromise;
   };

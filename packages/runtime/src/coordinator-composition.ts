@@ -129,6 +129,7 @@ export function createRuntimeCoordinatorComposition(
           ? {}
           : { activeCapabilities: payload.activeCapabilities }),
         ...(payload.userPreferences === undefined ? {} : { userPreferences: payload.userPreferences }),
+        signal,
       });
       cancelled(signal);
       if (observed.status === "no_change")
@@ -168,7 +169,7 @@ export function createRuntimeCoordinatorComposition(
     author: async (payload: AuthorRevisionJobPayload, signal: AbortSignal) => {
       cancelled(signal);
       const brief = briefFor(await briefs.findByDedupeKey(payload.hypothesisDedupeKey), payload.experimentId);
-      const authored = await options.learning.authorExperimentRevision({ brief });
+      const authored = await options.learning.authorExperimentRevision({ brief, signal });
       cancelled(signal);
       const exact = await manifests.rehydrate(payload.experimentId);
       if (

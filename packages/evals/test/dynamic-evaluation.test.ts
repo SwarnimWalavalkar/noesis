@@ -17,11 +17,11 @@ import type { AuthorRevisionResult } from "@noesis/learning";
 import type { RoleBackendRequest } from "@noesis/runtime-pi";
 import {
   createDefaultRoleContextPolicy,
-  createFakeAgentRoleRunner,
   createStructuredInferencePort,
   type RoleVariantConfiguration,
 } from "@noesis/runtime-pi";
 import { describe, expect, test } from "vitest";
+import { createScriptedAgentRoleRunner } from "../../runtime-pi/test/support/scripted-role-runner.ts";
 import {
   ALTERNATIVE_AGGREGATION_STRATEGY,
   ALTERNATIVE_GENERATOR_STRATEGY,
@@ -506,7 +506,7 @@ function createRecorder(): EvaluationEvidenceRecorder & {
 
 function createHarness(scenario: BackendScenario = {}, maxRepairAttempts = 1) {
   const backend = createBackend(scenario);
-  const runner = createFakeAgentRoleRunner({
+  const runner = createScriptedAgentRoleRunner({
     variants: roleConfigurations,
     respond: backend.respond,
   });

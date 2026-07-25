@@ -7,8 +7,8 @@ import type {
 } from "@noesis/agent-types";
 import { validateFrozenTurnPlan } from "@noesis/agent-types";
 
-/** Adapter-neutral deterministic runtime used by the runtime package's acceptance suite. */
-export function createFakeAgentRuntime(): NoesisAgentRuntime {
+/** Test-only adapter-neutral scripted runtime for narrow runtime package seams. */
+export function createScriptedAgentRuntime(): NoesisAgentRuntime {
   const active = new Map<string, AbortController>();
   const run = async (
     request: AgentRuntimeRequest,
@@ -24,16 +24,16 @@ export function createFakeAgentRuntime(): NoesisAgentRuntime {
     active.set(request.trailId, controller);
     try {
       const contextWindow = 8_000;
-      emit({ type: "model", provider: "fake", model: request.model, contextWindow });
+      emit({ type: "model", provider: "scripted", model: request.model, contextWindow });
       emit({ type: "status", status: "started" });
-      const text = `Fake completion for: ${request.prompt}`;
+      const text = `Scripted completion for: ${request.prompt}`;
       let rendered = "";
       for (const word of text.split(" ")) {
         if (controller.signal.aborted) {
           emit({ type: "status", status: "aborted" });
           return {
             text: rendered.trim(),
-            provider: "fake",
+            provider: "scripted",
             model: request.model,
             outcome: "aborted",
             stopReason: "aborted",
@@ -63,7 +63,7 @@ export function createFakeAgentRuntime(): NoesisAgentRuntime {
       emit({ type: "status", status: "completed" });
       return {
         text: rendered,
-        provider: "fake",
+        provider: "scripted",
         model: request.model,
         outcome: "completed",
         stopReason: "stop",
@@ -74,7 +74,7 @@ export function createFakeAgentRuntime(): NoesisAgentRuntime {
     }
   };
   return Object.freeze({
-    name: "fake",
+    name: "scripted-test-runtime",
     run,
     steer: async (trailId: string) => {
       if (!active.has(trailId)) throw new Error("Trail is not running");

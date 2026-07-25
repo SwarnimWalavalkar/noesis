@@ -1,4 +1,4 @@
-import { AgentHarness, InMemorySessionStorage, Session, type AgentTool } from "@earendil-works/pi-agent-core";
+import { AgentHarness, type AgentTool } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { MutableModels } from "@earendil-works/pi-ai";
 import type {
@@ -10,6 +10,7 @@ import type {
 } from "@noesis/agent-types";
 import { validateFrozenTurnPlan } from "@noesis/agent-types";
 import { z } from "zod";
+import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
 
 export * from "./auth.ts";
 export * from "./experiment-fixtures.ts";
@@ -78,91 +79,6 @@ export function createAssistantDeltaAggregator(): AssistantDeltaAggregator {
   };
 }
 
-export interface FakeAgentRuntime extends NoesisAgentRuntime {
-  readonly name: "fake";
-}
-
-export function createFakeAgentRuntime(): FakeAgentRuntime {
-  const active = new Map<string, AbortController>();
-
-  const run = async (
-    request: AgentRuntimeRequest,
-    emit: (event: AgentRuntimeEvent) => void,
-  ): Promise<AgentRuntimeResult> => {
-    verifyFrozenRequest(request);
-    if (active.has(request.trailId)) throw new Error(`Trail ${request.trailId} is already active`);
-    const controller = new AbortController();
-    active.set(request.trailId, controller);
-    try {
-      const contextWindow = 8_000;
-      emit({ type: "model", provider: "fake", model: request.model, contextWindow });
-      emit({ type: "status", status: "started" });
-      const text = `Fake completion for: ${request.prompt}`;
-      let rendered = "";
-      for (const word of text.split(" ")) {
-        if (controller.signal.aborted) {
-          emit({ type: "status", status: "aborted" });
-          return {
-            text: rendered.trim(),
-            provider: "fake",
-            model: request.model,
-            outcome: "aborted",
-            stopReason: "aborted",
-          };
-        }
-        const firstDelta = rendered.length === 0;
-        const delta = `${rendered ? " " : ""}${word}`;
-        rendered += delta;
-        emit({ type: "delta", text: delta });
-        // Give the first fake delta one render frame, then keep later chunks fast and deterministic.
-        await new Promise<void>((resolve) =>
-          firstDelta
-            ? setTimeout(resolve, 20)
-            : request.prompt.length > 200
-              ? setTimeout(resolve, 2)
-              : setImmediate(resolve),
-        );
-      }
-      const contextUsage: AgentContextUsage = {
-        usedTokens: Math.max(
-          1,
-          Math.ceil((request.systemPrompt.length + request.prompt.length + text.length) / 4),
-        ),
-        contextWindow,
-        accuracy: "estimated",
-      };
-      emit({ type: "usage", ...contextUsage });
-      emit({ type: "status", status: "completed" });
-      return {
-        text: rendered,
-        provider: "fake",
-        model: request.model,
-        outcome: "completed",
-        stopReason: "stop",
-        contextUsage,
-      };
-    } finally {
-      if (active.get(request.trailId) === controller) active.delete(request.trailId);
-    }
-  };
-
-  const steer = async (trailId: string, text: string): Promise<void> => {
-    if (!active.has(trailId)) throw new Error("Trail is not running");
-    void text;
-  };
-
-  const followUp = async (trailId: string, text: string): Promise<void> => {
-    if (!active.has(trailId)) throw new Error("Trail is not running");
-    void text;
-  };
-
-  const abort = async (trailId: string): Promise<void> => {
-    active.get(trailId)?.abort();
-  };
-
-  return Object.freeze({ name: "fake", run, steer, followUp, abort });
-}
-
 const inspectParameters = z.looseObject({
   section: z.enum(["context", "capabilities"]),
 });
@@ -175,6 +91,7 @@ export interface PiAgentRuntime extends NoesisAgentRuntime {
 export function createPiAgentRuntime(cwd: string, models: MutableModels): PiAgentRuntime {
   interface ActivePiExecution {
     harness?: AgentHarness;
+    sessionId?: string;
   }
 
   const active = new Map<string, ActivePiExecution>();
@@ -230,9 +147,11 @@ export function createPiAgentRuntime(cwd: string, models: MutableModels): PiAgen
             };
           },
         };
+      const { session, sessionId } = await createEphemeralPiSession();
+      execution.sessionId = sessionId;
       const harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),
-        session: new Session(new InMemorySessionStorage()),
+        session,
         models,
         model,
         tools: [inspectTool],
@@ -292,7 +211,15 @@ export function createPiAgentRuntime(cwd: string, models: MutableModels): PiAgen
         unsubscribe();
       }
     } finally {
-      if (active.get(request.trailId) === execution) active.delete(request.trailId);
+      try {
+        try {
+          if (execution.harness) await execution.harness.waitForIdle();
+        } finally {
+          if (execution.sessionId) releasePiSessionResources(execution.sessionId);
+        }
+      } finally {
+        if (active.get(request.trailId) === execution) active.delete(request.trailId);
+      }
     }
   };
 

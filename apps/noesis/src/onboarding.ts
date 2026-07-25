@@ -134,7 +134,6 @@ export async function runFirstLaunchOnboarding(input: {
   const config: NoesisConfig = {
     schemaVersion: 1,
     agent: {
-      runtime: "pi",
       provider,
       model,
       thinkingLevel,

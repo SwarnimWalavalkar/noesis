@@ -42,5 +42,5 @@
 - Do not use `any`. Avoid assertions; validate unknown durable data at the boundary.
 - Read a source file fully before a broad edit. Keep public package APIs narrow and add abstractions only with a consumer in this iteration.
 - Run `pnpm format`, `pnpm lint`, `pnpm typecheck`, and `pnpm test` after code changes. `pnpm check` runs the full set.
-- Use the fake runtime for tests and acceptance work. Never require paid model calls in CI.
+- Use Pi AgentHarness with a credential-free controlled provider for integration and acceptance work. Keep scripted runtime doubles test-only and limited to narrow unit seams. Never require credentials, network access, or paid model calls in CI.
 - Do not edit the local Pi, Hermes, or Codex reference clones. Do not commit unless explicitly asked.

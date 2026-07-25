@@ -6,14 +6,10 @@ import { z } from "zod";
 
 export const NOESIS_CONFIG_SCHEMA_VERSION = 1 as const;
 
-export const AgentRuntimeSchema = z.enum(["fake", "pi"]);
-export type AgentRuntime = z.infer<typeof AgentRuntimeSchema>;
-
 export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 
 export const AgentConfigSchema = z.strictObject({
-  runtime: AgentRuntimeSchema.optional(),
   provider: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   thinkingLevel: ThinkingLevelSchema.optional(),
@@ -62,7 +58,6 @@ export const NoesisConfigSchema = z.strictObject({
 export type NoesisConfig = Readonly<z.infer<typeof NoesisConfigSchema>>;
 
 export interface ResolvedAgentConfig {
-  readonly runtime: AgentRuntime;
   readonly provider: string;
   readonly model: string;
   readonly thinkingLevel: ThinkingLevel;
@@ -82,7 +77,6 @@ export interface ResolvedNoesisConfig {
 }
 
 export interface ConfigOverrides {
-  readonly runtime?: string;
   readonly provider?: string;
   readonly model?: string;
   readonly thinkingLevel?: string;
@@ -111,10 +105,9 @@ export class NoesisConfigError extends Error {
 }
 
 export const BUILT_IN_AGENT_DEFAULTS: ResolvedAgentConfig = {
-  runtime: "fake",
-  provider: "fake",
-  model: "noesis-fake-1",
-  thinkingLevel: "off",
+  provider: "openai-codex",
+  model: "gpt-5.5",
+  thinkingLevel: "medium",
 };
 
 export const BUILT_IN_LEARNING_DEFAULTS: Required<LearningConfig> = {
@@ -171,7 +164,23 @@ function decodeConfig(path: string, value: unknown): Result<NoesisConfig, Noesis
       ),
     );
   }
-  const parsed = NoesisConfigSchema.safeParse(value);
+  // schemaVersion 1 previously persisted an agent.runtime selector. Pi is now the
+  // only product executor, so the legacy field is ignored in memory and removed
+  // on the next explicit config write. Durable session runtime identity remains
+  // separate provenance and is not reconstructed from this setting.
+  const normalized =
+    value !== null &&
+    typeof value === "object" &&
+    "agent" in value &&
+    value.agent !== null &&
+    typeof value.agent === "object" &&
+    "runtime" in value.agent
+      ? {
+          ...value,
+          agent: Object.fromEntries(Object.entries(value.agent).filter(([key]) => key !== "runtime")),
+        }
+      : value;
+  const parsed = NoesisConfigSchema.safeParse(normalized);
   if (!parsed.success) {
     const first = parsed.error.issues[0];
     const pointer = first ? issuePath(first) : "";
@@ -208,14 +217,6 @@ function validateAgentValue<K extends keyof ResolvedAgentConfig>(
   key: K,
   value: string,
 ): ResolvedAgentConfig[K] {
-  if (key === "runtime") {
-    if (value !== "fake" && value !== "pi")
-      throw new NoesisConfigError(
-        path,
-        `agent.runtime must be "fake" or "pi"; received ${JSON.stringify(value)}`,
-      );
-    return value as ResolvedAgentConfig[K];
-  }
   if (key === "thinkingLevel") {
     if (!ThinkingLevelSchema.safeParse(value).success)
       throw new NoesisConfigError(
@@ -255,7 +256,6 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
   const learning = loaded.value.config?.learning ?? {};
   const autonomy = loaded.value.config?.autonomy ?? {};
   const experiments = loaded.value.config?.experiments ?? {};
-  const [runtime, runtimeSource] = pick(path, "runtime", cli, env, file, "NOESIS_RUNTIME");
   const [provider, providerSource] = pick(path, "provider", cli, env, file, "NOESIS_PROVIDER");
   const [model, modelSource] = pick(path, "model", cli, env, file, "NOESIS_MODEL");
   const [thinkingLevel, thinkingLevelSource] = pick(
@@ -270,7 +270,7 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
     schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
     home: input.home,
     configPath: path,
-    agent: { runtime, provider, model, thinkingLevel },
+    agent: { provider, model, thinkingLevel },
     learning: {
       enabled: learning.enabled ?? BUILT_IN_LEARNING_DEFAULTS.enabled,
       notifications: learning.notifications ?? BUILT_IN_LEARNING_DEFAULTS.notifications,
@@ -288,7 +288,6 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
       maxCost: experiments.maxCost ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxCost,
     },
     sources: {
-      runtime: runtimeSource,
       provider: providerSource,
       model: modelSource,
       thinkingLevel: thinkingLevelSource,
@@ -415,7 +414,6 @@ export async function updateNoesisConfig(home: string, patch: ConfigOverrides): 
     const path = noesisConfigPath(home);
     const current = loaded.value.config ?? DEFAULT_NOESIS_CONFIG;
     const nextAgent: MutableAgentConfig = { ...current.agent };
-    if (patch.runtime !== undefined) nextAgent.runtime = validateAgentValue(path, "runtime", patch.runtime);
     if (patch.provider !== undefined)
       nextAgent.provider = validateAgentValue(path, "provider", patch.provider);
     if (patch.model !== undefined) nextAgent.model = validateAgentValue(path, "model", patch.model);

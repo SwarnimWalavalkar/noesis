@@ -10,7 +10,6 @@
   "scripts": {
     "build": "tsc --noEmit",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
-    "demo": "tsx apps/noesis/src/cli.ts demo --home ./.noesis-demo",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",

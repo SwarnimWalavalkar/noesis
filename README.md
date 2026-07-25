@@ -28,12 +28,12 @@ Noesis is a local research preview. Its first causal compounding loop now runs e
 What works now:
 
 - The CLI and TUI support new and resumed sessions. They also support continue, fork, compact, and abort operations.
-- Pi executes model turns behind `packages/runtime-pi`. A deterministic fake runtime supports tests and demos without credentials.
+- Pi AgentHarness is the only production turn executor behind `packages/runtime-pi`. Tests drive the same adapter with credential-free controlled Pi providers.
 - Provider setup supports OpenAI Codex OAuth, OpenRouter, and the Anthropic provider exposed through Pi.
 - `WorkspaceStore` provides SQLite operational records and editable definitions. It also provides immutable revisions, evidence, artifacts, search, durable jobs, activation state, feedback state, integrity checks, and backups.
 - Every foreground turn admits one digest-validated `FrozenTurnPlan` before execution. The exact immutable capability bytes, routing decision, permissions, provider, model, reasoning level, and baseline lineage delivered to Pi are the bytes recorded in SQLite.
 - A fresh workspace bootstraps an immutable general-collaboration baseline. Ambient reflection can author and evaluate a narrow new capability, activate it, serve it only on related work, and restore the complete prior activation after feedback.
-- The deterministic demo exercises correction, reflection, authorship, protected evaluation, atomic activation, related serving, unrelated abstention, and protected revert without credentials.
+- Credential-free application acceptance tests exercise correction, reflection, authorship, protected evaluation, atomic activation, related serving, unrelated abstention, and protected revert through Pi AgentHarness.
 - Effect-free paired replay and compounding read models measure served-revision wins, scope leakage, context tax, correction recurrence, exclusions, and evidence coverage under durable call, token, and cost budgets.
 
 The research preview deliberately remains incomplete:
@@ -42,7 +42,7 @@ The research preview deliberately remains incomplete:
 - Ambient paired replay has an implementation and durable store, but its post-settlement scheduling policy is not yet wired into ordinary use.
 - Generated-tool execution remains deliberately absent until a real foreground consumer justifies restoring it.
 
-The completed [high-leverage correction plan](plans/noesis-high-leverage-correction-plan.html) removed unproven scope, made the compounding claim measurable, closed the minimal causal loop, and moved foreground and protected operational authority to SQLite. The [product loop plan](plans/compounding-partnership-product-loop.html) is next: it adds collaboration posture and selective learning with anticipated future use, serves exact active revisions and tools, exposes adaptation history and conversational controls, and proves the complete path with the fake runtime.
+The completed [high-leverage correction plan](plans/noesis-high-leverage-correction-plan.html) removed unproven scope, made the compounding claim measurable, closed the minimal causal loop, and moved foreground and protected operational authority to SQLite. The [product loop plan](plans/compounding-partnership-product-loop.html) is next: it adds collaboration posture and selective learning with anticipated future use, serves exact active revisions and tools, exposes adaptation history and conversational controls, and proves the complete path with a credential-free controlled Pi provider.
 
 ## Quick start
 
@@ -52,14 +52,8 @@ You need Node 22.19 or newer and pnpm 10.
 pnpm install
 pnpm check
 
-# Run the deterministic demo without credentials.
-pnpm demo
-
 # Start the TUI with a local home.
 pnpm start -- tui --home ./.noesis
-
-# Run the TUI with the deterministic fake runtime.
-pnpm start -- tui --home ./.noesis --runtime fake
 ```
 
 An interactive first launch with no config and no explicit agent settings starts onboarding. It asks for the provider, model, reasoning level, and authentication. You can run the same flow directly:
@@ -74,7 +68,7 @@ Noninteractive use does not wait for onboarding. Initialize or set the config fi
 pnpm start -- config init --home ./.noesis
 pnpm start -- config show --home ./.noesis
 pnpm start -- config set --home ./.noesis \
-  --runtime pi --provider openai-codex --model gpt-5.5 --thinking-level medium
+  --provider openai-codex --model gpt-5.5 --thinking-level medium
 ```
 
 ## Provider authentication
@@ -85,11 +79,11 @@ OpenAI Codex OAuth and OpenRouter are the two onboarding choices.
 # OpenAI Codex OAuth
 pnpm start -- auth login openai-codex --home ./.noesis
 pnpm start -- tui --home ./.noesis \
-  --runtime pi --provider openai-codex --model gpt-5.5
+  --provider openai-codex --model gpt-5.5
 
 # OpenRouter through the environment
 OPENROUTER_API_KEY=... pnpm start -- tui --home ./.noesis \
-  --runtime pi --provider openrouter --model anthropic/claude-sonnet-4.5
+  --provider openrouter --model anthropic/claude-sonnet-4.5
 ```
 
 Noesis does not register direct `OPENAI_API_KEY` authentication. Use `openai-codex` for Codex OAuth or `openrouter` for an OpenRouter key.
@@ -141,7 +135,6 @@ User preferences live in `<NOESIS_HOME>/config.json`. The file uses schema versi
 {
   "schemaVersion": 1,
   "agent": {
-    "runtime": "pi",
     "provider": "openai-codex",
     "model": "gpt-5.5",
     "thinkingLevel": "medium"
@@ -152,15 +145,17 @@ User preferences live in `<NOESIS_HOME>/config.json`. The file uses schema versi
 Agent settings use this precedence:
 
 1. CLI flags
-2. `NOESIS_RUNTIME`, `NOESIS_PROVIDER`, `NOESIS_MODEL`, and `NOESIS_THINKING_LEVEL`
+2. `NOESIS_PROVIDER`, `NOESIS_MODEL`, and `NOESIS_THINKING_LEVEL`
 3. `config.json`
 4. Defaults in source code
 
-`--home` overrides `NOESIS_HOME`, which overrides `.noesis`. Valid runtimes are `fake` and `pi`. Valid reasoning levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+`--home` overrides `NOESIS_HOME`, which overrides `.noesis`. Valid reasoning levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
 ## Architecture and storage
 
 Pi executes turns. Noesis owns the product and control plane around those turns. Only `packages/runtime-pi` imports Pi agent and runtime types. The TUI renders runtime read models and never owns durable state.
+
+Session and turn records retain the executor identity that originally produced them as immutable provenance. That durable field is not a user-selectable runtime mode. Existing schema-version-1 config files that contain the removed `agent.runtime` field are read without rewriting; the field is ignored and disappears on the next explicit config write. Sessions recorded by a different historical executor fail closed rather than being reinterpreted as Pi sessions.
 
 The persistence model is:
 
@@ -195,7 +190,7 @@ Run the complete local gate with:
 pnpm check
 ```
 
-This runs formatting checks, lint, type checking, and tests. Tests and acceptance work use the fake runtime and do not require paid model calls.
+This runs formatting checks, lint, type checking, and tests. Integration and acceptance work uses Pi AgentHarness with a credential-free controlled provider; narrow unit seams may use test-only scripted doubles. CI does not require credentials, network access, or paid model calls.
 
 ## Current limitations
 

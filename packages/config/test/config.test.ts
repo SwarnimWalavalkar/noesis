@@ -33,7 +33,7 @@ describe("Noesis config", () => {
       noesisConfigPath(home),
       JSON.stringify({
         schemaVersion: 1,
-        agent: { runtime: "pi", provider: "file-provider", model: "file-model", thinkingLevel: "low" },
+        agent: { provider: "file-provider", model: "file-model", thinkingLevel: "low" },
       }),
     );
     const resolved = await resolveNoesisConfig({
@@ -43,13 +43,11 @@ describe("Noesis config", () => {
     });
 
     expect(resolved.agent).toEqual({
-      runtime: "pi",
       provider: "env-provider",
       model: "cli-model",
       thinkingLevel: "off",
     });
     expect(resolved.sources).toEqual({
-      runtime: "config",
       provider: "environment",
       model: "cli",
       thinkingLevel: "cli",
@@ -62,13 +60,18 @@ describe("Noesis config", () => {
     expect((await resolveNoesisConfig({ home, env: {} })).agent.thinkingLevel).toBe(thinkingLevel);
   });
 
-  test("accepts legacy version-1 files and resolves new preferences without rewriting them", async () => {
+  test("ignores the removed version-1 runtime selector without rewriting the file", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-legacy-v1-"));
     const legacy = '{"schemaVersion":1,"agent":{"runtime":"fake"}}\n';
     await writeFile(noesisConfigPath(home), legacy);
 
     const resolved = await resolveNoesisConfig({ home, env: {} });
 
+    expect(resolved.agent).toEqual({
+      provider: "openai-codex",
+      model: "gpt-5.5",
+      thinkingLevel: "medium",
+    });
     expect(resolved.learning).toEqual({ enabled: true, notifications: "quiet", backgroundBudget: 1 });
     expect(resolved.autonomy).toEqual({
       riskLevel: "low",
@@ -135,10 +138,9 @@ describe("Noesis config", () => {
     expect(persisted).toEqual({
       schemaVersion: 1,
       agent: {
-        runtime: "fake",
         provider: "openai-codex",
         model: "gpt-5.5",
-        thinkingLevel: "off",
+        thinkingLevel: "medium",
       },
       learning: { enabled: true, notifications: "quiet", backgroundBudget: 1 },
       autonomy: {

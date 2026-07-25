@@ -91,9 +91,9 @@ export interface RuntimeAgentDefaults {
 }
 
 const DEFAULT_AGENT_SETTINGS: RuntimeAgentDefaults = {
-  provider: "fake",
-  model: "noesis-fake-1",
-  thinkingLevel: "off",
+  provider: "openai-codex",
+  model: "gpt-5.5",
+  thinkingLevel: "medium",
 };
 
 const RESUME_ATTEMPTS = 3;
@@ -266,7 +266,7 @@ export async function createNoesisRuntime(
       const trail = getTrail(trailId);
       if (trail.runtime !== agent.name)
         throw new Error(
-          `Session ${trailId} uses runtime ${trail.runtime}, but the active runtime is ${agent.name}. Relaunch with --runtime ${trail.runtime} to resume it.`,
+          `Session ${trailId} was recorded by runtime ${trail.runtime}, but this Pi-only build uses ${agent.name}. Runtime provenance is immutable; start a new session instead.`,
         );
       if (trail.status === "running") {
         await ledger.refresh();

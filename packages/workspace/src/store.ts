@@ -1715,7 +1715,7 @@ function createOperationalRepositories(
       put: putMessage,
       listForSession: async (sessionId: string) =>
         db
-          .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY created_at, message_id")
+          .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY created_at, rowid")
           .all(sessionId)
           .map(decodeMessage),
     }),

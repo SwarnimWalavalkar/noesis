@@ -412,6 +412,72 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     });
   });
 
+  test("does not launch an outcome judge when stop lands while the claim is pending", async () => {
+    const fixture = await createFixture();
+    await pinTurn(fixture, "turn-stop-during-feedback-claim");
+    let markClaimStarted: (() => void) | undefined;
+    const claimStarted = new Promise<void>((resolve) => {
+      markClaimStarted = resolve;
+    });
+    let releaseClaim: (() => void) | undefined;
+    const claimBlocked = new Promise<void>((resolve) => {
+      releaseClaim = resolve;
+    });
+    let firstClaim = true;
+    const workspace = Object.freeze({
+      ...fixture.workspace,
+      jobs: Object.freeze({
+        ...fixture.workspace.jobs,
+        claim: async (input: Parameters<typeof fixture.workspace.jobs.claim>[0]) => {
+          if (firstClaim) {
+            firstClaim = false;
+            markClaimStarted?.();
+            await claimBlocked;
+          }
+          return await fixture.workspace.jobs.claim(input);
+        },
+      }),
+    });
+    let judgeCalls = 0;
+    const feedback = createContinuousFeedbackController({
+      workspace,
+      protectedRuntime: fixture.protectedRuntime,
+      capabilities: fixture.resolver,
+      judge: Object.freeze({
+        run: async () => {
+          judgeCalls += 1;
+          throw new Error("The outcome judge must not start after stop");
+        },
+      }),
+      config: config(1),
+    });
+
+    try {
+      const observation = feedback.observeTurnOutcome(
+        observationInput(fixture, "turn-stop-during-feedback-claim"),
+      );
+      await claimStarted;
+      const stopping = feedback.stop();
+      releaseClaim?.();
+      await Promise.all([observation, stopping]);
+
+      expect(judgeCalls).toBe(0);
+      const jobs = await fixture.workspace.jobs.list({ kind: "runtime.outcome_judge", limit: 10 });
+      expect(jobs).toMatchObject([
+        {
+          status: "running",
+          attempt: 1,
+          leaseToken: expect.any(String),
+          leaseUntil: expect.any(String),
+        },
+      ]);
+    } finally {
+      releaseClaim?.();
+      await feedback.stop();
+      fixture.workspace.close();
+    }
+  });
+
   test("keep resolves while preserving the active revision", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-keep");

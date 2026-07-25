@@ -296,6 +296,37 @@ describe("WorkspaceStore", () => {
     store.close();
   });
 
+  test("preserves message insertion order when one turn shares a timestamp", async () => {
+    const store = await createWorkspaceStore(await temporary("message-order"));
+    await store.operational.sessions.put(session("session-message-order"));
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await store.operational.messages.put({
+      messageId: "turn-1:user",
+      sessionId: "session-message-order",
+      role: "user",
+      content: "question",
+      sensitivity: "normal",
+      createdAt,
+      metadata: { turnId: "turn-1" },
+    });
+    await store.operational.messages.put({
+      messageId: "turn-1:assistant",
+      sessionId: "session-message-order",
+      role: "assistant",
+      content: "answer",
+      sensitivity: "normal",
+      createdAt,
+      metadata: { turnId: "turn-1" },
+    });
+
+    expect(
+      (await store.operational.messages.listForSession("session-message-order")).map(
+        (message) => message.role,
+      ),
+    ).toEqual(["user", "assistant"]);
+    store.close();
+  });
+
   test("persists and validates complete capability revision identity for activation state", async () => {
     const store = await createWorkspaceStore(await temporary("activation-identity"));
     const capabilityRevision = revision("capability-revision-1", "a");

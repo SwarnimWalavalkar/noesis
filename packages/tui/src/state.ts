@@ -74,8 +74,8 @@ export const initialTuiState = (
 ): NoesisTuiState => ({
   title: "Noesis session",
   execution: "idle",
-  provider: options.provider ?? "fake",
-  model: options.model ?? "noesis-fake-1",
+  provider: options.provider ?? "openai-codex",
+  model: options.model ?? "gpt-5.5",
   reasoningLevel: options.reasoningLevel ?? "off",
   runtime,
   pane: "trail",
