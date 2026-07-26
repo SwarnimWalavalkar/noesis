@@ -1906,13 +1906,20 @@ export async function createApplicationRuntimeComposition(
           (event) => {
             if (event.type === "progress") emit({ type: "progress", value: event.value });
             else if (event.type === "tool-start")
-              emit({ type: "tool-start", name: event.name, callIndex: event.callIndex });
+              emit({
+                type: "tool-start",
+                name: event.name,
+                callIndex: event.callIndex,
+                input: event.input,
+              });
             else if (event.type === "tool-end")
               emit({
                 type: "tool-end",
                 name: event.name,
                 callIndex: event.callIndex,
                 ok: event.ok,
+                ...(event.result === undefined ? {} : { result: event.result }),
+                ...(event.error ? { error: event.error } : {}),
               });
           },
         );

@@ -8,6 +8,34 @@ export interface TuiMessage {
   readonly text: string;
 }
 
+export interface TuiAgentAction {
+  readonly actionId: string;
+  readonly parentActionId?: string;
+  readonly name: string;
+  readonly status: "running" | "completed" | "failed";
+  readonly input?: unknown;
+  readonly update?: unknown;
+  readonly output?: unknown;
+}
+
+export interface TuiMessageEntry extends TuiMessage {
+  readonly kind: "message";
+}
+
+export interface TuiAgentActionEntry extends TuiAgentAction {
+  readonly kind: "action";
+}
+
+export type TuiTimelineEntry = TuiMessageEntry | TuiAgentActionEntry;
+
+export function isTuiMessageEntry(entry: TuiTimelineEntry): entry is TuiMessageEntry {
+  return entry.kind === "message";
+}
+
+export function isTuiAgentActionEntry(entry: TuiTimelineEntry): entry is TuiAgentActionEntry {
+  return entry.kind === "action";
+}
+
 export type ExecutionState = "idle" | "thinking" | "streaming" | "tool" | "compacting" | "aborting" | "error";
 
 export interface TuiContextUsage {
@@ -25,7 +53,8 @@ export interface NoesisTuiState {
   readonly reasoningLevel: RuntimeAgentDefaults["thinkingLevel"];
   readonly runtime: string;
   readonly pane: Pane;
-  readonly messages: readonly TuiMessage[];
+  readonly timeline: readonly TuiTimelineEntry[];
+  readonly agentActionsExpanded: boolean;
   readonly context?: ContextSnapshot;
   readonly contextUsage?: TuiContextUsage;
   readonly turnCount: number;
@@ -40,8 +69,21 @@ export type NoesisTuiAction =
   | { readonly type: "prompt-submitted"; readonly text: string }
   | { readonly type: "stream-delta"; readonly text: string }
   | { readonly type: "stream-reconciled"; readonly text: string }
-  | { readonly type: "tool-started"; readonly name: string }
-  | { readonly type: "tool-ended" }
+  | {
+      readonly type: "action-started";
+      readonly actionId: string;
+      readonly parentActionId?: string;
+      readonly name: string;
+      readonly input?: unknown;
+    }
+  | { readonly type: "action-updated"; readonly actionId: string; readonly update: unknown }
+  | {
+      readonly type: "action-ended";
+      readonly actionId: string;
+      readonly output?: unknown;
+      readonly isError: boolean;
+    }
+  | { readonly type: "agent-actions-expansion-toggled" }
   | { readonly type: "execution-changed"; readonly execution: ExecutionState }
   | {
       readonly type: "model-metadata";
@@ -79,7 +121,8 @@ export const initialTuiState = (
   reasoningLevel: options.reasoningLevel ?? "off",
   runtime,
   pane: "trail",
-  messages: [],
+  timeline: [],
+  agentActionsExpanded: false,
   turnCount: 0,
   capabilityVersions: {},
   colorEnabled: options.colorEnabled ?? false,
@@ -101,12 +144,13 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         title: action.trail.title,
         provider: action.trail.provider,
         model: action.trail.model,
-        messages: action.trail.turns.flatMap((turn) => [
-          { role: "user" as const, text: turn.input },
-          { role: "assistant" as const, text: turn.output },
+        timeline: action.trail.turns.flatMap((turn): readonly TuiMessageEntry[] => [
+          { kind: "message", role: "user", text: turn.input },
+          { kind: "message", role: "assistant", text: turn.output },
         ]),
         ...(action.trail.context ? { context: action.trail.context } : {}),
         capabilityVersions: { ...action.trail.capabilityVersions },
+        agentActionsExpanded: false,
         turnCount: action.trail.turns.length,
         execution: "idle",
       };
@@ -116,31 +160,83 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       return {
         ...rest,
         execution: "thinking",
-        messages: [...state.messages, { role: "user", text: action.text }, { role: "assistant", text: "" }],
+        timeline: [...state.timeline, { kind: "message", role: "user", text: action.text }],
+        agentActionsExpanded: false,
       };
     }
     case "stream-delta": {
-      const messages = [...state.messages];
-      const last = messages.at(-1);
-      if (last?.role === "assistant")
-        messages[messages.length - 1] = { ...last, text: last.text + action.text };
-      return { ...state, execution: "streaming", messages };
+      const timeline = [...state.timeline];
+      const last = timeline.at(-1);
+      if (last?.kind === "message" && last.role === "assistant") {
+        timeline[timeline.length - 1] = { ...last, text: last.text + action.text };
+      } else {
+        timeline.push({ kind: "message", role: "assistant", text: action.text });
+      }
+      return { ...state, execution: "streaming", timeline };
     }
     case "stream-reconciled": {
-      const messages = [...state.messages];
-      const last = messages.at(-1);
-      if (last?.role === "assistant") messages[messages.length - 1] = { ...last, text: action.text };
-      return { ...state, messages };
+      const timeline = [...state.timeline];
+      const last = timeline.at(-1);
+      if (last?.kind === "message" && last.role === "assistant") {
+        timeline[timeline.length - 1] = { ...last, text: action.text };
+      } else {
+        timeline.push({ kind: "message", role: "assistant", text: action.text });
+      }
+      return { ...state, timeline };
     }
-    case "tool-started":
-      return { ...state, execution: "tool", activeTool: action.name };
-    case "tool-ended": {
+    case "action-started": {
+      const next: TuiAgentActionEntry = {
+        kind: "action",
+        actionId: action.actionId,
+        ...(action.parentActionId ? { parentActionId: action.parentActionId } : {}),
+        name: action.name,
+        status: "running",
+        ...(action.input === undefined ? {} : { input: action.input }),
+      };
+      const existing = state.timeline.findIndex(
+        (entry) => entry.kind === "action" && entry.actionId === action.actionId,
+      );
+      const timeline =
+        existing < 0
+          ? [...state.timeline, next]
+          : state.timeline.map((entry, index) => (index === existing ? next : entry));
+      return { ...state, execution: "tool", activeTool: action.name, timeline };
+    }
+    case "action-updated":
+      return {
+        ...state,
+        timeline: state.timeline.map((entry) =>
+          entry.kind === "action" && entry.actionId === action.actionId
+            ? { ...entry, update: action.update }
+            : entry,
+        ),
+      };
+    case "action-ended": {
+      const timeline = state.timeline.map(
+        (entry): TuiTimelineEntry =>
+          entry.kind === "action" && entry.actionId === action.actionId
+            ? {
+                ...entry,
+                status: action.isError ? "failed" : "completed",
+                ...(action.output === undefined ? {} : { output: action.output }),
+              }
+            : entry,
+      );
+      const activeTool = [...timeline]
+        .reverse()
+        .find(
+          (entry): entry is TuiAgentActionEntry => entry.kind === "action" && entry.status === "running",
+        )?.name;
       const { activeTool: _activeTool, ...rest } = state;
       return {
         ...rest,
-        execution: state.messages.at(-1)?.text ? "streaming" : "thinking",
+        ...(activeTool ? { activeTool } : {}),
+        timeline,
+        execution: activeTool ? "tool" : "thinking",
       };
     }
+    case "agent-actions-expansion-toggled":
+      return { ...state, agentActionsExpanded: !state.agentActionsExpanded };
     case "execution-changed": {
       const { activeTool: _activeTool, ...rest } = state;
       return { ...rest, execution: action.execution };
@@ -168,9 +264,10 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       };
     }
     case "turn-aborted": {
-      const messages = [...state.messages];
-      if (messages.at(-1)?.role === "assistant" && !messages.at(-1)?.text) messages.pop();
-      return { ...state, execution: "idle", messages };
+      const timeline = [...state.timeline];
+      const last = timeline.at(-1);
+      if (last?.kind === "message" && last.role === "assistant" && !last.text) timeline.pop();
+      return { ...state, execution: "idle", timeline };
     }
     case "compacted": {
       const { contextUsage: _contextUsage, ...rest } = state;
@@ -181,6 +278,9 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
     case "failed":
       return { ...state, execution: "error", error: action.error };
     case "system-message":
-      return { ...state, messages: [...state.messages, { role: "system", text: action.text }] };
+      return {
+        ...state,
+        timeline: [...state.timeline, { kind: "message", role: "system", text: action.text }],
+      };
   }
 }

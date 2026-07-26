@@ -339,9 +339,15 @@ describe("Noesis TUI lifecycle", () => {
       async run(request, emit) {
         emit({ type: "model", provider: request.provider, model: request.model, contextWindow: 4_000 });
         emit({ type: "status", status: "started" });
-        emit({ type: "tool-start", name: "inspect", input: {} });
+        emit({ type: "tool-start", actionId: "inspect-1", name: "inspect", input: {} });
         await toolBlocked;
-        emit({ type: "tool-end", name: "inspect", isError: false });
+        emit({
+          type: "tool-end",
+          actionId: "inspect-1",
+          name: "inspect",
+          isError: false,
+          result: { ok: true },
+        });
         emit({ type: "delta", text: "grounded answer" });
         const contextUsage = {
           usedTokens: 1_000,
@@ -369,10 +375,63 @@ describe("Noesis TUI lifecycle", () => {
 
     terminal.type("use the snapshot\r");
     await vi.waitFor(() => expect(terminal.output).toContain("● TOOL"));
+    await vi.waitFor(() => expect(terminal.output).toContain("● inspect"));
+    expect(terminal.output).not.toContain("ACTIONS");
+    expect(terminal.output).toContain("inspect");
     releaseTool?.();
     await vi.waitFor(() => expect(terminal.output).toContain("ctx  25%"));
     await vi.waitFor(() => expect(terminal.output).toContain("grounded answer"));
     await vi.waitFor(() => expect(terminal.output).toContain("1t"));
+    expect(terminal.output.lastIndexOf("inspect")).toBeLessThan(
+      terminal.output.lastIndexOf("grounded answer"),
+    );
+
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("auto-collapses long action details and expands them with Ctrl+O", async () => {
+    const source = Array.from({ length: 20 }, (_, index) => `source line ${String(index + 1)}`).join("\n");
+    const runtime = await createRuntime({
+      name: "actions-scripted",
+      async run(request, emit) {
+        emit({ type: "status", status: "started" });
+        emit({
+          type: "tool-start",
+          actionId: "execute-long",
+          name: "execute",
+          input: { source },
+        });
+        emit({
+          type: "tool-end",
+          actionId: "execute-long",
+          name: "execute",
+          isError: false,
+          result: { calls: 2 },
+        });
+        emit({ type: "status", status: "completed" });
+        return {
+          text: "done",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("run it\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("Ctrl+O expand"));
+    expect(terminal.output).not.toContain("source line 20");
+
+    terminal.send("\u000f");
+    await vi.waitFor(() => expect(terminal.output).toContain("source line 20"));
 
     terminal.type("/quit\n");
     await running;
@@ -385,8 +444,14 @@ describe("Noesis TUI lifecycle", () => {
       async run(request, emit) {
         emit({ type: "status", status: "started" });
         emit({ type: "delta", text: "intermediate reasoning" });
-        emit({ type: "tool-start", name: "inspect", input: {} });
-        emit({ type: "tool-end", name: "inspect", isError: false });
+        emit({ type: "tool-start", actionId: "inspect-1", name: "inspect", input: {} });
+        emit({
+          type: "tool-end",
+          actionId: "inspect-1",
+          name: "inspect",
+          isError: false,
+          result: { ok: true },
+        });
         emit({ type: "delta", text: "\n\nprovisional answer" });
         emit({ type: "status", status: "completed" });
         emitLate = () => emit({ type: "delta", text: "DETACHED-LATE-DELTA" });
@@ -613,7 +678,7 @@ describe("Noesis TUI lifecycle", () => {
     const main = startNoesisTui(runtime, {}, mainTerminal);
     await vi.waitFor(() => expect(mainTerminal.output).toContain("███╗   ██╗ ██████╗"));
     mainTerminal.resize(50, 9);
-    await vi.waitFor(() => expect(mainTerminal.output).toContain("? help · /quit exit"));
+    await vi.waitFor(() => expect(mainTerminal.output).toContain("? help · Ctrl+O actions"));
     expect(mainTerminal.output).toContain("› message");
     mainTerminal.type("/quit\n");
     await main;
@@ -649,7 +714,7 @@ describe("Noesis TUI lifecycle", () => {
     });
     const terminal = createTestTerminal();
     const running = startNoesisTui(runtime, {}, terminal);
-    await vi.waitFor(() => expect(terminal.output).toContain("? help · /quit exit"));
+    await vi.waitFor(() => expect(terminal.output).toContain("? help · Ctrl+O actions"));
     expect(terminal.output).not.toContain("/learn · /evaluate");
 
     terminal.type("?\r");

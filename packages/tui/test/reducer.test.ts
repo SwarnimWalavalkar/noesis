@@ -126,7 +126,8 @@ describe("Noesis TUI reducer", () => {
     expect(createTuiLayout(90, 28).transcriptRows).toBeGreaterThan(createTuiLayout(50, 8).transcriptRows);
     const crowded = {
       ...initialTuiState("fake"),
-      messages: Array.from({ length: 20 }, (_, index) => ({
+      timeline: Array.from({ length: 20 }, (_, index) => ({
+        kind: "message" as const,
         role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
         text: `message ${index}`,
       })),
@@ -189,16 +190,237 @@ describe("Noesis TUI reducer", () => {
     expect(state.execution).toBe("thinking");
     state = reduceTui(state, { type: "stream-delta", text: "answer" });
     expect(state.execution).toBe("streaming");
-    state = reduceTui(state, { type: "tool-started", name: "inspect" });
+    state = reduceTui(state, {
+      type: "action-started",
+      actionId: "tool-1",
+      name: "inspect",
+      input: { section: "memory" },
+    });
     expect(state).toMatchObject({ execution: "tool", activeTool: "inspect" });
-    state = reduceTui(state, { type: "tool-ended" });
-    expect(state.execution).toBe("streaming");
+    state = reduceTui(state, {
+      type: "action-updated",
+      actionId: "tool-1",
+      update: { status: "reading" },
+    });
+    state = reduceTui(state, {
+      type: "action-ended",
+      actionId: "tool-1",
+      output: { memories: 2 },
+      isError: false,
+    });
+    expect(state.execution).toBe("thinking");
+    expect(state.timeline.filter((entry) => entry.kind === "action")).toEqual([
+      {
+        kind: "action",
+        actionId: "tool-1",
+        name: "inspect",
+        status: "completed",
+        input: { section: "memory" },
+        update: { status: "reading" },
+        output: { memories: 2 },
+      },
+    ]);
+    state = reduceTui(state, { type: "agent-actions-expansion-toggled" });
+    expect(state.agentActionsExpanded).toBe(true);
+    state = reduceTui(state, {
+      type: "action-started",
+      actionId: "execute-1",
+      name: "execute",
+      input: { source: "return 1;" },
+    });
+    state = reduceTui(state, {
+      type: "action-started",
+      actionId: "execute-1:call:0",
+      parentActionId: "execute-1",
+      name: "shell.run",
+      input: { command: "pwd" },
+    });
+    state = reduceTui(state, {
+      type: "action-ended",
+      actionId: "execute-1:call:0",
+      output: { stdout: "/workspace" },
+      isError: false,
+    });
+    expect(state).toMatchObject({ execution: "tool", activeTool: "execute" });
+    state = reduceTui(state, {
+      type: "action-ended",
+      actionId: "execute-1",
+      output: { calls: 1 },
+      isError: false,
+    });
+    state = reduceTui(state, { type: "prompt-submitted", text: "next turn" });
+    expect(
+      state.timeline.filter((entry) => entry.kind === "action").map((entry) => entry.actionId),
+    ).toContain("tool-1");
+    expect(state.agentActionsExpanded).toBe(false);
     state = reduceTui(state, { type: "execution-changed", execution: "compacting" });
     expect(state.execution).toBe("compacting");
     state = reduceTui(state, { type: "execution-changed", execution: "aborting" });
     expect(state.execution).toBe("aborting");
     state = reduceTui(state, { type: "failed", error: "provider failed" });
     expect(state.execution).toBe("error");
+  });
+
+  test("keeps assistant text and tool actions in their chronological order", () => {
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "prompt-submitted",
+      text: "find something",
+    });
+    state = reduceTui(state, { type: "stream-delta", text: "I will check." });
+    state = reduceTui(state, {
+      type: "action-started",
+      actionId: "tool-1",
+      name: "shell.run",
+      input: { command: "pwd" },
+    });
+    state = reduceTui(state, {
+      type: "action-ended",
+      actionId: "tool-1",
+      output: { stdout: "/workspace" },
+      isError: false,
+    });
+    state = reduceTui(state, { type: "stream-delta", text: "The workspace is ready." });
+
+    expect(state.timeline).toEqual([
+      { kind: "message", role: "user", text: "find something" },
+      { kind: "message", role: "assistant", text: "I will check." },
+      {
+        kind: "action",
+        actionId: "tool-1",
+        name: "shell.run",
+        status: "completed",
+        input: { command: "pwd" },
+        output: { stdout: "/workspace" },
+      },
+      { kind: "message", role: "assistant", text: "The workspace is ready." },
+    ]);
+    expect(state.execution).toBe("streaming");
+  });
+
+  test("updates nested tools in place while the outer tool remains active", () => {
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "action-started",
+      actionId: "execute-1",
+      name: "execute",
+      input: { source: "return await noesis.invoke('shell.run', {});" },
+    });
+    state = reduceTui(state, {
+      type: "action-started",
+      actionId: "execute-1:call:0",
+      parentActionId: "execute-1",
+      name: "shell.run",
+      input: { command: "pwd" },
+    });
+    state = reduceTui(state, {
+      type: "action-ended",
+      actionId: "execute-1:call:0",
+      output: { stdout: "/workspace" },
+      isError: false,
+    });
+
+    expect(state.timeline.map((entry) => (entry.kind === "action" ? entry.actionId : entry.role))).toEqual([
+      "execute-1",
+      "execute-1:call:0",
+    ]);
+    expect(state).toMatchObject({ execution: "tool", activeTool: "execute" });
+
+    state = reduceTui(state, {
+      type: "action-ended",
+      actionId: "execute-1",
+      output: { calls: 1 },
+      isError: false,
+    });
+    expect(state.execution).toBe("thinking");
+    expect(state.activeTool).toBeUndefined();
+  });
+
+  test("reconciles only the final assistant segment around tool actions", () => {
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "prompt-submitted",
+      text: "inspect",
+    });
+    state = reduceTui(state, { type: "stream-delta", text: "Checking now." });
+    state = reduceTui(state, {
+      type: "action-started",
+      actionId: "inspect-1",
+      name: "inspect",
+    });
+    state = reduceTui(state, {
+      type: "action-ended",
+      actionId: "inspect-1",
+      isError: false,
+    });
+    state = reduceTui(state, { type: "stream-delta", text: "Draft answer" });
+    state = reduceTui(state, { type: "stream-reconciled", text: "Final answer" });
+
+    expect(state.timeline).toEqual([
+      { kind: "message", role: "user", text: "inspect" },
+      { kind: "message", role: "assistant", text: "Checking now." },
+      {
+        kind: "action",
+        actionId: "inspect-1",
+        name: "inspect",
+        status: "completed",
+      },
+      { kind: "message", role: "assistant", text: "Final answer" },
+    ]);
+
+    let withoutPostToolDelta = reduceTui(initialTuiState("fake"), {
+      type: "stream-delta",
+      text: "Checking now.",
+    });
+    withoutPostToolDelta = reduceTui(withoutPostToolDelta, {
+      type: "action-started",
+      actionId: "inspect-2",
+      name: "inspect",
+    });
+    withoutPostToolDelta = reduceTui(withoutPostToolDelta, {
+      type: "action-ended",
+      actionId: "inspect-2",
+      isError: false,
+    });
+    withoutPostToolDelta = reduceTui(withoutPostToolDelta, {
+      type: "stream-reconciled",
+      text: "Authoritative final answer",
+    });
+    expect(withoutPostToolDelta.timeline).toEqual([
+      { kind: "message", role: "assistant", text: "Checking now." },
+      {
+        kind: "action",
+        actionId: "inspect-2",
+        name: "inspect",
+        status: "completed",
+      },
+      { kind: "message", role: "assistant", text: "Authoritative final answer" },
+    ]);
+  });
+
+  test("reconstructs a resumed trail as an ordered message timeline", () => {
+    const state = reduceTui(initialTuiState("fake"), {
+      type: "trail-selected",
+      trail: {
+        trailId: "trail-1",
+        title: "resumed",
+        status: "idle",
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        runtime: "pi",
+        turns: [
+          { input: "first", output: "one" },
+          { input: "second", output: "two" },
+        ],
+        capabilityVersions: {},
+      },
+    });
+
+    expect(state.timeline).toEqual([
+      { kind: "message", role: "user", text: "first" },
+      { kind: "message", role: "assistant", text: "one" },
+      { kind: "message", role: "user", text: "second" },
+      { kind: "message", role: "assistant", text: "two" },
+    ]);
+    expect(state.execution).toBe("idle");
+    expect(state.turnCount).toBe(2);
   });
 
   test("honors NO_COLOR and emits no styling when color is disabled", () => {

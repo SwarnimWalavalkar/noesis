@@ -68,6 +68,7 @@ export type CodeExecutionEvent =
       readonly executionId: string;
       readonly name: string;
       readonly callIndex: number;
+      readonly input: JsonValue;
     }
   | {
       readonly type: "tool-end";
@@ -75,6 +76,8 @@ export type CodeExecutionEvent =
       readonly name: string;
       readonly callIndex: number;
       readonly ok: boolean;
+      readonly result?: JsonValue;
+      readonly error?: string;
     }
   | {
       readonly type: "completed";
@@ -144,6 +147,17 @@ function sdkRequestPayload(message: Extract<ChildMessage, { readonly type: "sdk-
   }
   if (message.kind === "describe") return Object.freeze({ name: message.name });
   return Object.freeze({ name: message.name, input: message.input });
+}
+
+function sdkActionInput(message: Extract<ChildMessage, { readonly type: "sdk-call" }>): JsonValue {
+  if (message.kind === "search") {
+    return Object.freeze({
+      query: message.query,
+      ...(message.limit === undefined ? {} : { limit: message.limit }),
+    });
+  }
+  if (message.kind === "describe") return Object.freeze({ name: message.name });
+  return message.input;
 }
 
 function invocationValue(result: ToolInvocationResult): JsonValue {
@@ -338,7 +352,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               : message.kind === "describe"
                 ? "noesis.describe"
                 : message.name;
-          notify({ type: "tool-start", executionId, name, callIndex });
+          notify({ type: "tool-start", executionId, name, callIndex, input: sdkActionInput(message) });
           try {
             const value = toJsonValue(
               message.kind === "search"
@@ -362,7 +376,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               ok: true,
               value,
             });
-            notify({ type: "tool-end", executionId, name, callIndex, ok: true });
+            notify({ type: "tool-end", executionId, name, callIndex, ok: true, result: value });
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
             respond({
@@ -371,7 +385,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               ok: false,
               error: reason,
             });
-            notify({ type: "tool-end", executionId, name, callIndex, ok: false });
+            notify({ type: "tool-end", executionId, name, callIndex, ok: false, error: reason });
           }
         };
         child.on("message", (raw: unknown) => {

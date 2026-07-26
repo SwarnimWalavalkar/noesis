@@ -6,7 +6,15 @@ import {
   type Component,
   type MarkdownTheme,
 } from "@earendil-works/pi-tui";
-import type { NoesisTuiAction, NoesisTuiState, TuiContextUsage, TuiMessage } from "./state.ts";
+import type {
+  NoesisTuiAction,
+  NoesisTuiState,
+  TuiAgentAction,
+  TuiAgentActionEntry,
+  TuiContextUsage,
+  TuiMessage,
+  TuiTimelineEntry,
+} from "./state.ts";
 import { reduceTui } from "./state.ts";
 
 export type TuiWidthClass = "wide" | "normal" | "narrow";
@@ -384,17 +392,119 @@ export function renderMessageBlock(message: TuiMessage, width: number, colorEnab
 }
 
 export function renderTranscriptLines(state: NoesisTuiState, inner: number): string[] {
-  if (state.messages.length === 0)
+  if (state.timeline.length === 0)
     return [
       elideText(styled(state.colorEnabled, ANSI.dim, "A clear question is a good place to begin."), inner),
     ];
-  return state.messages.flatMap((message, index) => [
+  const actions = state.timeline.filter((entry): entry is TuiAgentActionEntry => entry.kind === "action");
+  return state.timeline.flatMap((entry, index) => [
     ...(index === 0 ? [] : [""]),
-    ...renderMessageBlock(message, inner, state.colorEnabled),
+    ...(entry.kind === "message"
+      ? renderMessageBlock(entry, inner, state.colorEnabled)
+      : renderAgentActionBlock(entry, actions, inner, state.agentActionsExpanded, state.colorEnabled)),
   ]);
 }
 
-interface RenderedMessageBlock {
+const ACTION_DETAIL_MAX_CHARACTERS = 24_000;
+const ACTION_COLLAPSED_LINES = 4;
+const ACTION_AUTO_COLLAPSE_AFTER_LINES = 12;
+
+function printableActionValue(value: unknown): string {
+  if (typeof value === "string") return safeTerminalText(value);
+  try {
+    const encoded = JSON.stringify(value, undefined, 2);
+    return safeTerminalText(encoded ?? String(value));
+  } catch {
+    return safeTerminalText(String(value));
+  }
+}
+
+function boundedActionValue(value: unknown): string {
+  const text = printableActionValue(value);
+  if (text.length <= ACTION_DETAIL_MAX_CHARACTERS) return text;
+  return `${text.slice(0, ACTION_DETAIL_MAX_CHARACTERS)}\n… action detail truncated`;
+}
+
+function actionDetailSection(label: string, value: unknown): string {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const source = Reflect.get(value, "source");
+    if (typeof source === "string") {
+      const metadata = Object.fromEntries(Object.entries(value).filter(([key]) => key !== "source"));
+      const hasMetadata = Object.keys(metadata).length > 0;
+      return [
+        `${label}.source`,
+        boundedActionValue(source),
+        ...(hasMetadata ? ["", `${label}.metadata`, boundedActionValue(metadata)] : []),
+      ].join("\n");
+    }
+  }
+  return `${label}\n${boundedActionValue(value)}`;
+}
+
+function actionDetailSource(action: TuiAgentAction): string {
+  return [
+    ...(action.input === undefined ? [] : [actionDetailSection("input", action.input)]),
+    ...(action.update === undefined ? [] : [actionDetailSection("progress", action.update)]),
+    ...(action.output === undefined ? [] : [actionDetailSection("result", action.output)]),
+  ].join("\n\n");
+}
+
+function actionDepth(action: TuiAgentAction, actions: readonly TuiAgentAction[]): number {
+  let depth = 0;
+  let parentId = action.parentActionId;
+  const visited = new Set<string>();
+  while (parentId && depth < 4 && !visited.has(parentId)) {
+    visited.add(parentId);
+    const parent = actions.find((candidate) => candidate.actionId === parentId);
+    if (!parent) break;
+    depth += 1;
+    parentId = parent.parentActionId;
+  }
+  return depth;
+}
+
+export function renderAgentActionBlock(
+  action: TuiAgentAction,
+  actions: readonly TuiAgentAction[],
+  width: number,
+  expanded: boolean,
+  colorEnabled = false,
+): string[] {
+  if (width <= 0) return [];
+  const depth = actionDepth(action, actions);
+  const indent = "  ".repeat(depth);
+  const status = action.status === "running" ? "●" : action.status === "failed" ? "×" : "✓";
+  const statusColor =
+    action.status === "running" ? ANSI.cyan : action.status === "failed" ? ANSI.red : ANSI.green;
+  const header = elideText(
+    `${indent}${styled(colorEnabled, `${ANSI.bold}${statusColor}`, status)} ${styled(
+      colorEnabled,
+      ANSI.bold,
+      action.name,
+    )}`,
+    width,
+  );
+  const detail = actionDetailSource(action);
+  if (!detail) return [header];
+  const rail = `${indent}${styled(colorEnabled, ANSI.dim, "│ ")} `;
+  const bodyWidth = Math.max(1, width - visibleWidth(rail));
+  const lines = detail.split("\n").flatMap((line) => wrapTextWithAnsi(line, bodyWidth));
+  const isLong = lines.length > ACTION_AUTO_COLLAPSE_AFTER_LINES;
+  const visible =
+    isLong && !expanded
+      ? [
+          ...lines.slice(0, ACTION_COLLAPSED_LINES),
+          styled(
+            colorEnabled,
+            ANSI.dim,
+            `… ${String(lines.length - ACTION_COLLAPSED_LINES)} more lines · Ctrl+O expand`,
+          ),
+        ]
+      : lines;
+  return [header, ...visible.map((line) => elideText(`${rail}${line}`, width))];
+}
+
+interface RenderedTimelineBlock {
   readonly lines: readonly string[];
 }
 
@@ -410,43 +520,71 @@ export interface TranscriptRenderer {
 }
 
 export function createTranscriptRenderer(): TranscriptRenderer {
-  const cache = new WeakMap<TuiMessage, { readonly key: string; readonly block: RenderedMessageBlock }>();
+  const cache = new WeakMap<
+    TuiTimelineEntry,
+    { readonly key: string; readonly block: RenderedTimelineBlock }
+  >();
   let parsedBlocks = 0;
   let cacheHits = 0;
   let candidateBlocks = 0;
-  const renderBlock = (message: TuiMessage, width: number, colorEnabled: boolean): RenderedMessageBlock => {
-    const key = `${String(width)}:${colorEnabled ? "color" : "plain"}:${message.role}:${message.text}`;
-    const cached = cache.get(message);
+  const renderBlock = (
+    entry: TuiTimelineEntry,
+    actions: readonly TuiAgentAction[],
+    width: number,
+    expanded: boolean,
+    colorEnabled: boolean,
+  ): RenderedTimelineBlock => {
+    const depth = entry.kind === "action" ? actionDepth(entry, actions) : 0;
+    const key = `${String(width)}:${colorEnabled ? "color" : "plain"}:${
+      entry.kind === "action" && expanded ? "expanded" : "collapsed"
+    }:${String(depth)}`;
+    const cached = cache.get(entry);
     if (cached?.key === key) {
       cacheHits += 1;
       return cached.block;
     }
     parsedBlocks += 1;
-    const block = { lines: renderMessageBlock(message, width, colorEnabled) };
-    cache.set(message, { key, block });
+    const block = {
+      lines:
+        entry.kind === "message"
+          ? renderMessageBlock(entry, width, colorEnabled)
+          : renderAgentActionBlock(entry, actions, width, expanded, colorEnabled),
+    };
+    cache.set(entry, { key, block });
     return block;
   };
   return {
     renderViewport(state, width, rows) {
       if (width <= 0 || rows <= 0) return [];
-      if (state.messages.length === 0)
+      if (state.timeline.length === 0)
         return [
           elideText(
             styled(state.colorEnabled, ANSI.dim, "A clear question is a good place to begin."),
             width,
           ),
         ];
-      // Every semantic block costs at least a label and one body row. Starting from this bounded
-      // tail is therefore sufficient to fill the viewport without parsing unrelated old history.
-      const candidateLimit = Math.max(1, Math.ceil(rows / 2) + 1);
-      const candidates = state.messages.slice(-candidateLimit);
+      // Select the smallest bounded tail whose minimum rendered height can fill the viewport.
+      // Messages cost at least two rows; actions cost at least one. This avoids parsing unrelated
+      // history while allowing mixed conversation and action blocks to flow chronologically.
+      let candidateStart = state.timeline.length;
+      let minimumRows = 0;
+      while (candidateStart > 0 && minimumRows < rows) {
+        candidateStart -= 1;
+        const entry = state.timeline[candidateStart];
+        minimumRows +=
+          (entry?.kind === "message" ? 2 : 1) + (candidateStart < state.timeline.length - 1 ? 1 : 0);
+      }
+      const candidates = state.timeline.slice(candidateStart);
       candidateBlocks += candidates.length;
-      const blocks = candidates.map((message) => renderBlock(message, width, state.colorEnabled));
-      const omittedCandidates = candidates.length < state.messages.length;
+      const actions = state.timeline.filter((entry): entry is TuiAgentActionEntry => entry.kind === "action");
+      const blocks = candidates.map((entry) =>
+        renderBlock(entry, actions, width, state.agentActionsExpanded, state.colorEnabled),
+      );
+      const omittedCandidates = candidateStart > 0;
       const flattened = blocks.flatMap((block, index) => [...(index === 0 ? [] : [""]), ...block.lines]);
       if (!omittedCandidates && flattened.length <= rows) return flattened;
 
-      const marker = elideText(styled(state.colorEnabled, ANSI.dim, "⋯ earlier messages"), width);
+      const marker = elideText(styled(state.colorEnabled, ANSI.dim, "⋯ earlier conversation"), width);
       if (rows === 1) return [marker];
       let remaining = rows - 1;
       const visible: string[] = [];
@@ -461,7 +599,8 @@ export function createTranscriptRenderer(): TranscriptRenderer {
         }
         const available = remaining - separatorCost;
         if (available <= 0) break;
-        // If the viewport begins inside a block, repeat its semantic owner before the body tail.
+        // If the viewport begins inside a message or action, repeat its semantic owner before the
+        // body tail so cropped output never loses who said or performed it.
         const header = lines[0];
         if (header) {
           const tail = available > 1 ? lines.slice(-(available - 1)) : [];
@@ -489,7 +628,12 @@ export function renderBottomChrome(state: NoesisTuiState, width: number, height 
     elideText(styled(state.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), safeWidth),
     renderStatusLine(state, safeWidth, height),
     ...(height >= 8
-      ? [elideText(styled(state.colorEnabled, ANSI.dim, "? help · /quit exit · Ctrl+C stop"), safeWidth)]
+      ? [
+          elideText(
+            styled(state.colorEnabled, ANSI.dim, "? help · Ctrl+O actions · /quit exit · Ctrl+C stop"),
+            safeWidth,
+          ),
+        ]
       : []),
   ];
 }
@@ -601,7 +745,12 @@ export function createHelpView(colorEnabled: boolean, height: () => number): Com
     invalidate() {},
     render(width) {
       if (height() < 8) return [];
-      return [elideText(styled(colorEnabled, ANSI.dim, "? help · /quit exit · Ctrl+C stop"), width)];
+      return [
+        elideText(
+          styled(colorEnabled, ANSI.dim, "? help · Ctrl+O actions · /quit exit · Ctrl+C stop"),
+          width,
+        ),
+      ];
     },
   };
 }

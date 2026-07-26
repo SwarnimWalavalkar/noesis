@@ -224,6 +224,37 @@ export interface AgentRuntimeRequest {
   readonly frozenTurnPlan?: FrozenTurnPlan;
 }
 
+export interface AgentActionStartEvent {
+  readonly type: "tool-start";
+  /** Adapter-neutral stable identity for the lifetime of this action. */
+  readonly actionId: string;
+  /** Present when this action was invoked from another action, such as an SDK call inside execute. */
+  readonly parentActionId?: string;
+  readonly name: string;
+  readonly input: JsonValue;
+}
+
+export interface AgentActionUpdateEvent {
+  readonly type: "tool-update";
+  readonly actionId: string;
+  readonly parentActionId?: string;
+  readonly name: string;
+  /** A bounded snapshot of current progress, not an unbounded output delta. */
+  readonly update: JsonValue;
+}
+
+export interface AgentActionEndEvent {
+  readonly type: "tool-end";
+  readonly actionId: string;
+  readonly parentActionId?: string;
+  readonly name: string;
+  readonly isError: boolean;
+  /** A bounded final result or error representation. */
+  readonly result: JsonValue;
+}
+
+export type AgentActionEvent = AgentActionStartEvent | AgentActionUpdateEvent | AgentActionEndEvent;
+
 export type AgentRuntimeEvent =
   | { readonly type: "delta"; readonly text: string }
   | {
@@ -233,8 +264,7 @@ export type AgentRuntimeEvent =
       readonly contextWindow: number;
     }
   | ({ readonly type: "usage" } & AgentContextUsage)
-  | { readonly type: "tool-start"; readonly name: string; readonly input: Readonly<Record<string, unknown>> }
-  | { readonly type: "tool-end"; readonly name: string; readonly isError: boolean }
+  | AgentActionEvent
   | { readonly type: "status"; readonly status: "started" | "completed" | "aborted" }
   | { readonly type: "status"; readonly status: "failed"; readonly error: string };
 

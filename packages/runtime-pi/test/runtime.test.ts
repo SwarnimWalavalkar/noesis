@@ -1,5 +1,10 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { type FrozenRevisionMaterial, type FrozenTurnPlan, frozenTurnPlanDigest } from "@noesis/agent-types";
+import {
+  type AgentRuntimeEvent,
+  type FrozenRevisionMaterial,
+  type FrozenTurnPlan,
+  frozenTurnPlanDigest,
+} from "@noesis/agent-types";
 import { type FileRevisionRef, sha256 } from "@noesis/domain";
 import type { SessionToolDefinition, SessionToolName } from "@noesis/intelligence";
 import { describe, expect, test, vi } from "vitest";
@@ -11,9 +16,11 @@ import {
   createPiSelfTools,
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
+  type PreparedPiCodeExecution,
   type PiCodeExecutionAdapter,
   type PiSkillLibrary,
   resolveFrozenSessionToolDefinitions,
+  toAgentActionPayload,
 } from "../src/index.ts";
 import {
   CONTROLLED_PI_MODEL,
@@ -207,6 +214,23 @@ describe("agent runtime factories", () => {
     expect(executions).toBe(0);
   });
 
+  test("bounds arbitrary action payloads without leaking runtime-specific values", () => {
+    const cyclic: { self?: unknown } = {};
+    cyclic.self = cyclic;
+    const payload = toAgentActionPayload({
+      cyclic,
+      missing: undefined,
+      failure: new Error("controlled"),
+    });
+    const serialized = JSON.stringify(payload);
+    const bounded = JSON.stringify(toAgentActionPayload({ large: "x".repeat(500_000) }));
+
+    expect(new TextEncoder().encode(bounded).byteLength).toBeLessThanOrEqual(256 * 1024);
+    expect(bounded).toContain("truncated");
+    expect(serialized).toContain("controlled");
+    expect(serialized).toContain("[circular]");
+  });
+
   test("propagates cancellation and bounds direct self-tool results", async () => {
     const plan = frozenPlan();
     const turn = new AbortController();
@@ -373,6 +397,114 @@ describe("agent runtime factories", () => {
 
     expect(result).toMatchObject({ outcome: "completed", text: `Grounded in ${marker}` });
     expect(controlled.provider.state.callCount).toBe(2);
+  });
+
+  test("emits stable top-level and nested action lifecycles with bounded payloads", async () => {
+    const controlled = createControlledPiModels({
+      respond: ({ context }) => {
+        if (!context.messages.some((message) => message.role === "toolResult"))
+          return fauxAssistantMessage(
+            fauxToolCall(
+              "execute",
+              { source: "return await tools.shell.run({ command: 'pwd' });" },
+              { id: "call-execute-visible" },
+            ),
+            { stopReason: "toolUse" },
+          );
+        return fauxAssistantMessage("Done.");
+      },
+    });
+    const plan = frozenPlan();
+    const codeExecution: PiCodeExecutionAdapter = Object.freeze({
+      prepare: async () => {
+        const execute: PreparedPiCodeExecution["execute"] = async (_source, _timeoutMs, _signal, emit) => {
+          emit({ type: "progress", value: { message: "Starting shell" } });
+          emit({
+            type: "tool-start",
+            name: "shell.run",
+            callIndex: 0,
+            input: { command: "pwd" },
+          });
+          emit({
+            type: "tool-end",
+            name: "shell.run",
+            callIndex: 0,
+            ok: true,
+            result: { stdout: "/workspace" },
+          });
+          return Object.freeze({
+            executionId: "execution-actions",
+            value: { cwd: "/workspace" },
+            calls: 1,
+            durationMs: 2,
+          });
+        };
+        return Object.freeze({
+          catalogId: "catalog-actions",
+          catalogDigest: sha256("catalog-actions"),
+          execute,
+          close: async () => undefined,
+        });
+      },
+      shutdown: async () => undefined,
+    });
+    const events: AgentRuntimeEvent[] = [];
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution });
+
+    const result = await runtime.run(
+      {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "Show the working directory.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      (event) => events.push(event),
+    );
+
+    expect(result).toMatchObject({ outcome: "completed", text: "Done." });
+    expect(events).toContainEqual({
+      type: "tool-start",
+      actionId: "call-execute-visible",
+      name: "execute",
+      input: { source: "return await tools.shell.run({ command: 'pwd' });" },
+    });
+    expect(events).toContainEqual({
+      type: "tool-start",
+      actionId: "call-execute-visible:call:0",
+      parentActionId: "call-execute-visible",
+      name: "shell.run",
+      input: { command: "pwd" },
+    });
+    expect(events).toContainEqual({
+      type: "tool-end",
+      actionId: "call-execute-visible:call:0",
+      parentActionId: "call-execute-visible",
+      name: "shell.run",
+      isError: false,
+      result: { stdout: "/workspace" },
+    });
+    expect(
+      events.some(
+        (event) =>
+          event.type === "tool-update" &&
+          event.actionId === "call-execute-visible" &&
+          JSON.stringify(event.update).includes('"kind":"activity"') &&
+          JSON.stringify(event.update).includes("Starting shell"),
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "tool-end" &&
+          event.actionId === "call-execute-visible" &&
+          !event.parentActionId &&
+          !event.isError,
+      ),
+    ).toBe(true);
   });
 
   test("rejects sabotaged immutable bytes and incomplete tool registration before prompting", async () => {

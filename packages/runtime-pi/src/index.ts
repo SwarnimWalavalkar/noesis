@@ -15,6 +15,7 @@ import {
   type PiCodeExecutionAdapter,
   type PreparedPiCodeExecution,
 } from "./execute-tool.ts";
+import { toAgentActionPayload } from "./action-payload.ts";
 import { frozenPlanMaterialUses } from "./frozen-session-tools.ts";
 import { createPiSelfTools, type PiSelfToolAdapter } from "./self-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
@@ -29,6 +30,7 @@ export type {
   AgentThinkingLevel,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
+export * from "./action-payload.ts";
 export * from "./auth.ts";
 export * from "./execute-tool.ts";
 export * from "./experiment-fixtures.ts";
@@ -107,6 +109,24 @@ export function createAssistantDeltaAggregator(): AssistantDeltaAggregator {
     },
     text: () => aggregate,
   };
+}
+
+export function nestedCodeActionId(parentActionId: string, callIndex: number): string {
+  return `${parentActionId}:call:${String(callIndex)}`;
+}
+
+function piToolUpdatePayload(value: unknown): unknown {
+  if (!value || typeof value !== "object" || !("details" in value)) return value;
+  const details = value.details;
+  if (
+    !details ||
+    typeof details !== "object" ||
+    !("kind" in details) ||
+    details.kind !== "activity" ||
+    !("event" in details)
+  )
+    return value;
+  return Object.freeze({ kind: "activity", activity: details.event });
 }
 
 export interface PiAgentRuntime extends NoesisAgentRuntime {
@@ -225,10 +245,26 @@ export function createPiAgentRuntime(
         ? createPiExecuteTool({
             prepared: preparedCode,
             signal: execution.controller.signal,
-            emit: (event) => {
-              if (event.type === "tool-start") emit({ type: "tool-start", name: event.name, input: {} });
+            emit: (event, parentActionId) => {
+              if (event.type === "tool-start")
+                emit({
+                  type: "tool-start",
+                  actionId: nestedCodeActionId(parentActionId, event.callIndex),
+                  parentActionId,
+                  name: event.name,
+                  input: toAgentActionPayload(event.input ?? {}),
+                });
               else if (event.type === "tool-end")
-                emit({ type: "tool-end", name: event.name, isError: !event.ok });
+                emit({
+                  type: "tool-end",
+                  actionId: nestedCodeActionId(parentActionId, event.callIndex),
+                  parentActionId,
+                  name: event.name,
+                  isError: !event.ok,
+                  result: toAgentActionPayload(
+                    event.result ?? (event.error ? { error: event.error } : { ok: event.ok }),
+                  ),
+                });
             },
           })
         : undefined;
@@ -278,11 +314,27 @@ export function createPiAgentRuntime(
           const delta = assistantDeltas.push(event.assistantMessageEvent.delta);
           if (delta) emit({ type: "delta", text: delta });
         } else if (event.type === "tool_execution_start") {
-          const input: Record<string, unknown> =
-            event.args && typeof event.args === "object" && !Array.isArray(event.args) ? event.args : {};
-          emit({ type: "tool-start", name: event.toolName, input });
+          emit({
+            type: "tool-start",
+            actionId: event.toolCallId,
+            name: event.toolName,
+            input: toAgentActionPayload(event.args),
+          });
+        } else if (event.type === "tool_execution_update") {
+          emit({
+            type: "tool-update",
+            actionId: event.toolCallId,
+            name: event.toolName,
+            update: toAgentActionPayload(piToolUpdatePayload(event.partialResult)),
+          });
         } else if (event.type === "tool_execution_end") {
-          emit({ type: "tool-end", name: event.toolName, isError: event.isError });
+          emit({
+            type: "tool-end",
+            actionId: event.toolCallId,
+            name: event.toolName,
+            isError: event.isError,
+            result: toAgentActionPayload(event.result),
+          });
         }
       });
       emit({ type: "status", status: "started" });

@@ -411,7 +411,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).not.toContain("think · learn · create · grow");
     expect(output).toContain("● IDLE");
     expect(output).toContain("› message");
-    expect(output).toContain("? help · /quit exit");
+    expect(output).toContain("? help · Ctrl+O actions");
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
 
@@ -465,7 +465,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).toContain("● STREAMING");
     expect(output).toContain("Controlled Pi completion for:");
     expect(resized).not.toContain("███╗   ██╗");
-    expect(screen).toContain("⋯ earlier messages");
+    expect(screen).toContain("⋯ earlier conversation");
     expect(screen).toContain("NOESIS");
     expect(screen).toContain("alpha");
     expect(screen).toContain("MIXED-END");

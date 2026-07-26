@@ -116,8 +116,9 @@ export async function startNoesisTui(
       text: `${pendingStream?.token === token ? pendingStream.text : ""}${text}`,
     };
     if (streamRenderTimer) return;
+    const currentEntry = view.state.timeline.at(-1);
     const activeCharacters =
-      view.state.messages.at(-1)?.role === "assistant" ? (view.state.messages.at(-1)?.text.length ?? 0) : 0;
+      currentEntry?.kind === "message" && currentEntry.role === "assistant" ? currentEntry.text.length : 0;
     streamRenderTimer = setTimeout(
       () => flushStreamDelta(token),
       streamingFrameDelay(activeCharacters, pendingStream.text.length),
@@ -191,6 +192,11 @@ export async function startNoesisTui(
     if (matchesKey(data, "ctrl+c")) {
       cancelPicker?.();
       void shutdown();
+      return { consume: true };
+    }
+    if (phase === "main" && matchesKey(data, "ctrl+o")) {
+      view.dispatch({ type: "agent-actions-expansion-toggled" });
+      tui.requestRender();
       return { consume: true };
     }
     if (phase === "main" && data === "\n" && editor.getText().trim() === "/quit") {
@@ -501,6 +507,7 @@ export async function startNoesisTui(
       if (!trailId) return;
       turnGeneration += 1;
       const token: ActiveTurnToken = { generation: turnGeneration, trailId };
+      const actionIdForView = (actionId: string): string => `${String(token.generation)}:${actionId}`;
       activeTurnToken = token;
       const turn = (async () => {
         try {
@@ -513,10 +520,28 @@ export async function startNoesisTui(
                 return;
               } else if (event.type === "tool-start") {
                 flushStreamDelta(token);
-                view.dispatch({ type: "tool-started", name: event.name });
+                view.dispatch({
+                  type: "action-started",
+                  actionId: actionIdForView(event.actionId),
+                  ...(event.parentActionId ? { parentActionId: actionIdForView(event.parentActionId) } : {}),
+                  name: event.name,
+                  input: event.input,
+                });
+              } else if (event.type === "tool-update") {
+                flushStreamDelta(token);
+                view.dispatch({
+                  type: "action-updated",
+                  actionId: actionIdForView(event.actionId),
+                  update: event.update,
+                });
               } else if (event.type === "tool-end") {
                 flushStreamDelta(token);
-                view.dispatch({ type: "tool-ended" });
+                view.dispatch({
+                  type: "action-ended",
+                  actionId: actionIdForView(event.actionId),
+                  output: event.result,
+                  isError: event.isError,
+                });
               } else if (event.type === "model") {
                 flushStreamDelta(token);
                 view.dispatch({

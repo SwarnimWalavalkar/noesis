@@ -8,7 +8,7 @@ import {
 } from "@noesis/tools";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { type CodeModeRuntime, createCodeModeRuntime } from "../src/index.ts";
+import { type CodeExecutionEvent, type CodeModeRuntime, createCodeModeRuntime } from "../src/index.ts";
 
 const runtimes = new Set<CodeModeRuntime>();
 
@@ -68,22 +68,41 @@ function runtime(
 
 describe("codemode runtime", () => {
   it("runs ordinary JavaScript and composes sequential and parallel SDK calls", async () => {
-    const result = await runtime().execute({
-      source: `
-        const first = await tools.math.double({ value: 4 });
-        const pair = await Promise.all([
-          noesis.invoke("math.double", { value: first.value }),
-          tools.math.double({ value: 3 })
-        ]);
-        return { first, pair };
-      `,
-      sessionId: "session-1",
-    });
+    const events: CodeExecutionEvent[] = [];
+    const result = await runtime().execute(
+      {
+        source: `
+          const first = await tools.math.double({ value: 4 });
+          const pair = await Promise.all([
+            noesis.invoke("math.double", { value: first.value }),
+            tools.math.double({ value: 3 })
+          ]);
+          return { first, pair };
+        `,
+        sessionId: "session-1",
+      },
+      (event) => events.push(event),
+    );
     expect(result.value).toEqual({
       first: { value: 8 },
       pair: [{ value: 16 }, { value: 6 }],
     });
     expect(result.calls).toBe(3);
+    expect(events).toContainEqual({
+      type: "tool-start",
+      executionId: result.executionId,
+      name: "math.double",
+      callIndex: 1,
+      input: { value: 4 },
+    });
+    expect(events).toContainEqual({
+      type: "tool-end",
+      executionId: result.executionId,
+      name: "math.double",
+      callIndex: 1,
+      ok: true,
+      result: { value: 8 },
+    });
   });
 
   it("supports Node imports and progress", async () => {

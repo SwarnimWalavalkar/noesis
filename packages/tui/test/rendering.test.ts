@@ -5,6 +5,7 @@ import {
   createSafeEditor,
   createTranscriptRenderer,
   initialTuiState,
+  renderAgentActionBlock,
   renderBottomChrome,
   renderMessageBlock,
   renderNoesisState,
@@ -154,6 +155,54 @@ describe("Noesis safe editor key path", () => {
 });
 
 describe("Noesis transcript rendering", () => {
+  test("shows short agent actions fully and auto-collapses long actions until expanded", () => {
+    const shortAction = {
+      actionId: "remember-1",
+      name: "remember",
+      status: "completed" as const,
+      input: { memory: "Prefer primary sources." },
+      output: { saved: true },
+    };
+    const longAction = {
+      actionId: "execute-1",
+      name: "execute",
+      status: "completed" as const,
+      input: { source: Array.from({ length: 20 }, (_, index) => `line ${String(index + 1)}`).join("\n") },
+      output: { calls: 3 },
+    };
+
+    const short = renderAgentActionBlock(shortAction, [shortAction], 72, false).join("\n");
+    const collapsed = renderAgentActionBlock(longAction, [longAction], 72, false).join("\n");
+    const expanded = renderAgentActionBlock(longAction, [longAction], 72, true).join("\n");
+
+    expect(short).toContain("Prefer primary sources.");
+    expect(short).not.toContain("Ctrl+O expand");
+    expect(collapsed).toContain("Ctrl+O expand");
+    expect(collapsed).not.toContain("line 20");
+    expect(expanded).toContain("line 20");
+    expect(expanded).not.toContain("Ctrl+O expand");
+  });
+
+  test("indents nested codemode SDK calls under execute", () => {
+    const parent = {
+      actionId: "execute-1",
+      name: "execute",
+      status: "running" as const,
+    };
+    const child = {
+      actionId: "execute-1:call:0",
+      parentActionId: parent.actionId,
+      name: "shell.run",
+      status: "running" as const,
+      input: { command: "pwd" },
+    };
+
+    const rendered = renderAgentActionBlock(child, [parent, child], 72, false).join("\n");
+
+    expect(rendered).toContain("  ● shell.run");
+    expect(rendered).toContain("command");
+  });
+
   test("wraps long prose to the actual display width", () => {
     const paragraph = Array.from({ length: 32 }, (_, index) => `word-${index}`).join(" ");
     const lines = renderMessageBlock({ role: "assistant", text: paragraph }, 36);
@@ -167,16 +216,46 @@ describe("Noesis transcript rendering", () => {
   test("separates successive semantic message blocks with one optical row", () => {
     const state = {
       ...initialTuiState("fake"),
-      messages: [
-        { role: "user" as const, text: "First question" },
-        { role: "assistant" as const, text: "First answer" },
-        { role: "system" as const, text: "Lifecycle note" },
+      timeline: [
+        { kind: "message" as const, role: "user" as const, text: "First question" },
+        { kind: "message" as const, role: "assistant" as const, text: "First answer" },
+        { kind: "message" as const, role: "system" as const, text: "Lifecycle note" },
       ],
     };
     const rendered = renderTranscriptLines(state, 60);
 
     expect(rendered.join("\n")).toContain("YOU\n│ First question\n\nNOESIS\n  First answer\n\nNOTE");
     expect(rendered.filter((line) => line === "")).toHaveLength(2);
+  });
+
+  test("flows actions chronologically between assistant response segments without a separate panel", () => {
+    const state = {
+      ...initialTuiState("fake"),
+      timeline: [
+        { kind: "message" as const, role: "user" as const, text: "Check the repository." },
+        { kind: "message" as const, role: "assistant" as const, text: "I’ll inspect it first." },
+        {
+          kind: "action" as const,
+          actionId: "shell-1",
+          name: "shell.run",
+          status: "completed" as const,
+          input: { command: "git status --short" },
+          output: { stdout: "clean" },
+        },
+        { kind: "message" as const, role: "assistant" as const, text: "The worktree is clean." },
+      ],
+    };
+
+    const rendered = renderTranscriptLines(state, 72).join("\n");
+    const user = rendered.indexOf("Check the repository.");
+    const preTool = rendered.indexOf("I’ll inspect it first.");
+    const action = rendered.indexOf("shell.run");
+    const postTool = rendered.indexOf("The worktree is clean.");
+
+    expect(user).toBeLessThan(preTool);
+    expect(preTool).toBeLessThan(action);
+    expect(action).toBeLessThan(postTool);
+    expect(rendered).not.toContain("ACTIONS");
   });
 
   test("uses pi-tui Markdown for structured content", () => {
@@ -298,8 +377,9 @@ describe("Noesis transcript rendering", () => {
         provider: "provider-with-a-long-name",
         model: "model-with-a-long-name",
       }),
-      messages: [
+      timeline: [
         {
+          kind: "message" as const,
           role: "assistant" as const,
           text: "A long answer with 🧠 Unicode and a table.\n\n| a | b |\n|---|---|\n| one | two |",
         },
@@ -327,10 +407,14 @@ describe("Noesis transcript rendering", () => {
         colorEnabled: true,
       }),
       error: "a deliberately long error with 界面 and 🧠 content",
-      messages: [
-        { role: "user" as const, text: "question with 界面" },
-        { role: "assistant" as const, text: "answer\n\n```ts\nconst x = 1;\n```\n$$x+y$$ after" },
-        { role: "system" as const, text: "a long ownership note" },
+      timeline: [
+        { kind: "message" as const, role: "user" as const, text: "question with 界面" },
+        {
+          kind: "message" as const,
+          role: "assistant" as const,
+          text: "answer\n\n```ts\nconst x = 1;\n```\n$$x+y$$ after",
+        },
+        { kind: "message" as const, role: "system" as const, text: "a long ownership note" },
       ],
     };
     const editor = createSafeEditor(new TUI(inertTerminal));
@@ -361,38 +445,76 @@ describe("Noesis transcript rendering", () => {
   ] as const)("repeats %s ownership when cropping into one long semantic block", (role) => {
     const state = {
       ...initialTuiState("fake"),
-      messages: [{ role, text: Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n") }],
+      timeline: [
+        {
+          kind: "message" as const,
+          role,
+          text: Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n"),
+        },
+      ],
     };
     const rendered = createTranscriptRenderer().renderViewport(state, 22, 5);
     const expectedLabel = role === "user" ? "YOU" : role === "assistant" ? "NOESIS" : "NOTE";
 
-    expect(rendered[0]).toContain("earlier messages");
+    expect(rendered[0]).toContain("earlier conversation");
     expect(rendered[1]).toBe(expectedLabel);
     expect(rendered.join("\n")).toContain("line 29");
     expect(rendered.every((line) => visibleWidth(line) <= 22)).toBe(true);
   });
 
+  test("repeats action ownership when cropping into long action details", () => {
+    const state = {
+      ...initialTuiState("fake"),
+      timeline: [
+        {
+          kind: "action" as const,
+          actionId: "execute-1",
+          name: "execute",
+          status: "completed" as const,
+          input: {
+            source: Array.from(
+              { length: 30 },
+              (_, index) => `const value${String(index)} = ${String(index)};`,
+            ).join("\n"),
+          },
+        },
+      ],
+      agentActionsExpanded: true,
+    };
+
+    const rendered = createTranscriptRenderer().renderViewport(state, 32, 5);
+
+    expect(rendered[0]).toContain("earlier conversation");
+    expect(rendered[1]).toContain("execute");
+    expect(rendered.join("\n")).toContain("value29");
+    expect(rendered.every((line) => visibleWidth(line) <= 32)).toBe(true);
+  });
+
   test("reuses completed semantic blocks and bounds history rendering work", () => {
     const renderer = createTranscriptRenderer();
     const completed = Array.from({ length: 100 }, (_, index) => ({
+      kind: "message" as const,
       role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
       text: `completed ${String(index)}`,
     }));
-    let state = { ...initialTuiState("fake"), messages: completed };
+    let state = { ...initialTuiState("fake"), timeline: completed };
     renderer.renderViewport(state, 70, 12);
     for (let index = 1; index <= 40; index += 1) {
       state = {
         ...state,
         execution: "streaming",
-        messages: [...completed, { role: "assistant", text: "chunk ".repeat(index * 20) }],
+        timeline: [
+          ...completed,
+          { kind: "message", role: "assistant", text: "chunk ".repeat(index * 20) } as const,
+        ],
       };
       renderer.renderViewport(state, 70, 12);
     }
     const metrics = renderer.metrics();
 
     expect(metrics.parsedBlocks).toBeLessThanOrEqual(47);
-    expect(metrics.cacheHits).toBeGreaterThanOrEqual(200);
-    expect(metrics.candidateBlocks).toBeLessThanOrEqual(287);
+    expect(metrics.cacheHits).toBeGreaterThanOrEqual(150);
+    expect(metrics.candidateBlocks).toBeLessThanOrEqual(205);
     expect(streamingFrameDelay(200_000, 20_000)).toBe(80);
   });
 

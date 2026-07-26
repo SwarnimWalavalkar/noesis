@@ -16,12 +16,19 @@ const MAX_SOURCE_BYTES = 128 * 1024;
 
 export type PiCodeExecutionEvent =
   | { readonly type: "progress"; readonly value: JsonValue }
-  | { readonly type: "tool-start"; readonly name: string; readonly callIndex: number }
+  | {
+      readonly type: "tool-start";
+      readonly name: string;
+      readonly callIndex: number;
+      readonly input?: JsonValue;
+    }
   | {
       readonly type: "tool-end";
       readonly name: string;
       readonly callIndex: number;
       readonly ok: boolean;
+      readonly result?: JsonValue;
+      readonly error?: string;
     };
 
 export interface PreparedPiCodeExecution {
@@ -50,15 +57,23 @@ export interface PiCodeExecutionAdapter {
   readonly shutdown: () => Promise<void>;
 }
 
+export type PiExecuteToolDetails =
+  | {
+      readonly kind: "activity";
+      readonly event: PiCodeExecutionEvent;
+    }
+  | {
+      readonly kind: "result";
+      readonly executionId: string;
+      readonly calls: number;
+    };
+
 export function createPiExecuteTool(input: {
   readonly prepared: PreparedPiCodeExecution;
   readonly signal: AbortSignal;
-  readonly emit: (event: PiCodeExecutionEvent) => void;
-}): AgentTool<typeof executeParametersJsonSchema, { readonly executionId: string; readonly calls: number }> {
-  const tool: AgentTool<
-    typeof executeParametersJsonSchema,
-    { readonly executionId: string; readonly calls: number }
-  > = {
+  readonly emit: (event: PiCodeExecutionEvent, parentToolCallId: string) => void;
+}): AgentTool<typeof executeParametersJsonSchema, PiExecuteToolDetails> {
+  const tool: AgentTool<typeof executeParametersJsonSchema, PiExecuteToolDetails> = {
     name: "execute",
     label: "Execute JavaScript",
     description: [
@@ -69,7 +84,7 @@ export function createPiExecuteTool(input: {
     ].join(" "),
     parameters: executeParametersJsonSchema,
     executionMode: "sequential",
-    execute: async (_toolCallId, rawInput, toolSignal) => {
+    execute: async (toolCallId, rawInput, toolSignal, onUpdate) => {
       const params = executeParameters.parse(rawInput);
       if (new TextEncoder().encode(params.source).byteLength > MAX_SOURCE_BYTES)
         throw new Error(`Codemode source exceeds ${String(MAX_SOURCE_BYTES)} UTF-8 bytes`);
@@ -86,11 +101,21 @@ export function createPiExecuteTool(input: {
           params.source,
           params.timeoutMs,
           controller.signal,
-          input.emit,
+          (event) => {
+            input.emit(event, toolCallId);
+            onUpdate?.({
+              content: [],
+              details: Object.freeze({ kind: "activity", event }),
+            });
+          },
         );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result.value) }],
-          details: { executionId: result.executionId, calls: result.calls },
+          details: {
+            kind: "result",
+            executionId: result.executionId,
+            calls: result.calls,
+          },
         };
       } finally {
         input.signal.removeEventListener("abort", abortTurn);
