@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveNoesisConfig } from "@noesis/config";
@@ -101,6 +101,65 @@ describe("production codemode journey", () => {
         truncated: false,
       },
     });
+    await runtime.shutdown();
+  });
+
+  test("the production permission snapshot admits shell execution from an arbitrary host directory", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-shell-permission-"));
+    const outsideCwd = await mkdtemp(join(tmpdir(), "noesis-shell-outside-cwd-"));
+    const physicalOutsideCwd = await realpath(outsideCwd);
+    roots.push(home, outsideCwd);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context }) => {
+        if (context.messages.at(-1)?.role === "toolResult") return "External directory inspected.";
+        return controlledToolCallResponse(
+          "execute",
+          {
+            source: [
+              `const result = await tools.shell.run({ command: "pwd", cwd: ${JSON.stringify(outsideCwd)} });`,
+              "return result;",
+            ].join("\n"),
+          },
+          "call-shell-outside-cwd",
+        );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({ text: '{"decision":"no_change","reason":"disabled in acceptance"}' }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Shell permission acceptance" });
+
+    const result = await runtime.runTurn(trail.trailId, "Inspect an external host directory.");
+
+    expect(result.output).toBe("External directory inspected.");
+    expect(await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId)).toMatchObject([
+      {
+        toolName: "shell.run",
+        status: "completed",
+        response: {
+          output: {
+            exitCode: 0,
+            stdout: `${physicalOutsideCwd}\n`,
+          },
+        },
+      },
+    ]);
     await runtime.shutdown();
   });
 
@@ -379,7 +438,7 @@ describe("production codemode journey", () => {
       },
     ]);
     expect(phases[0]?.executionId).toBe(firstPhaseExecutionId);
-    expect(phases[1]?.logicalExecutionId).not.toBe(failedPhaseLogicalExecutionId);
+    expect(phases[1]?.logicalExecutionId).toBe(failedPhaseLogicalExecutionId);
     await runtime.shutdown();
   });
 });

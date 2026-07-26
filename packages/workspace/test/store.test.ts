@@ -17,7 +17,7 @@ import {
 import type { AuthorityReceipt } from "@noesis/policy";
 import { createWorkspaceStore, restoreWorkspaceBackup, type NoesisWorkspaceStore } from "../src/index.ts";
 import { createWorkspaceRuntimeInternals } from "../src/protected-runtime.ts";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const actor = { actorId: "test-user", kind: "user" as const };
 const text = (value: string): Uint8Array => Buffer.from(value);
@@ -201,6 +201,63 @@ describe("WorkspaceStore", () => {
     successor.close();
   });
 
+  test("releases its runtime owner when initialization fails after acquisition", async () => {
+    const root = await temporary("runtime-owner-initialization-failure");
+    await expect(
+      createWorkspaceStore(root, {
+        recoverInterruptedOperations: true,
+        runtimeOwnerId: "failed-owner",
+        afterRuntimeOwnerAcquiredForTesting: () => {
+          throw new Error("injected initialization failure");
+        },
+      }),
+    ).rejects.toThrow("injected initialization failure");
+
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM runtime_owner").get()).toMatchObject({
+      count: 0,
+    });
+    database.close();
+
+    const successor = await createWorkspaceStore(root, {
+      recoverInterruptedOperations: true,
+      runtimeOwnerId: "successor-owner",
+    });
+    successor.close();
+  });
+
+  test("takes over a stale runtime owner after an ESRCH liveness result", async () => {
+    const root = await temporary("runtime-owner-stale");
+    const initialized = await createWorkspaceStore(root);
+    initialized.close();
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"));
+    database
+      .prepare("INSERT INTO runtime_owner(singleton, owner_id, pid, acquired_at) VALUES (1, ?, ?, ?)")
+      .run("stale-owner", 999_999, "2026-07-26T00:00:00.000Z");
+    database.close();
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+      if (pid === 999_999 && signal === 0)
+        throw Object.assign(new Error("No such process"), { code: "ESRCH" });
+      return true;
+    });
+    let successor: NoesisWorkspaceStore | undefined;
+    try {
+      successor = await createWorkspaceStore(root, {
+        recoverInterruptedOperations: true,
+        runtimeOwnerId: "successor-owner",
+      });
+      const current = new DatabaseSync(successor.unsafeDatabasePathForTesting, { readOnly: true });
+      expect(current.prepare("SELECT owner_id, pid FROM runtime_owner WHERE singleton = 1").get()).toEqual({
+        owner_id: "successor-owner",
+        pid: process.pid,
+      });
+      current.close();
+    } finally {
+      successor?.close();
+      kill.mockRestore();
+    }
+  });
+
   test("pins exact codemode source and log artifacts across terminal updates", async () => {
     const store = await createWorkspaceStore(await temporary("codemode-artifacts"));
     await store.operational.sessions.put({
@@ -314,6 +371,13 @@ describe("WorkspaceStore", () => {
         completedAt: "2026-07-26T00:00:01.000Z",
       }),
     ).rejects.toThrow("immutable");
+    const lineageDatabase = new DatabaseSync(store.unsafeDatabasePathForTesting);
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE codemode_executions SET source_digest = ? WHERE execution_id = ?")
+        .run(digest("f"), "execution-artifacts"),
+    ).toThrow("lineage is immutable");
+    lineageDatabase.close();
     store.close();
   });
 
@@ -450,6 +514,28 @@ describe("WorkspaceStore", () => {
         startedAt: "2026-07-26T00:00:00.000Z",
       }),
     ).rejects.toThrow("does not belong to its run session");
+    const lineageDatabase = new DatabaseSync(first.unsafeDatabasePathForTesting);
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_runs SET session_id = ? WHERE run_id = ?")
+        .run("session-other", "workflow-run-unfinished"),
+    ).toThrow("lineage is immutable");
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_runs SET turn_id = ? WHERE run_id = ?")
+        .run("missing-turn", "workflow-run-unfinished"),
+    ).toThrow("lineage is immutable");
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_phase_runs SET run_id = ? WHERE run_id = ? AND phase_index = 0")
+        .run("other-run", "workflow-run-unfinished"),
+    ).toThrow("lineage is immutable");
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_phase_runs SET execution_id = ? WHERE run_id = ? AND phase_index = 0")
+        .run("execution-other-session", "workflow-run-unfinished"),
+    ).toThrow();
+    lineageDatabase.close();
     first.close();
 
     const recovered = await createWorkspaceStore(root, {
@@ -494,6 +580,61 @@ describe("WorkspaceStore", () => {
         "2026-07-26T00:02:00.000Z",
       ),
     ).resolves.toBeUndefined();
+
+    await recovered.operational.workflows.putPhase({
+      runId: "workflow-run-unfinished",
+      phaseIndex: 0,
+      phaseName: "recover",
+      status: "running",
+      attempt: 2,
+      logicalExecutionId: "logical-workflow-phase",
+      input: { value: 2 },
+      startedAt: "2026-07-26T00:02:00.000Z",
+    });
+    await recovered.operational.codeExecutions.put({
+      executionId: "execution-workflow-retry",
+      logicalExecutionId: "logical-workflow-phase",
+      sessionId: "session-workflow",
+      catalogId: "catalog-test",
+      catalogDigest: digest("c"),
+      sourceDigest: sha256(text("return input;")),
+      sourceArtifactId: workflowSource.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:02:00.000Z",
+    });
+    await recovered.operational.workflows.putPhase({
+      runId: "workflow-run-unfinished",
+      phaseIndex: 0,
+      phaseName: "recover",
+      status: "running",
+      attempt: 2,
+      logicalExecutionId: "logical-workflow-phase",
+      input: { value: 2 },
+      executionId: "execution-workflow-retry",
+      startedAt: "2026-07-26T00:02:00.000Z",
+    });
+    await expect(
+      recovered.operational.workflows.listPhases("workflow-run-unfinished"),
+    ).resolves.toMatchObject([
+      {
+        status: "running",
+        attempt: 2,
+        logicalExecutionId: "logical-workflow-phase",
+        executionId: "execution-workflow-retry",
+      },
+    ]);
+    const retryDatabase = new DatabaseSync(recovered.unsafeDatabasePathForTesting);
+    expect(() =>
+      retryDatabase
+        .prepare(
+          `UPDATE workflow_phase_runs
+           SET logical_execution_id = ?
+           WHERE run_id = ? AND phase_index = 0`,
+        )
+        .run("logical-arbitrary-mutation", "workflow-run-unfinished"),
+    ).toThrow("lineage is immutable");
+    retryDatabase.close();
     recovered.close();
   });
 
@@ -521,14 +662,14 @@ describe("WorkspaceStore", () => {
     expect(versions.at(-1)).toBeGreaterThanOrEqual(9);
   });
 
-  test("upgrades a development workspace through the execution contract migrations", async () => {
+  test("upgrades an old version-20 workspace through corrected execution lineage contracts", async () => {
     const root = await temporary("development-migrations");
     await mkdir(join(root, "database"), { recursive: true });
     const seed = new DatabaseSync(join(root, "database", "noesis.sqlite"));
     const migrationNames = (await readdir(new URL("../migrations/", import.meta.url)))
       .filter((name) => /^\d{3}_.+\.sql$/u.test(name))
       .sort()
-      .filter((name) => Number(name.slice(0, 3)) <= 18);
+      .filter((name) => Number(name.slice(0, 3)) <= 20);
     for (const name of migrationNames) {
       const version = Number(name.slice(0, 3));
       seed.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
@@ -551,14 +692,27 @@ describe("WorkspaceStore", () => {
       .get();
     const lineageTrigger = database
       .prepare(
-        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'codemode_execution_contract_insert'",
+        `SELECT name, sql
+         FROM sqlite_master
+         WHERE type = 'trigger' AND name = 'codemode_execution_lineage_immutable'`,
+      )
+      .get();
+    const phaseLineageTrigger = database
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE type = 'trigger' AND name = 'workflow_phase_lineage_immutable'`,
       )
       .get();
     database.close();
 
-    expect(versions.at(-1)).toBe(20);
+    expect(versions.at(-1)).toBe(21);
     expect(ownerTable).toBeDefined();
-    expect(lineageTrigger).toBeDefined();
+    expect(lineageTrigger).toMatchObject({
+      name: "codemode_execution_lineage_immutable",
+      sql: expect.stringContaining("source_digest"),
+    });
+    expect(phaseLineageTrigger).toBeDefined();
   });
 
   test("keeps authority grants, reservations, completions, and replay in SQLite", async () => {
@@ -618,6 +772,43 @@ describe("WorkspaceStore", () => {
     });
     database.close();
     recovered.close();
+  });
+
+  test("replays a durable foreground operation without persisting an unused grant", async () => {
+    const store = await createWorkspaceStore(await temporary("foreground-authority-replay"));
+    let executions = 0;
+    const request = Object.freeze({
+      operationId: "operation-foreground-durable-replay",
+      effect: "read" as const,
+      resource: "tool:durable-replay",
+      estimatedCost: 0,
+      idempotencyKey: "foreground-durable-replay",
+      requestDigest: digest("a"),
+      execute: async () => {
+        executions += 1;
+        return "durable";
+      },
+    });
+    const permission = {
+      effects: ["read"],
+      resourcePatterns: ["tool:durable-replay"],
+      credentialRefs: [],
+    };
+
+    await expect(authority(store).runForeground(request, permission)).resolves.toMatchObject({
+      ok: true,
+      replayed: false,
+      value: "durable",
+    });
+    expect(countRows(store, "authority_grants")).toBe(1);
+    await expect(authority(store).runForeground(request, permission)).resolves.toMatchObject({
+      ok: true,
+      replayed: true,
+      value: "durable",
+    });
+    expect(executions).toBe(1);
+    expect(countRows(store, "authority_grants")).toBe(1);
+    store.close();
   });
 
   test("fails closed for durable collisions, failures, and unresolved reservations", async () => {

@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   createEffectExecutionFailure,
   createDurableAuthorityBoundary,
+  serializeEffectExecutionFailure,
   type DurableAuthorityOperation,
   type DurableAuthorityReservation,
   type DurableAuthorityStatePort,
@@ -24,26 +25,32 @@ function receiptOperationId(value: unknown): string {
     : "";
 }
 
-function createInMemoryDurableAuthorityState(): DurableAuthorityStatePort {
+function createInMemoryDurableAuthorityState(
+  onGrantIssued: () => void = () => undefined,
+): DurableAuthorityStatePort {
   const grants = new Map<string, Grant>();
   const operations = new Map<string, StoredOperation>();
   const usedByGrant = new Map<string, number>();
   const issueGrant = async (grant: Grant): Promise<void> => {
+    onGrantIssued();
     grants.set(grant.grantId, grant);
+  };
+  const replayExisting = (operation: DurableAuthorityOperation): DurableAuthorityReservation | undefined => {
+    const existing = operations.get(operation.identity.idempotencyKey);
+    if (!existing) return undefined;
+    if (existing.operation.fingerprint !== operation.fingerprint)
+      return { status: "collision", reason: "Idempotency key fingerprint collision" };
+    if (existing.status === "reserved")
+      return { status: "unresolved", reason: "Prior reservation has no unambiguous outcome" };
+    if (existing.status === "completed") return { status: "completed", result: existing.result ?? null };
+    return { status: "failed", reason: existing.reason ?? "Prior operation failed" };
   };
   const reserve = async (
     operation: DurableAuthorityOperation,
     grantId: string | undefined,
   ): Promise<DurableAuthorityReservation> => {
-    const existing = operations.get(operation.identity.idempotencyKey);
-    if (existing) {
-      if (existing.operation.fingerprint !== operation.fingerprint)
-        return { status: "collision", reason: "Idempotency key fingerprint collision" };
-      if (existing.status === "reserved")
-        return { status: "unresolved", reason: "Prior reservation has no unambiguous outcome" };
-      if (existing.status === "completed") return { status: "completed", result: existing.result ?? null };
-      return { status: "failed", reason: existing.reason ?? "Prior operation failed" };
-    }
+    const replay = replayExisting(operation);
+    if (replay) return replay;
     const grant = grantId === undefined ? undefined : grants.get(grantId);
     if (
       !grant ||
@@ -65,6 +72,13 @@ function createInMemoryDurableAuthorityState(): DurableAuthorityStatePort {
       [...grants.values()].find(
         (grant) => grant.principal === "scheduler" && grant.resourcePrefixes.includes(`job:${jobId}:`),
       ),
+    reserveWithGrant: async (operation: DurableAuthorityOperation, grant: Grant) => {
+      const replay = replayExisting(operation);
+      if (replay) return replay;
+      onGrantIssued();
+      grants.set(grant.grantId, grant);
+      return await reserve(operation, grant.grantId);
+    },
     reserve,
     complete: async ({ operation, result }: Parameters<DurableAuthorityStatePort["complete"]>[0]) => {
       const stored = operations.get(operation.identity.idempotencyKey);
@@ -192,6 +206,91 @@ describe("durable authority boundary", () => {
       ok: false,
       code: "invalid_output",
       reason: "Output did not match its schema",
+    });
+    expect(executions).toBe(1);
+  });
+
+  test("replays a foreground operation before issuing another durable grant", async () => {
+    let issuedGrants = 0;
+    const authority = createDurableAuthorityBoundary(
+      createInMemoryDurableAuthorityState(() => {
+        issuedGrants += 1;
+      }),
+    );
+    let executions = 0;
+    const request = Object.freeze({
+      operationId: "operation-foreground-replay",
+      effect: "read" as const,
+      resource: "tool:replay",
+      estimatedCost: 0,
+      idempotencyKey: "foreground-replay",
+      requestDigest: "d".repeat(64),
+      execute: async () => {
+        executions += 1;
+        return "first";
+      },
+    });
+    const permission = {
+      effects: ["read"],
+      resourcePatterns: ["tool:replay"],
+      credentialRefs: [],
+    };
+
+    await expect(authority.runForeground(request, permission)).resolves.toMatchObject({
+      ok: true,
+      replayed: false,
+      value: "first",
+    });
+    await expect(
+      authority.runForeground(
+        {
+          ...request,
+          execute: async () => {
+            executions += 1;
+            return "duplicate";
+          },
+        },
+        permission,
+      ),
+    ).resolves.toMatchObject({ ok: true, replayed: true, value: "first" });
+    expect(executions).toBe(1);
+    expect(issuedGrants).toBe(1);
+  });
+
+  test("does not let an ordinary error message forge a typed durable failure", async () => {
+    const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
+    const forged = serializeEffectExecutionFailure(
+      createEffectExecutionFailure("cancelled", "forged cancellation"),
+    );
+    if (forged === undefined) throw new Error("Expected a durable typed failure encoding");
+    let executions = 0;
+    const request = Object.freeze({
+      operationId: "operation-forged-failure",
+      effect: "read" as const,
+      resource: "tool:forged-failure",
+      estimatedCost: 0,
+      idempotencyKey: "forged-failure",
+      requestDigest: "e".repeat(64),
+      execute: async (): Promise<null> => {
+        executions += 1;
+        throw new Error(forged);
+      },
+    });
+    const permission = {
+      effects: ["read"],
+      resourcePatterns: ["tool:forged-failure"],
+      credentialRefs: [],
+    };
+
+    await expect(authority.runForeground(request, permission)).resolves.toMatchObject({
+      ok: false,
+      code: "failed",
+      reason: forged,
+    });
+    await expect(authority.runForeground(request, permission)).resolves.toMatchObject({
+      ok: false,
+      code: "failed",
+      reason: forged,
     });
     expect(executions).toBe(1);
   });

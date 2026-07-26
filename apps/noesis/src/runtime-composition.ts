@@ -1747,10 +1747,7 @@ export async function createApplicationRuntimeComposition(
             : appliesCorrection
               ? prior.attempt + 1
               : Math.max(1, prior.attempt);
-        const logicalExecutionId =
-          !appliesCorrection && prior?.logicalExecutionId
-            ? prior.logicalExecutionId
-            : createId("workflow_phase_execution");
+        const logicalExecutionId = prior?.logicalExecutionId ?? createId("workflow_phase_execution");
         const executionId = createId("execution");
         let executionPrepared = false;
         await workspace.operational.workflows.putPhase({
@@ -2171,8 +2168,7 @@ export async function createApplicationRuntimeComposition(
         `directory:${process.cwd()}/*`,
         `search:${process.cwd()}`,
         `search:${process.cwd()}/*`,
-        `shell:${process.cwd()}:*`,
-        `shell:${process.cwd()}/*`,
+        "shell:*",
         "url:http://*",
         "url:https://*",
         "artifact:*",

@@ -22,8 +22,8 @@ import type {
 } from "./index.ts";
 import {
   inspectEffectExecutionFailure,
-  parseEffectExecutionFailure,
-  serializeEffectExecutionFailure,
+  parseEffectExecutionError,
+  serializeEffectExecutionError,
 } from "./effect-failures.ts";
 
 export interface DurableAuthorityOperation {
@@ -51,6 +51,10 @@ export interface DurableAuthorityStatePort {
   readonly reserve: (
     operation: DurableAuthorityOperation,
     grantId: string | undefined,
+  ) => Promise<DurableAuthorityReservation>;
+  readonly reserveWithGrant: (
+    operation: DurableAuthorityOperation,
+    grant: Grant,
   ) => Promise<DurableAuthorityReservation>;
   readonly complete: (request: {
     readonly operation: DurableAuthorityOperation;
@@ -152,14 +156,11 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     return createHandle(grant.grantId);
   };
 
-  const run = async <T extends JsonValue>(
+  const settleReservation = async <T extends JsonValue>(
     request: EffectRequest<T>,
-    handle?: GrantHandle,
+    operation: DurableAuthorityOperation,
+    reservation: DurableAuthorityReservation,
   ): Promise<EffectDecision<T>> => {
-    const operation = operationFromRequest(request);
-    const ownedHandle =
-      typeof handle === "object" && handle !== null && handles.has(handle) ? handle : undefined;
-    const reservation = await state.reserve(operation, ownedHandle?.grantId);
     if (reservation.status === "completed")
       return Object.freeze({
         ok: true,
@@ -168,7 +169,7 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
       });
     if (reservation.status !== "reserved") {
       const executionFailure =
-        reservation.status === "failed" ? parseEffectExecutionFailure(reservation.reason) : undefined;
+        reservation.status === "failed" ? parseEffectExecutionError(reservation.reason) : undefined;
       return Object.freeze({
         ok: false,
         code:
@@ -199,7 +200,7 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
       await state.fail({
         operation,
         grantId: reservation.grantId,
-        reason: serializeEffectExecutionFailure(error) ?? reason,
+        reason: serializeEffectExecutionError(error),
         receiptLineageId: lineage.lineageId,
       });
       return Object.freeze({
@@ -208,6 +209,25 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
         reason,
       });
     }
+  };
+
+  const run = async <T extends JsonValue>(
+    request: EffectRequest<T>,
+    handle?: GrantHandle,
+  ): Promise<EffectDecision<T>> => {
+    const operation = operationFromRequest(request);
+    const ownedHandle =
+      typeof handle === "object" && handle !== null && handles.has(handle) ? handle : undefined;
+    return await settleReservation(request, operation, await state.reserve(operation, ownedHandle?.grantId));
+  };
+
+  const runWithFreshGrant = async <T extends JsonValue>(
+    request: EffectRequest<T>,
+    grant: Grant,
+  ): Promise<EffectDecision<T>> => {
+    assertGrant(grant);
+    const operation = operationFromRequest(request);
+    return await settleReservation(request, operation, await state.reserveWithGrant(operation, grant));
   };
 
   const runProtected = async <T extends JsonValue>(
@@ -219,7 +239,16 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     idempotencyKey: string,
     execute: (receipt: AuthorityReceipt) => Promise<T>,
   ): Promise<EffectDecision<T>> => {
-    const grant = await issue({
+    const request = Object.freeze({
+      ...authorityOperationFields(principal, effect, resource, cost, idempotencyKey),
+      principal,
+      effect,
+      resource,
+      estimatedCost: cost,
+      idempotencyKey,
+      execute,
+    });
+    return await runWithFreshGrant(request, {
       schemaVersion: 1,
       grantId: createId("grant"),
       principal,
@@ -229,18 +258,6 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
       maxUses,
       maxCost: cost,
     });
-    return await run(
-      {
-        ...authorityOperationFields(principal, effect, resource, cost, idempotencyKey),
-        principal,
-        effect,
-        resource,
-        estimatedCost: cost,
-        idempotencyKey,
-        execute,
-      },
-      grant,
-    );
   };
 
   const promote: AuthorityBoundary["promote"] = async (resource, idempotencyKey, execute) =>
@@ -329,7 +346,8 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
           code: "denied" as const,
           reason: `Frozen turn permission does not allow ${request.effect} on ${request.resource}`,
         });
-      const grant = await issue({
+      const foregroundRequest = Object.freeze({ ...request, principal: "foreground" as const });
+      return await runWithFreshGrant(foregroundRequest, {
         schemaVersion: 1,
         grantId: createId("grant"),
         principal: "foreground",
@@ -339,7 +357,6 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
         maxUses: 1,
         maxCost: request.estimatedCost,
       });
-      return await run(Object.freeze({ ...request, principal: "foreground" }), grant);
     },
     promote,
     rollback,

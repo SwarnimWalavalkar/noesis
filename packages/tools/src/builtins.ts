@@ -1,9 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, matchesGlob, relative, resolve } from "node:path";
-import { createInterface } from "node:readline";
 import { type JsonValue, sha256 } from "@noesis/domain";
 import { createEffectExecutionFailure } from "@noesis/policy";
 import { z } from "zod";
@@ -13,6 +12,24 @@ import { MAX_TOOL_TEXT_BYTES } from "./limits.ts";
 const textBound = z.string().max(MAX_TOOL_TEXT_BYTES);
 const pathSchema = z.string().trim().min(1).max(4_096);
 const PROCESS_TERMINATION_GRACE_MS = 500;
+const FALLBACK_SEARCH_MAX_FILES = 10_000;
+const FALLBACK_SEARCH_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
+const FALLBACK_SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
+const FALLBACK_SEARCH_MAX_LINE_BYTES = 4 * 1024;
+const FALLBACK_SEARCH_MAX_RETAINED_BYTES = 64 * 1024;
+const FALLBACK_SEARCH_IGNORED_DIRECTORIES = new Set([
+  ".git",
+  ".hg",
+  ".svn",
+  ".next",
+  ".turbo",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "target",
+  "vendor",
+]);
 
 function resolvedPath(cwd: string, path: string): string {
   return resolve(cwd, path);
@@ -52,26 +69,49 @@ async function runProcess(input: {
     let settled = false;
     let terminationReason: "cancelled" | "timeout" | undefined;
     let forceKillTimer: NodeJS.Timeout | undefined;
-    const append = (kind: "stdout" | "stderr", chunk: Buffer | string): void => {
-      const encoded = Buffer.from(String(chunk), "utf8");
+    const stdoutDecoder = new TextDecoder();
+    const stderrDecoder = new TextDecoder();
+    const appendDecoded = (kind: "stdout" | "stderr", decoded: string): void => {
+      if (!decoded) return;
       const remaining = Math.max(0, maximum - bytes);
-      const accepted = encoded.subarray(0, remaining).toString("utf8");
+      const accepted = truncateUtf8(decoded, remaining);
       if (kind === "stdout") stdout += accepted;
       else stderr += accepted;
       bytes += Buffer.byteLength(accepted, "utf8");
-      if (encoded.byteLength > remaining) truncated = true;
+      if (accepted.length < decoded.length) truncated = true;
+    };
+    const append = (kind: "stdout" | "stderr", chunk: Buffer | string): void => {
+      const encoded = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+      if (bytes >= maximum) {
+        if (encoded.byteLength > 0) truncated = true;
+        return;
+      }
+      const decoded =
+        kind === "stdout"
+          ? stdoutDecoder.decode(encoded, { stream: true })
+          : stderrDecoder.decode(encoded, { stream: true });
+      appendDecoded(kind, decoded);
+    };
+    const flushOutput = (): void => {
+      appendDecoded("stdout", stdoutDecoder.decode());
+      appendDecoded("stderr", stderrDecoder.decode());
     };
     const killTree = (signal: NodeJS.Signals): void => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
       try {
-        if (detached && child.pid !== undefined) process.kill(-child.pid, signal);
-        else child.kill(signal);
+        if (detached && child.pid !== undefined) {
+          // The process group can outlive its leader, so target it even after the direct child exits.
+          process.kill(-child.pid, signal);
+        } else if (child.exitCode === null && child.signalCode === null) {
+          child.kill(signal);
+        }
       } catch {
         // The process may have exited between the state check and signal delivery.
-        try {
-          child.kill(signal);
-        } catch {
-          // A second ESRCH-style race means the desired terminal state is already reached.
+        if (child.exitCode === null && child.signalCode === null) {
+          try {
+            child.kill(signal);
+          } catch {
+            // A second ESRCH-style race means the desired terminal state is already reached.
+          }
         }
       }
     };
@@ -103,7 +143,9 @@ async function runProcess(input: {
     child.once("close", (exitCode, signal) => {
       if (settled) return;
       settled = true;
+      if (terminationReason) killTree("SIGKILL");
       cleanup();
+      flushOutput();
       if (terminationReason === "cancelled" || input.signal.aborted) {
         reject(createEffectExecutionFailure("cancelled", "Process was cancelled"));
         return;
@@ -132,8 +174,11 @@ async function readBoundedFile(
   const decoder = new TextDecoder();
   const chunks: string[] = [];
   let selectedBytes = 0;
-  let selectedLines = 0;
+  let selectedLinesStarted = 0;
   let lineNumber = 1;
+  let totalLines = 0;
+  let currentLineHasContent = false;
+  let currentOutputLineStarted = false;
   let outputTruncated = false;
   const selected = (line: number): boolean => line >= startLine && (endLine === undefined || line <= endLine);
   const append = (value: string): void => {
@@ -141,47 +186,70 @@ async function readBoundedFile(
       if (value) outputTruncated = true;
       return;
     }
-    const bytes = Buffer.from(value, "utf8");
     const remaining = MAX_TOOL_TEXT_BYTES - selectedBytes;
-    const accepted = bytes.subarray(0, remaining).toString("utf8");
+    const accepted = truncateUtf8(value, remaining);
     if (accepted) chunks.push(accepted);
     selectedBytes += Buffer.byteLength(accepted, "utf8");
-    if (bytes.byteLength > remaining) outputTruncated = true;
+    if (accepted.length < value.length) outputTruncated = true;
   };
-  const beginSelectedLine = (): void => {
-    if (!selected(lineNumber)) return;
-    if (selectedLines > 0) append("\n");
-    selectedLines += 1;
+  const startOutputLine = (): void => {
+    if (currentOutputLineStarted || !selected(lineNumber)) return;
+    if (selectedLinesStarted > 0) append("\n");
+    selectedLinesStarted += 1;
+    currentOutputLineStarted = true;
   };
   const consumeText = (text: string): void => {
     let offset = 0;
     while (offset < text.length) {
       const newline = text.indexOf("\n", offset);
       const boundary = newline === -1 ? text.length : newline;
-      if (selected(lineNumber)) append(text.slice(offset, boundary));
+      const segment = text.slice(offset, boundary);
+      if (segment) {
+        currentLineHasContent = true;
+        if (selected(lineNumber)) {
+          startOutputLine();
+          append(segment);
+        }
+      }
       if (newline === -1) return;
+      startOutputLine();
+      totalLines = lineNumber;
       lineNumber += 1;
-      beginSelectedLine();
+      currentLineHasContent = false;
+      currentOutputLineStarted = false;
       offset = newline + 1;
     }
   };
 
-  beginSelectedLine();
   for await (const chunk of createReadStream(path)) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     hash.update(bytes);
     consumeText(decoder.decode(bytes, { stream: true }));
   }
   consumeText(decoder.decode(new Uint8Array()));
-  const totalLines = lineNumber;
-  const requestedEnd = Math.max(startLine - 1, Math.min(endLine ?? totalLines, totalLines));
+  if (currentLineHasContent) totalLines = lineNumber;
+  const requestedEnd = Math.min(totalLines, endLine ?? totalLines);
   return Object.freeze({
     content: chunks.join(""),
     endLine: requestedEnd,
     totalLines,
     contentDigest: hash.digest("hex"),
-    truncated: outputTruncated || requestedEnd < totalLines,
+    truncated: outputTruncated || (endLine !== undefined && endLine < totalLines),
   });
+}
+
+function truncateUtf8(value: string, maximumBytes: number): string {
+  if (maximumBytes <= 0) return "";
+  if (Buffer.byteLength(value, "utf8") <= maximumBytes) return value;
+  let accepted = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maximumBytes) break;
+    accepted += character;
+    bytes += characterBytes;
+  }
+  return accepted;
 }
 
 async function readBoundedResponseBody(
@@ -231,8 +299,10 @@ async function searchWithoutRipgrep(input: {
   readonly truncated: boolean;
 }> {
   const root = resolvedPath(input.cwd, input.path);
-  const expression = new RegExp(input.query, "u");
   const matches: { path: string; line: number; text: string }[] = [];
+  let visitedFiles = 0;
+  let scannedBytes = 0;
+  let retainedBytes = 0;
   let truncated = false;
 
   async function* files(path: string): AsyncGenerator<string> {
@@ -246,32 +316,120 @@ async function searchWithoutRipgrep(input: {
     const entries = await readdir(path, { withFileTypes: true });
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
       const absolute = resolve(path, entry.name);
-      if (entry.isDirectory()) yield* files(absolute);
+      if (
+        entry.isDirectory() &&
+        !entry.name.startsWith(".") &&
+        !FALLBACK_SEARCH_IGNORED_DIRECTORIES.has(entry.name)
+      )
+        yield* files(absolute);
       else if (entry.isFile()) yield absolute;
     }
   }
 
   for await (const file of files(root)) {
+    if (visitedFiles >= FALLBACK_SEARCH_MAX_FILES || scannedBytes >= FALLBACK_SEARCH_MAX_TOTAL_BYTES) {
+      truncated = true;
+      break;
+    }
+    visitedFiles += 1;
     const relativePath = relative(input.cwd, file);
     if (input.glob && !matchesGlob(relativePath, input.glob)) continue;
-    const stream = createReadStream(file, { encoding: "utf8" });
-    const lines = createInterface({ input: stream, crlfDelay: Number.POSITIVE_INFINITY });
-    let lineNumber = 0;
+    const stream = createReadStream(file);
+    const decoder = new TextDecoder();
+    let fileBytes = 0;
+    let lineNumber = 1;
+    let linePreview = "";
+    let lineMatched = false;
+    let lineTruncated = false;
+    let matchSuffix = "";
+    let binary = false;
+    let stopped = false;
+    const fileMatches: { path: string; line: number; text: string }[] = [];
+    let fileRetainedBytes = 0;
+    const retainMatch = (): void => {
+      if (!lineMatched || binary || stopped) return;
+      const text = linePreview.endsWith("\r") ? linePreview.slice(0, -1) : linePreview;
+      const retained = Buffer.byteLength(file, "utf8") + Buffer.byteLength(text, "utf8") + 32;
+      if (
+        matches.length + fileMatches.length >= input.maxMatches ||
+        retainedBytes + fileRetainedBytes + retained > FALLBACK_SEARCH_MAX_RETAINED_BYTES
+      ) {
+        truncated = true;
+        stopped = true;
+        return;
+      }
+      fileMatches.push({
+        path: file,
+        line: lineNumber,
+        text: lineTruncated ? `${truncateUtf8(text, FALLBACK_SEARCH_MAX_LINE_BYTES - 3)}...` : text,
+      });
+      fileRetainedBytes += retained;
+    };
+    const consumeSegment = (segment: string): void => {
+      if (!segment || stopped) return;
+      if (!lineMatched && `${matchSuffix}${segment}`.includes(input.query)) lineMatched = true;
+      const suffixLength = Math.max(0, input.query.length - 1);
+      matchSuffix = suffixLength === 0 ? "" : `${matchSuffix}${segment}`.slice(-suffixLength);
+      if (Buffer.byteLength(linePreview, "utf8") < FALLBACK_SEARCH_MAX_LINE_BYTES) {
+        const remaining = FALLBACK_SEARCH_MAX_LINE_BYTES - Buffer.byteLength(linePreview, "utf8");
+        const accepted = truncateUtf8(segment, remaining);
+        linePreview += accepted;
+        if (accepted.length < segment.length) lineTruncated = true;
+      } else {
+        lineTruncated = true;
+      }
+    };
+    const consumeText = (text: string): void => {
+      let offset = 0;
+      while (offset < text.length && !stopped) {
+        const newline = text.indexOf("\n", offset);
+        const boundary = newline === -1 ? text.length : newline;
+        consumeSegment(text.slice(offset, boundary));
+        if (newline === -1) return;
+        retainMatch();
+        lineNumber += 1;
+        linePreview = "";
+        lineMatched = false;
+        lineTruncated = false;
+        matchSuffix = "";
+        offset = newline + 1;
+      }
+    };
     try {
-      for await (const line of lines) {
+      for await (const chunk of stream) {
         if (input.signal.aborted)
           throw createEffectExecutionFailure("cancelled", "File search was cancelled");
-        lineNumber += 1;
-        if (!expression.test(line)) continue;
-        if (matches.length >= input.maxMatches) {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        const remainingFile = FALLBACK_SEARCH_MAX_FILE_BYTES - fileBytes;
+        const remainingTotal = FALLBACK_SEARCH_MAX_TOTAL_BYTES - scannedBytes;
+        const acceptedBytes = Math.max(0, Math.min(bytes.byteLength, remainingFile, remainingTotal));
+        if (acceptedBytes > 0) {
+          const accepted = bytes.subarray(0, acceptedBytes);
+          fileBytes += acceptedBytes;
+          scannedBytes += acceptedBytes;
+          if (accepted.includes(0)) {
+            binary = true;
+            break;
+          }
+          consumeText(decoder.decode(accepted, { stream: true }));
+        }
+        if (acceptedBytes < bytes.byteLength) {
           truncated = true;
+          stopped = true;
           break;
         }
-        matches.push({ path: file, line: lineNumber, text: line });
+        if (stopped) break;
       }
     } finally {
-      lines.close();
       stream.destroy();
+    }
+    if (!binary && !stopped) {
+      consumeText(decoder.decode());
+      retainMatch();
+    }
+    if (!binary) {
+      matches.push(...fileMatches);
+      retainedBytes += fileRetainedBytes;
     }
     if (truncated) break;
   }
@@ -413,6 +571,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
         "--color",
         "never",
         "--no-heading",
+        "--fixed-strings",
         ...(glob ? ["--glob", glob] : []),
         "--",
         query,

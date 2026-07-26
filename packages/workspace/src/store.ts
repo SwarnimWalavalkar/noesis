@@ -113,6 +113,7 @@ export interface WorkspaceStoreOptions {
   readonly createId?: (prefix: string) => string;
   readonly recoverInterruptedOperations?: boolean;
   readonly runtimeOwnerId?: string;
+  readonly afterRuntimeOwnerAcquiredForTesting?: () => void;
   readonly afterDefinitionCommitForTesting?: () => void;
   readonly beforeActivationCommitForTesting?: () => void;
   readonly duringActivationCommitForTesting?: () => void;
@@ -226,31 +227,46 @@ export async function createWorkspaceStore(
   const runtimeOwnerId = options.recoverInterruptedOperations
     ? (options.runtimeOwnerId ?? createId("runtime_owner"))
     : undefined;
-  if (runtimeOwnerId) {
+  let runtimeOwnerAcquired = false;
+  const releaseRuntimeOwner = (): void => {
+    if (!runtimeOwnerId || !runtimeOwnerAcquired) return;
     database.transaction(() => {
-      const current = db.prepare("SELECT owner_id, pid FROM runtime_owner WHERE singleton = 1").get();
-      if (current !== undefined) {
-        const ownerId = requiredString(current, "owner_id");
-        const pid = requiredNumber(current, "pid");
-        let live = true;
-        try {
-          process.kill(pid, 0);
-        } catch (error) {
-          live = !(error instanceof Error && "code" in error && Reflect.get(error, "code") === "ESRCH");
-        }
-        if (live)
-          throw new Error(`Workspace already has a live runtime owner (${ownerId}, pid ${String(pid)})`);
-      }
-      db.prepare(
-        `INSERT INTO runtime_owner(singleton, owner_id, pid, acquired_at)
-         VALUES (1, ?, ?, ?)
-         ON CONFLICT(singleton) DO UPDATE SET
-           owner_id = excluded.owner_id,
-           pid = excluded.pid,
-           acquired_at = excluded.acquired_at`,
-      ).run(runtimeOwnerId, process.pid, now());
+      db.prepare("DELETE FROM runtime_owner WHERE singleton = 1 AND owner_id = ? AND pid = ?").run(
+        runtimeOwnerId,
+        process.pid,
+      );
     });
-  }
+    runtimeOwnerAcquired = false;
+  };
+
+  const acquireRuntimeOwner = (): void => {
+    if (runtimeOwnerId) {
+      database.transaction(() => {
+        const current = db.prepare("SELECT owner_id, pid FROM runtime_owner WHERE singleton = 1").get();
+        if (current !== undefined) {
+          const ownerId = requiredString(current, "owner_id");
+          const pid = requiredNumber(current, "pid");
+          let live = true;
+          try {
+            process.kill(pid, 0);
+          } catch (error) {
+            live = !(error instanceof Error && "code" in error && Reflect.get(error, "code") === "ESRCH");
+          }
+          if (live)
+            throw new Error(`Workspace already has a live runtime owner (${ownerId}, pid ${String(pid)})`);
+        }
+        db.prepare(
+          `INSERT INTO runtime_owner(singleton, owner_id, pid, acquired_at)
+           VALUES (1, ?, ?, ?)
+           ON CONFLICT(singleton) DO UPDATE SET
+             owner_id = excluded.owner_id,
+             pid = excluded.pid,
+             acquired_at = excluded.acquired_at`,
+        ).run(runtimeOwnerId, process.pid, now());
+      });
+      runtimeOwnerAcquired = true;
+    }
+  };
 
   const recordActivity = (
     actor: ActorRef,
@@ -755,11 +771,6 @@ export async function createWorkspaceStore(
 
   const research = createResearchRepositories(database, recordActivity, now);
   const operational = createOperationalRepositories(database, recordActivity);
-  if (options.recoverInterruptedOperations) {
-    const interruptedAt = now();
-    await operational.codeExecutions.interruptRunning(interruptedAt);
-    await operational.workflows.interruptRunning(interruptedAt);
-  }
   const jobs = createDurableJobStore(database, recordActivity, (reference) =>
     assertStoredReference(db, reference),
   );
@@ -1295,29 +1306,47 @@ export async function createWorkspaceStore(
       }),
     cutoverLegacyOperationalAuthority,
     close: () => {
-      if (runtimeOwnerId)
-        database.transaction(() => {
-          db.prepare("DELETE FROM runtime_owner WHERE singleton = 1 AND owner_id = ?").run(runtimeOwnerId);
-        });
+      releaseRuntimeOwner();
       database.close();
     },
     unsafeDatabasePathForTesting: paths.database,
     getArtifactMetadata,
   });
-  registerWorkspaceRuntimeInternals(
-    workspace,
-    Object.freeze({
-      authority,
-      protectedRuntime: createProtectedWorkspaceRuntime({
-        workspaceRoot: paths.root,
+  try {
+    acquireRuntimeOwner();
+    options.afterRuntimeOwnerAcquiredForTesting?.();
+    if (options.recoverInterruptedOperations) {
+      const interruptedAt = now();
+      await operational.codeExecutions.interruptRunning(interruptedAt);
+      await operational.workflows.interruptRunning(interruptedAt);
+    }
+    registerWorkspaceRuntimeInternals(
+      workspace,
+      Object.freeze({
         authority,
-        activations: protectedActivations,
-        feedback: protectedFeedback,
-        measurements: compoundingMeasurements,
+        protectedRuntime: createProtectedWorkspaceRuntime({
+          workspaceRoot: paths.root,
+          authority,
+          activations: protectedActivations,
+          feedback: protectedFeedback,
+          measurements: compoundingMeasurements,
+        }),
       }),
-    }),
-  );
-  return workspace;
+    );
+    return workspace;
+  } catch (error) {
+    try {
+      releaseRuntimeOwner();
+    } catch {
+      // Preserve the initialization failure. Exact-owner cleanup is best effort if SQLite itself failed.
+    }
+    try {
+      database.close();
+    } catch {
+      // Preserve the initialization failure if closing the partially initialized database also fails.
+    }
+    throw error;
+  }
 }
 
 interface DefinitionMetadataRepository extends DefinitionMetadataPort {

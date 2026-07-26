@@ -200,22 +200,20 @@ export async function startNoesisTui(
     return undefined;
   });
   editor.onSubmit = (text) => {
+    const submittedTrailId = view.state.trailId;
+    if (!submittedTrailId || !text.trim()) return;
+    inspectorGeneration += 1;
+    const submittedInspectorGeneration = inspectorGeneration;
+    const isCurrentSubmission = (): boolean =>
+      phase === "main" &&
+      inspectorGeneration === submittedInspectorGeneration &&
+      view.state.trailId === submittedTrailId;
+    const publishInspector = (message: string): void => {
+      if (!isCurrentSubmission() || activeTurn) return;
+      view.dispatch({ type: "system-message", text: boundedInspectorText(message) });
+      tui.requestRender();
+    };
     void (async () => {
-      if (!view.state.trailId || !text.trim()) return;
-      inspectorGeneration += 1;
-      const submittedInspectorGeneration = inspectorGeneration;
-      const submittedTrailId = view.state.trailId;
-      const publishInspector = (message: string): void => {
-        if (
-          phase !== "main" ||
-          inspectorGeneration !== submittedInspectorGeneration ||
-          view.state.trailId !== submittedTrailId ||
-          activeTurn
-        )
-          return;
-        view.dispatch({ type: "system-message", text: boundedInspectorText(message) });
-        tui.requestRender();
-      };
       if (text === "/quit") {
         await shutdown();
         return;
@@ -226,7 +224,7 @@ export async function startNoesisTui(
           tui.requestRender();
           // Keep ABORTING observable for one throttled TUI render frame before a cooperative runtime settles.
           await new Promise<void>((resolve) => setTimeout(resolve, 20));
-          await runtime.abort(view.state.trailId);
+          await runtime.abort(submittedTrailId);
         } else {
           view.dispatch({
             type: "system-message",
@@ -469,14 +467,14 @@ export async function startNoesisTui(
       if (text === "/compact") {
         view.dispatch({ type: "execution-changed", execution: "compacting" });
         tui.requestRender();
-        await runtime.compact(view.state.trailId);
+        await runtime.compact(submittedTrailId);
         view.dispatch({ type: "compacted" });
         view.dispatch({ type: "system-message", text: "Trail compacted." });
         tui.requestRender();
         return;
       }
       if (text === "/fork") {
-        const trail = await runtime.forkTrail(view.state.trailId);
+        const trail = await runtime.forkTrail(submittedTrailId);
         view.dispatch({ type: "trail-selected", trail });
         tui.requestRender();
         return;
@@ -587,6 +585,7 @@ export async function startNoesisTui(
       await turn;
       if (activeTurn === turn) activeTurn = undefined;
     })().catch((error: unknown) => {
+      if (!isCurrentSubmission()) return;
       view.dispatch({
         type: "failed",
         error: safeTerminalText(error instanceof Error ? error.message : String(error)),

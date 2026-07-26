@@ -3,16 +3,57 @@ import process from "node:process";
 const pending = new Map();
 let sequence = 0;
 const MAX_RESULT_BYTES = 256 * 1024;
+const MAX_SDK_INPUT_BYTES = 256 * 1024;
 const MAX_STORE_VALUE_BYTES = 64 * 1024;
+const MAX_STORE_BYTES = 256 * 1024;
+const MAX_STORE_ENTRIES = 256;
+const MAX_PROGRESS_VALUE_BYTES = 64 * 1024;
+const MAX_PROGRESS_BYTES = 256 * 1024;
+const MAX_CHILD_FRAME_BYTES = 1024 * 1024;
+const MAX_CHILD_IPC_BYTES = 8 * 1024 * 1024;
+const MAX_FAILURE_MESSAGE_BYTES = 32 * 1024;
+const MAX_FAILURE_STACK_BYTES = 96 * 1024;
+let childIpcBytes = 0;
 
-function send(message) {
+function rawSend(message) {
   if (typeof process.send !== "function") throw new Error("Codemode IPC channel is unavailable");
   process.send(message);
 }
 
-function jsonSafe(value) {
-  if (value === undefined) return null;
-  return JSON.parse(JSON.stringify(value));
+function send(message) {
+  const serialized = JSON.stringify(message);
+  const frameBytes = Buffer.byteLength(serialized, "utf8");
+  if (frameBytes > MAX_CHILD_FRAME_BYTES) {
+    throw new Error(`Codemode IPC frame exceeds ${MAX_CHILD_FRAME_BYTES} bytes`);
+  }
+  if (childIpcBytes + frameBytes > MAX_CHILD_IPC_BYTES) {
+    throw new Error(`Codemode IPC output exceeds ${MAX_CHILD_IPC_BYTES} bytes`);
+  }
+  childIpcBytes += frameBytes;
+  rawSend(message);
+}
+
+function truncateUtf8(value, maximumBytes) {
+  if (Buffer.byteLength(value, "utf8") <= maximumBytes) return value;
+  let accepted = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maximumBytes) break;
+    accepted += character;
+    bytes += characterBytes;
+  }
+  return accepted;
+}
+
+function sendFailure(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error && typeof error.stack === "string" ? error.stack : undefined;
+  rawSend({
+    type: "failure",
+    error: truncateUtf8(message, MAX_FAILURE_MESSAGE_BYTES),
+    ...(stack === undefined ? {} : { stack: truncateUtf8(stack, MAX_FAILURE_STACK_BYTES) }),
+  });
 }
 
 function boundedJsonSafe(value, maximum, label) {
@@ -27,7 +68,13 @@ function delegate(kind, payload) {
   const requestId = `sdk_${++sequence}`;
   return new Promise((resolve, reject) => {
     pending.set(requestId, { resolve, reject });
-    send({ type: "sdk-call", requestId, kind, ...payload });
+    try {
+      const safePayload = boundedJsonSafe(payload, MAX_SDK_INPUT_BYTES, "Codemode SDK request");
+      send({ type: "sdk-call", requestId, kind, ...safePayload });
+    } catch (error) {
+      pending.delete(requestId);
+      reject(error);
+    }
   });
 }
 
@@ -45,7 +92,10 @@ const tools = new Proxy(
           get(_namespaceTarget, operation) {
             if (typeof operation !== "string") return undefined;
             return async (input = {}) =>
-              await delegate("invoke", { name: `${family}.${operation}`, input: jsonSafe(input) });
+              await delegate("invoke", {
+                name: `${family}.${operation}`,
+                input,
+              });
           },
         },
       );
@@ -60,7 +110,10 @@ const noesis = Object.freeze({
     await delegate("search", { query: String(query), ...(limit === undefined ? {} : { limit }) }),
   describe: async (name) => await delegate("describe", { name: String(name) }),
   invoke: async (name, input = {}) =>
-    await delegate("invoke", { name: String(name), input: jsonSafe(input) }),
+    await delegate("invoke", {
+      name: String(name),
+      input,
+    }),
 });
 
 process.on("message", async (message) => {
@@ -75,10 +128,32 @@ process.on("message", async (message) => {
   }
   if (message.type !== "run" || typeof message.source !== "string") return;
   const sessionStore = new Map(Array.isArray(message.storeEntries) ? message.storeEntries : []);
-  const emit = (value) => send({ type: "progress", value: jsonSafe(value) });
+  const storeMutations = new Map();
+  let progressBytes = 0;
+  const emit = (value) => {
+    const safeValue = boundedJsonSafe(value, MAX_PROGRESS_VALUE_BYTES, "Codemode progress value");
+    progressBytes += Buffer.byteLength(JSON.stringify(safeValue), "utf8");
+    if (progressBytes > MAX_PROGRESS_BYTES) {
+      throw new Error(`Codemode progress exceeds ${MAX_PROGRESS_BYTES} bytes`);
+    }
+    send({ type: "progress", value: safeValue });
+  };
   const notify = emit;
   const store = (key, value) => {
-    sessionStore.set(String(key), boundedJsonSafe(value, MAX_STORE_VALUE_BYTES, "Codemode store value"));
+    const normalizedKey = String(key);
+    const safeValue = boundedJsonSafe(value, MAX_STORE_VALUE_BYTES, "Codemode store value");
+    const hadPrevious = sessionStore.has(normalizedKey);
+    const previousValue = sessionStore.get(normalizedKey);
+    sessionStore.set(normalizedKey, safeValue);
+    if (
+      sessionStore.size > MAX_STORE_ENTRIES ||
+      Buffer.byteLength(JSON.stringify([...sessionStore.entries()]), "utf8") > MAX_STORE_BYTES
+    ) {
+      if (hadPrevious) sessionStore.set(normalizedKey, previousValue);
+      else sessionStore.delete(normalizedKey);
+      throw new Error(`Codemode store exceeds ${MAX_STORE_BYTES} bytes or ${MAX_STORE_ENTRIES} entries`);
+    }
+    storeMutations.set(normalizedKey, safeValue);
   };
   const load = (key) => sessionStore.get(String(key));
   try {
@@ -97,14 +172,10 @@ process.on("message", async (message) => {
     send({
       type: "result",
       value: boundedJsonSafe(value, MAX_RESULT_BYTES, "Codemode result"),
-      storeEntries: [...sessionStore.entries()],
+      storeMutations: [...storeMutations.entries()],
     });
   } catch (error) {
-    send({
-      type: "failure",
-      error: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error && typeof error.stack === "string" ? error.stack : undefined,
-    });
+    sendFailure(error);
   }
 });
 

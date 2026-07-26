@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { access, mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { JsonValue } from "@noesis/domain";
-import { inspectEffectExecutionFailure, type AuthorityBoundary, type EffectDecision } from "@noesis/policy";
+import { type AuthorityBoundary, type EffectDecision, inspectEffectExecutionFailure } from "@noesis/policy";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createLocalWorkTools,
@@ -107,6 +107,26 @@ describe("local work tools", () => {
     expect(Buffer.byteLength(result["content"], "utf8")).toBeLessThanOrEqual(MAX_TOOL_TEXT_BYTES);
   });
 
+  it("does not invent a trailing line for newline-terminated or empty files", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-lines-"));
+    await writeFile(join(cwd, "terminated.txt"), "alpha\nbeta\n", "utf8");
+    await writeFile(join(cwd, "empty.txt"), "", "utf8");
+    const read = tool(toolsAt(cwd), "files.read");
+
+    await expect(read.execute({ path: "terminated.txt" }, context())).resolves.toMatchObject({
+      content: "alpha\nbeta",
+      endLine: 2,
+      totalLines: 2,
+      truncated: false,
+    });
+    await expect(read.execute({ path: "empty.txt" }, context())).resolves.toMatchObject({
+      content: "",
+      endLine: 0,
+      totalLines: 0,
+      truncated: false,
+    });
+  });
+
   it("does not spawn a pre-aborted shell command", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-abort-"));
     const marker = join(cwd, "should-not-exist");
@@ -144,6 +164,108 @@ describe("local work tools", () => {
     await expect(access(marker)).rejects.toThrow();
   });
 
+  it("kills a descendant group on timeout after the direct shell has exited", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-timeout-tree-"));
+    const marker = join(cwd, "timed-out-descendant-survived");
+    const childScript = [
+      `setTimeout(() => require("node:fs").writeFileSync(${JSON.stringify(marker)}, "alive"), 700)`,
+      "setTimeout(() => {}, 5_000)",
+    ].join(";");
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(childScript)} & exit 0`;
+    const startedAt = Date.now();
+
+    await expect(
+      tool(toolsAt(cwd), "shell.run").execute({ command, timeoutMs: 150 }, context()),
+    ).rejects.toThrow("Process timed out after 150ms");
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 850));
+    await expect(access(marker)).rejects.toThrow();
+  });
+
+  it("decodes split UTF-8 sequences from stdout and stderr without replacement characters", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-utf8-"));
+    const script = [
+      "process.stdout.write(Buffer.from([0xe2]))",
+      "process.stderr.write(Buffer.from([0xf0, 0x9f]))",
+      "setTimeout(() => {",
+      "process.stdout.write(Buffer.from([0x82, 0xac]))",
+      "process.stderr.write(Buffer.from([0x98, 0x80]))",
+      "}, 50)",
+    ].join(";");
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+
+    await expect(
+      tool(toolsAt(cwd), "shell.run").execute({ command, timeoutMs: 2_000 }, context()),
+    ).resolves.toMatchObject({
+      exitCode: 0,
+      stdout: "€",
+      stderr: "😀",
+      truncated: false,
+    });
+  });
+
+  it("bounds decoded UTF-8 output when invalid or incomplete bytes expand during decoding", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-utf8-bounds-"));
+    const shell = tool(toolsAt(cwd), "shell.run");
+    const invalidCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+      `process.stdout.write(Buffer.alloc(${MAX_TOOL_TEXT_BYTES}, 0xff))`,
+    )}`;
+    const boundaryCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
+      `process.stdout.write(Buffer.concat([Buffer.alloc(${MAX_TOOL_TEXT_BYTES - 1}, 0x61), Buffer.from([0xe2])]))`,
+    )}`;
+
+    const invalid = await shell.execute({ command: invalidCommand, timeoutMs: 2_000 }, context());
+    const boundary = await shell.execute({ command: boundaryCommand, timeoutMs: 2_000 }, context());
+
+    for (const result of [invalid, boundary]) {
+      if (
+        typeof result !== "object" ||
+        result === null ||
+        !("stdout" in result) ||
+        typeof result["stdout"] !== "string"
+      )
+        throw new Error("shell.run returned an unexpected value");
+      expect(Buffer.byteLength(result["stdout"], "utf8")).toBeLessThanOrEqual(MAX_TOOL_TEXT_BYTES);
+      expect(result).toMatchObject({ truncated: true });
+    }
+    if (
+      typeof boundary !== "object" ||
+      boundary === null ||
+      !("stdout" in boundary) ||
+      typeof boundary["stdout"] !== "string"
+    )
+      throw new Error("shell.run returned an unexpected boundary value");
+    expect(boundary["stdout"]).not.toContain("\ufffd");
+  });
+
+  it("uses literal search semantics in the primary ripgrep execution path", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-primary-search-"));
+    const searchCommand = join(cwd, "literal-rg.mjs");
+    await writeFile(
+      searchCommand,
+      [
+        `#!${process.execPath}`,
+        'if (!process.argv.includes("--fixed-strings")) {',
+        '  process.stderr.write("missing --fixed-strings");',
+        "  process.exit(2);",
+        "}",
+        'process.stdout.write("src/example.txt:2:[a-z]+ literal\\n");',
+      ].join("\n"),
+      "utf8",
+    );
+    await chmod(searchCommand, 0o755);
+
+    await expect(
+      tool(toolsAt(cwd, searchCommand), "files.search").execute(
+        { query: "[a-z]+", path: "src", maxMatches: 10 },
+        context(),
+      ),
+    ).resolves.toEqual({
+      matches: [{ path: join(cwd, "src", "example.txt"), line: 2, text: "[a-z]+ literal" }],
+      truncated: false,
+    });
+  });
+
   it("falls back to an in-process search when ripgrep is unavailable", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-search-"));
     await mkdir(join(cwd, "src"));
@@ -159,6 +281,51 @@ describe("local work tools", () => {
       matches: [{ path: join(cwd, "src", "first.ts"), line: 1, text: "const needle = true;" }],
       truncated: false,
     });
+  });
+
+  it("keeps fallback search literal and bounded while skipping hidden, dependency, and binary data", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-search-bounds-"));
+    await mkdir(join(cwd, "src"));
+    await mkdir(join(cwd, "node_modules"));
+    await mkdir(join(cwd, ".hidden"));
+    await writeFile(join(cwd, "node_modules", "ignored.txt"), "[a-z]+\n", "utf8");
+    await writeFile(join(cwd, ".hidden", "ignored.txt"), "[a-z]+\n", "utf8");
+    await writeFile(join(cwd, "src", "binary.dat"), Buffer.from([0, 91, 97, 45, 122, 93, 43]));
+    await writeFile(join(cwd, "src", "a-regex-looking.txt"), "letters only\n[a-z]+ literal\n", "utf8");
+    const hugeLines = Array.from(
+      { length: 100 },
+      (_, index) => `[a-z]+ match ${String(index)} ${"x".repeat(5_000)}`,
+    ).join("\n");
+    await writeFile(join(cwd, "src", "huge.txt"), hugeLines, "utf8");
+
+    const result = await tool(toolsAt(cwd, "noesis-rg-does-not-exist"), "files.search").execute(
+      { query: "[a-z]+", path: ".", maxMatches: 1_000 },
+      context(),
+    );
+
+    expect(result).toMatchObject({ truncated: true });
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("matches" in result) ||
+      !Array.isArray(result["matches"])
+    )
+      throw new Error("files.search returned an unexpected value");
+    expect(result["matches"]).not.toContainEqual(expect.objectContaining({ text: "letters only" }));
+    expect(result["matches"]).toContainEqual(expect.objectContaining({ text: "[a-z]+ literal" }));
+    expect(JSON.stringify(result)).not.toContain("ignored.txt");
+    expect(JSON.stringify(result)).not.toContain("binary.dat");
+    expect(
+      result["matches"].every(
+        (match) =>
+          typeof match === "object" &&
+          match !== null &&
+          "text" in match &&
+          typeof match["text"] === "string" &&
+          Buffer.byteLength(match["text"], "utf8") <= 4 * 1024,
+      ),
+    ).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(96 * 1024);
   });
 
   it("does not follow redirects and bounds streamed response bodies", async () => {

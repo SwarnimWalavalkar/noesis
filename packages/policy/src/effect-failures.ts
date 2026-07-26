@@ -1,7 +1,7 @@
 export type EffectExecutionFailureCode = "cancelled" | "invalid_output" | "result_too_large";
 
 const failureBrand = Symbol("noesis.effect-execution-failure");
-const durablePrefix = "noesis-effect-failure-v1:";
+const durablePrefix = "noesis-effect-failure-v2:";
 
 interface BrandedEffectExecutionFailure extends Error {
   readonly [failureBrand]: EffectExecutionFailureCode;
@@ -9,6 +9,11 @@ interface BrandedEffectExecutionFailure extends Error {
 
 export interface EffectExecutionFailureDetails {
   readonly code: EffectExecutionFailureCode;
+  readonly message: string;
+}
+
+export interface DurableEffectExecutionFailureDetails {
+  readonly code?: EffectExecutionFailureCode;
   readonly message: string;
 }
 
@@ -41,22 +46,41 @@ export function inspectEffectExecutionFailure(value: unknown): EffectExecutionFa
 
 export function serializeEffectExecutionFailure(value: unknown): string | undefined {
   const failure = inspectEffectExecutionFailure(value);
-  return failure ? `${durablePrefix}${JSON.stringify(failure)}` : undefined;
+  return failure ? `${durablePrefix}${JSON.stringify({ kind: "typed", ...failure })}` : undefined;
+}
+
+export function serializeEffectExecutionError(value: unknown): string {
+  return (
+    serializeEffectExecutionFailure(value) ??
+    `${durablePrefix}${JSON.stringify({
+      kind: "ordinary",
+      message: value instanceof Error ? value.message : String(value),
+    })}`
+  );
 }
 
 export function parseEffectExecutionFailure(reason: string): EffectExecutionFailureDetails | undefined {
+  const parsed = parseEffectExecutionError(reason);
+  return parsed?.code === undefined
+    ? undefined
+    : Object.freeze({ code: parsed.code, message: parsed.message });
+}
+
+export function parseEffectExecutionError(reason: string): DurableEffectExecutionFailureDetails | undefined {
   if (!reason.startsWith(durablePrefix)) return undefined;
   try {
     const parsed: unknown = JSON.parse(reason.slice(durablePrefix.length));
     if (
       typeof parsed !== "object" ||
       parsed === null ||
-      !("code" in parsed) ||
-      !isFailureCode(parsed.code) ||
+      !("kind" in parsed) ||
+      (parsed.kind !== "typed" && parsed.kind !== "ordinary") ||
       !("message" in parsed) ||
       typeof parsed.message !== "string"
     )
       return undefined;
+    if (parsed.kind === "ordinary") return Object.freeze({ message: parsed.message });
+    if (!("code" in parsed) || !isFailureCode(parsed.code)) return undefined;
     return Object.freeze({ code: parsed.code, message: parsed.message });
   } catch {
     return undefined;

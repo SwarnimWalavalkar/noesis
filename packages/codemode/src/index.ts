@@ -1,4 +1,4 @@
-import { fork, type ChildProcess } from "node:child_process";
+import { type ChildProcess, fork } from "node:child_process";
 import { createId, type JsonValue, JsonValueSchema, sha256, toJsonValue } from "@noesis/domain";
 import type { ToolBroker, ToolInvocationResult } from "@noesis/tools";
 import { z } from "zod";
@@ -6,8 +6,17 @@ import { z } from "zod";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_CALLS = 128;
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
+const DEFAULT_MAX_PROGRESS_BYTES = 256 * 1024;
+const DEFAULT_MAX_PROGRESS_VALUE_BYTES = 64 * 1024;
+const DEFAULT_MAX_RESULT_BYTES = 256 * 1024;
+const DEFAULT_MAX_SDK_REQUEST_BYTES = 256 * 1024;
+const DEFAULT_MAX_CHILD_FRAME_BYTES = 1024 * 1024;
+const DEFAULT_MAX_CHILD_IPC_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_STORE_BYTES = 256 * 1024;
 const DEFAULT_MAX_STORE_ENTRIES = 256;
+const DEFAULT_MAX_FAILURE_MESSAGE_BYTES = 32 * 1024;
+const DEFAULT_MAX_FAILURE_STACK_BYTES = 96 * 1024;
+const PENDING_SDK_ABORT_GRACE_MS = 500;
 
 const childMessageSchema = z.union([
   z.strictObject({ type: z.literal("ready") }),
@@ -38,7 +47,7 @@ const childMessageSchema = z.union([
   z.strictObject({
     type: z.literal("result"),
     value: JsonValueSchema,
-    storeEntries: z.array(z.tuple([z.string(), JsonValueSchema])),
+    storeMutations: z.array(z.tuple([z.string(), JsonValueSchema])),
   }),
   z.strictObject({
     type: z.literal("failure"),
@@ -122,6 +131,21 @@ interface ActiveExecution {
   readonly settled: Promise<void>;
 }
 
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function sdkRequestPayload(message: Extract<ChildMessage, { readonly type: "sdk-call" }>): JsonValue {
+  if (message.kind === "search") {
+    return Object.freeze({
+      query: message.query,
+      ...(message.limit === undefined ? {} : { limit: message.limit }),
+    });
+  }
+  if (message.kind === "describe") return Object.freeze({ name: message.name });
+  return Object.freeze({ name: message.name, input: message.input });
+}
+
 function invocationValue(result: ToolInvocationResult): JsonValue {
   if (result.ok) return result.value;
   throw new Error(`${result.code}: ${result.message}`);
@@ -129,12 +153,37 @@ function invocationValue(result: ToolInvocationResult): JsonValue {
 
 async function terminateChild(child: ChildProcess, closed: Promise<void>): Promise<void> {
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-  const closedAfterTerm = await Promise.race([
+  const closedAfterTerm = await settleWithin(
     closed.then(() => true),
-    new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
-  ]);
+    500,
+    false,
+  );
   if (!closedAfterTerm && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   await closed;
+}
+
+async function settleWithin<T, F>(pending: Promise<T>, maximumWaitMs: number, fallback: F): Promise<T | F> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<F>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), maximumWaitMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function waitForPendingSdkCalls(
+  pendingSdkCalls: ReadonlySet<Promise<void>>,
+  maximumWaitMs?: number,
+): Promise<boolean> {
+  const drained = Promise.allSettled([...pendingSdkCalls]).then(() => true);
+  if (maximumWaitMs === undefined) return await drained;
+  return await settleWithin(drained, maximumWaitMs, false);
 }
 
 export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): CodeModeRuntime {
@@ -166,6 +215,8 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     active.set(executionId, Object.freeze({ child, controller, closed, settled }));
     const output = { stdout: "", stderr: "" };
     let outputBytes = 0;
+    let progressBytes = 0;
+    let childIpcBytes = 0;
     let calls = 0;
     let ready = false;
     let terminal = false;
@@ -214,11 +265,26 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
           });
           reject(error);
         };
-        const finishSuccess = async (value: JsonValue): Promise<void> => {
+        const finishSuccess = async (
+          value: JsonValue,
+          storeMutations: readonly (readonly [string, JsonValue])[],
+        ): Promise<void> => {
           if (terminal || settlingResult) return;
           settlingResult = true;
-          await Promise.all([...pendingSdkCalls]);
+          await waitForPendingSdkCalls(pendingSdkCalls);
           if (terminal) return;
+          const nextStore = new Map(sessionStores.get(request.sessionId) ?? new Map());
+          for (const [key, storedValue] of storeMutations) nextStore.set(key, storedValue);
+          const nextEntries = [...nextStore.entries()];
+          if (nextEntries.length > DEFAULT_MAX_STORE_ENTRIES) {
+            finishFailure(new Error(`Codemode store exceeds ${String(DEFAULT_MAX_STORE_ENTRIES)} entries`));
+            return;
+          }
+          if (Buffer.byteLength(JSON.stringify(nextEntries), "utf8") > DEFAULT_MAX_STORE_BYTES) {
+            finishFailure(new Error(`Codemode store exceeds ${String(DEFAULT_MAX_STORE_BYTES)} bytes`));
+            return;
+          }
+          sessionStores.set(request.sessionId, nextStore);
           terminal = true;
           const durationMs = Date.now() - startedAt;
           notify({ type: "completed", executionId, calls, durationMs });
@@ -310,6 +376,20 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
         };
         child.on("message", (raw: unknown) => {
           try {
+            const frameBytes = jsonBytes(raw);
+            if (frameBytes > DEFAULT_MAX_CHILD_FRAME_BYTES) {
+              finishFailure(
+                new Error(`Codemode IPC frame exceeds ${String(DEFAULT_MAX_CHILD_FRAME_BYTES)} bytes`),
+              );
+              return;
+            }
+            childIpcBytes += frameBytes;
+            if (childIpcBytes > DEFAULT_MAX_CHILD_IPC_BYTES) {
+              finishFailure(
+                new Error(`Codemode IPC output exceeds ${String(DEFAULT_MAX_CHILD_IPC_BYTES)} bytes`),
+              );
+              return;
+            }
             const parsed = childMessageSchema.safeParse(raw);
             if (!parsed.success) {
               finishFailure(new Error(`Malformed codemode frame: ${z.prettifyError(parsed.error)}`));
@@ -329,25 +409,73 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                 ...(request.input === undefined ? {} : { input: request.input }),
               });
             } else if (message.type === "sdk-call") {
+              if (jsonBytes(sdkRequestPayload(message)) > DEFAULT_MAX_SDK_REQUEST_BYTES) {
+                finishFailure(
+                  new Error(`Codemode SDK request exceeds ${String(DEFAULT_MAX_SDK_REQUEST_BYTES)} bytes`),
+                );
+                return;
+              }
               const pending = handleSdkCall(message);
               pendingSdkCalls.add(pending);
               void pending.finally(() => pendingSdkCalls.delete(pending));
             } else if (message.type === "progress") {
-              notify({ type: "progress", executionId, value: message.value });
-            } else if (message.type === "result") {
-              if (message.storeEntries.length > DEFAULT_MAX_STORE_ENTRIES) {
+              const valueBytes = jsonBytes(message.value);
+              if (valueBytes > DEFAULT_MAX_PROGRESS_VALUE_BYTES) {
                 finishFailure(
-                  new Error(`Codemode store exceeds ${String(DEFAULT_MAX_STORE_ENTRIES)} entries`),
+                  new Error(
+                    `Codemode progress value exceeds ${String(DEFAULT_MAX_PROGRESS_VALUE_BYTES)} bytes`,
+                  ),
                 );
                 return;
               }
-              if (Buffer.byteLength(JSON.stringify(message.storeEntries), "utf8") > DEFAULT_MAX_STORE_BYTES) {
-                finishFailure(new Error(`Codemode store exceeds ${String(DEFAULT_MAX_STORE_BYTES)} bytes`));
+              progressBytes += valueBytes;
+              if (progressBytes > DEFAULT_MAX_PROGRESS_BYTES) {
+                finishFailure(
+                  new Error(`Codemode progress exceeds ${String(DEFAULT_MAX_PROGRESS_BYTES)} bytes`),
+                );
                 return;
               }
-              sessionStores.set(request.sessionId, new Map(message.storeEntries));
-              void finishSuccess(message.value);
+              notify({ type: "progress", executionId, value: message.value });
+            } else if (message.type === "result") {
+              if (jsonBytes(message.value) > DEFAULT_MAX_RESULT_BYTES) {
+                finishFailure(new Error(`Codemode result exceeds ${String(DEFAULT_MAX_RESULT_BYTES)} bytes`));
+                return;
+              }
+              if (message.storeMutations.length > DEFAULT_MAX_STORE_ENTRIES) {
+                finishFailure(
+                  new Error(`Codemode store mutations exceed ${String(DEFAULT_MAX_STORE_ENTRIES)} entries`),
+                );
+                return;
+              }
+              if (
+                Buffer.byteLength(JSON.stringify(message.storeMutations), "utf8") > DEFAULT_MAX_STORE_BYTES
+              ) {
+                finishFailure(
+                  new Error(`Codemode store mutations exceed ${String(DEFAULT_MAX_STORE_BYTES)} bytes`),
+                );
+                return;
+              }
+              void finishSuccess(message.value, message.storeMutations);
             } else {
+              if (Buffer.byteLength(message.error, "utf8") > DEFAULT_MAX_FAILURE_MESSAGE_BYTES) {
+                finishFailure(
+                  new Error(
+                    `Codemode failure message exceeds ${String(DEFAULT_MAX_FAILURE_MESSAGE_BYTES)} bytes`,
+                  ),
+                );
+                return;
+              }
+              if (
+                message.stack !== undefined &&
+                Buffer.byteLength(message.stack, "utf8") > DEFAULT_MAX_FAILURE_STACK_BYTES
+              ) {
+                finishFailure(
+                  new Error(
+                    `Codemode failure stack exceeds ${String(DEFAULT_MAX_FAILURE_STACK_BYTES)} bytes`,
+                  ),
+                );
+                return;
+              }
               finishFailure(new Error(message.error));
             }
           } catch (error) {
@@ -378,7 +506,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
       if (timer) clearTimeout(timer);
       request.signal?.removeEventListener("abort", abort);
       controller.abort();
-      await Promise.all([...pendingSdkCalls]);
+      await waitForPendingSdkCalls(pendingSdkCalls, PENDING_SDK_ABORT_GRACE_MS);
       await terminateChild(child, closed);
       active.delete(executionId);
       settleActive?.();

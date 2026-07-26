@@ -161,6 +161,55 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
+  test("drops stale inspector failures after switching trails", async () => {
+    const base = await createRuntime({
+      name: "inspector-rejection-race-scripted",
+      async run(request) {
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    let rejectInspector: ((error: Error) => void) | undefined;
+    let inspectorStarted = false;
+    const runtime = Object.freeze({
+      ...base,
+      inspectScript: async () =>
+        await new Promise<never>((_resolve, reject) => {
+          inspectorStarted = true;
+          rejectInspector = reject;
+        }),
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    const originalTrailId = runtime.listTrails()[0]?.trailId;
+    if (!originalTrailId) throw new Error("Expected the initial trail");
+
+    terminal.type("/script stale\r");
+    await vi.waitFor(() => expect(inspectorStarted).toBe(true));
+    terminal.type("/fork\r");
+    await vi.waitFor(() => {
+      const currentTrailId = runtime.listTrailSummaries()[0]?.trailId;
+      expect(currentTrailId).toBeDefined();
+      expect(currentTrailId).not.toBe(originalTrailId);
+    });
+    rejectInspector?.(new Error("STALE_INSPECTOR_REJECTION"));
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+    expect(terminal.output).not.toContain("STALE_INSPECTOR_REJECTION");
+    expect(terminal.output).toContain("● IDLE");
+    terminal.type("/quit\n");
+    await running;
+  });
+
   test("distinguishes unsupported inspectors from supported empty libraries", async () => {
     const agent: NoesisAgentRuntime = {
       name: "inspector-support-scripted",

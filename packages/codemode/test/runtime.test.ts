@@ -8,7 +8,7 @@ import {
 } from "@noesis/tools";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { createCodeModeRuntime, type CodeModeRuntime } from "../src/index.ts";
+import { type CodeModeRuntime, createCodeModeRuntime } from "../src/index.ts";
 
 const runtimes = new Set<CodeModeRuntime>();
 
@@ -127,6 +127,27 @@ describe("codemode runtime", () => {
     await code.shutdown();
   });
 
+  it("merges concurrent store mutations without overwriting unrelated keys", async () => {
+    const code = runtime();
+    await Promise.all([
+      code.execute({
+        source: 'await new Promise((resolve) => setTimeout(resolve, 40)); store("first", 1); return null;',
+        sessionId: "shared-session",
+      }),
+      code.execute({
+        source: 'await new Promise((resolve) => setTimeout(resolve, 60)); store("second", 2); return null;',
+        sessionId: "shared-session",
+      }),
+    ]);
+
+    await expect(
+      code.execute({
+        source: 'return { first: load("first"), second: load("second") };',
+        sessionId: "shared-session",
+      }),
+    ).resolves.toMatchObject({ value: { first: 1, second: 2 } });
+  });
+
   it("derives stable host call identities from a logical execution across retries", async () => {
     const requestedCallIds: string[] = [];
     const code = runtime({
@@ -185,6 +206,28 @@ describe("codemode runtime", () => {
     await expect(pending).rejects.toThrow("cancelled");
   });
 
+  it("does not hang shutdown when a broker call ignores cancellation", async () => {
+    let markToolStarted: (() => void) | undefined;
+    const toolStarted = new Promise<void>((resolve) => {
+      markToolStarted = resolve;
+    });
+    const code = runtime({
+      beforeDouble: async () => {
+        markToolStarted?.();
+        await new Promise<never>(() => undefined);
+      },
+    });
+    const pending = code.execute({
+      executionId: "ignored-cancellation",
+      source: "void tools.math.double({ value: 4 }); return null;",
+      sessionId: "session-1",
+    });
+    await toolStarted;
+
+    await expect(code.shutdown()).resolves.toBeUndefined();
+    await expect(pending).rejects.toThrow("cancelled");
+  });
+
   it("does not spawn work for an already-cancelled request", async () => {
     const controller = new AbortController();
     controller.abort();
@@ -204,6 +247,146 @@ describe("codemode runtime", () => {
         sessionId: "session-1",
       }),
     ).rejects.toThrow("Codemode result exceeds");
+  });
+
+  it("bounds SDK inputs and failure frames before sending them over IPC", async () => {
+    await expect(
+      runtime().execute({
+        source: 'return await noesis.invoke("math.double", { value: "x".repeat(300 * 1024) });',
+        sessionId: "session-1",
+      }),
+    ).rejects.toThrow("Codemode SDK request exceeds");
+
+    let thrown: unknown;
+    try {
+      await runtime().execute({
+        source: 'throw new Error("x".repeat(2 * 1024 * 1024));',
+        sessionId: "session-2",
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    if (!(thrown instanceof Error)) throw new Error("Expected codemode execution to fail");
+    expect(Buffer.byteLength(thrown.message, "utf8")).toBeLessThanOrEqual(32 * 1024);
+  });
+
+  it("bounds cumulative child-originated IPC even when generated code bypasses helpers", async () => {
+    await expect(
+      runtime().execute({
+        source: `
+          for (let index = 0; index < 45; index += 1) {
+            process.send({
+              type: "sdk-call",
+              requestId: "raw-" + String(index),
+              kind: "describe",
+              name: "x".repeat(190 * 1024)
+            });
+          }
+          return null;
+        `,
+        sessionId: "session-1",
+      }),
+    ).rejects.toThrow("Codemode IPC output exceeds");
+  });
+
+  it("enforces host-side frame and semantic limits against raw IPC bypasses", async () => {
+    await expect(
+      runtime().execute({
+        source: `
+          process.send({
+            type: "sdk-call",
+            requestId: "oversized-sdk",
+            kind: "invoke",
+            name: "math.double",
+            input: { value: "x".repeat(300 * 1024) }
+          });
+          return null;
+        `,
+        sessionId: "raw-sdk",
+      }),
+    ).rejects.toThrow("Codemode SDK request exceeds");
+
+    await expect(
+      runtime().execute({
+        source: `
+          process.send({ type: "result", value: "x".repeat(300 * 1024), storeMutations: [] });
+          return null;
+        `,
+        sessionId: "raw-result",
+      }),
+    ).rejects.toThrow("Codemode result exceeds");
+
+    await expect(
+      runtime().execute({
+        source: `
+          process.send({ type: "failure", error: "x".repeat(40 * 1024) });
+          return null;
+        `,
+        sessionId: "raw-failure",
+      }),
+    ).rejects.toThrow("Codemode failure message exceeds");
+
+    await expect(
+      runtime().execute({
+        source: `
+          process.send({ type: "failure", error: "failed", stack: "x".repeat(100 * 1024) });
+          return null;
+        `,
+        sessionId: "raw-stack",
+      }),
+    ).rejects.toThrow("Codemode failure stack exceeds");
+
+    await expect(
+      runtime().execute({
+        source: `
+          process.send({ type: "progress", value: "x".repeat(65 * 1024) });
+          return null;
+        `,
+        sessionId: "raw-progress",
+      }),
+    ).rejects.toThrow("Codemode progress value exceeds");
+
+    await expect(
+      runtime().execute({
+        source: `
+          process.send({ type: "failure", error: "x".repeat(1100 * 1024) });
+          return null;
+        `,
+        sessionId: "raw-frame",
+      }),
+    ).rejects.toThrow("Codemode IPC frame exceeds");
+  });
+
+  it("bounds aggregate store state in the child before returning it", async () => {
+    await expect(
+      runtime().execute({
+        source: `
+          for (let index = 0; index < 257; index += 1) store(String(index), index);
+          return null;
+        `,
+        sessionId: "session-1",
+      }),
+    ).rejects.toThrow("Codemode store exceeds");
+  });
+
+  it("bounds individual and aggregate progress before sending it over IPC", async () => {
+    await expect(
+      runtime().execute({
+        source: 'emit("x".repeat(65 * 1024)); return null;',
+        sessionId: "session-1",
+      }),
+    ).rejects.toThrow("Codemode progress value exceeds");
+
+    await expect(
+      runtime().execute({
+        source: `
+          for (let index = 0; index < 5; index += 1) emit("x".repeat(60 * 1024));
+          return null;
+        `,
+        sessionId: "session-2",
+      }),
+    ).rejects.toThrow("Codemode progress exceeds");
   });
 
   it("does not leak a child when an event observer throws", async () => {
