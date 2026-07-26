@@ -29,23 +29,31 @@ function normalizeActionValue(value: unknown, depth: number, seen: WeakSet<objec
   if (Array.isArray(value)) {
     if (seen.has(value)) return "[circular]";
     seen.add(value);
-    const items = value
-      .slice(0, MAX_COLLECTION_ITEMS)
-      .map((item) => normalizeActionValue(item, depth + 1, seen));
-    if (value.length > MAX_COLLECTION_ITEMS)
-      items.push(`[${String(value.length - MAX_COLLECTION_ITEMS)} more items]`);
-    return Object.freeze(items);
+    try {
+      const items = value
+        .slice(0, MAX_COLLECTION_ITEMS)
+        .map((item) => normalizeActionValue(item, depth + 1, seen));
+      if (value.length > MAX_COLLECTION_ITEMS)
+        items.push(`[${String(value.length - MAX_COLLECTION_ITEMS)} more items]`);
+      return Object.freeze(items);
+    } finally {
+      seen.delete(value);
+    }
   }
   if (typeof value === "object") {
     if (seen.has(value)) return "[circular]";
     seen.add(value);
-    const entries = Object.entries(value);
-    const normalized: Record<string, JsonValue> = {};
-    for (const [key, entry] of entries.slice(0, MAX_COLLECTION_ITEMS))
-      normalized[key] = normalizeActionValue(entry, depth + 1, seen);
-    if (entries.length > MAX_COLLECTION_ITEMS)
-      normalized["…"] = `[${String(entries.length - MAX_COLLECTION_ITEMS)} more properties]`;
-    return Object.freeze(normalized);
+    try {
+      const entries = Object.entries(value);
+      const normalized: Record<string, JsonValue> = {};
+      for (const [key, entry] of entries.slice(0, MAX_COLLECTION_ITEMS))
+        normalized[key] = normalizeActionValue(entry, depth + 1, seen);
+      if (entries.length > MAX_COLLECTION_ITEMS)
+        normalized["…"] = `[${String(entries.length - MAX_COLLECTION_ITEMS)} more properties]`;
+      return Object.freeze(normalized);
+    } finally {
+      seen.delete(value);
+    }
   }
   return String(value);
 }

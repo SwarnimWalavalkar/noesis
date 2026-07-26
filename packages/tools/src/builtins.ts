@@ -304,6 +304,7 @@ async function searchWithoutRipgrep(input: {
   let scannedBytes = 0;
   let retainedBytes = 0;
   let truncated = false;
+  let stopTraversal = false;
 
   async function* files(path: string): AsyncGenerator<string> {
     if (input.signal.aborted) throw createEffectExecutionFailure("cancelled", "File search was cancelled");
@@ -356,6 +357,7 @@ async function searchWithoutRipgrep(input: {
       ) {
         truncated = true;
         stopped = true;
+        stopTraversal = true;
         return;
       }
       fileMatches.push({
@@ -416,6 +418,7 @@ async function searchWithoutRipgrep(input: {
         if (acceptedBytes < bytes.byteLength) {
           truncated = true;
           stopped = true;
+          if (remainingTotal <= remainingFile) stopTraversal = true;
           break;
         }
         if (stopped) break;
@@ -431,7 +434,7 @@ async function searchWithoutRipgrep(input: {
       matches.push(...fileMatches);
       retainedBytes += fileRetainedBytes;
     }
-    if (truncated) break;
+    if (stopTraversal) break;
   }
   return Object.freeze({ matches: Object.freeze(matches), truncated });
 }

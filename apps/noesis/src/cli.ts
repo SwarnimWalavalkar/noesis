@@ -181,11 +181,14 @@ function parseArgs(argv: readonly string[]): CliInput {
     allowedOptions.add("--continue");
     allowedOptions.add("--trust-workspace");
   }
-  if (command === "skills") allowedOptions.add("--workspace");
+  if (command === "skills") {
+    allowedOptions.add("--workspace");
+    allowedOptions.add("--trust-workspace");
+  }
   if (workspaceIndexes[0] !== undefined && !allowedOptions.has("--workspace"))
     throw new Error("--workspace is valid only for skills commands");
   if (trustWorkspaceIndexes[0] !== undefined && !allowedOptions.has("--trust-workspace"))
-    throw new Error("--trust-workspace is valid only for the tui command");
+    throw new Error("--trust-workspace is valid only for the tui or skills command");
   const startupOption =
     startup.session.mode === "new" ? [] : startup.session.mode === "continue" ? ["--continue"] : ["--resume"];
   for (const name of [...optionValues.keys(), ...startupOption]) {
@@ -229,9 +232,9 @@ Usage:
   noesis config init [--home PATH]
   noesis config show|set [--home PATH] [agent options]
   noesis auth status|login|logout [PROVIDER] [--home PATH]
-  noesis skills list [--home PATH]
-  noesis skills install|remove SOURCE [--workspace] [--home PATH]
-  noesis skills update [SOURCE] [--workspace] [--home PATH]
+  noesis skills list [--workspace] [--trust-workspace] [--home PATH]
+  noesis skills install|remove SOURCE [--workspace] [--trust-workspace] [--home PATH]
+  noesis skills update [SOURCE] [--workspace] [--trust-workspace] [--home PATH]
   noesis help
 
 Session startup:
@@ -244,7 +247,7 @@ Agent options:
   --provider ID  --model ID  --thinking-level LEVEL
 
 Workspace trust:
-  --trust-workspace  Allow this launch to load workspace-selected skills.
+  --trust-workspace  Allow this command to load or mutate workspace-selected skills.
 
 The latest session is ordered by last activity, then full trail ID ascending on ties.
 A session still marked running is not recovered or resumed automatically.
@@ -458,7 +461,7 @@ async function runSkills(input: CliInput): Promise<void> {
   const library = createPiSkillLibrary({
     cwd: process.cwd(),
     agentDirectory: join(input.home, "agent"),
-    workspaceTrusted: input.skillScope === "workspace",
+    workspaceTrusted: input.workspaceTrusted,
   });
   const action = input.subcommand ?? "list";
   if (action === "list") {

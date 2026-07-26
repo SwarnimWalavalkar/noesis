@@ -217,8 +217,11 @@ describe("agent runtime factories", () => {
   test("bounds arbitrary action payloads without leaking runtime-specific values", () => {
     const cyclic: { self?: unknown } = {};
     cyclic.self = cyclic;
+    const shared = Object.freeze({ value: "shared" });
     const payload = toAgentActionPayload({
       cyclic,
+      first: shared,
+      second: shared,
       missing: undefined,
       failure: new Error("controlled"),
     });
@@ -229,6 +232,10 @@ describe("agent runtime factories", () => {
     expect(bounded).toContain("truncated");
     expect(serialized).toContain("controlled");
     expect(serialized).toContain("[circular]");
+    expect(payload).toMatchObject({
+      first: { value: "shared" },
+      second: { value: "shared" },
+    });
   });
 
   test("propagates cancellation and bounds direct self-tool results", async () => {
@@ -397,6 +404,52 @@ describe("agent runtime factories", () => {
 
     expect(result).toMatchObject({ outcome: "completed", text: `Grounded in ${marker}` });
     expect(controlled.provider.state.callCount).toBe(2);
+  });
+
+  test("does not let prepared codemode cleanup override a completed turn", async () => {
+    const controlled = createControlledPiModels({
+      respond: () => fauxAssistantMessage("Completed before cleanup."),
+    });
+    const plan = frozenPlan();
+    let closes = 0;
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      codeExecution: {
+        prepare: async () =>
+          Object.freeze({
+            catalogId: "catalog-close-failure",
+            catalogDigest: sha256("catalog-close-failure"),
+            execute: async () =>
+              Object.freeze({
+                executionId: "unused-execution",
+                value: null,
+                calls: 0,
+                durationMs: 0,
+              }),
+            close: async () => {
+              closes += 1;
+              throw new Error("cleanup failed after completion");
+            },
+          }),
+        shutdown: async () => undefined,
+      },
+    });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "Complete.",
+          activeCapabilities: [],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({ outcome: "completed", text: "Completed before cleanup." });
+    expect(closes).toBe(1);
   });
 
   test("emits stable top-level and nested action lifecycles with bounded payloads", async () => {

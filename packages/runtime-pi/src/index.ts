@@ -384,7 +384,7 @@ export function createPiAgentRuntime(
           if (execution.harness) await execution.harness.waitForIdle();
         } finally {
           try {
-            await execution.preparedCode?.close();
+            await execution.preparedCode?.close().catch(() => undefined);
           } finally {
             if (execution.sessionId) releasePiSessionResources(execution.sessionId);
           }

@@ -1,4 +1,4 @@
-import { GrantSchema, toJsonValue, type Grant, type JsonValue } from "@noesis/domain";
+import { canonicalJson, GrantSchema, toJsonValue, type Grant, type JsonValue } from "@noesis/domain";
 import {
   createDurableAuthorityBoundary,
   type AuthorityBoundary,
@@ -75,7 +75,7 @@ export function createWorkspaceAuthorityBoundary(
   const insertGrant = (grant: Grant, issuedAt: string): void => {
     const existing = db.prepare("SELECT * FROM authority_grants WHERE grant_id = ?").get(grant.grantId);
     if (existing !== undefined) {
-      if (JSON.stringify(decodeGrant(existing)) !== JSON.stringify(grant))
+      if (canonicalJson(decodeGrant(existing)) !== canonicalJson(grant))
         throw new Error(`Authority grant ${grant.grantId} already exists with different terms`);
       return;
     }
@@ -160,9 +160,9 @@ export function createWorkspaceAuthorityBoundary(
 
   const state: DurableAuthorityStatePort = Object.freeze({
     issueGrant: async (grant: Grant) => {
-      GrantSchema.parse(grant);
+      const parsed = GrantSchema.parse(grant);
       database.transaction(() => {
-        insertGrant(grant, now());
+        insertGrant(parsed, now());
       });
     },
     getGrant: async (grantId: string) => {
@@ -191,8 +191,8 @@ export function createWorkspaceAuthorityBoundary(
       grantId: string | undefined,
     ): Promise<DurableAuthorityReservation> => await reserveOperation(operation, grantId),
     reserveWithGrant: async (operation: DurableAuthorityOperation, grant: Grant) => {
-      GrantSchema.parse(grant);
-      return await reserveOperation(operation, undefined, grant);
+      const parsed = GrantSchema.parse(grant);
+      return await reserveOperation(operation, undefined, parsed);
     },
     complete: async (request: {
       readonly operation: DurableAuthorityOperation;

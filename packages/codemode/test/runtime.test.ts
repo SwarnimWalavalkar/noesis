@@ -247,6 +247,29 @@ describe("codemode runtime", () => {
     await expect(pending).rejects.toThrow("cancelled");
   });
 
+  it("times out after the cell returns while an unawaited broker call is still settling", async () => {
+    let markToolStarted: (() => void) | undefined;
+    const toolStarted = new Promise<void>((resolve) => {
+      markToolStarted = resolve;
+    });
+    const code = runtime({
+      beforeDouble: async () => {
+        markToolStarted?.();
+        await new Promise<never>(() => undefined);
+      },
+    });
+    const startedAt = Date.now();
+    const pending = code.execute({
+      source: "void tools.math.double({ value: 4 }); return null;",
+      sessionId: "session-timeout-during-settlement",
+      timeoutMs: 50,
+    });
+    await toolStarted;
+
+    await expect(pending).rejects.toThrow("timed out");
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
   it("does not spawn work for an already-cancelled request", async () => {
     const controller = new AbortController();
     controller.abort();

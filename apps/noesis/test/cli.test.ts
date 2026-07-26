@@ -73,7 +73,7 @@ describe("Noesis CLI grammar", () => {
     },
     {
       args: ["inspect", "--trust-workspace"],
-      message: "--trust-workspace is valid only for the tui command",
+      message: "--trust-workspace is valid only for the tui or skills command",
     },
     {
       args: ["--continue", "--resume"],
@@ -147,17 +147,38 @@ describe("Noesis CLI grammar", () => {
       "utf8",
     );
     const installed = await runCli(
-      ["skills", "install", skillPackage, "--workspace", "--home", home],
+      ["skills", "install", skillPackage, "--workspace", "--trust-workspace", "--home", home],
       workspace,
     );
     const updated = await runCli(
-      ["skills", "update", skillPackage, "--workspace", "--home", home],
+      ["skills", "update", skillPackage, "--workspace", "--trust-workspace", "--home", home],
       workspace,
     );
 
     expect(installed, installed.output).toMatchObject({ code: 0 });
     expect(updated, updated.output).toMatchObject({ code: 0 });
     expect(updated.output).toContain(`Updated ${skillPackage}`);
+  });
+
+  test("requires workspace trust independently from workspace skill scope", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-cli-skills-untrusted-"));
+    const workspace = join(home, "workspace");
+    const skillPackage = join(home, "skill-package");
+    await mkdir(workspace, { recursive: true });
+    await mkdir(join(skillPackage, "skills", "cli-skill"), { recursive: true });
+    await writeFile(
+      join(skillPackage, "skills", "cli-skill", "SKILL.md"),
+      "---\nname: cli-skill\ndescription: CLI trust test.\n---\n\nUse the CLI.",
+      "utf8",
+    );
+
+    const result = await runCli(
+      ["skills", "install", skillPackage, "--workspace", "--home", home],
+      workspace,
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.output).toContain("requires explicit workspace trust");
   });
 
   test("read-only inspection does not recover interrupted operations", async () => {

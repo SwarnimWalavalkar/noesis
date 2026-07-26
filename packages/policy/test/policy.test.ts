@@ -3,6 +3,8 @@ import { describe, expect, test } from "vitest";
 import {
   createEffectExecutionFailure,
   createDurableAuthorityBoundary,
+  parseEffectExecutionError,
+  parseEffectExecutionFailure,
   serializeEffectExecutionFailure,
   type DurableAuthorityOperation,
   type DurableAuthorityReservation,
@@ -96,6 +98,19 @@ function createInMemoryDurableAuthorityState(
 }
 
 describe("durable authority boundary", () => {
+  test("replays typed failures written by the v1 durable encoding", () => {
+    const reason = 'noesis-effect-failure-v1:{"code":"cancelled","message":"legacy cancellation"}';
+
+    expect(parseEffectExecutionFailure(reason)).toEqual({
+      code: "cancelled",
+      message: "legacy cancellation",
+    });
+    expect(parseEffectExecutionError(reason)).toEqual({
+      code: "cancelled",
+      message: "legacy cancellation",
+    });
+  });
+
   test("foreground effects cannot widen the frozen turn permission", async () => {
     const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
     let executions = 0;

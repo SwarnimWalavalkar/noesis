@@ -420,6 +420,7 @@ export interface ApplicationRuntimeCompositionOptions {
 
 function sessionDefinitionsForBroker(
   definitions: Awaited<ReturnType<typeof resolveFrozenSessionToolDefinitions>>,
+  planCanonicalDigest: string,
 ): readonly ToolDefinition[] {
   return Object.freeze(
     definitions.map((definition) =>
@@ -428,6 +429,11 @@ function sessionDefinitionsForBroker(
         label: definition.label,
         description: definition.description,
         visibility: "codemode_only",
+        identityMaterial: Object.freeze({
+          adapterRevision: "history-session-tools-v1",
+          planCanonicalDigest,
+          toolName: definition.name,
+        }),
         inputSchema: definition.inputSchema,
         outputSchema: z.json(),
         effect: () => ({
@@ -1499,7 +1505,7 @@ export async function createApplicationRuntimeComposition(
         skillLoadTool,
         ...scriptTools,
         ...workflowTools,
-        ...sessionDefinitionsForBroker(sessionDefinitions),
+        ...sessionDefinitionsForBroker(sessionDefinitions, plan.canonicalDigest),
       ]),
       authority,
       recorder: Object.freeze({

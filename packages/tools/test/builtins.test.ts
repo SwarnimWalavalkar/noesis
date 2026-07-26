@@ -328,6 +328,22 @@ describe("local work tools", () => {
     expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(96 * 1024);
   });
 
+  it("continues fallback search after truncating one oversized file", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-search-oversized-file-"));
+    await writeFile(join(cwd, "a-oversized.log"), "x".repeat(3 * 1024 * 1024), "utf8");
+    await writeFile(join(cwd, "z-match.ts"), "const laterNeedle = true;\n", "utf8");
+
+    const result = await tool(toolsAt(cwd, "noesis-rg-does-not-exist"), "files.search").execute(
+      { query: "laterNeedle", path: ".", maxMatches: 10 },
+      context(),
+    );
+
+    expect(result).toEqual({
+      matches: [{ path: join(cwd, "z-match.ts"), line: 1, text: "const laterNeedle = true;" }],
+      truncated: true,
+    });
+  });
+
   it("does not follow redirects and bounds streamed response bodies", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()

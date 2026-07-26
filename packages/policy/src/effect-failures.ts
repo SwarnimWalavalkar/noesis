@@ -2,6 +2,7 @@ export type EffectExecutionFailureCode = "cancelled" | "invalid_output" | "resul
 
 const failureBrand = Symbol("noesis.effect-execution-failure");
 const durablePrefix = "noesis-effect-failure-v2:";
+const legacyDurablePrefix = "noesis-effect-failure-v1:";
 
 interface BrandedEffectExecutionFailure extends Error {
   readonly [failureBrand]: EffectExecutionFailureCode;
@@ -67,18 +68,26 @@ export function parseEffectExecutionFailure(reason: string): EffectExecutionFail
 }
 
 export function parseEffectExecutionError(reason: string): DurableEffectExecutionFailureDetails | undefined {
-  if (!reason.startsWith(durablePrefix)) return undefined;
+  const prefix = reason.startsWith(durablePrefix)
+    ? durablePrefix
+    : reason.startsWith(legacyDurablePrefix)
+      ? legacyDurablePrefix
+      : undefined;
+  if (!prefix) return undefined;
   try {
-    const parsed: unknown = JSON.parse(reason.slice(durablePrefix.length));
+    const parsed: unknown = JSON.parse(reason.slice(prefix.length));
     if (
       typeof parsed !== "object" ||
       parsed === null ||
-      !("kind" in parsed) ||
-      (parsed.kind !== "typed" && parsed.kind !== "ordinary") ||
       !("message" in parsed) ||
       typeof parsed.message !== "string"
     )
       return undefined;
+    if (prefix === legacyDurablePrefix) {
+      if (!("code" in parsed) || !isFailureCode(parsed.code)) return undefined;
+      return Object.freeze({ code: parsed.code, message: parsed.message });
+    }
+    if (!("kind" in parsed) || (parsed.kind !== "typed" && parsed.kind !== "ordinary")) return undefined;
     if (parsed.kind === "ordinary") return Object.freeze({ message: parsed.message });
     if (!("code" in parsed) || !isFailureCode(parsed.code)) return undefined;
     return Object.freeze({ code: parsed.code, message: parsed.message });
