@@ -417,6 +417,10 @@ async function searchWithoutRipgrep(input: {
         }
         if (acceptedBytes < bytes.byteLength) {
           truncated = true;
+          if (!binary) {
+            lineTruncated = true;
+            retainMatch();
+          }
           stopped = true;
           if (remainingTotal <= remainingFile) stopTraversal = true;
           break;

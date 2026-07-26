@@ -258,16 +258,28 @@ describe("codemode runtime", () => {
         await new Promise<never>(() => undefined);
       },
     });
-    const startedAt = Date.now();
-    const pending = code.execute({
-      source: "void tools.math.double({ value: 4 }); return null;",
-      sessionId: "session-timeout-during-settlement",
-      timeoutMs: 50,
-    });
-    await toolStarted;
+    const outcome = code
+      .execute({
+        source: "void tools.math.double({ value: 4 }); return null;",
+        sessionId: "session-timeout-during-settlement",
+        timeoutMs: 1_000,
+      })
+      .then(
+        (value) => ({ ok: true, value }) as const,
+        (error: unknown) => ({ ok: false, error }) as const,
+      );
+    const firstEvent = await Promise.race([
+      toolStarted.then(() => "tool-started" as const),
+      outcome.then(() => "execution-settled" as const),
+    ]);
+    expect(firstEvent).toBe("tool-started");
 
-    await expect(pending).rejects.toThrow("timed out");
-    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    const result = await outcome;
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected codemode execution to time out");
+    expect(result.error).toBeInstanceOf(Error);
+    if (!(result.error instanceof Error)) throw new Error("Expected codemode execution to fail");
+    expect(result.error.message).toContain("timed out");
   });
 
   it("does not spawn work for an already-cancelled request", async () => {

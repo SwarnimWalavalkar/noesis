@@ -344,6 +344,49 @@ describe("local work tools", () => {
     });
   });
 
+  it("retains a partial-line match found at the fallback per-file byte cap", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-search-partial-line-"));
+    const query = "boundaryNeedle";
+    const perFileLimit = 2 * 1024 * 1024;
+    await writeFile(
+      join(cwd, "oversized.log"),
+      `${"x".repeat(perFileLimit - query.length)}${query}ignored`,
+      "utf8",
+    );
+
+    const result = await tool(toolsAt(cwd, "noesis-rg-does-not-exist"), "files.search").execute(
+      { query, path: ".", maxMatches: 10 },
+      context(),
+    );
+
+    expect(result).toEqual({
+      matches: [
+        {
+          path: join(cwd, "oversized.log"),
+          line: 1,
+          text: `${"x".repeat(4 * 1024 - 3)}...`,
+        },
+      ],
+      truncated: true,
+    });
+  });
+
+  it("does not invent a replacement-character match when the byte cap splits UTF-8", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-search-split-utf8-"));
+    const perFileLimit = 2 * 1024 * 1024;
+    await writeFile(
+      join(cwd, "oversized.log"),
+      Buffer.concat([Buffer.alloc(perFileLimit - 1, "x"), Buffer.from("€ignored", "utf8")]),
+    );
+
+    const result = await tool(toolsAt(cwd, "noesis-rg-does-not-exist"), "files.search").execute(
+      { query: "\ufffd", path: ".", maxMatches: 10 },
+      context(),
+    );
+
+    expect(result).toEqual({ matches: [], truncated: true });
+  });
+
   it("does not follow redirects and bounds streamed response bodies", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
