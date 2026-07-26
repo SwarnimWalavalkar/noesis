@@ -21,6 +21,7 @@ import {
 } from "./session-picker.ts";
 import { initialTuiState } from "./state.ts";
 
+export * from "./onboarding.ts";
 export * from "./rendering.ts";
 export * from "./runtime-port.ts";
 export * from "./safe-editor.ts";
@@ -216,7 +217,10 @@ export async function startNoesisTui(
       view.state.trailId === submittedTrailId;
     const publishInspector = (message: string): void => {
       if (!isCurrentSubmission() || activeTurn) return;
-      view.dispatch({ type: "system-message", text: boundedInspectorText(message) });
+      view.dispatch({
+        type: "system-message",
+        text: boundedInspectorText(message),
+      });
       tui.requestRender();
     };
     void (async () => {
@@ -560,13 +564,19 @@ export async function startNoesisTui(
                 });
               } else if (event.type === "status" && event.status === "started") {
                 flushStreamDelta(token);
-                view.dispatch({ type: "execution-changed", execution: "thinking" });
+                view.dispatch({
+                  type: "execution-changed",
+                  execution: "thinking",
+                });
               } else if (event.type === "status" && event.status === "aborted") {
                 flushStreamDelta(token);
                 view.dispatch({ type: "execution-changed", execution: "idle" });
               } else if (event.type === "status" && event.status === "failed") {
                 flushStreamDelta(token);
-                view.dispatch({ type: "failed", error: safeTerminalText(event.error) });
+                view.dispatch({
+                  type: "failed",
+                  error: safeTerminalText(event.error),
+                });
               }
               tui.requestRender();
             },
@@ -575,7 +585,10 @@ export async function startNoesisTui(
           if (!isCurrentTurn(token)) return;
           // Intermediate tool-loop messages are useful while a turn is live, but durable runtime
           // output is authoritative at settlement and replaces the current assistant block exactly.
-          view.dispatch({ type: "stream-reconciled", text: safeTerminalText(result.output) });
+          view.dispatch({
+            type: "stream-reconciled",
+            text: safeTerminalText(result.output),
+          });
           if (result.outcome === "aborted") {
             view.dispatch({ type: "turn-aborted" });
             view.dispatch({ type: "system-message", text: "Turn aborted." });

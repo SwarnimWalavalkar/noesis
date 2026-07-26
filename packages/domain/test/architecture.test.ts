@@ -13,6 +13,7 @@ const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const allowedErrorClasses = new Set([
   "apps/noesis/src/onboarding.ts:OnboardingCancelledError",
   "packages/config/src/index.ts:NoesisConfigError",
+  "packages/tui/src/onboarding.ts:OnboardingInterruptedError",
 ]);
 
 async function filesBelow(directory: string): Promise<readonly string[]> {
@@ -137,7 +138,10 @@ describe("first-party architecture boundaries", () => {
         readonly dependencies?: Readonly<Record<string, string>>;
         readonly devDependencies?: Readonly<Record<string, string>>;
       };
-      const dependencies = { ...manifest.dependencies, ...manifest.devDependencies };
+      const dependencies = {
+        ...manifest.dependencies,
+        ...manifest.devDependencies,
+      };
       for (const name of Object.keys(dependencies)) {
         if (!name.startsWith("@earendil-works/pi-")) continue;
         const allowedRuntimePi =
@@ -197,7 +201,9 @@ describe("first-party architecture boundaries", () => {
     }
 
     const rootConfig = JSON.parse(await readFile(resolve(repositoryRoot, "tsconfig.json"), "utf8")) as {
-      readonly compilerOptions?: { readonly paths?: Readonly<Record<string, readonly string[]>> };
+      readonly compilerOptions?: {
+        readonly paths?: Readonly<Record<string, readonly string[]>>;
+      };
     };
     const protectedAliases = Object.keys(rootConfig.compilerOptions?.paths ?? {}).filter((path) =>
       path.includes("protected"),
@@ -266,7 +272,10 @@ describe("first-party architecture boundaries", () => {
       readonly dependencies?: Readonly<Record<string, string>>;
       readonly devDependencies?: Readonly<Record<string, string>>;
     };
-    const dependencies = { ...manifest.dependencies, ...manifest.devDependencies };
+    const dependencies = {
+      ...manifest.dependencies,
+      ...manifest.devDependencies,
+    };
 
     expect(sourceViolations).toEqual([]);
     expect("@noesis/runtime-pi" in dependencies).toBe(false);

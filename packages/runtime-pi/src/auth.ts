@@ -385,10 +385,16 @@ export type NoesisAuthEvent =
     }
   | { readonly type: "progress"; readonly message: string };
 
+export interface NoesisOAuthCallbackPage {
+  readonly provider: "openai-codex";
+  readonly status: "success";
+}
+
 export interface NoesisAuthLoginCallbacks {
   readonly signal?: AbortSignal;
   prompt(prompt: NoesisAuthPrompt): Promise<string>;
   notify(event: NoesisAuthEvent): void;
+  renderOAuthCallbackPage?(page: NoesisOAuthCallbackPage): string;
 }
 
 export interface PiAuthManager {
@@ -407,6 +413,9 @@ export function createPiAuthManager(models: MutableModels, credentials: Credenti
       ...(callbacks.signal ? { signal: callbacks.signal } : {}),
       prompt: async (prompt) => await callbacks.prompt(prompt),
       notify: (event) => callbacks.notify(event),
+      ...(callbacks.renderOAuthCallbackPage
+        ? { renderOAuthCallbackPage: callbacks.renderOAuthCallbackPage }
+        : {}),
     };
     const credential = provider.auth.oauth
       ? await provider.auth.oauth.login(piCallbacks)

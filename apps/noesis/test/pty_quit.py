@@ -95,7 +95,11 @@ class VirtualScreen:
 
     def _csi(self, raw: str, final: str) -> None:
         clean = raw.lstrip("?><!")
-        values = [int(value) if value.isdigit() else 0 for value in clean.split(";")] if clean else [0]
+        values = (
+            [int(value) if value.isdigit() else 0 for value in clean.split(";")]
+            if clean
+            else [0]
+        )
         amount = values[0] or 1
         if final == "A":
             self.row = max(0, self.row - amount)
@@ -109,7 +113,9 @@ class VirtualScreen:
             self.column = min(self.columns - 1, max(0, amount - 1))
         elif final in ("H", "f"):
             self.row = min(self.rows - 1, max(0, (values[0] or 1) - 1))
-            self.column = min(self.columns - 1, max(0, (values[1] if len(values) > 1 else 1) - 1))
+            self.column = min(
+                self.columns - 1, max(0, (values[1] if len(values) > 1 else 1) - 1)
+            )
         elif final == "K":
             mode = values[0]
             start = 0 if mode in (1, 2) else self.column
@@ -120,6 +126,28 @@ class VirtualScreen:
             self.grid = [[" "] * self.columns for _ in range(self.rows)]
             self.row = 0
             self.column = 0
+
+
+URL_ROW = re.compile(r"[A-Za-z0-9:/?&=._~%+\-]+")
+
+
+def extract_oauth_state(screen: "VirtualScreen") -> "str | None":
+    """Recover the authorization state from the rendered screen.
+
+    Onboarding renders the sign-in URL as column-aligned chunks, so the raw byte stream carries
+    line breaks inside the URL. Rejoining the contiguous URL rows of the grid restores it.
+    """
+    url = ""
+    for row in (line.strip() for line in screen.text().split("\n")):
+        if not url:
+            if row.startswith("https://auth.openai.com"):
+                url = row
+            continue
+        if not URL_ROW.fullmatch(row):
+            break
+        url += row
+    match = re.search(r"[?&]state=([A-Za-z0-9_\-]+)", url)
+    return match.group(1) if match else None
 
 
 def main() -> int:
@@ -140,21 +168,21 @@ def main() -> int:
         exit_input = b"/quit\n" if action == "first-launch-quit-lf" else b"\x03"
         ready_marker = "● IDLE".encode()
         onboarding_writes = [
-            (b"Choose an AI provider", b"2\n"),
-            (b"OpenRouter model ID", b"\n"),
-            (b"Choose a reasoning level", b"\n"),
-            (b"Authenticate and create this configuration?", b"\n"),
-            (b"Enter OpenRouter API key", b"test-openrouter-key\n"),
+            (b"Choose an AI provider", b"\x1b[B\r"),
+            (b"OpenRouter model ID", b"\r"),
+            (b"Choose a reasoning level", b"\r"),
+            (b"Authenticate and create this configuration?", b"\r"),
+            (b"Enter OpenRouter API key", b"test-openrouter-key\r"),
         ]
     elif action in ("first-launch-oauth-quit-lf", "first-launch-oauth-ctrl-c"):
         exit_input = b"/quit\n" if action == "first-launch-oauth-quit-lf" else b"\x03"
         ready_marker = "● IDLE".encode()
         onboarding_writes = [
-            (b"Choose an AI provider", b"\n"),
-            (b"Choose a Codex model", b"\n"),
-            (b"Choose a reasoning level", b"\n"),
-            (b"Authenticate and create this configuration?", b"\n"),
-            (b"Select OpenAI Codex login method:", b"browser\n"),
+            (b"Choose an AI provider", b"\r"),
+            (b"Choose a Codex model", b"\r"),
+            (b"Choose a reasoning level", b"\r"),
+            (b"Authenticate and create this configuration?", b"\r"),
+            (b"Select OpenAI Codex login method:", b"\r"),
         ]
         oauth_callback_pending = True
     elif action == "picker-cancel":
@@ -242,9 +270,17 @@ def main() -> int:
     screen = VirtualScreen(columns, rows)
     try:
         while time.monotonic() < deadline:
-            if sent_exit and followup_writes and next_write_at is not None and time.monotonic() >= next_write_at:
+            if (
+                sent_exit
+                and followup_writes
+                and next_write_at is not None
+                and time.monotonic() >= next_write_at
+            ):
                 _, next_input, label = followup_writes.pop(0)
-                if label == "genuine-enter" and b"Controlled Pi completion for:" in output:
+                if (
+                    label == "genuine-enter"
+                    and b"Controlled Pi completion for:" in output
+                ):
                     os.write(sys.stdout.fileno(), b"\n__NOESIS_PREMATURE_SUBMIT__\n")
                 os.write(master, next_input)
                 last_write_label = label
@@ -267,27 +303,56 @@ def main() -> int:
                         _, onboarding_input = onboarding_writes.pop(0)
                         os.write(master, onboarding_input)
                         output = b""
-                    elif oauth_callback_pending and b"Complete login in your browser" in output:
-                        state_match = re.search(rb"[?&]state=([^&\s]+)", output)
-                        if not state_match:
-                            raise RuntimeError("OAuth authorization URL did not contain state")
-                        callback = (
-                            b"http://127.0.0.1:1455/auth/callback?code=test-code&state="
-                            + state_match.group(1)
-                        )
-                        with urllib.request.urlopen(callback.decode(), timeout=1) as response:
-                            response.read()
-                        oauth_callback_pending = False
-                        output = b""
+                    elif (
+                        oauth_callback_pending
+                        and b"Complete login in your browser" in output
+                    ):
+                        state = extract_oauth_state(screen)
+                        if state:
+                            callback = (
+                                "http://127.0.0.1:1455/auth/callback?code=test-code&state="
+                                + state
+                            ).encode()
+                            with urllib.request.urlopen(
+                                callback.decode(), timeout=1
+                            ) as response:
+                                callback_page = response.read()
+                                callback_headers = "\n".join(
+                                    f"{name}: {response.headers.get(name, '')}"
+                                    for name in (
+                                        "Cache-Control",
+                                        "Content-Security-Policy",
+                                        "Referrer-Policy",
+                                        "X-Content-Type-Options",
+                                    )
+                                ).encode()
+                            os.write(
+                                sys.stdout.fileno(),
+                                b"\n__NOESIS_OAUTH_CALLBACK_PAGE__\n"
+                                + callback_page
+                                + b"\n__NOESIS_OAUTH_CALLBACK_HEADERS__\n"
+                                + callback_headers
+                                + b"\n__NOESIS_OAUTH_CALLBACK_END__\n",
+                            )
+                            oauth_callback_pending = False
+                            output = b""
                     elif not sent_exit and ready_marker in output:
                         if action == "resize-main-quit":
                             os.write(sys.stdout.fileno(), b"\n__NOESIS_RESIZED__\n")
-                            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 9, 50, 0, 0))
+                            fcntl.ioctl(
+                                master,
+                                termios.TIOCSWINSZ,
+                                struct.pack("HHHH", 9, 50, 0, 0),
+                            )
                             screen.resize(50, 9)
                             os.kill(pid, signal.SIGWINCH)
                         elif action == "resize-picker-cancel":
                             os.write(sys.stdout.fileno(), b"\n__NOESIS_RESIZED__\n")
-                            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 7, 46, 0, 0))
+                            fcntl.ioctl(
+                                master,
+                                termios.TIOCSWINSZ,
+                                struct.pack("HHHH", 7, 46, 0, 0),
+                            )
                             screen.resize(46, 7)
                             os.kill(pid, signal.SIGWINCH)
                         else:
@@ -296,15 +361,25 @@ def main() -> int:
                                 next_write_at = time.monotonic() + followup_writes[0][0]
                         sent_exit = True
                         output = b""
-                    elif action == "picker-select-quit" and sent_exit and "● IDLE".encode() in output:
+                    elif (
+                        action == "picker-select-quit"
+                        and sent_exit
+                        and "● IDLE".encode() in output
+                    ):
                         os.write(master, b"/quit\n")
                         action = "picker-selected"
-                    elif action in (
-                        "prompt-quit",
-                        "backspace-del-quit",
-                        "backspace-bs-quit",
-                        "backspace-grapheme-quit",
-                    ) and sent_exit and b"Controlled Pi completion for:" in output and "● IDLE".encode() in output:
+                    elif (
+                        action
+                        in (
+                            "prompt-quit",
+                            "backspace-del-quit",
+                            "backspace-bs-quit",
+                            "backspace-grapheme-quit",
+                        )
+                        and sent_exit
+                        and b"Controlled Pi completion for:" in output
+                        and "● IDLE".encode() in output
+                    ):
                         os.write(master, b"/quit\n")
                         action = "prompt-selected"
                     elif (
@@ -315,7 +390,9 @@ def main() -> int:
                     ):
                         os.write(
                             master,
-                            b"/quit\n" if action == "completed-turn-quit-lf" else b"\x03",
+                            b"/quit\n"
+                            if action == "completed-turn-quit-lf"
+                            else b"\x03",
                         )
                         action = "completed-turn-finished"
                     elif (
@@ -335,10 +412,18 @@ def main() -> int:
                     ):
                         os.write(master, b"/quit\n")
                         action = "fragmented-hostile-paste-finished"
-                    elif action == "resize-main-quit" and sent_exit and b"? help" in output:
+                    elif (
+                        action == "resize-main-quit"
+                        and sent_exit
+                        and b"? help" in output
+                    ):
                         os.write(master, b"/quit\n")
                         action = "main-resized"
-                    elif action == "resize-picker-cancel" and sent_exit and b"resume a session" in output:
+                    elif (
+                        action == "resize-picker-cancel"
+                        and sent_exit
+                        and b"resume a session" in output
+                    ):
                         os.write(master, b"\x1b")
                         action = "picker-resized"
                     elif (
@@ -351,7 +436,11 @@ def main() -> int:
                         and b"MIXED-END" in output
                     ):
                         os.write(sys.stdout.fileno(), b"\n__NOESIS_MIXED_RESIZED__\n")
-                        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 22, 70, 0, 0))
+                        fcntl.ioctl(
+                            master,
+                            termios.TIOCSWINSZ,
+                            struct.pack("HHHH", 22, 70, 0, 0),
+                        )
                         screen.resize(70, 22)
                         os.kill(pid, signal.SIGWINCH)
                         action = "mixed-resized"
@@ -363,7 +452,9 @@ def main() -> int:
                     ):
                         os.write(sys.stdout.fileno(), b"\n__NOESIS_FINAL_SCREEN__\n")
                         os.write(sys.stdout.fileno(), screen.text().encode())
-                        os.write(sys.stdout.fileno(), b"\n__NOESIS_FINAL_SCREEN_END__\n")
+                        os.write(
+                            sys.stdout.fileno(), b"\n__NOESIS_FINAL_SCREEN_END__\n"
+                        )
                         os.write(master, b"/quit\n")
                         action = "mixed-finished"
             finished, status = os.waitpid(pid, os.WNOHANG)
