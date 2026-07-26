@@ -29,6 +29,8 @@ export async function initializeWorkspaceDirectories(paths: WorkspacePaths): Pro
       join(paths.definitions, "skills"),
       join(paths.definitions, "capabilities"),
       join(paths.definitions, "tools"),
+      join(paths.definitions, "scripts"),
+      join(paths.definitions, "workflows"),
       join(paths.definitions, "evals"),
       paths.candidates,
       paths.active,

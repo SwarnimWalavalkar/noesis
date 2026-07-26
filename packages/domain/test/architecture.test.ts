@@ -115,7 +115,9 @@ describe("first-party architecture boundaries", () => {
           (specifier === "@earendil-works/pi-agent-core" ||
             specifier.startsWith("@earendil-works/pi-agent-core/") ||
             specifier === "@earendil-works/pi-ai" ||
-            specifier.startsWith("@earendil-works/pi-ai/"));
+            specifier.startsWith("@earendil-works/pi-ai/") ||
+            specifier === "@earendil-works/pi-coding-agent" ||
+            specifier.startsWith("@earendil-works/pi-coding-agent/"));
         const allowedTui =
           localPath.startsWith("packages/tui/") &&
           (specifier === "@earendil-works/pi-tui" || specifier.startsWith("@earendil-works/pi-tui/"));
@@ -140,7 +142,9 @@ describe("first-party architecture boundaries", () => {
         if (!name.startsWith("@earendil-works/pi-")) continue;
         const allowedRuntimePi =
           localPath === "packages/runtime-pi/package.json" &&
-          (name === "@earendil-works/pi-agent-core" || name === "@earendil-works/pi-ai");
+          (name === "@earendil-works/pi-agent-core" ||
+            name === "@earendil-works/pi-ai" ||
+            name === "@earendil-works/pi-coding-agent");
         const allowedTui = localPath === "packages/tui/package.json" && name === "@earendil-works/pi-tui";
         if (!allowedRuntimePi && !allowedTui) dependencyViolations.push(`${localPath}:${name}`);
       }

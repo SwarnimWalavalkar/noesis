@@ -33,7 +33,8 @@ describe("credential-free Pi application acceptance", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });

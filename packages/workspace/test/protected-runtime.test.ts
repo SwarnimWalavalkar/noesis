@@ -174,6 +174,15 @@ describe("protected workspace runtime", () => {
           reason: "A durable reservation exists without an authoritative outcome",
         });
       },
+      reserveWithGrant: async (
+        operation: DurableAuthorityOperation,
+      ): Promise<DurableAuthorityReservation> => {
+        attemptedOperations.push(operation);
+        return Object.freeze({
+          status: "unresolved",
+          reason: "A durable reservation exists without an authoritative outcome",
+        });
+      },
       complete: async () => {
         terminalWrites += 1;
       },

@@ -1,0 +1,14 @@
+{
+  "name": "@noesis/codemode",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@noesis/domain": "workspace:*",
+    "@noesis/tools": "workspace:*",
+    "zod": "4.4.3"
+  }
+}

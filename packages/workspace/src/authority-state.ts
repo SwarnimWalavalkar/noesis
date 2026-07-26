@@ -1,4 +1,4 @@
-import { GrantSchema, toJsonValue, type Grant, type JsonValue } from "@noesis/domain";
+import { canonicalJson, GrantSchema, toJsonValue, type Grant, type JsonValue } from "@noesis/domain";
 import {
   createDurableAuthorityBoundary,
   type AuthorityBoundary,
@@ -35,7 +35,7 @@ const permitted = (grant: Grant, operation: DurableAuthorityOperation, at: strin
 const replayReservation = (
   row: unknown,
   operation: DurableAuthorityOperation,
-): DurableAuthorityReservation => {
+): Exclude<DurableAuthorityReservation, { readonly status: "reserved" }> => {
   if (requiredString(row, "operation_fingerprint") !== operation.fingerprint)
     return Object.freeze({
       status: "collision",
@@ -72,32 +72,97 @@ export function createWorkspaceAuthorityBoundary(
   now: () => string,
 ): AuthorityBoundary {
   const db = database.connection;
+  const insertGrant = (grant: Grant, issuedAt: string): void => {
+    const existing = db.prepare("SELECT * FROM authority_grants WHERE grant_id = ?").get(grant.grantId);
+    if (existing !== undefined) {
+      if (canonicalJson(decodeGrant(existing)) !== canonicalJson(grant))
+        throw new Error(`Authority grant ${grant.grantId} already exists with different terms`);
+      return;
+    }
+    db.prepare(
+      `INSERT INTO authority_grants(
+        grant_id, principal, effects_json, resource_prefixes_json, expires_at,
+        max_uses, max_cost, issued_at, source_event_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+    ).run(
+      grant.grantId,
+      grant.principal,
+      JSON.stringify(grant.effects),
+      JSON.stringify(grant.resourcePrefixes),
+      grant.expiresAt,
+      grant.maxUses,
+      grant.maxCost,
+      issuedAt,
+    );
+  };
+  const reserveOperation = async (
+    operation: DurableAuthorityOperation,
+    grantId: string | undefined,
+    freshGrant?: Grant,
+  ): Promise<DurableAuthorityReservation> =>
+    database.transaction(() => {
+      const existing = db
+        .prepare("SELECT * FROM authority_operations WHERE idempotency_key = ?")
+        .get(operation.identity.idempotencyKey);
+      if (existing !== undefined) return replayReservation(existing, operation);
+
+      const at = now();
+      const grantRow =
+        freshGrant === undefined && grantId !== undefined
+          ? db.prepare("SELECT * FROM authority_grants WHERE grant_id = ?").get(grantId)
+          : undefined;
+      const grant = freshGrant ?? (grantRow === undefined ? undefined : decodeGrant(grantRow));
+      let denial: string | undefined;
+      if (grant === undefined) denial = "A live, process-owned grant is required";
+      else if (!permitted(grant, operation, at))
+        denial = "Grant does not authorize this principal, effect, resource, or time";
+      else {
+        const usage = db
+          .prepare(
+            `SELECT COUNT(*) AS uses, COALESCE(SUM(estimated_cost), 0) AS cost
+             FROM authority_operations
+             WHERE grant_id = ? AND status != 'denied'`,
+          )
+          .get(grant.grantId);
+        const uses = requiredNumber(usage, "uses");
+        const cost = requiredNumber(usage, "cost");
+        if (uses + 1 > grant.maxUses || cost + operation.estimatedCost > grant.maxCost)
+          denial = "Grant use or cost budget exhausted";
+      }
+
+      if (freshGrant !== undefined && denial === undefined) insertGrant(freshGrant, at);
+      const status = denial === undefined ? "reserved" : "denied";
+      db.prepare(
+        `INSERT INTO authority_operations(
+          operation_id, idempotency_key, operation_fingerprint, principal, effect, resource,
+          request_digest, estimated_cost, grant_id, status, result_json, failure,
+          receipt_lineage_id, source_event_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?)`,
+      ).run(
+        operation.identity.operationId,
+        operation.identity.idempotencyKey,
+        operation.fingerprint,
+        operation.identity.principal,
+        operation.identity.effect,
+        operation.identity.resource,
+        operation.identity.requestDigest,
+        operation.estimatedCost,
+        denial === undefined ? (grant?.grantId ?? null) : null,
+        status,
+        denial ?? null,
+        at,
+        at,
+      );
+      return denial === undefined
+        ? Object.freeze({ status: "reserved", grantId: grant?.grantId ?? "" })
+        : Object.freeze({ status: "denied", reason: denial });
+    });
 
   const state: DurableAuthorityStatePort = Object.freeze({
     issueGrant: async (grant: Grant) => {
-      GrantSchema.parse(grant);
+      const parsed = GrantSchema.parse(grant);
       database.transaction(() => {
-        const existing = db.prepare("SELECT * FROM authority_grants WHERE grant_id = ?").get(grant.grantId);
-        if (existing !== undefined) {
-          if (JSON.stringify(decodeGrant(existing)) !== JSON.stringify(grant))
-            throw new Error(`Authority grant ${grant.grantId} already exists with different terms`);
-          return;
-        }
-        db.prepare(
-          `INSERT INTO authority_grants(
-            grant_id, principal, effects_json, resource_prefixes_json, expires_at,
-            max_uses, max_cost, issued_at, source_event_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-        ).run(
-          grant.grantId,
-          grant.principal,
-          JSON.stringify(grant.effects),
-          JSON.stringify(grant.resourcePrefixes),
-          grant.expiresAt,
-          grant.maxUses,
-          grant.maxCost,
-          now(),
-        );
+        insertGrant(parsed, now());
       });
     },
     getGrant: async (grantId: string) => {
@@ -124,63 +189,11 @@ export function createWorkspaceAuthorityBoundary(
     reserve: async (
       operation: DurableAuthorityOperation,
       grantId: string | undefined,
-    ): Promise<DurableAuthorityReservation> =>
-      database.transaction(() => {
-        const existing = db
-          .prepare("SELECT * FROM authority_operations WHERE idempotency_key = ?")
-          .get(operation.identity.idempotencyKey);
-        if (existing !== undefined) return replayReservation(existing, operation);
-
-        const at = now();
-        const grantRow =
-          grantId === undefined
-            ? undefined
-            : db.prepare("SELECT * FROM authority_grants WHERE grant_id = ?").get(grantId);
-        const grant = grantRow === undefined ? undefined : decodeGrant(grantRow);
-        let denial: string | undefined;
-        if (grant === undefined) denial = "A live, process-owned grant is required";
-        else if (!permitted(grant, operation, at))
-          denial = "Grant does not authorize this principal, effect, resource, or time";
-        else {
-          const usage = db
-            .prepare(
-              `SELECT COUNT(*) AS uses, COALESCE(SUM(estimated_cost), 0) AS cost
-               FROM authority_operations
-               WHERE grant_id = ? AND status != 'denied'`,
-            )
-            .get(grant.grantId);
-          const uses = requiredNumber(usage, "uses");
-          const cost = requiredNumber(usage, "cost");
-          if (uses + 1 > grant.maxUses || cost + operation.estimatedCost > grant.maxCost)
-            denial = "Grant use or cost budget exhausted";
-        }
-
-        const status = denial === undefined ? "reserved" : "denied";
-        db.prepare(
-          `INSERT INTO authority_operations(
-            operation_id, idempotency_key, operation_fingerprint, principal, effect, resource,
-            request_digest, estimated_cost, grant_id, status, result_json, failure,
-            receipt_lineage_id, source_event_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?)`,
-        ).run(
-          operation.identity.operationId,
-          operation.identity.idempotencyKey,
-          operation.fingerprint,
-          operation.identity.principal,
-          operation.identity.effect,
-          operation.identity.resource,
-          operation.identity.requestDigest,
-          operation.estimatedCost,
-          grant?.grantId ?? null,
-          status,
-          denial ?? null,
-          at,
-          at,
-        );
-        return denial === undefined
-          ? Object.freeze({ status: "reserved", grantId: grant?.grantId ?? "" })
-          : Object.freeze({ status: "denied", reason: denial });
-      }),
+    ): Promise<DurableAuthorityReservation> => await reserveOperation(operation, grantId),
+    reserveWithGrant: async (operation: DurableAuthorityOperation, grant: Grant) => {
+      const parsed = GrantSchema.parse(grant);
+      return await reserveOperation(operation, undefined, parsed);
+    },
     complete: async (request: {
       readonly operation: DurableAuthorityOperation;
       readonly grantId: string;

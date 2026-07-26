@@ -1,19 +1,20 @@
 #!/usr/bin/env node
-import { Writable } from "node:stream";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { resolve } from "node:path";
+import { Writable } from "node:stream";
 import {
+  type ConfigOverrides,
   initializeNoesisConfig,
+  type ResolvedNoesisConfig,
   readNoesisConfig,
   resolveNoesisConfig,
-  type ConfigOverrides,
-  type ResolvedNoesisConfig,
   updateNoesisConfig,
 } from "@noesis/config";
 import {
-  createPiModelServices,
-  createPiAgentRuntime,
   createPiAgentRoleRunner,
+  createPiAgentRuntime,
+  createPiModelServices,
+  createPiSkillLibrary,
   type NoesisAuthEvent,
   type NoesisAuthLoginCallbacks,
   type NoesisAuthPrompt,
@@ -26,13 +27,16 @@ import {
   runFirstLaunchOnboarding,
   shouldAutoOnboard,
 } from "./onboarding.ts";
-import { createApplicationRuntimeComposition, type ApplicationRuntime } from "./runtime-composition.ts";
+import { type ApplicationRuntime, createApplicationRuntimeComposition } from "./runtime-composition.ts";
 
 interface CliInput {
   readonly args: readonly string[];
   readonly command: string;
   readonly subcommand?: string;
   readonly authProvider?: string;
+  readonly skillSource?: string;
+  readonly skillScope?: "personal" | "workspace";
+  readonly workspaceTrusted: boolean;
   readonly home: string;
   readonly overrides: ConfigOverrides;
   readonly session:
@@ -44,9 +48,10 @@ interface CliInput {
 
 type SessionStartup = CliInput["session"];
 
-const COMMANDS = new Set(["tui", "onboard", "inspect", "rebuild", "config", "auth", "help"]);
+const COMMANDS = new Set(["tui", "onboard", "inspect", "rebuild", "config", "auth", "skills", "help"]);
 const CONFIG_COMMANDS = new Set(["show", "init", "set"]);
 const AUTH_COMMANDS = new Set(["status", "login", "logout"]);
+const SKILL_COMMANDS = new Set(["list", "install", "update", "remove"]);
 const AGENT_OPTIONS = ["--provider", "--model", "--thinking-level"] as const;
 const VALUE_OPTIONS = ["--home", ...AGENT_OPTIONS] as const;
 
@@ -104,7 +109,9 @@ function parseArgs(argv: readonly string[]): CliInput {
   const args = argv[0] === "--" ? argv.slice(1) : argv;
   const command = args[0] === undefined || args[0].startsWith("--") ? "tui" : args[0];
   if (!COMMANDS.has(command))
-    throw new Error(`Unknown command ${command}. Use tui, onboard, inspect, rebuild, config, auth, or help.`);
+    throw new Error(
+      `Unknown command ${command}. Use tui, onboard, inspect, rebuild, config, auth, skills, or help.`,
+    );
   const commandIndex = command === "tui" && args[0]?.startsWith("--") ? -1 : 0;
   const consumed = new Set<number>();
   if (commandIndex === 0) consumed.add(0);
@@ -125,12 +132,21 @@ function parseArgs(argv: readonly string[]): CliInput {
   const helpIndexes = args.flatMap((argument, index) => (argument === "--help" ? [index] : []));
   if (helpIndexes.length > 1) throw new Error("--help may be specified only once");
   if (helpIndexes[0] !== undefined) consumed.add(helpIndexes[0]);
+  const workspaceIndexes = args.flatMap((argument, index) => (argument === "--workspace" ? [index] : []));
+  if (workspaceIndexes.length > 1) throw new Error("--workspace may be specified only once");
+  if (workspaceIndexes[0] !== undefined) consumed.add(workspaceIndexes[0]);
+  const trustWorkspaceIndexes = args.flatMap((argument, index) =>
+    argument === "--trust-workspace" ? [index] : [],
+  );
+  if (trustWorkspaceIndexes.length > 1) throw new Error("--trust-workspace may be specified only once");
+  if (trustWorkspaceIndexes[0] !== undefined) consumed.add(trustWorkspaceIndexes[0]);
   const operands = args.filter((argument, index) => !consumed.has(index) && !argument.startsWith("--"));
   const unknownOption = args.find((argument, index) => !consumed.has(index) && argument.startsWith("--"));
   if (unknownOption) throw new Error(`Unknown ${command} option ${unknownOption}`);
 
   let subcommand: string | undefined;
   let authProvider: string | undefined;
+  let skillSource: string | undefined;
   if (command === "config") {
     subcommand = operands[0] ?? "show";
     if (!CONFIG_COMMANDS.has(subcommand))
@@ -142,6 +158,14 @@ function parseArgs(argv: readonly string[]): CliInput {
       throw new Error("Unknown auth command. Use auth login, auth status, or auth logout.");
     authProvider = operands[1];
     if (operands[2]) throw new Error(`Unexpected auth argument ${operands[2]}`);
+  } else if (command === "skills") {
+    subcommand = operands[0] ?? "list";
+    if (!SKILL_COMMANDS.has(subcommand))
+      throw new Error("Unknown skills command. Use skills list, install, update, or remove.");
+    skillSource = operands[1];
+    if ((subcommand === "install" || subcommand === "remove") && !skillSource)
+      throw new Error(`skills ${subcommand} requires a package, Git, URL, or local path source`);
+    if (operands[2]) throw new Error(`Unexpected skills argument ${operands[2]}`);
   } else if (operands[0]) {
     throw new Error(`Unexpected ${command} argument ${operands[0]}`);
   }
@@ -155,7 +179,16 @@ function parseArgs(argv: readonly string[]): CliInput {
   if (command === "tui") {
     allowedOptions.add("--resume");
     allowedOptions.add("--continue");
+    allowedOptions.add("--trust-workspace");
   }
+  if (command === "skills") {
+    allowedOptions.add("--workspace");
+    allowedOptions.add("--trust-workspace");
+  }
+  if (workspaceIndexes[0] !== undefined && !allowedOptions.has("--workspace"))
+    throw new Error("--workspace is valid only for skills commands");
+  if (trustWorkspaceIndexes[0] !== undefined && !allowedOptions.has("--trust-workspace"))
+    throw new Error("--trust-workspace is valid only for the tui or skills command");
   const startupOption =
     startup.session.mode === "new" ? [] : startup.session.mode === "continue" ? ["--continue"] : ["--resume"];
   for (const name of [...optionValues.keys(), ...startupOption]) {
@@ -173,6 +206,11 @@ function parseArgs(argv: readonly string[]): CliInput {
     command,
     ...(subcommand ? { subcommand } : {}),
     ...(authProvider ? { authProvider } : {}),
+    ...(skillSource ? { skillSource } : {}),
+    ...(command === "skills"
+      ? { skillScope: workspaceIndexes[0] === undefined ? ("personal" as const) : ("workspace" as const) }
+      : {}),
+    workspaceTrusted: trustWorkspaceIndexes[0] !== undefined,
     home,
     session: startup.session,
     overrides: {
@@ -186,7 +224,7 @@ function parseArgs(argv: readonly string[]): CliInput {
 const CLI_HELP = `Noesis
 
 Usage:
-  noesis [tui] [--home PATH] [agent options]
+  noesis [tui] [--home PATH] [--trust-workspace] [agent options]
   noesis [tui] --continue [--home PATH] [agent options]
   noesis [tui] --resume [SESSION_ID] [--home PATH] [agent options]
   noesis onboard [--home PATH]
@@ -194,6 +232,9 @@ Usage:
   noesis config init [--home PATH]
   noesis config show|set [--home PATH] [agent options]
   noesis auth status|login|logout [PROVIDER] [--home PATH]
+  noesis skills list [--workspace] [--trust-workspace] [--home PATH]
+  noesis skills install|remove SOURCE [--workspace] [--trust-workspace] [--home PATH]
+  noesis skills update [SOURCE] [--workspace] [--trust-workspace] [--home PATH]
   noesis help
 
 Session startup:
@@ -205,15 +246,37 @@ Session startup:
 Agent options:
   --provider ID  --model ID  --thinking-level LEVEL
 
+Workspace trust:
+  --trust-workspace  Allow this command to load or mutate workspace-selected skills.
+
 The latest session is ordered by last activity, then full trail ID ascending on ties.
 A session still marked running is not recovered or resumed automatically.
 Unknown options, conflicting startup arguments, and trailing operands are rejected.`;
 
-async function createRuntime(config: ResolvedNoesisConfig): Promise<ApplicationRuntime> {
+async function createRuntime(
+  config: ResolvedNoesisConfig,
+  options: {
+    readonly recoverInterruptedOperations: boolean;
+    readonly workspaceTrusted: boolean;
+  },
+): Promise<ApplicationRuntime> {
   const services = createPiModelServices(config.home);
+  const skills = createPiSkillLibrary({
+    cwd: process.cwd(),
+    agentDirectory: join(config.home, "agent"),
+    workspaceTrusted: options.workspaceTrusted,
+  });
   return await createApplicationRuntimeComposition({
     config,
-    createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), services.models, { sessionTools }),
+    skills,
+    recoverInterruptedOperations: options.recoverInterruptedOperations,
+    createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
+      createPiAgentRuntime(process.cwd(), services.models, {
+        codeExecution,
+        selfTools,
+        requirePinnedSkillSnapshot: true,
+        ...(skillLibrary ? { skills: skillLibrary } : {}),
+      }),
     createRoleRunner: (configurations) =>
       createPiAgentRoleRunner(process.cwd(), services.models, configurations),
   });
@@ -394,6 +457,48 @@ async function runConfig(input: CliInput): Promise<void> {
   throw new Error("Unknown config command. Use config show, config init, or config set.");
 }
 
+async function runSkills(input: CliInput): Promise<void> {
+  const library = createPiSkillLibrary({
+    cwd: process.cwd(),
+    agentDirectory: join(input.home, "agent"),
+    workspaceTrusted: input.workspaceTrusted,
+  });
+  const action = input.subcommand ?? "list";
+  if (action === "list") {
+    const snapshot = await library.snapshot();
+    console.log(
+      JSON.stringify(
+        {
+          skills: snapshot.skills.map(({ content: _content, ...skill }) => skill),
+          diagnostics: snapshot.diagnostics,
+          packages: library.configured(),
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  if (action === "install") {
+    if (!input.skillSource) throw new Error("skills install requires a source");
+    await library.install(input.skillSource, input.skillScope ?? "personal");
+    console.log(`Installed ${input.skillSource} for ${input.skillScope ?? "personal"} use.`);
+    return;
+  }
+  if (action === "remove") {
+    if (!input.skillSource) throw new Error("skills remove requires a source");
+    const removed = await library.remove(input.skillSource, input.skillScope ?? "personal");
+    console.log(removed ? `Removed ${input.skillSource}.` : `${input.skillSource} was not configured.`);
+    return;
+  }
+  if (action === "update") {
+    await library.update(input.skillSource, input.skillScope ?? "personal");
+    console.log(input.skillSource ? `Updated ${input.skillSource}.` : "Updated configured skill packages.");
+    return;
+  }
+  throw new Error("Unknown skills command. Use skills list, install, update, or remove.");
+}
+
 async function main(): Promise<void> {
   const input = parseArgs(process.argv.slice(2));
   if (input.args.includes("--help") || input.command === "help") {
@@ -406,6 +511,10 @@ async function main(): Promise<void> {
   }
   if (input.command === "auth") {
     await runAuth(input, createPiModelServices(input.home).auth);
+    return;
+  }
+  if (input.command === "skills") {
+    await runSkills(input);
     return;
   }
   const loaded = await readNoesisConfig(input.home);
@@ -436,7 +545,10 @@ async function main(): Promise<void> {
       "No Noesis config found. Run `noesis onboard` in an interactive terminal or `noesis config init` for non-interactive setup.",
     );
   const config = await resolveNoesisConfig({ home: input.home, cli: input.overrides });
-  const runtime = await createRuntime(config);
+  const runtime = await createRuntime(config, {
+    recoverInterruptedOperations: input.command === "tui",
+    workspaceTrusted: input.workspaceTrusted,
+  });
   try {
     if (input.command === "rebuild") {
       const documents = await runtime.debug.workspace.search.rebuildDocuments();
@@ -461,7 +573,7 @@ async function main(): Promise<void> {
       });
     else
       throw new Error(
-        `Unknown command ${input.command}. Use tui, onboard, inspect, rebuild, config, or auth.`,
+        `Unknown command ${input.command}. Use tui, onboard, inspect, rebuild, config, auth, or skills.`,
       );
   } finally {
     await runtime.shutdown();

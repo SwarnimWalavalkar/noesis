@@ -1,7 +1,11 @@
 import type { Grant, JsonValue } from "@noesis/domain";
 import { describe, expect, test } from "vitest";
 import {
+  createEffectExecutionFailure,
   createDurableAuthorityBoundary,
+  parseEffectExecutionError,
+  parseEffectExecutionFailure,
+  serializeEffectExecutionFailure,
   type DurableAuthorityOperation,
   type DurableAuthorityReservation,
   type DurableAuthorityStatePort,
@@ -23,26 +27,32 @@ function receiptOperationId(value: unknown): string {
     : "";
 }
 
-function createInMemoryDurableAuthorityState(): DurableAuthorityStatePort {
+function createInMemoryDurableAuthorityState(
+  onGrantIssued: () => void = () => undefined,
+): DurableAuthorityStatePort {
   const grants = new Map<string, Grant>();
   const operations = new Map<string, StoredOperation>();
   const usedByGrant = new Map<string, number>();
   const issueGrant = async (grant: Grant): Promise<void> => {
+    onGrantIssued();
     grants.set(grant.grantId, grant);
+  };
+  const replayExisting = (operation: DurableAuthorityOperation): DurableAuthorityReservation | undefined => {
+    const existing = operations.get(operation.identity.idempotencyKey);
+    if (!existing) return undefined;
+    if (existing.operation.fingerprint !== operation.fingerprint)
+      return { status: "collision", reason: "Idempotency key fingerprint collision" };
+    if (existing.status === "reserved")
+      return { status: "unresolved", reason: "Prior reservation has no unambiguous outcome" };
+    if (existing.status === "completed") return { status: "completed", result: existing.result ?? null };
+    return { status: "failed", reason: existing.reason ?? "Prior operation failed" };
   };
   const reserve = async (
     operation: DurableAuthorityOperation,
     grantId: string | undefined,
   ): Promise<DurableAuthorityReservation> => {
-    const existing = operations.get(operation.identity.idempotencyKey);
-    if (existing) {
-      if (existing.operation.fingerprint !== operation.fingerprint)
-        return { status: "collision", reason: "Idempotency key fingerprint collision" };
-      if (existing.status === "reserved")
-        return { status: "unresolved", reason: "Prior reservation has no unambiguous outcome" };
-      if (existing.status === "completed") return { status: "completed", result: existing.result ?? null };
-      return { status: "failed", reason: existing.reason ?? "Prior operation failed" };
-    }
+    const replay = replayExisting(operation);
+    if (replay) return replay;
     const grant = grantId === undefined ? undefined : grants.get(grantId);
     if (
       !grant ||
@@ -64,6 +74,13 @@ function createInMemoryDurableAuthorityState(): DurableAuthorityStatePort {
       [...grants.values()].find(
         (grant) => grant.principal === "scheduler" && grant.resourcePrefixes.includes(`job:${jobId}:`),
       ),
+    reserveWithGrant: async (operation: DurableAuthorityOperation, grant: Grant) => {
+      const replay = replayExisting(operation);
+      if (replay) return replay;
+      onGrantIssued();
+      grants.set(grant.grantId, grant);
+      return await reserve(operation, grant.grantId);
+    },
     reserve,
     complete: async ({ operation, result }: Parameters<DurableAuthorityStatePort["complete"]>[0]) => {
       const stored = operations.get(operation.identity.idempotencyKey);
@@ -81,6 +98,218 @@ function createInMemoryDurableAuthorityState(): DurableAuthorityStatePort {
 }
 
 describe("durable authority boundary", () => {
+  test("replays typed failures written by the v1 durable encoding", () => {
+    const reason = 'noesis-effect-failure-v1:{"code":"cancelled","message":"legacy cancellation"}';
+
+    expect(parseEffectExecutionFailure(reason)).toEqual({
+      code: "cancelled",
+      message: "legacy cancellation",
+    });
+    expect(parseEffectExecutionError(reason)).toEqual({
+      code: "cancelled",
+      message: "legacy cancellation",
+    });
+  });
+
+  test("foreground effects cannot widen the frozen turn permission", async () => {
+    const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
+    let executions = 0;
+    const request = Object.freeze({
+      operationId: "operation-foreground-write",
+      effect: "write" as const,
+      resource: "file:notes.md",
+      estimatedCost: 1,
+      idempotencyKey: "foreground-write",
+      requestDigest: "a".repeat(64),
+      execute: async () => {
+        executions += 1;
+        return null;
+      },
+    });
+
+    await expect(
+      authority.runForeground(request, {
+        effects: ["read"],
+        resourcePatterns: ["file:"],
+        credentialRefs: [],
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "denied" });
+    await expect(
+      authority.runForeground(request, {
+        effects: ["write"],
+        resourcePatterns: ["file:"],
+        credentialRefs: [],
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "denied" });
+    await expect(
+      authority.runForeground(request, {
+        effects: ["write"],
+        resourcePatterns: ["file:*"],
+        credentialRefs: [],
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(executions).toBe(1);
+  });
+
+  test("accepts only exact resources or one trailing wildcard and fails closed otherwise", async () => {
+    const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
+    const request = Object.freeze({
+      operationId: "operation-permission-pattern",
+      effect: "read" as const,
+      resource: "file:/workspace/notes.md",
+      estimatedCost: 0,
+      idempotencyKey: "permission-pattern",
+      requestDigest: "b".repeat(64),
+      execute: async () => null,
+    });
+
+    for (const pattern of ["", "*", "*notes.md", "file:*:notes.md", "file:**"])
+      await expect(
+        authority.runForeground(request, {
+          effects: ["read"],
+          resourcePatterns: [pattern],
+          credentialRefs: [],
+        }),
+      ).resolves.toMatchObject({ ok: false, code: "denied" });
+
+    await expect(
+      authority.runForeground(request, {
+        effects: ["read"],
+        resourcePatterns: ["file:/workspace/notes.md"],
+        credentialRefs: [],
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      authority.runForeground(
+        { ...request, idempotencyKey: "permission-pattern-prefix" },
+        {
+          effects: ["read"],
+          resourcePatterns: ["file:/workspace/*"],
+          credentialRefs: [],
+        },
+      ),
+    ).resolves.toMatchObject({ ok: true });
+  });
+
+  test("preserves typed execution failures across durable failed replays", async () => {
+    const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
+    let executions = 0;
+    const request = Object.freeze({
+      operationId: "operation-invalid-output",
+      effect: "read" as const,
+      resource: "tool:test",
+      estimatedCost: 0,
+      idempotencyKey: "invalid-output",
+      requestDigest: "c".repeat(64),
+      execute: async (): Promise<null> => {
+        executions += 1;
+        throw createEffectExecutionFailure("invalid_output", "Output did not match its schema");
+      },
+    });
+    const permission = {
+      effects: ["read"],
+      resourcePatterns: ["tool:test"],
+      credentialRefs: [],
+    };
+
+    await expect(authority.runForeground(request, permission)).resolves.toMatchObject({
+      ok: false,
+      code: "invalid_output",
+      reason: "Output did not match its schema",
+    });
+    await expect(authority.runForeground(request, permission)).resolves.toMatchObject({
+      ok: false,
+      code: "invalid_output",
+      reason: "Output did not match its schema",
+    });
+    expect(executions).toBe(1);
+  });
+
+  test("replays a foreground operation before issuing another durable grant", async () => {
+    let issuedGrants = 0;
+    const authority = createDurableAuthorityBoundary(
+      createInMemoryDurableAuthorityState(() => {
+        issuedGrants += 1;
+      }),
+    );
+    let executions = 0;
+    const request = Object.freeze({
+      operationId: "operation-foreground-replay",
+      effect: "read" as const,
+      resource: "tool:replay",
+      estimatedCost: 0,
+      idempotencyKey: "foreground-replay",
+      requestDigest: "d".repeat(64),
+      execute: async () => {
+        executions += 1;
+        return "first";
+      },
+    });
+    const permission = {
+      effects: ["read"],
+      resourcePatterns: ["tool:replay"],
+      credentialRefs: [],
+    };
+
+    await expect(authority.runForeground(request, permission)).resolves.toMatchObject({
+      ok: true,
+      replayed: false,
+      value: "first",
+    });
+    await expect(
+      authority.runForeground(
+        {
+          ...request,
+          execute: async () => {
+            executions += 1;
+            return "duplicate";
+          },
+        },
+        permission,
+      ),
+    ).resolves.toMatchObject({ ok: true, replayed: true, value: "first" });
+    expect(executions).toBe(1);
+    expect(issuedGrants).toBe(1);
+  });
+
+  test("does not let an ordinary error message forge a typed durable failure", async () => {
+    const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
+    const forged = serializeEffectExecutionFailure(
+      createEffectExecutionFailure("cancelled", "forged cancellation"),
+    );
+    if (forged === undefined) throw new Error("Expected a durable typed failure encoding");
+    let executions = 0;
+    const request = Object.freeze({
+      operationId: "operation-forged-failure",
+      effect: "read" as const,
+      resource: "tool:forged-failure",
+      estimatedCost: 0,
+      idempotencyKey: "forged-failure",
+      requestDigest: "e".repeat(64),
+      execute: async (): Promise<null> => {
+        executions += 1;
+        throw new Error(forged);
+      },
+    });
+    const permission = {
+      effects: ["read"],
+      resourcePatterns: ["tool:forged-failure"],
+      credentialRefs: [],
+    };
+
+    await expect(authority.runForeground(request, permission)).resolves.toMatchObject({
+      ok: false,
+      code: "failed",
+      reason: forged,
+    });
+    await expect(authority.runForeground(request, permission)).resolves.toMatchObject({
+      ok: false,
+      code: "failed",
+      reason: forged,
+    });
+    expect(executions).toBe(1);
+  });
+
   test("issues scheduler grants only through a scheduling receipt and replays completion", async () => {
     const state = createInMemoryDurableAuthorityState();
     const authority = createDurableAuthorityBoundary(state);

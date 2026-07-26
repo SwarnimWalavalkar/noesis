@@ -11,6 +11,7 @@ import type {
   WorkspaceStore,
   CapabilityRevisionRef,
   DataSensitivity,
+  JsonValue,
   PermissionManifest,
 } from "@noesis/domain";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
@@ -63,6 +64,64 @@ export interface ToolCallRecord {
   readonly status: "requested" | "running" | "completed" | "failed" | "denied" | "ambiguous";
   readonly sensitivity: Sensitivity;
   readonly createdAt: string;
+  readonly completedAt?: string;
+}
+
+export interface CodeExecutionRecord {
+  readonly executionId: string;
+  readonly logicalExecutionId: string;
+  readonly parentExecutionId?: string;
+  readonly sessionId: string;
+  readonly turnId?: string;
+  readonly catalogId: string;
+  readonly catalogDigest: string;
+  readonly sourceDigest: string;
+  readonly sourceArtifactId?: string;
+  readonly stdoutArtifactId?: string;
+  readonly stderrArtifactId?: string;
+  readonly status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  readonly result?: JsonValue;
+  readonly error?: string;
+  readonly callCount: number;
+  readonly startedAt: string;
+  readonly completedAt?: string;
+}
+
+export interface WorkflowRunRecord {
+  readonly runId: string;
+  readonly workflowName: string;
+  readonly workflowRevision: number;
+  readonly definitionRevisionId: string;
+  readonly catalogId?: string;
+  readonly catalogDigest?: string;
+  readonly permissionDigest?: string;
+  readonly provider?: string;
+  readonly model?: string;
+  readonly thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  readonly sessionId: string;
+  readonly turnId?: string;
+  readonly status: "running" | "paused" | "completed" | "failed" | "cancelled";
+  readonly currentPhase: number;
+  readonly input: JsonValue;
+  readonly output?: JsonValue;
+  readonly error?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly completedAt?: string;
+}
+
+export interface WorkflowPhaseRunRecord {
+  readonly runId: string;
+  readonly phaseIndex: number;
+  readonly phaseName: string;
+  readonly status: "pending" | "running" | "completed" | "failed" | "cancelled";
+  readonly attempt: number;
+  readonly logicalExecutionId?: string;
+  readonly input: JsonValue;
+  readonly output?: JsonValue;
+  readonly executionId?: string;
+  readonly error?: string;
+  readonly startedAt?: string;
   readonly completedAt?: string;
 }
 
@@ -393,6 +452,29 @@ export interface OperationalRepositories {
     readonly get: (toolCallId: string) => Promise<ToolCallRecord | undefined>;
     readonly put: (record: ToolCallRecord) => Promise<DatabaseRowRef>;
     readonly listForSession: (sessionId: string) => Promise<readonly ToolCallRecord[]>;
+    readonly listForExecution: (executionId: string) => Promise<readonly ToolCallRecord[]>;
+  };
+  readonly codeExecutions: {
+    readonly get: (executionId: string) => Promise<CodeExecutionRecord | undefined>;
+    readonly put: (record: CodeExecutionRecord) => Promise<void>;
+    readonly listForSession: (sessionId: string) => Promise<readonly CodeExecutionRecord[]>;
+    readonly interruptRunning: (interruptedAt: string) => Promise<number>;
+  };
+  readonly workflows: {
+    readonly getRun: (runId: string) => Promise<WorkflowRunRecord | undefined>;
+    readonly putRun: (record: WorkflowRunRecord) => Promise<void>;
+    readonly claimPausedRun: (
+      runId: string,
+      sessionId: string,
+      claimedAt: string,
+    ) => Promise<WorkflowRunRecord | undefined>;
+    readonly listRunsForSession: (sessionId: string) => Promise<readonly WorkflowRunRecord[]>;
+    readonly putPhase: (record: WorkflowPhaseRunRecord) => Promise<void>;
+    readonly listPhases: (runId: string) => Promise<readonly WorkflowPhaseRunRecord[]>;
+    readonly interruptRunning: (interruptedAt: string) => Promise<{
+      readonly runs: number;
+      readonly phases: number;
+    }>;
   };
   readonly outcomes: {
     readonly get: (outcomeId: string) => Promise<OutcomeRecord | undefined>;

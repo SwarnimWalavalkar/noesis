@@ -3,6 +3,7 @@ import {
   ExperimentSchema,
   FeedbackSignalSchema,
   FileRevisionRefSchema,
+  JsonValueSchema,
   type Experiment,
   type FeedbackSignal,
   type FileRevisionRef,
@@ -15,6 +16,7 @@ import type {
   ActivationOperationRecord,
   ActivationRecord,
   CanonicalSearchSource,
+  CodeExecutionRecord,
   MessageRecord,
   OutcomeRecord,
   SearchConfiguration,
@@ -22,6 +24,8 @@ import type {
   SessionRecord,
   ToolCallRecord,
   TurnActivationPinRecord,
+  WorkflowPhaseRunRecord,
+  WorkflowRunRecord,
 } from "./types.ts";
 
 export const JsonRecordSchema = z.record(z.string(), z.unknown());
@@ -34,6 +38,13 @@ export const SearchConfigurationSchema = z.strictObject({
   updatedAt: z.string().min(1),
 });
 export const SensitivitySchema = z.enum(["normal", "private", "secret"]);
+const SessionStatusSchema = z.enum(["idle", "running", "completed", "aborted", "failed"]);
+const MessageRoleSchema = z.enum(["user", "assistant", "system", "tool"]);
+const ToolCallStatusSchema = z.enum(["requested", "running", "completed", "failed", "denied", "ambiguous"]);
+const CodeExecutionStatusSchema = z.enum(["running", "completed", "failed", "cancelled", "interrupted"]);
+const WorkflowRunStatusSchema = z.enum(["running", "paused", "completed", "failed", "cancelled"]);
+const WorkflowPhaseStatusSchema = z.enum(["pending", "running", "completed", "failed", "cancelled"]);
+const OutcomeStatusSchema = z.enum(["accepted", "corrected", "failed", "unknown"]);
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const ActivationEvidenceBindingSchema = z.strictObject({
@@ -77,7 +88,7 @@ export function decodeSession(row: unknown): SessionRecord {
     sessionId: requiredString(row, "session_id"),
     ...(parentSessionId === undefined ? {} : { parentSessionId }),
     title: requiredString(row, "title"),
-    status: requiredString(row, "status") as SessionRecord["status"],
+    status: SessionStatusSchema.parse(requiredString(row, "status")),
     provider: requiredString(row, "provider"),
     model: requiredString(row, "model"),
     runtime: requiredString(row, "runtime"),
@@ -91,9 +102,9 @@ export function decodeMessage(row: unknown): MessageRecord {
   return {
     messageId: requiredString(row, "message_id"),
     sessionId: requiredString(row, "session_id"),
-    role: requiredString(row, "role") as MessageRecord["role"],
+    role: MessageRoleSchema.parse(requiredString(row, "role")),
     content: requiredString(row, "content"),
-    sensitivity: requiredString(row, "sensitivity") as MessageRecord["sensitivity"],
+    sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
     createdAt: requiredString(row, "created_at"),
     metadata: JsonRecordSchema.parse(parseJson(requiredString(row, "metadata_json"))),
   };
@@ -110,9 +121,103 @@ export function decodeToolCall(row: unknown): ToolCallRecord {
     toolName: requiredString(row, "tool_name"),
     request: parseJson(requiredString(row, "request_json")),
     ...(response === undefined ? {} : { response: parseJson(response) }),
-    status: requiredString(row, "status") as ToolCallRecord["status"],
-    sensitivity: requiredString(row, "sensitivity") as ToolCallRecord["sensitivity"],
+    status: ToolCallStatusSchema.parse(requiredString(row, "status")),
+    sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
     createdAt: requiredString(row, "created_at"),
+    ...(completedAt === undefined ? {} : { completedAt }),
+  };
+}
+
+export function decodeCodeExecution(row: unknown): CodeExecutionRecord {
+  const parentExecutionId = optionalString(row, "parent_execution_id");
+  const turnId = optionalString(row, "turn_id");
+  const result = optionalString(row, "result_json");
+  const error = optionalString(row, "error");
+  const completedAt = optionalString(row, "completed_at");
+  const sourceArtifactId = optionalString(row, "source_artifact_id");
+  const stdoutArtifactId = optionalString(row, "stdout_artifact_id");
+  const stderrArtifactId = optionalString(row, "stderr_artifact_id");
+  return {
+    executionId: requiredString(row, "execution_id"),
+    logicalExecutionId: requiredString(row, "logical_execution_id"),
+    ...(parentExecutionId === undefined ? {} : { parentExecutionId }),
+    sessionId: requiredString(row, "session_id"),
+    ...(turnId === undefined ? {} : { turnId }),
+    catalogId: requiredString(row, "catalog_id"),
+    catalogDigest: requiredString(row, "catalog_digest"),
+    sourceDigest: requiredString(row, "source_digest"),
+    ...(sourceArtifactId === undefined ? {} : { sourceArtifactId }),
+    ...(stdoutArtifactId === undefined ? {} : { stdoutArtifactId }),
+    ...(stderrArtifactId === undefined ? {} : { stderrArtifactId }),
+    status: CodeExecutionStatusSchema.parse(requiredString(row, "status")),
+    ...(result === undefined ? {} : { result: JsonValueSchema.parse(parseJson(result)) }),
+    ...(error === undefined ? {} : { error }),
+    callCount: requiredNumber(row, "call_count"),
+    startedAt: requiredString(row, "started_at"),
+    ...(completedAt === undefined ? {} : { completedAt }),
+  };
+}
+
+export function decodeWorkflowRun(row: unknown): WorkflowRunRecord {
+  const turnId = optionalString(row, "turn_id");
+  const catalogId = optionalString(row, "catalog_id");
+  const catalogDigest = optionalString(row, "catalog_digest");
+  const permissionDigest = optionalString(row, "permission_digest");
+  const provider = optionalString(row, "provider");
+  const model = optionalString(row, "model");
+  const thinkingLevel = optionalString(row, "thinking_level");
+  const output = optionalString(row, "output_json");
+  const error = optionalString(row, "error");
+  const completedAt = optionalString(row, "completed_at");
+  return {
+    runId: requiredString(row, "run_id"),
+    workflowName: requiredString(row, "workflow_name"),
+    workflowRevision: requiredNumber(row, "workflow_revision"),
+    definitionRevisionId: requiredString(row, "definition_revision_id"),
+    ...(catalogId === undefined ? {} : { catalogId }),
+    ...(catalogDigest === undefined ? {} : { catalogDigest }),
+    ...(permissionDigest === undefined ? {} : { permissionDigest }),
+    ...(provider === undefined ? {} : { provider }),
+    ...(model === undefined ? {} : { model }),
+    ...(thinkingLevel === undefined
+      ? {}
+      : {
+          thinkingLevel: z
+            .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+            .parse(thinkingLevel),
+        }),
+    sessionId: requiredString(row, "session_id"),
+    ...(turnId === undefined ? {} : { turnId }),
+    status: WorkflowRunStatusSchema.parse(requiredString(row, "status")),
+    currentPhase: requiredNumber(row, "current_phase"),
+    input: JsonValueSchema.parse(parseJson(requiredString(row, "input_json"))),
+    ...(output === undefined ? {} : { output: JsonValueSchema.parse(parseJson(output)) }),
+    ...(error === undefined ? {} : { error }),
+    createdAt: requiredString(row, "created_at"),
+    updatedAt: requiredString(row, "updated_at"),
+    ...(completedAt === undefined ? {} : { completedAt }),
+  };
+}
+
+export function decodeWorkflowPhaseRun(row: unknown): WorkflowPhaseRunRecord {
+  const output = optionalString(row, "output_json");
+  const executionId = optionalString(row, "execution_id");
+  const logicalExecutionId = optionalString(row, "logical_execution_id");
+  const error = optionalString(row, "error");
+  const startedAt = optionalString(row, "started_at");
+  const completedAt = optionalString(row, "completed_at");
+  return {
+    runId: requiredString(row, "run_id"),
+    phaseIndex: requiredNumber(row, "phase_index"),
+    phaseName: requiredString(row, "phase_name"),
+    status: WorkflowPhaseStatusSchema.parse(requiredString(row, "status")),
+    attempt: requiredNumber(row, "attempt"),
+    ...(logicalExecutionId === undefined ? {} : { logicalExecutionId }),
+    input: JsonValueSchema.parse(parseJson(requiredString(row, "input_json"))),
+    ...(output === undefined ? {} : { output: JsonValueSchema.parse(parseJson(output)) }),
+    ...(executionId === undefined ? {} : { executionId }),
+    ...(error === undefined ? {} : { error }),
+    ...(startedAt === undefined ? {} : { startedAt }),
     ...(completedAt === undefined ? {} : { completedAt }),
   };
 }
@@ -123,9 +228,9 @@ export function decodeOutcome(row: unknown): OutcomeRecord {
     outcomeId: requiredString(row, "outcome_id"),
     sessionId: requiredString(row, "session_id"),
     ...(turnId === undefined ? {} : { turnId }),
-    status: requiredString(row, "status") as OutcomeRecord["status"],
+    status: OutcomeStatusSchema.parse(requiredString(row, "status")),
     summary: requiredString(row, "summary"),
-    sensitivity: requiredString(row, "sensitivity") as OutcomeRecord["sensitivity"],
+    sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
     createdAt: requiredString(row, "created_at"),
     metadata: JsonRecordSchema.parse(parseJson(requiredString(row, "metadata_json"))),
   };

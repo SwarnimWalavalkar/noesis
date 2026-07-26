@@ -22,6 +22,7 @@
       "@noesis/capabilities": ["packages/capabilities/src/index.ts"],
       "@noesis/config": ["packages/config/src/index.ts"],
       "@noesis/context": ["packages/context/src/index.ts"],
+      "@noesis/codemode": ["packages/codemode/src/index.ts"],
       "@noesis/domain": ["packages/domain/src/index.ts"],
       "@noesis/evals": ["packages/evals/src/index.ts"],
       "@noesis/intelligence": ["packages/intelligence/src/index.ts"],
@@ -30,6 +31,7 @@
       "@noesis/runtime": ["packages/runtime/src/index.ts"],
       "@noesis/runtime-pi": ["packages/runtime-pi/src/index.ts"],
       "@noesis/tui": ["packages/tui/src/index.ts"],
+      "@noesis/tools": ["packages/tools/src/index.ts"],
       "@noesis/workspace": ["packages/workspace/src/index.ts"]
     }
   },

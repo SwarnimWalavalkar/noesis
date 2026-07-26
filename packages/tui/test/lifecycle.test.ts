@@ -1,7 +1,7 @@
 import type { Terminal } from "@earendil-works/pi-tui";
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
 import { describe, expect, test, vi } from "vitest";
-import { startNoesisTui } from "../src/index.ts";
+import { boundedInspectorText, startNoesisTui } from "../src/index.ts";
 import { createInMemoryTestRuntime, type TestNoesisRuntime } from "./support/in-memory-runtime.ts";
 
 interface TestTerminal extends Terminal {
@@ -98,6 +98,157 @@ async function createRuntime(agent: NoesisAgentRuntime): Promise<TestNoesisRunti
 }
 
 describe("Noesis TUI lifecycle", () => {
+  test("bounds and sanitizes inspector text", () => {
+    const inspected = boundedInspectorText(`unsafe\u001b[2J${"x".repeat(30_000)}`);
+
+    expect(inspected).not.toContain("\u001b[2J");
+    expect(inspected).toContain("inspector preview truncated");
+    expect(inspected.length).toBeLessThan(25_000);
+  });
+
+  test("drops stale inspector results when a prompt supersedes them", async () => {
+    const base = await createRuntime({
+      name: "inspector-race-scripted",
+      async run(request) {
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    let releaseInspector: (() => void) | undefined;
+    const inspectorGate = new Promise<void>((resolve) => {
+      releaseInspector = resolve;
+    });
+    let inspectorStarted = false;
+    const runtime = Object.freeze({
+      ...base,
+      inspectScript: async () => {
+        inspectorStarted = true;
+        await inspectorGate;
+        return {
+          name: "stale-script",
+          description: "STALE_INSPECTOR_RESULT",
+          revision: 1,
+          requiredTools: Object.freeze([]),
+          sourceDigest: "a".repeat(64),
+          workingPath: "scripts/stale/index.mjs",
+          source: "return null;",
+          inputSchema: "{}",
+          outputSchema: "{}",
+        };
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("/script stale\r");
+    await vi.waitFor(() => expect(inspectorStarted).toBe(true));
+    terminal.type("new prompt\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("reply:new prompt"));
+    releaseInspector?.();
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+    expect(terminal.output).not.toContain("STALE_INSPECTOR_RESULT");
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("drops stale inspector failures after switching trails", async () => {
+    const base = await createRuntime({
+      name: "inspector-rejection-race-scripted",
+      async run(request) {
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    let rejectInspector: ((error: Error) => void) | undefined;
+    let inspectorStarted = false;
+    const runtime = Object.freeze({
+      ...base,
+      inspectScript: async () =>
+        await new Promise<never>((_resolve, reject) => {
+          inspectorStarted = true;
+          rejectInspector = reject;
+        }),
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    const originalTrailId = runtime.listTrails()[0]?.trailId;
+    if (!originalTrailId) throw new Error("Expected the initial trail");
+
+    terminal.type("/script stale\r");
+    await vi.waitFor(() => expect(inspectorStarted).toBe(true));
+    terminal.type("/fork\r");
+    await vi.waitFor(() => {
+      const currentTrailId = runtime.listTrailSummaries()[0]?.trailId;
+      expect(currentTrailId).toBeDefined();
+      expect(currentTrailId).not.toBe(originalTrailId);
+    });
+    rejectInspector?.(new Error("STALE_INSPECTOR_REJECTION"));
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+    expect(terminal.output).not.toContain("STALE_INSPECTOR_REJECTION");
+    expect(terminal.output).toContain("● IDLE");
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("distinguishes unsupported inspectors from supported empty libraries", async () => {
+    const agent: NoesisAgentRuntime = {
+      name: "inspector-support-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    };
+    const unsupported = await createRuntime(agent);
+    const unsupportedTerminal = createTestTerminal();
+    const unsupportedRun = startNoesisTui(unsupported, {}, unsupportedTerminal);
+    await vi.waitFor(() => expect(unsupportedTerminal.output).toContain("● IDLE"));
+    unsupportedTerminal.type("/skills\r");
+    await vi.waitFor(() => expect(unsupportedTerminal.output).toContain("unavailable in this runtime"));
+    unsupportedTerminal.type("/quit\n");
+    await unsupportedRun;
+
+    const empty = Object.freeze({
+      ...(await createRuntime(agent)),
+      listSkills: async () => Object.freeze([]),
+    });
+    const emptyTerminal = createTestTerminal();
+    const emptyRun = startNoesisTui(empty, {}, emptyTerminal);
+    await vi.waitFor(() => expect(emptyTerminal.output).toContain("● IDLE"));
+    emptyTerminal.type("/skills\r");
+    await vi.waitFor(() => expect(emptyTerminal.output).toContain("No skills are installed"));
+    expect(emptyTerminal.output).not.toContain("unavailable in this runtime");
+    emptyTerminal.type("/quit\n");
+    await emptyRun;
+  });
+
   test("two plain launches create distinct fresh sessions without prior conversation", async () => {
     const runtime = await createRuntime({
       name: "fresh-scripted",
@@ -188,9 +339,15 @@ describe("Noesis TUI lifecycle", () => {
       async run(request, emit) {
         emit({ type: "model", provider: request.provider, model: request.model, contextWindow: 4_000 });
         emit({ type: "status", status: "started" });
-        emit({ type: "tool-start", name: "inspect", input: {} });
+        emit({ type: "tool-start", actionId: "inspect-1", name: "inspect", input: {} });
         await toolBlocked;
-        emit({ type: "tool-end", name: "inspect", isError: false });
+        emit({
+          type: "tool-end",
+          actionId: "inspect-1",
+          name: "inspect",
+          isError: false,
+          result: { ok: true },
+        });
         emit({ type: "delta", text: "grounded answer" });
         const contextUsage = {
           usedTokens: 1_000,
@@ -218,10 +375,63 @@ describe("Noesis TUI lifecycle", () => {
 
     terminal.type("use the snapshot\r");
     await vi.waitFor(() => expect(terminal.output).toContain("● TOOL"));
+    await vi.waitFor(() => expect(terminal.output).toContain("● inspect"));
+    expect(terminal.output).not.toContain("ACTIONS");
+    expect(terminal.output).toContain("inspect");
     releaseTool?.();
     await vi.waitFor(() => expect(terminal.output).toContain("ctx  25%"));
     await vi.waitFor(() => expect(terminal.output).toContain("grounded answer"));
     await vi.waitFor(() => expect(terminal.output).toContain("1t"));
+    expect(terminal.output.lastIndexOf("inspect")).toBeLessThan(
+      terminal.output.lastIndexOf("grounded answer"),
+    );
+
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("auto-collapses long action details and expands them with Ctrl+O", async () => {
+    const source = Array.from({ length: 20 }, (_, index) => `source line ${String(index + 1)}`).join("\n");
+    const runtime = await createRuntime({
+      name: "actions-scripted",
+      async run(request, emit) {
+        emit({ type: "status", status: "started" });
+        emit({
+          type: "tool-start",
+          actionId: "execute-long",
+          name: "execute",
+          input: { source },
+        });
+        emit({
+          type: "tool-end",
+          actionId: "execute-long",
+          name: "execute",
+          isError: false,
+          result: { calls: 2 },
+        });
+        emit({ type: "status", status: "completed" });
+        return {
+          text: "done",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("run it\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("Ctrl+O expand"));
+    expect(terminal.output).not.toContain("source line 20");
+
+    terminal.send("\u000f");
+    await vi.waitFor(() => expect(terminal.output).toContain("source line 20"));
 
     terminal.type("/quit\n");
     await running;
@@ -234,8 +444,14 @@ describe("Noesis TUI lifecycle", () => {
       async run(request, emit) {
         emit({ type: "status", status: "started" });
         emit({ type: "delta", text: "intermediate reasoning" });
-        emit({ type: "tool-start", name: "inspect", input: {} });
-        emit({ type: "tool-end", name: "inspect", isError: false });
+        emit({ type: "tool-start", actionId: "inspect-1", name: "inspect", input: {} });
+        emit({
+          type: "tool-end",
+          actionId: "inspect-1",
+          name: "inspect",
+          isError: false,
+          result: { ok: true },
+        });
         emit({ type: "delta", text: "\n\nprovisional answer" });
         emit({ type: "status", status: "completed" });
         emitLate = () => emit({ type: "delta", text: "DETACHED-LATE-DELTA" });
@@ -462,7 +678,7 @@ describe("Noesis TUI lifecycle", () => {
     const main = startNoesisTui(runtime, {}, mainTerminal);
     await vi.waitFor(() => expect(mainTerminal.output).toContain("███╗   ██╗ ██████╗"));
     mainTerminal.resize(50, 9);
-    await vi.waitFor(() => expect(mainTerminal.output).toContain("? help · /quit exit"));
+    await vi.waitFor(() => expect(mainTerminal.output).toContain("? help · Ctrl+O actions"));
     expect(mainTerminal.output).toContain("› message");
     mainTerminal.type("/quit\n");
     await main;
@@ -498,7 +714,7 @@ describe("Noesis TUI lifecycle", () => {
     });
     const terminal = createTestTerminal();
     const running = startNoesisTui(runtime, {}, terminal);
-    await vi.waitFor(() => expect(terminal.output).toContain("? help · /quit exit"));
+    await vi.waitFor(() => expect(terminal.output).toContain("? help · Ctrl+O actions"));
     expect(terminal.output).not.toContain("/learn · /evaluate");
 
     terminal.type("?\r");

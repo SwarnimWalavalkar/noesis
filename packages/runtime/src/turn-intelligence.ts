@@ -13,6 +13,7 @@ import type {
   CapabilityRevisionRef,
   EvidenceRef,
   FileRevisionRef,
+  PermissionManifest,
 } from "@noesis/domain";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
@@ -44,6 +45,7 @@ export interface TurnIntelligencePlannerOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly protectedRuntime: ProtectedWorkspaceRuntime;
   readonly capabilities: TurnCapabilityResolver;
+  readonly basePermissionManifest?: PermissionManifest;
   readonly now?: () => string;
   readonly createPlanId?: (turnId: string) => string;
 }
@@ -73,16 +75,30 @@ async function materialize(
 
 function mergedPermissions(
   selections: readonly FrozenCapabilitySelection[],
+  baseline: PermissionManifest = Object.freeze({
+    effects: Object.freeze([]),
+    resourcePatterns: Object.freeze([]),
+    credentialRefs: Object.freeze([]),
+  }),
 ): FrozenTurnPlan["permissionSnapshot"] {
   return Object.freeze({
     effects: Object.freeze([
-      ...new Set(selections.flatMap((selection) => selection.permissionManifest.effects)),
+      ...new Set([
+        ...baseline.effects,
+        ...selections.flatMap((selection) => selection.permissionManifest.effects),
+      ]),
     ]),
     resourcePatterns: Object.freeze([
-      ...new Set(selections.flatMap((selection) => selection.permissionManifest.resourcePatterns)),
+      ...new Set([
+        ...baseline.resourcePatterns,
+        ...selections.flatMap((selection) => selection.permissionManifest.resourcePatterns),
+      ]),
     ]),
     credentialRefs: Object.freeze([
-      ...new Set(selections.flatMap((selection) => selection.permissionManifest.credentialRefs)),
+      ...new Set([
+        ...baseline.credentialRefs,
+        ...selections.flatMap((selection) => selection.permissionManifest.credentialRefs),
+      ]),
     ]),
   });
 }
@@ -150,7 +166,7 @@ export function createTurnIntelligencePlanner(
       provider: request.provider,
       model: request.model,
       thinkingLevel: request.thinkingLevel,
-      permissionSnapshot: mergedPermissions(selections),
+      permissionSnapshot: mergedPermissions(selections, options.basePermissionManifest),
       retrievalCitations: Object.freeze([...(request.retrievalCitations ?? [])]),
       routing: Object.freeze({
         strategyId: "scope-match-v1",

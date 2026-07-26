@@ -33,7 +33,8 @@ async function createTestRuntime(home: string) {
   });
   return await createApplicationRuntimeComposition({
     config,
-    createAgent: (sessionTools) => createPiAgentRuntime(repositoryRoot, controlled.models, { sessionTools }),
+    createAgent: (_sessionTools, codeExecution, selfTools) =>
+      createPiAgentRuntime(repositoryRoot, controlled.models, { codeExecution, selfTools }),
     createRoleRunner: (configurations) =>
       createPiAgentRoleRunner(repositoryRoot, controlled.models, configurations),
   });
@@ -410,7 +411,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).not.toContain("think · learn · create · grow");
     expect(output).toContain("● IDLE");
     expect(output).toContain("› message");
-    expect(output).toContain("? help · /quit exit");
+    expect(output).toContain("? help · Ctrl+O actions");
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
 
@@ -464,7 +465,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).toContain("● STREAMING");
     expect(output).toContain("Controlled Pi completion for:");
     expect(resized).not.toContain("███╗   ██╗");
-    expect(screen).toContain("⋯ earlier messages");
+    expect(screen).toContain("⋯ earlier conversation");
     expect(screen).toContain("NOESIS");
     expect(screen).toContain("alpha");
     expect(screen).toContain("MIXED-END");

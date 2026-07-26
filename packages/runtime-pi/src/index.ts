@@ -1,4 +1,4 @@
-import { AgentHarness, type AgentTool } from "@earendil-works/pi-agent-core";
+import { AgentHarness, formatSkillsForSystemPrompt, type Skill } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { MutableModels } from "@earendil-works/pi-ai";
 import type {
@@ -10,24 +10,17 @@ import type {
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
 import { validateFrozenTurnPlan } from "@noesis/agent-types";
-import { z } from "zod";
-import { resolveFrozenSessionTools, type FrozenSessionToolResolver } from "./frozen-session-tools.ts";
+import {
+  createPiExecuteTool,
+  type PiCodeExecutionAdapter,
+  type PreparedPiCodeExecution,
+} from "./execute-tool.ts";
+import { toAgentActionPayload } from "./action-payload.ts";
+import { frozenPlanMaterialUses } from "./frozen-session-tools.ts";
+import { createPiSelfTools, type PiSelfToolAdapter } from "./self-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
+import type { PiSkillLibrary } from "./skill-library.ts";
 
-export * from "./auth.ts";
-export * from "./experiment-fixtures.ts";
-export { frozenPlanMaterialUses } from "./frozen-session-tools.ts";
-export type {
-  FrozenPlanMaterialKind,
-  FrozenPlanMaterialUse,
-  FrozenSessionToolResolution,
-  FrozenSessionToolResolver,
-} from "./frozen-session-tools.ts";
-export * from "./pi-role-backend.ts";
-export * from "./role-context.ts";
-export * from "./role-runner.ts";
-export * from "./role-types.ts";
-export * from "./session-tool-registration.ts";
 export type {
   AgentCompletedStopReason,
   AgentContextUsage,
@@ -37,6 +30,26 @@ export type {
   AgentThinkingLevel,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
+export * from "./action-payload.ts";
+export * from "./auth.ts";
+export * from "./execute-tool.ts";
+export * from "./experiment-fixtures.ts";
+export type {
+  FrozenPlanMaterialKind,
+  FrozenPlanMaterialUse,
+  FrozenSessionToolResolution,
+  FrozenSessionToolResolver,
+} from "./frozen-session-tools.ts";
+export {
+  frozenPlanMaterialUses,
+  resolveFrozenSessionToolDefinitions,
+} from "./frozen-session-tools.ts";
+export * from "./pi-role-backend.ts";
+export * from "./role-context.ts";
+export * from "./role-runner.ts";
+export * from "./role-types.ts";
+export * from "./self-tools.ts";
+export * from "./skill-library.ts";
 
 function assistantText(message: { readonly content: readonly unknown[] }): string {
   return message.content
@@ -98,17 +111,33 @@ export function createAssistantDeltaAggregator(): AssistantDeltaAggregator {
   };
 }
 
-const inspectParameters = z.looseObject({
-  section: z.enum(["context", "capabilities"]),
-});
-const inspectParametersJsonSchema = z.toJSONSchema(inspectParameters);
+export function nestedCodeActionId(parentActionId: string, callIndex: number): string {
+  return `${parentActionId}:call:${String(callIndex)}`;
+}
+
+function piToolUpdatePayload(value: unknown): unknown {
+  if (!value || typeof value !== "object" || !("details" in value)) return value;
+  const details = value.details;
+  if (
+    !details ||
+    typeof details !== "object" ||
+    !("kind" in details) ||
+    details.kind !== "activity" ||
+    !("event" in details)
+  )
+    return value;
+  return Object.freeze({ kind: "activity", activity: details.event });
+}
 
 export interface PiAgentRuntime extends NoesisAgentRuntime {
   readonly name: "pi-agent-harness-0.80.6";
 }
 
 export interface CreatePiAgentRuntimeOptions {
-  readonly sessionTools?: FrozenSessionToolResolver;
+  readonly codeExecution?: PiCodeExecutionAdapter;
+  readonly selfTools?: PiSelfToolAdapter;
+  readonly skills?: PiSkillLibrary;
+  readonly requirePinnedSkillSnapshot?: boolean;
 }
 
 export function createPiAgentRuntime(
@@ -120,6 +149,7 @@ export function createPiAgentRuntime(
     readonly controller: AbortController;
     harness?: AgentHarness;
     sessionId?: string;
+    preparedCode?: PreparedPiCodeExecution;
     requestHarnessAbort?: () => Promise<void>;
     abortError?: unknown;
     abortStatusEmitted?: boolean;
@@ -158,10 +188,6 @@ export function createPiAgentRuntime(
         model: model.id,
         contextWindow: model.contextWindow,
       });
-      const sessionTools = plan
-        ? await resolveFrozenSessionTools(plan, options.sessionTools, execution.controller.signal)
-        : Object.freeze([]);
-      if (execution.controller.signal.aborted) return abortedBeforePrompt();
       const auth = await models.getAuth(model);
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
       if (!auth) {
@@ -175,39 +201,95 @@ export function createPiAgentRuntime(
           );
         throw new Error(`Pi credentials are missing for provider ${request.provider}.`);
       }
-      const inspectTool: AgentTool<typeof inspectParametersJsonSchema, { section: string; immutable: true }> =
-        {
-          name: "inspect_noesis_snapshot",
-          label: "Inspect Noesis snapshot",
-          description: "Inspect the immutable context or capability snapshot pinned to this turn.",
-          parameters: inspectParametersJsonSchema,
-          execute: async (_toolCallId, input) => {
-            const params = inspectParameters.parse(input);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text:
-                    params.section === "context"
-                      ? request.systemPrompt
-                      : JSON.stringify(request.activeCapabilities, null, 2),
-                },
-              ],
-              details: { section: params.section, immutable: true },
-            };
-          },
-        };
+      const pinnedSkillSnapshot = plan ? options.skills?.claimPinnedSnapshot(plan.planId) : undefined;
+      if (plan && options.skills && options.requirePinnedSkillSnapshot && !pinnedSkillSnapshot)
+        throw new Error(`Frozen turn plan ${plan.planId} has no skill snapshot pinned at admission`);
+      const skillSnapshot =
+        pinnedSkillSnapshot ??
+        (options.skills
+          ? await options.skills.snapshot(execution.controller.signal)
+          : Object.freeze({ skills: Object.freeze([]), diagnostics: Object.freeze([]) }));
+      const preparedCode =
+        plan && options.codeExecution
+          ? await options.codeExecution.prepare(plan, execution.controller.signal, {
+              skills: skillSnapshot.skills,
+            })
+          : undefined;
+      if (plan && !preparedCode && frozenPlanMaterialUses(plan).length > 0)
+        throw new Error(
+          `Frozen turn plan ${plan.planId} contains skill, router, or tool material without a codemode execution adapter`,
+        );
+      if (preparedCode) execution.preparedCode = preparedCode;
+      if (execution.controller.signal.aborted) return abortedBeforePrompt();
+      const selfTools =
+        plan && options.selfTools
+          ? createPiSelfTools({
+              adapter: options.selfTools,
+              plan,
+              request,
+              signal: execution.controller.signal,
+              ...(preparedCode
+                ? {
+                    catalog: {
+                      catalogId: preparedCode.catalogId,
+                      catalogDigest: preparedCode.catalogDigest,
+                    },
+                  }
+                : {}),
+            })
+          : Object.freeze([]);
       const { session, sessionId } = await createEphemeralPiSession();
       execution.sessionId = sessionId;
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
+      const executeTool = preparedCode
+        ? createPiExecuteTool({
+            prepared: preparedCode,
+            signal: execution.controller.signal,
+            emit: (event, parentActionId) => {
+              if (event.type === "tool-start")
+                emit({
+                  type: "tool-start",
+                  actionId: nestedCodeActionId(parentActionId, event.callIndex),
+                  parentActionId,
+                  name: event.name,
+                  input: toAgentActionPayload(event.input ?? {}),
+                });
+              else if (event.type === "tool-end")
+                emit({
+                  type: "tool-end",
+                  actionId: nestedCodeActionId(parentActionId, event.callIndex),
+                  parentActionId,
+                  name: event.name,
+                  isError: !event.ok,
+                  result: toAgentActionPayload(
+                    event.result ?? (event.error ? { error: event.error } : { ok: event.ok }),
+                  ),
+                });
+            },
+          })
+        : undefined;
+      const piSkills = skillSnapshot.skills.map(
+        (skill): Skill => ({
+          name: skill.name,
+          description: skill.description,
+          content: skill.content,
+          filePath: skill.filePath,
+          disableModelInvocation: skill.disableModelInvocation,
+        }),
+      );
       const harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),
         session,
         models,
         model,
-        tools: [inspectTool, ...sessionTools],
+        tools: executeTool ? [...selfTools, executeTool] : [...selfTools],
         thinkingLevel: request.thinkingLevel,
-        systemPrompt: request.systemPrompt,
+        resources: {
+          skills: piSkills,
+        },
+        systemPrompt: [request.systemPrompt, formatSkillsForSystemPrompt(piSkills)]
+          .filter(Boolean)
+          .join("\n\n"),
       });
       execution.harness = harness;
       let abortPromise: Promise<void> | undefined;
@@ -232,11 +314,27 @@ export function createPiAgentRuntime(
           const delta = assistantDeltas.push(event.assistantMessageEvent.delta);
           if (delta) emit({ type: "delta", text: delta });
         } else if (event.type === "tool_execution_start") {
-          const input: Record<string, unknown> =
-            event.args && typeof event.args === "object" && !Array.isArray(event.args) ? event.args : {};
-          emit({ type: "tool-start", name: event.toolName, input });
+          emit({
+            type: "tool-start",
+            actionId: event.toolCallId,
+            name: event.toolName,
+            input: toAgentActionPayload(event.args),
+          });
+        } else if (event.type === "tool_execution_update") {
+          emit({
+            type: "tool-update",
+            actionId: event.toolCallId,
+            name: event.toolName,
+            update: toAgentActionPayload(piToolUpdatePayload(event.partialResult)),
+          });
         } else if (event.type === "tool_execution_end") {
-          emit({ type: "tool-end", name: event.toolName, isError: event.isError });
+          emit({
+            type: "tool-end",
+            actionId: event.toolCallId,
+            name: event.toolName,
+            isError: event.isError,
+            result: toAgentActionPayload(event.result),
+          });
         }
       });
       emit({ type: "status", status: "started" });
@@ -285,7 +383,11 @@ export function createPiAgentRuntime(
         try {
           if (execution.harness) await execution.harness.waitForIdle();
         } finally {
-          if (execution.sessionId) releasePiSessionResources(execution.sessionId);
+          try {
+            await execution.preparedCode?.close().catch(() => undefined);
+          } finally {
+            if (execution.sessionId) releasePiSessionResources(execution.sessionId);
+          }
         }
       } finally {
         if (active.get(request.trailId) === execution) active.delete(request.trailId);

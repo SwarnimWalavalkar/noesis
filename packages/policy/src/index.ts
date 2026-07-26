@@ -1,6 +1,8 @@
-import type { EffectClass, JsonValue, Principal } from "@noesis/domain";
+import type { EffectClass, JsonValue, PermissionManifest, Principal } from "@noesis/domain";
+import type { EffectExecutionFailureCode } from "./effect-failures.ts";
 
 export * from "./durable-authority.ts";
+export * from "./effect-failures.ts";
 
 export interface EffectRequest<T extends JsonValue> {
   readonly operationId: string;
@@ -13,11 +15,18 @@ export interface EffectRequest<T extends JsonValue> {
   readonly execute: (receipt: AuthorityReceipt) => Promise<T>;
 }
 
+export type EffectDecisionFailureCode =
+  | "denied"
+  | "failed"
+  | "ambiguous"
+  | "collision"
+  | EffectExecutionFailureCode;
+
 export type EffectDecision<T extends JsonValue> =
   | { readonly ok: true; readonly value: T; readonly replayed: boolean }
   | {
       readonly ok: false;
-      readonly code: "denied" | "failed" | "ambiguous" | "collision";
+      readonly code: EffectDecisionFailureCode;
       readonly reason: string;
     };
 
@@ -49,6 +58,10 @@ export interface EffectGateway {
 /** The only production grant and receipt issuer. Callers receive operation-shaped decisions. */
 export interface AuthorityBoundary {
   readonly receiptVerifier: AuthorityReceiptVerifier;
+  runForeground<T extends JsonValue>(
+    request: Omit<EffectRequest<T>, "principal">,
+    permission: PermissionManifest,
+  ): Promise<EffectDecision<T>>;
   promote<T extends JsonValue>(
     resource: string,
     idempotencyKey: string,

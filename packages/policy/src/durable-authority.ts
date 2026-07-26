@@ -9,6 +9,7 @@ import {
   type EffectClass,
   type Grant,
   type JsonValue,
+  type PermissionManifest,
   type Principal,
 } from "@noesis/domain";
 import type {
@@ -19,6 +20,11 @@ import type {
   EffectRequest,
   GrantHandle,
 } from "./index.ts";
+import {
+  inspectEffectExecutionFailure,
+  parseEffectExecutionError,
+  serializeEffectExecutionError,
+} from "./effect-failures.ts";
 
 export interface DurableAuthorityOperation {
   readonly identity: ReturnType<typeof StableEffectOperationIdentitySchema.parse>;
@@ -45,6 +51,10 @@ export interface DurableAuthorityStatePort {
   readonly reserve: (
     operation: DurableAuthorityOperation,
     grantId: string | undefined,
+  ) => Promise<DurableAuthorityReservation>;
+  readonly reserveWithGrant: (
+    operation: DurableAuthorityOperation,
+    grant: Grant,
   ) => Promise<DurableAuthorityReservation>;
   readonly complete: (request: {
     readonly operation: DurableAuthorityOperation;
@@ -146,33 +156,34 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     return createHandle(grant.grantId);
   };
 
-  const run = async <T extends JsonValue>(
+  const settleReservation = async <T extends JsonValue>(
     request: EffectRequest<T>,
-    handle?: GrantHandle,
+    operation: DurableAuthorityOperation,
+    reservation: DurableAuthorityReservation,
   ): Promise<EffectDecision<T>> => {
-    const operation = operationFromRequest(request);
-    const ownedHandle =
-      typeof handle === "object" && handle !== null && handles.has(handle) ? handle : undefined;
-    const reservation = await state.reserve(operation, ownedHandle?.grantId);
     if (reservation.status === "completed")
       return Object.freeze({
         ok: true,
         value: reservation.result as T,
         replayed: true,
       });
-    if (reservation.status !== "reserved")
+    if (reservation.status !== "reserved") {
+      const executionFailure =
+        reservation.status === "failed" ? parseEffectExecutionError(reservation.reason) : undefined;
       return Object.freeze({
         ok: false,
         code:
-          reservation.status === "collision"
+          executionFailure?.code ??
+          (reservation.status === "collision"
             ? "collision"
             : reservation.status === "unresolved"
               ? "ambiguous"
               : reservation.status === "failed"
                 ? "failed"
-                : "denied",
-        reason: reservation.reason,
+                : "denied"),
+        reason: executionFailure?.message ?? reservation.reason,
       });
+    }
     const lineage = createReceipt(operation);
     try {
       const value = await request.execute(lineage.receipt);
@@ -184,15 +195,39 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
       });
       return Object.freeze({ ok: true, value, replayed: false });
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const executionFailure = inspectEffectExecutionFailure(error);
+      const reason = executionFailure?.message ?? (error instanceof Error ? error.message : String(error));
       await state.fail({
         operation,
         grantId: reservation.grantId,
-        reason,
+        reason: serializeEffectExecutionError(error),
         receiptLineageId: lineage.lineageId,
       });
-      return Object.freeze({ ok: false, code: "failed", reason });
+      return Object.freeze({
+        ok: false,
+        code: executionFailure?.code ?? ("failed" as const),
+        reason,
+      });
     }
+  };
+
+  const run = async <T extends JsonValue>(
+    request: EffectRequest<T>,
+    handle?: GrantHandle,
+  ): Promise<EffectDecision<T>> => {
+    const operation = operationFromRequest(request);
+    const ownedHandle =
+      typeof handle === "object" && handle !== null && handles.has(handle) ? handle : undefined;
+    return await settleReservation(request, operation, await state.reserve(operation, ownedHandle?.grantId));
+  };
+
+  const runWithFreshGrant = async <T extends JsonValue>(
+    request: EffectRequest<T>,
+    grant: Grant,
+  ): Promise<EffectDecision<T>> => {
+    assertGrant(grant);
+    const operation = operationFromRequest(request);
+    return await settleReservation(request, operation, await state.reserveWithGrant(operation, grant));
   };
 
   const runProtected = async <T extends JsonValue>(
@@ -204,7 +239,16 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     idempotencyKey: string,
     execute: (receipt: AuthorityReceipt) => Promise<T>,
   ): Promise<EffectDecision<T>> => {
-    const grant = await issue({
+    const request = Object.freeze({
+      ...authorityOperationFields(principal, effect, resource, cost, idempotencyKey),
+      principal,
+      effect,
+      resource,
+      estimatedCost: cost,
+      idempotencyKey,
+      execute,
+    });
+    return await runWithFreshGrant(request, {
       schemaVersion: 1,
       grantId: createId("grant"),
       principal,
@@ -214,18 +258,6 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
       maxUses,
       maxCost: cost,
     });
-    return await run(
-      {
-        ...authorityOperationFields(principal, effect, resource, cost, idempotencyKey),
-        principal,
-        effect,
-        resource,
-        estimatedCost: cost,
-        idempotencyKey,
-        execute,
-      },
-      grant,
-    );
   };
 
   const promote: AuthorityBoundary["promote"] = async (resource, idempotencyKey, execute) =>
@@ -290,8 +322,42 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     );
   };
 
+  const permits = (permission: PermissionManifest, effect: EffectClass, resource: string): boolean => {
+    if (!permission.effects.includes(effect)) return false;
+    return permission.resourcePatterns.some((pattern) => {
+      if (pattern.length === 0) return false;
+      const wildcard = pattern.indexOf("*");
+      if (wildcard === -1) return resource === pattern;
+      if (wildcard === 0 || wildcard !== pattern.length - 1 || pattern.lastIndexOf("*") !== wildcard)
+        return false;
+      return resource.startsWith(pattern.slice(0, -1));
+    });
+  };
+
   return Object.freeze({
     receiptVerifier: verifier,
+    runForeground: async <T extends JsonValue>(
+      request: Omit<EffectRequest<T>, "principal">,
+      permission: PermissionManifest,
+    ): Promise<EffectDecision<T>> => {
+      if (!permits(permission, request.effect, request.resource))
+        return Object.freeze({
+          ok: false,
+          code: "denied" as const,
+          reason: `Frozen turn permission does not allow ${request.effect} on ${request.resource}`,
+        });
+      const foregroundRequest = Object.freeze({ ...request, principal: "foreground" as const });
+      return await runWithFreshGrant(foregroundRequest, {
+        schemaVersion: 1,
+        grantId: createId("grant"),
+        principal: "foreground",
+        effects: [request.effect],
+        resourcePrefixes: [request.resource],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        maxUses: 1,
+        maxCost: request.estimatedCost,
+      });
+    },
     promote,
     rollback,
     schedule,

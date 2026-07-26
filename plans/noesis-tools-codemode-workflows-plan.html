@@ -1,0 +1,2024 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Noesis Skills, Tools, Codemode, Scripts, and Workflows — Implementation Plan</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #090b10;
+        --panel: #11151d;
+        --panel-2: #171d27;
+        --text: #f1f4f8;
+        --muted: #9aa7b8;
+        --line: #2a3442;
+        --mint: #8ee6c2;
+        --blue: #9dbdff;
+        --amber: #ffd28a;
+        --red: #ff9e9e;
+        --green: #a8e59f;
+        --measure: 82rem;
+        --radius: 12px;
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 15px;
+        line-height: 1.58;
+      }
+      header,
+      main,
+      footer,
+      nav ul {
+        width: min(calc(100% - 2rem), var(--measure));
+        margin-inline: auto;
+      }
+      header {
+        padding: clamp(3rem, 8vw, 7rem) 0 2.5rem;
+      }
+      main {
+        padding-bottom: 5rem;
+      }
+      footer {
+        padding: 2rem 0 4rem;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+      }
+      nav {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        border-block: 1px solid var(--line);
+        background: color-mix(in srgb, var(--bg) 94%, transparent);
+        backdrop-filter: blur(10px);
+      }
+      nav ul {
+        display: flex;
+        gap: 1rem;
+        margin-block: 0;
+        padding: 0.75rem 0;
+        list-style: none;
+        overflow-x: auto;
+      }
+      nav a {
+        color: var(--muted);
+        text-decoration: none;
+        white-space: nowrap;
+      }
+      nav a:hover {
+        color: var(--text);
+      }
+      h1,
+      h2,
+      h3 {
+        line-height: 1.2;
+        text-wrap: balance;
+      }
+      h1 {
+        margin: 0;
+        max-width: 16ch;
+        font-size: clamp(2.4rem, 7vw, 5.7rem);
+        letter-spacing: -0.07em;
+      }
+      h2 {
+        margin-top: 0;
+        font-size: clamp(1.45rem, 3vw, 2.15rem);
+      }
+      h3 {
+        margin-bottom: 0.4rem;
+        color: var(--mint);
+        font-size: 1rem;
+      }
+      p {
+        max-width: 78ch;
+      }
+      a {
+        color: var(--blue);
+      }
+      code {
+        color: var(--mint);
+        overflow-wrap: anywhere;
+      }
+      pre {
+        margin: 0;
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: #07090d;
+        color: #dbe5f2;
+        overflow-x: auto;
+      }
+      section {
+        margin-top: 1.25rem;
+        padding: clamp(1.1rem, 3vw, 2rem);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        background: var(--panel);
+        scroll-margin-top: 5rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 0.72rem;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        color: var(--mint);
+        font-size: 0.8rem;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+      ul,
+      ol {
+        padding-left: 1.35rem;
+      }
+      li + li {
+        margin-top: 0.32rem;
+      }
+      .eyebrow {
+        color: var(--mint);
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+      .lede {
+        max-width: 68ch;
+        color: var(--muted);
+        font-size: clamp(1rem, 2vw, 1.24rem);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
+        gap: 1rem;
+      }
+      .card {
+        grid-column: span 4;
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: var(--panel-2);
+      }
+      .card.wide {
+        grid-column: span 6;
+      }
+      .card.full {
+        grid-column: 1 / -1;
+      }
+      .card p {
+        margin-bottom: 0;
+        color: var(--muted);
+      }
+      .callout {
+        padding: 1rem;
+        border-left: 3px solid var(--mint);
+        background: var(--panel-2);
+      }
+      .warning {
+        border-left-color: var(--amber);
+      }
+      .danger {
+        border-left-color: var(--red);
+      }
+      .good {
+        border-left-color: var(--green);
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .pill {
+        display: inline-block;
+        margin: 0.12rem;
+        padding: 0.13rem 0.48rem;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 0.78rem;
+      }
+      .task {
+        padding: 1.2rem 0;
+        border-top: 1px solid var(--line);
+      }
+      .task:first-of-type {
+        border-top: 0;
+      }
+      .task h3 {
+        display: flex;
+        gap: 0.75rem;
+        align-items: baseline;
+        color: var(--text);
+      }
+      .task-id {
+        min-width: 4.8rem;
+        color: var(--mint);
+      }
+      .task dl {
+        display: grid;
+        grid-template-columns: 8rem 1fr;
+        gap: 0.38rem 1rem;
+      }
+      .task dt {
+        color: var(--muted);
+      }
+      .task dd {
+        margin: 0;
+      }
+      .scroll {
+        overflow-x: auto;
+      }
+      @media (max-width: 780px) {
+        .card,
+        .card.wide {
+          grid-column: 1 / -1;
+        }
+        .task dl {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="eyebrow">Noesis · implementation plan · research preview</div>
+      <h1>Tools that compound</h1>
+      <p class="lede">
+        A single, inspectable architecture for thin self-modification tools,
+        progressively disclosed skills, code-composed work tools, reusable
+        scripts, and durable multi-phase workflows. The goal is not merely to
+        give Noesis a shell. It is to give it a programmable action substrate
+        that becomes more useful through use.
+      </p>
+      <span class="pill">Status: proposed</span>
+      <span class="pill">Runtime: TypeScript + Node + Pi</span>
+      <span class="pill">Execution: JavaScript</span>
+      <span class="pill">Authority: existing Noesis control plane</span>
+    </header>
+
+    <nav aria-label="Plan sections">
+      <ul>
+        <li><a href="#decision">Decision</a></li>
+        <li><a href="#research">Research</a></li>
+        <li><a href="#model">Model</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#self-tools">Self tools</a></li>
+        <li><a href="#skills">Skills</a></li>
+        <li><a href="#codemode">Codemode</a></li>
+        <li><a href="#scripts">Scripts</a></li>
+        <li><a href="#workflows">Workflows</a></li>
+        <li><a href="#tui">TUI</a></li>
+        <li><a href="#workstreams">Workstreams</a></li>
+        <li><a href="#verification">Verification</a></li>
+      </ul>
+    </nav>
+
+    <main>
+      <section id="decision">
+        <h2>The recommendation</h2>
+        <div class="callout good">
+          <strong>Give the model four ordinary tools:</strong>
+          <code>inspect_self</code>, <code>remember</code>,
+          <code>adapt</code>, and <code>execute</code>. The first three are small,
+          semantic operations over Noesis itself. <code>execute</code> executes
+          JavaScript with Node.js on the user's machine and provides the work
+          toolset as a programmatic SDK. Shell, files, web, session search, and
+          future integrations are discoverable and composable through that SDK.
+        </div>
+        <p>
+          This preserves the user's desired context shape: the model always knows
+          how to understand and improve itself, while a potentially enormous work
+          toolset costs roughly one tool declaration. It also preserves Noesis's
+          existing architecture: codemode is an execution client, not a second
+          permission system, tool registry, persistence layer, or authority
+          boundary.
+        </p>
+        <div class="grid">
+          <article class="card">
+            <h3>Atomic tools</h3>
+            <p>
+              Host capabilities such as <code>files.read</code>,
+              <code>files.edit</code>, <code>shell.run</code>,
+              <code>web.search</code>, and <code>history.search</code>.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Skills</h3>
+            <p>
+              On-demand instruction and knowledge packages installed from the
+              Agent Skills and Pi ecosystems. Skills teach; they do not create a
+              second execution runtime.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Scripts</h3>
+            <p>
+              Saved, inspectable JavaScript programs for a reusable unit of work.
+              “Script” describes an artifact, with no implication that it runs
+              periodically or on a schedule.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Workflows</h3>
+            <p>
+              Durable, resumable multi-phase orchestration over agents and
+              scripts. They own phase state while running as ordinary local Node
+              programs.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section id="research">
+        <h2>Research synthesis</h2>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>System</th>
+                <th>What is worth taking</th>
+                <th>What Noesis should not copy</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>
+                  <a href="https://pi.dev/docs/latest/sdk">Pi SDK</a>
+                </td>
+                <td>
+                  A capable turn engine, custom tool adapters, built-in
+                  read/write/edit/bash primitives, resource loading, and clean
+                  model-provider handling.
+                </td>
+                <td>
+                  Pi's interactive agent as the product root, or exposing its
+                  entire coding toolset directly to the model. Pi remains the turn
+                  executor behind <code>packages/runtime-pi</code>.
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  <a
+                    href="https://developers.cloudflare.com/agents/tools/codemode/"
+                    >Cloudflare Code Mode</a
+                  >
+                </td>
+                <td>
+                  One outer tool; tools as TypeScript-like SDK methods; tool
+                  search and description; intermediate values stay outside the
+                  model context; host-side auth, approval, recording, replay, and
+                  saved snippets.
+                </td>
+                <td>
+                  Its Worker-specific runtime as a foundational dependency.
+                  Noesis is local-first and provider-neutral.
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  <a
+                    href="https://platform.claude.com/docs/en/agents-and-tools/tool-use/programmatic-tool-calling"
+                    >Anthropic programmatic tool calling</a
+                  >
+                </td>
+                <td>
+                  Strong validation that programmatic composition can reduce
+                  round trips and context use while improving multi-tool
+                  performance.
+                </td>
+                <td>
+                  Provider-specific server containers or treating
+                  <code>allowed_callers</code> metadata as a security boundary.
+                </td>
+              </tr>
+              <tr>
+                <td>
+                  <a href="https://code.claude.com/docs/en/workflows"
+                    >Claude Code workflows</a
+                  >
+                </td>
+                <td>
+                  JavaScript as an orchestration language; explicit structured
+                  phase outputs; fan-out, loops, background execution, progress,
+                  and resume.
+                </td>
+                <td>
+                  Treating every saved script as a workflow. Durable orchestration
+                  is a distinct layer above within-turn codemode.
+                </td>
+              </tr>
+              <tr>
+                <td>Local Codex clone</td>
+                <td>
+                  A fresh V8 isolate per cell; a persistent logical session;
+                  <code>exec</code>/<code>wait</code>; injected
+                  <code>tools</code>; a host delegate for nested calls; bounded
+                  IPC; cancellation; no Node, filesystem, or network globals.
+                </td>
+                <td>
+                  Reimplementing its Rust/V8 isolation stack. Take its simple
+                  model-visible tool, nested-call protocol, session lifecycle,
+                  and inspection ideas while using ordinary Node execution.
+                </td>
+              </tr>
+              <tr>
+                <td>Local Hermes clone</td>
+                <td>
+                  A child process, parent-owned tool dispatch, bounded
+                  calls/output, and a small RPC SDK.
+                </td>
+                <td>
+                  A hard-coded seven-tool allowlist and hand-maintained stubs.
+                  Noesis should derive its SDK and documentation from one
+                  catalog.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Noesis deliberately chooses <strong>trusted local execution</strong>
+          for this research-preview iteration. Generated code is written to an
+          ordinary <code>.mjs</code> entrypoint and launched with the user's
+          installed Node.js. The child process exists for lifecycle, streaming,
+          cancellation, and monitoring—not as a security sandbox. Node
+          <code>&gt;= 22.19</code> remains a hard product requirement.
+        </p>
+        <div class="callout warning">
+          <strong>Be explicit about the trust model:</strong> generated scripts
+          and workflows can use Node built-ins and locally available packages,
+          and therefore can act with the user's local permissions. The Noesis SDK
+          remains the preferred path because it gives the agent stable interfaces,
+          structured results, citations, and excellent inspection. Strong
+          containment is deferred until real usage demonstrates that it is worth
+          the complexity.
+        </div>
+      </section>
+
+      <section id="model">
+        <h2>Product and domain model</h2>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Term</th>
+                <th>Meaning</th>
+                <th>Authority</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Self tool</strong></td>
+                <td>
+                  A thin semantic operation for inspecting, remembering, or
+                  proposing a change to Noesis.
+                </td>
+                <td>
+                  Directly model-visible; implementation uses existing workspace,
+                  learning, policy, and activation services.
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Skill</strong></td>
+                <td>
+                  A progressively disclosed instruction and knowledge package,
+                  compatible with the Agent Skills standard. It can include
+                  references, assets, and helper files.
+                </td>
+                <td>
+                  Installed skill files plus a frozen turn snapshot; Pi adapts
+                  discovery, prompt formatting, and explicit invocation.
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Atomic tool</strong></td>
+                <td>
+                  One host capability with validated input/output and declared
+                  effects, such as reading a file or running a command.
+                </td>
+                <td>
+                  Canonical Tool Catalog plus host adapter. Model-accessible only
+                  through codemode.
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Codemode execution</strong></td>
+                <td>
+                  One local Node.js program written for the current turn. It can
+                  use ordinary JavaScript and Node while searching, describing,
+                  and invoking the frozen tool catalog through the Noesis SDK.
+                </td>
+                <td>
+                  Operational status in SQLite; code and result attached to the
+                  turn; nested effects recorded by the existing gateway path.
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Script</strong></td>
+                <td>
+                  An inspectable, named, parameterized codemode program saved for
+                  reuse. A script is not automatically a skill.
+                </td>
+                <td>
+                  Editable definition files; immutable revision snapshots when
+                  invoked or evaluated.
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Workflow</strong></td>
+                <td>
+                  A durable multi-phase program over agents and scripts with
+                  typed phase boundaries, progress, cancellation, and resume.
+                </td>
+                <td>
+                  Editable workflow definition; SQLite run and phase state;
+                  ordinary artifact files for large outputs.
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Capability</strong></td>
+                <td>
+                  Noesis's broader unit of learned behavior. A capability may pin
+                  prompt, skill, tool, script, and routing revisions.
+                </td>
+                <td>
+                  Existing capability revision and activation system.
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Experiment</strong></td>
+                <td>
+                  A proposed change under evaluation. It may produce a new
+                  script, tool, workflow, prompt, or capability revision.
+                </td>
+                <td>
+                  Existing experiment/evaluation/activation path. It is a process
+                  state, not another executable abstraction.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="callout">
+          <strong>The key distinction:</strong> skills teach context and methods,
+          tools provide atomic powers, scripts are reusable programs, workflows
+          are durable orchestration, capabilities are learned behavior bundles,
+          and experiments are how changes are tried. None of these names are
+          aliases for one another.
+        </div>
+      </section>
+
+      <section id="architecture">
+        <h2>One execution spine</h2>
+        <pre aria-label="Architecture flow">
+Pi AgentHarness
+  │
+  ├── inspect_self / remember / adapt ──→ semantic self services
+  │                                         │
+  │                                         └──→ WorkspaceStore + learning /
+  │                                              evaluation / activation
+  │
+  └── execute({ source }) ──→ CodemodeSession ──→ local Node child process
+                                                 │
+                                                 ├── ordinary Node.js
+                                                 │
+                                                 └── SDK invocation envelope
+                                                          │
+                                                          ▼
+                                        Frozen Tool Broker
+                                                 │
+                                   validate input + derive effect
+                                                 │
+                                   reserve / record operation
+                                                 │
+                             AuthorityBoundary + EffectGateway
+                                                 │
+                                   invoke host-side adapter
+                                                 │
+                              record result / ambiguity / citation
+                                                 │
+                                                 ▼
+                                       bounded value to JS
+        </pre>
+        <p>
+          The Tool Broker is the deepest new module. It hides catalog discovery,
+          schema validation, frozen revision lookup, operation identity,
+          permission binding, effect dispatch, result bounds, and durable
+          recording behind a small interface. Codemode and direct adapters do not
+          recreate any of these decisions.
+        </p>
+        <h3>Proposed package ownership</h3>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Owner</th>
+                <th>Responsibility</th>
+                <th>Must not own</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>packages/tools</code> (new)</td>
+                <td>
+                  Canonical tool definitions, frozen catalog snapshots, search,
+                  describe, invocation broker, output normalization, and adapter
+                  interfaces.
+                </td>
+                <td>
+                  Pi types, user interface, credentials, generated-code
+                  execution, or an alternate permission system.
+                </td>
+              </tr>
+              <tr>
+                <td><code>packages/codemode</code> (new)</td>
+                <td>
+                  Logical code sessions, cells, Node child-process lifecycle, SDK
+                  bridge, cancellation, output bounds, and emitted execution
+                  events.
+                </td>
+                <td>
+                  Real tool implementations, policy decisions, workspace
+                  authority, or model-provider types.
+                </td>
+              </tr>
+              <tr>
+                <td><code>packages/skills</code> (new)</td>
+                <td>
+                  Adapter-neutral skill library, personal/workspace scope,
+                  precedence, source provenance, frozen snapshots, progressive
+                  discovery, and read models.
+                </td>
+                <td>
+                  Pi types, workflow execution, arbitrary extension registration,
+                  or a second tool catalog.
+                </td>
+              </tr>
+              <tr>
+                <td><code>packages/runtime-pi</code></td>
+                <td>
+                  Adapt the three self tools and codemode to Pi
+                  <code>AgentTool</code>s; adapt Pi's skill ResourceLoader,
+                  package manager, prompt formatter, and explicit skill
+                  invocation; optionally adapt Pi's mature file and shell
+                  primitives behind Noesis interfaces.
+                </td>
+                <td>
+                  Product policy, canonical tool discovery, or durable state.
+                </td>
+              </tr>
+              <tr>
+                <td><code>packages/workspace</code></td>
+                <td>
+                  Tool-call lineage, code execution state, script/workflow
+                  revisions, workflow run state, artifacts, and read models.
+                </td>
+                <td>
+                  Executing code or determining authority.
+                </td>
+              </tr>
+              <tr>
+                <td><code>packages/policy</code></td>
+                <td>
+                  Continue to own grants, effect reservations, receipts,
+                  ambiguous outcomes, promotion, rollback, and scheduling
+                  authority.
+                </td>
+                <td>
+                  Parsing code or rendering model tools.
+                </td>
+              </tr>
+              <tr>
+                <td><code>packages/runtime</code></td>
+                <td>
+                  Compose the frozen turn plan, catalog revision, permission
+                  snapshot, broker, code session, and background job runtime.
+                </td>
+                <td>
+                  A second store or a second tool registry.
+                </td>
+              </tr>
+              <tr>
+                <td><code>packages/tui</code></td>
+                <td>
+                  Render code activity, nested calls, scripts, and workflow
+                  progress from read models.
+                </td>
+                <td>
+                  Durable run state or execution decisions.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>The broker seam</h3>
+        <pre><code>type ToolBroker = Readonly&lt;{
+  search: (
+    scope: FrozenToolScope,
+    query: string,
+  ) =&gt; Promise&lt;Result&lt;readonly ToolSummary[], ToolBrokerError&gt;&gt;;
+
+  describe: (
+    scope: FrozenToolScope,
+    toolName: string,
+  ) =&gt; Promise&lt;Result&lt;ToolContract, ToolBrokerError&gt;&gt;;
+
+  invoke: (
+    scope: FrozenToolScope,
+    request: ToolInvocationRequest,
+    signal: AbortSignal,
+  ) =&gt; Promise&lt;Result&lt;ToolInvocationResult, ToolBrokerError&gt;&gt;;
+}&gt;;</code></pre>
+        <p>
+          <code>FrozenToolScope</code> is host-created and contains the current
+          principal, trail/turn, exact tool revisions, permission snapshot, and
+          catalog digest. The child receives an opaque execution ID, and the host
+          binds every nested SDK call back to the frozen scope. Node operations
+          performed outside the SDK are covered by the enclosing local-code
+          execution grant but do not produce structured per-call Noesis records.
+        </p>
+      </section>
+
+      <section id="self-tools">
+        <h2>Always-visible self tools</h2>
+        <p>
+          These tools should describe intentions in the product's language, not
+          expose file CRUD. The model should not need to know workspace paths,
+          SQLite tables, revision IDs, or authority receipts.
+        </p>
+        <div class="grid">
+          <article class="card">
+            <h3><code>inspect_self</code></h3>
+            <p>
+              Query active prompts, learned profile, capabilities, scripts,
+              tools, workflows, experiments, recent adaptations, and relevant
+              provenance through one bounded semantic inspector.
+            </p>
+          </article>
+          <article class="card">
+            <h3><code>remember</code></h3>
+            <p>
+              Propose or reinforce scoped durable memory with content,
+              anticipated future use, and narrow scope. The host binds current
+              turn evidence automatically.
+            </p>
+          </article>
+          <article class="card">
+            <h3><code>adapt</code></h3>
+            <p>
+              Propose, revise, contest, or revert a prompt, skill, atomic tool,
+              script, workflow, toolset, router, or later TUI definition. It
+              creates an inspectable candidate; it does not mint authority.
+            </p>
+          </article>
+        </div>
+        <h3>Behavioral contract</h3>
+        <ul>
+          <li>
+            The host supplies current principal, trail, turn, evidence, and
+            provenance. The model supplies semantic intent.
+          </li>
+          <li>
+            <code>remember</code> starts at the narrowest plausible scope and
+            names anticipated future use. Repeated evidence may broaden it later.
+          </li>
+          <li>
+            <code>adapt</code> may write a candidate definition and request
+            evaluation. Existing protected code decides activation and rollback.
+          </li>
+          <li>
+            Reflection can call these tools ambiently. <code>no_change</code>
+            remains valid and should be common.
+          </li>
+          <li>
+            Ordinary user feedback such as “that was worse” is translated into
+            contest/revise/revert behavior without forcing an approval form.
+          </li>
+        </ul>
+        <div class="callout warning">
+          TUI self-modification begins with declarative themes, status widgets,
+          and layout definitions. Arbitrary generated TypeScript must not run
+          inside the TUI process. If arbitrary UI extensions become valuable,
+          they use the same revision, evaluation, activation, and isolated
+          execution principles as other generated behavior.
+        </div>
+      </section>
+
+      <section id="skills">
+        <h2>Skills: progressive knowledge and an open ecosystem</h2>
+        <div class="callout good">
+          <strong>Agent-created executable behavior should normally be a
+          workflow, not a skill.</strong> A skill is best understood as a
+          discoverable package that teaches the agent when and how to approach a
+          domain. A workflow is the inspectable executable behavior Noesis can
+          create, evaluate, revise, and monitor. A skill may point to workflows,
+          but it does not replace them.
+        </div>
+        <p>
+          Noesis should implement the
+          <a href="https://agentskills.io/specification">Agent Skills standard</a>
+          by reusing Pi's existing skill primitives. Pi already discovers
+          <code>SKILL.md</code> packages, validates frontmatter, represents skills
+          as name/description/content/location, formats compact
+          <code>&lt;available_skills&gt;</code> prompt metadata, resolves explicit
+          skill invocation from the same frozen turn snapshot, and understands
+          global, project, package, settings, and explicit-path sources.
+        </p>
+
+        <h3>Two origins, one skill experience</h3>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Origin</th>
+                <th>What it becomes</th>
+                <th>How it enters Noesis</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>User-authored or downloaded Agent Skill</td>
+                <td>
+                  A standard <code>SKILL.md</code> package with instructions,
+                  references, assets, and optional helper scripts.
+                </td>
+                <td>
+                  Discovered from a configured directory or installed from npm,
+                  git, URL, or local path.
+                </td>
+              </tr>
+              <tr>
+                <td>Noesis-created reusable behavior</td>
+                <td>
+                  A workflow, or a script when a single program is sufficient.
+                  It receives the same compact discovery metadata and on-demand
+                  detail loading as a skill.
+                </td>
+                <td>
+                  Created through <code>adapt</code>, evaluated from real work,
+                  and activated through the existing capability system.
+                </td>
+              </tr>
+              <tr>
+                <td>Noesis-created domain guidance</td>
+                <td>
+                  Usually memory, prompt, or a workflow description. A generated
+                  <code>SKILL.md</code> is reserved for genuinely reusable
+                  instruction/reference material that should be portable to other
+                  Agent Skills-compatible harnesses.
+                </td>
+                <td>
+                  Proposed as an inspectable skill candidate, never silently
+                  conflated with a workflow.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Progressive disclosure</h3>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Level</th>
+                <th>Always available</th>
+                <th>Loaded when needed</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>0 · Discovery index</td>
+                <td>
+                  Skill/workflow name, one precise description, scope, origin,
+                  and a compact input summary.
+                </td>
+                <td>Nothing else enters the context window.</td>
+              </tr>
+              <tr>
+                <td>1 · Instructions or contract</td>
+                <td>Loaded after semantic match or explicit invocation.</td>
+                <td>
+                  Full <code>SKILL.md</code>, or workflow description, inputs,
+                  outputs, phases, and required tools.
+                </td>
+              </tr>
+              <tr>
+                <td>2 · Supporting resources</td>
+                <td>Referenced only by Level 1 content.</td>
+                <td>
+                  Specific references, examples, templates, assets, or source
+                  files requested through <code>execute</code>.
+                </td>
+              </tr>
+              <tr>
+                <td>3 · Execution</td>
+                <td>No executable bytes are placed in the model prompt.</td>
+                <td>
+                  The exact script/workflow revision is invoked by
+                  <code>execute</code> and monitored as a run.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Agent and user invocation</h3>
+        <ul>
+          <li>
+            At turn start, the frozen prompt contains Pi-formatted
+            <code>&lt;available_skills&gt;</code> metadata and an analogous
+            Noesis <code>&lt;available_workflows&gt;</code> index.
+          </li>
+          <li>
+            When the agent recognizes a match, it calls
+            <code>execute</code> and uses
+            <code>noesis.skills.load(name)</code> or
+            <code>noesis.workflows.describe(name)</code>. The full content then
+            returns through the normal tool loop.
+          </li>
+          <li>
+            A user can explicitly invoke
+            <code>/skill:&lt;name&gt; [arguments]</code>. The Pi adapter uses
+            <code>AgentHarness.skill()</code>, resolving the skill from the same
+            frozen resources as the turn.
+          </li>
+          <li>
+            A user or agent invokes a workflow through
+            <code>/workflow:&lt;name&gt;</code>, the workflow library, normal
+            conversation, or <code>noesis.workflows.run()</code> inside
+            <code>execute</code>.
+          </li>
+        </ul>
+
+        <h3>Installation and portability</h3>
+        <pre><code>noesis skills install npm:@scope/package@1.2.3
+noesis skills install https://github.com/user/skill-repo@v1
+noesis skills install git:github.com/user/skill-repo@commit
+noesis skills install /absolute/or/relative/path
+noesis skills install --workspace ./team-skills</code></pre>
+        <ul>
+          <li>
+            Reuse Pi's exported <code>DefaultPackageManager</code> behind a
+            <code>runtime-pi</code> adapter for npm, git, URL, local-path,
+            install, update, remove, source resolution, and package dependencies.
+          </li>
+          <li>
+            Reuse <code>DefaultResourceLoader</code> and Pi skill parsing for
+            standard locations and packages, configured through Noesis rather
+            than creating another skill parser.
+          </li>
+          <li>
+            Support personal and workspace scope. Workspace entries take
+            precedence by skill name; collisions remain visible in diagnostics
+            and the TUI.
+          </li>
+          <li>
+            Also allow users to point Noesis at existing
+            <code>~/.agents/skills</code>, <code>~/.pi/agent/skills</code>,
+            <code>~/.claude/skills</code>, and <code>~/.codex/skills</code>
+            directories instead of copying them.
+          </li>
+          <li>
+            Standard skills work without a Noesis-specific manifest. A package
+            may additionally declare Noesis scripts/workflows, which are imported
+            into the corresponding first-class libraries.
+          </li>
+          <li>
+            A skill's freeform <code>scripts/</code> directory remains ordinary
+            skill content unless an item declares a Noesis script manifest. This
+            avoids confusing arbitrary helper files with first-class Noesis
+            scripts.
+          </li>
+          <li>
+            Installing an online package shows one concise source preview:
+            resolved source/ref, scope, included skills, included executable
+            content, and dependencies. After installation it follows the same
+            trusted-local Node model as user-authored code.
+          </li>
+        </ul>
+
+        <h3>What Pi does—and does not own</h3>
+        <p>
+          Pi is the adapter for standard discovery, parsing, prompt formatting,
+          explicit invocation, and package acquisition. Noesis freezes the exact
+          skill bytes selected for a turn, records use and provenance, renders
+          the library, and decides which workflow/tool/capability revisions are
+          active. A downloaded Pi extension must not automatically register
+          model-visible tools; executable integrations still enter through the
+          one Noesis Tool Catalog.
+        </p>
+      </section>
+
+      <section id="codemode">
+        <h2>Codemode: the programmable work surface</h2>
+        <div class="callout good">
+          <strong>Yes—codemode is itself a basic agent tool.</strong>
+          <code>packages/runtime-pi</code> registers <code>execute</code> as an
+          ordinary Pi <code>AgentTool</code>, alongside the three self tools. The
+          model invokes it through the normal tool-calling loop. The difference is
+          that the input is a JavaScript program and the program can make many
+          nested calls through the generated SDK before returning one result.
+        </div>
+        <h3>Model-visible contract</h3>
+        <pre><code>await execute({
+  source: `
+    const files = await noesis.search("read and search project files");
+    const contract = await noesis.describe("files.read");
+
+    const matches = await tools.files.search({
+      root: ".",
+      query: "TODO",
+      glob: "**/*.ts"
+    });
+
+    const contents = await Promise.all(
+      matches.slice(0, 20).map((match) =&gt;
+        tools.files.read({ path: match.path })
+      )
+    );
+
+    return contents.map(summarizeLocally);
+  `
+});</code></pre>
+        <p>
+          JavaScript is the execution language even though Noesis is authored in
+          TypeScript. Noesis writes a temporary <code>.mjs</code> entrypoint and
+          launches it with the user's Node.js. The host generates TypeScript-like
+          declarations and examples for the SDK, but no compilation step is
+          required.
+        </p>
+        <h3>Local execution surface</h3>
+        <ul>
+          <li>
+            <code>tools</code>: namespace of callable proxies resolved through
+            the broker.
+          </li>
+          <li>
+            <code>noesis.search(query)</code> and
+            <code>noesis.describe(name)</code>: progressive tool discovery.
+          </li>
+          <li>
+            <code>noesis.step(name, fn)</code>: a stable replay boundary for
+            effectful or resumable work.
+          </li>
+          <li>
+            <code>scripts.list/describe/run</code>: saved programs, added after
+            the script workstream.
+          </li>
+          <li>
+            <code>emit(value)</code>, <code>notify(value)</code>, and
+            <code>exit(value)</code>: bounded result and progress helpers.
+          </li>
+          <li>
+            JSON-safe session storage through <code>store/load</code>, scoped to
+            the current Noesis trail and codemode session.
+          </li>
+          <li>
+            Ordinary Node.js globals, built-ins, dynamic imports, and locally
+            installed dependencies. The working directory is the task's declared
+            cwd.
+          </li>
+        </ul>
+        <p>
+          The agent is instructed to prefer <code>tools.*</code> for user work:
+          SDK calls are typed, searchable, cited, rendered live in the TUI, and
+          recorded for learning and replay. Direct Node operations are permitted
+          in this trusted-local iteration, but they have only process-level
+          stdout/stderr and exit observability.
+        </p>
+        <h3>Initial atomic tool families</h3>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Namespace</th>
+                <th>Initial tools</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>files</code></td>
+                <td>
+                  <code>list</code>, <code>search</code>, <code>read</code>,
+                  <code>write</code>, <code>edit</code>,
+                  <code>apply_patch</code>, <code>stat</code>
+                </td>
+                <td>
+                  Workspace-relative paths by default; explicit roots can be
+                  granted. Results cite paths and revisions.
+                </td>
+              </tr>
+              <tr>
+                <td><code>shell</code></td>
+                <td><code>run</code>, <code>write_stdin</code></td>
+                <td>
+                  PTY and non-PTY, abortable, bounded output, stable process
+                  handles, explicit cwd.
+                </td>
+              </tr>
+              <tr>
+                <td><code>web</code></td>
+                <td>
+                  <code>search</code>, <code>fetch</code>,
+                  <code>extract</code>
+                </td>
+                <td>
+                  Host-owned credentials, normalized extraction, and citations.
+                  Direct Node networking remains possible but is not a substitute
+                  for cited SDK results.
+                </td>
+              </tr>
+              <tr>
+                <td><code>history</code></td>
+                <td>
+                  Existing session, message, event, artifact, and case search.
+                </td>
+                <td>
+                  Move the existing frozen session tools behind this same broker;
+                  do not preserve a parallel Pi-only registry.
+                </td>
+              </tr>
+              <tr>
+                <td><code>artifacts</code></td>
+                <td><code>create</code>, <code>read</code>, <code>attach</code></td>
+                <td>
+                  Large outputs stay in ordinary files with SQLite metadata.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>Invocation semantics</h3>
+        <ol>
+          <li>
+            Freeze the exact tool catalog and permissions at turn start. A
+            running cell cannot discover a newly activated tool revision.
+          </li>
+          <li>
+            Validate nested input with Zod before any reservation or effect.
+          </li>
+          <li>
+            Derive effect class, resource, cost, and operation fingerprint
+            host-side. Generated code cannot choose them.
+          </li>
+          <li>
+            Record the request and reserve effect use durably before dispatch.
+          </li>
+          <li>
+            Dispatch through <code>EffectGateway</code>; credentials and grants
+            remain host-side.
+          </li>
+          <li>
+            Validate, normalize, bound, and record the result before returning it
+            to the running Node program.
+          </li>
+          <li>
+            Expose only the value selected by the script to the model context.
+            Full nested lineage remains inspectable from the execution record.
+          </li>
+        </ol>
+        <div class="callout warning">
+          A codemode execution is not a transaction across the outside world. If
+          a script performs three effects and the fourth fails, the first three
+          remain real. Completed <code>step</code>s replay from their recorded
+          results; an interrupted effect with no unambiguous outcome fails closed.
+          Compensation is explicit and tool-specific, never implied rollback.
+          Direct Node operations cannot receive this per-call replay behavior.
+        </div>
+      </section>
+
+      <section id="scripts">
+        <h2>Scripts: successful code that becomes reusable</h2>
+        <p>
+          A script is the smallest reusable unit above an atomic tool. It may be
+          saved because the user asks, because the agent anticipates a credible
+          future use, or because ambient reflection sees recurring evidence.
+          Saving creates a candidate; repeated use and feedback can promote it
+          into a capability revision later.
+        </p>
+        <h3>Inspectable definition</h3>
+        <pre><code>definitions/scripts/repo-health/
+  script.json   # name, description, input/output JSON schemas, tool requirements
+  main.mjs       # exported run({ input, tools, noesis }) function
+
+revisions/scripts/&lt;revision-id&gt;/
+  script.json   # byte-stable snapshot
+  main.mjs       # byte-stable snapshot</code></pre>
+        <p>
+          The editable files are authoritative for the working definition. Every
+          execution pins an immutable recorded revision. Editing the working file
+          never changes an in-flight or historical run.
+        </p>
+        <h3>Lifecycle</h3>
+        <pre>ad hoc code succeeds
+  → user asks "save that" or reflection sees credible reuse
+  → adapt(target: "script") materializes a candidate definition
+  → validate schemas + static contract + controlled execution
+  → make available to codemode as scripts.run(...)
+  → collect task outcome and conversational feedback
+  → revise, retain, promote into a capability, or revert</pre>
+        <ul>
+          <li>
+            Scripts declare required tool names and effect classes. The run still
+            uses the caller's current frozen permissions.
+          </li>
+          <li>
+            Scripts receive structured JSON input and must return a value that
+            passes their output schema.
+          </li>
+          <li>
+            Scripts may import Node built-ins and dependencies already installed
+            in the Noesis or target workspace. Automatic dependency installation
+            is not part of the first implementation.
+          </li>
+          <li>
+            Skills remain instructional context and may refer to scripts later.
+            Script and skill are intentionally not the same abstraction.
+          </li>
+        </ul>
+      </section>
+
+      <section id="workflows">
+        <h2>Workflows: durable thinking and doing</h2>
+        <p>
+          A workflow is warranted when work must survive a turn, expose phase
+          progress, pause, resume, or accept feedback between phases. It is not
+          merely a long codemode cell. The first implementation is deliberately
+          sequential; bounded fan-out and background scheduling remain later
+          extensions.
+        </p>
+        <h3>Programming model</h3>
+        <pre><code>await tools.workflows.save({
+  name: "deep-research",
+  description: "Discover, analyze, and synthesize in durable order.",
+  inputSchema: { /* JSON Schema */ },
+  outputSchema: { /* JSON Schema */ },
+  phases: [
+    { name: "discover", source: "/* return a source list */", /* schemas + requiredTools */ },
+    { name: "analyze", source: "/* analyze the complete list */", /* schemas + requiredTools */ },
+    { name: "synthesize", source: "/* produce the final answer */", /* schemas + requiredTools */ }
+  ]
+});</code></pre>
+        <h3>Workflow rules</h3>
+        <ul>
+          <li>
+            Workflow definitions are ordinary local Node programs. Their
+            <code>agent</code>, <code>script</code>, and <code>tools</code>
+            helpers use the same Tool Broker and Effect Gateway; direct Node
+            operations remain possible under the workflow's enclosing execution
+            grant.
+          </li>
+          <li>
+            <code>phase(name, schema, fn)</code> is a stable durable step:
+            requested, running, completed, failed, ambiguous, or cancelled.
+          </li>
+          <li>
+            Phase input/output is schema-validated. Large data becomes an artifact
+            reference rather than an oversized SQLite blob.
+          </li>
+          <li>
+            Phases execute sequentially in the first implementation. A later
+            bounded <code>map</code> primitive may use the existing job scheduler;
+            workflows will not introduce another queue.
+          </li>
+          <li>
+            Resume reuses completed phase outputs. An ambiguous effect blocks
+            automatic continuation until reconciled.
+          </li>
+          <li>
+            A workflow run pins its definition, scripts, capabilities, model
+            routing, and tool catalog. Later edits affect later runs.
+          </li>
+          <li>
+            User feedback can be an explicit phase input, a conversational
+            correction, or post-run outcome evidence.
+          </li>
+        </ul>
+      </section>
+
+      <section id="tui">
+        <h2>Skills, scripts, and workflows as first-class TUI objects</h2>
+        <p>
+          The TUI must make the programmable substrate feel like part of the
+          product, not a hidden developer feature. A user should be able to move
+          naturally between conversation, reusable definitions, and live work
+          without leaving Noesis.
+        </p>
+        <h3>Primary surfaces</h3>
+        <ul>
+          <li>
+            Foreground codemode collapses to a live summary such as
+            <code>execute · 8 calls · 6 read · 1 write · 1.2s</code>.
+          </li>
+          <li>
+            Pressing Enter on that summary opens a run inspector with source,
+            inputs, stdout/stderr, returned value, nested SDK calls, durations,
+            errors, artifacts, and effect receipts.
+          </li>
+          <li>
+            <code>/skills</code> opens a searchable skill library with personal
+            and workspace scope, origin, compatibility, installed revision,
+            diagnostics, and included resources. The detail view renders
+            <code>SKILL.md</code>, references, assets, provenance, and related
+            scripts/workflows, with invoke, install, update, remove, enable, and
+            inspect actions.
+          </li>
+          <li>
+            <code>/scripts</code> opens a searchable script library. The list
+            shows name, description, origin, revision, last run, recent success,
+            and required tools. Its detail view shows formatted source, manifest,
+            revision history, provenance, recent runs, and actions to run, edit,
+            compare, or inspect.
+          </li>
+          <li>
+            <code>/workflows</code> opens a searchable workflow library. Its
+            detail view shows the phase graph, schemas, source, pinned
+            dependencies, revisions, recent outcomes, and actions to start,
+            edit, clone, or inspect.
+          </li>
+          <li>
+            <code>/runs</code> opens active and recent script/workflow runs.
+            Active workflows show phases, current activity, fan-out, elapsed time,
+            model/cost where available, logs, artifacts, and pause/cancel/resume
+            controls.
+          </li>
+          <li>
+            The command palette exposes the same library, run, and inspection
+            actions, and transcript rows deep-link into the relevant script,
+            workflow, revision, or run. Navigation must be keyboard-first and
+            preserve the current chat state when the user returns.
+          </li>
+          <li>
+            Conversational commands remain primary: “save that,” “run it again,”
+            “continue in the background,” and “change the synthesis phase.”
+          </li>
+        </ul>
+        <div class="callout">
+          <strong>UX principle:</strong> source, definitions, and run history are
+          not debugging afterthoughts. Skills, scripts, and workflows are
+          user-owned objects. Their library and inspector surfaces ship with
+          execution, backed by TUI read models rather than UI-owned durable state.
+        </div>
+      </section>
+
+      <section id="persistence">
+        <h2>Authority and persistence</h2>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Datum</th>
+                <th>Authority</th>
+                <th>Projection / history</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Atomic tool definition and adapter identity</td>
+                <td>
+                  Application code or editable generated-tool definition, exactly
+                  one per tool.
+                </td>
+                <td>Frozen catalog snapshot and search index.</td>
+              </tr>
+              <tr>
+                <td>Codemode execution status</td>
+                <td>SQLite operational rows.</td>
+                <td>Turn events and TUI read model.</td>
+              </tr>
+              <tr>
+                <td>Nested call and effect outcome</td>
+                <td>
+                  Existing authoritative tool-call/effect reservation and receipt
+                  records, extended with execution and step lineage.
+                </td>
+                <td>Execution inspector and activity history.</td>
+              </tr>
+              <tr>
+                <td>Installed skill source and scope</td>
+                <td>
+                  Personal/workspace declarative configuration plus Pi-managed
+                  package checkout or referenced local directory.
+                </td>
+                <td>Skill library read model and installation diagnostics.</td>
+              </tr>
+              <tr>
+                <td>Skill selected for a turn</td>
+                <td>
+                  Immutable recorded snapshot of exact <code>SKILL.md</code> and
+                  loaded resource bytes.
+                </td>
+                <td>Prompt metadata, usage lineage, and provenance inspector.</td>
+              </tr>
+              <tr>
+                <td>Script definition</td>
+                <td>Editable files under <code>definitions/scripts</code>.</td>
+                <td>Immutable revision snapshots and search projection.</td>
+              </tr>
+              <tr>
+                <td>Workflow definition</td>
+                <td>Editable files under <code>definitions/workflows</code>.</td>
+                <td>Immutable revision snapshots and search projection.</td>
+              </tr>
+              <tr>
+                <td>Workflow run and phase state</td>
+                <td>SQLite operational rows.</td>
+                <td>TUI read model and activity history.</td>
+              </tr>
+              <tr>
+                <td>Large code/output/evidence</td>
+                <td>Ordinary artifact files with SQLite metadata.</td>
+                <td>Bounded previews and citations.</td>
+              </tr>
+              <tr>
+                <td>Credentials</td>
+                <td>Protected credential store or process environment only.</td>
+                <td>
+                  Never copied into execution records, generated manifests, or
+                  SDK payloads.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          Extend the existing one-authority matrix; do not create an event-sourced
+          shadow state. Activity records explain what happened. They do not
+          reconstruct current operational truth.
+        </p>
+      </section>
+
+      <section id="workstreams">
+        <h2>Implementation workstreams</h2>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-00</span> Freeze the vocabulary and prove
+            the Node runner lifecycle
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              A minimal local Node runner proves the process and SDK protocol
+              before package interfaces or migrations are committed.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Execute <code>.mjs</code> files; inject execution identity and SDK
+              client; bridge sequential and parallel host calls; stream
+              stdout/stderr and progress; bound captured output and SDK call
+              count; cancel outstanding calls; and prove clean process shutdown.
+            </dd>
+            <dt>Gate</dt>
+            <dd>
+              Do not design multiple runner adapters. Adopt the ordinary Node
+              child process once async SDK calls, cancellation, streaming, and
+              shutdown are proven.
+            </dd>
+          </dl>
+        </article>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-01</span> Build the one canonical Tool
+            Catalog and Broker
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              One package defines discovery and invocation for all atomic tools.
+              The current session-search tools move behind it.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Define functional Zod-backed tool definitions, visibility
+              (<code>always</code> or <code>codemode_only</code>), frozen catalog
+              snapshots, search, describe, invocation, normalized errors,
+              bounded/cited results, and adapter injection. Integrate
+              <code>EffectGateway</code> rather than recreating it.
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              A caller can freeze a catalog, search it, describe one revision,
+              invoke it through a scripted adapter, and prove that later catalog
+              mutations do not affect the frozen call.
+            </dd>
+          </dl>
+        </article>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-02</span> Implement the codemode process and
+            session
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              <code>packages/codemode</code> runs local Node.js cells and
+              delegates SDK calls without knowing what any real tool does.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Child-process host, framed JSON protocol, session/cell IDs,
+              execute/wait/terminate/shutdown, generated <code>.mjs</code>
+              bootstrap, SDK client, JSON-safe session store, stdout/stderr/result
+              streaming, pending call limits, backpressure, and abort propagation.
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              Pure computation, sequential/parallel delegate calls, progress,
+              ordinary Node imports, timeout, cancellation, malformed frames,
+              child crash, and orderly app exit all have deterministic tests.
+            </dd>
+          </dl>
+        </article>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-03</span> Add authoritative execution
+            records
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              SQLite owns codemode execution/cell status and nested call lineage;
+              ordinary artifacts own large code and output.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Add migrations and WorkspaceStore functions for executions, cells,
+              stable steps, parent-child tool calls, cancellation, and ambiguous
+              outcomes. Extend existing rows rather than creating parallel effect
+              history. Add integrity checks and read models.
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              Restart rehydrates terminal and interrupted execution state without
+              guessing. An unresolved reserved effect remains blocked.
+            </dd>
+          </dl>
+        </article>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-04</span> Ship the first useful work toolset
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              Codemode can inspect and modify a project, run commands, search the
+              web, search Noesis history, and create artifacts.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Implement or adapt the initial <code>files</code>,
+              <code>shell</code>, <code>web</code>, <code>history</code>, and
+              <code>artifacts</code> families. Prefer Pi's proven coding
+              primitives behind a narrow <code>runtime-pi</code> adapter where
+              they fit; Pi types must not escape that package. Add stable process
+              handles and abortable streams.
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              A controlled Pi turn completes the repository-TODO journey with one
+              model-visible codemode call and inspectable nested operations.
+            </dd>
+          </dl>
+        </article>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-05</span> Implement the three semantic self
+            tools
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              The agent can inspect its active behavior, create narrow durable
+              memory, and propose/revise/revert adaptations without seeing
+              storage internals.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Create domain functions and Pi adapters for
+              <code>inspect_self</code>, <code>remember</code>, and
+              <code>adapt</code>. Bind provenance and anticipated-use evidence
+              host-side. Reuse experiments, evaluations, capabilities,
+              activation, and rollback.
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              A reflection turn can produce <code>no_change</code>, a scoped
+              memory candidate, or a script/prompt candidate; generated content
+              cannot activate itself.
+            </dd>
+          </dl>
+        </article>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-06</span> Integrate the frozen turn and Pi
+            surface
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              Pi sees exactly the three self tools plus <code>execute</code>; the
+              code session sees only the frozen codemode catalog.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Extend <code>FrozenTurnPlan</code> with exact catalog/permission
+              identity, compose the broker at the application root, replace
+              direct session-search registrations, stream nested activity through
+              existing runtime events, and close code sessions during normal
+              shutdown.
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              Plain startup, completed turns, <code>/quit</code>, Ctrl+C,
+              <code>--continue</code>, abort, and process error all release the
+              executor without hanging or losing authoritative state.
+            </dd>
+          </dl>
+        </article>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-07</span> Make codemode legible in the TUI
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              Work feels active but not noisy. The transcript shows a compact
+              summary with a discoverable detailed inspector.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Add execution read models, live aggregate status, nested call
+              counts, transcript deep-links, the reusable run inspector,
+              <code>/runs</code> library, error/cancellation states, and bounded
+              source/result/stdout/stderr previews. Establish reusable list,
+              detail, revision, and run-inspection views that TCW-08, TCW-09, and
+              TCW-10 populate. Preserve markdown/LaTeX rendering and native input
+              behavior.
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              Long-running and high-volume executions remain readable at narrow
+              and wide terminal sizes; keyboard navigation enters and leaves the
+              inspector without losing chat state; the model transcript contains
+              only the selected final value.
+            </dd>
+          </dl>
+        </article>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-08</span> Add the skill library and Pi
+            package installation
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              Users can discover, inspect, invoke, install, update, remove, and
+              scope standard Agent Skills from the TUI and CLI.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Add the adapter-neutral skill library; Pi ResourceLoader and
+              DefaultPackageManager adapters; personal/workspace precedence;
+              npm/git/URL/local sources; frozen skill snapshots; compact prompt
+              metadata; <code>noesis.skills.load</code>; explicit
+              <code>/skill:name</code>; diagnostics; and the complete
+              <code>/skills</code> library and detail view. Ignore package
+              extensions/tools unless separately registered through the Noesis
+              Tool Catalog.
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              Install a pinned git skill at workspace scope, discover its compact
+              metadata, load its full instructions only on match, explicitly
+              invoke it, inspect provenance/resources in the TUI, restart with
+              the same resolved content, and remove it cleanly.
+            </dd>
+          </dl>
+        </article>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-09</span> Add saved scripts and ambient
+            reuse
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              Successful code can become an inspectable parameterized script and
+              run again at an exact revision.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Add script definition directories, revision snapshots, schemas,
+              required-tool manifests, list/describe/run SDK calls, controlled
+              preflight, explicit “save that” behavior, and ambient proposals
+              after recurring evidence. Complete the <code>/scripts</code>
+              library, detail/source view, revision comparison, recent runs, and
+              run/edit/inspect actions on the TCW-07 read-model seam.
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              Save and rerun repository-health script; edit its working file;
+              prove an existing execution still resolves the pinned bytes; reject
+              invalid output and unavailable tools.
+            </dd>
+          </dl>
+        </article>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-10</span> Add durable workflow primitives
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              Noesis can execute typed, inspectable, resumable, multi-phase work
+              through sequential durable phases.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Workflow definition/revision, run and phase rows,
+              sequential phase execution through saved JavaScript, artifacts,
+              pause/cancel/resume, progress read models, conversational controls,
+              and the complete <code>/workflows</code> library plus live
+              phase/run inspector.
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              A deep-research workflow survives restart after phase one, resumes
+              without repeating completed effects, accepts a user correction
+              before synthesis, and produces cited output.
+            </dd>
+          </dl>
+        </article>
+
+        <article class="task">
+          <h3>
+            <span class="task-id">TCW-11</span> Close the self-improvement loop
+          </h3>
+          <dl>
+            <dt>Outcome</dt>
+            <dd>
+              Reflection can propose better scripts, workflows, tool definitions,
+              toolsets, prompts, and memory based on actual outcomes.
+            </dd>
+            <dt>Work</dt>
+            <dd>
+              Add evidence extractors from code/workflow runs, dynamic eval cases,
+              user-feedback attribution, candidate materialization, controlled
+              replay, activation pins, regression retention, and conversational
+              adaptation history. Keep protected promotion outside generated code.
+            </dd>
+            <dt>Acceptance</dt>
+            <dd>
+              Repeated real work yields a narrow proposal, a controlled comparison
+              uses frozen revisions, later work serves the selected revision, and
+              negative feedback can revise or revert it.
+            </dd>
+          </dl>
+        </article>
+      </section>
+
+      <section id="ordering">
+        <h2>Dependency and parallelization map</h2>
+        <pre>Wave 0  TCW-00 local Node runner proof + freeze vocabulary
+          │
+          ├───────────────────────────────────────────────────┐
+Wave 1  TCW-01 Tool Broker  ∥  TCW-02 codemode runtime       │
+        TCW-03 persistence  ∥  TCW-05 self-tool semantics    │
+          │                     │                              │
+          └──────────────┬──────┴──────────────────────────────┘
+                         ▼
+Wave 2             TCW-06 frozen-turn integration
+                    │                       │
+                    ▼                       ▼
+             TCW-04 work tools       TCW-07 TUI read models
+                    └───────────┬───────────┘
+                                ▼
+Wave 3                 TCW-08 skills  ∥  TCW-09 scripts
+                                ▼
+Wave 4                      TCW-10 workflows
+                                ▼
+Wave 5                   TCW-11 compounding loop
+                                ▼
+                    focused adversarial review + journeys</pre>
+        <h3>Serialization points</h3>
+        <ul>
+          <li>
+            TCW-00 is a short gate because child-process behavior shapes protocol
+            and lifecycle; it is not a sandbox research project.
+          </li>
+          <li>
+            TCW-01 first freezes the broker contracts; TCW-02, TCW-03, and
+            TCW-05 can then proceed in parallel against those types.
+          </li>
+          <li>
+            TCW-06 is the integration barrier. No work tool becomes model-visible
+            through a separate temporary path.
+          </li>
+          <li>
+            Skills and scripts can build in parallel after the frozen resource
+            and TUI seams are proven. Workflows follow a proven script revision
+            and reuse the existing scheduler.
+          </li>
+          <li>
+            Self-improvement closes last because it needs real execution and
+            outcome evidence. Its semantic self tools can ship earlier.
+          </li>
+        </ul>
+        <h3>Suggested implementation task ownership</h3>
+        <p>
+          After TCW-00, separate tasks may own:
+          <strong>(A)</strong> Tool Broker and work adapters,
+          <strong>(B)</strong> codemode runtime/protocol,
+          <strong>(C)</strong> WorkspaceStore migrations/read models, and
+          <strong>(D)</strong> self-tool domain behavior. TCW-06 should be one
+          integration owner. Skills and scripts may proceed in parallel;
+          workflows should be a stacked follow-up rather than a parallel edit to
+          the same runtime composition.
+        </p>
+      </section>
+
+      <section id="verification">
+        <h2>Verification and product journeys</h2>
+        <h3>Contract tests</h3>
+        <ul>
+          <li>
+            Node version, cwd, module resolution, SDK injection, the enclosing
+            execution grant, stdout/stderr streaming, and exit behavior are
+            explicit and reproducible.
+          </li>
+          <li>
+            Too many SDK calls, huge captured output, cancellation, malformed
+            IPC, and child crashes terminate predictably.
+          </li>
+          <li>
+            Every nested input and output is validated at the broker boundary.
+          </li>
+          <li>
+            Frozen catalog, tool, skill, script, workflow, prompt, and permission
+            revisions are byte-stable for a run.
+          </li>
+          <li>
+            Effect identities collide safely; ambiguous outcomes fail closed;
+            completed named steps replay without repeating effects.
+          </li>
+          <li>
+            Executor shutdown is included in both <code>/quit</code> and Ctrl+C
+            after completed and interrupted turns.
+          </li>
+          <li>
+            Script, workflow, and run libraries remain responsive, searchable,
+            keyboard-navigable, and correctly deep-link to source, revisions,
+            phases, nested calls, logs, artifacts, and receipts.
+          </li>
+        </ul>
+        <h3>Acceptance journeys</h3>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Journey</th>
+                <th>Proof</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>“Find every TODO in this repository and summarize themes.”</td>
+                <td>
+                  One outer <code>execute</code> call composes search/read, keeps
+                  file bodies out of model context, and returns cited synthesis
+                  input.
+                </td>
+              </tr>
+              <tr>
+                <td>“Refactor this module and run its tests.”</td>
+                <td>
+                  Read/edit/shell calls use one broker and effect path; the user
+                  can inspect each mutation and command.
+                </td>
+              </tr>
+              <tr>
+                <td>“Remember that I prefer pure functions in Noesis.”</td>
+                <td>
+                  <code>remember</code> creates narrow, evidence-bound,
+                  anticipated-use memory which appears only in relevant later
+                  turns.
+                </td>
+              </tr>
+              <tr>
+                <td>“Install and use this skill from GitHub.”</td>
+                <td>
+                  Noesis resolves and records the pinned source, shows its
+                  contents and scope in <code>/skills</code>, places only compact
+                  metadata in the prompt, loads full instructions on match, and
+                  never auto-registers bundled extensions as tools.
+                </td>
+              </tr>
+              <tr>
+                <td>“Save that as my repo-health script.”</td>
+                <td>
+                  Exact code and schemas become editable files plus immutable
+                  revision; rerun uses current permissions.
+                </td>
+              </tr>
+              <tr>
+                <td>“Research this deeply and let me steer the synthesis.”</td>
+                <td>
+                  Durable sequential discover/analyze/synthesize phases pause for
+                  feedback, resume after restart, and emit progress.
+                </td>
+              </tr>
+              <tr>
+                <td>Ambient improvement after recurring work</td>
+                <td>
+                  Reflection proposes a script/toolset/prompt change, controlled
+                  evidence evaluates it, and protected activation chooses the
+                  exact revision.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <h3>Required checks</h3>
+        <p>
+          Every implementation stack runs <code>pnpm format</code>,
+          <code>pnpm lint</code>, <code>pnpm typecheck</code>, and
+          <code>pnpm test</code>. Product journeys use the credential-free
+          controlled Pi provider path and the actual runtime composition; no fake
+          production runtime is reintroduced.
+        </p>
+      </section>
+
+      <section id="non-goals">
+        <h2>Explicit non-goals for the first complete implementation</h2>
+        <ul>
+          <li>Security sandboxing or container isolation for local generated code.</li>
+          <li>Automatic installation or mutation of npm dependencies.</li>
+          <li>A second tool registry for codemode or workflows.</li>
+          <li>A second permission, approval, effect, scheduler, or persistence system.</li>
+          <li>Direct model exposure of the broad work tool catalog.</li>
+          <li>Automatically enabling Pi package extensions or bypassing the Noesis Tool Catalog.</li>
+          <li>Automatic rollback of arbitrary external side effects.</li>
+          <li>Equating scripts with skills or forcing all reuse through skills.</li>
+          <li>Arbitrary generated TypeScript in the TUI process.</li>
+          <li>Cloud-only execution as a requirement for local Noesis.</li>
+          <li>Restoring the deleted duplicate tool runtime without this broker path replacing its responsibility.</li>
+        </ul>
+      </section>
+
+      <section id="done">
+        <h2>Definition of done</h2>
+        <p>
+          Noesis can install and progressively load portable Agent Skills;
+          complete real local and web work through one model-visible
+          <code>execute</code> tool; inspect and intentionally modify its own
+          memory and behavior through three thin semantic tools; save successful
+          programs as inspectable scripts; run typed multi-phase work durably; and
+          learn from the outcomes without creating duplicate authority systems.
+        </p>
+        <p>
+          The feature is complete only when a user can understand what ran, what
+          changed, which exact revisions were used, what evidence supported an
+          adaptation, and how to contest or revert it—without the ordinary
+          experience becoming a procession of approval dialogs.
+        </p>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        This plan extends the product thesis, product experience, first-complete
+        iteration, autonomous-compounding architecture, and compounding
+        partnership loop. Where those plans previously deferred generated tools,
+        the user's explicit need for a real programmable work surface now
+        satisfies the “proven need” condition—but only through one authoritative
+        execution spine.
+      </p>
+    </footer>
+  </body>
+</html>

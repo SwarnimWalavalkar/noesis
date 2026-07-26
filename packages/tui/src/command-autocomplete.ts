@@ -1,0 +1,123 @@
+import {
+  CombinedAutocompleteProvider,
+  type AutocompleteItem,
+  type AutocompleteProvider,
+  type SlashCommand,
+} from "@earendil-works/pi-tui";
+
+const MODEL_PROVIDER_COMPLETIONS: readonly AutocompleteItem[] = [
+  {
+    value: "openai-codex/",
+    label: "openai-codex/",
+    description: "Codex OAuth · enter a model ID after the slash",
+  },
+  {
+    value: "openrouter/",
+    label: "openrouter/",
+    description: "OpenRouter · enter a provider/model ID after the slash",
+  },
+];
+
+const completeModelProvider = (argumentPrefix: string): AutocompleteItem[] => {
+  const normalizedPrefix = argumentPrefix.trim().toLowerCase();
+  if (!normalizedPrefix) return [...MODEL_PROVIDER_COMPLETIONS];
+  return MODEL_PROVIDER_COMPLETIONS.filter((item) => item.value.includes(normalizedPrefix));
+};
+
+export const NOESIS_SLASH_COMMANDS = [
+  {
+    name: "help",
+    description: "Show commands and usage",
+  },
+  {
+    name: "model",
+    description: "Start a session with a different model",
+    argumentHint: "<provider>/<model>",
+    getArgumentCompletions: completeModelProvider,
+  },
+  {
+    name: "context",
+    description: "Inspect the current context",
+  },
+  {
+    name: "capabilities",
+    description: "Inspect active capabilities",
+  },
+  {
+    name: "skills",
+    description: "List installed and discoverable skills",
+  },
+  {
+    name: "skill",
+    description: "Inspect one skill",
+    argumentHint: "<name>",
+  },
+  {
+    name: "scripts",
+    description: "List reusable scripts",
+  },
+  {
+    name: "script",
+    description: "Inspect one reusable script",
+    argumentHint: "<name>",
+  },
+  {
+    name: "workflows",
+    description: "List multi-phase workflows",
+  },
+  {
+    name: "workflow",
+    description: "Inspect one workflow",
+    argumentHint: "<name>",
+  },
+  {
+    name: "runs",
+    description: "List recent codemode and workflow runs",
+  },
+  {
+    name: "run",
+    description: "Inspect one run",
+    argumentHint: "<execution-id>",
+  },
+  {
+    name: "fork",
+    description: "Fork the current session",
+  },
+  {
+    name: "compact",
+    description: "Compact the current context",
+  },
+  {
+    name: "abort",
+    description: "Stop the active turn",
+  },
+  {
+    name: "quit",
+    description: "Exit Noesis",
+  },
+] as const satisfies readonly SlashCommand[];
+
+export function createNoesisCommandAutocompleteProvider(): AutocompleteProvider {
+  const provider = new CombinedAutocompleteProvider([...NOESIS_SLASH_COMMANDS], process.cwd());
+
+  return {
+    getSuggestions: (lines, cursorLine, cursorCol, options) => {
+      const currentLine = lines[cursorLine] ?? "";
+      const beforeCursor = currentLine.slice(0, cursorCol);
+      if (!beforeCursor.startsWith("/")) return Promise.resolve(null);
+
+      // Pi's combined provider interprets a forced request as file completion. For Noesis,
+      // Tab inside a slash command should complete the command or its static argument form.
+      return provider.getSuggestions(lines, cursorLine, cursorCol, {
+        ...options,
+        force: false,
+      });
+    },
+    applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
+      provider.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
+    shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) => {
+      const currentLine = lines[cursorLine] ?? "";
+      return currentLine.slice(0, cursorCol).startsWith("/");
+    },
+  };
+}

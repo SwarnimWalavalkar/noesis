@@ -1,18 +1,23 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { sha256 } from "@noesis/domain";
+import { createWorkspaceStore } from "@noesis/workspace";
 import { describe, expect, test } from "vitest";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const cliPath = join(repositoryRoot, "apps/noesis/src/cli.ts");
+const tsxLoader = import.meta.resolve("tsx");
 
 async function runCli(
   args: readonly string[],
+  cwd = repositoryRoot,
 ): Promise<{ readonly code: number | null; readonly output: string }> {
-  const child = spawn(process.execPath, ["--import", "tsx", cliPath, ...args], {
-    cwd: repositoryRoot,
+  const child = spawn(process.execPath, ["--import", tsxLoader, cliPath, ...args], {
+    cwd,
     env: { ...process.env, NO_COLOR: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -65,6 +70,10 @@ describe("Noesis CLI grammar", () => {
     {
       args: ["rebuild", "--resume"],
       message: "--resume is available only with the tui command",
+    },
+    {
+      args: ["inspect", "--trust-workspace"],
+      message: "--trust-workspace is valid only for the tui or skills command",
     },
     {
       args: ["--continue", "--resume"],
@@ -123,6 +132,107 @@ describe("Noesis CLI grammar", () => {
     expect(result.output).toContain("single most recently active session");
     expect(result.output).toContain("full trail ID ascending on ties");
     expect(result.output).toContain("still marked running is not recovered or resumed automatically");
+    expect(result.output).toContain("--trust-workspace");
+  });
+
+  test("honors workspace scope for skill updates", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-cli-skills-"));
+    const workspace = join(home, "workspace");
+    const skillPackage = join(home, "skill-package");
+    await mkdir(workspace, { recursive: true });
+    await mkdir(join(skillPackage, "skills", "cli-skill"), { recursive: true });
+    await writeFile(
+      join(skillPackage, "skills", "cli-skill", "SKILL.md"),
+      "---\nname: cli-skill\ndescription: CLI scope test.\n---\n\nUse the CLI.",
+      "utf8",
+    );
+    const installed = await runCli(
+      ["skills", "install", skillPackage, "--workspace", "--trust-workspace", "--home", home],
+      workspace,
+    );
+    const updated = await runCli(
+      ["skills", "update", skillPackage, "--workspace", "--trust-workspace", "--home", home],
+      workspace,
+    );
+
+    expect(installed, installed.output).toMatchObject({ code: 0 });
+    expect(updated, updated.output).toMatchObject({ code: 0 });
+    expect(updated.output).toContain(`Updated ${skillPackage}`);
+  });
+
+  test("requires workspace trust independently from workspace skill scope", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-cli-skills-untrusted-"));
+    const workspace = join(home, "workspace");
+    const skillPackage = join(home, "skill-package");
+    await mkdir(workspace, { recursive: true });
+    await mkdir(join(skillPackage, "skills", "cli-skill"), { recursive: true });
+    await writeFile(
+      join(skillPackage, "skills", "cli-skill", "SKILL.md"),
+      "---\nname: cli-skill\ndescription: CLI trust test.\n---\n\nUse the CLI.",
+      "utf8",
+    );
+
+    const result = await runCli(
+      ["skills", "install", skillPackage, "--workspace", "--home", home],
+      workspace,
+    );
+
+    expect(result.code).toBe(1);
+    expect(result.output).toContain("requires explicit workspace trust");
+  });
+
+  test("read-only inspection does not recover interrupted operations", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-cli-read-only-"));
+    expect((await runCli(["config", "init", "--home", home])).code).toBe(0);
+    const store = await createWorkspaceStore(home, { recoverInterruptedOperations: false });
+    await store.operational.sessions.put({
+      sessionId: "session-running",
+      title: "Running",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const sourceBytes = Buffer.from("return null;");
+    const sourceArtifact = await store.artifacts.writeArtifact({
+      path: "codemode/execution-running/source.mjs",
+      mediaType: "text/javascript",
+      bytes: sourceBytes,
+      actor: Object.freeze({ actorId: "cli-test", kind: "user" as const }),
+      relationshipRefs: Object.freeze([
+        {
+          kind: "database_row" as const,
+          table: "sessions" as const,
+          rowId: "session-running",
+        },
+      ]),
+    });
+    await store.operational.codeExecutions.put({
+      executionId: "execution-running",
+      logicalExecutionId: "execution-running",
+      sessionId: "session-running",
+      catalogId: "catalog",
+      catalogDigest: sha256("catalog"),
+      sourceDigest: sha256(sourceBytes),
+      sourceArtifactId: sourceArtifact.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    store.close();
+
+    const inspected = await runCli(["inspect", "--home", home]);
+    const database = new DatabaseSync(join(home, "database", "noesis.sqlite"), { readOnly: true });
+    const row = database
+      .prepare("SELECT status FROM codemode_executions WHERE execution_id = ?")
+      .get("execution-running");
+    database.close();
+
+    expect(inspected.code).toBe(0);
+    expect(Reflect.get(row ?? {}, "status")).toBe("running");
   });
 
   test("continue on an empty configured home fails without creating a trail", async () => {

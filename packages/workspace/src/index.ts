@@ -12,6 +12,7 @@ export type {
   CanonicalSearchSource,
   CommitExperimentOutcomeRequest,
   CompoundingReplayBudgetRecord,
+  CodeExecutionRecord,
   CompoundingReplayReservationResult,
   CompoundingReplayRoleReservation,
   ExperimentObservationRecord,
@@ -41,6 +42,8 @@ export type {
   StagedDefinition,
   SuccessorLineageInputRecord,
   ToolCallRecord,
+  WorkflowPhaseRunRecord,
+  WorkflowRunRecord,
   TurnActivationPinRecord,
   WorkspacePaths,
 } from "./types.ts";

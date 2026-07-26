@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
@@ -6,6 +6,7 @@ import {
   eventChecksum,
   effectOperationFingerprint,
   SCHEMA_VERSION,
+  sha256,
   type CapabilityRevisionRef,
   type Experiment,
   type ExperimentTrial,
@@ -16,7 +17,7 @@ import {
 import type { AuthorityReceipt } from "@noesis/policy";
 import { createWorkspaceStore, restoreWorkspaceBackup, type NoesisWorkspaceStore } from "../src/index.ts";
 import { createWorkspaceRuntimeInternals } from "../src/protected-runtime.ts";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 const actor = { actorId: "test-user", kind: "user" as const };
 const text = (value: string): Uint8Array => Buffer.from(value);
@@ -89,6 +90,554 @@ describe("WorkspaceStore", () => {
     store.close();
   });
 
+  test("rehydrates unfinished codemode executions as interrupted", async () => {
+    const root = await temporary("codemode-recovery");
+    const first = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:00:00.000Z",
+    });
+    await first.operational.sessions.put({
+      sessionId: "session-codemode",
+      title: "Codemode",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const unfinishedSource = await first.artifacts.writeArtifact({
+      path: "codemode/execution-unfinished/source.mjs",
+      mediaType: "text/javascript",
+      bytes: text('return "exact";'),
+      actor,
+      relationshipRefs: Object.freeze([
+        { kind: "database_row" as const, table: "sessions" as const, rowId: "session-codemode" },
+      ]),
+    });
+    await first.operational.codeExecutions.put({
+      executionId: "execution-unfinished",
+      logicalExecutionId: "logical-execution-unfinished",
+      sessionId: "session-codemode",
+      catalogId: "catalog-test",
+      catalogDigest: digest("a"),
+      sourceDigest: sha256(text('return "exact";')),
+      sourceArtifactId: unfinishedSource.artifactId,
+      status: "running",
+      callCount: 1,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    first.close();
+
+    const recovered = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:01:00.000Z",
+      recoverInterruptedOperations: true,
+    });
+
+    expect(await recovered.operational.codeExecutions.get("execution-unfinished")).toMatchObject({
+      status: "interrupted",
+      error: "Process exited before execution settled",
+      completedAt: "2026-07-26T00:01:00.000Z",
+    });
+    recovered.close();
+  });
+
+  test("keeps one live mutating runtime owner while allowing non-recovering readers", async () => {
+    const root = await temporary("runtime-owner");
+    const owner = await createWorkspaceStore(root, {
+      recoverInterruptedOperations: true,
+      runtimeOwnerId: "owner-one",
+    });
+    await owner.operational.sessions.put({
+      sessionId: "session-live-owner",
+      title: "Live owner",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const source = await owner.artifacts.writeArtifact({
+      path: "codemode/execution-live-owner/source.mjs",
+      mediaType: "text/javascript",
+      bytes: text('return "live";'),
+      actor,
+      relationshipRefs: Object.freeze([
+        { kind: "database_row" as const, table: "sessions" as const, rowId: "session-live-owner" },
+      ]),
+    });
+    await owner.operational.codeExecutions.put({
+      executionId: "execution-live-owner",
+      logicalExecutionId: "logical-live-owner",
+      sessionId: "session-live-owner",
+      catalogId: "catalog-test",
+      catalogDigest: digest("a"),
+      sourceDigest: sha256(text('return "live";')),
+      sourceArtifactId: source.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    const reader = await createWorkspaceStore(root);
+    expect(await reader.operational.codeExecutions.get("execution-live-owner")).toMatchObject({
+      status: "running",
+    });
+
+    await expect(
+      createWorkspaceStore(root, {
+        recoverInterruptedOperations: true,
+        runtimeOwnerId: "owner-two",
+      }),
+    ).rejects.toThrow("live runtime owner");
+
+    reader.close();
+    owner.close();
+    const successor = await createWorkspaceStore(root, {
+      recoverInterruptedOperations: true,
+      runtimeOwnerId: "owner-two",
+    });
+    successor.close();
+  });
+
+  test("releases its runtime owner when initialization fails after acquisition", async () => {
+    const root = await temporary("runtime-owner-initialization-failure");
+    await expect(
+      createWorkspaceStore(root, {
+        recoverInterruptedOperations: true,
+        runtimeOwnerId: "failed-owner",
+        afterRuntimeOwnerAcquiredForTesting: () => {
+          throw new Error("injected initialization failure");
+        },
+      }),
+    ).rejects.toThrow("injected initialization failure");
+
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM runtime_owner").get()).toMatchObject({
+      count: 0,
+    });
+    database.close();
+
+    const successor = await createWorkspaceStore(root, {
+      recoverInterruptedOperations: true,
+      runtimeOwnerId: "successor-owner",
+    });
+    successor.close();
+  });
+
+  test("takes over a stale runtime owner after an ESRCH liveness result", async () => {
+    const root = await temporary("runtime-owner-stale");
+    const initialized = await createWorkspaceStore(root);
+    initialized.close();
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"));
+    database
+      .prepare("INSERT INTO runtime_owner(singleton, owner_id, pid, acquired_at) VALUES (1, ?, ?, ?)")
+      .run("stale-owner", 999_999, "2026-07-26T00:00:00.000Z");
+    database.close();
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+      if (pid === 999_999 && signal === 0)
+        throw Object.assign(new Error("No such process"), { code: "ESRCH" });
+      return true;
+    });
+    let successor: NoesisWorkspaceStore | undefined;
+    try {
+      successor = await createWorkspaceStore(root, {
+        recoverInterruptedOperations: true,
+        runtimeOwnerId: "successor-owner",
+      });
+      const current = new DatabaseSync(successor.unsafeDatabasePathForTesting, { readOnly: true });
+      expect(current.prepare("SELECT owner_id, pid FROM runtime_owner WHERE singleton = 1").get()).toEqual({
+        owner_id: "successor-owner",
+        pid: process.pid,
+      });
+      current.close();
+    } finally {
+      successor?.close();
+      kill.mockRestore();
+    }
+  });
+
+  test("pins exact codemode source and log artifacts across terminal updates", async () => {
+    const store = await createWorkspaceStore(await temporary("codemode-artifacts"));
+    await store.operational.sessions.put({
+      sessionId: "session-artifacts",
+      title: "Codemode artifacts",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const relationshipRefs = Object.freeze([
+      {
+        kind: "database_row" as const,
+        table: "sessions" as const,
+        rowId: "session-artifacts",
+      },
+    ]);
+    await expect(
+      store.operational.codeExecutions.put({
+        executionId: "execution-missing-source",
+        logicalExecutionId: "execution-missing-source",
+        sessionId: "session-artifacts",
+        catalogId: "catalog-test",
+        catalogDigest: digest("a"),
+        sourceDigest: sha256(text('return "missing";')),
+        status: "running",
+        callCount: 0,
+        startedAt: "2026-07-26T00:00:00.000Z",
+      }),
+    ).rejects.toThrow("requires a source artifact");
+    const source = await store.artifacts.writeArtifact({
+      path: "codemode/execution-artifacts/source.mjs",
+      mediaType: "text/javascript",
+      bytes: text('return "exact";'),
+      actor,
+      relationshipRefs,
+    });
+    const stdout = await store.artifacts.writeArtifact({
+      path: "codemode/execution-artifacts/stdout.log",
+      mediaType: "text/plain",
+      bytes: text("one\n"),
+      actor,
+      relationshipRefs,
+    });
+    const stderr = await store.artifacts.writeArtifact({
+      path: "codemode/execution-artifacts/stderr.log",
+      mediaType: "text/plain",
+      bytes: text(""),
+      actor,
+      relationshipRefs,
+    });
+    await store.operational.codeExecutions.put({
+      executionId: "execution-artifacts",
+      logicalExecutionId: "execution-artifacts",
+      sessionId: "session-artifacts",
+      catalogId: "catalog-test",
+      catalogDigest: digest("a"),
+      sourceDigest: sha256(text('return "exact";')),
+      sourceArtifactId: source.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    await store.operational.codeExecutions.put({
+      executionId: "execution-artifacts",
+      logicalExecutionId: "execution-artifacts",
+      sessionId: "session-artifacts",
+      catalogId: "catalog-test",
+      catalogDigest: digest("a"),
+      sourceDigest: sha256(text('return "exact";')),
+      sourceArtifactId: source.artifactId,
+      stdoutArtifactId: stdout.artifactId,
+      stderrArtifactId: stderr.artifactId,
+      status: "completed",
+      result: "exact",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+      completedAt: "2026-07-26T00:00:01.000Z",
+    });
+    const alternateStdout = await store.artifacts.writeArtifact({
+      path: "codemode/execution-artifacts/alternate-stdout.log",
+      mediaType: "text/plain",
+      bytes: text("two\n"),
+      actor,
+      relationshipRefs,
+    });
+
+    expect(await store.operational.codeExecutions.get("execution-artifacts")).toMatchObject({
+      sourceArtifactId: source.artifactId,
+      stdoutArtifactId: stdout.artifactId,
+      stderrArtifactId: stderr.artifactId,
+    });
+    await expect(
+      store.operational.codeExecutions.put({
+        executionId: "execution-artifacts",
+        logicalExecutionId: "execution-artifacts",
+        sessionId: "session-artifacts",
+        catalogId: "catalog-test",
+        catalogDigest: digest("a"),
+        sourceDigest: sha256(text('return "exact";')),
+        sourceArtifactId: source.artifactId,
+        stdoutArtifactId: alternateStdout.artifactId,
+        stderrArtifactId: stderr.artifactId,
+        status: "completed",
+        result: "exact",
+        callCount: 0,
+        startedAt: "2026-07-26T00:00:00.000Z",
+        completedAt: "2026-07-26T00:00:01.000Z",
+      }),
+    ).rejects.toThrow("immutable");
+    const lineageDatabase = new DatabaseSync(store.unsafeDatabasePathForTesting);
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE codemode_executions SET source_digest = ? WHERE execution_id = ?")
+        .run(digest("f"), "execution-artifacts"),
+    ).toThrow("lineage is immutable");
+    lineageDatabase.close();
+    store.close();
+  });
+
+  test("rehydrates unfinished workflows as paused with their phase identity intact", async () => {
+    const root = await temporary("workflow-recovery");
+    const first = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:00:00.000Z",
+    });
+    await first.operational.sessions.put({
+      sessionId: "session-workflow",
+      title: "Workflow",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const definitionRevision = await first.definitions.recordWorkingDefinition({
+      workingPath: "workflows/recover/workflow.json",
+      bytes: text('{"name":"recover"}'),
+      actor,
+    });
+    const workflowSource = await first.artifacts.writeArtifact({
+      path: "codemode/execution-workflow-unfinished/source.mjs",
+      mediaType: "text/javascript",
+      bytes: text("return input;"),
+      actor,
+      relationshipRefs: Object.freeze([
+        { kind: "database_row" as const, table: "sessions" as const, rowId: "session-workflow" },
+      ]),
+    });
+    await first.operational.workflows.putRun({
+      runId: "workflow-run-unfinished",
+      workflowName: "recover",
+      workflowRevision: 1,
+      definitionRevisionId: definitionRevision.revisionId,
+      sessionId: "session-workflow",
+      status: "running",
+      currentPhase: 0,
+      input: { value: 1 },
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+    });
+    await first.operational.codeExecutions.put({
+      executionId: "execution-workflow-unfinished",
+      logicalExecutionId: "logical-workflow-phase",
+      sessionId: "session-workflow",
+      catalogId: "catalog-test",
+      catalogDigest: digest("c"),
+      sourceDigest: sha256(text("return input;")),
+      sourceArtifactId: workflowSource.artifactId,
+      status: "running",
+      callCount: 1,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    await first.operational.workflows.putPhase({
+      runId: "workflow-run-unfinished",
+      phaseIndex: 0,
+      phaseName: "recover",
+      status: "running",
+      attempt: 1,
+      logicalExecutionId: "logical-workflow-phase",
+      input: { value: 1 },
+      executionId: "execution-workflow-unfinished",
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    await expect(
+      first.operational.workflows.putPhase({
+        runId: "workflow-run-unfinished",
+        phaseIndex: 1,
+        phaseName: "pending-cannot-start",
+        status: "pending",
+        attempt: 0,
+        input: { value: 1 },
+        startedAt: "2026-07-26T00:00:00.000Z",
+      }),
+    ).rejects.toThrow("cannot start");
+    await expect(
+      first.operational.workflows.putPhase({
+        runId: "workflow-run-unfinished",
+        phaseIndex: 1,
+        phaseName: "completed-must-start",
+        status: "completed",
+        attempt: 1,
+        input: { value: 1 },
+        output: { value: 1 },
+        completedAt: "2026-07-26T00:00:01.000Z",
+      }),
+    ).rejects.toThrow("requires a start time");
+    await first.operational.sessions.put({
+      sessionId: "session-other",
+      title: "Other session",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const otherSource = await first.artifacts.writeArtifact({
+      path: "codemode/execution-other-session/source.mjs",
+      mediaType: "text/javascript",
+      bytes: text("return input;"),
+      actor,
+      relationshipRefs: Object.freeze([
+        { kind: "database_row" as const, table: "sessions" as const, rowId: "session-other" },
+      ]),
+    });
+    await first.operational.codeExecutions.put({
+      executionId: "execution-other-session",
+      logicalExecutionId: "logical-other-session",
+      sessionId: "session-other",
+      catalogId: "catalog-test",
+      catalogDigest: digest("c"),
+      sourceDigest: sha256(text("return input;")),
+      sourceArtifactId: otherSource.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    await expect(
+      first.operational.workflows.putPhase({
+        runId: "workflow-run-unfinished",
+        phaseIndex: 1,
+        phaseName: "cross-session",
+        status: "running",
+        attempt: 1,
+        logicalExecutionId: "logical-other-session",
+        input: { value: 1 },
+        executionId: "execution-other-session",
+        startedAt: "2026-07-26T00:00:00.000Z",
+      }),
+    ).rejects.toThrow("does not belong to its run session");
+    const lineageDatabase = new DatabaseSync(first.unsafeDatabasePathForTesting);
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_runs SET session_id = ? WHERE run_id = ?")
+        .run("session-other", "workflow-run-unfinished"),
+    ).toThrow("lineage is immutable");
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_runs SET turn_id = ? WHERE run_id = ?")
+        .run("missing-turn", "workflow-run-unfinished"),
+    ).toThrow("lineage is immutable");
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_phase_runs SET run_id = ? WHERE run_id = ? AND phase_index = 0")
+        .run("other-run", "workflow-run-unfinished"),
+    ).toThrow("lineage is immutable");
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_phase_runs SET execution_id = ? WHERE run_id = ? AND phase_index = 0")
+        .run("execution-other-session", "workflow-run-unfinished"),
+    ).toThrow();
+    lineageDatabase.close();
+    first.close();
+
+    const recovered = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:01:00.000Z",
+      recoverInterruptedOperations: true,
+    });
+
+    expect(await recovered.operational.workflows.getRun("workflow-run-unfinished")).toMatchObject({
+      status: "paused",
+      error: "Process exited before workflow settled",
+      updatedAt: "2026-07-26T00:01:00.000Z",
+    });
+    expect(await recovered.operational.workflows.listPhases("workflow-run-unfinished")).toMatchObject([
+      {
+        status: "failed",
+        attempt: 1,
+        logicalExecutionId: "logical-workflow-phase",
+        input: { value: 1 },
+        executionId: "execution-workflow-unfinished",
+        error: "Process exited before workflow phase settled",
+        completedAt: "2026-07-26T00:01:00.000Z",
+      },
+    ]);
+    await expect(
+      recovered.operational.workflows.claimPausedRun(
+        "workflow-run-unfinished",
+        "session-other",
+        "2026-07-26T00:02:00.000Z",
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      recovered.operational.workflows.claimPausedRun(
+        "workflow-run-unfinished",
+        "session-workflow",
+        "2026-07-26T00:02:00.000Z",
+      ),
+    ).resolves.toMatchObject({ status: "running" });
+    await expect(
+      recovered.operational.workflows.claimPausedRun(
+        "workflow-run-unfinished",
+        "session-workflow",
+        "2026-07-26T00:02:00.000Z",
+      ),
+    ).resolves.toBeUndefined();
+
+    await recovered.operational.workflows.putPhase({
+      runId: "workflow-run-unfinished",
+      phaseIndex: 0,
+      phaseName: "recover",
+      status: "running",
+      attempt: 2,
+      logicalExecutionId: "logical-workflow-phase",
+      input: { value: 2 },
+      startedAt: "2026-07-26T00:02:00.000Z",
+    });
+    await recovered.operational.codeExecutions.put({
+      executionId: "execution-workflow-retry",
+      logicalExecutionId: "logical-workflow-phase",
+      sessionId: "session-workflow",
+      catalogId: "catalog-test",
+      catalogDigest: digest("c"),
+      sourceDigest: sha256(text("return input;")),
+      sourceArtifactId: workflowSource.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:02:00.000Z",
+    });
+    await recovered.operational.workflows.putPhase({
+      runId: "workflow-run-unfinished",
+      phaseIndex: 0,
+      phaseName: "recover",
+      status: "running",
+      attempt: 2,
+      logicalExecutionId: "logical-workflow-phase",
+      input: { value: 2 },
+      executionId: "execution-workflow-retry",
+      startedAt: "2026-07-26T00:02:00.000Z",
+    });
+    await expect(
+      recovered.operational.workflows.listPhases("workflow-run-unfinished"),
+    ).resolves.toMatchObject([
+      {
+        status: "running",
+        attempt: 2,
+        logicalExecutionId: "logical-workflow-phase",
+        executionId: "execution-workflow-retry",
+      },
+    ]);
+    const retryDatabase = new DatabaseSync(recovered.unsafeDatabasePathForTesting);
+    expect(() =>
+      retryDatabase
+        .prepare(
+          `UPDATE workflow_phase_runs
+           SET logical_execution_id = ?
+           WHERE run_id = ? AND phase_index = 0`,
+        )
+        .run("logical-arbitrary-mutation", "workflow-run-unfinished"),
+    ).toThrow("lineage is immutable");
+    retryDatabase.close();
+    recovered.close();
+  });
+
   test("upgrades a version-1 workspace and keeps migrations idempotent", async () => {
     const root = await temporary("migrations");
     await mkdir(join(root, "database"), { recursive: true });
@@ -111,6 +660,59 @@ describe("WorkspaceStore", () => {
     database.close();
     expect(versions).toEqual(Array.from({ length: versions.length }, (_, index) => index + 1));
     expect(versions.at(-1)).toBeGreaterThanOrEqual(9);
+  });
+
+  test("upgrades an old version-20 workspace through corrected execution lineage contracts", async () => {
+    const root = await temporary("development-migrations");
+    await mkdir(join(root, "database"), { recursive: true });
+    const seed = new DatabaseSync(join(root, "database", "noesis.sqlite"));
+    const migrationNames = (await readdir(new URL("../migrations/", import.meta.url)))
+      .filter((name) => /^\d{3}_.+\.sql$/u.test(name))
+      .sort()
+      .filter((name) => Number(name.slice(0, 3)) <= 20);
+    for (const name of migrationNames) {
+      const version = Number(name.slice(0, 3));
+      seed.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
+      seed
+        .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+        .run(version, name, "2026-07-26T00:00:00.000Z");
+    }
+    seed.close();
+
+    const upgraded = await createWorkspaceStore(root);
+    upgraded.close();
+
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    const versions = database
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all()
+      .map((row) => Reflect.get(row, "version"));
+    const ownerTable = database
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_owner'")
+      .get();
+    const lineageTrigger = database
+      .prepare(
+        `SELECT name, sql
+         FROM sqlite_master
+         WHERE type = 'trigger' AND name = 'codemode_execution_lineage_immutable'`,
+      )
+      .get();
+    const phaseLineageTrigger = database
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE type = 'trigger' AND name = 'workflow_phase_lineage_immutable'`,
+      )
+      .get();
+    database.close();
+
+    expect(versions.at(-1)).toBe(21);
+    expect(ownerTable).toBeDefined();
+    expect(lineageTrigger).toMatchObject({
+      name: "codemode_execution_lineage_immutable",
+      sql: expect.stringContaining("source_digest"),
+    });
+    expect(phaseLineageTrigger).toBeDefined();
   });
 
   test("keeps authority grants, reservations, completions, and replay in SQLite", async () => {
@@ -170,6 +772,43 @@ describe("WorkspaceStore", () => {
     });
     database.close();
     recovered.close();
+  });
+
+  test("replays a durable foreground operation without persisting an unused grant", async () => {
+    const store = await createWorkspaceStore(await temporary("foreground-authority-replay"));
+    let executions = 0;
+    const request = Object.freeze({
+      operationId: "operation-foreground-durable-replay",
+      effect: "read" as const,
+      resource: "tool:durable-replay",
+      estimatedCost: 0,
+      idempotencyKey: "foreground-durable-replay",
+      requestDigest: digest("a"),
+      execute: async () => {
+        executions += 1;
+        return "durable";
+      },
+    });
+    const permission = {
+      effects: ["read"],
+      resourcePatterns: ["tool:durable-replay"],
+      credentialRefs: [],
+    };
+
+    await expect(authority(store).runForeground(request, permission)).resolves.toMatchObject({
+      ok: true,
+      replayed: false,
+      value: "durable",
+    });
+    expect(countRows(store, "authority_grants")).toBe(1);
+    await expect(authority(store).runForeground(request, permission)).resolves.toMatchObject({
+      ok: true,
+      replayed: true,
+      value: "durable",
+    });
+    expect(executions).toBe(1);
+    expect(countRows(store, "authority_grants")).toBe(1);
+    store.close();
   });
 
   test("fails closed for durable collisions, failures, and unresolved reservations", async () => {

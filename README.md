@@ -35,12 +35,16 @@ What works now:
 - A fresh workspace bootstraps an immutable general-collaboration baseline. Ambient reflection can author and evaluate a narrow new capability, activate it, serve it only on related work, and restore the complete prior activation after feedback.
 - Credential-free application acceptance tests exercise correction, reflection, authorship, protected evaluation, atomic activation, related serving, unrelated abstention, and protected revert through Pi AgentHarness.
 - Effect-free paired replay and compounding read models measure served-revision wins, scope leakage, context tax, correction recurrence, exclusions, and evidence coverage under durable call, token, and cost budgets.
+- Pi sees four stable foreground tools: `inspect_self`, `remember`, `adapt`, and `execute`. Broad work tools remain progressively discoverable inside `execute` as a JavaScript SDK rather than consuming the model context directly.
+- The frozen Tool Broker provides file, shell, web, artifact, history, skill, script, and workflow operations through the same protected effect path. Codemode runs ordinary local Node.js with cancellation, bounds, nested-call lineage, and authoritative execution records.
+- Standard Agent Skills can be installed from local, Git, URL, or package sources at personal or workspace scope through Pi’s package manager. Only compact skill metadata enters the prompt; full instructions load on demand.
+- Successful code can be saved as a typed, editable script and rerun from an immutable revision. Typed multi-phase workflows persist run and phase state, pause on failure or correction, and resume without repeating completed phases.
 
 The research preview deliberately remains incomplete:
 
 - Collaboration posture, anticipated future use, adaptation history, and conversational contest or revert are not yet productized in the TUI.
 - Ambient paired replay has an implementation and durable store, but its post-settlement scheduling policy is not yet wired into ordinary use.
-- Generated-tool execution remains deliberately absent until a real foreground consumer justifies restoring it.
+- Workflow execution is foreground and sequential in this iteration. Background scheduling, named `map` fan-out, and nested agent phases remain future work.
 
 The completed [high-leverage correction plan](plans/noesis-high-leverage-correction-plan.html) removed unproven scope, made the compounding claim measurable, closed the minimal causal loop, and moved foreground and protected operational authority to SQLite. The [product loop plan](plans/compounding-partnership-product-loop.html) is next: it adds collaboration posture and selective learning with anticipated future use, serves exact active revisions and tools, exposes adaptation history and conversational controls, and proves the complete path with a credential-free controlled Pi provider.
 
@@ -121,11 +125,37 @@ pnpm start -- --continue --home ./.noesis
 The TUI uses `@earendil-works/pi-tui` directly. It streams turns and supports:
 
 ```text
-/model provider/model  /context  /capabilities  /fork
-/compact               /abort    /quit
+/model provider/model  /context       /capabilities
+/skills                /scripts       /workflows       /runs
+/skill NAME             /script NAME   /workflow NAME   /run ID
+/fork                   /compact       /abort           /quit
 ```
 
 Enter `?` or `/help` to see the command list. Use `/quit` or Ctrl+C to exit. `NO_COLOR` and `TERM=dumb` disable styling.
+
+## Tools, skills, scripts, and workflows
+
+Noesis deliberately separates instruction from execution:
+
+- A **tool** is one atomic host capability. The model discovers tools with `noesis.search()` and composes them through `tools.<family>.<operation>()` inside `execute`.
+- A **skill** is portable instructional context using the standard Agent Skills format. It may teach Noesis when and how to use tools or workflows, but installing a skill does not silently register executable extensions.
+- A **script** is one reusable JavaScript program with JSON-schema-validated input and output plus an exact required-tool manifest.
+- A **workflow** is a durable ordered set of typed JavaScript phases. Completed phase outputs are reused on resume, and a correction can become the next incomplete phase’s input.
+
+Codemode is trusted local execution, not a sandbox. Generated JavaScript runs on the user’s machine with Node.js and can import installed packages. SDK tool calls still pass through the Tool Broker, `AuthorityBoundary`, and `EffectGateway`, bound to the admitted turn’s frozen permission snapshot. Direct Node operations carry the authority of the local user running Noesis.
+
+Each turn freezes the visible skill bytes and the current script/workflow revisions into its tool-catalog identity. An edit made while a turn is running is therefore visible on the next turn, never midway through the current one. Workflow retries reuse stable logical call identities; an unresolved external effect fails closed instead of being guessed safe to repeat.
+
+Manage standard skills from the CLI:
+
+```sh
+pnpm start -- skills list --home ./.noesis
+pnpm start -- skills install ./path/to/skill --workspace --home ./.noesis
+pnpm start -- skills update --home ./.noesis
+pnpm start -- skills remove ./path/to/skill --workspace --home ./.noesis
+```
+
+Inside the TUI, `/skills`, `/scripts`, `/workflows`, and `/runs` show the corresponding libraries. Singular commands inspect exact content, source, schemas, revisions, nested calls, and phase state.
 
 ## Configuration
 
@@ -174,6 +204,8 @@ Important package boundaries include:
 - `packages/runtime` owns the turn lifecycle and protected coordination.
 - `packages/workspace` owns SQLite, definitions, immutable revisions, evidence, artifacts, search indexes, and backups.
 - `packages/runtime-pi` is the only Pi runtime boundary.
+- `packages/tools` owns the canonical frozen Tool Catalog, Broker, and initial host adapters.
+- `packages/codemode` owns the local Node child-process protocol and execution lifecycle without knowing what real tools do.
 - `packages/intelligence`, `packages/learning`, and `packages/evals` own retrieval, reflection and candidate creation, and comparison evidence.
 - `packages/policy` and `packages/capabilities` own protected effects and exact capability revisions.
 - `packages/tui` owns terminal rendering and input handling.
@@ -196,8 +228,8 @@ This runs formatting checks, lint, type checking, and tests. Integration and acc
 
 ## Current limitations
 
-- The Pi foreground runtime currently registers only immutable snapshot inspection. The session-retrieval adapter exists but is not wired into the application turn.
 - Collaboration posture, anticipated future use, adaptation history, and conversational contest or revert are not implemented in the TUI.
 - Ambient compounding replay is not yet scheduled from ordinary post-settlement work.
-- Generated-tool execution is deliberately absent until a real foreground consumer justifies restoring a bounded runtime.
+- Workflows currently run sequentially in the foreground. Background job integration, bounded `map` fan-out, and nested agent phases are not implemented yet.
+- Installed skill bytes are frozen for the active turn and bound into its catalog digest, but historical skill content is not yet copied into workspace-owned immutable snapshots.
 - A session left `running` after its executor ends cannot be recovered safely until Noesis has durable executor ownership evidence.

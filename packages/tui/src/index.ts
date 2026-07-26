@@ -1,6 +1,5 @@
-import { Container, ProcessTerminal, TUI, matchesKey, type Terminal } from "@earendil-works/pi-tui";
+import { Container, matchesKey, ProcessTerminal, type Terminal, TUI } from "@earendil-works/pi-tui";
 import type { TrailState } from "@noesis/runtime";
-import { createSafeEditor, createSelectTheme } from "./safe-editor.ts";
 import {
   ANSI,
   createHelpView,
@@ -13,6 +12,7 @@ import {
   styled,
 } from "./rendering.ts";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
+import { createSafeEditor, createSelectTheme } from "./safe-editor.ts";
 import {
   createResponsiveSessionPicker,
   createSessionPickerItems,
@@ -21,13 +21,20 @@ import {
 } from "./session-picker.ts";
 import { initialTuiState } from "./state.ts";
 
-export * from "./runtime-port.ts";
-export * from "./state.ts";
 export * from "./rendering.ts";
+export * from "./runtime-port.ts";
 export * from "./safe-editor.ts";
 export * from "./session-picker.ts";
+export * from "./state.ts";
 
 const SHUTDOWN_GRACE_MS = 250;
+const INSPECTOR_PREVIEW_CHARACTERS = 24_000;
+
+export function boundedInspectorText(text: string): string {
+  const safe = safeTerminalText(text);
+  if (safe.length <= INSPECTOR_PREVIEW_CHARACTERS) return safe;
+  return `${safe.slice(0, INSPECTOR_PREVIEW_CHARACTERS)}\n\n… inspector preview truncated`;
+}
 
 export function streamingFrameDelay(activeCharacters: number, pendingCharacters: number): number {
   const total = Math.max(0, activeCharacters) + Math.max(0, pendingCharacters);
@@ -80,6 +87,7 @@ export async function startNoesisTui(
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
   let activeTurn: Promise<void> | undefined;
   let turnGeneration = 0;
+  let inspectorGeneration = 0;
   interface ActiveTurnToken {
     readonly generation: number;
     readonly trailId: string;
@@ -108,8 +116,9 @@ export async function startNoesisTui(
       text: `${pendingStream?.token === token ? pendingStream.text : ""}${text}`,
     };
     if (streamRenderTimer) return;
+    const currentEntry = view.state.timeline.at(-1);
     const activeCharacters =
-      view.state.messages.at(-1)?.role === "assistant" ? (view.state.messages.at(-1)?.text.length ?? 0) : 0;
+      currentEntry?.kind === "message" && currentEntry.role === "assistant" ? currentEntry.text.length : 0;
     streamRenderTimer = setTimeout(
       () => flushStreamDelta(token),
       streamingFrameDelay(activeCharacters, pendingStream.text.length),
@@ -131,6 +140,7 @@ export async function startNoesisTui(
     shutdownPromise = (async () => {
       phase = "stopped";
       turnGeneration += 1;
+      inspectorGeneration += 1;
       activeTurnToken = undefined;
       if (streamRenderTimer) clearTimeout(streamRenderTimer);
       streamRenderTimer = undefined;
@@ -184,6 +194,11 @@ export async function startNoesisTui(
       void shutdown();
       return { consume: true };
     }
+    if (phase === "main" && matchesKey(data, "ctrl+o")) {
+      view.dispatch({ type: "agent-actions-expansion-toggled" });
+      tui.requestRender();
+      return { consume: true };
+    }
     if (phase === "main" && data === "\n" && editor.getText().trim() === "/quit") {
       void shutdown();
       return { consume: true };
@@ -191,8 +206,20 @@ export async function startNoesisTui(
     return undefined;
   });
   editor.onSubmit = (text) => {
+    const submittedTrailId = view.state.trailId;
+    if (!submittedTrailId || !text.trim()) return;
+    inspectorGeneration += 1;
+    const submittedInspectorGeneration = inspectorGeneration;
+    const isCurrentSubmission = (): boolean =>
+      phase === "main" &&
+      inspectorGeneration === submittedInspectorGeneration &&
+      view.state.trailId === submittedTrailId;
+    const publishInspector = (message: string): void => {
+      if (!isCurrentSubmission() || activeTurn) return;
+      view.dispatch({ type: "system-message", text: boundedInspectorText(message) });
+      tui.requestRender();
+    };
     void (async () => {
-      if (!view.state.trailId || !text.trim()) return;
       if (text === "/quit") {
         await shutdown();
         return;
@@ -203,7 +230,7 @@ export async function startNoesisTui(
           tui.requestRender();
           // Keep ABORTING observable for one throttled TUI render frame before a cooperative runtime settles.
           await new Promise<void>((resolve) => setTimeout(resolve, 20));
-          await runtime.abort(view.state.trailId);
+          await runtime.abort(submittedTrailId);
         } else {
           view.dispatch({
             type: "system-message",
@@ -223,11 +250,215 @@ export async function startNoesisTui(
         tui.requestRender();
         return;
       }
+      if (text === "/skills") {
+        if (!runtime.listSkills) {
+          publishInspector("Skill inspection is unavailable in this runtime.");
+          return;
+        }
+        const skills = await runtime.listSkills();
+        publishInspector(
+          skills.length === 0
+            ? "No skills are installed or discoverable."
+            : [
+                `Skills · ${skills.length}`,
+                ...skills.map(
+                  (skill) =>
+                    `• ${skill.name}${skill.disableModelInvocation ? " · explicit only" : ""}\n  ${skill.description}\n  ${skill.filePath}`,
+                ),
+                "",
+                "Install with: noesis skills install SOURCE [--workspace]",
+                "Invoke with: /skill:<name> [instructions]",
+              ].join("\n"),
+        );
+        return;
+      }
+      if (text.startsWith("/skill ")) {
+        const name = text.slice("/skill ".length).trim();
+        if (!runtime.inspectSkill) {
+          publishInspector("Skill detail inspection is unavailable in this runtime.");
+          return;
+        }
+        const skill = await runtime.inspectSkill(name);
+        publishInspector(
+          skill
+            ? [
+                `${skill.name}${skill.disableModelInvocation ? " · explicit only" : ""}`,
+                skill.description,
+                skill.filePath,
+                `digest ${skill.contentDigest}`,
+                "",
+                skill.content,
+              ].join("\n")
+            : `Unknown skill: ${name}`,
+        );
+        return;
+      }
+      if (text === "/scripts") {
+        if (!runtime.listScripts) {
+          publishInspector("Script inspection is unavailable in this runtime.");
+          return;
+        }
+        const scripts = await runtime.listScripts();
+        publishInspector(
+          scripts.length === 0
+            ? "No reusable scripts have been saved yet."
+            : [
+                `Scripts · ${scripts.length}`,
+                ...scripts.map(
+                  (script) =>
+                    `• ${script.name} · r${String(script.revision)}\n  ${script.description}\n  ${script.requiredTools.join(", ") || "pure JavaScript"}\n  ${script.workingPath}`,
+                ),
+                "",
+                "Ask Noesis to run one by name, or say “save that as a script” after useful work.",
+              ].join("\n"),
+        );
+        return;
+      }
+      if (text.startsWith("/script ")) {
+        const name = text.slice("/script ".length).trim();
+        if (!runtime.inspectScript) {
+          publishInspector("Script detail inspection is unavailable in this runtime.");
+          return;
+        }
+        const script = await runtime.inspectScript(name);
+        publishInspector(
+          script
+            ? [
+                `${script.name} · r${String(script.revision)}`,
+                script.description,
+                script.workingPath,
+                `requires: ${script.requiredTools.join(", ") || "pure JavaScript"}`,
+                "",
+                `Input schema\n${script.inputSchema}`,
+                "",
+                `Output schema\n${script.outputSchema}`,
+                "",
+                `Source\n${script.source}`,
+              ].join("\n")
+            : `Unknown script: ${name}`,
+        );
+        return;
+      }
+      if (text === "/workflows") {
+        if (!runtime.listWorkflows) {
+          publishInspector("Workflow inspection is unavailable in this runtime.");
+          return;
+        }
+        const workflows = await runtime.listWorkflows();
+        publishInspector(
+          workflows.length === 0
+            ? "No multi-phase workflows have been saved yet."
+            : [
+                `Workflows · ${workflows.length}`,
+                ...workflows.map(
+                  (workflow) =>
+                    `• ${workflow.name} · r${String(workflow.revision)} · ${workflow.phaseNames.length} phases\n  ${workflow.description}\n  ${workflow.phaseNames.join(" → ")}\n  ${workflow.workingPath}`,
+                ),
+                "",
+                "Ask Noesis to run or resume a workflow by name.",
+              ].join("\n"),
+        );
+        return;
+      }
+      if (text.startsWith("/workflow ")) {
+        const name = text.slice("/workflow ".length).trim();
+        if (!runtime.inspectWorkflow) {
+          publishInspector("Workflow detail inspection is unavailable in this runtime.");
+          return;
+        }
+        const workflow = await runtime.inspectWorkflow(name);
+        publishInspector(
+          workflow
+            ? [
+                `${workflow.name} · r${String(workflow.revision)}`,
+                workflow.description,
+                workflow.workingPath,
+                "",
+                ...workflow.phases.flatMap((workflowPhase, index) => [
+                  `${String(index + 1)}. ${workflowPhase.name} · ${workflowPhase.description}`,
+                  `   requires: ${workflowPhase.requiredTools.join(", ") || "pure JavaScript"}`,
+                  workflowPhase.source,
+                  "",
+                ]),
+              ].join("\n")
+            : `Unknown workflow: ${name}`,
+        );
+        return;
+      }
+      if (text === "/runs") {
+        if (!runtime.listExecutions) {
+          publishInspector("Run inspection is unavailable in this runtime.");
+          return;
+        }
+        const runs = await runtime.listExecutions(submittedTrailId);
+        publishInspector(
+          runs.length === 0
+            ? "No codemode executions have run in this session."
+            : [
+                `Runs · ${runs.length}`,
+                ...runs.map(
+                  (run) =>
+                    `• ${run.kind} · ${run.label} · ${run.executionId}\n  ${run.status} · ${run.callCount} ${run.kind === "workflow" ? "phases" : "calls"} · ${run.toolNames.join(", ") || "no nested calls"}\n  ${run.startedAt}`,
+                ),
+              ].join("\n"),
+        );
+        return;
+      }
+      if (text.startsWith("/run ")) {
+        const executionId = text.slice("/run ".length).trim();
+        if (!runtime.inspectExecution) {
+          publishInspector("Run detail inspection is unavailable in this runtime.");
+          return;
+        }
+        const run = await runtime.inspectExecution(submittedTrailId, executionId);
+        publishInspector(
+          run
+            ? [
+                `${run.kind} · ${run.label}`,
+                `${run.executionId} · ${run.status}`,
+                ...(run.parentExecutionId ? [`parent ${run.parentExecutionId}`] : []),
+                ...(run.catalogDigest ? [`catalog ${run.catalogDigest}`] : []),
+                ...(run.sourceDigest ? [`source ${run.sourceDigest}`] : []),
+                ...(run.sourceArtifact
+                  ? [
+                      "",
+                      `Source · ${run.sourceArtifact.path}${run.sourceArtifact.truncated ? " · preview truncated" : ""}`,
+                      run.sourceArtifact.preview || "(empty)",
+                    ]
+                  : []),
+                ...(run.stdoutArtifact
+                  ? [
+                      "",
+                      `Stdout · ${run.stdoutArtifact.path}${run.stdoutArtifact.truncated ? " · preview truncated" : ""}`,
+                      run.stdoutArtifact.preview || "(empty)",
+                    ]
+                  : []),
+                ...(run.stderrArtifact
+                  ? [
+                      "",
+                      `Stderr · ${run.stderrArtifact.path}${run.stderrArtifact.truncated ? " · preview truncated" : ""}`,
+                      run.stderrArtifact.preview || "(empty)",
+                    ]
+                  : []),
+                ...(run.phases ?? []).map(
+                  (runPhase) =>
+                    `${String(runPhase.index + 1)}. ${runPhase.name} · ${runPhase.status}${runPhase.executionId ? ` · ${runPhase.executionId}` : ""}${runPhase.error ? `\n   ${runPhase.error}` : ""}`,
+                ),
+                ...(run.result ? ["", `Result\n${run.result}`] : []),
+                ...(run.error ? ["", `Error\n${run.error}`] : []),
+              ].join("\n")
+            : `Unknown run in this session: ${executionId}`,
+        );
+        return;
+      }
       if (text === "?" || text === "/help") {
         view.dispatch({
           type: "system-message",
           text: [
-            "/model provider/model · /context · /capabilities · /fork · /compact · /abort",
+            "/model provider/model · /context · /capabilities",
+            "/skills · /scripts · /workflows · /runs",
+            "/skill NAME · /script NAME · /workflow NAME · /run ID",
+            "/fork · /compact · /abort",
             "/quit · learning, experiments, activation, and revert run ambiently",
           ].join("\n"),
         });
@@ -242,14 +473,14 @@ export async function startNoesisTui(
       if (text === "/compact") {
         view.dispatch({ type: "execution-changed", execution: "compacting" });
         tui.requestRender();
-        await runtime.compact(view.state.trailId);
+        await runtime.compact(submittedTrailId);
         view.dispatch({ type: "compacted" });
         view.dispatch({ type: "system-message", text: "Trail compacted." });
         tui.requestRender();
         return;
       }
       if (text === "/fork") {
-        const trail = await runtime.forkTrail(view.state.trailId);
+        const trail = await runtime.forkTrail(submittedTrailId);
         view.dispatch({ type: "trail-selected", trail });
         tui.requestRender();
         return;
@@ -276,6 +507,7 @@ export async function startNoesisTui(
       if (!trailId) return;
       turnGeneration += 1;
       const token: ActiveTurnToken = { generation: turnGeneration, trailId };
+      const actionIdForView = (actionId: string): string => `${String(token.generation)}:${actionId}`;
       activeTurnToken = token;
       const turn = (async () => {
         try {
@@ -288,10 +520,28 @@ export async function startNoesisTui(
                 return;
               } else if (event.type === "tool-start") {
                 flushStreamDelta(token);
-                view.dispatch({ type: "tool-started", name: event.name });
+                view.dispatch({
+                  type: "action-started",
+                  actionId: actionIdForView(event.actionId),
+                  ...(event.parentActionId ? { parentActionId: actionIdForView(event.parentActionId) } : {}),
+                  name: event.name,
+                  input: event.input,
+                });
+              } else if (event.type === "tool-update") {
+                flushStreamDelta(token);
+                view.dispatch({
+                  type: "action-updated",
+                  actionId: actionIdForView(event.actionId),
+                  update: event.update,
+                });
               } else if (event.type === "tool-end") {
                 flushStreamDelta(token);
-                view.dispatch({ type: "tool-ended" });
+                view.dispatch({
+                  type: "action-ended",
+                  actionId: actionIdForView(event.actionId),
+                  output: event.result,
+                  isError: event.isError,
+                });
               } else if (event.type === "model") {
                 flushStreamDelta(token);
                 view.dispatch({
@@ -360,6 +610,7 @@ export async function startNoesisTui(
       await turn;
       if (activeTurn === turn) activeTurn = undefined;
     })().catch((error: unknown) => {
+      if (!isCurrentSubmission()) return;
       view.dispatch({
         type: "failed",
         error: safeTerminalText(error instanceof Error ? error.message : String(error)),
