@@ -207,7 +207,9 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       expect(output).toContain("AUTHORIZATION RECEIVED");
       expect(output).toContain("Return to Noesis.");
       expect(output).toContain("Cache-Control: no-store");
-      expect(output).toContain("Content-Security-Policy: default-src 'none'");
+      expect(output).toContain(
+        "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      );
       expect(output).toContain("Referrer-Policy: no-referrer");
       expect(output).toContain("X-Content-Type-Options: nosniff");
       expect(output).toContain("● IDLE");

@@ -11,14 +11,7 @@ import {
   TUI,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import {
-  ANSI,
-  elideText,
-  NOESIS_WORDMARK,
-  safeTerminalText,
-  shouldUseColor,
-  styled,
-} from "./rendering.ts";
+import { ANSI, elideText, NOESIS_WORDMARK, safeTerminalText, shouldUseColor, styled } from "./rendering.ts";
 import { createSelectTheme } from "./safe-editor.ts";
 
 export interface OnboardingSurfaceChoice {
@@ -43,11 +36,7 @@ export interface OnboardingSurface {
     defaultId: string,
     options?: OnboardingPromptOptions,
   ): Promise<string>;
-  text(
-    message: string,
-    defaultValue: string,
-    options?: OnboardingPromptOptions,
-  ): Promise<string>;
+  text(message: string, defaultValue: string, options?: OnboardingPromptOptions): Promise<string>;
   secret(message: string, options?: OnboardingPromptOptions): Promise<string>;
   confirm(message: string, defaultValue: boolean): Promise<boolean>;
   note(message: string): void;
@@ -94,8 +83,7 @@ export function onboardingHeaderLines(
   colorEnabled: boolean,
   collapsed = false,
 ): string[] {
-  const brand = (text: string): string =>
-    styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, text);
+  const brand = (text: string): string => styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, text);
   const muted = (text: string): string => styled(colorEnabled, ANSI.dim, text);
   if (width < 30 || height < 8) return [];
   if (!collapsed && width >= 60 && height >= 22)
@@ -105,25 +93,19 @@ export function onboardingHeaderLines(
       muted("first-launch setup"),
       muted("─".repeat(width)),
     ];
-  return [
-    `${brand("NOESIS")}${muted("  first-launch setup")}`,
-    muted("─".repeat(width)),
-  ];
+  return [`${brand("NOESIS")}${muted("  first-launch setup")}`, muted("─".repeat(width))];
 }
 
 function chunkByWidth(value: string, width: number): string[] {
   if (width <= 0) return [];
+  const codePoints = [...value];
   const chunks: string[] = [];
-  for (let index = 0; index < value.length; index += width)
-    chunks.push(value.slice(index, index + width));
+  for (let index = 0; index < codePoints.length; index += width)
+    chunks.push(codePoints.slice(index, index + width).join(""));
   return chunks.length > 0 ? chunks : [""];
 }
 
-function renderTranscriptEntry(
-  entry: TranscriptEntry,
-  width: number,
-  colorEnabled: boolean,
-): string[] {
+function renderTranscriptEntry(entry: TranscriptEntry, width: number, colorEnabled: boolean): string[] {
   if (entry.kind === "answer")
     return [
       elideText(
@@ -137,10 +119,7 @@ function renderTranscriptEntry(
     ];
   if (entry.kind === "reference")
     return [
-      elideText(
-        styled(colorEnabled, ANSI.dim, safeTerminalText(entry.label)),
-        width,
-      ),
+      elideText(styled(colorEnabled, ANSI.dim, safeTerminalText(entry.label)), width),
       // References are copy targets. Split them on exact column boundaries instead of wrapping on
       // word breaks or eliding, so nothing the user has to retype is silently dropped.
       ...chunkByWidth(safeTerminalText(entry.value), width).map((chunk) =>
@@ -153,10 +132,7 @@ function renderTranscriptEntry(
     .map((line) => styled(colorEnabled, ANSI.dim, line));
 }
 
-function createMaskedInput(
-  input: Input,
-  colorEnabled: boolean,
-): Component & { focused: boolean } {
+function createMaskedInput(input: Input, colorEnabled: boolean): Component & { focused: boolean } {
   return {
     get focused() {
       return input.focused;
@@ -168,12 +144,7 @@ function createMaskedInput(
     invalidate: () => input.invalidate(),
     render(width) {
       const masked = "•".repeat([...input.getValue()].length);
-      return [
-        elideText(
-          `${styled(colorEnabled, ANSI.dim, "> ")}${masked}`,
-          Math.max(0, width),
-        ),
-      ];
+      return [elideText(`${styled(colorEnabled, ANSI.dim, "> ")}${masked}`, Math.max(0, width))];
     },
   };
 }
@@ -206,9 +177,7 @@ function createChoiceBody(
       render: (width) => list.render(width),
       handleInput(data) {
         // Preserve the numbered-list muscle memory of the previous prompt-based setup.
-        const shortcut = /^[1-9]$/.test(data)
-          ? choices[Number(data) - 1]
-          : undefined;
+        const shortcut = /^[1-9]$/.test(data) ? choices[Number(data) - 1] : undefined;
         if (shortcut) {
           onSelect(shortcut.id);
           return;
@@ -224,9 +193,7 @@ export async function runNoesisOnboardingTui<T>(
   terminal: Terminal = new ProcessTerminal(),
 ): Promise<T> {
   const colorEnabled =
-    terminal instanceof ProcessTerminal &&
-    shouldUseColor(process.env) &&
-    process.stdout.hasColors();
+    terminal instanceof ProcessTerminal && shouldUseColor(process.env) && process.stdout.hasColors();
   const theme = createSelectTheme(colorEnabled);
   const tui = new TUI(terminal);
   const root = new Container();
@@ -254,22 +221,14 @@ export async function runNoesisOnboardingTui<T>(
       const height = Math.max(1, terminal.rows);
       // Once setup is done the block becomes a receipt above the running app, which draws its own
       // banner. Collapsing the header keeps exactly one wordmark on the handoff screen.
-      const header = onboardingHeaderLines(
-        inner,
-        height,
-        colorEnabled,
-        stopped,
-      );
+      const header = onboardingHeaderLines(inner, height, colorEnabled, stopped);
       const hintRows = height >= 8 && active ? 1 : 0;
       // Questions wrap rather than elide: an authentication prompt can carry a long placeholder
       // that the reader needs in full to know what to paste.
       const questionLines = question
         ? [
             "",
-            ...wrapTextWithAnsi(
-              safeTerminalText(question),
-              Math.max(1, inner - 2),
-            ).map((line, index) =>
+            ...wrapTextWithAnsi(safeTerminalText(question), Math.max(1, inner - 2)).map((line, index) =>
               index === 0
                 ? `${styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "›")} ${styled(colorEnabled, ANSI.bold, line)}`
                 : `  ${styled(colorEnabled, ANSI.bold, line)}`,
@@ -278,15 +237,9 @@ export async function runNoesisOnboardingTui<T>(
         : [];
       const transcriptRows = Math.max(
         0,
-        height -
-          header.length -
-          questionLines.length -
-          hintRows -
-          (active?.rows ?? 0),
+        height - header.length - questionLines.length - hintRows - (active?.rows ?? 0),
       );
-      const lines = entries.flatMap((entry) =>
-        renderTranscriptEntry(entry, inner, colorEnabled),
-      );
+      const lines = entries.flatMap((entry) => renderTranscriptEntry(entry, inner, colorEnabled));
       const transcript = transcriptRows > 0 ? lines.slice(-transcriptRows) : [];
       return [...header, ...transcript, ...questionLines];
     },
@@ -296,12 +249,7 @@ export async function runNoesisOnboardingTui<T>(
     invalidate() {},
     render: (width) =>
       terminal.rows >= 8 && active
-        ? [
-            elideText(
-              styled(colorEnabled, ANSI.dim, active.hint),
-              Math.max(0, width),
-            ),
-          ]
+        ? [elideText(styled(colorEnabled, ANSI.dim, active.hint), Math.max(0, width))]
         : [],
   };
 
@@ -331,9 +279,7 @@ export async function runNoesisOnboardingTui<T>(
     next.start();
     elapsedTimer = setInterval(() => {
       const seconds = Math.floor((Date.now() - startedAt) / 1_000);
-      next.setMessage(
-        seconds >= 3 ? `${waitingLabel} · ${String(seconds)}s` : waitingLabel,
-      );
+      next.setMessage(seconds >= 3 ? `${waitingLabel} · ${String(seconds)}s` : waitingLabel);
     }, ELAPSED_INTERVAL_MS);
     elapsedTimer.unref();
     tui.requestRender();
@@ -358,9 +304,7 @@ export async function runNoesisOnboardingTui<T>(
     tui.requestRender();
   };
 
-  const settle = (
-    answered: { readonly question: string; readonly value: string } | undefined,
-  ): void => {
+  const settle = (answered: { readonly question: string; readonly value: string } | undefined): void => {
     if (answered) entries.push({ kind: "answer", ...answered });
     question = undefined;
     active = undefined;
@@ -371,9 +315,7 @@ export async function runNoesisOnboardingTui<T>(
   };
 
   const ask = <V>(
-    build: (
-      resolve: (value: V) => void,
-    ) => { readonly prompt: string } & ActiveBody,
+    build: (resolve: (value: V) => void) => { readonly prompt: string } & ActiveBody,
     options: OnboardingPromptOptions | undefined,
     record: (value: V) => string,
   ): Promise<V> =>
@@ -403,10 +345,7 @@ export async function runNoesisOnboardingTui<T>(
     });
 
   const choiceRows = (count: number): number =>
-    Math.max(
-      1,
-      Math.min(count, MAX_CHOICE_ROWS, Math.max(1, terminal.rows - 6)),
-    );
+    Math.max(1, Math.min(count, MAX_CHOICE_ROWS, Math.max(1, terminal.rows - 6)));
 
   const textBody = (
     initial: string,
@@ -433,13 +372,7 @@ export async function runNoesisOnboardingTui<T>(
       ask<string>(
         (resolve) => ({
           prompt: message,
-          ...createChoiceBody(
-            choices,
-            defaultId,
-            theme,
-            choiceRows(choices.length),
-            resolve,
-          ),
+          ...createChoiceBody(choices, defaultId, theme, choiceRows(choices.length), resolve),
         }),
         options,
         (id) => choices.find((choice) => choice.id === id)?.label ?? id,

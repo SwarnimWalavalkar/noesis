@@ -1,6 +1,6 @@
 import { NOESIS_WORDMARK } from "@noesis/tui";
 import { describe, expect, test } from "vitest";
-import { renderNoesisOAuthCallbackPage } from "../src/oauth-callback-page.ts";
+import { escapeHtmlText, renderNoesisOAuthCallbackPage } from "../src/oauth-callback-page.ts";
 
 describe("Noesis OAuth callback page", () => {
   const html = renderNoesisOAuthCallbackPage({
@@ -26,5 +26,11 @@ describe("Noesis OAuth callback page", () => {
     // Monospace columns scale by font-size only; width or transform would distort them.
     expect(html).toContain("font-size: max(6px, min(2.7vw, 4.2vh, 15px));");
     expect(html).not.toMatch(/\.wordmark\s*\{[^}]*(transform|width)\s*:/);
+  });
+
+  test("escapes text before interpolating it into HTML", () => {
+    expect(escapeHtmlText(`<tag data-value="one & two">'quoted'</tag>`)).toBe(
+      "&lt;tag data-value=&quot;one &amp; two&quot;&gt;&#39;quoted&#39;&lt;/tag&gt;",
+    );
   });
 });

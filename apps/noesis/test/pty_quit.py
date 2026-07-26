@@ -308,37 +308,34 @@ def main() -> int:
                         and b"Complete login in your browser" in output
                     ):
                         state = extract_oauth_state(screen)
-                        if not state:
-                            raise RuntimeError(
-                                "OAuth authorization URL did not contain state"
-                            )
-                        callback = (
-                            "http://127.0.0.1:1455/auth/callback?code=test-code&state="
-                            + state
-                        ).encode()
-                        with urllib.request.urlopen(
-                            callback.decode(), timeout=1
-                        ) as response:
-                            callback_page = response.read()
-                            callback_headers = "\n".join(
-                                f"{name}: {response.headers.get(name, '')}"
-                                for name in (
-                                    "Cache-Control",
-                                    "Content-Security-Policy",
-                                    "Referrer-Policy",
-                                    "X-Content-Type-Options",
-                                )
+                        if state:
+                            callback = (
+                                "http://127.0.0.1:1455/auth/callback?code=test-code&state="
+                                + state
                             ).encode()
-                        os.write(
-                            sys.stdout.fileno(),
-                            b"\n__NOESIS_OAUTH_CALLBACK_PAGE__\n"
-                            + callback_page
-                            + b"\n__NOESIS_OAUTH_CALLBACK_HEADERS__\n"
-                            + callback_headers
-                            + b"\n__NOESIS_OAUTH_CALLBACK_END__\n",
-                        )
-                        oauth_callback_pending = False
-                        output = b""
+                            with urllib.request.urlopen(
+                                callback.decode(), timeout=1
+                            ) as response:
+                                callback_page = response.read()
+                                callback_headers = "\n".join(
+                                    f"{name}: {response.headers.get(name, '')}"
+                                    for name in (
+                                        "Cache-Control",
+                                        "Content-Security-Policy",
+                                        "Referrer-Policy",
+                                        "X-Content-Type-Options",
+                                    )
+                                ).encode()
+                            os.write(
+                                sys.stdout.fileno(),
+                                b"\n__NOESIS_OAUTH_CALLBACK_PAGE__\n"
+                                + callback_page
+                                + b"\n__NOESIS_OAUTH_CALLBACK_HEADERS__\n"
+                                + callback_headers
+                                + b"\n__NOESIS_OAUTH_CALLBACK_END__\n",
+                            )
+                            oauth_callback_pending = False
+                            output = b""
                     elif not sent_exit and ready_marker in output:
                         if action == "resize-main-quit":
                             os.write(sys.stdout.fileno(), b"\n__NOESIS_RESIZED__\n")

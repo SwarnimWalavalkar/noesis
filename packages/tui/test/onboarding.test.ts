@@ -4,10 +4,7 @@ import {
   type OnboardingSurface,
   runNoesisOnboardingTui,
 } from "../src/onboarding.ts";
-import {
-  createTestTerminal,
-  type TestTerminal,
-} from "./support/test-terminal.ts";
+import { createTestTerminal, type TestTerminal } from "./support/test-terminal.ts";
 
 const DOWN = "\u001b[B";
 const ENTER = "\r";
@@ -26,10 +23,7 @@ const PROVIDERS = [
   },
 ] as const;
 
-async function waitForOutput(
-  terminal: TestTerminal,
-  text: string,
-): Promise<void> {
+async function waitForOutput(terminal: TestTerminal, text: string): Promise<void> {
   await vi.waitFor(() => expect(terminal.output).toContain(text));
 }
 
@@ -38,11 +32,7 @@ describe("first-launch onboarding surface", () => {
     const terminal = createTestTerminal();
     const running = runNoesisOnboardingTui(async (surface) => {
       surface.note("Welcome to Noesis.");
-      const provider = await surface.choose(
-        "Choose an AI provider",
-        PROVIDERS,
-        "openai-codex",
-      );
+      const provider = await surface.choose("Choose an AI provider", PROVIDERS, "openai-codex");
       const model = await surface.text("Model ID", "gpt-5.6-sol");
       return { provider, model };
     }, terminal);
@@ -52,9 +42,7 @@ describe("first-launch onboarding surface", () => {
     expect(terminal.output).toContain("Welcome to Noesis.");
     expect(terminal.output).toContain("Choose an AI provider");
     expect(terminal.output).toContain("Sign in with your ChatGPT account");
-    expect(terminal.output).toContain(
-      "↑/↓ navigate · 1-9 jump · Enter select · Ctrl+C cancel",
-    );
+    expect(terminal.output).toContain("↑/↓ navigate · 1-9 jump · Enter select · Ctrl+C cancel");
 
     terminal.send(DOWN);
     terminal.send(ENTER);
@@ -74,12 +62,7 @@ describe("first-launch onboarding surface", () => {
   test("number keys select a listed choice directly", async () => {
     const terminal = createTestTerminal();
     const running = runNoesisOnboardingTui(
-      async (surface) =>
-        await surface.choose(
-          "Choose an AI provider",
-          PROVIDERS,
-          "openai-codex",
-        ),
+      async (surface) => await surface.choose("Choose an AI provider", PROVIDERS, "openai-codex"),
       terminal,
     );
 
@@ -106,18 +89,11 @@ describe("first-launch onboarding surface", () => {
   test("confirmation offers Yes and No instead of typed letters", async () => {
     const terminal = createTestTerminal();
     const running = runNoesisOnboardingTui(
-      async (surface) =>
-        await surface.confirm(
-          "Authenticate and create this configuration?",
-          true,
-        ),
+      async (surface) => await surface.confirm("Authenticate and create this configuration?", true),
       terminal,
     );
 
-    await waitForOutput(
-      terminal,
-      "Authenticate and create this configuration?",
-    );
+    await waitForOutput(terminal, "Authenticate and create this configuration?");
     expect(terminal.output).toContain("Yes");
     expect(terminal.output).toContain("No");
 
@@ -125,9 +101,7 @@ describe("first-launch onboarding surface", () => {
     terminal.send(ENTER);
 
     await expect(running).resolves.toBe(false);
-    expect(terminal.output).toContain(
-      "✓ Authenticate and create this configuration? · No",
-    );
+    expect(terminal.output).toContain("✓ Authenticate and create this configuration? · No");
   });
 
   test("secret entry is masked in the live prompt and in the completed transcript", async () => {
@@ -139,9 +113,7 @@ describe("first-launch onboarding surface", () => {
     }, terminal);
 
     await waitForOutput(terminal, "Enter OpenRouter API key");
-    expect(terminal.output).toContain(
-      "Input hidden · Enter accept · Ctrl+C cancel",
-    );
+    expect(terminal.output).toContain("Input hidden · Enter accept · Ctrl+C cancel");
     terminal.type("sk-secret-value");
     await waitForOutput(terminal, "•••");
     terminal.send(ENTER);
@@ -160,9 +132,24 @@ describe("first-launch onboarding surface", () => {
 
     await waitForOutput(terminal, "Open this URL:");
     for (let index = 0; index < url.length; index += terminal.columns)
-      expect(terminal.output).toContain(
-        url.slice(index, index + terminal.columns),
-      );
+      expect(terminal.output).toContain(url.slice(index, index + terminal.columns));
+
+    terminal.send(ENTER);
+    await running;
+  });
+
+  test("reference chunks preserve a non-BMP code point at a column boundary", async () => {
+    const terminal = createTestTerminal();
+    const prefix = "a".repeat(terminal.columns - 1);
+    const reference = `${prefix}😀tail`;
+    const running = runNoesisOnboardingTui(async (surface) => {
+      surface.reference("Copy this value:", reference);
+      return await surface.confirm("Done?", true);
+    }, terminal);
+
+    await waitForOutput(terminal, "Copy this value:");
+    expect(terminal.output).toContain(`${prefix}😀`);
+    expect(terminal.output).toContain("tail");
 
     terminal.send(ENTER);
     await running;
@@ -192,11 +179,7 @@ describe("first-launch onboarding surface", () => {
     let observed: OnboardingSurface | undefined;
     const running = runNoesisOnboardingTui(async (surface) => {
       observed = surface;
-      return await surface.choose(
-        "Choose an AI provider",
-        PROVIDERS,
-        "openai-codex",
-      );
+      return await surface.choose("Choose an AI provider", PROVIDERS, "openai-codex");
     }, terminal);
 
     await waitForOutput(terminal, "Choose an AI provider");
@@ -224,11 +207,7 @@ describe("first-launch onboarding surface", () => {
   test("collapses the wordmark on the final frame so the app it hands off to owns the banner", async () => {
     const terminal = createTestTerminal();
     const running = runNoesisOnboardingTui(async (surface) => {
-      const provider = await surface.choose(
-        "Choose an AI provider",
-        PROVIDERS,
-        "openai-codex",
-      );
+      const provider = await surface.choose("Choose an AI provider", PROVIDERS, "openai-codex");
       surface.note("Noesis is ready.");
       return provider;
     }, terminal);
@@ -248,12 +227,7 @@ describe("first-launch onboarding surface", () => {
     const terminal = createTestTerminal();
     terminal.resize(50, 10);
     const running = runNoesisOnboardingTui(
-      async (surface) =>
-        await surface.choose(
-          "Choose an AI provider",
-          PROVIDERS,
-          "openai-codex",
-        ),
+      async (surface) => await surface.choose("Choose an AI provider", PROVIDERS, "openai-codex"),
       terminal,
     );
 

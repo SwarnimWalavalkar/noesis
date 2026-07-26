@@ -1,12 +1,18 @@
 import type { NoesisOAuthCallbackPage } from "@noesis/runtime-pi";
 import { NOESIS_WORDMARK } from "@noesis/tui";
 
-const wordmark = NOESIS_WORDMARK.join("\n");
+export function escapeHtmlText(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
 
-export function renderNoesisOAuthCallbackPage(page: NoesisOAuthCallbackPage): string {
-  if (page.provider !== "openai-codex" || page.status !== "success")
-    throw new Error("Unsupported Noesis OAuth callback page");
+const wordmark = escapeHtmlText(NOESIS_WORDMARK.join("\n"));
 
+export function renderNoesisOAuthCallbackPage(_page: NoesisOAuthCallbackPage): string {
   return `<!doctype html>
 <html lang="en">
 <head>
