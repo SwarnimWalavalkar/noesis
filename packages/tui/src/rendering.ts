@@ -1,16 +1,8 @@
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
-import { renderRunInspector } from "./run-inspector.ts";
-import {
-  createTranscriptRenderer,
-  type TranscriptRenderer,
-} from "./transcript.ts";
+import { renderRunInspectorFrame } from "./run-inspector.ts";
+import { createTranscriptRenderer, type TranscriptRenderer } from "./transcript.ts";
 import { ANSI, elideText, NOESIS_WORDMARK, styled } from "./theme.ts";
-import {
-  reduceTui,
-  type NoesisTuiAction,
-  type NoesisTuiState,
-  type TuiContextUsage,
-} from "./state.ts";
+import { reduceTui, type NoesisTuiAction, type NoesisTuiState, type TuiContextUsage } from "./state.ts";
 
 export * from "./action-summary.ts";
 export * from "./rich-text.ts";
@@ -32,14 +24,9 @@ export interface TuiLayout {
 }
 
 export function createTuiLayout(width: number, height: number): TuiLayout {
-  const widthClass: TuiWidthClass =
-    width >= 120 ? "wide" : width >= 80 ? "normal" : "narrow";
+  const widthClass: TuiWidthClass = width >= 120 ? "wide" : width >= 80 ? "normal" : "narrow";
   const headerMode: HeaderMode =
-    width < 36 || height < 10
-      ? "none"
-      : width >= 100 && height >= 30
-        ? "ascii"
-        : "compact";
+    width < 36 || height < 10 ? "none" : width >= 100 && height >= 30 ? "ascii" : "compact";
   return {
     widthClass,
     headerMode,
@@ -52,10 +39,7 @@ export function createTuiLayout(width: number, height: number): TuiLayout {
 export const shortSessionId = (trailId: string | undefined): string => {
   if (!trailId) return "new";
   const separator = trailId.indexOf("_");
-  return trailId.slice(
-    separator < 0 ? 0 : separator + 1,
-    (separator < 0 ? 0 : separator + 1) + 8,
-  );
+  return trailId.slice(separator < 0 ? 0 : separator + 1, (separator < 0 ? 0 : separator + 1) + 8);
 };
 
 const formatTokenCount = (tokens: number): string => {
@@ -68,22 +52,15 @@ export function formatContextUsage(usage: TuiContextUsage | undefined): {
   readonly percent: string;
   readonly tokens?: string;
 } {
-  if (!usage || usage.contextWindow <= 0 || usage.usedTokens < 0)
-    return { percent: "ctx   —" };
-  const percent = Math.min(
-    100,
-    Math.max(0, Math.round((usage.usedTokens / usage.contextWindow) * 100)),
-  );
+  if (!usage || usage.contextWindow <= 0 || usage.usedTokens < 0) return { percent: "ctx   —" };
+  const percent = Math.min(100, Math.max(0, Math.round((usage.usedTokens / usage.contextWindow) * 100)));
   return {
     percent: `ctx ${usage.accuracy === "estimated" ? "~" : " "}${String(percent).padStart(2)}%`,
     tokens: `${formatTokenCount(usage.usedTokens)}/${formatTokenCount(usage.contextWindow)}`,
   };
 }
 
-export function createStatusFields(
-  state: NoesisTuiState,
-  layout: TuiLayout,
-): readonly string[] {
+export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): readonly string[] {
   const context = formatContextUsage(state.contextUsage);
   const execution = `● ${state.execution.toUpperCase().padEnd(10)}`;
   const model = `${state.provider}/${state.model}`;
@@ -113,25 +90,17 @@ export function createStatusFields(
   return [execution, model, context.percent, turns];
 }
 
-export function fitStatusFields(
-  fields: readonly string[],
-  width: number,
-): readonly string[] {
+export function fitStatusFields(fields: readonly string[], width: number): readonly string[] {
   if (fields.length < 2) return fields;
   const current = fields.join(" · ");
   if (visibleWidth(current) <= width) return fields;
   const model = fields[1] ?? "";
   const overflow = visibleWidth(current) - width;
   const modelWidth = Math.max(8, visibleWidth(model) - overflow);
-  return fields.map((field, index) =>
-    index === 1 ? elideText(field, modelWidth) : field,
-  );
+  return fields.map((field, index) => (index === 1 ? elideText(field, modelWidth) : field));
 }
 
-function colorStatusLine(
-  state: NoesisTuiState,
-  fields: readonly string[],
-): string {
+function colorStatusLine(state: NoesisTuiState, fields: readonly string[]): string {
   const stateColor =
     state.execution === "error"
       ? ANSI.red
@@ -149,57 +118,28 @@ function colorStatusLine(
     .join(" · ");
 }
 
-export function renderStatusLine(
-  state: NoesisTuiState,
-  width: number,
-  height = 30,
-): string {
+export function renderStatusLine(state: NoesisTuiState, width: number, height = 30): string {
   const layout = createTuiLayout(width, height);
-  return elideText(
-    colorStatusLine(
-      state,
-      fitStatusFields(createStatusFields(state, layout), width),
-    ),
-    width,
-  );
+  return elideText(colorStatusLine(state, fitStatusFields(createStatusFields(state, layout), width)), width);
 }
 
 /** Keys change meaning while the transcript is navigable, so the hint follows the mode. */
 export function helpHint(state: NoesisTuiState): string {
   if (state.inspector) return "↑/↓ scroll · esc close";
-  if (state.actionCursor)
-    return "↑/↓ select · space expand · enter inspect · esc leave · ctrl+c quit";
+  if (state.actionCursor) return "↑/↓ select · space expand · enter inspect · esc leave · ctrl+c quit";
   return "? help · ctrl+o inspect runs · /quit exit · ctrl+c quit";
 }
 
-export function renderBottomChrome(
-  state: NoesisTuiState,
-  width: number,
-  height = 30,
-): string[] {
+export function renderBottomChrome(state: NoesisTuiState, width: number, height = 30): string[] {
   const safeWidth = Math.max(0, Math.floor(width));
   return [
-    elideText(
-      styled(state.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"),
-      safeWidth,
-    ),
+    elideText(styled(state.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), safeWidth),
     renderStatusLine(state, safeWidth, height),
-    ...(height >= 8
-      ? [
-          elideText(
-            styled(state.colorEnabled, ANSI.dim, helpHint(state)),
-            safeWidth,
-          ),
-        ]
-      : []),
+    ...(height >= 8 ? [elideText(styled(state.colorEnabled, ANSI.dim, helpHint(state)), safeWidth)] : []),
   ];
 }
 
-export function renderHeader(
-  colorEnabled: boolean,
-  width: number,
-  height: number,
-): string[] {
+export function renderHeader(colorEnabled: boolean, width: number, height: number): string[] {
   const terminalWidth = Math.max(0, Math.floor(width));
   const inner = terminalWidth > 2 ? terminalWidth - 2 : terminalWidth;
   if (inner <= 0) return [];
@@ -209,9 +149,7 @@ export function renderHeader(
   const lines =
     headerMode === "ascii"
       ? [
-          ...NOESIS_WORDMARK.map((line) =>
-            styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, line),
-          ),
+          ...NOESIS_WORDMARK.map((line) => styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, line)),
           styled(colorEnabled, ANSI.dim, tagline),
         ]
       : [
@@ -221,15 +159,10 @@ export function renderHeader(
             terminalWidth >= 52 && height >= 16 ? `  ${tagline}` : "",
           )}`,
         ];
-  return [...lines, styled(colorEnabled, ANSI.dim, "─".repeat(inner))].map(
-    (line) => elideText(line, inner),
-  );
+  return [...lines, styled(colorEnabled, ANSI.dim, "─".repeat(inner))].map((line) => elideText(line, inner));
 }
 
-function paneLines(
-  state: NoesisTuiState,
-  layout: TuiLayout,
-): readonly string[] {
+function paneLines(state: NoesisTuiState, layout: TuiLayout): readonly string[] {
   const all =
     state.pane === "context" && state.context
       ? state.context.fragments.map(
@@ -262,13 +195,7 @@ export function renderNoesisState(
     ...transcriptRenderer.render(state, inner, layout.expandedRowBudget),
     ...paneLines(state, layout).map((line) => elideText(line, inner)),
     ...(state.error
-      ? [
-          styled(
-            state.colorEnabled,
-            `${ANSI.bold}${ANSI.red}`,
-            elideText(`Error · ${state.error}`, inner),
-          ),
-        ]
+      ? [styled(state.colorEnabled, `${ANSI.bold}${ANSI.red}`, elideText(`Error · ${state.error}`, inner))]
       : []),
   ];
 }
@@ -280,10 +207,7 @@ export interface NoesisView extends Component {
   readonly dispatch: (action: NoesisTuiAction) => void;
 }
 
-export function createNoesisView(
-  initialState: NoesisTuiState,
-  height: () => number,
-): NoesisView {
+export function createNoesisView(initialState: NoesisTuiState, height: () => number): NoesisView {
   let state = initialState;
   const transcriptRenderer = createTranscriptRenderer();
   return {
@@ -306,10 +230,7 @@ export function createNoesisView(
  * and scrolls out of the viewport into terminal scrollback as the conversation grows, so it costs
  * nothing after the first screen.
  */
-export function createHeaderView(
-  colorEnabled: boolean,
-  height: () => number,
-): Component {
+export function createHeaderView(colorEnabled: boolean, height: () => number): Component {
   return {
     invalidate() {},
     render: (width) => renderHeader(colorEnabled, width, height()),
@@ -324,42 +245,33 @@ export function createHeaderView(
 export function createRunInspectorOverlay(
   view: NoesisView,
   height: () => number,
+  onBoundsMeasured: (maxScroll: number) => void = () => undefined,
 ): Component {
   return {
     invalidate() {},
     render(width) {
-      if (!view.state.inspector) return [];
-      return renderRunInspector(
-        view.state,
-        Math.max(0, width),
-        Math.max(6, height() - 6),
-      );
+      const inspector = view.state.inspector;
+      if (!inspector) return [];
+      // This is the overlay's sole height bound. Keeping the returned rows within the terminal
+      // means pi-tui never needs to clip them after maxScroll has already been calculated.
+      const rendered = renderRunInspectorFrame(view.state, Math.max(0, width), Math.max(0, height() - 6));
+      onBoundsMeasured(rendered.maxScroll);
+      return [...rendered.rows];
     },
   };
 }
 
-export function createInputLabelView(
-  colorEnabled: boolean,
-  height: () => number,
-): Component {
+export function createInputLabelView(colorEnabled: boolean, height: () => number): Component {
   return {
     invalidate() {},
     render(width) {
       if (height() < 6) return [];
-      return [
-        elideText(
-          styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"),
-          width,
-        ),
-      ];
+      return [elideText(styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), width)];
     },
   };
 }
 
-export function createStatusView(
-  view: NoesisView,
-  height: () => number,
-): Component {
+export function createStatusView(view: NoesisView, height: () => number): Component {
   return {
     invalidate() {},
     render(width) {
@@ -369,28 +281,17 @@ export function createStatusView(
   };
 }
 
-export function createHelpView(
-  view: NoesisView,
-  height: () => number,
-): Component {
+export function createHelpView(view: NoesisView, height: () => number): Component {
   return {
     invalidate() {},
     render(width) {
       if (height() < 8) return [];
-      return [
-        elideText(
-          styled(view.state.colorEnabled, ANSI.dim, helpHint(view.state)),
-          Math.max(0, width),
-        ),
-      ];
+      return [elideText(styled(view.state.colorEnabled, ANSI.dim, helpHint(view.state)), Math.max(0, width))];
     },
   };
 }
 
-export function createStaticLineView(
-  text: string,
-  visible: () => boolean = () => true,
-): Component {
+export function createStaticLineView(text: string, visible: () => boolean = () => true): Component {
   return {
     invalidate() {},
     render: (width) => (visible() ? [elideText(text, Math.max(0, width))] : []),

@@ -3,11 +3,11 @@ import { EXECUTE_ACTION_NAME, formatCount, sourceOf, summarizeAction } from "./a
 import { renderRichText } from "./rich-text.ts";
 import {
   childActions,
-  timelineActions,
   type NoesisTuiState,
   type TuiAgentAction,
   type TuiMessage,
   type TuiTimelineEntry,
+  timelineActions,
 } from "./state.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 
@@ -208,6 +208,13 @@ export function createTranscriptRenderer(): TranscriptRenderer {
     const expanded = entry.kind === "action" && state.expandedActionIds.has(entry.actionId);
     const selected = entry.kind === "action" && state.actionCursor === entry.actionId;
     const depth = entry.kind === "action" ? actionDepth(entry, actions) : 0;
+    // An execute row summarizes its direct children. Those children arrive and settle as separate
+    // immutable timeline entries, so the parent object can remain identical while its rendered
+    // summary changes.
+    const childSummaryKey =
+      entry.kind === "action" && entry.name === EXECUTE_ACTION_NAME
+        ? JSON.stringify(childActions(actions, entry.actionId).map((child) => [child.name, child.status]))
+        : "";
     const key = [
       String(width),
       state.colorEnabled ? "color" : "plain",
@@ -215,6 +222,7 @@ export function createTranscriptRenderer(): TranscriptRenderer {
       selected ? "selected" : "unselected",
       String(depth),
       String(maxBodyRows),
+      childSummaryKey,
     ].join(":");
     const cached = cache.get(entry);
     if (cached?.key === key) {

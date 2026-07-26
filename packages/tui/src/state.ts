@@ -117,7 +117,11 @@ export type NoesisTuiAction =
       readonly actionId: string;
       readonly detail?: TuiExecutionDetail;
     }
-  | { readonly type: "inspector-scrolled"; readonly delta: number }
+  | {
+      readonly type: "inspector-scrolled";
+      readonly delta: number;
+      readonly maxScroll: number;
+    }
   | { readonly type: "inspector-closed" }
   | { readonly type: "execution-changed"; readonly execution: ExecutionState }
   | {
@@ -334,7 +338,11 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       return {
         ...state,
         actionCursor: action.actionId,
-        inspector: { actionId: action.actionId, status: "loading", scroll: 0 },
+        inspector: {
+          actionId: action.actionId,
+          status: "loading",
+          scroll: 0,
+        },
       };
     case "inspector-loaded": {
       // A slow inspector fetch must never replace a newer selection.
@@ -355,7 +363,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         ...state,
         inspector: {
           ...state.inspector,
-          scroll: Math.max(0, state.inspector.scroll + action.delta),
+          scroll: Math.min(Math.max(0, action.maxScroll), Math.max(0, state.inspector.scroll + action.delta)),
         },
       };
     }

@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { TrailState } from "@noesis/runtime";
 import { executionIdOf } from "./action-summary.ts";
-import { runSlashCommand } from "./commands.ts";
+import { isExclusiveSlashCommand, runSlashCommand } from "./commands.ts";
 import {
   createHeaderView,
   createHelpView,
@@ -98,13 +98,21 @@ export async function startNoesisTui(
   );
   const editor = createSafeEditor(tui, colorEnabled, selectTheme, () => terminal.rows);
   const headerView = createHeaderView(colorEnabled, () => terminal.rows);
-  const inspectorOverlay = createRunInspectorOverlay(view, () => terminal.rows);
+  let inspectorMaxScroll = 0;
+  const inspectorOverlay = createRunInspectorOverlay(
+    view,
+    () => terminal.rows,
+    (maxScroll) => {
+      inspectorMaxScroll = maxScroll;
+    },
+  );
   let inspectorHandle: OverlayHandle | undefined;
   const statusView = createStatusView(view, () => terminal.rows);
   const inputLabelView = createInputLabelView(colorEnabled, () => terminal.rows);
   const helpView = createHelpView(view, () => terminal.rows);
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
   let activeTurn: Promise<void> | undefined;
+  let activeExclusiveCommand: Promise<boolean> | undefined;
   let turnGeneration = 0;
   let inspectorGeneration = 0;
   interface ActiveTurnToken {
@@ -179,38 +187,52 @@ export async function startNoesisTui(
         }
       }
       const trailId = view.state.trailId;
-      if (activeTurn && trailId) {
-        const turn = activeTurn;
+      const turn = activeTurn;
+      const exclusiveCommand = activeExclusiveCommand;
+      let shutdownFailure: { readonly error: unknown } | undefined;
+      if (turn && trailId) {
         const abortAndSettle = (async () => {
           await runtime.abort(trailId);
           await turn;
-        })();
+        })().then<ShutdownSettlement, ShutdownSettlement>(
+          () => ({ status: "settled" }),
+          (error: unknown) => ({ status: "rejected", error }),
+        );
         let graceTimer: NodeJS.Timeout | undefined;
         // Terminal ownership is already released. Give a cooperative runtime a brief chance to
-        // settle, then detach: a broken runtime must not keep the CLI lifecycle pending forever.
+        // settle, then detach the abortable turn: a broken runtime must not keep the CLI lifecycle
+        // pending forever.
         const settlement = await Promise.race<ShutdownSettlement>([
-          abortAndSettle.then<ShutdownSettlement, ShutdownSettlement>(
-            () => ({ status: "settled" }),
-            (error: unknown) => ({ status: "rejected", error }),
-          ),
+          abortAndSettle,
           new Promise<ShutdownSettlement>((resolve) => {
             graceTimer = setTimeout(() => resolve({ status: "timed-out" }), SHUTDOWN_GRACE_MS);
             graceTimer.unref();
           }),
         ]);
         if (graceTimer) clearTimeout(graceTimer);
-        if (settlement.status === "rejected") throw settlement.error;
+        if (settlement.status === "rejected") shutdownFailure = { error: settlement.error };
         if (settlement.status === "timed-out") {
-          // The detached operation may still reject later; observe it without extending shutdown.
-          void abortAndSettle.catch(() => undefined);
+          // The detached turn may still settle later; the mapped promise observes its rejection.
+          void abortAndSettle;
         }
       }
+      // Exclusive commands have no cancellation primitive. They remain shutdown-owned after the
+      // terminal is released so runtime shutdown cannot race an in-flight mutation.
+      if (exclusiveCommand) {
+        try {
+          await exclusiveCommand;
+        } catch (error) {
+          shutdownFailure ??= { error };
+        }
+      }
+      if (shutdownFailure) throw shutdownFailure.error;
     })();
     shutdownPromise.then(resolveShutdown, rejectShutdown);
     return shutdownPromise;
   };
 
   const closeRunInspector = (): void => {
+    inspectorMaxScroll = 0;
     view.dispatch({ type: "inspector-closed" });
     inspectorHandle?.hide();
     inspectorHandle = undefined;
@@ -218,17 +240,18 @@ export async function startNoesisTui(
   };
 
   const openRunInspector = (actionId: string): void => {
+    inspectorMaxScroll = 0;
     view.dispatch({ type: "inspector-opened", actionId });
     inspectorHandle ??= tui.showOverlay(inspectorOverlay, {
       anchor: "center",
       width: "90%",
-      maxHeight: "80%",
     });
     tui.requestRender();
     const trailId = view.state.trailId;
     const action = timelineActions(view.state.timeline).find((candidate) => candidate.actionId === actionId);
     const executionId = action ? executionIdOf(action) : undefined;
     const settle = (detail?: Awaited<ReturnType<NonNullable<typeof runtime.inspectExecution>>>): void => {
+      inspectorMaxScroll = 0;
       view.dispatch({
         type: "inspector-loaded",
         actionId,
@@ -254,17 +277,29 @@ export async function startNoesisTui(
         closeRunInspector();
         return true;
       }
-      if (matchesKey(data, "up")) view.dispatch({ type: "inspector-scrolled", delta: -1 });
-      else if (matchesKey(data, "down")) view.dispatch({ type: "inspector-scrolled", delta: 1 });
+      if (matchesKey(data, "up"))
+        view.dispatch({
+          type: "inspector-scrolled",
+          delta: -1,
+          maxScroll: inspectorMaxScroll,
+        });
+      else if (matchesKey(data, "down"))
+        view.dispatch({
+          type: "inspector-scrolled",
+          delta: 1,
+          maxScroll: inspectorMaxScroll,
+        });
       else if (matchesKey(data, "pageUp"))
         view.dispatch({
           type: "inspector-scrolled",
           delta: -INSPECTOR_PAGE_ROWS,
+          maxScroll: inspectorMaxScroll,
         });
       else if (matchesKey(data, "pageDown"))
         view.dispatch({
           type: "inspector-scrolled",
           delta: INSPECTOR_PAGE_ROWS,
+          maxScroll: inspectorMaxScroll,
         });
       tui.requestRender();
       return true;
@@ -310,13 +345,27 @@ export async function startNoesisTui(
   });
   editor.onSubmit = (text) => {
     const submittedTrailId = view.state.trailId;
-    if (!submittedTrailId || !text.trim()) return;
+    let ownedTrailId = submittedTrailId;
+    const normalizedInput = text.trim();
+    if (!submittedTrailId || !normalizedInput) return;
+    if (normalizedInput === "/quit") {
+      void shutdown();
+      return;
+    }
+    if (activeExclusiveCommand) {
+      view.dispatch({
+        type: "system-message",
+        text: "A command is active. Wait for it to finish before submitting another command or prompt.",
+      });
+      tui.requestRender();
+      return;
+    }
     inspectorGeneration += 1;
     const submittedInspectorGeneration = inspectorGeneration;
     const isCurrentSubmission = (): boolean =>
       phase === "main" &&
       inspectorGeneration === submittedInspectorGeneration &&
-      view.state.trailId === submittedTrailId;
+      view.state.trailId === ownedTrailId;
     const publishInspector = (message: string): void => {
       if (!isCurrentSubmission() || activeTurn) return;
       view.dispatch({
@@ -326,12 +375,8 @@ export async function startNoesisTui(
       tui.requestRender();
     };
     void (async () => {
-      if (text === "/quit") {
-        await shutdown();
-        return;
-      }
       if (activeTurn) {
-        if (text.trim() === "/abort") {
+        if (normalizedInput === "/abort") {
           view.dispatch({ type: "execution-changed", execution: "aborting" });
           tui.requestRender();
           // Keep ABORTING observable for one throttled TUI render frame before a cooperative runtime settles.
@@ -346,22 +391,34 @@ export async function startNoesisTui(
         }
         return;
       }
-      if (text === "/abort") {
+      if (normalizedInput === "/abort") {
         view.dispatch({ type: "system-message", text: "No turn is active." });
         tui.requestRender();
         return;
       }
-      const handled = await runSlashCommand(text, {
-        runtime,
-        trailId: submittedTrailId,
-        publishInspector,
-        dispatch: (action) => {
-          view.dispatch(action);
-        },
-        requestRender: () => {
-          tui.requestRender();
-        },
-      });
+      let handled = false;
+      if (normalizedInput === "?" || normalizedInput.startsWith("/")) {
+        const exclusiveCommand = isExclusiveSlashCommand(normalizedInput);
+        const commandWork = runSlashCommand(normalizedInput, {
+          runtime,
+          trailId: submittedTrailId,
+          publishInspector,
+          dispatch: (action) => {
+            if (!isCurrentSubmission()) return;
+            view.dispatch(action);
+            if (action.type === "trail-selected") ownedTrailId = action.trail.trailId;
+          },
+          requestRender: () => {
+            if (isCurrentSubmission()) tui.requestRender();
+          },
+        });
+        if (exclusiveCommand) activeExclusiveCommand = commandWork;
+        try {
+          handled = await commandWork;
+        } finally {
+          if (activeExclusiveCommand === commandWork) activeExclusiveCommand = undefined;
+        }
+      }
       if (handled) return;
 
       view.dispatch({ type: "prompt-submitted", text });

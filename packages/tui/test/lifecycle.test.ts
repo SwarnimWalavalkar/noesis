@@ -133,6 +133,95 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
+  test("renders a forked trail when the trail-switching command settles", async () => {
+    const base = await createRuntime({
+      name: "fork-render-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    let releaseFork: (() => void) | undefined;
+    const forkGate = new Promise<void>((resolve) => {
+      releaseFork = resolve;
+    });
+    let forkStarted = false;
+    const runtime = Object.freeze({
+      ...base,
+      forkTrail: async (trailId: string) => {
+        forkStarted = true;
+        await forkGate;
+        const forked = await base.forkTrail(trailId);
+        return Object.freeze({ ...forked, model: "forked" });
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("/fork\r");
+    await vi.waitFor(() => expect(forkStarted).toBe(true));
+    releaseFork?.();
+    await vi.waitFor(() => expect(terminal.output).toContain("test-provider/forked"));
+
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("renders a newly selected model when the trail-switching command settles", async () => {
+    const base = await createRuntime({
+      name: "model-render-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    let releaseModel: (() => void) | undefined;
+    const modelGate = new Promise<void>((resolve) => {
+      releaseModel = resolve;
+    });
+    let starts = 0;
+    let modelStarted = false;
+    const runtime = Object.freeze({
+      ...base,
+      startTrail: async (input: Parameters<typeof base.startTrail>[0]) => {
+        starts += 1;
+        if (starts > 1) {
+          modelStarted = true;
+          await modelGate;
+        }
+        return await base.startTrail(input);
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("/model visible/v1\r");
+    await vi.waitFor(() => expect(modelStarted).toBe(true));
+    releaseModel?.();
+    await vi.waitFor(() => expect(terminal.output).toContain("visible/v1"));
+
+    terminal.type("/quit\n");
+    await running;
+  });
+
   test("distinguishes unsupported inspectors from supported empty libraries", async () => {
     const agent: NoesisAgentRuntime = {
       name: "inspector-support-scripted",
@@ -170,6 +259,184 @@ describe("Noesis TUI lifecycle", () => {
     expect(emptyTerminal.output).not.toContain("unavailable in this runtime");
     emptyTerminal.type("/quit\n");
     await emptyRun;
+  });
+
+  test("serializes slash commands with prompts and other commands", async () => {
+    let releaseCompact: (() => void) | undefined;
+    const compactGate = new Promise<void>((resolve) => {
+      releaseCompact = resolve;
+    });
+    let compactStarted = false;
+    const prompts: string[] = [];
+    const base = await createRuntime({
+      name: "command-serialization-scripted",
+      async run(request) {
+        prompts.push(request.prompt);
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    const runtime = Object.freeze({
+      ...base,
+      compact: async () => {
+        compactStarted = true;
+        await compactGate;
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("/compact\r");
+    await vi.waitFor(() => expect(compactStarted).toBe(true));
+    terminal.type("do not overlap\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("A command is active."));
+    expect(prompts).toEqual([]);
+
+    releaseCompact?.();
+    await vi.waitFor(() => expect(terminal.output).toContain("Trail compacted."));
+    terminal.type("after compact\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("reply:after compact"));
+    expect(prompts).toEqual(["after compact"]);
+
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test.each([
+    ["/quit", "/quit\r"],
+    ["Ctrl+C", "\u0003"],
+  ] as const)("releases the terminal immediately and settles an active compact before %s shutdown completes", async (_exit, exitInput) => {
+    let releaseCompact: (() => void) | undefined;
+    const compactGate = new Promise<void>((resolve) => {
+      releaseCompact = resolve;
+    });
+    let compactStarted = false;
+    let compactFinished = false;
+    const base = await createRuntime({
+      name: "command-shutdown-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    const runtime = Object.freeze({
+      ...base,
+      compact: async () => {
+        compactStarted = true;
+        await compactGate;
+        compactFinished = true;
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    let shutdownCompleted = false;
+    void running.then(() => {
+      shutdownCompleted = true;
+    });
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("/compact\r");
+    await vi.waitFor(() => expect(compactStarted).toBe(true));
+    terminal.type(exitInput);
+    await vi.waitFor(() => expect(terminal.stops).toBe(1));
+    expect(shutdownCompleted).toBe(false);
+    await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    expect(shutdownCompleted).toBe(false);
+
+    releaseCompact?.();
+    await running;
+    expect(compactFinished).toBe(true);
+    expect(terminal.output).not.toContain("Trail compacted.");
+    expect(terminal.stops).toBe(1);
+  });
+
+  test("claims conversational turn ownership before another prompt can start", async () => {
+    let releaseTurn: (() => void) | undefined;
+    const turnGate = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const prompts: string[] = [];
+    const runtime = await createRuntime({
+      name: "prompt-serialization-scripted",
+      async run(request) {
+        prompts.push(request.prompt);
+        await turnGate;
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("first prompt\r");
+    terminal.type("second prompt\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("A turn is active."));
+    expect(prompts).toEqual(["first prompt"]);
+
+    releaseTurn?.();
+    await vi.waitFor(() => expect(terminal.output).toContain("reply:first prompt"));
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("preserves leading and trailing whitespace in ordinary prompts", async () => {
+    const prompts: string[] = [];
+    const runtime = await createRuntime({
+      name: "prompt-whitespace-scripted",
+      async run(request) {
+        prompts.push(request.prompt);
+        return {
+          text: "preserved",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("  indented value  \r");
+    await vi.waitFor(() => expect(prompts).toEqual(["  indented value  "]));
+    const trail = runtime.listTrails()[0];
+    if (!trail) throw new Error("Expected prompt whitespace trail");
+    await vi.waitFor(() =>
+      expect(runtime.getTrail(trail.trailId).turns[0]?.input).toBe("  indented value  "),
+    );
+
+    terminal.type("/quit\n");
+    await running;
   });
 
   test("two plain launches create distinct fresh sessions without prior conversation", async () => {
@@ -437,8 +704,10 @@ describe("Noesis TUI lifecycle", () => {
     terminal.send(" ");
     await vi.waitFor(() => expect(terminal.output).toContain("source line 5"));
     // Collapsing shrinks the rendered content; that must not clear what has scrolled away.
+    const beforeCollapse = terminal.output.length;
     terminal.send(" ");
-    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    await vi.waitFor(() => expect(terminal.output.length).toBeGreaterThan(beforeCollapse));
+    expect(terminal.output.slice(beforeCollapse)).not.toContain("source line 5");
     terminal.send("\u001b");
 
     expect(terminal.output).not.toContain("\u001b[3J");
@@ -494,6 +763,64 @@ describe("Noesis TUI lifecycle", () => {
     terminal.send("\u001b");
     await vi.waitFor(() => expect(terminal.output).toContain("↑/↓ select"));
 
+    terminal.send("\u001b");
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("keeps a tall run inspector footer and final rows reachable after resize", async () => {
+    const source = Array.from({ length: 80 }, (_, index) => `source line ${String(index + 1)}`).join("\n");
+    const runtime = await createRuntime({
+      name: "tall-inspector-scripted",
+      async run(request, emit) {
+        emit({ type: "status", status: "started" });
+        emit({
+          type: "tool-start",
+          actionId: "execute-1",
+          name: "execute",
+          input: { source },
+        });
+        emit({
+          type: "tool-end",
+          actionId: "execute-1",
+          name: "execute",
+          isError: false,
+          result: { calls: 0 },
+        });
+        emit({ type: "status", status: "completed" });
+        return {
+          text: "done",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    const terminal = createTestTerminal();
+    terminal.resize(100, 50);
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("run it\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("✓ execute"));
+    terminal.send("\u000f");
+    terminal.send("\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("pgup/pgdn scroll"));
+
+    for (let index = 0; index < 12; index += 1) terminal.send("\u001b[6~");
+    await vi.waitFor(() => expect(terminal.output).toContain('"calls": 0'));
+
+    const resizedAt = terminal.output.length;
+    terminal.resize(100, 40);
+    await vi.waitFor(() => expect(terminal.output.slice(resizedAt)).toContain("pgup/pgdn scroll"));
+    for (let page = 0; page < 8; page += 1) terminal.send("\u001b[6~");
+    await vi.waitFor(() => expect(terminal.output.slice(resizedAt)).toContain('"calls": 0'));
+
+    terminal.send("\u001b");
     terminal.send("\u001b");
     terminal.type("/quit\n");
     await running;

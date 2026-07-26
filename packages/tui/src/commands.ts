@@ -19,29 +19,36 @@ export const HELP_LINES = [
   "/quit · learning, experiments, activation, and revert run ambiently",
 ] as const;
 
+/** Commands that change the active trail or its context must not overlap another submission. */
+export function isExclusiveSlashCommand(text: string): boolean {
+  const command = text.trim();
+  return command === "/compact" || command === "/fork" || command.startsWith("/model ");
+}
+
 /**
  * Handles read-only inspection and session commands. Turn control (`/quit`, `/abort`) stays with
  * the session loop because it owns shutdown and the active turn.
  */
 export async function runSlashCommand(text: string, context: SlashCommandContext): Promise<boolean> {
   const { runtime, trailId, publishInspector, dispatch, requestRender } = context;
+  const command = text.trim();
 
-  if (text === "?" || text === "/help") {
+  if (command === "?" || command === "/help") {
     dispatch({ type: "system-message", text: HELP_LINES.join("\n") });
     requestRender();
     return true;
   }
 
-  if (text === "/context" || text === "/capabilities") {
+  if (command === "/context" || command === "/capabilities") {
     dispatch({
       type: "pane-selected",
-      pane: text === "/context" ? "context" : "capabilities",
+      pane: command === "/context" ? "context" : "capabilities",
     });
     requestRender();
     return true;
   }
 
-  if (text === "/skills") {
+  if (command === "/skills") {
     if (!runtime.listSkills) {
       publishInspector("Skill inspection is unavailable in this runtime.");
       return true;
@@ -64,8 +71,8 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (text.startsWith("/skill ")) {
-    const name = text.slice("/skill ".length).trim();
+  if (command.startsWith("/skill ")) {
+    const name = command.slice("/skill ".length).trim();
     if (!runtime.inspectSkill) {
       publishInspector("Skill detail inspection is unavailable in this runtime.");
       return true;
@@ -86,7 +93,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (text === "/scripts") {
+  if (command === "/scripts") {
     if (!runtime.listScripts) {
       publishInspector("Script inspection is unavailable in this runtime.");
       return true;
@@ -108,8 +115,8 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (text.startsWith("/script ")) {
-    const name = text.slice("/script ".length).trim();
+  if (command.startsWith("/script ")) {
+    const name = command.slice("/script ".length).trim();
     if (!runtime.inspectScript) {
       publishInspector("Script detail inspection is unavailable in this runtime.");
       return true;
@@ -134,7 +141,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (text === "/workflows") {
+  if (command === "/workflows") {
     if (!runtime.listWorkflows) {
       publishInspector("Workflow inspection is unavailable in this runtime.");
       return true;
@@ -156,8 +163,8 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (text.startsWith("/workflow ")) {
-    const name = text.slice("/workflow ".length).trim();
+  if (command.startsWith("/workflow ")) {
+    const name = command.slice("/workflow ".length).trim();
     if (!runtime.inspectWorkflow) {
       publishInspector("Workflow detail inspection is unavailable in this runtime.");
       return true;
@@ -182,7 +189,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (text === "/runs") {
+  if (command === "/runs") {
     if (!runtime.listExecutions) {
       publishInspector("Run inspection is unavailable in this runtime.");
       return true;
@@ -202,8 +209,8 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (text.startsWith("/run ")) {
-    const executionId = text.slice("/run ".length).trim();
+  if (command.startsWith("/run ")) {
+    const executionId = command.slice("/run ".length).trim();
     if (!runtime.inspectExecution) {
       publishInspector("Run detail inspection is unavailable in this runtime.");
       return true;
@@ -250,7 +257,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (text === "/compact") {
+  if (command === "/compact") {
     dispatch({ type: "execution-changed", execution: "compacting" });
     requestRender();
     await runtime.compact(trailId);
@@ -260,7 +267,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (text === "/fork") {
+  if (command === "/fork") {
     dispatch({
       type: "trail-selected",
       trail: await runtime.forkTrail(trailId),
@@ -269,8 +276,8 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (text.startsWith("/model ")) {
-    const selection = text.slice("/model ".length).trim();
+  if (command.startsWith("/model ")) {
+    const selection = command.slice("/model ".length).trim();
     const separator = selection.indexOf("/");
     if (separator <= 0 || separator === selection.length - 1) {
       dispatch({ type: "failed", error: "Use /model provider/model" });

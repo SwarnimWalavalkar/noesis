@@ -9,6 +9,10 @@ import {
   type TuiExecutionDetail,
 } from "../src/index.ts";
 
+const ESC = String.fromCodePoint(27);
+const YELLOW = `${ESC}[33m`;
+const RESET = `${ESC}[0m`;
+
 const PROGRAM = [
   "const state = await tools.files.read({ path: 'packages/tui/src/state.ts' });",
   "const hits = await tools.files.search({ query: 'timeline' });",
@@ -37,11 +41,7 @@ const DETAIL: TuiExecutionDetail = {
 };
 
 function stateWithRun(
-  options: {
-    readonly failed?: boolean;
-    readonly detail?: TuiExecutionDetail;
-    readonly scroll?: number;
-  } = {},
+  options: { readonly failed?: boolean; readonly detail?: TuiExecutionDetail; readonly scroll?: number } = {},
 ): NoesisTuiState {
   const events: NoesisTuiAction[] = [
     {
@@ -101,7 +101,11 @@ function stateWithRun(
     },
     ...(options.scroll
       ? ([
-          { type: "inspector-scrolled", delta: options.scroll },
+          {
+            type: "inspector-scrolled",
+            delta: options.scroll,
+            maxScroll: options.scroll,
+          },
         ] as NoesisTuiAction[])
       : []),
   ];
@@ -132,9 +136,7 @@ describe("run inspector panel", () => {
   test("leads with identity, then calls, source, and provenance", () => {
     const rows = render(stateWithRun({ detail: DETAIL }), 88, 60);
     const body = rows.join("\n");
-    const order = ["CALLS", "SOURCE", "RESULT", "STDOUT", "PROVENANCE"].map(
-      (label) => body.indexOf(label),
-    );
+    const order = ["CALLS", "SOURCE", "RESULT", "STDOUT", "PROVENANCE"].map((label) => body.indexOf(label));
 
     expect(rows[1]).toContain("codemode · 2 calls · 1.2s · exec_7d31c0a4");
     expect(order.every((position) => position >= 0)).toBe(true);
@@ -149,12 +151,54 @@ describe("run inspector panel", () => {
     expect(body).toContain('2 ✓ files.search "timeline" · 3 matches · 270ms');
   });
 
+  test("bounds hostile nested call subjects and outcomes before wrapping", () => {
+    const hostileSubject = `subject-${"s".repeat(50_000)}-SUBJECT-END${ESC}[2J`;
+    const hostileOutcome = `outcome-${"o".repeat(50_000)}-OUTCOME-END${ESC}[31m`;
+    const state = stateWithRun({ detail: DETAIL });
+    const timeline = state.timeline.map((entry) =>
+      entry.kind === "action" && entry.actionId === "x1:1"
+        ? {
+            ...entry,
+            name: "workflows.run",
+            input: { name: hostileSubject },
+            output: { status: hostileOutcome },
+          }
+        : entry,
+    );
+    const body = render({ ...state, timeline }, 88, 100).join("\n");
+
+    expect(body).toContain("subject-");
+    expect(body).toContain("outcome-");
+    expect(body).toContain("…");
+    expect(body).not.toContain("SUBJECT-END");
+    expect(body).not.toContain("OUTCOME-END");
+    expect(body).not.toContain(ESC);
+    expect(body.length).toBeLessThan(5_000);
+  });
+
   test("numbers the program and keeps wrapped code clear of the gutter", () => {
     const body = render(stateWithRun({ detail: DETAIL }), 56, 60).join("\n");
 
     expect(body).toContain("1  const state = await");
     // The wrapped remainder is indented past the gutter rather than starting under the numbers.
     expect(body).toMatch(/\n│ {4}\S/u);
+  });
+
+  test("labels a truncated durable source preview", () => {
+    const detail: TuiExecutionDetail = {
+      ...DETAIL,
+      sourceArtifact: {
+        artifactId: "artifact-source",
+        path: ".noesis/artifacts/codemode/0370194c/source.js",
+        mediaType: "text/javascript",
+        preview: "const partial = true;",
+        truncated: true,
+      },
+    };
+    const body = render(stateWithRun({ detail }), 88, 60).join("\n");
+
+    expect(body).toContain("SOURCE preview truncated");
+    expect(body).toContain("1  const partial = true;");
   });
 
   test("puts the error above the program and does not repeat it as a result", () => {
@@ -180,18 +224,121 @@ describe("run inspector panel", () => {
     expect(body).toContain("execution  exec_7d31c0a4");
   });
 
+  test("sanitizes hostile terminal controls in phase text before rendering", () => {
+    const detail: TuiExecutionDetail = {
+      ...DETAIL,
+      phases: [
+        {
+          index: 0,
+          name: `prepare${ESC}[31m\u0007phase`,
+          status: `pending${ESC}[32m`,
+          error: `bad${ESC}[2J\u0000news`,
+        },
+      ],
+    };
+    const body = render(stateWithRun({ detail }), 88, 60).join("\n");
+
+    expect(body).not.toContain(ESC);
+    expect(body).not.toContain("\u0007");
+    expect(body).not.toContain("\u0000");
+    expect(body).toContain("prepare [31m phase");
+    expect(body).toContain("pending [32m");
+    expect(body).toContain("bad [2J news");
+  });
+
+  test("sanitizes every scalar metadata boundary without flattening content sections", () => {
+    const hostile = `${ESC}]52;c;copied\u0007\nINJECTED`;
+    const detail: TuiExecutionDetail = {
+      ...DETAIL,
+      executionId: `exec${hostile}`,
+      parentExecutionId: `parent${hostile}`,
+      catalogDigest: `catalog${hostile}`,
+      sourceDigest: `source${hostile}`,
+      startedAt: `started${hostile}`,
+      completedAt: `completed${hostile}`,
+      stdoutArtifact: {
+        artifactId: "artifact-hostile",
+        path: `stdout${hostile}`,
+        mediaType: "text/plain",
+        preview: "first\nsecond",
+        truncated: false,
+      },
+    };
+    const state = stateWithRun({ detail });
+    const timeline = state.timeline.map((entry) =>
+      entry.kind === "action"
+        ? {
+            ...entry,
+            name: `${entry.name}${hostile}`,
+          }
+        : entry,
+    );
+    const rows = render({ ...state, timeline }, 120, 100);
+    const body = rows.join("\n");
+
+    expect(body).not.toContain(ESC);
+    expect(body).not.toContain("\u0007");
+    expect(body).toContain("]52;c;copied  INJECTED");
+    expect(rows.findIndex((row) => row.includes("first")) + 1).toBe(
+      rows.findIndex((row) => row.includes("second")),
+    );
+  });
+
+  test("preserves leading, trailing, and whitespace-only artifact preview rows", () => {
+    const detail: TuiExecutionDetail = {
+      ...DETAIL,
+      stdoutArtifact: {
+        artifactId: "artifact-1",
+        path: ".noesis/artifacts/codemode/0370194c/stdout.log",
+        mediaType: "text/plain",
+        preview: "\n  indented\ntrailing\n",
+        truncated: false,
+      },
+      stderrArtifact: {
+        artifactId: "artifact-2",
+        path: ".noesis/artifacts/codemode/0370194c/stderr.log",
+        mediaType: "text/plain",
+        preview: " \n\t",
+        truncated: false,
+      },
+    };
+    const rows = render(stateWithRun({ detail }), 88, 80);
+    const stdout = rows.findIndex((row) => row.includes("STDOUT"));
+    const content = (offset: number): string => (rows[stdout + offset]?.slice(2, -2) ?? "").trimEnd();
+    const body = rows.join("\n");
+
+    expect(stdout).toBeGreaterThanOrEqual(0);
+    expect(content(1)).toBe("");
+    expect(content(2)).toBe("  indented");
+    expect(content(3)).toBe("trailing");
+    expect(content(4)).toBe("");
+    expect(body).not.toContain("(empty)");
+  });
+
+  test("renders pending and unknown statuses without success semantics", () => {
+    const detail: TuiExecutionDetail = {
+      ...DETAIL,
+      phases: [
+        { index: 0, name: "queued", status: "pending" },
+        { index: 1, name: "unexpected", status: "mystery" },
+      ],
+    };
+    const colored = render({ ...stateWithRun({ detail }), colorEnabled: true }, 88, 60).join("\n");
+    const fallback = stateWithRun();
+    const [unknownTitle] = render({ ...fallback, timeline: [], colorEnabled: false }, 88, 24);
+
+    expect(colored).toContain(`${YELLOW}○${RESET} queued`);
+    expect(colored).toContain(`${YELLOW}?${RESET} unexpected`);
+    expect(colored).not.toContain("✓ queued");
+    expect(colored).not.toContain("✓ unexpected");
+    expect(unknownTitle).toContain("? unknown");
+    expect(unknownTitle).not.toContain("✓ unknown");
+  });
+
   test("reports the visible range and clamps scrolling to the content", () => {
     const whole = render(stateWithRun({ detail: DETAIL }), 88, 60);
-    const scrolled = render(
-      stateWithRun({ detail: DETAIL, scroll: 6 }),
-      88,
-      12,
-    );
-    const overscrolled = render(
-      stateWithRun({ detail: DETAIL, scroll: 900 }),
-      88,
-      12,
-    );
+    const scrolled = render(stateWithRun({ detail: DETAIL, scroll: 6 }), 88, 12);
+    const overscrolled = render(stateWithRun({ detail: DETAIL, scroll: 900 }), 88, 12);
 
     expect(whole.at(-1)).toContain("25 rows");
     expect(scrolled.at(-1)).toContain("7–16 of 25");
@@ -202,13 +349,7 @@ describe("run inspector panel", () => {
   test("renders nothing without an open inspector or usable space", () => {
     const state = stateWithRun({ detail: DETAIL });
 
-    expect(
-      renderRunInspector(
-        reduceTui(state, { type: "inspector-closed" }),
-        88,
-        24,
-      ),
-    ).toEqual([]);
+    expect(renderRunInspector(reduceTui(state, { type: "inspector-closed" }), 88, 24)).toEqual([]);
     expect(renderRunInspector(state, 8, 24)).toEqual([]);
     expect(renderRunInspector(state, 88, 2)).toEqual([]);
   });

@@ -595,10 +595,29 @@ describe("Noesis TUI reducer", () => {
     });
     expect(state.inspector?.status).toBe("fallback");
 
-    state = reduceTui(state, { type: "inspector-scrolled", delta: 5 });
-    expect(state.inspector?.scroll).toBe(5);
-    state = reduceTui(state, { type: "inspector-scrolled", delta: -50 });
+    state = reduceTui(state, {
+      type: "inspector-scrolled",
+      delta: 50,
+      maxScroll: 8,
+    });
+    expect(state.inspector?.scroll).toBe(8);
+    state = reduceTui(state, {
+      type: "inspector-scrolled",
+      delta: -50,
+      maxScroll: 8,
+    });
     expect(state.inspector?.scroll).toBe(0);
+    state = reduceTui(state, {
+      type: "inspector-scrolled",
+      delta: 7,
+      maxScroll: 8,
+    });
+    state = reduceTui(state, {
+      type: "inspector-scrolled",
+      delta: 0,
+      maxScroll: 3,
+    });
+    expect(state.inspector?.scroll).toBe(3);
 
     state = reduceTui(state, { type: "inspector-closed" });
     expect(state.inspector).toBeUndefined();

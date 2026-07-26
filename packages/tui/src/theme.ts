@@ -24,15 +24,10 @@ export const ANSI = {
   magenta: "\u001b[35m",
 } as const;
 
-export const styled = (
-  enabled: boolean,
-  codes: string,
-  text: string,
-): string => (enabled ? `${codes}${text}${ANSI.reset}` : text);
+export const styled = (enabled: boolean, codes: string, text: string): string =>
+  enabled ? `${codes}${text}${ANSI.reset}` : text;
 
-export function shouldUseColor(
-  env: Readonly<Record<string, string | undefined>>,
-): boolean {
+export function shouldUseColor(env: Readonly<Record<string, string | undefined>>): boolean {
   return !("NO_COLOR" in env) && env["TERM"] !== "dumb";
 }
 
@@ -40,20 +35,14 @@ export function elideText(text: string, width: number): string {
   const truncated = truncateToWidth(text, Math.max(0, width), "…");
   // pi-tui defensively appends resets while truncating. Do not introduce ANSI into plain text,
   // especially under NO_COLOR; preserve the helper's ANSI-safe behavior for styled input.
-  return text.includes("\u001b[")
-    ? truncated
-    : truncated.replaceAll("\u001b[0m", "");
+  return text.includes("\u001b[") ? truncated : truncated.replaceAll("\u001b[0m", "");
 }
 
 export function safeTerminalText(text: string): string {
   return [...text]
     .map((character) => {
       const code = character.codePointAt(0) ?? 0;
-      return code === 9 ||
-        code === 10 ||
-        (code >= 32 && !(code >= 127 && code <= 159))
-        ? character
-        : " ";
+      return code === 9 || code === 10 || (code >= 32 && !(code >= 127 && code <= 159)) ? character : " ";
     })
     .join("")
     .replaceAll("\u001b", "");
@@ -73,17 +62,9 @@ export function createMarkdownTheme(colorEnabled: boolean): MarkdownTheme {
     quoteBorder: (text) => styled(colorEnabled, ANSI.cyan, text),
     hr: (text) => styled(colorEnabled, ANSI.dim, text),
     listBullet: (text) => styled(colorEnabled, ANSI.cyan, text),
-    bold: colorEnabled
-      ? (text) => `${ANSI.bold}${text}${ANSI.reset}`
-      : identity,
-    italic: colorEnabled
-      ? (text) => `${ANSI.italic}${text}${ANSI.reset}`
-      : identity,
-    strikethrough: colorEnabled
-      ? (text) => `${ANSI.strikethrough}${text}${ANSI.reset}`
-      : identity,
-    underline: colorEnabled
-      ? (text) => `${ANSI.underline}${text}${ANSI.reset}`
-      : identity,
+    bold: colorEnabled ? (text) => `${ANSI.bold}${text}${ANSI.reset}` : identity,
+    italic: colorEnabled ? (text) => `${ANSI.italic}${text}${ANSI.reset}` : identity,
+    strikethrough: colorEnabled ? (text) => `${ANSI.strikethrough}${text}${ANSI.reset}` : identity,
+    underline: colorEnabled ? (text) => `${ANSI.underline}${text}${ANSI.reset}` : identity,
   };
 }

@@ -169,8 +169,10 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
         clearTimeout(timeout);
         reject(error);
       });
-      child.once("exit", (code, signal) => {
+      child.once("close", (code, signal) => {
         clearTimeout(timeout);
+        output += stdoutDecoder.end();
+        output += stderrDecoder.end();
         resolveExit({ code, signal });
       });
     });
@@ -397,7 +399,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
 
     expect(output).not.toContain("__NOESIS_PREMATURE_SUBMIT__");
     expect(turns).toHaveLength(1);
-    expect(turns[0]?.input).toBe("safe\nBAD [2J  31m");
+    expect(turns[0]?.input).toBe("safe\nBAD [2J  31m ");
     expect(containsUnsafeTextControl(turns[0]?.input ?? "")).toBe(false);
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);

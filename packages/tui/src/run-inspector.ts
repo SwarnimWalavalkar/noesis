@@ -1,14 +1,6 @@
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import {
-  formatCount,
-  formatDuration,
-  sourceOf,
-  summarizeNestedAction,
-} from "./action-summary.ts";
-import type {
-  TuiExecutionArtifact,
-  TuiExecutionDetail,
-} from "./runtime-port.ts";
+import { formatCount, formatDuration, sourceOf, summarizeNestedAction } from "./action-summary.ts";
+import type { TuiExecutionArtifact, TuiExecutionDetail } from "./runtime-port.ts";
 import {
   childActions,
   timelineActions,
@@ -21,9 +13,15 @@ import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 
 export const INSPECTOR_HINT = "↑/↓ · pgup/pgdn scroll · esc close";
 
+export interface RenderedRunInspector {
+  readonly rows: readonly string[];
+  readonly maxScroll: number;
+}
+
 /** Codemode results carry whole file contents, so every section is bounded before it is styled. */
 const SECTION_MAX_CHARACTERS = 20_000;
 const DIGEST_DISPLAY_CHARACTERS = 24;
+const CALL_SUMMARY_MAX_CHARACTERS = 256;
 
 interface Section {
   readonly label: string;
@@ -39,6 +37,16 @@ function boundedText(text: string): string {
     : `${safe.slice(0, SECTION_MAX_CHARACTERS)}\n… truncated`;
 }
 
+/** Inspector metadata occupies one framed row; controls and embedded rows are never structural. */
+function safeInspectorScalar(text: string): string {
+  return safeTerminalText(text).replaceAll("\t", " ").replaceAll("\n", " ");
+}
+
+function boundedInspectorScalar(text: string, maxCharacters: number): string {
+  const safe = safeInspectorScalar(text);
+  return safe.length <= maxCharacters ? safe : `${safe.slice(0, maxCharacters)}…`;
+}
+
 function encodeJson(value: unknown): string {
   try {
     return JSON.stringify(value, undefined, 2) ?? String(value);
@@ -47,10 +55,10 @@ function encodeJson(value: unknown): string {
   }
 }
 
-const shortDigest = (digest: string): string =>
-  digest.length > DIGEST_DISPLAY_CHARACTERS
-    ? `${digest.slice(0, DIGEST_DISPLAY_CHARACTERS)}…`
-    : digest;
+const shortDigest = (digest: string): string => {
+  const safe = safeInspectorScalar(digest);
+  return safe.length > DIGEST_DISPLAY_CHARACTERS ? `${safe.slice(0, DIGEST_DISPLAY_CHARACTERS)}…` : safe;
+};
 
 /**
  * Right-aligned dim line numbers, so a stack trace or phase error can be located by eye. Long
@@ -81,25 +89,30 @@ function keyValueLines(
   colorEnabled: boolean,
 ): readonly string[] {
   const keyWidth = Math.max(0, ...entries.map(([key]) => key.length));
-  return entries.map(
-    ([key, value]) =>
-      `${styled(colorEnabled, ANSI.dim, key.padEnd(keyWidth))}  ${value}`,
-  );
+  return entries.map(([key, value]) => `${styled(colorEnabled, ANSI.dim, key.padEnd(keyWidth))}  ${value}`);
 }
 
 const statusGlyph = (status: string): string =>
   status === "running" || status === "paused"
     ? "●"
-    : status === "failed" || status === "cancelled" || status === "interrupted"
-      ? "×"
-      : "✓";
+    : status === "pending"
+      ? "○"
+      : status === "failed" || status === "cancelled" || status === "interrupted"
+        ? "×"
+        : status === "completed"
+          ? "✓"
+          : "?";
 
 const statusColor = (status: string): string =>
   status === "running" || status === "paused"
     ? ANSI.cyan
-    : status === "failed" || status === "cancelled" || status === "interrupted"
-      ? ANSI.red
-      : ANSI.green;
+    : status === "pending"
+      ? ANSI.yellow
+      : status === "failed" || status === "cancelled" || status === "interrupted"
+        ? ANSI.red
+        : status === "completed"
+          ? ANSI.green
+          : ANSI.yellow;
 
 function artifactSection(
   label: string,
@@ -107,50 +120,49 @@ function artifactSection(
   colorEnabled: boolean,
 ): readonly Section[] {
   if (!artifact) return [];
-  const preview = artifact.preview.trim();
+  const preview = artifact.preview;
   return [
     {
       label,
-      note: `${artifact.path}${artifact.truncated ? " · preview truncated" : ""}`,
-      lines: preview
-        ? boundedText(preview).split("\n")
-        : [styled(colorEnabled, ANSI.dim, "(empty)")],
+      note: `${safeInspectorScalar(artifact.path)}${artifact.truncated ? " · preview truncated" : ""}`,
+      lines: preview ? boundedText(preview).split("\n") : [styled(colorEnabled, ANSI.dim, "(empty)")],
     },
   ];
 }
 
 /** Nested calls read as a numbered list whose columns line up with the transcript summaries. */
-function callsSection(
-  children: readonly TuiAgentAction[],
-  colorEnabled: boolean,
-): readonly Section[] {
+function callsSection(children: readonly TuiAgentAction[], colorEnabled: boolean): readonly Section[] {
   if (children.length === 0) return [];
   const ordinalWidth = String(children.length).length;
-  const nameWidth = Math.max(...children.map((child) => child.name.length));
+  const summaries = children.map((child) => {
+    const summary = summarizeNestedAction(child);
+    return {
+      child,
+      summary: {
+        name: boundedInspectorScalar(summary.name, CALL_SUMMARY_MAX_CHARACTERS),
+        ...(summary.subject
+          ? { subject: boundedInspectorScalar(summary.subject, CALL_SUMMARY_MAX_CHARACTERS) }
+          : {}),
+        ...(summary.outcome
+          ? { outcome: boundedInspectorScalar(summary.outcome, CALL_SUMMARY_MAX_CHARACTERS) }
+          : {}),
+      },
+    };
+  });
+  const nameWidth = Math.max(...summaries.map(({ summary }) => summary.name.length));
   return [
     {
       label: "calls",
-      lines: children.map((child, index) => {
-        const summary = summarizeNestedAction(child);
+      lines: summaries.map(({ child, summary }, index) => {
         const trailing = [
           summary.subject,
           summary.outcome,
-          child.durationMs === undefined
-            ? undefined
-            : formatDuration(child.durationMs),
+          child.durationMs === undefined ? undefined : formatDuration(child.durationMs),
         ].filter((part): part is string => Boolean(part));
         return [
-          styled(
-            colorEnabled,
-            ANSI.dim,
-            String(index + 1).padStart(ordinalWidth),
-          ),
-          styled(
-            colorEnabled,
-            statusColor(child.status),
-            statusGlyph(child.status),
-          ),
-          child.name.padEnd(nameWidth),
+          styled(colorEnabled, ANSI.dim, String(index + 1).padStart(ordinalWidth)),
+          styled(colorEnabled, statusColor(child.status), statusGlyph(child.status)),
+          summary.name.padEnd(nameWidth),
           styled(colorEnabled, ANSI.dim, trailing.join(" · ")),
         ].join(" ");
       }),
@@ -158,25 +170,25 @@ function callsSection(
   ];
 }
 
-function phasesSection(
-  detail: TuiExecutionDetail | undefined,
-  colorEnabled: boolean,
-): readonly Section[] {
+function phasesSection(detail: TuiExecutionDetail | undefined, colorEnabled: boolean): readonly Section[] {
   const phases = detail?.phases ?? [];
   if (phases.length === 0) return [];
   return [
     {
       label: "phases",
-      lines: phases.flatMap((phase) => [
-        `${styled(colorEnabled, ANSI.dim, String(phase.index + 1))} ${styled(
-          colorEnabled,
-          statusColor(phase.status),
-          statusGlyph(phase.status),
-        )} ${phase.name} ${styled(colorEnabled, ANSI.dim, `· ${phase.status}`)}`,
-        ...(phase.error
-          ? [`  ${styled(colorEnabled, ANSI.red, phase.error)}`]
-          : []),
-      ]),
+      lines: phases.flatMap((phase) => {
+        const name = safeInspectorScalar(phase.name);
+        const status = safeInspectorScalar(phase.status);
+        const error = phase.error ? boundedText(phase.error) : undefined;
+        return [
+          `${styled(colorEnabled, ANSI.dim, String(phase.index + 1))} ${styled(
+            colorEnabled,
+            statusColor(status),
+            statusGlyph(status),
+          )} ${name} ${styled(colorEnabled, ANSI.dim, `· ${status}`)}`,
+          ...(error ? [`  ${styled(colorEnabled, ANSI.red, error)}`] : []),
+        ];
+      }),
     },
   ];
 }
@@ -187,28 +199,19 @@ function provenanceSection(
 ): readonly Section[] {
   if (!detail) return [];
   const entries: (readonly [string, string])[] = [
-    ["execution", detail.executionId],
+    ["execution", safeInspectorScalar(detail.executionId)],
     ...(detail.parentExecutionId
-      ? ([["parent", detail.parentExecutionId]] as const)
+      ? ([["parent", safeInspectorScalar(detail.parentExecutionId)]] as const)
       : []),
-    ...(detail.catalogDigest
-      ? ([["catalog", shortDigest(detail.catalogDigest)]] as const)
-      : []),
-    ...(detail.sourceDigest
-      ? ([["source", shortDigest(detail.sourceDigest)]] as const)
-      : []),
-    ["started", detail.startedAt],
-    ...(detail.completedAt
-      ? ([["completed", detail.completedAt]] as const)
-      : []),
+    ...(detail.catalogDigest ? ([["catalog", shortDigest(detail.catalogDigest)]] as const) : []),
+    ...(detail.sourceDigest ? ([["source", shortDigest(detail.sourceDigest)]] as const) : []),
+    ["started", safeInspectorScalar(detail.startedAt)],
+    ...(detail.completedAt ? ([["completed", safeInspectorScalar(detail.completedAt)]] as const) : []),
   ];
   return [{ label: "provenance", lines: keyValueLines(entries, colorEnabled) }];
 }
 
-function errorText(
-  action: TuiAgentAction,
-  detail: TuiExecutionDetail | undefined,
-): string | undefined {
+function errorText(action: TuiAgentAction, detail: TuiExecutionDetail | undefined): string | undefined {
   if (detail?.error) return detail.error;
   if (action.status !== "failed") return undefined;
   const output = action.output;
@@ -239,9 +242,7 @@ function buildSections(
   // payload again as a result would just push the useful sections further down.
   const result =
     detail?.result ??
-    (action.output === undefined || (error && !detail?.error)
-      ? undefined
-      : encodeJson(action.output));
+    (action.output === undefined || (error && !detail?.error) ? undefined : encodeJson(action.output));
   return [
     // The reason a failed run gets opened is the error, so it never sits below the program.
     ...(error
@@ -260,6 +261,7 @@ function buildSections(
       ? [
           {
             label: "source",
+            ...(detail?.sourceArtifact?.truncated ? { note: "preview truncated" } : {}),
             lines: numberedCode(source, "js", width, colorEnabled),
           },
         ]
@@ -268,11 +270,7 @@ function buildSections(
         : [
             {
               label: "input",
-              lines: highlightCode(
-                boundedText(encodeJson(action.input)),
-                "json",
-                colorEnabled,
-              ),
+              lines: highlightCode(boundedText(encodeJson(action.input)), "json", colorEnabled),
             },
           ]),
     ...(result
@@ -289,17 +287,10 @@ function buildSections(
   ];
 }
 
-function sectionRule(
-  section: Section,
-  width: number,
-  colorEnabled: boolean,
-): string {
+function sectionRule(section: Section, width: number, colorEnabled: boolean): string {
   const label = styled(colorEnabled, ANSI.bold, section.label.toUpperCase());
-  const note = section.note
-    ? ` ${styled(colorEnabled, ANSI.dim, section.note)}`
-    : "";
-  const used =
-    section.label.length + (section.note ? section.note.length + 1 : 0);
+  const note = section.note ? ` ${styled(colorEnabled, ANSI.dim, section.note)}` : "";
+  const used = section.label.length + (section.note ? section.note.length + 1 : 0);
   const fill = Math.max(0, width - used - 4);
   return `${styled(colorEnabled, ANSI.dim, "──")} ${label}${note} ${styled(colorEnabled, ANSI.dim, "─".repeat(fill))}`;
 }
@@ -314,12 +305,10 @@ function identityLines(
   const detail = inspector.detail;
   const callCount = Math.max(children.length, detail?.callCount ?? 0);
   const parts = [
-    detail?.kind ?? (sourceOf(action) ? "codemode" : "tool"),
+    detail ? safeInspectorScalar(detail.kind) : sourceOf(action) ? "codemode" : "tool",
     ...(callCount > 0 ? [formatCount(callCount, "call")] : []),
-    ...(action.durationMs === undefined
-      ? []
-      : [formatDuration(action.durationMs)]),
-    ...(detail ? [detail.executionId] : []),
+    ...(action.durationMs === undefined ? [] : [formatDuration(action.durationMs)]),
+    ...(detail ? [safeInspectorScalar(detail.executionId)] : []),
   ];
   const note =
     inspector.status === "loading"
@@ -360,38 +349,27 @@ function frameEdge(
   );
 }
 
-export function renderRunInspector(
+export function renderRunInspectorFrame(
   state: NoesisTuiState,
   width: number,
   height: number,
-): string[] {
+): RenderedRunInspector {
   const inspector = state.inspector;
-  if (!inspector || width < 16 || height < 4) return [];
+  if (!inspector || width < 16 || height < 4) return { rows: [], maxScroll: 0 };
   const colorEnabled = state.colorEnabled;
   const actions = timelineActions(state.timeline);
-  const action = actions.find(
-    (candidate) => candidate.actionId === inspector.actionId,
-  );
+  const action = actions.find((candidate) => candidate.actionId === inspector.actionId);
   const inner = width - 4;
   const body = action
     ? [
-        ...identityLines(
-          action,
-          childActions(actions, action.actionId),
-          inspector,
-          colorEnabled,
-        ),
+        ...identityLines(action, childActions(actions, action.actionId), inspector, colorEnabled),
         ...buildSections(
           action,
           childActions(actions, action.actionId),
           inspector.detail,
           inner,
           colorEnabled,
-        ).flatMap((section) => [
-          "",
-          sectionRule(section, inner, colorEnabled),
-          ...section.lines,
-        ]),
+        ).flatMap((section) => ["", sectionRule(section, inner, colorEnabled), ...section.lines]),
       ]
     : ["This run is no longer available."];
   const wrapped = body.flatMap((line) => wrapTextWithAnsi(line, inner));
@@ -401,10 +379,14 @@ export function renderRunInspector(
   const maxScroll = Math.max(0, wrapped.length - visibleRows);
   const scroll = Math.min(inspector.scroll, maxScroll);
   const rows = wrapped.slice(scroll, scroll + visibleRows);
-  const status = inspector.detail?.status ?? action?.status ?? "unknown";
+  const status = safeInspectorScalar(inspector.detail?.status ?? action?.status ?? "unknown");
   const title = `${styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "RUN")}${
     action
-      ? `${styled(colorEnabled, ANSI.dim, " · ")}${styled(colorEnabled, ANSI.bold, action.name)}`
+      ? `${styled(colorEnabled, ANSI.dim, " · ")}${styled(
+          colorEnabled,
+          ANSI.bold,
+          safeInspectorScalar(action.name),
+        )}`
       : ""
   }`;
   const position =
@@ -413,40 +395,31 @@ export function renderRunInspector(
       : formatCount(wrapped.length, "row");
 
   // The right frame edge doubles as a scrollbar track so the panel shows how much lies below.
-  const thumbSize =
-    maxScroll > 0
-      ? Math.max(1, Math.round((visibleRows / wrapped.length) * visibleRows))
-      : 0;
-  const thumbStart =
-    maxScroll > 0
-      ? Math.round((scroll / maxScroll) * (visibleRows - thumbSize))
-      : 0;
+  const thumbSize = maxScroll > 0 ? Math.max(1, Math.round((visibleRows / wrapped.length) * visibleRows)) : 0;
+  const thumbStart = maxScroll > 0 ? Math.round((scroll / maxScroll) * (visibleRows - thumbSize)) : 0;
   const dim = (text: string): string => styled(colorEnabled, ANSI.dim, text);
-  return [
-    frameEdge(
-      { left: "╭", right: "╮" },
-      title,
-      styled(
+  return {
+    maxScroll,
+    rows: [
+      frameEdge(
+        { left: "╭", right: "╮" },
+        title,
+        styled(colorEnabled, statusColor(status), `${statusGlyph(status)} ${status}`),
+        width,
         colorEnabled,
-        statusColor(status),
-        `${statusGlyph(status)} ${status}`,
       ),
-      width,
-      colorEnabled,
-    ),
-    ...rows.map((line, index) => {
-      const scrollbar =
-        thumbSize > 0 && index >= thumbStart && index < thumbStart + thumbSize
-          ? styled(colorEnabled, ANSI.cyan, "┃")
-          : dim("│");
-      return `${dim("│")} ${padTo(elideText(line, inner), inner)} ${scrollbar}`;
-    }),
-    frameEdge(
-      { left: "╰", right: "╯" },
-      dim(INSPECTOR_HINT),
-      dim(position),
-      width,
-      colorEnabled,
-    ),
-  ];
+      ...rows.map((line, index) => {
+        const scrollbar =
+          thumbSize > 0 && index >= thumbStart && index < thumbStart + thumbSize
+            ? styled(colorEnabled, ANSI.cyan, "┃")
+            : dim("│");
+        return `${dim("│")} ${padTo(elideText(line, inner), inner)} ${scrollbar}`;
+      }),
+      frameEdge({ left: "╰", right: "╯" }, dim(INSPECTOR_HINT), dim(position), width, colorEnabled),
+    ],
+  };
+}
+
+export function renderRunInspector(state: NoesisTuiState, width: number, height: number): string[] {
+  return [...renderRunInspectorFrame(state, width, height).rows];
 }

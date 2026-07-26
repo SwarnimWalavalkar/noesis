@@ -1,5 +1,6 @@
 import {
   Editor,
+  matchesKey,
   type AutocompleteProvider,
   type Component,
   type Focusable,
@@ -83,7 +84,12 @@ export function createSafeEditor(
   let inputState: SafeEditorInputState = { kind: "keyboard", pending: "" };
   let ambiguityTimer: NodeJS.Timeout | undefined;
   let submit: ((text: string) => void) | undefined;
-  editor.onSubmit = (text) => submit?.(sanitizeEditorText(text));
+  let pendingSubmissionText: string | undefined;
+  editor.onSubmit = (text) => {
+    const submittedText = pendingSubmissionText ?? text;
+    pendingSubmissionText = undefined;
+    submit?.(sanitizeEditorText(submittedText));
+  };
 
   const clearAmbiguityTimer = (): void => {
     if (ambiguityTimer) clearTimeout(ambiguityTimer);
@@ -101,7 +107,9 @@ export function createSafeEditor(
         return !(code >= 128 && code <= 159);
       })
       .join("");
-    if (safe) editor.handleInput(safe);
+    if (!safe) return;
+    if (matchesKey(safe, "enter")) pendingSubmissionText = editor.getExpandedText();
+    editor.handleInput(safe);
   };
 
   const insertSanitizedPaste = (text: string): void => {

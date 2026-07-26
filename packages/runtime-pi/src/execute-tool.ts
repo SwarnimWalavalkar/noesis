@@ -15,6 +15,7 @@ const executeParametersJsonSchema = z.toJSONSchema(executeParameters);
 const MAX_SOURCE_BYTES = 128 * 1024;
 
 export type PiCodeExecutionEvent =
+  | { readonly type: "started"; readonly executionId: string }
   | { readonly type: "progress"; readonly value: JsonValue }
   | {
       readonly type: "tool-start";
@@ -60,6 +61,7 @@ export interface PiCodeExecutionAdapter {
 export type PiExecuteToolDetails =
   | {
       readonly kind: "activity";
+      readonly executionId?: string;
       readonly event: PiCodeExecutionEvent;
     }
   | {
@@ -97,15 +99,21 @@ export function createPiExecuteTool(input: {
       else toolSignal?.addEventListener("abort", abortTool, { once: true });
       try {
         if (controller.signal.aborted) throw new Error("Codemode execution was cancelled before start");
+        let executionId: string | undefined;
         const result = await input.prepared.execute(
           params.source,
           params.timeoutMs,
           controller.signal,
           (event) => {
+            if (event.type === "started") executionId = event.executionId;
             input.emit(event, toolCallId);
             onUpdate?.({
               content: [],
-              details: Object.freeze({ kind: "activity", event }),
+              details: Object.freeze({
+                kind: "activity",
+                ...(executionId ? { executionId } : {}),
+                event,
+              }),
             });
           },
         );

@@ -12,8 +12,7 @@ const CYAN = `${ESC}[36m`;
 const DIM = `${ESC}[2m`;
 const RESET = `${ESC}[0m`;
 
-const highlight = (code: string, language: string): string[] =>
-  highlightCode(code, language, true);
+const highlight = (code: string, language: string): string[] => highlightCode(code, language, true);
 
 describe("syntax language resolution", () => {
   test.each([
@@ -36,10 +35,7 @@ describe("syntax language resolution", () => {
 
 describe("code highlighting", () => {
   test("returns the source unchanged for an unrecognized language", () => {
-    expect(highlight("SELECT 1;\nSELECT 2;", "sql")).toEqual([
-      "SELECT 1;",
-      "SELECT 2;",
-    ]);
+    expect(highlight("SELECT 1;\nSELECT 2;", "sql")).toEqual(["SELECT 1;", "SELECT 2;"]);
   });
 
   test("emits no escape sequences when color is disabled", () => {
@@ -49,10 +45,7 @@ describe("code highlighting", () => {
   });
 
   test("classifies the parts of a codemode call", () => {
-    const [line] = highlight(
-      "const file = await tools.files.read({ n: 1 });",
-      "js",
-    );
+    const [line] = highlight("const file = await tools.files.read({ n: 1 });", "js");
 
     expect(line).toContain(`${MAGENTA}const${RESET}`);
     expect(line).toContain(`${MAGENTA}await${RESET}`);
@@ -61,16 +54,11 @@ describe("code highlighting", () => {
     expect(line).toContain("tools");
     expect(line).toContain(`${YELLOW}1${RESET}`);
     expect(line).toContain(`${DIM};${RESET}`);
-    expect(stripAnsi(line ?? "")).toBe(
-      "const file = await tools.files.read({ n: 1 });",
-    );
+    expect(stripAnsi(line ?? "")).toBe("const file = await tools.files.read({ n: 1 });");
   });
 
   test("dims comments and colors strings and constants", () => {
-    const lines = highlight(
-      '// why\nlet done = true;\nlet name = "noesis";',
-      "js",
-    );
+    const lines = highlight('// why\nlet done = true;\nlet name = "noesis";', "js");
 
     expect(lines[0]).toBe(`${DIM}// why${RESET}`);
     expect(lines[1]).toContain(`${YELLOW}true${RESET}`);
@@ -91,9 +79,23 @@ describe("code highlighting", () => {
 
     expect(line).toContain(`${GREEN}\`rg ${RESET}`);
     expect(line).toContain(`${YELLOW}1${RESET}`);
-    expect(stripAnsi(line ?? "")).toBe(
-      "await run(`rg ${query} ${count + 1}`);",
-    );
+    expect(stripAnsi(line ?? "")).toBe("await run(`rg ${query} ${count + 1}`);");
+  });
+
+  test("skips closing braces inside regex literals in template interpolations", () => {
+    const source = `const value = \`x\${/}/g}\`;`;
+    const [line] = highlight(source, "js");
+
+    expect(line).toContain(`${GREEN}/}/g${RESET}`);
+    expect(stripAnsi(line ?? "")).toBe(source);
+  });
+
+  test("does not treat division as a regex while matching template braces", () => {
+    const source = `const value = \`\${total / count} \${(total) / 2}\`;`;
+    const [line] = highlight(source, "js");
+
+    expect((line?.split(`${DIM}/${RESET}`).length ?? 1) - 1).toBe(2);
+    expect(stripAnsi(line ?? "")).toBe(source);
   });
 
   test("keeps a multi-line block comment on its own lines", () => {
@@ -106,10 +108,7 @@ describe("code highlighting", () => {
   });
 
   test("distinguishes JSON keys from string values", () => {
-    const lines = highlight(
-      '{\n  "path": "state.ts",\n  "ok": true\n}',
-      "json",
-    );
+    const lines = highlight('{\n  "path": "state.ts",\n  "ok": true\n}', "json");
 
     expect(lines[1]).toContain(`${CYAN}"path"${RESET}`);
     expect(lines[1]).toContain(`${GREEN}"state.ts"${RESET}`);
@@ -157,25 +156,15 @@ describe("code highlighting", () => {
     ].join("\n");
 
     for (const line of highlight(source, "js")) {
-      const opened = [...line.matchAll(SGR_PATTERN)].filter(
-        (match) => match[0] !== RESET,
-      ).length;
-      const closed = [...line.matchAll(SGR_PATTERN)].filter(
-        (match) => match[0] === RESET,
-      ).length;
+      const opened = [...line.matchAll(SGR_PATTERN)].filter((match) => match[0] !== RESET).length;
+      const closed = [...line.matchAll(SGR_PATTERN)].filter((match) => match[0] === RESET).length;
       expect(closed).toBe(opened);
     }
   });
 
   test("terminates unterminated strings and comments at the source end", () => {
-    expect(stripAnsi(highlight('const a = "open', "js").join("\n"))).toBe(
-      'const a = "open',
-    );
-    expect(stripAnsi(highlight("const a = 1; /* open", "js").join("\n"))).toBe(
-      "const a = 1; /* open",
-    );
-    expect(stripAnsi(highlight("const a = `open ${b", "js").join("\n"))).toBe(
-      "const a = `open ${b",
-    );
+    expect(stripAnsi(highlight('const a = "open', "js").join("\n"))).toBe('const a = "open');
+    expect(stripAnsi(highlight("const a = 1; /* open", "js").join("\n"))).toBe("const a = 1; /* open");
+    expect(stripAnsi(highlight("const a = `open ${b", "js").join("\n"))).toBe("const a = `open ${b");
   });
 });

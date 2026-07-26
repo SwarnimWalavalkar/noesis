@@ -126,7 +126,13 @@ function piToolUpdatePayload(value: unknown): unknown {
     !("event" in details)
   )
     return value;
-  return Object.freeze({ kind: "activity", activity: details.event });
+  const executionId =
+    "executionId" in details && typeof details.executionId === "string" ? details.executionId : undefined;
+  return Object.freeze({
+    kind: "activity",
+    ...(executionId ? { executionId } : {}),
+    activity: details.event,
+  });
 }
 
 export interface PiAgentRuntime extends NoesisAgentRuntime {

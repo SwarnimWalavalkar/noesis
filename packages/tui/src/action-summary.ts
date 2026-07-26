@@ -1,4 +1,5 @@
 import type { TuiAgentAction } from "./state.ts";
+import { safeTerminalText } from "./theme.ts";
 
 /**
  * Codemode routes nearly all work through a single `execute` call whose nested SDK calls carry
@@ -38,10 +39,16 @@ function booleanField(value: unknown, key: string): boolean | undefined {
 }
 
 export function executionIdOf(action: TuiAgentAction): string | undefined {
-  if (!isRecord(action.output)) return undefined;
-  const details = action.output["details"];
-  if (stringField(details, "kind") !== "result") return undefined;
-  return stringField(details, "executionId");
+  const details = isRecord(action.output) ? action.output["details"] : undefined;
+  if (stringField(details, "kind") === "result") {
+    const completedExecutionId = stringField(details, "executionId");
+    if (completedExecutionId) return completedExecutionId;
+  }
+  if (stringField(action.update, "kind") !== "activity") return undefined;
+  return (
+    stringField(action.update, "executionId") ??
+    stringField(isRecord(action.update) ? action.update["activity"] : undefined, "executionId")
+  );
 }
 
 export function sourceOf(action: TuiAgentAction): string | undefined {
@@ -65,14 +72,21 @@ export function formatBytes(bytes: number): string {
 }
 
 export function formatDuration(milliseconds: number): string {
-  if (milliseconds < 1_000) return `${String(Math.round(milliseconds))}ms`;
-  if (milliseconds < 60_000) return `${(milliseconds / 1_000).toFixed(1)}s`;
-  const minutes = Math.floor(milliseconds / 60_000);
-  const seconds = Math.round((milliseconds % 60_000) / 1_000);
+  const roundedMilliseconds = Math.round(milliseconds);
+  if (roundedMilliseconds < 1_000) return `${String(roundedMilliseconds)}ms`;
+  const tenthsOfASecond = Math.round(milliseconds / 100);
+  if (tenthsOfASecond < 600) return `${(tenthsOfASecond / 10).toFixed(1)}s`;
+  const roundedSeconds = Math.round(milliseconds / 1_000);
+  const minutes = Math.floor(roundedSeconds / 60);
+  const seconds = roundedSeconds % 60;
   return `${String(minutes)}m ${String(seconds).padStart(2, "0")}s`;
 }
 
 const firstLine = (text: string): string => text.split("\n", 1)[0] ?? "";
+
+function summaryLine(text: string): string {
+  return firstLine(safeTerminalText(text));
+}
 
 /** Reduce one nested SDK call to a subject and an outcome, e.g. "state.ts" and "287 lines". */
 type NestedSummarizer = (
@@ -206,6 +220,17 @@ export interface ActionSummary {
   readonly outcome?: string;
 }
 
+function createActionSummary(name: string, subject?: string, outcome?: string): ActionSummary {
+  const safeName = summaryLine(name);
+  const safeSubject = subject === undefined ? undefined : summaryLine(subject);
+  const safeOutcome = outcome === undefined ? undefined : summaryLine(outcome);
+  return {
+    name: safeName,
+    ...(safeSubject ? { subject: safeSubject } : {}),
+    ...(safeOutcome ? { outcome: safeOutcome } : {}),
+  };
+}
+
 export function summarizeNestedAction(action: TuiAgentAction): ActionSummary {
   const summarizer = NESTED_SUMMARIZERS[action.name];
   const summarized = summarizer?.(action.input, action.output);
@@ -217,11 +242,7 @@ export function summarizeNestedAction(action: TuiAgentAction): ActionSummary {
         (action.status === "failed"
           ? (stringField(action.output, "error") ?? "failed")
           : genericOutcome(action.output)));
-  return {
-    name: action.name,
-    ...(subject ? { subject } : {}),
-    ...(outcome ? { outcome: firstLine(outcome) } : {}),
-  };
+  return createActionSummary(action.name, subject, outcome);
 }
 
 /** Collapse repeated nested tool names into `2 files.read · 1 shell.run`, most frequent first. */
@@ -251,11 +272,7 @@ export function summarizeExecuteAction(
   // Once nested calls are visible beneath the row they describe the work better than the opening
   // line of the program does, so the source is only previewed before the first call lands.
   const source = children.length === 0 ? sourceOf(action) : undefined;
-  return {
-    name: action.name,
-    ...(source ? { subject: firstLine(source) } : {}),
-    ...(parts.length > 0 ? { outcome: parts.join(" · ") } : {}),
-  };
+  return createActionSummary(action.name, source, parts.length > 0 ? parts.join(" · ") : undefined);
 }
 
 export function summarizeAction(action: TuiAgentAction, children: readonly TuiAgentAction[]): ActionSummary {
