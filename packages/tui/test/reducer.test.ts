@@ -16,6 +16,14 @@ import {
 } from "../src/index.ts";
 
 describe("Noesis TUI reducer", () => {
+  test("uses the built-in Codex model and reasoning defaults", () => {
+    expect(initialTuiState("pi")).toMatchObject({
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      reasoningLevel: "high",
+    });
+  });
+
   test("builds deterministic picker rows in most-recently-active order", () => {
     const items = createSessionPickerItems([
       {

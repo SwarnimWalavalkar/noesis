@@ -247,7 +247,9 @@ Session startup:
   noesis --resume SESSION_ID   Resume that exact prior session
 
 Agent options:
-  --provider ID  --model ID  --thinking-level LEVEL
+  --provider ID              Provider (default: openai-codex)
+  --model ID                 Model (Codex default: gpt-5.6-sol)
+  --thinking-level LEVEL     Reasoning level (default: high)
 
 Home:
   Defaults to ~/.noesis.

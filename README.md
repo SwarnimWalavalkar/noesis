@@ -72,7 +72,7 @@ Noninteractive use does not wait for onboarding. Initialize or set the config fi
 pnpm start -- config init
 pnpm start -- config show
 pnpm start -- config set \
-  --provider openai-codex --model gpt-5.5 --thinking-level medium
+  --provider openai-codex --model gpt-5.6-sol --thinking-level high
 ```
 
 ## Provider authentication
@@ -83,7 +83,7 @@ OpenAI Codex OAuth and OpenRouter are the two onboarding choices.
 # OpenAI Codex OAuth
 pnpm start -- auth login openai-codex
 pnpm start -- tui \
-  --provider openai-codex --model gpt-5.5
+  --provider openai-codex --model gpt-5.6-sol
 
 # OpenRouter through the environment
 OPENROUTER_API_KEY=... pnpm start -- tui \
@@ -166,8 +166,8 @@ User preferences live in `<NOESIS_HOME>/config.json`. The file uses schema versi
   "schemaVersion": 1,
   "agent": {
     "provider": "openai-codex",
-    "model": "gpt-5.5",
-    "thinkingLevel": "medium"
+    "model": "gpt-5.6-sol",
+    "thinkingLevel": "high"
   }
 }
 ```

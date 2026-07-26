@@ -136,6 +136,8 @@ describe("Noesis CLI grammar", () => {
     expect(result.code).toBe(0);
     expect(result.output).toContain("Defaults to ~/.noesis");
     expect(result.output).toContain("--home PATH overrides NOESIS_HOME");
+    expect(result.output).toContain("Codex default: gpt-5.6-sol");
+    expect(result.output).toContain("Reasoning level (default: high)");
     expect(result.output).toContain("noesis --continue");
     expect(result.output).toContain("single most recently active session");
     expect(result.output).toContain("full trail ID ascending on ties");

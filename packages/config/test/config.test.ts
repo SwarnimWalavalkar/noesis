@@ -69,8 +69,8 @@ describe("Noesis config", () => {
 
     expect(resolved.agent).toEqual({
       provider: "openai-codex",
-      model: "gpt-5.5",
-      thinkingLevel: "medium",
+      model: "gpt-5.6-sol",
+      thinkingLevel: "high",
     });
     expect(resolved.learning).toEqual({ enabled: true, notifications: "quiet", backgroundBudget: 1 });
     expect(resolved.autonomy).toEqual({
@@ -140,7 +140,7 @@ describe("Noesis config", () => {
       agent: {
         provider: "openai-codex",
         model: "gpt-5.5",
-        thinkingLevel: "medium",
+        thinkingLevel: "high",
       },
       learning: { enabled: true, notifications: "quiet", backgroundBudget: 1 },
       autonomy: {

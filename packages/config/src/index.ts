@@ -106,8 +106,8 @@ export class NoesisConfigError extends Error {
 
 export const BUILT_IN_AGENT_DEFAULTS: ResolvedAgentConfig = {
   provider: "openai-codex",
-  model: "gpt-5.5",
-  thinkingLevel: "medium",
+  model: "gpt-5.6-sol",
+  thinkingLevel: "high",
 };
 
 export const BUILT_IN_LEARNING_DEFAULTS: Required<LearningConfig> = {

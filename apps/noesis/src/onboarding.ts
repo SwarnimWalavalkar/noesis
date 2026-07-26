@@ -1,4 +1,9 @@
-import { initializeNoesisConfig, type NoesisConfig, type ThinkingLevel } from "@noesis/config";
+import {
+  BUILT_IN_AGENT_DEFAULTS,
+  initializeNoesisConfig,
+  type NoesisConfig,
+  type ThinkingLevel,
+} from "@noesis/config";
 import type { NoesisAuthLoginCallbacks, PiAuthOperations, PiAuthStatus } from "@noesis/runtime-pi";
 
 export interface OnboardingChoice {
@@ -49,14 +54,19 @@ async function chooseModel(prompts: OnboardingPrompts, provider: string): Promis
     const selection = await prompts.choose(
       "Choose a Codex model",
       [
-        { id: "gpt-5.5", label: "GPT-5.5", description: "Recommended default" },
+        {
+          id: BUILT_IN_AGENT_DEFAULTS.model,
+          label: "GPT-5.6 Sol",
+          description: "Recommended default",
+        },
+        { id: "gpt-5.5", label: "GPT-5.5" },
         { id: "gpt-5.4", label: "GPT-5.4" },
         { id: "custom", label: "Enter another model ID" },
       ],
-      "gpt-5.5",
+      BUILT_IN_AGENT_DEFAULTS.model,
     );
     if (selection !== "custom") return selection;
-    return await prompts.text("Codex model ID", "gpt-5.5");
+    return await prompts.text("Codex model ID", BUILT_IN_AGENT_DEFAULTS.model);
   }
   return await prompts.text("OpenRouter model ID", "openai/gpt-5.5");
 }
@@ -65,8 +75,8 @@ const THINKING_CHOICES: readonly OnboardingChoice[] = [
   { id: "off", label: "Off" },
   { id: "minimal", label: "Minimal" },
   { id: "low", label: "Low" },
-  { id: "medium", label: "Medium", description: "Recommended default" },
-  { id: "high", label: "High" },
+  { id: "medium", label: "Medium" },
+  { id: "high", label: "High", description: "Recommended default" },
   { id: "xhigh", label: "Extra high" },
   { id: "max", label: "Maximum" },
 ];
@@ -104,7 +114,11 @@ export async function runFirstLaunchOnboarding(input: {
 
   const model = (await chooseModel(prompts, provider)).trim();
   if (model.length === 0) throw new Error("Model ID cannot be empty");
-  const thinkingLevel = await prompts.choose("Choose a reasoning level", THINKING_CHOICES, "medium");
+  const thinkingLevel = await prompts.choose(
+    "Choose a reasoning level",
+    THINKING_CHOICES,
+    BUILT_IN_AGENT_DEFAULTS.thinkingLevel,
+  );
   if (!isThinkingLevel(thinkingLevel)) throw new Error(`Unsupported reasoning level ${thinkingLevel}`);
 
   prompts.note(

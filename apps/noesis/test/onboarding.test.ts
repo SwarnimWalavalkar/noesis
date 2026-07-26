@@ -49,6 +49,29 @@ interface FakeAuth extends PiAuthOperations {
   readonly log: readonly string[];
 }
 
+function createDefaultPrompts(confirmations: boolean[]): ScriptedPrompts {
+  const notes: string[] = [];
+  return {
+    notes,
+    async choose(_message, availableChoices, defaultId) {
+      if (!availableChoices.some((choice) => choice.id === defaultId))
+        throw new Error(`Default choice ${defaultId} is not available`);
+      return defaultId;
+    },
+    async text(_message, defaultValue) {
+      return defaultValue;
+    },
+    async confirm() {
+      const answer = confirmations.shift();
+      if (answer === undefined) throw new Error("Missing scripted confirmation");
+      return answer;
+    },
+    note(message) {
+      notes.push(message);
+    },
+  };
+}
+
 function createFakeAuth(initial: PiAuthStatus): FakeAuth {
   const log: string[] = [];
   return {
@@ -79,7 +102,7 @@ const authCallbacks: NoesisAuthLoginCallbacks = {
 describe("first-launch onboarding", () => {
   test("authenticates Codex and atomically writes the complete schema-v1 config", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-onboarding-codex-"));
-    const prompts = createScriptedPrompts(["openai-codex", "gpt-5.5", "medium"], [], [true]);
+    const prompts = createDefaultPrompts([true]);
     const auth = createFakeAuth({ provider: "openai-codex", configured: false, source: "none" });
 
     const result = await runFirstLaunchOnboarding({ home, prompts, auth, authCallbacks });
@@ -88,8 +111,8 @@ describe("first-launch onboarding", () => {
       schemaVersion: 1,
       agent: {
         provider: "openai-codex",
-        model: "gpt-5.5",
-        thinkingLevel: "medium",
+        model: "gpt-5.6-sol",
+        thinkingLevel: "high",
       },
     });
     expect(auth.log).toEqual(["status:openai-codex", "login:openai-codex"]);
@@ -115,7 +138,7 @@ describe("first-launch onboarding", () => {
 
   test("cancellation happens before authentication and leaves config absent", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-onboarding-cancel-"));
-    const prompts = createScriptedPrompts(["openai-codex", "gpt-5.5", "medium"], [], [false]);
+    const prompts = createScriptedPrompts(["openai-codex", "gpt-5.6-sol", "high"], [], [false]);
     const auth = createFakeAuth({ provider: "openai-codex", configured: false, source: "none" });
 
     await expect(runFirstLaunchOnboarding({ home, prompts, auth, authCallbacks })).rejects.toBeInstanceOf(
