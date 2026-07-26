@@ -23,33 +23,24 @@ export type BrowserProcessSpawner = (
 
 export type BrowserUrlOpener = (url: string) => boolean;
 
-const spawnBrowserProcess: BrowserProcessSpawner = (
-  command,
-  args,
-  options,
-): ChildProcess => spawn(command, args, options);
+const spawnBrowserProcess: BrowserProcessSpawner = (command, args, options): ChildProcess =>
+  spawn(command, args, options);
 
-export function browserOpenCommand(
-  platform: NodeJS.Platform,
-  url: string,
-): BrowserOpenCommand | undefined {
-  if (platform === "darwin")
-    return Object.freeze({ command: "open", args: Object.freeze([url]) });
+export function browserOpenCommand(platform: NodeJS.Platform, url: string): BrowserOpenCommand | undefined {
+  if (platform === "darwin") return Object.freeze({ command: "open", args: Object.freeze([url]) });
   if (platform === "win32")
     return Object.freeze({
       command: "rundll32",
       args: Object.freeze(["url.dll,FileProtocolHandler", url]),
     });
-  if (platform === "linux")
-    return Object.freeze({ command: "xdg-open", args: Object.freeze([url]) });
+  if (platform === "linux") return Object.freeze({ command: "xdg-open", args: Object.freeze([url]) });
   return undefined;
 }
 
 function browserSafeUrl(value: string): string | undefined {
   try {
     const parsed = new URL(value);
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:")
-      return undefined;
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return undefined;
     if (parsed.username || parsed.password) return undefined;
     return parsed.href;
   } catch {
@@ -102,22 +93,12 @@ export interface AuthEventPresentation {
   readonly reference?: (label: string, value: string) => void;
 }
 
-export function presentAuthEvent(
-  event: NoesisAuthEvent,
-  options: AuthEventPresentation,
-): void {
+export function presentAuthEvent(event: NoesisAuthEvent, options: AuthEventPresentation): void {
   if (event.type === "auth_url") {
     if (options.reference) {
       const opened = options.openUrl(event.url);
-      options.note(
-        opened
-          ? "Opening your browser to finish sign-in."
-          : "Finish sign-in in your browser.",
-      );
-      options.reference(
-        opened ? "If nothing opened, use this URL:" : "Open this URL:",
-        event.url,
-      );
+      options.note(opened ? "Opening your browser to finish sign-in." : "Finish sign-in in your browser.");
+      options.reference(opened ? "If nothing opened, use this URL:" : "Open this URL:", event.url);
       if (event.instructions) options.note(event.instructions);
       return;
     }
@@ -131,9 +112,7 @@ export function presentAuthEvent(
     return;
   }
   if (event.type === "device_code") {
-    options.note(
-      `Open ${event.verificationUri} and enter code ${event.userCode}.`,
-    );
+    options.note(`Open ${event.verificationUri} and enter code ${event.userCode}.`);
     return;
   }
   options.note(event.message);

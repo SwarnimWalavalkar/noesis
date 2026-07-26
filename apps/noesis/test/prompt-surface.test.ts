@@ -6,9 +6,7 @@ import {
   promptsFromSurface,
 } from "../src/prompt-surface.ts";
 
-function createSurface(
-  overrides: Partial<OnboardingSurface> = {},
-): OnboardingSurface {
+function createSurface(overrides: Partial<OnboardingSurface> = {}): OnboardingSurface {
   return {
     signal: new AbortController().signal,
     choose: vi.fn(async () => "chosen"),
@@ -74,10 +72,7 @@ describe("prompt surface adapters", () => {
         placeholder: "sk-...",
       }),
     ).resolves.toBe("sk-test");
-    expect(surface.secret).toHaveBeenCalledWith(
-      "Enter OpenRouter API key (sk-...)",
-      {},
-    );
+    expect(surface.secret).toHaveBeenCalledWith("Enter OpenRouter API key (sk-...)", {});
 
     callbacks.notify({
       type: "auth_url",
@@ -85,16 +80,12 @@ describe("prompt surface adapters", () => {
       instructions: "Complete login in your browser.",
     });
     expect(openUrl).toHaveBeenCalledWith("https://auth.example/authorize");
-    expect(surface.note).toHaveBeenCalledWith(
-      "Opening your browser to finish sign-in.",
-    );
+    expect(surface.note).toHaveBeenCalledWith("Opening your browser to finish sign-in.");
     expect(surface.reference).toHaveBeenCalledWith(
       "If nothing opened, use this URL:",
       "https://auth.example/authorize",
     );
-    expect(surface.note).toHaveBeenCalledWith(
-      "Complete login in your browser.",
-    );
+    expect(surface.note).toHaveBeenCalledWith("Complete login in your browser.");
   });
 
   test("promptsFromSurface preserves empty text answers as the default", async () => {
@@ -104,9 +95,7 @@ describe("prompt surface adapters", () => {
     });
     const prompts = promptsFromSurface(surface);
 
-    await expect(prompts.text("Model ID", "gpt-5.6-sol")).resolves.toBe(
-      "gpt-5.6-sol",
-    );
+    await expect(prompts.text("Model ID", "gpt-5.6-sol")).resolves.toBe("gpt-5.6-sol");
     await expect(prompts.confirm("Continue?", true)).resolves.toBe(false);
     prompts.note("hello");
     expect(surface.note).toHaveBeenCalledWith("hello");

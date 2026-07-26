@@ -315,7 +315,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("ctx  25%"));
     await vi.waitFor(() => expect(terminal.output).toContain("grounded answer"));
     await vi.waitFor(() => expect(terminal.output).toContain("1t"));
-    expect(terminal.output.lastIndexOf("inspect")).toBeLessThan(
+    expect(terminal.output.lastIndexOf("✓ inspect")).toBeLessThan(
       terminal.output.lastIndexOf("grounded answer"),
     );
 
@@ -323,7 +323,7 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
-  test("auto-collapses long action details and expands them with Ctrl+O", async () => {
+  test("collapses codemode detail until the selected row is expanded", async () => {
     const source = Array.from({ length: 20 }, (_, index) => `source line ${String(index + 1)}`).join("\n");
     const runtime = await createRuntime({
       name: "actions-scripted",
@@ -360,12 +360,141 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("run it\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("Ctrl+O expand"));
+    await vi.waitFor(() => expect(terminal.output).toContain("✓ execute"));
     expect(terminal.output).not.toContain("source line 20");
 
+    // Ctrl+O selects the most recent action, then space expands just that row.
     terminal.send("\u000f");
-    await vi.waitFor(() => expect(terminal.output).toContain("source line 20"));
+    await vi.waitFor(() => expect(terminal.output).toContain("▸"));
+    terminal.send(" ");
+    await vi.waitFor(() => expect(terminal.output).toContain("source line 5"));
 
+    terminal.send("\u001b");
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("never erases terminal scrollback while the transcript grows and shrinks", async () => {
+    const source = Array.from({ length: 40 }, (_, index) => `source line ${String(index + 1)}`).join("\n");
+    const runtime = await createRuntime({
+      name: "scrollback-scripted",
+      async run(request, emit) {
+        emit({ type: "status", status: "started" });
+        emit({
+          type: "tool-start",
+          actionId: "execute-1",
+          name: "execute",
+          input: { source },
+        });
+        emit({
+          type: "tool-start",
+          actionId: "execute-1:call:1",
+          parentActionId: "execute-1",
+          name: "files.read",
+          input: { path: "state.ts" },
+        });
+        emit({
+          type: "tool-end",
+          actionId: "execute-1:call:1",
+          parentActionId: "execute-1",
+          name: "files.read",
+          isError: false,
+          result: {
+            path: "state.ts",
+            content: "x".repeat(4_000),
+            totalLines: 287,
+          },
+        });
+        emit({
+          type: "tool-end",
+          actionId: "execute-1",
+          name: "execute",
+          isError: false,
+          result: { calls: 1 },
+        });
+        emit({ type: "status", status: "completed" });
+        return {
+          text: "done",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("run it\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("287 lines"));
+    // Ctrl+O selects the newest action, the nested read; step up to its parent execute.
+    terminal.send("\u000f");
+    terminal.send("\u001b[A");
+    terminal.send(" ");
+    await vi.waitFor(() => expect(terminal.output).toContain("source line 5"));
+    // Collapsing shrinks the rendered content; that must not clear what has scrolled away.
+    terminal.send(" ");
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    terminal.send("\u001b");
+
+    expect(terminal.output).not.toContain("\u001b[3J");
+
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("opens and closes the run inspector from the transcript", async () => {
+    const runtime = await createRuntime({
+      name: "inspector-scripted",
+      async run(request, emit) {
+        emit({ type: "status", status: "started" });
+        emit({
+          type: "tool-start",
+          actionId: "execute-1",
+          name: "execute",
+          input: {
+            source: "return await tools.shell.run({ command: 'pwd' });",
+          },
+        });
+        emit({
+          type: "tool-end",
+          actionId: "execute-1",
+          name: "execute",
+          isError: false,
+          result: { calls: 0 },
+        });
+        emit({ type: "status", status: "completed" });
+        return {
+          text: "done",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("run it\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("✓ execute"));
+    terminal.send("\u000f");
+    terminal.send("\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("esc close"));
+    expect(terminal.output).toContain("tools.shell.run");
+
+    terminal.send("\u001b");
+    await vi.waitFor(() => expect(terminal.output).toContain("↑/↓ select"));
+
+    terminal.send("\u001b");
     terminal.type("/quit\n");
     await running;
   });
@@ -616,7 +745,7 @@ describe("Noesis TUI lifecycle", () => {
     const main = startNoesisTui(runtime, {}, mainTerminal);
     await vi.waitFor(() => expect(mainTerminal.output).toContain("███╗   ██╗ ██████╗"));
     mainTerminal.resize(50, 9);
-    await vi.waitFor(() => expect(mainTerminal.output).toContain("? help · Ctrl+O actions"));
+    await vi.waitFor(() => expect(mainTerminal.output).toContain("? help · ctrl+o inspect runs"));
     expect(mainTerminal.output).toContain("› message");
     mainTerminal.type("/quit\n");
     await main;
@@ -654,7 +783,7 @@ describe("Noesis TUI lifecycle", () => {
     });
     const terminal = createTestTerminal();
     const running = startNoesisTui(runtime, {}, terminal);
-    await vi.waitFor(() => expect(terminal.output).toContain("? help · Ctrl+O actions"));
+    await vi.waitFor(() => expect(terminal.output).toContain("? help · ctrl+o inspect runs"));
     expect(terminal.output).not.toContain("/learn · /evaluate");
 
     terminal.type("?\r");
@@ -701,7 +830,7 @@ describe("Noesis TUI lifecycle", () => {
 
     const running = startNoesisTui(runtime, { session: { mode: "continue" } }, terminal);
     await vi.waitFor(() => expect(terminal.output).toContain("selected-latest-history"));
-    expect(terminal.output).toContain(`session ${selected.trailId.slice(6, 14)}`);
+    expect(terminal.output).toContain(`s ${selected.trailId.slice(6, 14)}`);
     expect(terminal.output).toContain("preserved-provid");
     expect(terminal.output).not.toContain("other-history");
     terminal.type("/quit\n");
@@ -736,7 +865,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("resume a session"));
     terminal.send("\u001b[B");
     terminal.send("\r");
-    await vi.waitFor(() => expect(terminal.output).toContain(`session ${older.trailId.slice(6, 14)}`));
+    await vi.waitFor(() => expect(terminal.output).toContain(`s ${older.trailId.slice(6, 14)}`));
     expect(terminal.output).toContain("older-history");
     terminal.type("/quit\n");
     await running;

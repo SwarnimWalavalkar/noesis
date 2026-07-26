@@ -7,22 +7,31 @@ import {
   initialTuiState,
   renderAgentActionBlock,
   renderBottomChrome,
+  renderHeader,
   renderMessageBlock,
   renderNoesisState,
   renderRichText,
-  renderTranscriptLines,
   safeTerminalText,
   sanitizeEditorText,
   streamingFrameDelay,
+  type NoesisTuiState,
 } from "../src/index.ts";
 
-const stripAnsi = (text: string): string =>
-  [0, 1, 2, 3, 4, 9, 31, 32, 33, 36].reduce((plain, code) => plain.replaceAll(`\u001b[${code}m`, ""), text);
+const renderTranscriptLines = (
+  state: NoesisTuiState,
+  width: number,
+): readonly string[] => createTranscriptRenderer().render(state, width);
+
+const SGR_PATTERN = new RegExp(`${String.fromCodePoint(27)}\\[[0-9;]*m`, "gu");
+
+const stripAnsi = (text: string): string => text.replaceAll(SGR_PATTERN, "");
 
 const containsUnsafeTextControl = (text: string): boolean =>
   [...text].some((character) => {
     const code = character.codePointAt(0) ?? 0;
-    return (code < 32 && code !== 9 && code !== 10) || (code >= 127 && code <= 159);
+    return (
+      (code < 32 && code !== 9 && code !== 10) || (code >= 127 && code <= 159)
+    );
   });
 
 const inertTerminal: Terminal = {
@@ -53,14 +62,17 @@ describe("Noesis safe editor key path", () => {
   test.each([
     ["DEL", "\u007f"],
     ["BS", "\u0008"],
-  ] as const)("delegates ordinary %s Backspace to pi-tui", (_variant, backspace) => {
-    const editor = createSafeEditor(new TUI(inertTerminal));
-    editor.handleInput?.("abc");
+  ] as const)(
+    "delegates ordinary %s Backspace to pi-tui",
+    (_variant, backspace) => {
+      const editor = createSafeEditor(new TUI(inertTerminal));
+      editor.handleInput?.("abc");
 
-    editor.handleInput?.(backspace);
+      editor.handleInput?.(backspace);
 
-    expect(editor.getText()).toBe("ab");
-  });
+      expect(editor.getText()).toBe("ab");
+    },
+  );
 
   test("preserves pi-tui grapheme deletion semantics", () => {
     const editor = createSafeEditor(new TUI(inertTerminal));
@@ -155,32 +167,104 @@ describe("Noesis safe editor key path", () => {
 });
 
 describe("Noesis transcript rendering", () => {
-  test("shows short agent actions fully and auto-collapses long actions until expanded", () => {
-    const shortAction = {
-      actionId: "remember-1",
-      name: "remember",
-      status: "completed" as const,
-      input: { memory: "Prefer primary sources." },
-      output: { saved: true },
-    };
-    const longAction = {
+  const codemodeActions = () => {
+    const execute = {
       actionId: "execute-1",
       name: "execute",
       status: "completed" as const,
-      input: { source: Array.from({ length: 20 }, (_, index) => `line ${String(index + 1)}`).join("\n") },
-      output: { calls: 3 },
+      input: {
+        source:
+          "const file = await tools.files.read({ path: 'state.ts' });\nreturn file.totalLines;",
+      },
+      output: { calls: 2, details: { kind: "result", executionId: "exec-9" } },
+      durationMs: 1_240,
+    };
+    const read = {
+      actionId: "execute-1:call:1",
+      parentActionId: "execute-1",
+      name: "files.read",
+      status: "completed" as const,
+      input: { path: "packages/tui/src/state.ts" },
+      // Codemode returns whole file bodies; this is the payload that must not reach the transcript.
+      output: {
+        path: "/repo/packages/tui/src/state.ts",
+        content: "x".repeat(50_000),
+        totalLines: 287,
+        truncated: false,
+      },
+    };
+    const write = {
+      actionId: "execute-1:call:2",
+      parentActionId: "execute-1",
+      name: "files.write",
+      status: "completed" as const,
+      input: { path: "notes.md", content: "y".repeat(1_234) },
+      output: { path: "/repo/notes.md", bytes: 1_234 },
+    };
+    return { execute, read, write, all: [execute, read, write] };
+  };
+
+  test("collapses each codemode call to one summarized row", () => {
+    const { execute, read, write, all } = codemodeActions();
+
+    const executeRow = renderAgentActionBlock(execute, all, 100);
+    const readRow = renderAgentActionBlock(read, all, 100);
+    const writeRow = renderAgentActionBlock(write, all, 100);
+
+    expect(executeRow).toHaveLength(1);
+    expect(executeRow[0]).toContain("2 calls");
+    expect(executeRow[0]).toContain("1 files.read");
+    expect(executeRow[0]).toContain("1.2s");
+
+    expect(readRow).toHaveLength(1);
+    expect(readRow[0]).toContain("state.ts");
+    expect(readRow[0]).toContain("287 lines");
+    expect(readRow[0]).not.toContain("xxx");
+
+    expect(writeRow[0]).toContain("notes.md");
+    expect(writeRow[0]).toContain("1.2 kB");
+  });
+
+  test("reveals the codemode program only when its row is expanded", () => {
+    const { execute, all } = codemodeActions();
+
+    const collapsed = renderAgentActionBlock(execute, all, 100).join("\n");
+    const expanded = renderAgentActionBlock(execute, all, 100, {
+      expanded: true,
+    }).join("\n");
+
+    expect(collapsed).not.toContain("tools.files.read");
+    expect(expanded).toContain("tools.files.read");
+    expect(expanded).toContain("return file.totalLines;");
+  });
+
+  test("summarizes a failed nested call with its error rather than its payload", () => {
+    const failed = {
+      actionId: "execute-1:call:1",
+      parentActionId: "execute-1",
+      name: "shell.run",
+      status: "failed" as const,
+      input: { command: "pnpm test" },
+      output: { error: "command exited with 1" },
     };
 
-    const short = renderAgentActionBlock(shortAction, [shortAction], 72, false).join("\n");
-    const collapsed = renderAgentActionBlock(longAction, [longAction], 72, false).join("\n");
-    const expanded = renderAgentActionBlock(longAction, [longAction], 72, true).join("\n");
+    const rendered = renderAgentActionBlock(failed, [failed], 72).join("\n");
 
-    expect(short).toContain("Prefer primary sources.");
-    expect(short).not.toContain("Ctrl+O expand");
-    expect(collapsed).toContain("Ctrl+O expand");
-    expect(collapsed).not.toContain("line 20");
-    expect(expanded).toContain("line 20");
-    expect(expanded).not.toContain("Ctrl+O expand");
+    expect(rendered).toContain("× shell.run");
+    expect(rendered).toContain("command exited with 1");
+  });
+
+  test("previews the program while an execute call has produced no nested calls yet", () => {
+    const running = {
+      actionId: "execute-1",
+      name: "execute",
+      status: "running" as const,
+      input: { source: "await tools.shell.run({ command: 'pnpm build' });" },
+    };
+
+    expect(
+      renderAgentActionBlock(running, [running], 100).join("\n"),
+    ).toContain("pnpm build");
   });
 
   test("indents nested codemode SDK calls under execute", () => {
@@ -190,22 +274,43 @@ describe("Noesis transcript rendering", () => {
       status: "running" as const,
     };
     const child = {
-      actionId: "execute-1:call:0",
+      actionId: "execute-1:call:1",
       parentActionId: parent.actionId,
       name: "shell.run",
       status: "running" as const,
       input: { command: "pwd" },
     };
 
-    const rendered = renderAgentActionBlock(child, [parent, child], 72, false).join("\n");
+    const [rendered = ""] = renderAgentActionBlock(child, [parent, child], 72);
 
-    expect(rendered).toContain("  ● shell.run");
-    expect(rendered).toContain("command");
+    expect(rendered).toContain("● shell.run");
+    expect(rendered).toContain("pwd");
+    expect(rendered.startsWith("   ")).toBe(true);
+  });
+
+  test("marks the selected row without shifting the content beside it", () => {
+    const { read, all } = codemodeActions();
+
+    const [plain = ""] = renderAgentActionBlock(read, all, 100);
+    const [selected = ""] = renderAgentActionBlock(read, all, 100, {
+      selected: true,
+    });
+
+    expect(plain.startsWith(" ")).toBe(true);
+    expect(selected.startsWith("▸")).toBe(true);
+    // A leading gutter column means selecting a row never reflows the transcript.
+    expect(visibleWidth(selected)).toBe(visibleWidth(plain));
   });
 
   test("wraps long prose to the actual display width", () => {
-    const paragraph = Array.from({ length: 32 }, (_, index) => `word-${index}`).join(" ");
-    const lines = renderMessageBlock({ role: "assistant", text: paragraph }, 36);
+    const paragraph = Array.from(
+      { length: 32 },
+      (_, index) => `word-${index}`,
+    ).join(" ");
+    const lines = renderMessageBlock(
+      { role: "assistant", text: paragraph },
+      36,
+    );
 
     expect(lines.length).toBeGreaterThan(4);
     expect(lines.every((line) => visibleWidth(line) <= 36)).toBe(true);
@@ -217,14 +322,28 @@ describe("Noesis transcript rendering", () => {
     const state = {
       ...initialTuiState("fake"),
       timeline: [
-        { kind: "message" as const, role: "user" as const, text: "First question" },
-        { kind: "message" as const, role: "assistant" as const, text: "First answer" },
-        { kind: "message" as const, role: "system" as const, text: "Lifecycle note" },
+        {
+          kind: "message" as const,
+          role: "user" as const,
+          text: "First question",
+        },
+        {
+          kind: "message" as const,
+          role: "assistant" as const,
+          text: "First answer",
+        },
+        {
+          kind: "message" as const,
+          role: "system" as const,
+          text: "Lifecycle note",
+        },
       ],
     };
     const rendered = renderTranscriptLines(state, 60);
 
-    expect(rendered.join("\n")).toContain("YOU\n│ First question\n\nNOESIS\n  First answer\n\nNOTE");
+    expect(rendered.join("\n")).toContain(
+      "YOU\n│ First question\n\nNOESIS\n  First answer\n\nNOTE",
+    );
     expect(rendered.filter((line) => line === "")).toHaveLength(2);
   });
 
@@ -232,8 +351,16 @@ describe("Noesis transcript rendering", () => {
     const state = {
       ...initialTuiState("fake"),
       timeline: [
-        { kind: "message" as const, role: "user" as const, text: "Check the repository." },
-        { kind: "message" as const, role: "assistant" as const, text: "I’ll inspect it first." },
+        {
+          kind: "message" as const,
+          role: "user" as const,
+          text: "Check the repository.",
+        },
+        {
+          kind: "message" as const,
+          role: "assistant" as const,
+          text: "I’ll inspect it first.",
+        },
         {
           kind: "action" as const,
           actionId: "shell-1",
@@ -242,7 +369,11 @@ describe("Noesis transcript rendering", () => {
           input: { command: "git status --short" },
           output: { stdout: "clean" },
         },
-        { kind: "message" as const, role: "assistant" as const, text: "The worktree is clean." },
+        {
+          kind: "message" as const,
+          role: "assistant" as const,
+          text: "The worktree is clean.",
+        },
       ],
     };
 
@@ -290,7 +421,8 @@ describe("Noesis transcript rendering", () => {
   });
 
   test("preserves Unicode display width, indentation, and blank lines", () => {
-    const source = "Emoji 🧠 and CJK 界面 stay visible.\n\n```text\n  indented\n\tTabbed\n```";
+    const source =
+      "Emoji 🧠 and CJK 界面 stay visible.\n\n```text\n  indented\n\tTabbed\n```";
     const lines = renderRichText(source, 24);
 
     expect(lines.every((line) => visibleWidth(line) <= 24)).toBe(true);
@@ -316,7 +448,9 @@ describe("Noesis transcript rendering", () => {
 
     expect(rendered).toContain("$x_i^2 + **y**$");
     expect(rendered).toContain("\\(a_b = c\\)");
-    expect(rendered).toContain("╭─ math\n│ $$\n│ \\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}\n│ $$\n╰─");
+    expect(rendered).toContain(
+      "╭─ math\n│ $$\n│ \\sum_{i=1}^{n} i = \\frac{n(n+1)}{2}\n│ $$\n╰─",
+    );
     expect(rendered).toContain("│ \\[\n│ E = mc^2\n│ \\]");
   });
 
@@ -344,7 +478,9 @@ describe("Noesis transcript rendering", () => {
     expect(rendered).toContain("code $not_math$");
     expect(rendered).toContain("fenced $$not_math$$ and $still_code$");
     expect(rendered).toContain("Unmatched stream $pending and \\(also pending");
-    expect(renderRichText(source, 12).every((line) => visibleWidth(line) <= 12)).toBe(true);
+    expect(
+      renderRichText(source, 12).every((line) => visibleWidth(line) <= 12),
+    ).toBe(true);
   });
 
   test("neutralizes model-provided controls and ANSI sequences", () => {
@@ -359,7 +495,9 @@ describe("Noesis transcript rendering", () => {
   });
 
   test("renders incomplete streaming fences and math delimiters safely", () => {
-    const code = renderRichText("```ts\nconst pending = true;\n``", 40).join("\n");
+    const code = renderRichText("```ts\nconst pending = true;\n``", 40).join(
+      "\n",
+    );
     const math = renderRichText("Before\n\n$$\n\\frac{1}{2}", 40).join("\n");
 
     expect(code).toContain("```ts");
@@ -391,12 +529,22 @@ describe("Noesis transcript rendering", () => {
       [70, 22],
       [34, 8],
     ] as const) {
-      const lines = [...renderNoesisState(state, width, height), ...renderBottomChrome(state, width, height)];
+      const lines = [
+        ...renderHeader(false, width, height),
+        ...renderNoesisState(state, width, height),
+        ...renderBottomChrome(state, width, height),
+      ];
       expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
     }
-    expect(renderNoesisState(state, 120, 35).join("\n")).toContain(NOESIS_WORDMARK[0]);
-    expect(renderNoesisState(state, 90, 28).join("\n")).not.toContain(NOESIS_WORDMARK[0]);
-    expect(renderNoesisState(state, 34, 8).join("\n")).not.toContain(NOESIS_WORDMARK[0]);
+    expect(renderHeader(false, 120, 35).join("\n")).toContain(
+      NOESIS_WORDMARK[0],
+    );
+    expect(renderHeader(false, 90, 28).join("\n")).not.toContain(
+      NOESIS_WORDMARK[0],
+    );
+    expect(renderHeader(false, 34, 8).join("\n")).not.toContain(
+      NOESIS_WORDMARK[0],
+    );
   });
 
   test("keeps every owned emitted line inside terminal columns from 1 through 120", () => {
@@ -408,13 +556,21 @@ describe("Noesis transcript rendering", () => {
       }),
       error: "a deliberately long error with 界面 and 🧠 content",
       timeline: [
-        { kind: "message" as const, role: "user" as const, text: "question with 界面" },
+        {
+          kind: "message" as const,
+          role: "user" as const,
+          text: "question with 界面",
+        },
         {
           kind: "message" as const,
           role: "assistant" as const,
           text: "answer\n\n```ts\nconst x = 1;\n```\n$$x+y$$ after",
         },
-        { kind: "message" as const, role: "system" as const, text: "a long ownership note" },
+        {
+          kind: "message" as const,
+          role: "system" as const,
+          text: "a long ownership note",
+        },
       ],
     };
     const editor = createSafeEditor(new TUI(inertTerminal));
@@ -423,7 +579,12 @@ describe("Noesis transcript rendering", () => {
     for (let width = 1; width <= 120; width += 1) {
       for (const height of [1, 4, 8, 22, 35]) {
         const emitted = [
-          ...renderNoesisState(state, width, height, createTranscriptRenderer()),
+          ...renderNoesisState(
+            state,
+            width,
+            height,
+            createTranscriptRenderer(),
+          ),
           ...renderBottomChrome(state, width, height),
         ];
         expect(
@@ -438,31 +599,34 @@ describe("Noesis transcript rendering", () => {
     }
   });
 
-  test.each([
-    "user",
-    "assistant",
-    "system",
-  ] as const)("repeats %s ownership when cropping into one long semantic block", (role) => {
-    const state = {
-      ...initialTuiState("fake"),
-      timeline: [
-        {
-          kind: "message" as const,
-          role,
-          text: Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n"),
-        },
-      ],
-    };
-    const rendered = createTranscriptRenderer().renderViewport(state, 22, 5);
-    const expectedLabel = role === "user" ? "YOU" : role === "assistant" ? "NOESIS" : "NOTE";
+  test.each(["user", "assistant", "system"] as const)(
+    "keeps every line of a long %s message reachable",
+    (role) => {
+      const state = {
+        ...initialTuiState("fake"),
+        timeline: [
+          {
+            kind: "message" as const,
+            role,
+            text: Array.from(
+              { length: 30 },
+              (_, index) => `line ${index}`,
+            ).join("\n"),
+          },
+        ],
+      };
+      const rendered = createTranscriptRenderer().render(state, 22);
+      const expectedLabel =
+        role === "user" ? "YOU" : role === "assistant" ? "NOESIS" : "NOTE";
 
-    expect(rendered[0]).toContain("earlier conversation");
-    expect(rendered[1]).toBe(expectedLabel);
-    expect(rendered.join("\n")).toContain("line 29");
-    expect(rendered.every((line) => visibleWidth(line) <= 22)).toBe(true);
-  });
+      expect(rendered[0]).toBe(expectedLabel);
+      expect(rendered.join("\n")).toContain("line 0");
+      expect(rendered.join("\n")).toContain("line 29");
+      expect(rendered.every((line) => visibleWidth(line) <= 22)).toBe(true);
+    },
+  );
 
-  test("repeats action ownership when cropping into long action details", () => {
+  test("bounds an expanded codemode program to the visible screen", () => {
     const state = {
       ...initialTuiState("fake"),
       timeline: [
@@ -479,18 +643,25 @@ describe("Noesis transcript rendering", () => {
           },
         },
       ],
-      agentActionsExpanded: true,
+      expandedActionIds: new Set(["execute-1"]),
     };
 
-    const rendered = createTranscriptRenderer().renderViewport(state, 32, 5);
+    const rendered = createTranscriptRenderer().render(state, 32, 12);
 
-    expect(rendered[0]).toContain("earlier conversation");
-    expect(rendered[1]).toContain("execute");
-    expect(rendered.join("\n")).toContain("value29");
+    expect(rendered[0]).toContain("execute");
+    expect(rendered.join("\n")).toContain("value0");
+    // An inline body taller than the screen would push its own header above the viewport, which
+    // makes pi-tui repaint everything and drop scrollback. The rest lives in the run inspector.
+    expect(rendered.join("\n")).not.toContain("value29");
+    expect(rendered.join("\n")).toContain("more rows");
+    expect(rendered.length).toBeLessThanOrEqual(13);
     expect(rendered.every((line) => visibleWidth(line) <= 32)).toBe(true);
+    expect(
+      createTranscriptRenderer().render(state, 90, 12).join("\n"),
+    ).toContain("enter opens the run inspector");
   });
 
-  test("reuses completed semantic blocks and bounds history rendering work", () => {
+  test("reuses settled blocks so a growing transcript reparses only what changed", () => {
     const renderer = createTranscriptRenderer();
     const completed = Array.from({ length: 100 }, (_, index) => ({
       kind: "message" as const,
@@ -498,28 +669,78 @@ describe("Noesis transcript rendering", () => {
       text: `completed ${String(index)}`,
     }));
     let state = { ...initialTuiState("fake"), timeline: completed };
-    renderer.renderViewport(state, 70, 12);
+    renderer.render(state, 70);
     for (let index = 1; index <= 40; index += 1) {
       state = {
         ...state,
         execution: "streaming",
         timeline: [
           ...completed,
-          { kind: "message", role: "assistant", text: "chunk ".repeat(index * 20) } as const,
+          {
+            kind: "message",
+            role: "assistant",
+            text: "chunk ".repeat(index * 20),
+          } as const,
         ],
       };
-      renderer.renderViewport(state, 70, 12);
+      renderer.render(state, 70);
     }
     const metrics = renderer.metrics();
 
-    expect(metrics.parsedBlocks).toBeLessThanOrEqual(47);
-    expect(metrics.cacheHits).toBeGreaterThanOrEqual(150);
-    expect(metrics.candidateBlocks).toBeLessThanOrEqual(205);
+    // 100 settled blocks parsed once, plus one reparse per streamed frame.
+    expect(metrics.parsedBlocks).toBe(140);
+    expect(metrics.cacheHits).toBe(4_000);
     expect(streamingFrameDelay(200_000, 20_000)).toBe(80);
   });
 
+  test("separates turns but keeps nested codemode calls tight under their parent", () => {
+    const state = {
+      ...initialTuiState("fake"),
+      timeline: [
+        {
+          kind: "message" as const,
+          role: "user" as const,
+          text: "Audit the reducer.",
+        },
+        {
+          kind: "action" as const,
+          actionId: "execute-1",
+          name: "execute",
+          status: "completed" as const,
+          input: { source: "return 1;" },
+          output: { calls: 2 },
+        },
+        {
+          kind: "action" as const,
+          actionId: "execute-1:call:1",
+          parentActionId: "execute-1",
+          name: "files.read",
+          status: "completed" as const,
+          input: { path: "state.ts" },
+          output: { path: "state.ts", totalLines: 12 },
+        },
+        {
+          kind: "action" as const,
+          actionId: "execute-1:call:2",
+          parentActionId: "execute-1",
+          name: "files.write",
+          status: "completed" as const,
+          input: { path: "notes.md" },
+          output: { path: "notes.md", bytes: 20 },
+        },
+      ],
+    };
+
+    const rendered = createTranscriptRenderer().render(state, 80);
+
+    // One row per action, one blank line before the execute block, none between nested calls.
+    expect(rendered.filter((line) => line === "")).toHaveLength(1);
+    expect(rendered).toHaveLength(6);
+  });
+
   test("sanitizes live editor text without losing Unicode, newlines, or logical tabs", () => {
-    const hostile = "hello\t界面\n\u001b[2J\u009b31m\u009dtitle\u009c\u007fworld";
+    const hostile =
+      "hello\t界面\n\u001b[2J\u009b31m\u009dtitle\u009c\u007fworld";
     const safe = sanitizeEditorText(hostile);
 
     expect(safe).toContain("hello\t界面\n");
@@ -528,8 +749,14 @@ describe("Noesis transcript rendering", () => {
   });
 
   test("keeps the hand-owned wordmark stable and bottom chrome in input-status-help order", () => {
-    expect(new Set(NOESIS_WORDMARK.map((line) => visibleWidth(line)))).toEqual(new Set([46]));
-    expect(NOESIS_WORDMARK.every((line) => line === line.trimEnd() && line === line.trimStart())).toBe(true);
+    expect(new Set(NOESIS_WORDMARK.map((line) => visibleWidth(line)))).toEqual(
+      new Set([46]),
+    );
+    expect(
+      NOESIS_WORDMARK.every(
+        (line) => line === line.trimEnd() && line === line.trimStart(),
+      ),
+    ).toBe(true);
 
     const bottom = renderBottomChrome(initialTuiState("fake"), 90, 28);
     expect(bottom[0]).toContain("› message");

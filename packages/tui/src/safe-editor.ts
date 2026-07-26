@@ -7,7 +7,7 @@ import {
   type TUI,
 } from "@earendil-works/pi-tui";
 import { createNoesisCommandAutocompleteProvider } from "./command-autocomplete.ts";
-import { ANSI, elideText, styled } from "./rendering.ts";
+import { ANSI, elideText, styled } from "./theme.ts";
 
 export {
   createNoesisCommandAutocompleteProvider,
@@ -34,7 +34,11 @@ const SAFE_EDITOR_MAX_BUFFERED_CHARACTERS = 1024 * 1024;
 type SafeEditorInputState =
   | { readonly kind: "keyboard"; readonly pending: string }
   | { readonly kind: "paste"; readonly text: string }
-  | { readonly kind: "paste-close"; readonly text: string; readonly trailing: string };
+  | {
+      readonly kind: "paste-close";
+      readonly text: string;
+      readonly trailing: string;
+    };
 
 const markerPrefixSuffixLength = (text: string, marker: string): number => {
   for (let length = Math.min(text.length, marker.length - 1); length > 0; length -= 1) {
@@ -168,7 +172,11 @@ export function createSafeEditor(
         };
         return;
       }
-      inputState = { kind: "paste-close", text: combined.slice(0, end), trailing: "" };
+      inputState = {
+        kind: "paste-close",
+        text: combined.slice(0, end),
+        trailing: "",
+      };
       handleInput(combined.slice(end + BRACKETED_PASTE_END.length));
       return;
     }

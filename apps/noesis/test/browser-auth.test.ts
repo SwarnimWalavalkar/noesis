@@ -17,26 +17,14 @@ function createProcess() {
 describe("browser OAuth URL opening", () => {
   test.each([
     ["darwin", "open", ["https://auth.example/callback?state=abc"]],
-    [
-      "win32",
-      "rundll32",
-      [
-        "url.dll,FileProtocolHandler",
-        "https://auth.example/callback?state=abc",
-      ],
-    ],
+    ["win32", "rundll32", ["url.dll,FileProtocolHandler", "https://auth.example/callback?state=abc"]],
     ["linux", "xdg-open", ["https://auth.example/callback?state=abc"]],
-  ] as const)(
-    "selects the platform browser opener on %s",
-    (platform, command, args) => {
-      expect(
-        browserOpenCommand(platform, "https://auth.example/callback?state=abc"),
-      ).toEqual({
-        command,
-        args,
-      });
-    },
-  );
+  ] as const)("selects the platform browser opener on %s", (platform, command, args) => {
+    expect(browserOpenCommand(platform, "https://auth.example/callback?state=abc")).toEqual({
+      command,
+      args,
+    });
+  });
 
   test("passes an allowed URL as one argument without shell interpolation", () => {
     const child = createProcess();
@@ -46,18 +34,12 @@ describe("browser OAuth URL opening", () => {
       spawnProcess,
     });
 
-    expect(openUrl("https://auth.example/authorize?a=1&b=$(whoami)")).toBe(
-      true,
-    );
-    expect(spawnProcess).toHaveBeenCalledWith(
-      "open",
-      ["https://auth.example/authorize?a=1&b=$(whoami)"],
-      {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-      },
-    );
+    expect(openUrl("https://auth.example/authorize?a=1&b=$(whoami)")).toBe(true);
+    expect(spawnProcess).toHaveBeenCalledWith("open", ["https://auth.example/authorize?a=1&b=$(whoami)"], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
     expect(child.once).toHaveBeenCalledWith("error", expect.any(Function));
     expect(child.unref).toHaveBeenCalledOnce();
   });
@@ -184,12 +166,7 @@ describe("browser OAuth URL opening", () => {
     );
 
     expect(openUrl).toHaveBeenCalledWith("https://auth.example/authorize");
-    expect(notes).toEqual([
-      "Finish sign-in in your browser.",
-      "Complete login in your browser.",
-    ]);
-    expect(references).toEqual([
-      ["Open this URL:", "https://auth.example/authorize"],
-    ]);
+    expect(notes).toEqual(["Finish sign-in in your browser.", "Complete login in your browser."]);
+    expect(references).toEqual([["Open this URL:", "https://auth.example/authorize"]]);
   });
 });
