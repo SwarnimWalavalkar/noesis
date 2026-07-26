@@ -56,22 +56,22 @@ You need Node 22.19 or newer and pnpm 10.
 pnpm install
 pnpm check
 
-# Start the TUI with a local home.
-pnpm start -- tui --home ./.noesis
+# Start the TUI. Noesis uses ~/.noesis by default.
+pnpm start -- tui
 ```
 
 An interactive first launch with no config and no explicit agent settings starts onboarding. It asks for the provider, model, reasoning level, and authentication. You can run the same flow directly:
 
 ```sh
-pnpm start -- onboard --home ./.noesis
+pnpm start -- onboard
 ```
 
 Noninteractive use does not wait for onboarding. Initialize or set the config first:
 
 ```sh
-pnpm start -- config init --home ./.noesis
-pnpm start -- config show --home ./.noesis
-pnpm start -- config set --home ./.noesis \
+pnpm start -- config init
+pnpm start -- config show
+pnpm start -- config set \
   --provider openai-codex --model gpt-5.5 --thinking-level medium
 ```
 
@@ -81,12 +81,12 @@ OpenAI Codex OAuth and OpenRouter are the two onboarding choices.
 
 ```sh
 # OpenAI Codex OAuth
-pnpm start -- auth login openai-codex --home ./.noesis
-pnpm start -- tui --home ./.noesis \
+pnpm start -- auth login openai-codex
+pnpm start -- tui \
   --provider openai-codex --model gpt-5.5
 
 # OpenRouter through the environment
-OPENROUTER_API_KEY=... pnpm start -- tui --home ./.noesis \
+OPENROUTER_API_KEY=... pnpm start -- tui \
   --provider openrouter --model anthropic/claude-sonnet-4.5
 ```
 
@@ -97,10 +97,10 @@ Pi credentials live in `<NOESIS_HOME>/auth.json`, separate from user preferences
 Use these commands to inspect or change provider credentials:
 
 ```sh
-pnpm start -- auth status openai-codex --home ./.noesis
-pnpm start -- auth logout openai-codex --home ./.noesis
-pnpm start -- auth login openrouter --home ./.noesis
-pnpm start -- auth logout openrouter --home ./.noesis
+pnpm start -- auth status openai-codex
+pnpm start -- auth logout openai-codex
+pnpm start -- auth login openrouter
+pnpm start -- auth logout openrouter
 ```
 
 For OpenRouter, a stored credential takes precedence over `OPENROUTER_API_KEY`. Remove the stored credential to use the environment key. `auth status` does not print credentials or refresh an expired OAuth token.
@@ -111,13 +111,13 @@ A plain `noesis`, `noesis tui`, or `pnpm start` creates a new independent sessio
 
 ```sh
 # Choose a saved session.
-pnpm start -- --resume --home ./.noesis
+pnpm start -- --resume
 
 # Resume one exact session.
-pnpm start -- --resume trail_01234567-89ab-cdef-0123-456789abcdef --home ./.noesis
+pnpm start -- --resume trail_01234567-89ab-cdef-0123-456789abcdef
 
 # Resume the most recently active session.
-pnpm start -- --continue --home ./.noesis
+pnpm start -- --continue
 ```
 
 `--resume` opens a picker that you can control with the keyboard. `--continue` selects the single most recently active session. Both fail closed if the selected session is still marked `running`. This build has no durable executor ownership lease, so it cannot safely recover a session whose process ended during a turn. Start a separate session or wait until explicit recovery is available.
@@ -149,10 +149,10 @@ Each turn freezes the visible skill bytes and the current script/workflow revisi
 Manage standard skills from the CLI:
 
 ```sh
-pnpm start -- skills list --home ./.noesis
-pnpm start -- skills install ./path/to/skill --workspace --home ./.noesis
-pnpm start -- skills update --home ./.noesis
-pnpm start -- skills remove ./path/to/skill --workspace --home ./.noesis
+pnpm start -- skills list
+pnpm start -- skills install ./path/to/skill --workspace
+pnpm start -- skills update
+pnpm start -- skills remove ./path/to/skill --workspace
 ```
 
 Inside the TUI, `/skills`, `/scripts`, `/workflows`, and `/runs` show the corresponding libraries. Singular commands inspect exact content, source, schemas, revisions, nested calls, and phase state.
@@ -179,7 +179,7 @@ Agent settings use this precedence:
 3. `config.json`
 4. Defaults in source code
 
-`--home` overrides `NOESIS_HOME`, which overrides `.noesis`. Valid reasoning levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
+Noesis stores its global state in `~/.noesis/` by default. `--home` overrides `NOESIS_HOME`, which overrides that default. Valid reasoning levels are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
 ## Architecture and storage
 

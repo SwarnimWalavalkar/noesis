@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
@@ -197,7 +198,9 @@ function parseArgs(argv: readonly string[]): CliInput {
       throw new Error(`${name} is not valid for ${scope}`);
     }
   }
-  const home = resolve(optionValues.get("--home") ?? process.env["NOESIS_HOME"] ?? ".noesis");
+  const home = resolve(
+    optionValues.get("--home") ?? process.env["NOESIS_HOME"] ?? join(homedir(), ".noesis"),
+  );
   const provider = optionValues.get("--provider");
   const model = optionValues.get("--model");
   const thinkingLevel = optionValues.get("--thinking-level");
@@ -245,6 +248,10 @@ Session startup:
 
 Agent options:
   --provider ID  --model ID  --thinking-level LEVEL
+
+Home:
+  Defaults to ~/.noesis.
+  --home PATH overrides NOESIS_HOME.
 
 Workspace trust:
   --trust-workspace  Allow this command to load or mutate workspace-selected skills.
