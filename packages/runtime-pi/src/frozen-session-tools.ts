@@ -1,6 +1,5 @@
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import type { SessionToolDefinition } from "@noesis/intelligence";
-import { createPiSessionToolRegistration } from "./session-tool-registration.ts";
 
 export type FrozenPlanMaterialKind = "skill" | "router" | "tool";
 
@@ -59,11 +58,11 @@ export function frozenPlanMaterialUses(plan: FrozenTurnPlan): readonly FrozenPla
   );
 }
 
-export async function resolveFrozenSessionTools(
+export async function resolveFrozenSessionToolDefinitions(
   plan: FrozenTurnPlan,
   resolver: FrozenSessionToolResolver | undefined,
   signal: AbortSignal,
-) {
+): Promise<readonly SessionToolDefinition[]> {
   const expected = frozenPlanMaterialUses(plan);
   if (!resolver) {
     if (expected.length > 0)
@@ -96,6 +95,5 @@ export async function resolveFrozenSessionTools(
         .join(", ")}`,
     );
 
-  if (resolution.definitions.length === 0) return Object.freeze([]);
-  return createPiSessionToolRegistration({ definitions: resolution.definitions });
+  return Object.freeze([...resolution.definitions]);
 }

@@ -9,6 +9,7 @@ import {
   type EffectClass,
   type Grant,
   type JsonValue,
+  type PermissionManifest,
   type Principal,
 } from "@noesis/domain";
 import type {
@@ -290,8 +291,39 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     );
   };
 
+  const permits = (permission: PermissionManifest, effect: EffectClass, resource: string): boolean => {
+    if (!permission.effects.includes(effect)) return false;
+    return permission.resourcePatterns.some((pattern) => {
+      if (pattern === "*") return true;
+      const wildcard = pattern.indexOf("*");
+      return resource.startsWith(wildcard === -1 ? pattern : pattern.slice(0, wildcard));
+    });
+  };
+
   return Object.freeze({
     receiptVerifier: verifier,
+    runForeground: async <T extends JsonValue>(
+      request: Omit<EffectRequest<T>, "principal">,
+      permission: PermissionManifest,
+    ): Promise<EffectDecision<T>> => {
+      if (!permits(permission, request.effect, request.resource))
+        return Object.freeze({
+          ok: false,
+          code: "denied" as const,
+          reason: `Frozen turn permission does not allow ${request.effect} on ${request.resource}`,
+        });
+      const grant = await issue({
+        schemaVersion: 1,
+        grantId: createId("grant"),
+        principal: "foreground",
+        effects: [request.effect],
+        resourcePrefixes: [request.resource],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        maxUses: 1,
+        maxCost: request.estimatedCost,
+      });
+      return await run(Object.freeze({ ...request, principal: "foreground" }), grant);
+    },
     promote,
     rollback,
     schedule,

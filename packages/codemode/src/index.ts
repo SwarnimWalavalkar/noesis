@@ -1,0 +1,366 @@
+import { fork, type ChildProcess } from "node:child_process";
+import { createId, type JsonValue, JsonValueSchema, sha256, toJsonValue } from "@noesis/domain";
+import type { ToolBroker, ToolInvocationResult } from "@noesis/tools";
+import { z } from "zod";
+
+const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_CALLS = 128;
+const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
+
+const childMessageSchema = z.union([
+  z.strictObject({ type: z.literal("ready") }),
+  z.strictObject({
+    type: z.literal("sdk-call"),
+    requestId: z.string().min(1),
+    kind: z.literal("search"),
+    query: z.string(),
+    limit: z.number().int().optional(),
+  }),
+  z.strictObject({
+    type: z.literal("sdk-call"),
+    requestId: z.string().min(1),
+    kind: z.literal("describe"),
+    name: z.string(),
+  }),
+  z.strictObject({
+    type: z.literal("sdk-call"),
+    requestId: z.string().min(1),
+    kind: z.literal("invoke"),
+    name: z.string(),
+    input: JsonValueSchema,
+  }),
+  z.strictObject({
+    type: z.literal("progress"),
+    value: JsonValueSchema,
+  }),
+  z.strictObject({
+    type: z.literal("result"),
+    value: JsonValueSchema,
+  }),
+  z.strictObject({
+    type: z.literal("failure"),
+    error: z.string(),
+    stack: z.string().optional(),
+  }),
+]);
+
+type ChildMessage = z.infer<typeof childMessageSchema>;
+
+export type CodeExecutionEvent =
+  | { readonly type: "started"; readonly executionId: string }
+  | { readonly type: "stdout"; readonly executionId: string; readonly text: string }
+  | { readonly type: "stderr"; readonly executionId: string; readonly text: string }
+  | { readonly type: "progress"; readonly executionId: string; readonly value: JsonValue }
+  | {
+      readonly type: "tool-start";
+      readonly executionId: string;
+      readonly name: string;
+      readonly callIndex: number;
+    }
+  | {
+      readonly type: "tool-end";
+      readonly executionId: string;
+      readonly name: string;
+      readonly callIndex: number;
+      readonly ok: boolean;
+    }
+  | {
+      readonly type: "completed";
+      readonly executionId: string;
+      readonly calls: number;
+      readonly durationMs: number;
+    }
+  | {
+      readonly type: "failed" | "cancelled";
+      readonly executionId: string;
+      readonly error: string;
+    };
+
+export interface CodeExecutionRequest {
+  readonly executionId?: string;
+  readonly logicalExecutionId?: string;
+  readonly source: string;
+  readonly input?: JsonValue;
+  readonly sessionId: string;
+  readonly turnId?: string;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+}
+
+export interface CodeExecutionResult {
+  readonly executionId: string;
+  readonly value: JsonValue;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly calls: number;
+  readonly durationMs: number;
+}
+
+export interface CodeModeRuntime {
+  readonly execute: (
+    request: CodeExecutionRequest,
+    emit?: (event: CodeExecutionEvent) => void,
+  ) => Promise<CodeExecutionResult>;
+  readonly terminate: (executionId: string) => Promise<void>;
+  readonly shutdown: () => Promise<void>;
+}
+
+export interface CreateCodeModeRuntimeOptions {
+  readonly cwd: string;
+  readonly broker: ToolBroker;
+  readonly maxCalls?: number;
+  readonly maxOutputBytes?: number;
+}
+
+interface ActiveExecution {
+  readonly child: ChildProcess;
+  readonly controller: AbortController;
+  readonly closed: Promise<void>;
+  readonly settled: Promise<void>;
+}
+
+function invocationValue(result: ToolInvocationResult): JsonValue {
+  if (result.ok) return result.value;
+  throw new Error(`${result.code}: ${result.message}`);
+}
+
+async function terminateChild(child: ChildProcess, closed: Promise<void>): Promise<void> {
+  if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+  const closedAfterTerm = await Promise.race([
+    closed.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
+  ]);
+  if (!closedAfterTerm && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  await closed;
+}
+
+export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): CodeModeRuntime {
+  const active = new Map<string, ActiveExecution>();
+  const maxCalls = options.maxCalls ?? DEFAULT_MAX_CALLS;
+  const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+
+  const execute: CodeModeRuntime["execute"] = async (request, emit = () => undefined) => {
+    if (!request.source.trim()) throw new Error("Codemode source must not be empty");
+    if (Buffer.byteLength(request.source, "utf8") > 128 * 1024)
+      throw new Error("Codemode source exceeds 128 KiB");
+    const executionId = request.executionId ?? createId("execution");
+    const logicalExecutionId = request.logicalExecutionId ?? executionId;
+    if (active.has(executionId)) throw new Error(`Codemode execution ${executionId} is already running`);
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const child = fork(new URL("./runner.mjs", import.meta.url), [], {
+      cwd: options.cwd,
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+      serialization: "advanced",
+    });
+    const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+    let settleActive: (() => void) | undefined;
+    const settled = new Promise<void>((resolve) => {
+      settleActive = resolve;
+    });
+    active.set(executionId, Object.freeze({ child, controller, closed, settled }));
+    const output = { stdout: "", stderr: "" };
+    let outputBytes = 0;
+    let calls = 0;
+    let ready = false;
+    let terminal = false;
+    let settlingResult = false;
+    let timer: NodeJS.Timeout | undefined;
+    const pendingSdkCalls = new Set<Promise<void>>();
+
+    const appendOutput = (kind: "stdout" | "stderr", chunk: string): void => {
+      if (!chunk || outputBytes >= maxOutputBytes) return;
+      const remaining = maxOutputBytes - outputBytes;
+      const bytes = Buffer.from(chunk, "utf8");
+      const accepted = bytes.subarray(0, remaining).toString("utf8");
+      output[kind] += accepted;
+      outputBytes += Buffer.byteLength(accepted, "utf8");
+      if (accepted) emit({ type: kind, executionId, text: accepted });
+    };
+
+    const abort = (): void => {
+      if (controller.signal.aborted) return;
+      controller.abort();
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+    };
+    request.signal?.addEventListener("abort", abort, { once: true });
+    child.stdout?.on("data", (chunk: Buffer | string) => appendOutput("stdout", String(chunk)));
+    child.stderr?.on("data", (chunk: Buffer | string) => appendOutput("stderr", String(chunk)));
+    emit({ type: "started", executionId });
+
+    try {
+      return await new Promise<CodeExecutionResult>((resolve, reject) => {
+        const finishFailure = (error: Error, cancelled = false): void => {
+          if (terminal) return;
+          terminal = true;
+          abort();
+          emit({
+            type: cancelled ? "cancelled" : "failed",
+            executionId,
+            error: error.message,
+          });
+          reject(error);
+        };
+        const finishSuccess = async (value: JsonValue): Promise<void> => {
+          if (terminal || settlingResult) return;
+          settlingResult = true;
+          await Promise.all([...pendingSdkCalls]);
+          if (terminal) return;
+          terminal = true;
+          const durationMs = Date.now() - startedAt;
+          emit({ type: "completed", executionId, calls, durationMs });
+          resolve(
+            Object.freeze({
+              executionId,
+              value,
+              stdout: output.stdout,
+              stderr: output.stderr,
+              calls,
+              durationMs,
+            }),
+          );
+        };
+        const respond = (message: object): void => {
+          if (!child.connected) return;
+          child.send(message);
+        };
+        const handleSdkCall = async (
+          message: Extract<ChildMessage, { readonly type: "sdk-call" }>,
+        ): Promise<void> => {
+          calls += 1;
+          if (calls > maxCalls) {
+            respond({
+              type: "sdk-result",
+              requestId: message.requestId,
+              ok: false,
+              error: `Codemode exceeded ${maxCalls} SDK calls`,
+            });
+            abort();
+            return;
+          }
+          const callIndex = calls;
+          const callId = `tool_call_${sha256(`${logicalExecutionId}:${String(callIndex)}`)}`;
+          const name =
+            message.kind === "search"
+              ? "noesis.search"
+              : message.kind === "describe"
+                ? "noesis.describe"
+                : message.name;
+          emit({ type: "tool-start", executionId, name, callIndex });
+          try {
+            const value = toJsonValue(
+              message.kind === "search"
+                ? options.broker.search(message.query, message.limit)
+                : message.kind === "describe"
+                  ? (options.broker.describe(message.name) ?? null)
+                  : invocationValue(
+                      await options.broker.invoke(message.name, message.input, {
+                        executionId,
+                        logicalExecutionId,
+                        callId,
+                        sessionId: request.sessionId,
+                        ...(request.turnId ? { turnId: request.turnId } : {}),
+                        signal: controller.signal,
+                      }),
+                    ),
+            );
+            respond({
+              type: "sdk-result",
+              requestId: message.requestId,
+              ok: true,
+              value,
+            });
+            emit({ type: "tool-end", executionId, name, callIndex, ok: true });
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : String(error);
+            respond({
+              type: "sdk-result",
+              requestId: message.requestId,
+              ok: false,
+              error: reason,
+            });
+            emit({ type: "tool-end", executionId, name, callIndex, ok: false });
+          }
+        };
+        child.on("message", (raw: unknown) => {
+          const parsed = childMessageSchema.safeParse(raw);
+          if (!parsed.success) {
+            finishFailure(new Error(`Malformed codemode frame: ${z.prettifyError(parsed.error)}`));
+            return;
+          }
+          const message = parsed.data;
+          if (message.type === "ready") {
+            if (ready) {
+              finishFailure(new Error("Codemode child sent duplicate ready frame"));
+              return;
+            }
+            ready = true;
+            child.send({
+              type: "run",
+              source: request.source,
+              ...(request.input === undefined ? {} : { input: request.input }),
+            });
+          } else if (message.type === "sdk-call") {
+            const pending = handleSdkCall(message);
+            pendingSdkCalls.add(pending);
+            void pending.finally(() => pendingSdkCalls.delete(pending));
+          } else if (message.type === "progress") {
+            emit({ type: "progress", executionId, value: message.value });
+          } else if (message.type === "result") {
+            void finishSuccess(message.value);
+          } else {
+            finishFailure(new Error(message.error));
+          }
+        });
+        child.once("error", (error) => finishFailure(error));
+        child.once("exit", (code, signal) => {
+          if (terminal || settlingResult) return;
+          if (controller.signal.aborted) finishFailure(new Error("Codemode execution was cancelled"), true);
+          else
+            finishFailure(
+              new Error(
+                `Codemode child exited before producing a result (${signal ?? `code ${String(code)}`})`,
+              ),
+            );
+        });
+        controller.signal.addEventListener(
+          "abort",
+          () => finishFailure(new Error("Codemode execution was cancelled"), true),
+          { once: true },
+        );
+        timer = setTimeout(() => {
+          finishFailure(new Error("Codemode execution timed out"));
+        }, request.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
+      request.signal?.removeEventListener("abort", abort);
+      controller.abort();
+      await Promise.all([...pendingSdkCalls]);
+      await terminateChild(child, closed);
+      active.delete(executionId);
+      settleActive?.();
+    }
+  };
+
+  const terminate = async (executionId: string): Promise<void> => {
+    const execution = active.get(executionId);
+    if (!execution) return;
+    execution.controller.abort();
+    if (execution.child.exitCode === null && execution.child.signalCode === null)
+      execution.child.kill("SIGTERM");
+    await execution.settled;
+  };
+
+  const shutdown = async (): Promise<void> => {
+    const executions = [...active.values()];
+    for (const execution of executions) {
+      execution.controller.abort();
+      if (execution.child.exitCode === null && execution.child.signalCode === null)
+        execution.child.kill("SIGTERM");
+    }
+    await Promise.all(executions.map(async (execution) => await execution.settled));
+  };
+
+  return Object.freeze({ execute, terminate, shutdown });
+}

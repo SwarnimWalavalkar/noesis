@@ -6,6 +6,7 @@ import {
   eventChecksum,
   effectOperationFingerprint,
   SCHEMA_VERSION,
+  sha256,
   type CapabilityRevisionRef,
   type Experiment,
   type ExperimentTrial,
@@ -87,6 +88,230 @@ describe("WorkspaceStore", () => {
       code: "ENOENT",
     });
     store.close();
+  });
+
+  test("rehydrates unfinished codemode executions as interrupted", async () => {
+    const root = await temporary("codemode-recovery");
+    const first = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:00:00.000Z",
+    });
+    await first.operational.sessions.put({
+      sessionId: "session-codemode",
+      title: "Codemode",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    await first.operational.codeExecutions.put({
+      executionId: "execution-unfinished",
+      logicalExecutionId: "logical-execution-unfinished",
+      sessionId: "session-codemode",
+      catalogId: "catalog-test",
+      catalogDigest: digest("a"),
+      sourceDigest: sha256(text('return "exact";')),
+      status: "running",
+      callCount: 1,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    first.close();
+
+    const recovered = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:01:00.000Z",
+    });
+
+    expect(await recovered.operational.codeExecutions.get("execution-unfinished")).toMatchObject({
+      status: "interrupted",
+      error: "Process exited before execution settled",
+      completedAt: "2026-07-26T00:01:00.000Z",
+    });
+    recovered.close();
+  });
+
+  test("pins exact codemode source and log artifacts across terminal updates", async () => {
+    const store = await createWorkspaceStore(await temporary("codemode-artifacts"));
+    await store.operational.sessions.put({
+      sessionId: "session-artifacts",
+      title: "Codemode artifacts",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const relationshipRefs = Object.freeze([
+      {
+        kind: "database_row" as const,
+        table: "sessions" as const,
+        rowId: "session-artifacts",
+      },
+    ]);
+    const source = await store.artifacts.writeArtifact({
+      path: "codemode/execution-artifacts/source.mjs",
+      mediaType: "text/javascript",
+      bytes: text('return "exact";'),
+      actor,
+      relationshipRefs,
+    });
+    const stdout = await store.artifacts.writeArtifact({
+      path: "codemode/execution-artifacts/stdout.log",
+      mediaType: "text/plain",
+      bytes: text("one\n"),
+      actor,
+      relationshipRefs,
+    });
+    const stderr = await store.artifacts.writeArtifact({
+      path: "codemode/execution-artifacts/stderr.log",
+      mediaType: "text/plain",
+      bytes: text(""),
+      actor,
+      relationshipRefs,
+    });
+    await store.operational.codeExecutions.put({
+      executionId: "execution-artifacts",
+      logicalExecutionId: "execution-artifacts",
+      sessionId: "session-artifacts",
+      catalogId: "catalog-test",
+      catalogDigest: digest("a"),
+      sourceDigest: sha256(text('return "exact";')),
+      sourceArtifactId: source.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    await store.operational.codeExecutions.put({
+      executionId: "execution-artifacts",
+      logicalExecutionId: "execution-artifacts",
+      sessionId: "session-artifacts",
+      catalogId: "catalog-test",
+      catalogDigest: digest("a"),
+      sourceDigest: sha256(text('return "exact";')),
+      sourceArtifactId: source.artifactId,
+      stdoutArtifactId: stdout.artifactId,
+      stderrArtifactId: stderr.artifactId,
+      status: "completed",
+      result: "exact",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+      completedAt: "2026-07-26T00:00:01.000Z",
+    });
+    const alternateStdout = await store.artifacts.writeArtifact({
+      path: "codemode/execution-artifacts/alternate-stdout.log",
+      mediaType: "text/plain",
+      bytes: text("two\n"),
+      actor,
+      relationshipRefs,
+    });
+
+    expect(await store.operational.codeExecutions.get("execution-artifacts")).toMatchObject({
+      sourceArtifactId: source.artifactId,
+      stdoutArtifactId: stdout.artifactId,
+      stderrArtifactId: stderr.artifactId,
+    });
+    await expect(
+      store.operational.codeExecutions.put({
+        executionId: "execution-artifacts",
+        logicalExecutionId: "execution-artifacts",
+        sessionId: "session-artifacts",
+        catalogId: "catalog-test",
+        catalogDigest: digest("a"),
+        sourceDigest: sha256(text('return "exact";')),
+        sourceArtifactId: source.artifactId,
+        stdoutArtifactId: alternateStdout.artifactId,
+        stderrArtifactId: stderr.artifactId,
+        status: "completed",
+        result: "exact",
+        callCount: 0,
+        startedAt: "2026-07-26T00:00:00.000Z",
+        completedAt: "2026-07-26T00:00:01.000Z",
+      }),
+    ).rejects.toThrow("immutable");
+    store.close();
+  });
+
+  test("rehydrates unfinished workflows as paused with their phase identity intact", async () => {
+    const root = await temporary("workflow-recovery");
+    const first = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:00:00.000Z",
+    });
+    await first.operational.sessions.put({
+      sessionId: "session-workflow",
+      title: "Workflow",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const definitionRevision = await first.definitions.recordWorkingDefinition({
+      workingPath: "workflows/recover/workflow.json",
+      bytes: text('{"name":"recover"}'),
+      actor,
+    });
+    await first.operational.workflows.putRun({
+      runId: "workflow-run-unfinished",
+      workflowName: "recover",
+      workflowRevision: 1,
+      definitionRevisionId: definitionRevision.revisionId,
+      sessionId: "session-workflow",
+      status: "running",
+      currentPhase: 0,
+      input: { value: 1 },
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+    });
+    await first.operational.codeExecutions.put({
+      executionId: "execution-workflow-unfinished",
+      logicalExecutionId: "logical-workflow-phase",
+      sessionId: "session-workflow",
+      catalogId: "catalog-test",
+      catalogDigest: digest("c"),
+      sourceDigest: digest("d"),
+      status: "running",
+      callCount: 1,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    await first.operational.workflows.putPhase({
+      runId: "workflow-run-unfinished",
+      phaseIndex: 0,
+      phaseName: "recover",
+      status: "running",
+      attempt: 1,
+      logicalExecutionId: "logical-workflow-phase",
+      input: { value: 1 },
+      executionId: "execution-workflow-unfinished",
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    first.close();
+
+    const recovered = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:01:00.000Z",
+    });
+
+    expect(await recovered.operational.workflows.getRun("workflow-run-unfinished")).toMatchObject({
+      status: "paused",
+      error: "Process exited before workflow settled",
+      updatedAt: "2026-07-26T00:01:00.000Z",
+    });
+    expect(await recovered.operational.workflows.listPhases("workflow-run-unfinished")).toMatchObject([
+      {
+        status: "failed",
+        attempt: 1,
+        logicalExecutionId: "logical-workflow-phase",
+        input: { value: 1 },
+        executionId: "execution-workflow-unfinished",
+        error: "Process exited before workflow phase settled",
+        completedAt: "2026-07-26T00:01:00.000Z",
+      },
+    ]);
+    recovered.close();
   });
 
   test("upgrades a version-1 workspace and keeps migrations idempotent", async () => {

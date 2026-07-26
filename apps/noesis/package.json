@@ -9,6 +9,7 @@
   "dependencies": {
     "@noesis/capabilities": "workspace:*",
     "@noesis/config": "workspace:*",
+    "@noesis/codemode": "workspace:*",
     "@noesis/context": "workspace:*",
     "@noesis/domain": "workspace:*",
     "@noesis/evals": "workspace:*",
@@ -18,6 +19,7 @@
     "@noesis/runtime": "workspace:*",
     "@noesis/runtime-pi": "workspace:*",
     "@noesis/tui": "workspace:*",
+    "@noesis/tools": "workspace:*",
     "@noesis/workspace": "workspace:*",
     "zod": "4.4.3"
   }

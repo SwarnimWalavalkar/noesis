@@ -1,4 +1,4 @@
-import type { EffectClass, JsonValue, Principal } from "@noesis/domain";
+import type { EffectClass, JsonValue, PermissionManifest, Principal } from "@noesis/domain";
 
 export * from "./durable-authority.ts";
 
@@ -49,6 +49,10 @@ export interface EffectGateway {
 /** The only production grant and receipt issuer. Callers receive operation-shaped decisions. */
 export interface AuthorityBoundary {
   readonly receiptVerifier: AuthorityReceiptVerifier;
+  runForeground<T extends JsonValue>(
+    request: Omit<EffectRequest<T>, "principal">,
+    permission: PermissionManifest,
+  ): Promise<EffectDecision<T>>;
   promote<T extends JsonValue>(
     resource: string,
     idempotencyKey: string,

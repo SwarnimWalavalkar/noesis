@@ -157,6 +157,11 @@ describe("turn intelligence", () => {
       workspace,
       protectedRuntime,
       capabilities: resolver,
+      basePermissionManifest: Object.freeze({
+        effects: Object.freeze(["read", "execute"]),
+        resourcePatterns: Object.freeze(["*"]),
+        credentialRefs: Object.freeze([]),
+      }),
       now: () => "2026-07-25T00:00:00.000Z",
     });
 
@@ -174,6 +179,11 @@ describe("turn intelligence", () => {
       "research-brief",
     ]);
     expect(related.renderedSystemPrompt).toContain("NARROW RESEARCH PROMPT");
+    expect(related.permissionSnapshot).toEqual({
+      effects: ["read", "execute"],
+      resourcePatterns: ["*"],
+      credentialRefs: [],
+    });
     expect(await protectedRuntime.activations.getTurnPlan("session-related", "turn-related")).toEqual(
       related,
     );

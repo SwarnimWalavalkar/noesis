@@ -8,6 +8,9 @@ import {
   createAssistantDeltaAggregator,
   createPiAgentRuntime,
   frozenPlanMaterialUses,
+  resolveFrozenSessionToolDefinitions,
+  type FrozenSessionToolResolver,
+  type PiCodeExecutionAdapter,
 } from "../src/index.ts";
 import {
   CONTROLLED_PI_MODEL,
@@ -108,6 +111,31 @@ function definitions(marker: string): readonly SessionToolDefinition[] {
   );
 }
 
+function controlledCodeExecution(
+  resolver: FrozenSessionToolResolver,
+  marker: string,
+): PiCodeExecutionAdapter {
+  const prepare: PiCodeExecutionAdapter["prepare"] = async (plan, signal) => {
+    await resolveFrozenSessionToolDefinitions(plan, resolver, signal);
+    return Object.freeze({
+      catalogId: "catalog-controlled",
+      catalogDigest: sha256("catalog-controlled"),
+      execute: async () =>
+        Object.freeze({
+          executionId: "execution-controlled",
+          value: Object.freeze({ marker }),
+          calls: 1,
+          durationMs: 1,
+        }),
+      close: async () => undefined,
+    });
+  };
+  return Object.freeze({
+    prepare,
+    shutdown: async () => undefined,
+  });
+}
+
 describe("agent runtime factories", () => {
   test("aggregates authoritative Pi text deltas across tool-loop assistant messages", () => {
     const deltas = createAssistantDeltaAggregator();
@@ -139,7 +167,7 @@ describe("agent runtime factories", () => {
         },
         () => undefined,
       ),
-    ).rejects.toThrow("without a turn-scoped session-tool resolver");
+    ).rejects.toThrow("without a codemode execution adapter");
     expect(controlled.provider.state.callCount).toBe(0);
   });
 
@@ -149,7 +177,7 @@ describe("agent runtime factories", () => {
       respond: ({ context }) => {
         if (!context.messages.some((message) => message.role === "toolResult"))
           return fauxAssistantMessage(
-            fauxToolCall("search_sessions", { query: "immutable evidence" }, { id: "call-search" }),
+            fauxToolCall("execute", { source: "return { grounded: true };" }, { id: "call-execute" }),
             { stopReason: "toolUse" },
           );
         const toolContext = JSON.stringify(context.messages);
@@ -160,15 +188,18 @@ describe("agent runtime factories", () => {
     });
     const plan = frozenPlan();
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
-      sessionTools: {
-        resolve: async (received) =>
-          Object.freeze({
-            planId: received.planId,
-            canonicalDigest: received.canonicalDigest,
-            consumedMaterials: frozenPlanMaterialUses(received),
-            definitions: definitions(marker),
-          }),
-      },
+      codeExecution: controlledCodeExecution(
+        {
+          resolve: async (received) =>
+            Object.freeze({
+              planId: received.planId,
+              canonicalDigest: received.canonicalDigest,
+              consumedMaterials: frozenPlanMaterialUses(received),
+              definitions: definitions(marker),
+            }),
+        },
+        marker,
+      ),
     });
 
     const result = await runtime.run(
@@ -210,15 +241,18 @@ describe("agent runtime factories", () => {
       canonicalDigest: frozenTurnPlanDigest(unsigned),
     }) as FrozenTurnPlan;
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
-      sessionTools: {
-        resolve: async (received) =>
-          Object.freeze({
-            planId: received.planId,
-            canonicalDigest: received.canonicalDigest,
-            consumedMaterials: frozenPlanMaterialUses(received).slice(1),
-            definitions: definitions("must-not-run"),
-          }),
-      },
+      codeExecution: controlledCodeExecution(
+        {
+          resolve: async (received) =>
+            Object.freeze({
+              planId: received.planId,
+              canonicalDigest: received.canonicalDigest,
+              consumedMaterials: frozenPlanMaterialUses(received).slice(1),
+              definitions: definitions("must-not-run"),
+            }),
+        },
+        "must-not-run",
+      ),
     });
     const request = {
       trailId: plan.sessionId,

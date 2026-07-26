@@ -82,7 +82,8 @@ describe("apps/noesis production control-plane composition", () => {
     const controlled = createControlledPiModels();
     const first = await createApplicationRuntimeComposition({
       config,
-      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
@@ -94,7 +95,8 @@ describe("apps/noesis production control-plane composition", () => {
 
     const reopened = await createApplicationRuntimeComposition({
       config,
-      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
@@ -119,7 +121,8 @@ describe("apps/noesis production control-plane composition", () => {
 
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
@@ -227,8 +230,8 @@ describe("apps/noesis production control-plane composition", () => {
     const seenConfigurations: unknown[] = [];
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (sessionTools) => {
-        const pi = createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools });
+      createAgent: (_sessionTools, codeExecution, selfTools) => {
+        const pi = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
         const capturingAgent: NoesisAgentRuntime = Object.freeze({
           ...pi,
           run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
@@ -328,7 +331,8 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
@@ -368,7 +372,8 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -441,7 +446,8 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (sessionTools) => createPiAgentRuntime(process.cwd(), controlled.models, { sessionTools }),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,

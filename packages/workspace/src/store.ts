@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 import {
   type ActorRef,
   type ArtifactFileRef,
@@ -59,6 +60,7 @@ import {
 } from "./database.ts";
 import {
   decodeExperiment,
+  decodeCodeExecution,
   decodeFeedbackSignal,
   decodeFileRevisionRef,
   decodeMessage,
@@ -69,6 +71,8 @@ import {
   decodeSession,
   decodeStored,
   decodeToolCall,
+  decodeWorkflowPhaseRun,
+  decodeWorkflowRun,
   decodeVector,
   JsonRecordSchema,
   SearchConfigurationSchema,
@@ -87,6 +91,7 @@ import {
 import { createProtectedWorkspaceRuntime, registerWorkspaceRuntimeInternals } from "./protected-runtime.ts";
 import type {
   CanonicalSearchSource,
+  CodeExecutionRecord,
   MessageRecord,
   NoesisWorkspaceStore,
   OperationalCutoverReport,
@@ -98,6 +103,8 @@ import type {
   StageDefinitionRequest,
   StagedDefinition,
   ToolCallRecord,
+  WorkflowPhaseRunRecord,
+  WorkflowRunRecord,
   WorkspacePaths,
 } from "./types.ts";
 
@@ -261,6 +268,8 @@ export async function createWorkspaceStore(
       "skills",
       "capabilities",
       "tools",
+      "scripts",
+      "workflows",
       "evals",
       "candidates",
       "active",
@@ -716,6 +725,9 @@ export async function createWorkspaceStore(
 
   const research = createResearchRepositories(database, recordActivity, now);
   const operational = createOperationalRepositories(database, recordActivity);
+  const interruptedAt = now();
+  await operational.codeExecutions.interruptRunning(interruptedAt);
+  await operational.workflows.interruptRunning(interruptedAt);
   const jobs = createDurableJobStore(database, recordActivity, (reference) =>
     assertStoredReference(db, reference),
   );
@@ -1589,6 +1601,231 @@ function createOperationalRepositories(
     });
     return databaseRef("tool_calls", record.toolCallId);
   };
+  const putCodeExecution = async (record: CodeExecutionRecord): Promise<void> => {
+    database.transaction(() => {
+      if (record.sourceArtifactId) {
+        const sourceArtifact = db
+          .prepare("SELECT content_digest FROM artifacts WHERE artifact_id = ?")
+          .get(record.sourceArtifactId);
+        if (
+          sourceArtifact === undefined ||
+          requiredString(sourceArtifact, "content_digest") !== record.sourceDigest
+        )
+          throw new Error(
+            `Codemode execution ${record.executionId} source artifact does not match its source digest`,
+          );
+      }
+      const currentRow = db
+        .prepare("SELECT * FROM codemode_executions WHERE execution_id = ?")
+        .get(record.executionId);
+      if (currentRow !== undefined) {
+        const current = decodeCodeExecution(currentRow);
+        const transitions: Readonly<
+          Record<CodeExecutionRecord["status"], readonly CodeExecutionRecord["status"][]>
+        > = {
+          running: ["running", "completed", "failed", "cancelled", "interrupted"],
+          completed: ["completed"],
+          failed: ["failed"],
+          cancelled: ["cancelled"],
+          interrupted: ["interrupted"],
+        };
+        if (!transitions[current.status].includes(record.status))
+          throw new Error(`Invalid codemode transition ${current.status} -> ${record.status}`);
+        const currentIdentity = {
+          ...current,
+          status: record.status,
+          result: record.result,
+          error: record.error,
+          stdoutArtifactId: record.stdoutArtifactId,
+          stderrArtifactId: record.stderrArtifactId,
+          callCount: record.callCount,
+          completedAt: record.completedAt,
+        };
+        if (
+          !isDeepStrictEqual(JSON.parse(JSON.stringify(currentIdentity)), JSON.parse(JSON.stringify(record)))
+        )
+          throw new Error(`Codemode execution ${record.executionId} changed its immutable identity`);
+        if (record.callCount < current.callCount)
+          throw new Error(`Codemode execution ${record.executionId} cannot reduce its call count`);
+        if (
+          current.status !== "running" &&
+          !isDeepStrictEqual(JSON.parse(JSON.stringify(current)), JSON.parse(JSON.stringify(record)))
+        )
+          throw new Error(`Terminal codemode execution ${record.executionId} is immutable`);
+      }
+      db.prepare(
+        `INSERT INTO codemode_executions(
+          execution_id, logical_execution_id, parent_execution_id, session_id, turn_id,
+          catalog_id, catalog_digest,
+          source_digest, source_artifact_id, stdout_artifact_id, stderr_artifact_id,
+          status, result_json, error, call_count, started_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(execution_id) DO UPDATE SET
+          status = excluded.status, result_json = excluded.result_json, error = excluded.error,
+          stdout_artifact_id = excluded.stdout_artifact_id,
+          stderr_artifact_id = excluded.stderr_artifact_id,
+          call_count = excluded.call_count, completed_at = excluded.completed_at`,
+      ).run(
+        record.executionId,
+        record.logicalExecutionId,
+        record.parentExecutionId ?? null,
+        record.sessionId,
+        record.turnId ?? null,
+        record.catalogId,
+        record.catalogDigest,
+        record.sourceDigest,
+        record.sourceArtifactId ?? null,
+        record.stdoutArtifactId ?? null,
+        record.stderrArtifactId ?? null,
+        record.status,
+        record.result === undefined ? null : JSON.stringify(record.result),
+        record.error ?? null,
+        record.callCount,
+        record.startedAt,
+        record.completedAt ?? null,
+      );
+      recordActivity(
+        systemActor,
+        `codemode_execution.${record.status}`,
+        "codemode_execution",
+        record.executionId,
+      );
+    });
+  };
+  const putWorkflowRun = async (record: WorkflowRunRecord): Promise<void> => {
+    database.transaction(() => {
+      const currentRow = db.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get(record.runId);
+      if (currentRow !== undefined) {
+        const current = decodeWorkflowRun(currentRow);
+        const transitions: Readonly<
+          Record<WorkflowRunRecord["status"], readonly WorkflowRunRecord["status"][]>
+        > = {
+          running: ["running", "paused", "completed", "failed", "cancelled"],
+          paused: ["running", "failed", "cancelled"],
+          completed: ["completed"],
+          failed: ["failed"],
+          cancelled: ["cancelled"],
+        };
+        if (!transitions[current.status].includes(record.status))
+          throw new Error(`Invalid workflow-run transition ${current.status} -> ${record.status}`);
+        const currentIdentity = {
+          ...current,
+          status: record.status,
+          currentPhase: record.currentPhase,
+          output: record.output,
+          error: record.error,
+          updatedAt: record.updatedAt,
+          completedAt: record.completedAt,
+        };
+        if (
+          !isDeepStrictEqual(JSON.parse(JSON.stringify(currentIdentity)), JSON.parse(JSON.stringify(record)))
+        )
+          throw new Error(`Workflow run ${record.runId} changed its immutable identity`);
+        if (record.currentPhase < current.currentPhase)
+          throw new Error(`Workflow run ${record.runId} cannot move to an earlier phase`);
+        if (
+          (current.status === "completed" || current.status === "failed" || current.status === "cancelled") &&
+          !isDeepStrictEqual(JSON.parse(JSON.stringify(current)), JSON.parse(JSON.stringify(record)))
+        )
+          throw new Error(`Terminal workflow run ${record.runId} is immutable`);
+      }
+      db.prepare(
+        `INSERT INTO workflow_runs(
+          run_id, workflow_name, workflow_revision, definition_revision_id,
+          catalog_id, catalog_digest, permission_digest, provider, model, thinking_level, session_id,
+          turn_id, status, current_phase, input_json, output_json, error,
+          created_at, updated_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET
+          status = excluded.status, current_phase = excluded.current_phase,
+          output_json = excluded.output_json, error = excluded.error,
+          updated_at = excluded.updated_at, completed_at = excluded.completed_at`,
+      ).run(
+        record.runId,
+        record.workflowName,
+        record.workflowRevision,
+        record.definitionRevisionId,
+        record.catalogId ?? null,
+        record.catalogDigest ?? null,
+        record.permissionDigest ?? null,
+        record.provider ?? null,
+        record.model ?? null,
+        record.thinkingLevel ?? null,
+        record.sessionId,
+        record.turnId ?? null,
+        record.status,
+        record.currentPhase,
+        JSON.stringify(record.input),
+        record.output === undefined ? null : JSON.stringify(record.output),
+        record.error ?? null,
+        record.createdAt,
+        record.updatedAt,
+        record.completedAt ?? null,
+      );
+      recordActivity(systemActor, `workflow_run.${record.status}`, "workflow_run", record.runId);
+    });
+  };
+  const putWorkflowPhase = async (record: WorkflowPhaseRunRecord): Promise<void> => {
+    database.transaction(() => {
+      const currentRow = db
+        .prepare("SELECT * FROM workflow_phase_runs WHERE run_id = ? AND phase_index = ?")
+        .get(record.runId, record.phaseIndex);
+      if (currentRow !== undefined) {
+        const current = decodeWorkflowPhaseRun(currentRow);
+        const transitions: Readonly<
+          Record<WorkflowPhaseRunRecord["status"], readonly WorkflowPhaseRunRecord["status"][]>
+        > = {
+          pending: ["pending", "running", "cancelled"],
+          running: ["running", "completed", "failed", "cancelled"],
+          completed: ["completed"],
+          failed: ["running", "failed", "cancelled"],
+          cancelled: ["cancelled"],
+        };
+        if (!transitions[current.status].includes(record.status))
+          throw new Error(`Invalid workflow-phase transition ${current.status} -> ${record.status}`);
+        if (current.phaseName !== record.phaseName)
+          throw new Error(`Workflow phase ${record.runId}/${String(record.phaseIndex)} changed its name`);
+        if (record.attempt < current.attempt || record.attempt > current.attempt + 1)
+          throw new Error(
+            `Workflow phase ${record.runId}/${String(record.phaseIndex)} has an invalid attempt`,
+          );
+        if (
+          (current.status === "completed" || current.status === "cancelled") &&
+          !isDeepStrictEqual(JSON.parse(JSON.stringify(current)), JSON.parse(JSON.stringify(record)))
+        )
+          throw new Error(
+            `Terminal workflow phase ${record.runId}/${String(record.phaseIndex)} is immutable`,
+          );
+      }
+      db.prepare(
+        `INSERT INTO workflow_phase_runs(
+          run_id, phase_index, phase_name, status, attempt, logical_execution_id,
+          input_json, output_json,
+          execution_id, error, started_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id, phase_index) DO UPDATE SET
+          status = excluded.status, attempt = excluded.attempt,
+          logical_execution_id = excluded.logical_execution_id,
+          input_json = excluded.input_json, output_json = excluded.output_json,
+          execution_id = excluded.execution_id, error = excluded.error,
+          started_at = excluded.started_at, completed_at = excluded.completed_at`,
+      ).run(
+        record.runId,
+        record.phaseIndex,
+        record.phaseName,
+        record.status,
+        record.attempt,
+        record.logicalExecutionId ?? null,
+        JSON.stringify(record.input),
+        record.output === undefined ? null : JSON.stringify(record.output),
+        record.executionId ?? null,
+        record.error ?? null,
+        record.startedAt ?? null,
+        record.completedAt ?? null,
+      );
+      recordActivity(systemActor, `workflow_phase.${record.status}`, "workflow_run", record.runId);
+    });
+  };
   const putOutcome = async (record: OutcomeRecord): Promise<void> => {
     database.transaction(() => {
       db.prepare(
@@ -1721,6 +1958,93 @@ function createOperationalRepositories(
           .prepare("SELECT * FROM tool_calls WHERE session_id = ? ORDER BY created_at, tool_call_id")
           .all(sessionId)
           .map(decodeToolCall),
+    }),
+    codeExecutions: Object.freeze({
+      get: async (executionId: string) =>
+        decodeOptional(
+          db.prepare("SELECT * FROM codemode_executions WHERE execution_id = ?").get(executionId),
+          decodeCodeExecution,
+        ),
+      put: putCodeExecution,
+      listForSession: async (sessionId: string) =>
+        db
+          .prepare("SELECT * FROM codemode_executions WHERE session_id = ? ORDER BY started_at, execution_id")
+          .all(sessionId)
+          .map(decodeCodeExecution),
+      interruptRunning: async (interruptedAt: string) =>
+        database.transaction(() => {
+          const running = db
+            .prepare("SELECT execution_id FROM codemode_executions WHERE status = 'running'")
+            .all();
+          for (const row of running) {
+            const executionId = requiredString(row, "execution_id");
+            db.prepare(
+              `UPDATE codemode_executions
+               SET status = 'interrupted', error = 'Process exited before execution settled',
+                   completed_at = ?
+               WHERE execution_id = ? AND status = 'running'`,
+            ).run(interruptedAt, executionId);
+            recordActivity(systemActor, "codemode_execution.interrupted", "codemode_execution", executionId);
+          }
+          return running.length;
+        }),
+    }),
+    workflows: Object.freeze({
+      getRun: async (runId: string) =>
+        decodeOptional(
+          db.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get(runId),
+          decodeWorkflowRun,
+        ),
+      putRun: putWorkflowRun,
+      listRunsForSession: async (sessionId: string) =>
+        db
+          .prepare("SELECT * FROM workflow_runs WHERE session_id = ? ORDER BY created_at, run_id")
+          .all(sessionId)
+          .map(decodeWorkflowRun),
+      putPhase: putWorkflowPhase,
+      listPhases: async (runId: string) =>
+        db
+          .prepare("SELECT * FROM workflow_phase_runs WHERE run_id = ? ORDER BY phase_index")
+          .all(runId)
+          .map(decodeWorkflowPhaseRun),
+      interruptRunning: async (interruptedAt: string) =>
+        database.transaction(() => {
+          const runningPhases = db
+            .prepare(
+              `SELECT run_id, phase_index
+               FROM workflow_phase_runs
+               WHERE status = 'running'`,
+            )
+            .all();
+          for (const row of runningPhases) {
+            const runId = requiredString(row, "run_id");
+            const phaseIndex = requiredNumber(row, "phase_index");
+            db.prepare(
+              `UPDATE workflow_phase_runs
+               SET status = 'failed',
+                   error = 'Process exited before workflow phase settled',
+                   completed_at = ?
+               WHERE run_id = ? AND phase_index = ? AND status = 'running'`,
+            ).run(interruptedAt, runId, phaseIndex);
+            recordActivity(systemActor, "workflow_phase.interrupted", "workflow_run", runId, [phaseIndex]);
+          }
+          const runningRuns = db.prepare("SELECT run_id FROM workflow_runs WHERE status = 'running'").all();
+          for (const row of runningRuns) {
+            const runId = requiredString(row, "run_id");
+            db.prepare(
+              `UPDATE workflow_runs
+               SET status = 'paused',
+                   error = 'Process exited before workflow settled',
+                   updated_at = ?
+               WHERE run_id = ? AND status = 'running'`,
+            ).run(interruptedAt, runId);
+            recordActivity(systemActor, "workflow_run.interrupted", "workflow_run", runId);
+          }
+          return Object.freeze({
+            runs: runningRuns.length,
+            phases: runningPhases.length,
+          });
+        }),
     }),
     outcomes: Object.freeze({
       get: async (outcomeId: string) =>

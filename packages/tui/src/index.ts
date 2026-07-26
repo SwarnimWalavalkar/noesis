@@ -223,11 +223,203 @@ export async function startNoesisTui(
         tui.requestRender();
         return;
       }
+      if (text === "/skills") {
+        const skills = (await runtime.listSkills?.()) ?? [];
+        view.dispatch({
+          type: "system-message",
+          text:
+            skills.length === 0
+              ? "No skills are installed or discoverable."
+              : [
+                  `Skills · ${skills.length}`,
+                  ...skills.map(
+                    (skill) =>
+                      `• ${skill.name}${skill.disableModelInvocation ? " · explicit only" : ""}\n  ${skill.description}\n  ${skill.filePath}`,
+                  ),
+                  "",
+                  "Install with: noesis skills install SOURCE [--workspace]",
+                  "Invoke with: /skill:<name> [instructions]",
+                ].join("\n"),
+        });
+        tui.requestRender();
+        return;
+      }
+      if (text.startsWith("/skill ")) {
+        const name = text.slice("/skill ".length).trim();
+        const skill = await runtime.inspectSkill?.(name);
+        view.dispatch({
+          type: "system-message",
+          text: skill
+            ? [
+                `${skill.name}${skill.disableModelInvocation ? " · explicit only" : ""}`,
+                skill.description,
+                skill.filePath,
+                `digest ${skill.contentDigest}`,
+                "",
+                skill.content,
+              ].join("\n")
+            : `Unknown skill: ${name}`,
+        });
+        tui.requestRender();
+        return;
+      }
+      if (text === "/scripts") {
+        const scripts = (await runtime.listScripts?.()) ?? [];
+        view.dispatch({
+          type: "system-message",
+          text:
+            scripts.length === 0
+              ? "No reusable scripts have been saved yet."
+              : [
+                  `Scripts · ${scripts.length}`,
+                  ...scripts.map(
+                    (script) =>
+                      `• ${script.name} · r${String(script.revision)}\n  ${script.description}\n  ${script.requiredTools.join(", ") || "pure JavaScript"}\n  ${script.workingPath}`,
+                  ),
+                  "",
+                  "Ask Noesis to run one by name, or say “save that as a script” after useful work.",
+                ].join("\n"),
+        });
+        tui.requestRender();
+        return;
+      }
+      if (text.startsWith("/script ")) {
+        const name = text.slice("/script ".length).trim();
+        const script = await runtime.inspectScript?.(name);
+        view.dispatch({
+          type: "system-message",
+          text: script
+            ? [
+                `${script.name} · r${String(script.revision)}`,
+                script.description,
+                script.workingPath,
+                `requires: ${script.requiredTools.join(", ") || "pure JavaScript"}`,
+                "",
+                `Input schema\n${script.inputSchema}`,
+                "",
+                `Output schema\n${script.outputSchema}`,
+                "",
+                `Source\n${script.source}`,
+              ].join("\n")
+            : `Unknown script: ${name}`,
+        });
+        tui.requestRender();
+        return;
+      }
+      if (text === "/workflows") {
+        const workflows = (await runtime.listWorkflows?.()) ?? [];
+        view.dispatch({
+          type: "system-message",
+          text:
+            workflows.length === 0
+              ? "No multi-phase workflows have been saved yet."
+              : [
+                  `Workflows · ${workflows.length}`,
+                  ...workflows.map(
+                    (workflow) =>
+                      `• ${workflow.name} · r${String(workflow.revision)} · ${workflow.phaseNames.length} phases\n  ${workflow.description}\n  ${workflow.phaseNames.join(" → ")}\n  ${workflow.workingPath}`,
+                  ),
+                  "",
+                  "Ask Noesis to run or resume a workflow by name.",
+                ].join("\n"),
+        });
+        tui.requestRender();
+        return;
+      }
+      if (text.startsWith("/workflow ")) {
+        const name = text.slice("/workflow ".length).trim();
+        const workflow = await runtime.inspectWorkflow?.(name);
+        view.dispatch({
+          type: "system-message",
+          text: workflow
+            ? [
+                `${workflow.name} · r${String(workflow.revision)}`,
+                workflow.description,
+                workflow.workingPath,
+                "",
+                ...workflow.phases.flatMap((workflowPhase, index) => [
+                  `${String(index + 1)}. ${workflowPhase.name} · ${workflowPhase.description}`,
+                  `   requires: ${workflowPhase.requiredTools.join(", ") || "pure JavaScript"}`,
+                  workflowPhase.source,
+                  "",
+                ]),
+              ].join("\n")
+            : `Unknown workflow: ${name}`,
+        });
+        tui.requestRender();
+        return;
+      }
+      if (text === "/runs") {
+        const runs = (await runtime.listExecutions?.(view.state.trailId)) ?? [];
+        view.dispatch({
+          type: "system-message",
+          text:
+            runs.length === 0
+              ? "No codemode executions have run in this session."
+              : [
+                  `Runs · ${runs.length}`,
+                  ...runs.map(
+                    (run) =>
+                      `• ${run.kind} · ${run.label} · ${run.executionId}\n  ${run.status} · ${run.callCount} ${run.kind === "workflow" ? "phases" : "calls"} · ${run.toolNames.join(", ") || "no nested calls"}\n  ${run.startedAt}`,
+                  ),
+                ].join("\n"),
+        });
+        tui.requestRender();
+        return;
+      }
+      if (text.startsWith("/run ")) {
+        const executionId = text.slice("/run ".length).trim();
+        const run = await runtime.inspectExecution?.(view.state.trailId, executionId);
+        view.dispatch({
+          type: "system-message",
+          text: run
+            ? [
+                `${run.kind} · ${run.label}`,
+                `${run.executionId} · ${run.status}`,
+                ...(run.parentExecutionId ? [`parent ${run.parentExecutionId}`] : []),
+                ...(run.catalogDigest ? [`catalog ${run.catalogDigest}`] : []),
+                ...(run.sourceDigest ? [`source ${run.sourceDigest}`] : []),
+                ...(run.sourceArtifact
+                  ? [
+                      "",
+                      `Source · ${run.sourceArtifact.path}${run.sourceArtifact.truncated ? " · preview truncated" : ""}`,
+                      run.sourceArtifact.preview || "(empty)",
+                    ]
+                  : []),
+                ...(run.stdoutArtifact
+                  ? [
+                      "",
+                      `Stdout · ${run.stdoutArtifact.path}${run.stdoutArtifact.truncated ? " · preview truncated" : ""}`,
+                      run.stdoutArtifact.preview || "(empty)",
+                    ]
+                  : []),
+                ...(run.stderrArtifact
+                  ? [
+                      "",
+                      `Stderr · ${run.stderrArtifact.path}${run.stderrArtifact.truncated ? " · preview truncated" : ""}`,
+                      run.stderrArtifact.preview || "(empty)",
+                    ]
+                  : []),
+                ...(run.phases ?? []).map(
+                  (runPhase) =>
+                    `${String(runPhase.index + 1)}. ${runPhase.name} · ${runPhase.status}${runPhase.executionId ? ` · ${runPhase.executionId}` : ""}${runPhase.error ? `\n   ${runPhase.error}` : ""}`,
+                ),
+                ...(run.result ? ["", `Result\n${run.result}`] : []),
+                ...(run.error ? ["", `Error\n${run.error}`] : []),
+              ].join("\n")
+            : `Unknown run in this session: ${executionId}`,
+        });
+        tui.requestRender();
+        return;
+      }
       if (text === "?" || text === "/help") {
         view.dispatch({
           type: "system-message",
           text: [
-            "/model provider/model · /context · /capabilities · /fork · /compact · /abort",
+            "/model provider/model · /context · /capabilities",
+            "/skills · /scripts · /workflows · /runs",
+            "/skill NAME · /script NAME · /workflow NAME · /run ID",
+            "/fork · /compact · /abort",
             "/quit · learning, experiments, activation, and revert run ambiently",
           ].join("\n"),
         });

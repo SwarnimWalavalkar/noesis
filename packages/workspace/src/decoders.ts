@@ -3,6 +3,7 @@ import {
   ExperimentSchema,
   FeedbackSignalSchema,
   FileRevisionRefSchema,
+  JsonValueSchema,
   type Experiment,
   type FeedbackSignal,
   type FileRevisionRef,
@@ -15,6 +16,7 @@ import type {
   ActivationOperationRecord,
   ActivationRecord,
   CanonicalSearchSource,
+  CodeExecutionRecord,
   MessageRecord,
   OutcomeRecord,
   SearchConfiguration,
@@ -22,6 +24,8 @@ import type {
   SessionRecord,
   ToolCallRecord,
   TurnActivationPinRecord,
+  WorkflowPhaseRunRecord,
+  WorkflowRunRecord,
 } from "./types.ts";
 
 export const JsonRecordSchema = z.record(z.string(), z.unknown());
@@ -113,6 +117,100 @@ export function decodeToolCall(row: unknown): ToolCallRecord {
     status: requiredString(row, "status") as ToolCallRecord["status"],
     sensitivity: requiredString(row, "sensitivity") as ToolCallRecord["sensitivity"],
     createdAt: requiredString(row, "created_at"),
+    ...(completedAt === undefined ? {} : { completedAt }),
+  };
+}
+
+export function decodeCodeExecution(row: unknown): CodeExecutionRecord {
+  const parentExecutionId = optionalString(row, "parent_execution_id");
+  const turnId = optionalString(row, "turn_id");
+  const result = optionalString(row, "result_json");
+  const error = optionalString(row, "error");
+  const completedAt = optionalString(row, "completed_at");
+  const sourceArtifactId = optionalString(row, "source_artifact_id");
+  const stdoutArtifactId = optionalString(row, "stdout_artifact_id");
+  const stderrArtifactId = optionalString(row, "stderr_artifact_id");
+  return {
+    executionId: requiredString(row, "execution_id"),
+    logicalExecutionId: requiredString(row, "logical_execution_id"),
+    ...(parentExecutionId === undefined ? {} : { parentExecutionId }),
+    sessionId: requiredString(row, "session_id"),
+    ...(turnId === undefined ? {} : { turnId }),
+    catalogId: requiredString(row, "catalog_id"),
+    catalogDigest: requiredString(row, "catalog_digest"),
+    sourceDigest: requiredString(row, "source_digest"),
+    ...(sourceArtifactId === undefined ? {} : { sourceArtifactId }),
+    ...(stdoutArtifactId === undefined ? {} : { stdoutArtifactId }),
+    ...(stderrArtifactId === undefined ? {} : { stderrArtifactId }),
+    status: requiredString(row, "status") as CodeExecutionRecord["status"],
+    ...(result === undefined ? {} : { result: JsonValueSchema.parse(parseJson(result)) }),
+    ...(error === undefined ? {} : { error }),
+    callCount: requiredNumber(row, "call_count"),
+    startedAt: requiredString(row, "started_at"),
+    ...(completedAt === undefined ? {} : { completedAt }),
+  };
+}
+
+export function decodeWorkflowRun(row: unknown): WorkflowRunRecord {
+  const turnId = optionalString(row, "turn_id");
+  const catalogId = optionalString(row, "catalog_id");
+  const catalogDigest = optionalString(row, "catalog_digest");
+  const permissionDigest = optionalString(row, "permission_digest");
+  const provider = optionalString(row, "provider");
+  const model = optionalString(row, "model");
+  const thinkingLevel = optionalString(row, "thinking_level");
+  const output = optionalString(row, "output_json");
+  const error = optionalString(row, "error");
+  const completedAt = optionalString(row, "completed_at");
+  return {
+    runId: requiredString(row, "run_id"),
+    workflowName: requiredString(row, "workflow_name"),
+    workflowRevision: requiredNumber(row, "workflow_revision"),
+    definitionRevisionId: requiredString(row, "definition_revision_id"),
+    ...(catalogId === undefined ? {} : { catalogId }),
+    ...(catalogDigest === undefined ? {} : { catalogDigest }),
+    ...(permissionDigest === undefined ? {} : { permissionDigest }),
+    ...(provider === undefined ? {} : { provider }),
+    ...(model === undefined ? {} : { model }),
+    ...(thinkingLevel === undefined
+      ? {}
+      : {
+          thinkingLevel: z
+            .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+            .parse(thinkingLevel),
+        }),
+    sessionId: requiredString(row, "session_id"),
+    ...(turnId === undefined ? {} : { turnId }),
+    status: requiredString(row, "status") as WorkflowRunRecord["status"],
+    currentPhase: requiredNumber(row, "current_phase"),
+    input: JsonValueSchema.parse(parseJson(requiredString(row, "input_json"))),
+    ...(output === undefined ? {} : { output: JsonValueSchema.parse(parseJson(output)) }),
+    ...(error === undefined ? {} : { error }),
+    createdAt: requiredString(row, "created_at"),
+    updatedAt: requiredString(row, "updated_at"),
+    ...(completedAt === undefined ? {} : { completedAt }),
+  };
+}
+
+export function decodeWorkflowPhaseRun(row: unknown): WorkflowPhaseRunRecord {
+  const output = optionalString(row, "output_json");
+  const executionId = optionalString(row, "execution_id");
+  const logicalExecutionId = optionalString(row, "logical_execution_id");
+  const error = optionalString(row, "error");
+  const startedAt = optionalString(row, "started_at");
+  const completedAt = optionalString(row, "completed_at");
+  return {
+    runId: requiredString(row, "run_id"),
+    phaseIndex: requiredNumber(row, "phase_index"),
+    phaseName: requiredString(row, "phase_name"),
+    status: requiredString(row, "status") as WorkflowPhaseRunRecord["status"],
+    attempt: requiredNumber(row, "attempt"),
+    ...(logicalExecutionId === undefined ? {} : { logicalExecutionId }),
+    input: JsonValueSchema.parse(parseJson(requiredString(row, "input_json"))),
+    ...(output === undefined ? {} : { output: JsonValueSchema.parse(parseJson(output)) }),
+    ...(executionId === undefined ? {} : { executionId }),
+    ...(error === undefined ? {} : { error }),
+    ...(startedAt === undefined ? {} : { startedAt }),
     ...(completedAt === undefined ? {} : { completedAt }),
   };
 }

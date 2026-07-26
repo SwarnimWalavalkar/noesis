@@ -110,3 +110,11 @@ The user can ask why the change happened, inspect the evidence and comparison, c
 The user asks for a bounded, explicit task. Noesis defaults to doing it, produces the result, and reports material limitations. Ambient reflection finds no credible reusable learning and records no durable change.
 
 The absence of compounding machinery in the visible experience is a feature: not every useful session needs to become memory, policy, or an experiment.
+
+### Useful execution becomes an inspectable program
+
+The user asks Noesis to investigate a repository, modify files, run commands, consult the web, or create an artifact. Noesis uses one model-visible `execute` call and composes progressively discovered host tools in JavaScript. The conversation receives the selected final value while nested operations, effects, and revisions remain inspectable.
+
+When the program has a credible future use, the user or ambient reflection may propose saving it. One reusable computation becomes a typed script. Work that needs named phases, durable progress, corrections between phases, or resume becomes a workflow. Skills remain portable instructional context that can teach when and how to use these primitives without silently installing executable authority.
+
+Scripts and workflows remain ordinary editable files. Executions pin immutable revisions, and SQLite records code, nested calls, workflow runs, and phases. A later correction resumes from completed work rather than replaying it, while protected code—not generated content—retains authority over promotion and permission.

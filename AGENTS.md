@@ -14,6 +14,7 @@
 ## Architecture
 
 - Read `plans/noesis-first-complete-iteration.html` and `plans/noesis-autonomous-compounding-implementation-plan.html` before changing package ownership or protected boundaries. The autonomous-compounding plan supersedes the older plan's storage and ledger architecture.
+- Read `plans/noesis-tools-codemode-workflows-plan.html` before changing tools, codemode, skills, scripts, workflows, or their TUI surfaces.
 - Pi executes turns only. Only `packages/runtime-pi` may import Pi agent/runtime types. Do not introduce `createAgentSession` or Pi `InteractiveMode` as a product root.
 - The TUI uses `@earendil-works/pi-tui` directly and renders read models. UI components never own durable state.
 - `WorkspaceStore` owns persistence boundaries. SQLite is authoritative for operational state; ordinary editable workspace files are authoritative for declarative definitions.
@@ -24,6 +25,11 @@
 - Legacy JSONL support is import-only inside the workspace cutover. Do not recreate a runtime ledger, ledger package, or second operational authority around it.
 - Large outputs remain ordinary artifact files with SQLite metadata. Evaluation evidence is revisioned and append-only once used by a decision; credentials remain only in the protected credential store or process environment.
 - Context fragments have provenance and hard per-fragment and total bounds. Capability versions are frozen at turn start.
+- Pi sees only the three semantic self tools plus `execute`. Broad work tools are codemode-only and use one frozen Tool Catalog and Broker.
+- Codemode is trusted local Node.js execution. It owns process lifecycle and the SDK bridge, not real tools, policy, durable state, or a second registry.
+- Standard skills remain instructional resources with progressive disclosure. A skill package never registers executable extensions implicitly.
+- Editable script and workflow files are declarative authority; immutable revisions pin executions. SQLite owns code execution, workflow run, phase, and nested-call state.
+- Code executions retain exact source and bounded logs as artifact files. Workflow runs pin their definition, tool catalog, permission snapshot, and model routing; changed dependencies fail closed on resume.
 
 ## Protected control plane
 

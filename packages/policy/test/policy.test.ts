@@ -81,6 +81,46 @@ function createInMemoryDurableAuthorityState(): DurableAuthorityStatePort {
 }
 
 describe("durable authority boundary", () => {
+  test("foreground effects cannot widen the frozen turn permission", async () => {
+    const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
+    let executions = 0;
+    const request = Object.freeze({
+      operationId: "operation-foreground-write",
+      effect: "write" as const,
+      resource: "file:notes.md",
+      estimatedCost: 1,
+      idempotencyKey: "foreground-write",
+      requestDigest: "a".repeat(64),
+      execute: async () => {
+        executions += 1;
+        return null;
+      },
+    });
+
+    await expect(
+      authority.runForeground(request, {
+        effects: ["read"],
+        resourcePatterns: ["file:"],
+        credentialRefs: [],
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "denied" });
+    await expect(
+      authority.runForeground(request, {
+        effects: ["write"],
+        resourcePatterns: ["workspace:"],
+        credentialRefs: [],
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "denied" });
+    await expect(
+      authority.runForeground(request, {
+        effects: ["write"],
+        resourcePatterns: ["file:*"],
+        credentialRefs: [],
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(executions).toBe(1);
+  });
+
   test("issues scheduler grants only through a scheduling receipt and replays completion", async () => {
     const state = createInMemoryDurableAuthorityState();
     const authority = createDurableAuthorityBoundary(state);
