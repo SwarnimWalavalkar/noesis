@@ -16,12 +16,13 @@ import {
   createPiAgentRuntime,
   createPiModelServices,
   createPiSkillLibrary,
-  type NoesisAuthEvent,
   type NoesisAuthLoginCallbacks,
   type NoesisAuthPrompt,
   type PiAuthOperations,
 } from "@noesis/runtime-pi";
 import { startNoesisTui } from "@noesis/tui";
+import { createAuthEventNotifier, createBrowserUrlOpener } from "./browser-auth.ts";
+import { renderNoesisOAuthCallbackPage } from "./oauth-callback-page.ts";
 import {
   type OnboardingChoice,
   type OnboardingPrompts,
@@ -337,7 +338,14 @@ async function handleAuthPrompt(prompt: NoesisAuthPrompt): Promise<string> {
   if (prompt.type === "select") {
     console.log(prompt.message);
     for (const item of prompt.options) console.log(`  ${item.id}: ${item.label}`);
-    return await visiblePrompt("Selection", prompt.signal);
+    const defaultOption =
+      prompt.options.find((option) => option.label.toLowerCase().includes("(default)")) ?? prompt.options[0];
+    const answer = (
+      await visiblePrompt(`Selection${defaultOption ? ` [${defaultOption.id}]` : ""}`, prompt.signal)
+    ).trim();
+    if (answer.length > 0) return answer;
+    if (defaultOption) return defaultOption.id;
+    throw new Error(`Authentication selection prompt has no options: ${prompt.message}`);
   }
   const message = `${prompt.message}${prompt.placeholder ? ` (${prompt.placeholder})` : ""}`;
   return prompt.type === "secret"
@@ -345,18 +353,17 @@ async function handleAuthPrompt(prompt: NoesisAuthPrompt): Promise<string> {
     : await visiblePrompt(message, prompt.signal);
 }
 
-function notifyAuth(event: NoesisAuthEvent): void {
-  if (event.type === "auth_url") {
-    console.log(`Open this URL in your browser:\n${event.url}`);
-    if (event.instructions) console.log(event.instructions);
-  } else if (event.type === "device_code") {
-    console.log(`Open ${event.verificationUri} and enter code ${event.userCode}.`);
-  } else console.log(event.message);
-}
+const notifyAuth = createAuthEventNotifier({
+  openUrl: createBrowserUrlOpener({
+    enabled: process.env["NOESIS_DISABLE_BROWSER_OPEN"] !== "1",
+  }),
+  writeLine: console.log,
+});
 
 const interactiveAuthCallbacks: NoesisAuthLoginCallbacks = {
   prompt: handleAuthPrompt,
   notify: notifyAuth,
+  renderOAuthCallbackPage: renderNoesisOAuthCallbackPage,
 };
 
 async function chooseOnboardingOption(

@@ -128,6 +128,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
         env: {
           ...process.env,
           NO_COLOR: "1",
+          NOESIS_DISABLE_BROWSER_OPEN: "1",
           ...(firstLaunch ? { OPENROUTER_API_KEY: undefined } : { OPENROUTER_API_KEY: "test-key" }),
         },
         stdio: ["pipe", "pipe", "pipe"],
@@ -201,6 +202,14 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     async (action, _input) => {
       const { output, result } = await runPtyExit(action);
 
+      expect(output).toContain("__NOESIS_OAUTH_CALLBACK_PAGE__");
+      expect(output).toContain("<title>Noesis — authorization received</title>");
+      expect(output).toContain("AUTHORIZATION RECEIVED");
+      expect(output).toContain("Return to Noesis.");
+      expect(output).toContain("Cache-Control: no-store");
+      expect(output).toContain("Content-Security-Policy: default-src 'none'");
+      expect(output).toContain("Referrer-Policy: no-referrer");
+      expect(output).toContain("X-Content-Type-Options: nosniff");
       expect(output).toContain("● IDLE");
       expect(result).toEqual({ code: 0, signal: null });
     },

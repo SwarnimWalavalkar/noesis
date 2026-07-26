@@ -154,7 +154,7 @@ def main() -> int:
             (b"Choose a Codex model", b"\n"),
             (b"Choose a reasoning level", b"\n"),
             (b"Authenticate and create this configuration?", b"\n"),
-            (b"Select OpenAI Codex login method:", b"browser\n"),
+            (b"Select OpenAI Codex login method:", b"\n"),
         ]
         oauth_callback_pending = True
     elif action == "picker-cancel":
@@ -276,7 +276,24 @@ def main() -> int:
                             + state_match.group(1)
                         )
                         with urllib.request.urlopen(callback.decode(), timeout=1) as response:
-                            response.read()
+                            callback_page = response.read()
+                            callback_headers = "\n".join(
+                                f"{name}: {response.headers.get(name, '')}"
+                                for name in (
+                                    "Cache-Control",
+                                    "Content-Security-Policy",
+                                    "Referrer-Policy",
+                                    "X-Content-Type-Options",
+                                )
+                            ).encode()
+                        os.write(
+                            sys.stdout.fileno(),
+                            b"\n__NOESIS_OAUTH_CALLBACK_PAGE__\n"
+                            + callback_page
+                            + b"\n__NOESIS_OAUTH_CALLBACK_HEADERS__\n"
+                            + callback_headers
+                            + b"\n__NOESIS_OAUTH_CALLBACK_END__\n",
+                        )
                         oauth_callback_pending = False
                         output = b""
                     elif not sent_exit and ready_marker in output:
