@@ -15,10 +15,16 @@ const tsxLoader = import.meta.resolve("tsx");
 async function runCli(
   args: readonly string[],
   cwd = repositoryRoot,
+  environment: Readonly<Record<string, string | undefined>> = {},
 ): Promise<{ readonly code: number | null; readonly output: string }> {
+  const env: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: "1" };
+  for (const [name, value] of Object.entries(environment)) {
+    if (value === undefined) delete env[name];
+    else env[name] = value;
+  }
   const child = spawn(process.execPath, ["--import", tsxLoader, cliPath, ...args], {
     cwd,
-    env: { ...process.env, NO_COLOR: "1" },
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
@@ -128,11 +134,55 @@ describe("Noesis CLI grammar", () => {
     const result = await runCli(["--help"]);
 
     expect(result.code).toBe(0);
+    expect(result.output).toContain("Defaults to ~/.noesis");
+    expect(result.output).toContain("--home PATH overrides NOESIS_HOME");
     expect(result.output).toContain("noesis --continue");
     expect(result.output).toContain("single most recently active session");
     expect(result.output).toContain("full trail ID ascending on ties");
     expect(result.output).toContain("still marked running is not recovered or resumed automatically");
     expect(result.output).toContain("--trust-workspace");
+  });
+
+  test("defaults to the current OS user's global Noesis home", async () => {
+    const userHome = await mkdtemp(join(tmpdir(), "noesis-cli-user-home-"));
+    const workingDirectory = await mkdtemp(join(tmpdir(), "noesis-cli-working-directory-"));
+
+    const initialized = await runCli(["config", "init"], workingDirectory, {
+      HOME: userHome,
+      NOESIS_HOME: undefined,
+      USERPROFILE: userHome,
+    });
+
+    expect(initialized.code).toBe(0);
+    expect(initialized.output).toContain(`Initialized ${join(userHome, ".noesis", "config.json")}`);
+    await expect(readFile(join(userHome, ".noesis", "config.json"), "utf8")).resolves.toContain(
+      '"schemaVersion": 1',
+    );
+    await expect(readFile(join(workingDirectory, ".noesis", "config.json"), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  test("--home overrides NOESIS_HOME and NOESIS_HOME overrides the global default", async () => {
+    const userHome = await mkdtemp(join(tmpdir(), "noesis-cli-precedence-user-"));
+    const environmentHome = join(userHome, "from-environment");
+    const explicitHome = join(userHome, "from-cli");
+
+    const initializedFromEnvironment = await runCli(["config", "init"], repositoryRoot, {
+      HOME: userHome,
+      NOESIS_HOME: environmentHome,
+    });
+    const initializedFromCli = await runCli(["config", "init", "--home", explicitHome], repositoryRoot, {
+      HOME: userHome,
+      NOESIS_HOME: environmentHome,
+    });
+
+    expect(initializedFromEnvironment.code).toBe(0);
+    expect(initializedFromEnvironment.output).toContain(
+      `Initialized ${join(environmentHome, "config.json")}`,
+    );
+    expect(initializedFromCli.code).toBe(0);
+    expect(initializedFromCli.output).toContain(`Initialized ${join(explicitHome, "config.json")}`);
   });
 
   test("honors workspace scope for skill updates", async () => {
