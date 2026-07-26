@@ -1,24 +1,13 @@
-import type {
-  NoesisAuthLoginCallbacks,
-  NoesisAuthPrompt,
-  NoesisOAuthCallbackPage,
-} from "@noesis/runtime-pi";
+import type { NoesisAuthLoginCallbacks, NoesisAuthPrompt, NoesisOAuthCallbackPage } from "@noesis/runtime-pi";
 import type { OnboardingSurface } from "@noesis/tui";
 import type { BrowserUrlOpener } from "./browser-auth.ts";
 import { presentAuthEvent } from "./browser-auth.ts";
 import type { OnboardingPrompts } from "./onboarding.ts";
 
-export function defaultAuthOptionId(
-  prompt: NoesisAuthPrompt & { readonly type: "select" },
-): string {
+export function defaultAuthOptionId(prompt: NoesisAuthPrompt & { readonly type: "select" }): string {
   const preferred =
-    prompt.options.find((option) =>
-      option.label.toLowerCase().includes("(default)"),
-    ) ?? prompt.options[0];
-  if (!preferred)
-    throw new Error(
-      `Authentication selection prompt has no options: ${prompt.message}`,
-    );
+    prompt.options.find((option) => option.label.toLowerCase().includes("(default)")) ?? prompt.options[0];
+  if (!preferred) throw new Error(`Authentication selection prompt has no options: ${prompt.message}`);
   return preferred.id;
 }
 
@@ -57,18 +46,14 @@ export function createSurfaceAuthCallbacks(
 }
 
 /** Adapt the shared prompt surface to first-launch onboarding prompts. */
-export function promptsFromSurface(
-  surface: OnboardingSurface,
-): OnboardingPrompts {
+export function promptsFromSurface(surface: OnboardingSurface): OnboardingPrompts {
   return {
-    choose: async (message, choices, defaultId) =>
-      await surface.choose(message, choices, defaultId),
+    choose: async (message, choices, defaultId) => await surface.choose(message, choices, defaultId),
     text: async (message, defaultValue) => {
       const answer = (await surface.text(message, defaultValue)).trim();
       return answer.length === 0 ? defaultValue : answer;
     },
-    confirm: async (message, defaultValue) =>
-      await surface.confirm(message, defaultValue),
+    confirm: async (message, defaultValue) => await surface.confirm(message, defaultValue),
     note: (message) => surface.note(message),
   };
 }

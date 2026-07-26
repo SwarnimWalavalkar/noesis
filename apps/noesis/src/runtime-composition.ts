@@ -1928,6 +1928,9 @@ export async function createApplicationRuntimeComposition(
                 ...(event.error ? { error: event.error } : {}),
               });
           },
+          async (executionId) => {
+            emit({ type: "started", executionId });
+          },
         );
         return Object.freeze({
           executionId: result.executionId,

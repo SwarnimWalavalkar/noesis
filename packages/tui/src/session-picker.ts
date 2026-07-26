@@ -5,7 +5,7 @@ import {
   type TrailState,
   type TrailSummary,
 } from "@noesis/runtime";
-import { elideText } from "./rendering.ts";
+import { elideText } from "./theme.ts";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
 
 export interface TuiStartOptions {

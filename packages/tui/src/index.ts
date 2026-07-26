@@ -1,15 +1,22 @@
-import { Container, matchesKey, ProcessTerminal, type Terminal, TUI } from "@earendil-works/pi-tui";
-import type { TrailState } from "@noesis/runtime";
 import {
-  ANSI,
+  Container,
+  matchesKey,
+  ProcessTerminal,
+  type OverlayHandle,
+  type Terminal,
+  TUI,
+} from "@earendil-works/pi-tui";
+import type { TrailState } from "@noesis/runtime";
+import { executionIdOf } from "./action-summary.ts";
+import { isExclusiveSlashCommand, runSlashCommand } from "./commands.ts";
+import {
+  createHeaderView,
   createHelpView,
   createInputLabelView,
   createNoesisView,
+  createRunInspectorOverlay,
   createStaticLineView,
   createStatusView,
-  safeTerminalText,
-  shouldUseColor,
-  styled,
 } from "./rendering.ts";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
 import { createSafeEditor, createSelectTheme } from "./safe-editor.ts";
@@ -19,8 +26,11 @@ import {
   resumableTrail,
   type TuiStartOptions,
 } from "./session-picker.ts";
-import { initialTuiState } from "./state.ts";
+import { initialTuiState, timelineActions } from "./state.ts";
+import { ANSI, safeTerminalText, shouldUseColor, styled } from "./theme.ts";
 
+export * from "./action-summary.ts";
+export * from "./commands.ts";
 export * from "./onboarding.ts";
 export * from "./rendering.ts";
 export * from "./runtime-port.ts";
@@ -30,6 +40,7 @@ export * from "./state.ts";
 
 const SHUTDOWN_GRACE_MS = 250;
 const INSPECTOR_PREVIEW_CHARACTERS = 24_000;
+const INSPECTOR_PAGE_ROWS = 10;
 
 export function boundedInspectorText(text: string): string {
   const safe = safeTerminalText(text);
@@ -65,6 +76,10 @@ export async function startNoesisTui(
         })()
       : requestedSession;
   const tui = new TUI(terminal);
+  // The transcript grows without bound so history reaches native terminal scrollback. Clearing on
+  // shrink would emit an erase-scrollback sequence whenever a block collapses or a streamed
+  // message reconciles shorter, destroying that history.
+  tui.setClearOnShrink(false);
   const root = new Container();
   const requestedProvider = options.provider ?? runtime.agentDefaults.provider;
   const requestedModel = options.model ?? runtime.agentDefaults.model;
@@ -82,11 +97,22 @@ export async function startNoesisTui(
     () => terminal.rows,
   );
   const editor = createSafeEditor(tui, colorEnabled, selectTheme, () => terminal.rows);
+  const headerView = createHeaderView(colorEnabled, () => terminal.rows);
+  let inspectorMaxScroll = 0;
+  const inspectorOverlay = createRunInspectorOverlay(
+    view,
+    () => terminal.rows,
+    (maxScroll) => {
+      inspectorMaxScroll = maxScroll;
+    },
+  );
+  let inspectorHandle: OverlayHandle | undefined;
   const statusView = createStatusView(view, () => terminal.rows);
   const inputLabelView = createInputLabelView(colorEnabled, () => terminal.rows);
-  const helpView = createHelpView(colorEnabled, () => terminal.rows);
+  const helpView = createHelpView(view, () => terminal.rows);
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
   let activeTurn: Promise<void> | undefined;
+  let activeExclusiveCommand: Promise<boolean> | undefined;
   let turnGeneration = 0;
   let inspectorGeneration = 0;
   interface ActiveTurnToken {
@@ -143,6 +169,8 @@ export async function startNoesisTui(
       turnGeneration += 1;
       inspectorGeneration += 1;
       activeTurnToken = undefined;
+      inspectorHandle?.hide();
+      inspectorHandle = undefined;
       if (streamRenderTimer) clearTimeout(streamRenderTimer);
       streamRenderTimer = undefined;
       streamRenderTimerToken = undefined;
@@ -159,48 +187,157 @@ export async function startNoesisTui(
         }
       }
       const trailId = view.state.trailId;
-      if (activeTurn && trailId) {
-        const turn = activeTurn;
+      const turn = activeTurn;
+      const exclusiveCommand = activeExclusiveCommand;
+      let shutdownFailure: { readonly error: unknown } | undefined;
+      if (turn && trailId) {
         const abortAndSettle = (async () => {
           await runtime.abort(trailId);
           await turn;
-        })();
+        })().then<ShutdownSettlement, ShutdownSettlement>(
+          () => ({ status: "settled" }),
+          (error: unknown) => ({ status: "rejected", error }),
+        );
         let graceTimer: NodeJS.Timeout | undefined;
         // Terminal ownership is already released. Give a cooperative runtime a brief chance to
-        // settle, then detach: a broken runtime must not keep the CLI lifecycle pending forever.
+        // settle, then detach the abortable turn: a broken runtime must not keep the CLI lifecycle
+        // pending forever.
         const settlement = await Promise.race<ShutdownSettlement>([
-          abortAndSettle.then<ShutdownSettlement, ShutdownSettlement>(
-            () => ({ status: "settled" }),
-            (error: unknown) => ({ status: "rejected", error }),
-          ),
+          abortAndSettle,
           new Promise<ShutdownSettlement>((resolve) => {
             graceTimer = setTimeout(() => resolve({ status: "timed-out" }), SHUTDOWN_GRACE_MS);
             graceTimer.unref();
           }),
         ]);
         if (graceTimer) clearTimeout(graceTimer);
-        if (settlement.status === "rejected") throw settlement.error;
+        if (settlement.status === "rejected") shutdownFailure = { error: settlement.error };
         if (settlement.status === "timed-out") {
-          // The detached operation may still reject later; observe it without extending shutdown.
-          void abortAndSettle.catch(() => undefined);
+          // The detached turn may still settle later; the mapped promise observes its rejection.
+          void abortAndSettle;
         }
       }
+      // Exclusive commands have no cancellation primitive. They remain shutdown-owned after the
+      // terminal is released so runtime shutdown cannot race an in-flight mutation.
+      if (exclusiveCommand) {
+        try {
+          await exclusiveCommand;
+        } catch (error) {
+          shutdownFailure ??= { error };
+        }
+      }
+      if (shutdownFailure) throw shutdownFailure.error;
     })();
     shutdownPromise.then(resolveShutdown, rejectShutdown);
     return shutdownPromise;
   };
+
+  const closeRunInspector = (): void => {
+    inspectorMaxScroll = 0;
+    view.dispatch({ type: "inspector-closed" });
+    inspectorHandle?.hide();
+    inspectorHandle = undefined;
+    tui.requestRender();
+  };
+
+  const openRunInspector = (actionId: string): void => {
+    inspectorMaxScroll = 0;
+    view.dispatch({ type: "inspector-opened", actionId });
+    inspectorHandle ??= tui.showOverlay(inspectorOverlay, {
+      anchor: "center",
+      width: "90%",
+    });
+    tui.requestRender();
+    const trailId = view.state.trailId;
+    const action = timelineActions(view.state.timeline).find((candidate) => candidate.actionId === actionId);
+    const executionId = action ? executionIdOf(action) : undefined;
+    const settle = (detail?: Awaited<ReturnType<NonNullable<typeof runtime.inspectExecution>>>): void => {
+      inspectorMaxScroll = 0;
+      view.dispatch({
+        type: "inspector-loaded",
+        actionId,
+        ...(detail ? { detail } : {}),
+      });
+      tui.requestRender();
+    };
+    if (!trailId || !executionId || !runtime.inspectExecution) {
+      settle();
+      return;
+    }
+    void runtime.inspectExecution(trailId, executionId).then(
+      (detail) => settle(detail),
+      () => settle(),
+    );
+  };
+
+  /** Read-only keyboard navigation over transcript actions; the editor keeps input otherwise. */
+  const handleTranscriptKey = (data: string): boolean => {
+    const state = view.state;
+    if (state.inspector) {
+      if (matchesKey(data, "escape")) {
+        closeRunInspector();
+        return true;
+      }
+      if (matchesKey(data, "up"))
+        view.dispatch({
+          type: "inspector-scrolled",
+          delta: -1,
+          maxScroll: inspectorMaxScroll,
+        });
+      else if (matchesKey(data, "down"))
+        view.dispatch({
+          type: "inspector-scrolled",
+          delta: 1,
+          maxScroll: inspectorMaxScroll,
+        });
+      else if (matchesKey(data, "pageUp"))
+        view.dispatch({
+          type: "inspector-scrolled",
+          delta: -INSPECTOR_PAGE_ROWS,
+          maxScroll: inspectorMaxScroll,
+        });
+      else if (matchesKey(data, "pageDown"))
+        view.dispatch({
+          type: "inspector-scrolled",
+          delta: INSPECTOR_PAGE_ROWS,
+          maxScroll: inspectorMaxScroll,
+        });
+      tui.requestRender();
+      return true;
+    }
+    if (state.actionCursor) {
+      if (matchesKey(data, "escape") || matchesKey(data, "ctrl+o"))
+        view.dispatch({ type: "action-cursor-cleared" });
+      else if (matchesKey(data, "up")) view.dispatch({ type: "action-cursor-moved", direction: "previous" });
+      else if (matchesKey(data, "down")) view.dispatch({ type: "action-cursor-moved", direction: "next" });
+      else if (matchesKey(data, "space"))
+        view.dispatch({
+          type: "action-expansion-toggled",
+          actionId: state.actionCursor,
+        });
+      else if (matchesKey(data, "enter")) {
+        openRunInspector(state.actionCursor);
+        return true;
+      }
+      tui.requestRender();
+      return true;
+    }
+    if (matchesKey(data, "ctrl+o")) {
+      view.dispatch({ type: "action-cursor-moved", direction: "previous" });
+      tui.requestRender();
+      return true;
+    }
+    return false;
+  };
+
   removeExitInputListener = tui.addInputListener((data) => {
     if (matchesKey(data, "ctrl+c")) {
       cancelPicker?.();
       void shutdown();
       return { consume: true };
     }
-    if (phase === "main" && matchesKey(data, "ctrl+o")) {
-      view.dispatch({ type: "agent-actions-expansion-toggled" });
-      tui.requestRender();
-      return { consume: true };
-    }
-    if (phase === "main" && data === "\n" && editor.getText().trim() === "/quit") {
+    if (phase !== "main") return undefined;
+    if (handleTranscriptKey(data)) return { consume: true };
+    if (data === "\n" && editor.getText().trim() === "/quit") {
       void shutdown();
       return { consume: true };
     }
@@ -208,13 +345,27 @@ export async function startNoesisTui(
   });
   editor.onSubmit = (text) => {
     const submittedTrailId = view.state.trailId;
-    if (!submittedTrailId || !text.trim()) return;
+    let ownedTrailId = submittedTrailId;
+    const normalizedInput = text.trim();
+    if (!submittedTrailId || !normalizedInput) return;
+    if (normalizedInput === "/quit") {
+      void shutdown();
+      return;
+    }
+    if (activeExclusiveCommand) {
+      view.dispatch({
+        type: "system-message",
+        text: "A command is active. Wait for it to finish before submitting another command or prompt.",
+      });
+      tui.requestRender();
+      return;
+    }
     inspectorGeneration += 1;
     const submittedInspectorGeneration = inspectorGeneration;
     const isCurrentSubmission = (): boolean =>
       phase === "main" &&
       inspectorGeneration === submittedInspectorGeneration &&
-      view.state.trailId === submittedTrailId;
+      view.state.trailId === ownedTrailId;
     const publishInspector = (message: string): void => {
       if (!isCurrentSubmission() || activeTurn) return;
       view.dispatch({
@@ -224,12 +375,8 @@ export async function startNoesisTui(
       tui.requestRender();
     };
     void (async () => {
-      if (text === "/quit") {
-        await shutdown();
-        return;
-      }
       if (activeTurn) {
-        if (text.trim() === "/abort") {
+        if (normalizedInput === "/abort") {
           view.dispatch({ type: "execution-changed", execution: "aborting" });
           tui.requestRender();
           // Keep ABORTING observable for one throttled TUI render frame before a cooperative runtime settles.
@@ -244,267 +391,36 @@ export async function startNoesisTui(
         }
         return;
       }
-      if (text === "/context") {
-        view.dispatch({ type: "pane-selected", pane: "context" });
-        tui.requestRender();
-        return;
-      }
-      if (text === "/capabilities") {
-        view.dispatch({ type: "pane-selected", pane: "capabilities" });
-        tui.requestRender();
-        return;
-      }
-      if (text === "/skills") {
-        if (!runtime.listSkills) {
-          publishInspector("Skill inspection is unavailable in this runtime.");
-          return;
-        }
-        const skills = await runtime.listSkills();
-        publishInspector(
-          skills.length === 0
-            ? "No skills are installed or discoverable."
-            : [
-                `Skills · ${skills.length}`,
-                ...skills.map(
-                  (skill) =>
-                    `• ${skill.name}${skill.disableModelInvocation ? " · explicit only" : ""}\n  ${skill.description}\n  ${skill.filePath}`,
-                ),
-                "",
-                "Install with: noesis skills install SOURCE [--workspace]",
-                "Invoke with: /skill:<name> [instructions]",
-              ].join("\n"),
-        );
-        return;
-      }
-      if (text.startsWith("/skill ")) {
-        const name = text.slice("/skill ".length).trim();
-        if (!runtime.inspectSkill) {
-          publishInspector("Skill detail inspection is unavailable in this runtime.");
-          return;
-        }
-        const skill = await runtime.inspectSkill(name);
-        publishInspector(
-          skill
-            ? [
-                `${skill.name}${skill.disableModelInvocation ? " · explicit only" : ""}`,
-                skill.description,
-                skill.filePath,
-                `digest ${skill.contentDigest}`,
-                "",
-                skill.content,
-              ].join("\n")
-            : `Unknown skill: ${name}`,
-        );
-        return;
-      }
-      if (text === "/scripts") {
-        if (!runtime.listScripts) {
-          publishInspector("Script inspection is unavailable in this runtime.");
-          return;
-        }
-        const scripts = await runtime.listScripts();
-        publishInspector(
-          scripts.length === 0
-            ? "No reusable scripts have been saved yet."
-            : [
-                `Scripts · ${scripts.length}`,
-                ...scripts.map(
-                  (script) =>
-                    `• ${script.name} · r${String(script.revision)}\n  ${script.description}\n  ${script.requiredTools.join(", ") || "pure JavaScript"}\n  ${script.workingPath}`,
-                ),
-                "",
-                "Ask Noesis to run one by name, or say “save that as a script” after useful work.",
-              ].join("\n"),
-        );
-        return;
-      }
-      if (text.startsWith("/script ")) {
-        const name = text.slice("/script ".length).trim();
-        if (!runtime.inspectScript) {
-          publishInspector("Script detail inspection is unavailable in this runtime.");
-          return;
-        }
-        const script = await runtime.inspectScript(name);
-        publishInspector(
-          script
-            ? [
-                `${script.name} · r${String(script.revision)}`,
-                script.description,
-                script.workingPath,
-                `requires: ${script.requiredTools.join(", ") || "pure JavaScript"}`,
-                "",
-                `Input schema\n${script.inputSchema}`,
-                "",
-                `Output schema\n${script.outputSchema}`,
-                "",
-                `Source\n${script.source}`,
-              ].join("\n")
-            : `Unknown script: ${name}`,
-        );
-        return;
-      }
-      if (text === "/workflows") {
-        if (!runtime.listWorkflows) {
-          publishInspector("Workflow inspection is unavailable in this runtime.");
-          return;
-        }
-        const workflows = await runtime.listWorkflows();
-        publishInspector(
-          workflows.length === 0
-            ? "No multi-phase workflows have been saved yet."
-            : [
-                `Workflows · ${workflows.length}`,
-                ...workflows.map(
-                  (workflow) =>
-                    `• ${workflow.name} · r${String(workflow.revision)} · ${workflow.phaseNames.length} phases\n  ${workflow.description}\n  ${workflow.phaseNames.join(" → ")}\n  ${workflow.workingPath}`,
-                ),
-                "",
-                "Ask Noesis to run or resume a workflow by name.",
-              ].join("\n"),
-        );
-        return;
-      }
-      if (text.startsWith("/workflow ")) {
-        const name = text.slice("/workflow ".length).trim();
-        if (!runtime.inspectWorkflow) {
-          publishInspector("Workflow detail inspection is unavailable in this runtime.");
-          return;
-        }
-        const workflow = await runtime.inspectWorkflow(name);
-        publishInspector(
-          workflow
-            ? [
-                `${workflow.name} · r${String(workflow.revision)}`,
-                workflow.description,
-                workflow.workingPath,
-                "",
-                ...workflow.phases.flatMap((workflowPhase, index) => [
-                  `${String(index + 1)}. ${workflowPhase.name} · ${workflowPhase.description}`,
-                  `   requires: ${workflowPhase.requiredTools.join(", ") || "pure JavaScript"}`,
-                  workflowPhase.source,
-                  "",
-                ]),
-              ].join("\n")
-            : `Unknown workflow: ${name}`,
-        );
-        return;
-      }
-      if (text === "/runs") {
-        if (!runtime.listExecutions) {
-          publishInspector("Run inspection is unavailable in this runtime.");
-          return;
-        }
-        const runs = await runtime.listExecutions(submittedTrailId);
-        publishInspector(
-          runs.length === 0
-            ? "No codemode executions have run in this session."
-            : [
-                `Runs · ${runs.length}`,
-                ...runs.map(
-                  (run) =>
-                    `• ${run.kind} · ${run.label} · ${run.executionId}\n  ${run.status} · ${run.callCount} ${run.kind === "workflow" ? "phases" : "calls"} · ${run.toolNames.join(", ") || "no nested calls"}\n  ${run.startedAt}`,
-                ),
-              ].join("\n"),
-        );
-        return;
-      }
-      if (text.startsWith("/run ")) {
-        const executionId = text.slice("/run ".length).trim();
-        if (!runtime.inspectExecution) {
-          publishInspector("Run detail inspection is unavailable in this runtime.");
-          return;
-        }
-        const run = await runtime.inspectExecution(submittedTrailId, executionId);
-        publishInspector(
-          run
-            ? [
-                `${run.kind} · ${run.label}`,
-                `${run.executionId} · ${run.status}`,
-                ...(run.parentExecutionId ? [`parent ${run.parentExecutionId}`] : []),
-                ...(run.catalogDigest ? [`catalog ${run.catalogDigest}`] : []),
-                ...(run.sourceDigest ? [`source ${run.sourceDigest}`] : []),
-                ...(run.sourceArtifact
-                  ? [
-                      "",
-                      `Source · ${run.sourceArtifact.path}${run.sourceArtifact.truncated ? " · preview truncated" : ""}`,
-                      run.sourceArtifact.preview || "(empty)",
-                    ]
-                  : []),
-                ...(run.stdoutArtifact
-                  ? [
-                      "",
-                      `Stdout · ${run.stdoutArtifact.path}${run.stdoutArtifact.truncated ? " · preview truncated" : ""}`,
-                      run.stdoutArtifact.preview || "(empty)",
-                    ]
-                  : []),
-                ...(run.stderrArtifact
-                  ? [
-                      "",
-                      `Stderr · ${run.stderrArtifact.path}${run.stderrArtifact.truncated ? " · preview truncated" : ""}`,
-                      run.stderrArtifact.preview || "(empty)",
-                    ]
-                  : []),
-                ...(run.phases ?? []).map(
-                  (runPhase) =>
-                    `${String(runPhase.index + 1)}. ${runPhase.name} · ${runPhase.status}${runPhase.executionId ? ` · ${runPhase.executionId}` : ""}${runPhase.error ? `\n   ${runPhase.error}` : ""}`,
-                ),
-                ...(run.result ? ["", `Result\n${run.result}`] : []),
-                ...(run.error ? ["", `Error\n${run.error}`] : []),
-              ].join("\n")
-            : `Unknown run in this session: ${executionId}`,
-        );
-        return;
-      }
-      if (text === "?" || text === "/help") {
-        view.dispatch({
-          type: "system-message",
-          text: [
-            "/model provider/model · /context · /capabilities",
-            "/skills · /scripts · /workflows · /runs",
-            "/skill NAME · /script NAME · /workflow NAME · /run ID",
-            "/fork · /compact · /abort",
-            "/quit · learning, experiments, activation, and revert run ambiently",
-          ].join("\n"),
-        });
-        tui.requestRender();
-        return;
-      }
-      if (text === "/abort") {
+      if (normalizedInput === "/abort") {
         view.dispatch({ type: "system-message", text: "No turn is active." });
         tui.requestRender();
         return;
       }
-      if (text === "/compact") {
-        view.dispatch({ type: "execution-changed", execution: "compacting" });
-        tui.requestRender();
-        await runtime.compact(submittedTrailId);
-        view.dispatch({ type: "compacted" });
-        view.dispatch({ type: "system-message", text: "Trail compacted." });
-        tui.requestRender();
-        return;
-      }
-      if (text === "/fork") {
-        const trail = await runtime.forkTrail(submittedTrailId);
-        view.dispatch({ type: "trail-selected", trail });
-        tui.requestRender();
-        return;
-      }
-      if (text.startsWith("/model ")) {
-        const selection = text.slice(7).trim();
-        const separator = selection.indexOf("/");
-        if (separator <= 0 || separator === selection.length - 1) {
-          view.dispatch({ type: "failed", error: "Use /model provider/model" });
-        } else {
-          const trail = await runtime.startTrail({
-            title: `Model ${selection}`,
-            provider: selection.slice(0, separator),
-            model: selection.slice(separator + 1),
-          });
-          view.dispatch({ type: "trail-selected", trail });
+      let handled = false;
+      if (normalizedInput === "?" || normalizedInput.startsWith("/")) {
+        const exclusiveCommand = isExclusiveSlashCommand(normalizedInput);
+        const commandWork = runSlashCommand(normalizedInput, {
+          runtime,
+          trailId: submittedTrailId,
+          publishInspector,
+          dispatch: (action) => {
+            if (!isCurrentSubmission()) return;
+            view.dispatch(action);
+            if (action.type === "trail-selected") ownedTrailId = action.trail.trailId;
+          },
+          requestRender: () => {
+            if (isCurrentSubmission()) tui.requestRender();
+          },
+        });
+        if (exclusiveCommand) activeExclusiveCommand = commandWork;
+        try {
+          handled = await commandWork;
+        } finally {
+          if (activeExclusiveCommand === commandWork) activeExclusiveCommand = undefined;
         }
-        tui.requestRender();
-        return;
       }
+      if (handled) return;
+
       view.dispatch({ type: "prompt-submitted", text });
       tui.requestRender();
       const trailId = view.state.trailId;
@@ -530,6 +446,7 @@ export async function startNoesisTui(
                   ...(event.parentActionId ? { parentActionId: actionIdForView(event.parentActionId) } : {}),
                   name: event.name,
                   input: event.input,
+                  at: Date.now(),
                 });
               } else if (event.type === "tool-update") {
                 flushStreamDelta(token);
@@ -545,6 +462,7 @@ export async function startNoesisTui(
                   actionId: actionIdForView(event.actionId),
                   output: event.result,
                   isError: event.isError,
+                  at: Date.now(),
                 });
               } else if (event.type === "model") {
                 flushStreamDelta(token);
@@ -635,8 +553,11 @@ export async function startNoesisTui(
   const mountMain = (trail: TrailState): void => {
     phase = "main";
     cancelPicker = undefined;
+    inspectorHandle?.hide();
+    inspectorHandle = undefined;
     view.dispatch({ type: "trail-selected", trail });
     root.clear();
+    root.addChild(headerView);
     root.addChild(view);
     root.addChild(inputLabelView);
     root.addChild(editor);

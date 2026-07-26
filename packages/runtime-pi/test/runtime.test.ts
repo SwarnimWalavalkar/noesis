@@ -471,6 +471,7 @@ describe("agent runtime factories", () => {
     const codeExecution: PiCodeExecutionAdapter = Object.freeze({
       prepare: async () => {
         const execute: PreparedPiCodeExecution["execute"] = async (_source, _timeoutMs, _signal, emit) => {
+          emit({ type: "started", executionId: "execution-actions" });
           emit({ type: "progress", value: { message: "Starting shell" } });
           emit({
             type: "tool-start",
@@ -549,6 +550,19 @@ describe("agent runtime factories", () => {
           JSON.stringify(event.update).includes("Starting shell"),
       ),
     ).toBe(true);
+    expect(
+      events
+        .filter(
+          (event): event is Extract<AgentRuntimeEvent, { readonly type: "tool-update" }> =>
+            event.type === "tool-update" && event.actionId === "call-execute-visible",
+        )
+        .at(-1),
+    ).toMatchObject({
+      update: {
+        kind: "activity",
+        executionId: "execution-actions",
+      },
+    });
     expect(
       events.some(
         (event) =>

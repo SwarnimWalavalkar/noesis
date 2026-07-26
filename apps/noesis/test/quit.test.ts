@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { resolveNoesisConfig } from "@noesis/config";
 import { createPiAgentRoleRunner, createPiAgentRuntime } from "@noesis/runtime-pi";
@@ -34,7 +35,10 @@ async function createTestRuntime(home: string) {
   return await createApplicationRuntimeComposition({
     config,
     createAgent: (_sessionTools, codeExecution, selfTools) =>
-      createPiAgentRuntime(repositoryRoot, controlled.models, { codeExecution, selfTools }),
+      createPiAgentRuntime(repositoryRoot, controlled.models, {
+        codeExecution,
+        selfTools,
+      }),
     createRoleRunner: (configurations) =>
       createPiAgentRoleRunner(repositoryRoot, controlled.models, configurations),
   });
@@ -90,11 +94,17 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       | "paste-controls-quit"
       | "fragmented-hostile-paste-quit",
     prepare?: (home: string) => Promise<readonly string[]>,
-    size: { readonly columns: number; readonly rows: number } = { columns: 100, rows: 30 },
+    size: { readonly columns: number; readonly rows: number } = {
+      columns: 100,
+      rows: 30,
+    },
   ): Promise<{
     readonly home: string;
     readonly output: string;
-    readonly result: { readonly code: number | null; readonly signal: NodeJS.Signals | null };
+    readonly result: {
+      readonly code: number | null;
+      readonly signal: NodeJS.Signals | null;
+    };
   }> {
     const home = await mkdtemp(join(tmpdir(), "noesis-tui-process-"));
     homes.push(home);
@@ -136,11 +146,16 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     );
     children.add(child);
     let output = "";
-    const collect = (chunk: Buffer): void => {
-      output += chunk.toString("utf8");
-    };
-    child.stdout?.on("data", collect);
-    child.stderr?.on("data", collect);
+    // PTY reads split multi-byte characters across chunks, so decode as a stream rather than
+    // per chunk; otherwise glyphs like ● in the status line decode as replacement characters.
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (chunk: Buffer) => {
+      output += stdoutDecoder.write(chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      output += stderrDecoder.write(chunk);
+    });
 
     const result = await new Promise<{
       readonly code: number | null;
@@ -154,8 +169,10 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
         clearTimeout(timeout);
         reject(error);
       });
-      child.once("exit", (code, signal) => {
+      child.once("close", (code, signal) => {
         clearTimeout(timeout);
+        output += stdoutDecoder.end();
+        output += stderrDecoder.end();
         resolveExit({ code, signal });
       });
     });
@@ -232,7 +249,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     });
 
     expect(output).toContain("resume a session");
-    expect(output).toContain(`session ${selectedTrailId.slice(6, 14)}`);
+    expect(output).toContain(`s ${selectedTrailId.slice(6, 14)}`);
     expect(output).toContain("selected real PTY history");
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
@@ -246,14 +263,16 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       const runtime = await createTestRuntime(home);
       const older = await runtime.startTrail({ title: "older continue" });
       await runtime.runTurn(older.trailId, "older continue PTY history");
-      const selected = await runtime.startTrail({ title: "latest continue" });
+      const selected = await runtime.startTrail({
+        title: "latest continue",
+      });
       await runtime.runTurn(selected.trailId, "latest continue PTY history");
       selectedTrailId = selected.trailId;
       await runtime.shutdown();
       return ["--continue"];
     });
 
-    expect(output).toContain(`session ${selectedTrailId.slice(6, 14)}`);
+    expect(output).toContain(`s ${selectedTrailId.slice(6, 14)}`);
     expect(output).toContain("latest continue PTY history");
     expect(output).not.toContain("older continue PTY history");
     expect(result).toEqual({ code: 0, signal: null });
@@ -269,7 +288,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       await runtime.shutdown();
       return ["--resume", selected.trailId];
     });
-    expect(direct.output).toContain(`session ${selectedTrailId.slice(6, 14)}`);
+    expect(direct.output).toContain(`s ${selectedTrailId.slice(6, 14)}`);
     expect(direct.output).toContain("direct real PTY history");
     expect(direct.result).toEqual({ code: 0, signal: null });
 
@@ -287,7 +306,10 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
   }, 12_000);
 
   test("captures a wide 120x35 fresh shell with the full identity", async () => {
-    const { output, result } = await runPtyExit("quit-lf", undefined, { columns: 120, rows: 35 });
+    const { output, result } = await runPtyExit("quit-lf", undefined, {
+      columns: 120,
+      rows: 35,
+    });
 
     expect(output).toContain("███╗   ██╗ ██████╗");
     expect(output).toContain("think · learn · create · grow");
@@ -296,7 +318,10 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
   }, 7_000);
 
   test("captures real streaming semantics in a normal 90x28 shell", async () => {
-    const { output, result } = await runPtyExit("prompt-quit", undefined, { columns: 90, rows: 28 });
+    const { output, result } = await runPtyExit("prompt-quit", undefined, {
+      columns: 90,
+      rows: 28,
+    });
 
     expect(output).toContain("● THINKING");
     expect(output).toContain("Controlled Pi completion for: show the polished shell");
@@ -312,7 +337,10 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     async (action, _input) => {
       const { home, output, result } = await runPtyExit(action);
       const workspace = await createWorkspaceStore(home);
-      const reflectionJobs = await workspace.jobs.list({ kind: "runtime.reflect_turn", limit: 10 });
+      const reflectionJobs = await workspace.jobs.list({
+        kind: "runtime.reflect_turn",
+        limit: 10,
+      });
       workspace.close();
 
       expect(output).toContain("Controlled Pi completion for: No, keep this research brief concise.");
@@ -371,7 +399,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
 
     expect(output).not.toContain("__NOESIS_PREMATURE_SUBMIT__");
     expect(turns).toHaveLength(1);
-    expect(turns[0]?.input).toBe("safe\nBAD [2J  31m");
+    expect(turns[0]?.input).toBe("safe\nBAD [2J  31m ");
     expect(containsUnsafeTextControl(turns[0]?.input ?? "")).toBe(false);
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
@@ -382,7 +410,9 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       "quit-lf",
       async (home) => {
         const runtime = await createTestRuntime(home);
-        const selected = await runtime.startTrail({ title: "narrow resumed" });
+        const selected = await runtime.startTrail({
+          title: "narrow resumed",
+        });
         await runtime.runTurn(selected.trailId, "narrow history");
         selectedTrailId = selected.trailId;
         await runtime.shutdown();
@@ -393,7 +423,8 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
 
     expect(output).toContain("NOESIS  think · learn · create · grow");
     expect(output).not.toContain("███╗   ██╗ ██████╗");
-    expect(output).toContain(`session ${selectedTrailId.slice(6, 14)}`);
+    // A 70-column status line has no room for the session field; the resumed content is the
+    // evidence that the right session opened.
     expect(output).toContain("narrow history");
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
@@ -416,13 +447,16 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
   }, 7_000);
 
   test("protects chat and input in a short 50x9 shell", async () => {
-    const { output, result } = await runPtyExit("quit-lf", undefined, { columns: 50, rows: 9 });
+    const { output, result } = await runPtyExit("quit-lf", undefined, {
+      columns: 50,
+      rows: 9,
+    });
 
     expect(output).not.toContain("███╗   ██╗ ██████╗");
     expect(output).not.toContain("think · learn · create · grow");
     expect(output).toContain("● IDLE");
     expect(output).toContain("› message");
-    expect(output).toContain("? help · Ctrl+O actions");
+    expect(output).toContain("? help · ctrl+o inspect runs");
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
 
@@ -447,7 +481,9 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       async (home) => {
         const runtime = await createTestRuntime(home);
         for (let index = 0; index < 12; index += 1)
-          await runtime.startTrail({ title: `resize picker ${String(index).padStart(2, "0")}` });
+          await runtime.startTrail({
+            title: `resize picker ${String(index).padStart(2, "0")}`,
+          });
         await runtime.shutdown();
         return ["--resume"];
       },
@@ -476,8 +512,11 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).toContain("● STREAMING");
     expect(output).toContain("Controlled Pi completion for:");
     expect(resized).not.toContain("███╗   ██╗");
-    expect(screen).toContain("⋯ earlier conversation");
-    expect(screen).toContain("NOESIS");
+    // History scrolls into terminal scrollback instead of being replaced by a crop marker.
+    expect(screen).not.toContain("earlier conversation");
+    // The speaker label was rendered and has since scrolled above the viewport into scrollback,
+    // exactly as a long message behaves in any terminal transcript.
+    expect(output).toContain("NOESIS");
     expect(screen).toContain("alpha");
     expect(screen).toContain("MIXED-END");
     expect(screen).toContain("● IDLE");

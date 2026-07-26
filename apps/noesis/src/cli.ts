@@ -27,14 +27,8 @@ import {
 import { createBrowserUrlOpener } from "./browser-auth.ts";
 import { renderNoesisOAuthCallbackPage } from "./oauth-callback-page.ts";
 import { runFirstLaunchOnboarding, shouldAutoOnboard } from "./onboarding.ts";
-import {
-  createSurfaceAuthCallbacks,
-  promptsFromSurface,
-} from "./prompt-surface.ts";
-import {
-  type ApplicationRuntime,
-  createApplicationRuntimeComposition,
-} from "./runtime-composition.ts";
+import { createSurfaceAuthCallbacks, promptsFromSurface } from "./prompt-surface.ts";
+import { type ApplicationRuntime, createApplicationRuntimeComposition } from "./runtime-composition.ts";
 
 interface CliInput {
   readonly args: readonly string[];
@@ -55,16 +49,7 @@ interface CliInput {
 
 type SessionStartup = CliInput["session"];
 
-const COMMANDS = new Set([
-  "tui",
-  "onboard",
-  "inspect",
-  "rebuild",
-  "config",
-  "auth",
-  "skills",
-  "help",
-]);
+const COMMANDS = new Set(["tui", "onboard", "inspect", "rebuild", "config", "auth", "skills", "help"]);
 const CONFIG_COMMANDS = new Set(["show", "init", "set"]);
 const AUTH_COMMANDS = new Set(["status", "login", "logout"]);
 const SKILL_COMMANDS = new Set(["list", "install", "update", "remove"]);
@@ -79,22 +64,14 @@ function parseSessionStartup(
   readonly consumed: ReadonlySet<number>;
 } {
   if (args.some((argument) => argument.startsWith("--resume=")))
-    throw new Error(
-      "Use --resume <session-id>, with a space before the session ID",
-    );
+    throw new Error("Use --resume <session-id>, with a space before the session ID");
   if (args.some((argument) => argument.startsWith("--continue=")))
     throw new Error("--continue does not accept a value");
 
-  const resumeIndexes = args.flatMap((argument, index) =>
-    argument === "--resume" ? [index] : [],
-  );
-  const continueIndexes = args.flatMap((argument, index) =>
-    argument === "--continue" ? [index] : [],
-  );
-  if (resumeIndexes.length > 1)
-    throw new Error("--resume may be specified only once");
-  if (continueIndexes.length > 1)
-    throw new Error("--continue may be specified only once");
+  const resumeIndexes = args.flatMap((argument, index) => (argument === "--resume" ? [index] : []));
+  const continueIndexes = args.flatMap((argument, index) => (argument === "--continue" ? [index] : []));
+  if (resumeIndexes.length > 1) throw new Error("--resume may be specified only once");
+  if (continueIndexes.length > 1) throw new Error("--continue may be specified only once");
   if (resumeIndexes.length > 0 && continueIndexes.length > 0)
     throw new Error("--continue and --resume are mutually exclusive");
   if (resumeIndexes.length > 0 && command !== "tui")
@@ -113,12 +90,8 @@ function parseSessionStartup(
   }
 
   const resumeIndex = resumeIndexes[0];
-  const resumeValue =
-    resumeIndex === undefined ? undefined : args[resumeIndex + 1];
-  const resumeId =
-    resumeValue && !resumeValue.startsWith("--")
-      ? resumeValue.trim()
-      : undefined;
+  const resumeValue = resumeIndex === undefined ? undefined : args[resumeIndex + 1];
+  const resumeId = resumeValue && !resumeValue.startsWith("--") ? resumeValue.trim() : undefined;
   if (resumeValue !== undefined && !resumeValue.startsWith("--") && !resumeId)
     throw new Error("--resume session ID must not be empty");
   if (resumeIndex !== undefined) {
@@ -138,8 +111,7 @@ function parseSessionStartup(
 
 function parseArgs(argv: readonly string[]): CliInput {
   const args = argv[0] === "--" ? argv.slice(1) : argv;
-  const command =
-    args[0] === undefined || args[0].startsWith("--") ? "tui" : args[0];
+  const command = args[0] === undefined || args[0].startsWith("--") ? "tui" : args[0];
   if (!COMMANDS.has(command))
     throw new Error(
       `Unknown command ${command}. Use tui, onboard, inspect, rebuild, config, auth, skills, or help.`,
@@ -149,49 +121,32 @@ function parseArgs(argv: readonly string[]): CliInput {
   if (commandIndex === 0) consumed.add(0);
   const optionValues = new Map<string, string>();
   for (const name of VALUE_OPTIONS) {
-    const indexes = args.flatMap((argument, index) =>
-      argument === name ? [index] : [],
-    );
-    if (indexes.length > 1)
-      throw new Error(`${name} may be specified only once`);
+    const indexes = args.flatMap((argument, index) => (argument === name ? [index] : []));
+    if (indexes.length > 1) throw new Error(`${name} may be specified only once`);
     const index = indexes[0];
     if (index === undefined) continue;
     const value = args[index + 1];
-    if (value === undefined || value.startsWith("--"))
-      throw new Error(`${name} requires a value`);
+    if (value === undefined || value.startsWith("--")) throw new Error(`${name} requires a value`);
     consumed.add(index);
     consumed.add(index + 1);
     optionValues.set(name, value);
   }
   const startup = parseSessionStartup(args, command);
   for (const index of startup.consumed) consumed.add(index);
-  const helpIndexes = args.flatMap((argument, index) =>
-    argument === "--help" ? [index] : [],
-  );
-  if (helpIndexes.length > 1)
-    throw new Error("--help may be specified only once");
+  const helpIndexes = args.flatMap((argument, index) => (argument === "--help" ? [index] : []));
+  if (helpIndexes.length > 1) throw new Error("--help may be specified only once");
   if (helpIndexes[0] !== undefined) consumed.add(helpIndexes[0]);
-  const workspaceIndexes = args.flatMap((argument, index) =>
-    argument === "--workspace" ? [index] : [],
-  );
-  if (workspaceIndexes.length > 1)
-    throw new Error("--workspace may be specified only once");
+  const workspaceIndexes = args.flatMap((argument, index) => (argument === "--workspace" ? [index] : []));
+  if (workspaceIndexes.length > 1) throw new Error("--workspace may be specified only once");
   if (workspaceIndexes[0] !== undefined) consumed.add(workspaceIndexes[0]);
   const trustWorkspaceIndexes = args.flatMap((argument, index) =>
     argument === "--trust-workspace" ? [index] : [],
   );
-  if (trustWorkspaceIndexes.length > 1)
-    throw new Error("--trust-workspace may be specified only once");
-  if (trustWorkspaceIndexes[0] !== undefined)
-    consumed.add(trustWorkspaceIndexes[0]);
-  const operands = args.filter(
-    (argument, index) => !consumed.has(index) && !argument.startsWith("--"),
-  );
-  const unknownOption = args.find(
-    (argument, index) => !consumed.has(index) && argument.startsWith("--"),
-  );
-  if (unknownOption)
-    throw new Error(`Unknown ${command} option ${unknownOption}`);
+  if (trustWorkspaceIndexes.length > 1) throw new Error("--trust-workspace may be specified only once");
+  if (trustWorkspaceIndexes[0] !== undefined) consumed.add(trustWorkspaceIndexes[0]);
+  const operands = args.filter((argument, index) => !consumed.has(index) && !argument.startsWith("--"));
+  const unknownOption = args.find((argument, index) => !consumed.has(index) && argument.startsWith("--"));
+  if (unknownOption) throw new Error(`Unknown ${command} option ${unknownOption}`);
 
   let subcommand: string | undefined;
   let authProvider: string | undefined;
@@ -199,32 +154,22 @@ function parseArgs(argv: readonly string[]): CliInput {
   if (command === "config") {
     subcommand = operands[0] ?? "show";
     if (!CONFIG_COMMANDS.has(subcommand))
-      throw new Error(
-        "Unknown config command. Use config show, config init, or config set.",
-      );
-    if (operands[1])
-      throw new Error(`Unexpected config argument ${operands[1]}`);
+      throw new Error("Unknown config command. Use config show, config init, or config set.");
+    if (operands[1]) throw new Error(`Unexpected config argument ${operands[1]}`);
   } else if (command === "auth") {
     subcommand = operands[0] ?? "status";
     if (!AUTH_COMMANDS.has(subcommand))
-      throw new Error(
-        "Unknown auth command. Use auth login, auth status, or auth logout.",
-      );
+      throw new Error("Unknown auth command. Use auth login, auth status, or auth logout.");
     authProvider = operands[1];
     if (operands[2]) throw new Error(`Unexpected auth argument ${operands[2]}`);
   } else if (command === "skills") {
     subcommand = operands[0] ?? "list";
     if (!SKILL_COMMANDS.has(subcommand))
-      throw new Error(
-        "Unknown skills command. Use skills list, install, update, or remove.",
-      );
+      throw new Error("Unknown skills command. Use skills list, install, update, or remove.");
     skillSource = operands[1];
     if ((subcommand === "install" || subcommand === "remove") && !skillSource)
-      throw new Error(
-        `skills ${subcommand} requires a package, Git, URL, or local path source`,
-      );
-    if (operands[2])
-      throw new Error(`Unexpected skills argument ${operands[2]}`);
+      throw new Error(`skills ${subcommand} requires a package, Git, URL, or local path source`);
+    if (operands[2]) throw new Error(`Unexpected skills argument ${operands[2]}`);
   } else if (operands[0]) {
     throw new Error(`Unexpected ${command} argument ${operands[0]}`);
   }
@@ -246,19 +191,10 @@ function parseArgs(argv: readonly string[]): CliInput {
   }
   if (workspaceIndexes[0] !== undefined && !allowedOptions.has("--workspace"))
     throw new Error("--workspace is valid only for skills commands");
-  if (
-    trustWorkspaceIndexes[0] !== undefined &&
-    !allowedOptions.has("--trust-workspace")
-  )
-    throw new Error(
-      "--trust-workspace is valid only for the tui or skills command",
-    );
+  if (trustWorkspaceIndexes[0] !== undefined && !allowedOptions.has("--trust-workspace"))
+    throw new Error("--trust-workspace is valid only for the tui or skills command");
   const startupOption =
-    startup.session.mode === "new"
-      ? []
-      : startup.session.mode === "continue"
-        ? ["--continue"]
-        : ["--resume"];
+    startup.session.mode === "new" ? [] : startup.session.mode === "continue" ? ["--continue"] : ["--resume"];
   for (const name of [...optionValues.keys(), ...startupOption]) {
     if (!allowedOptions.has(name)) {
       const scope = subcommand ? `${command} ${subcommand}` : command;
@@ -266,9 +202,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     }
   }
   const home = resolve(
-    optionValues.get("--home") ??
-      process.env["NOESIS_HOME"] ??
-      join(homedir(), ".noesis"),
+    optionValues.get("--home") ?? process.env["NOESIS_HOME"] ?? join(homedir(), ".noesis"),
   );
   const provider = optionValues.get("--provider");
   const model = optionValues.get("--model");
@@ -281,10 +215,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     ...(skillSource ? { skillSource } : {}),
     ...(command === "skills"
       ? {
-          skillScope:
-            workspaceIndexes[0] === undefined
-              ? ("personal" as const)
-              : ("workspace" as const),
+          skillScope: workspaceIndexes[0] === undefined ? ("personal" as const) : ("workspace" as const),
         }
       : {}),
     workspaceTrusted: trustWorkspaceIndexes[0] !== undefined,
@@ -433,23 +364,14 @@ async function runAuth(input: CliInput, auth: PiAuthOperations): Promise<void> {
   const provider = input.authProvider;
   if (action === "status") {
     const providers = provider ? [provider] : ["openai-codex", "openrouter"];
-    console.log(
-      JSON.stringify(
-        await Promise.all(providers.map((id) => auth.status(id))),
-        null,
-        2,
-      ),
-    );
+    console.log(JSON.stringify(await Promise.all(providers.map((id) => auth.status(id))), null, 2));
     return;
   }
   const selected = provider ?? "openai-codex";
   if (action === "login") {
     await runSetupSurface(
       async (surface) => {
-        const status = await auth.login(
-          selected,
-          surfaceAuthCallbacks(surface),
-        );
+        const status = await auth.login(selected, surfaceAuthCallbacks(surface));
         surface.note(`Authenticated ${status.provider} via ${status.source}.`);
         return status;
       },
@@ -466,20 +388,14 @@ async function runAuth(input: CliInput, auth: PiAuthOperations): Promise<void> {
     console.log(`Removed stored credentials for ${selected}.`);
     return;
   }
-  throw new Error(
-    "Unknown auth command. Use auth login, auth status, or auth logout.",
-  );
+  throw new Error("Unknown auth command. Use auth login, auth status, or auth logout.");
 }
 
 async function runConfig(input: CliInput): Promise<void> {
   const action = input.subcommand ?? "show";
   if (action === "show") {
     console.log(
-      JSON.stringify(
-        await resolveNoesisConfig({ home: input.home, cli: input.overrides }),
-        null,
-        2,
-      ),
+      JSON.stringify(await resolveNoesisConfig({ home: input.home, cli: input.overrides }), null, 2),
     );
     return;
   }
@@ -488,18 +404,10 @@ async function runConfig(input: CliInput): Promise<void> {
     return;
   }
   if (action === "set") {
-    console.log(
-      JSON.stringify(
-        await updateNoesisConfig(input.home, input.overrides),
-        null,
-        2,
-      ),
-    );
+    console.log(JSON.stringify(await updateNoesisConfig(input.home, input.overrides), null, 2));
     return;
   }
-  throw new Error(
-    "Unknown config command. Use config show, config init, or config set.",
-  );
+  throw new Error("Unknown config command. Use config show, config init, or config set.");
 }
 
 async function runSkills(input: CliInput): Promise<void> {
@@ -514,9 +422,7 @@ async function runSkills(input: CliInput): Promise<void> {
     console.log(
       JSON.stringify(
         {
-          skills: snapshot.skills.map(
-            ({ content: _content, ...skill }) => skill,
-          ),
+          skills: snapshot.skills.map(({ content: _content, ...skill }) => skill),
           diagnostics: snapshot.diagnostics,
           packages: library.configured(),
         },
@@ -529,36 +435,21 @@ async function runSkills(input: CliInput): Promise<void> {
   if (action === "install") {
     if (!input.skillSource) throw new Error("skills install requires a source");
     await library.install(input.skillSource, input.skillScope ?? "personal");
-    console.log(
-      `Installed ${input.skillSource} for ${input.skillScope ?? "personal"} use.`,
-    );
+    console.log(`Installed ${input.skillSource} for ${input.skillScope ?? "personal"} use.`);
     return;
   }
   if (action === "remove") {
     if (!input.skillSource) throw new Error("skills remove requires a source");
-    const removed = await library.remove(
-      input.skillSource,
-      input.skillScope ?? "personal",
-    );
-    console.log(
-      removed
-        ? `Removed ${input.skillSource}.`
-        : `${input.skillSource} was not configured.`,
-    );
+    const removed = await library.remove(input.skillSource, input.skillScope ?? "personal");
+    console.log(removed ? `Removed ${input.skillSource}.` : `${input.skillSource} was not configured.`);
     return;
   }
   if (action === "update") {
     await library.update(input.skillSource, input.skillScope ?? "personal");
-    console.log(
-      input.skillSource
-        ? `Updated ${input.skillSource}.`
-        : "Updated configured skill packages.",
-    );
+    console.log(input.skillSource ? `Updated ${input.skillSource}.` : "Updated configured skill packages.");
     return;
   }
-  throw new Error(
-    "Unknown skills command. Use skills list, install, update, or remove.",
-  );
+  throw new Error("Unknown skills command. Use skills list, install, update, or remove.");
 }
 
 async function main(): Promise<void> {

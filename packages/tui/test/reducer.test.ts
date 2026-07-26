@@ -9,6 +9,7 @@ import {
   initialTuiState,
   renderBottomChrome,
   reduceTui,
+  renderHeader,
   renderNoesisState,
   safeTerminalText,
   sessionPickerVisibleCount,
@@ -126,12 +127,30 @@ describe("Noesis TUI reducer", () => {
     expect(capabilities).toContain("capability> research@2");
   });
 
-  test("chooses deterministic responsive header and transcript budgets", () => {
-    expect(createTuiLayout(120, 35)).toMatchObject({ widthClass: "wide", headerMode: "ascii" });
-    expect(createTuiLayout(90, 28)).toMatchObject({ widthClass: "normal", headerMode: "compact" });
-    expect(createTuiLayout(70, 22)).toMatchObject({ widthClass: "narrow", headerMode: "compact" });
-    expect(createTuiLayout(50, 8)).toMatchObject({ widthClass: "narrow", headerMode: "none" });
-    expect(createTuiLayout(90, 28).transcriptRows).toBeGreaterThan(createTuiLayout(50, 8).transcriptRows);
+  test("chooses deterministic responsive header modes and bounds inspection panes", () => {
+    expect(createTuiLayout(120, 35)).toMatchObject({
+      widthClass: "wide",
+      headerMode: "ascii",
+    });
+    expect(createTuiLayout(90, 28)).toMatchObject({
+      widthClass: "normal",
+      headerMode: "compact",
+    });
+    expect(createTuiLayout(70, 22)).toMatchObject({
+      widthClass: "narrow",
+      headerMode: "compact",
+    });
+    expect(createTuiLayout(50, 8)).toMatchObject({
+      widthClass: "narrow",
+      headerMode: "none",
+    });
+    expect(createTuiLayout(90, 28).paneRows).toBeGreaterThan(createTuiLayout(50, 8).paneRows);
+    expect(sessionPickerVisibleCount(30)).toBe(10);
+    expect(sessionPickerVisibleCount(7)).toBe(4);
+    expect(sessionPickerVisibleCount(3)).toBe(1);
+  });
+
+  test("renders the whole conversation instead of cropping it to the viewport", () => {
     const crowded = {
       ...initialTuiState("fake"),
       timeline: Array.from({ length: 20 }, (_, index) => ({
@@ -140,10 +159,22 @@ describe("Noesis TUI reducer", () => {
         text: `message ${index}`,
       })),
     };
-    expect(renderNoesisState(crowded, 50, 9)).toHaveLength(3);
-    expect(sessionPickerVisibleCount(30)).toBe(10);
-    expect(sessionPickerVisibleCount(7)).toBe(4);
-    expect(sessionPickerVisibleCount(3)).toBe(1);
+    const rendered = renderNoesisState(crowded, 50, 9);
+
+    // Output taller than the terminal reaches native terminal scrollback, so nothing is dropped
+    // and no "earlier conversation" placeholder stands in for unreachable history.
+    expect(rendered.length).toBeGreaterThan(9);
+    expect(rendered.join("\n")).toContain("message 0");
+    expect(rendered.join("\n")).toContain("message 19");
+    expect(rendered.join("\n")).not.toContain("earlier conversation");
+  });
+
+  test("shows the banner only while it fits and never pins it to the viewport", () => {
+    expect(renderHeader(false, 100, 34).join("\n")).toContain("think · learn · create · grow");
+    expect(renderHeader(false, 90, 28).join("\n")).toContain("NOESIS");
+    expect(renderHeader(false, 30, 8)).toEqual([]);
+    // The banner is not part of the conversation view, so a long transcript scrolls past it.
+    expect(renderNoesisState(initialTuiState("fake"), 100, 34).join("\n")).not.toContain("NOESIS");
   });
 
   test("elides Unicode and ANSI text by visible columns", () => {
@@ -156,15 +187,29 @@ describe("Noesis TUI reducer", () => {
 
   test("formats context percentages honestly and clamps overflow", () => {
     expect(formatContextUsage(undefined)).toEqual({ percent: "ctx   —" });
-    expect(formatContextUsage({ usedTokens: 32_000, contextWindow: 114_000, accuracy: "reported" })).toEqual({
+    expect(
+      formatContextUsage({
+        usedTokens: 32_000,
+        contextWindow: 114_000,
+        accuracy: "reported",
+      }),
+    ).toEqual({
       percent: "ctx  28%",
       tokens: "32k/114k",
     });
     expect(
-      formatContextUsage({ usedTokens: 1_000, contextWindow: 8_000, accuracy: "estimated" }).percent,
+      formatContextUsage({
+        usedTokens: 1_000,
+        contextWindow: 8_000,
+        accuracy: "estimated",
+      }).percent,
     ).toBe("ctx ~13%");
     expect(
-      formatContextUsage({ usedTokens: 200_000, contextWindow: 100_000, accuracy: "reported" }).percent,
+      formatContextUsage({
+        usedTokens: 200_000,
+        contextWindow: 100_000,
+        accuracy: "reported",
+      }).percent,
     ).toBe("ctx  100%");
   });
 
@@ -177,7 +222,11 @@ describe("Noesis TUI reducer", () => {
       }),
       trailId: "trail_69b186a1-0000-0000-0000-000000000000",
       turnCount: 12,
-      contextUsage: { usedTokens: 32_000, contextWindow: 114_000, accuracy: "reported" as const },
+      contextUsage: {
+        usedTokens: 32_000,
+        contextWindow: 114_000,
+        accuracy: "reported" as const,
+      },
       capabilityVersions: { research: 1, writing: 2 },
     };
     const wide = createStatusFields(state, createTuiLayout(120, 35)).join(" | ");
@@ -194,7 +243,10 @@ describe("Noesis TUI reducer", () => {
   });
 
   test("maps lifecycle actions to supported execution states", () => {
-    let state = reduceTui(initialTuiState("fake"), { type: "prompt-submitted", text: "think" });
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "prompt-submitted",
+      text: "think",
+    });
     expect(state.execution).toBe("thinking");
     state = reduceTui(state, { type: "stream-delta", text: "answer" });
     expect(state.execution).toBe("streaming");
@@ -228,8 +280,11 @@ describe("Noesis TUI reducer", () => {
         output: { memories: 2 },
       },
     ]);
-    state = reduceTui(state, { type: "agent-actions-expansion-toggled" });
-    expect(state.agentActionsExpanded).toBe(true);
+    state = reduceTui(state, {
+      type: "action-expansion-toggled",
+      actionId: "tool-1",
+    });
+    expect(state.expandedActionIds.has("tool-1")).toBe(true);
     state = reduceTui(state, {
       type: "action-started",
       actionId: "execute-1",
@@ -260,10 +315,18 @@ describe("Noesis TUI reducer", () => {
     expect(
       state.timeline.filter((entry) => entry.kind === "action").map((entry) => entry.actionId),
     ).toContain("tool-1");
-    expect(state.agentActionsExpanded).toBe(false);
-    state = reduceTui(state, { type: "execution-changed", execution: "compacting" });
+    // Expansion is a deliberate per-row choice, so a later prompt does not silently collapse it.
+    expect(state.expandedActionIds.has("tool-1")).toBe(true);
+    expect(state.expandedActionIds.has("execute-1")).toBe(false);
+    state = reduceTui(state, {
+      type: "execution-changed",
+      execution: "compacting",
+    });
     expect(state.execution).toBe("compacting");
-    state = reduceTui(state, { type: "execution-changed", execution: "aborting" });
+    state = reduceTui(state, {
+      type: "execution-changed",
+      execution: "aborting",
+    });
     expect(state.execution).toBe("aborting");
     state = reduceTui(state, { type: "failed", error: "provider failed" });
     expect(state.execution).toBe("error");
@@ -287,7 +350,10 @@ describe("Noesis TUI reducer", () => {
       output: { stdout: "/workspace" },
       isError: false,
     });
-    state = reduceTui(state, { type: "stream-delta", text: "The workspace is ready." });
+    state = reduceTui(state, {
+      type: "stream-delta",
+      text: "The workspace is ready.",
+    });
 
     expect(state.timeline).toEqual([
       { kind: "message", role: "user", text: "find something" },
@@ -359,7 +425,10 @@ describe("Noesis TUI reducer", () => {
       isError: false,
     });
     state = reduceTui(state, { type: "stream-delta", text: "Draft answer" });
-    state = reduceTui(state, { type: "stream-reconciled", text: "Final answer" });
+    state = reduceTui(state, {
+      type: "stream-reconciled",
+      text: "Final answer",
+    });
 
     expect(state.timeline).toEqual([
       { kind: "message", role: "user", text: "inspect" },
@@ -399,7 +468,11 @@ describe("Noesis TUI reducer", () => {
         name: "inspect",
         status: "completed",
       },
-      { kind: "message", role: "assistant", text: "Authoritative final answer" },
+      {
+        kind: "message",
+        role: "assistant",
+        text: "Authoritative final answer",
+      },
     ]);
   });
 
@@ -429,6 +502,125 @@ describe("Noesis TUI reducer", () => {
     ]);
     expect(state.execution).toBe("idle");
     expect(state.turnCount).toBe(2);
+  });
+
+  test("records action durations from the dispatched clock", () => {
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "action-started",
+      actionId: "execute-1",
+      name: "execute",
+      input: { source: "return 1;" },
+      at: 1_000,
+    });
+    state = reduceTui(state, {
+      type: "action-ended",
+      actionId: "execute-1",
+      output: { calls: 0 },
+      isError: false,
+      at: 2_500,
+    });
+
+    const [action] = state.timeline.filter((entry) => entry.kind === "action");
+    expect(action).toMatchObject({ startedAt: 1_000, durationMs: 1_500 });
+  });
+
+  test("moves a transcript cursor across actions and leaves it on demand", () => {
+    let state = initialTuiState("fake");
+    for (const actionId of ["a1", "a2", "a3"])
+      state = reduceTui(state, {
+        type: "action-started",
+        actionId,
+        name: "files.read",
+      });
+
+    // Entering navigation lands on the most recent action.
+    state = reduceTui(state, {
+      type: "action-cursor-moved",
+      direction: "previous",
+    });
+    expect(state.actionCursor).toBe("a3");
+    state = reduceTui(state, {
+      type: "action-cursor-moved",
+      direction: "previous",
+    });
+    expect(state.actionCursor).toBe("a2");
+    state = reduceTui(state, {
+      type: "action-cursor-moved",
+      direction: "next",
+    });
+    expect(state.actionCursor).toBe("a3");
+    // The cursor clamps rather than wrapping, so it cannot fall off either end.
+    state = reduceTui(state, {
+      type: "action-cursor-moved",
+      direction: "next",
+    });
+    expect(state.actionCursor).toBe("a3");
+    state = reduceTui(state, { type: "action-cursor-cleared" });
+    expect(state.actionCursor).toBeUndefined();
+  });
+
+  test("never enters navigation when the transcript holds no actions", () => {
+    const state = reduceTui(initialTuiState("fake"), {
+      type: "action-cursor-moved",
+      direction: "previous",
+    });
+    expect(state.actionCursor).toBeUndefined();
+  });
+
+  test("drops inspector results that a newer selection has superseded", () => {
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "action-started",
+      actionId: "execute-1",
+      name: "execute",
+    });
+    state = reduceTui(state, {
+      type: "inspector-opened",
+      actionId: "execute-1",
+    });
+    expect(state.inspector).toMatchObject({
+      actionId: "execute-1",
+      status: "loading",
+      scroll: 0,
+    });
+
+    const stale = reduceTui(state, {
+      type: "inspector-loaded",
+      actionId: "execute-0",
+    });
+    expect(stale.inspector?.status).toBe("loading");
+
+    state = reduceTui(state, {
+      type: "inspector-loaded",
+      actionId: "execute-1",
+    });
+    expect(state.inspector?.status).toBe("fallback");
+
+    state = reduceTui(state, {
+      type: "inspector-scrolled",
+      delta: 50,
+      maxScroll: 8,
+    });
+    expect(state.inspector?.scroll).toBe(8);
+    state = reduceTui(state, {
+      type: "inspector-scrolled",
+      delta: -50,
+      maxScroll: 8,
+    });
+    expect(state.inspector?.scroll).toBe(0);
+    state = reduceTui(state, {
+      type: "inspector-scrolled",
+      delta: 7,
+      maxScroll: 8,
+    });
+    state = reduceTui(state, {
+      type: "inspector-scrolled",
+      delta: 0,
+      maxScroll: 3,
+    });
+    expect(state.inspector?.scroll).toBe(3);
+
+    state = reduceTui(state, { type: "inspector-closed" });
+    expect(state.inspector).toBeUndefined();
   });
 
   test("honors NO_COLOR and emits no styling when color is disabled", () => {
