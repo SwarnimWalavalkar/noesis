@@ -1,85 +1,8 @@
-import type { Terminal } from "@earendil-works/pi-tui";
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
 import { describe, expect, test, vi } from "vitest";
 import { boundedInspectorText, startNoesisTui } from "../src/index.ts";
 import { createInMemoryTestRuntime, type TestNoesisRuntime } from "./support/in-memory-runtime.ts";
-
-interface TestTerminal extends Terminal {
-  readonly starts: number;
-  readonly stops: number;
-  readonly drains: number;
-  readonly output: string;
-  readonly type: (text: string) => void;
-  readonly send: (data: string) => void;
-  readonly resize: (columns: number, rows: number) => void;
-}
-
-function createTestTerminal(): TestTerminal {
-  let starts = 0;
-  let stops = 0;
-  let drains = 0;
-  let output = "";
-  let input: ((data: string) => void) | undefined;
-  let resizeHandler: (() => void) | undefined;
-  let columns = 80;
-  let rows = 24;
-  return {
-    kittyProtocolActive: false,
-    get columns() {
-      return columns;
-    },
-    get rows() {
-      return rows;
-    },
-    get starts() {
-      return starts;
-    },
-    get stops() {
-      return stops;
-    },
-    get drains() {
-      return drains;
-    },
-    get output() {
-      return output;
-    },
-    start(onInput, onResize) {
-      starts += 1;
-      input = onInput;
-      resizeHandler = onResize;
-    },
-    stop() {
-      stops += 1;
-      input = undefined;
-      resizeHandler = undefined;
-    },
-    async drainInput() {
-      drains += 1;
-    },
-    type(text) {
-      for (const character of text) input?.(character);
-    },
-    send(data) {
-      input?.(data);
-    },
-    resize(nextColumns, nextRows) {
-      columns = nextColumns;
-      rows = nextRows;
-      resizeHandler?.();
-    },
-    write(data) {
-      output += data;
-    },
-    moveBy() {},
-    hideCursor() {},
-    showCursor() {},
-    clearLine() {},
-    clearFromCursor() {},
-    clearScreen() {},
-    setTitle() {},
-    setProgress() {},
-  };
-}
+import { createTestTerminal } from "./support/test-terminal.ts";
 
 const containsUnsafeTextControl = (text: string): boolean =>
   [...text].some((character) => {
@@ -337,9 +260,19 @@ describe("Noesis TUI lifecycle", () => {
     const runtime = await createRuntime({
       name: "telemetry-scripted",
       async run(request, emit) {
-        emit({ type: "model", provider: request.provider, model: request.model, contextWindow: 4_000 });
+        emit({
+          type: "model",
+          provider: request.provider,
+          model: request.model,
+          contextWindow: 4_000,
+        });
         emit({ type: "status", status: "started" });
-        emit({ type: "tool-start", actionId: "inspect-1", name: "inspect", input: {} });
+        emit({
+          type: "tool-start",
+          actionId: "inspect-1",
+          name: "inspect",
+          input: {},
+        });
         await toolBlocked;
         emit({
           type: "tool-end",
@@ -444,7 +377,12 @@ describe("Noesis TUI lifecycle", () => {
       async run(request, emit) {
         emit({ type: "status", status: "started" });
         emit({ type: "delta", text: "intermediate reasoning" });
-        emit({ type: "tool-start", actionId: "inspect-1", name: "inspect", input: {} });
+        emit({
+          type: "tool-start",
+          actionId: "inspect-1",
+          name: "inspect",
+          input: {},
+        });
         emit({
           type: "tool-end",
           actionId: "inspect-1",
@@ -684,7 +622,9 @@ describe("Noesis TUI lifecycle", () => {
     await main;
 
     for (let index = 0; index < 12; index += 1)
-      await runtime.startTrail({ title: `picker resize ${String(index).padStart(2, "0")}` });
+      await runtime.startTrail({
+        title: `picker resize ${String(index).padStart(2, "0")}`,
+      });
     const pickerTerminal = createTestTerminal();
     pickerTerminal.resize(100, 30);
     const picker = startNoesisTui(runtime, { session: { mode: "pick" } }, pickerTerminal);

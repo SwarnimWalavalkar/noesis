@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// Imported first so the filter is installed before any module can emit a load-time warning.
+import "./process-warnings.ts";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -20,15 +22,15 @@ import {
   type NoesisAuthPrompt,
   type PiAuthOperations,
 } from "@noesis/runtime-pi";
-import { startNoesisTui } from "@noesis/tui";
+import {
+  OnboardingInterruptedError,
+  type OnboardingSurface,
+  runNoesisOnboardingTui,
+  startNoesisTui,
+} from "@noesis/tui";
 import { createAuthEventNotifier, createBrowserUrlOpener } from "./browser-auth.ts";
 import { renderNoesisOAuthCallbackPage } from "./oauth-callback-page.ts";
-import {
-  type OnboardingChoice,
-  type OnboardingPrompts,
-  runFirstLaunchOnboarding,
-  shouldAutoOnboard,
-} from "./onboarding.ts";
+import { type OnboardingPrompts, runFirstLaunchOnboarding, shouldAutoOnboard } from "./onboarding.ts";
 import { type ApplicationRuntime, createApplicationRuntimeComposition } from "./runtime-composition.ts";
 
 interface CliInput {
@@ -60,7 +62,10 @@ const VALUE_OPTIONS = ["--home", ...AGENT_OPTIONS] as const;
 function parseSessionStartup(
   args: readonly string[],
   command: string,
-): { readonly session: SessionStartup; readonly consumed: ReadonlySet<number> } {
+): {
+  readonly session: SessionStartup;
+  readonly consumed: ReadonlySet<number>;
+} {
   if (args.some((argument) => argument.startsWith("--resume=")))
     throw new Error("Use --resume <session-id>, with a space before the session ID");
   if (args.some((argument) => argument.startsWith("--continue=")))
@@ -212,7 +217,9 @@ function parseArgs(argv: readonly string[]): CliInput {
     ...(authProvider ? { authProvider } : {}),
     ...(skillSource ? { skillSource } : {}),
     ...(command === "skills"
-      ? { skillScope: workspaceIndexes[0] === undefined ? ("personal" as const) : ("workspace" as const) }
+      ? {
+          skillScope: workspaceIndexes[0] === undefined ? ("personal" as const) : ("workspace" as const),
+        }
       : {}),
     workspaceTrusted: trustWorkspaceIndexes[0] !== undefined,
     home,
@@ -294,7 +301,10 @@ async function createRuntime(
 
 function visiblePrompt(message: string, signal?: AbortSignal): Promise<string> {
   return new Promise((resolveAnswer, reject) => {
-    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
     const abort = () => {
       rl.close();
       reject(new Error("Authentication prompt cancelled"));
@@ -318,7 +328,11 @@ function secretPrompt(message: string, signal?: AbortSignal): Promise<string> {
         callback();
       },
     });
-    const rl = createInterface({ input: process.stdin, output, terminal: true });
+    const rl = createInterface({
+      input: process.stdin,
+      output,
+      terminal: true,
+    });
     const abort = () => {
       rl.close();
       reject(new Error("Authentication prompt cancelled"));
@@ -353,10 +367,12 @@ async function handleAuthPrompt(prompt: NoesisAuthPrompt): Promise<string> {
     : await visiblePrompt(message, prompt.signal);
 }
 
+const openAuthUrl = createBrowserUrlOpener({
+  enabled: process.env["NOESIS_DISABLE_BROWSER_OPEN"] !== "1",
+});
+
 const notifyAuth = createAuthEventNotifier({
-  openUrl: createBrowserUrlOpener({
-    enabled: process.env["NOESIS_DISABLE_BROWSER_OPEN"] !== "1",
-  }),
+  openUrl: openAuthUrl,
   writeLine: console.log,
 });
 
@@ -366,49 +382,54 @@ const interactiveAuthCallbacks: NoesisAuthLoginCallbacks = {
   renderOAuthCallbackPage: renderNoesisOAuthCallbackPage,
 };
 
-async function chooseOnboardingOption(
-  message: string,
-  choices: readonly OnboardingChoice[],
-  defaultId: string,
-): Promise<string> {
-  for (;;) {
-    console.log(`\n${message}`);
-    choices.forEach((choice, index) => {
-      const detail = choice.description ? ` — ${choice.description}` : "";
-      console.log(`  ${index + 1}. ${choice.label}${detail}`);
-    });
-    const defaultChoice = choices.find((choice) => choice.id === defaultId);
-    const answer = (
-      await visiblePrompt(`Selection${defaultChoice ? ` [${defaultChoice.label}]` : ""}`)
-    ).trim();
-    if (answer.length === 0) return defaultId;
-    const numbered = Number(answer);
-    if (Number.isInteger(numbered) && numbered >= 1 && numbered <= choices.length)
-      return choices[numbered - 1]?.id ?? defaultId;
-    const direct = choices.find((choice) => choice.id === answer);
-    if (direct) return direct.id;
-    console.log("Choose one of the listed numbers or IDs.");
-  }
+function defaultAuthOptionId(prompt: NoesisAuthPrompt & { readonly type: "select" }): string {
+  const preferred =
+    prompt.options.find((option) => option.label.toLowerCase().includes("(default)")) ?? prompt.options[0];
+  if (!preferred) throw new Error(`Authentication selection prompt has no options: ${prompt.message}`);
+  return preferred.id;
 }
 
-const terminalOnboardingPrompts: OnboardingPrompts = {
-  choose: chooseOnboardingOption,
-  text: async (message, defaultValue) => {
-    const answer = (await visiblePrompt(`${message} [${defaultValue}]`)).trim();
-    return answer.length === 0 ? defaultValue : answer;
-  },
-  confirm: async (message, defaultValue) => {
-    for (;;) {
-      const hint = defaultValue ? "Y/n" : "y/N";
-      const answer = (await visiblePrompt(`${message} [${hint}]`)).trim().toLowerCase();
-      if (answer.length === 0) return defaultValue;
-      if (answer === "y" || answer === "yes") return true;
-      if (answer === "n" || answer === "no") return false;
-      console.log("Answer yes or no.");
-    }
-  },
-  note: (message) => console.log(message),
-};
+function onboardingAuthCallbacks(surface: OnboardingSurface): NoesisAuthLoginCallbacks {
+  return {
+    signal: surface.signal,
+    prompt: async (prompt) => {
+      const options = prompt.signal ? { signal: prompt.signal } : {};
+      if (prompt.type === "select")
+        return await surface.choose(prompt.message, prompt.options, defaultAuthOptionId(prompt), options);
+      const message = `${prompt.message}${prompt.placeholder ? ` (${prompt.placeholder})` : ""}`;
+      return prompt.type === "secret"
+        ? await surface.secret(message, options)
+        : await surface.text(message, "", options);
+    },
+    notify: (event) => {
+      if (event.type === "auth_url") {
+        const opened = openAuthUrl(event.url);
+        surface.note(opened ? "Opening your browser to finish sign-in." : "Finish sign-in in your browser.");
+        surface.reference(opened ? "If nothing opened, use this URL:" : "Open this URL:", event.url);
+        if (event.instructions) surface.note(event.instructions);
+        return;
+      }
+      if (event.type === "device_code") {
+        surface.note(`Open ${event.verificationUri} and enter code ${event.userCode}.`);
+        return;
+      }
+      surface.note(event.message);
+    },
+    renderOAuthCallbackPage: renderNoesisOAuthCallbackPage,
+  };
+}
+
+function onboardingPrompts(surface: OnboardingSurface): OnboardingPrompts {
+  return {
+    choose: async (message, choices, defaultId) => await surface.choose(message, choices, defaultId),
+    text: async (message, defaultValue) => {
+      const answer = (await surface.text(message, defaultValue)).trim();
+      return answer.length === 0 ? defaultValue : answer;
+    },
+    confirm: async (message, defaultValue) => await surface.confirm(message, defaultValue),
+    note: (message) => surface.note(message),
+  };
+}
 
 function hasExplicitAgentSettings(input: CliInput): boolean {
   return (
@@ -424,12 +445,24 @@ async function runOnboarding(input: CliInput): Promise<void> {
     throw new Error(
       "First-launch onboarding requires an interactive terminal. Run `noesis config init` for non-interactive setup.",
     );
-  await runFirstLaunchOnboarding({
-    home: input.home,
-    prompts: terminalOnboardingPrompts,
-    auth: createPiModelServices(input.home).auth,
-    authCallbacks: interactiveAuthCallbacks,
-  });
+  const auth = createPiModelServices(input.home).auth;
+  try {
+    await runNoesisOnboardingTui(
+      async (surface) =>
+        await runFirstLaunchOnboarding({
+          home: input.home,
+          prompts: onboardingPrompts(surface),
+          auth,
+          authCallbacks: onboardingAuthCallbacks(surface),
+        }),
+    );
+  } catch (error) {
+    if (!(error instanceof OnboardingInterruptedError)) throw error;
+    console.error("Setup cancelled; no configuration was written.");
+    // The onboarding terminal is in raw mode, so Ctrl+C arrives as input rather than SIGINT. An
+    // interrupted sign-in can leave its local OAuth listener holding the event loop open.
+    process.exit(1);
+  }
 }
 
 async function runAuth(input: CliInput, auth: PiAuthOperations): Promise<void> {
@@ -560,7 +593,10 @@ async function main(): Promise<void> {
     throw new Error(
       "No Noesis config found. Run `noesis onboard` in an interactive terminal or `noesis config init` for non-interactive setup.",
     );
-  const config = await resolveNoesisConfig({ home: input.home, cli: input.overrides });
+  const config = await resolveNoesisConfig({
+    home: input.home,
+    cli: input.overrides,
+  });
   const runtime = await createRuntime(config, {
     recoverInterruptedOperations: input.command === "tui",
     workspaceTrusted: input.workspaceTrusted,
