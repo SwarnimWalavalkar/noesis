@@ -1,7 +1,7 @@
 import type { Terminal } from "@earendil-works/pi-tui";
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
 import { describe, expect, test, vi } from "vitest";
-import { startNoesisTui } from "../src/index.ts";
+import { boundedInspectorText, startNoesisTui } from "../src/index.ts";
 import { createInMemoryTestRuntime, type TestNoesisRuntime } from "./support/in-memory-runtime.ts";
 
 interface TestTerminal extends Terminal {
@@ -98,6 +98,108 @@ async function createRuntime(agent: NoesisAgentRuntime): Promise<TestNoesisRunti
 }
 
 describe("Noesis TUI lifecycle", () => {
+  test("bounds and sanitizes inspector text", () => {
+    const inspected = boundedInspectorText(`unsafe\u001b[2J${"x".repeat(30_000)}`);
+
+    expect(inspected).not.toContain("\u001b[2J");
+    expect(inspected).toContain("inspector preview truncated");
+    expect(inspected.length).toBeLessThan(25_000);
+  });
+
+  test("drops stale inspector results when a prompt supersedes them", async () => {
+    const base = await createRuntime({
+      name: "inspector-race-scripted",
+      async run(request) {
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    let releaseInspector: (() => void) | undefined;
+    const inspectorGate = new Promise<void>((resolve) => {
+      releaseInspector = resolve;
+    });
+    let inspectorStarted = false;
+    const runtime = Object.freeze({
+      ...base,
+      inspectScript: async () => {
+        inspectorStarted = true;
+        await inspectorGate;
+        return {
+          name: "stale-script",
+          description: "STALE_INSPECTOR_RESULT",
+          revision: 1,
+          requiredTools: Object.freeze([]),
+          sourceDigest: "a".repeat(64),
+          workingPath: "scripts/stale/index.mjs",
+          source: "return null;",
+          inputSchema: "{}",
+          outputSchema: "{}",
+        };
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("/script stale\r");
+    await vi.waitFor(() => expect(inspectorStarted).toBe(true));
+    terminal.type("new prompt\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("reply:new prompt"));
+    releaseInspector?.();
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+
+    expect(terminal.output).not.toContain("STALE_INSPECTOR_RESULT");
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("distinguishes unsupported inspectors from supported empty libraries", async () => {
+    const agent: NoesisAgentRuntime = {
+      name: "inspector-support-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    };
+    const unsupported = await createRuntime(agent);
+    const unsupportedTerminal = createTestTerminal();
+    const unsupportedRun = startNoesisTui(unsupported, {}, unsupportedTerminal);
+    await vi.waitFor(() => expect(unsupportedTerminal.output).toContain("● IDLE"));
+    unsupportedTerminal.type("/skills\r");
+    await vi.waitFor(() => expect(unsupportedTerminal.output).toContain("unavailable in this runtime"));
+    unsupportedTerminal.type("/quit\n");
+    await unsupportedRun;
+
+    const empty = Object.freeze({
+      ...(await createRuntime(agent)),
+      listSkills: async () => Object.freeze([]),
+    });
+    const emptyTerminal = createTestTerminal();
+    const emptyRun = startNoesisTui(empty, {}, emptyTerminal);
+    await vi.waitFor(() => expect(emptyTerminal.output).toContain("● IDLE"));
+    emptyTerminal.type("/skills\r");
+    await vi.waitFor(() => expect(emptyTerminal.output).toContain("No skills are installed"));
+    expect(emptyTerminal.output).not.toContain("unavailable in this runtime");
+    emptyTerminal.type("/quit\n");
+    await emptyRun;
+  });
+
   test("two plain launches create distinct fresh sessions without prior conversation", async () => {
     const runtime = await createRuntime({
       name: "fresh-scripted",

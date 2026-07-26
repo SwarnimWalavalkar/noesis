@@ -1257,32 +1257,22 @@ revisions/scripts/&lt;revision-id&gt;/
         <h2>Workflows: durable thinking and doing</h2>
         <p>
           A workflow is warranted when work must survive a turn, expose phase
-          progress, fan out, pause, resume, accept feedback between phases, or run
-          in the background. It is not merely a long codemode cell.
+          progress, pause, resume, or accept feedback between phases. It is not
+          merely a long codemode cell. The first implementation is deliberately
+          sequential; bounded fan-out and background scheduling remain later
+          extensions.
         </p>
         <h3>Programming model</h3>
-        <pre><code>export const manifest = {
+        <pre><code>await tools.workflows.save({
   name: "deep-research",
+  description: "Discover, analyze, and synthesize in durable order.",
   inputSchema: { /* JSON Schema */ },
   outputSchema: { /* JSON Schema */ },
-};
-
-export default workflow(async ({ input, phase, map, agent, script }) =&gt; {
-  const sources = await phase("discover", SourceList, () =&gt;
-    agent({ goal: `Find primary sources for ${input.question}` })
-  );
-
-  const analyses = await map(
-    "analyze",
-    sources,
-    Analysis,
-    (source) =&gt; agent({ goal: "Analyze this source", input: source }),
-    { concurrency: 6 }
-  );
-
-  return phase("synthesize", FinalAnswer, () =&gt;
-    agent({ goal: input.question, input: analyses })
-  );
+  phases: [
+    { name: "discover", source: "/* return a source list */", /* schemas + requiredTools */ },
+    { name: "analyze", source: "/* analyze the complete list */", /* schemas + requiredTools */ },
+    { name: "synthesize", source: "/* produce the final answer */", /* schemas + requiredTools */ }
+  ]
 });</code></pre>
         <h3>Workflow rules</h3>
         <ul>
@@ -1302,8 +1292,9 @@ export default workflow(async ({ input, phase, map, agent, script }) =&gt; {
             reference rather than an oversized SQLite blob.
           </li>
           <li>
-            <code>map</code> provides bounded fan-out; the existing job scheduler
-            owns background execution. Workflows do not introduce another queue.
+            Phases execute sequentially in the first implementation. A later
+            bounded <code>map</code> primitive may use the existing job scheduler;
+            workflows will not introduce another queue.
           </li>
           <li>
             Resume reuses completed phase outputs. An ambiguous effect blocks
@@ -1766,22 +1757,21 @@ export default workflow(async ({ input, phase, map, agent, script }) =&gt; {
             <dt>Outcome</dt>
             <dd>
               Noesis can execute typed, inspectable, resumable, multi-phase work
-              with bounded fan-out.
+              through sequential durable phases.
             </dd>
             <dt>Work</dt>
             <dd>
               Workflow definition/revision, run and phase rows,
-              <code>workflow</code>/<code>phase</code>/<code>map</code>/
-              <code>agent</code>/<code>script</code> primitives, integration
-              with the existing job scheduler, artifacts, pause/cancel/resume,
-              progress read models, conversational controls, and the complete
-              <code>/workflows</code> library plus live phase/run inspector.
+              sequential phase execution through saved JavaScript, artifacts,
+              pause/cancel/resume, progress read models, conversational controls,
+              and the complete <code>/workflows</code> library plus live
+              phase/run inspector.
             </dd>
             <dt>Acceptance</dt>
             <dd>
-              A deep-research workflow fans out, survives restart after phase one,
-              resumes without repeating completed effects, accepts a user
-              correction before synthesis, and produces cited output.
+              A deep-research workflow survives restart after phase one, resumes
+              without repeating completed effects, accepts a user correction
+              before synthesis, and produces cited output.
             </dd>
           </dl>
         </article>
@@ -1959,7 +1949,7 @@ Wave 5                   TCW-11 compounding loop
               <tr>
                 <td>“Research this deeply and let me steer the synthesis.”</td>
                 <td>
-                  Durable discover/analyze/synthesize phases fan out, pause for
+                  Durable sequential discover/analyze/synthesize phases pause for
                   feedback, resume after restart, and emit progress.
                 </td>
               </tr>

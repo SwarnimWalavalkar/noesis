@@ -1,6 +1,7 @@
 import type { EffectClass, JsonValue, PermissionManifest, Principal } from "@noesis/domain";
 
 export * from "./durable-authority.ts";
+export * from "./effect-failures.ts";
 
 export interface EffectRequest<T extends JsonValue> {
   readonly operationId: string;
@@ -17,7 +18,14 @@ export type EffectDecision<T extends JsonValue> =
   | { readonly ok: true; readonly value: T; readonly replayed: boolean }
   | {
       readonly ok: false;
-      readonly code: "denied" | "failed" | "ambiguous" | "collision";
+      readonly code:
+        | "denied"
+        | "failed"
+        | "ambiguous"
+        | "collision"
+        | "cancelled"
+        | "invalid_output"
+        | "result_too_large";
       readonly reason: string;
     };
 

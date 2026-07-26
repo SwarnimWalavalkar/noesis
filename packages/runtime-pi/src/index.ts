@@ -15,30 +15,11 @@ import {
   type PiCodeExecutionAdapter,
   type PreparedPiCodeExecution,
 } from "./execute-tool.ts";
-import { createPiSelfTools, type PiSelfToolAdapter } from "./self-tools.ts";
-import type { PiSkillLibrary } from "./skill-library.ts";
 import { frozenPlanMaterialUses } from "./frozen-session-tools.ts";
+import { createPiSelfTools, type PiSelfToolAdapter } from "./self-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
+import type { PiSkillLibrary } from "./skill-library.ts";
 
-export * from "./auth.ts";
-export * from "./experiment-fixtures.ts";
-export {
-  frozenPlanMaterialUses,
-  resolveFrozenSessionToolDefinitions,
-} from "./frozen-session-tools.ts";
-export * from "./execute-tool.ts";
-export * from "./self-tools.ts";
-export * from "./skill-library.ts";
-export type {
-  FrozenPlanMaterialKind,
-  FrozenPlanMaterialUse,
-  FrozenSessionToolResolution,
-  FrozenSessionToolResolver,
-} from "./frozen-session-tools.ts";
-export * from "./pi-role-backend.ts";
-export * from "./role-context.ts";
-export * from "./role-runner.ts";
-export * from "./role-types.ts";
 export type {
   AgentCompletedStopReason,
   AgentContextUsage,
@@ -48,6 +29,25 @@ export type {
   AgentThinkingLevel,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
+export * from "./auth.ts";
+export * from "./execute-tool.ts";
+export * from "./experiment-fixtures.ts";
+export type {
+  FrozenPlanMaterialKind,
+  FrozenPlanMaterialUse,
+  FrozenSessionToolResolution,
+  FrozenSessionToolResolver,
+} from "./frozen-session-tools.ts";
+export {
+  frozenPlanMaterialUses,
+  resolveFrozenSessionToolDefinitions,
+} from "./frozen-session-tools.ts";
+export * from "./pi-role-backend.ts";
+export * from "./role-context.ts";
+export * from "./role-runner.ts";
+export * from "./role-types.ts";
+export * from "./self-tools.ts";
+export * from "./skill-library.ts";
 
 function assistantText(message: { readonly content: readonly unknown[] }): string {
   return message.content
@@ -117,6 +117,7 @@ export interface CreatePiAgentRuntimeOptions {
   readonly codeExecution?: PiCodeExecutionAdapter;
   readonly selfTools?: PiSelfToolAdapter;
   readonly skills?: PiSkillLibrary;
+  readonly requirePinnedSkillSnapshot?: boolean;
 }
 
 export function createPiAgentRuntime(
@@ -167,21 +168,6 @@ export function createPiAgentRuntime(
         model: model.id,
         contextWindow: model.contextWindow,
       });
-      const skillSnapshot = options.skills
-        ? await options.skills.snapshot(execution.controller.signal)
-        : Object.freeze({ skills: Object.freeze([]), diagnostics: Object.freeze([]) });
-      const preparedCode =
-        plan && options.codeExecution
-          ? await options.codeExecution.prepare(plan, execution.controller.signal, {
-              skills: skillSnapshot.skills,
-            })
-          : undefined;
-      if (plan && !preparedCode && frozenPlanMaterialUses(plan).length > 0)
-        throw new Error(
-          `Frozen turn plan ${plan.planId} contains skill, router, or tool material without a codemode execution adapter`,
-        );
-      if (preparedCode) execution.preparedCode = preparedCode;
-      if (execution.controller.signal.aborted) return abortedBeforePrompt();
       const auth = await models.getAuth(model);
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
       if (!auth) {
@@ -195,12 +181,33 @@ export function createPiAgentRuntime(
           );
         throw new Error(`Pi credentials are missing for provider ${request.provider}.`);
       }
+      const pinnedSkillSnapshot = plan ? options.skills?.claimPinnedSnapshot(plan.planId) : undefined;
+      if (plan && options.skills && options.requirePinnedSkillSnapshot && !pinnedSkillSnapshot)
+        throw new Error(`Frozen turn plan ${plan.planId} has no skill snapshot pinned at admission`);
+      const skillSnapshot =
+        pinnedSkillSnapshot ??
+        (options.skills
+          ? await options.skills.snapshot(execution.controller.signal)
+          : Object.freeze({ skills: Object.freeze([]), diagnostics: Object.freeze([]) }));
+      const preparedCode =
+        plan && options.codeExecution
+          ? await options.codeExecution.prepare(plan, execution.controller.signal, {
+              skills: skillSnapshot.skills,
+            })
+          : undefined;
+      if (plan && !preparedCode && frozenPlanMaterialUses(plan).length > 0)
+        throw new Error(
+          `Frozen turn plan ${plan.planId} contains skill, router, or tool material without a codemode execution adapter`,
+        );
+      if (preparedCode) execution.preparedCode = preparedCode;
+      if (execution.controller.signal.aborted) return abortedBeforePrompt();
       const selfTools =
         plan && options.selfTools
           ? createPiSelfTools({
               adapter: options.selfTools,
               plan,
               request,
+              signal: execution.controller.signal,
               ...(preparedCode
                 ? {
                     catalog: {
@@ -225,6 +232,15 @@ export function createPiAgentRuntime(
             },
           })
         : undefined;
+      const piSkills = skillSnapshot.skills.map(
+        (skill): Skill => ({
+          name: skill.name,
+          description: skill.description,
+          content: skill.content,
+          filePath: skill.filePath,
+          disableModelInvocation: skill.disableModelInvocation,
+        }),
+      );
       const harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),
         session,
@@ -233,30 +249,9 @@ export function createPiAgentRuntime(
         tools: executeTool ? [...selfTools, executeTool] : [...selfTools],
         thinkingLevel: request.thinkingLevel,
         resources: {
-          skills: skillSnapshot.skills.map(
-            (skill): Skill => ({
-              name: skill.name,
-              description: skill.description,
-              content: skill.content,
-              filePath: skill.filePath,
-              disableModelInvocation: skill.disableModelInvocation,
-            }),
-          ),
+          skills: piSkills,
         },
-        systemPrompt: [
-          request.systemPrompt,
-          formatSkillsForSystemPrompt(
-            skillSnapshot.skills.map(
-              (skill): Skill => ({
-                name: skill.name,
-                description: skill.description,
-                content: skill.content,
-                filePath: skill.filePath,
-                disableModelInvocation: skill.disableModelInvocation,
-              }),
-            ),
-          ),
-        ]
+        systemPrompt: [request.systemPrompt, formatSkillsForSystemPrompt(piSkills)]
           .filter(Boolean)
           .join("\n\n"),
       });

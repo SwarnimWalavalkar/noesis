@@ -12,6 +12,7 @@ const executeParameters = z.strictObject({
   timeoutMs: z.number().int().min(100).max(600_000).optional(),
 });
 const executeParametersJsonSchema = z.toJSONSchema(executeParameters);
+const MAX_SOURCE_BYTES = 128 * 1024;
 
 export type PiCodeExecutionEvent =
   | { readonly type: "progress"; readonly value: JsonValue }
@@ -62,18 +63,25 @@ export function createPiExecuteTool(input: {
     label: "Execute JavaScript",
     description: [
       "Execute JavaScript on the user's machine and compose work tools through the injected SDK.",
-      "Use tools.<family>.<operation>(input), noesis.search(query), and noesis.describe(name).",
+      "Use tools.<family>.<operation>(input), noesis.search(query), noesis.describe(name), or noesis.invoke(name, input).",
+      "Use emit(value) or notify(value) for progress, and store(key, value)/load(key) for execution-local state.",
       "Return only the final value that should enter the conversation context.",
     ].join(" "),
     parameters: executeParametersJsonSchema,
     executionMode: "sequential",
     execute: async (_toolCallId, rawInput, toolSignal) => {
       const params = executeParameters.parse(rawInput);
+      if (new TextEncoder().encode(params.source).byteLength > MAX_SOURCE_BYTES)
+        throw new Error(`Codemode source exceeds ${String(MAX_SOURCE_BYTES)} UTF-8 bytes`);
       const controller = new AbortController();
-      const abort = (): void => controller.abort();
-      input.signal.addEventListener("abort", abort, { once: true });
-      toolSignal?.addEventListener("abort", abort, { once: true });
+      const abortTurn = (): void => controller.abort(input.signal.reason);
+      const abortTool = (): void => controller.abort(toolSignal?.reason);
+      if (input.signal.aborted) abortTurn();
+      else input.signal.addEventListener("abort", abortTurn, { once: true });
+      if (toolSignal?.aborted) abortTool();
+      else toolSignal?.addEventListener("abort", abortTool, { once: true });
       try {
+        if (controller.signal.aborted) throw new Error("Codemode execution was cancelled before start");
         const result = await input.prepared.execute(
           params.source,
           params.timeoutMs,
@@ -85,8 +93,8 @@ export function createPiExecuteTool(input: {
           details: { executionId: result.executionId, calls: result.calls },
         };
       } finally {
-        input.signal.removeEventListener("abort", abort);
-        toolSignal?.removeEventListener("abort", abort);
+        input.signal.removeEventListener("abort", abortTurn);
+        toolSignal?.removeEventListener("abort", abortTool);
       }
     },
   };

@@ -1,16 +1,19 @@
-import { frozenTurnPlanDigest, type FrozenTurnPlan, type FrozenRevisionMaterial } from "@noesis/agent-types";
-import { sha256, type FileRevisionRef } from "@noesis/domain";
-import type { SessionToolDefinition, SessionToolName } from "@noesis/intelligence";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { describe, expect, test } from "vitest";
+import { type FrozenRevisionMaterial, type FrozenTurnPlan, frozenTurnPlanDigest } from "@noesis/agent-types";
+import { type FileRevisionRef, sha256 } from "@noesis/domain";
+import type { SessionToolDefinition, SessionToolName } from "@noesis/intelligence";
+import { describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import {
   createAssistantDeltaAggregator,
   createPiAgentRuntime,
-  frozenPlanMaterialUses,
-  resolveFrozenSessionToolDefinitions,
+  createPiExecuteTool,
+  createPiSelfTools,
   type FrozenSessionToolResolver,
+  frozenPlanMaterialUses,
   type PiCodeExecutionAdapter,
+  type PiSkillLibrary,
+  resolveFrozenSessionToolDefinitions,
 } from "../src/index.ts";
 import {
   CONTROLLED_PI_MODEL,
@@ -146,6 +149,158 @@ describe("agent runtime factories", () => {
     deltas.beginMessage();
     expect(deltas.push("Grounded answer.")).toBe("\n\nGrounded answer.");
     expect(deltas.text()).toBe("I will inspect the snapshot.\n\nGrounded answer.");
+  });
+
+  test("rejects already-cancelled and oversized execute requests before preparation", async () => {
+    let executions = 0;
+    const turn = new AbortController();
+    turn.abort("cancelled");
+    const execute = createPiExecuteTool({
+      prepared: {
+        catalogId: "catalog",
+        catalogDigest: sha256("catalog"),
+        execute: async () => {
+          executions += 1;
+          return {
+            executionId: "must-not-run",
+            value: null,
+            calls: 0,
+            durationMs: 0,
+          };
+        },
+        close: async () => undefined,
+      },
+      signal: turn.signal,
+      emit: () => undefined,
+    });
+
+    await expect(execute.execute("cancelled", { source: "return null;" })).rejects.toThrow(
+      "cancelled before start",
+    );
+    expect(executions).toBe(0);
+
+    const active = new AbortController();
+    const byteBounded = createPiExecuteTool({
+      prepared: {
+        catalogId: "catalog",
+        catalogDigest: sha256("catalog"),
+        execute: async () => {
+          executions += 1;
+          return {
+            executionId: "must-not-run",
+            value: null,
+            calls: 0,
+            durationMs: 0,
+          };
+        },
+        close: async () => undefined,
+      },
+      signal: active.signal,
+      emit: () => undefined,
+    });
+    await expect(byteBounded.execute("oversized", { source: "😀".repeat(40_000) })).rejects.toThrow(
+      "UTF-8 bytes",
+    );
+    expect(byteBounded.description).toContain("noesis.invoke");
+    expect(byteBounded.description).toContain("emit(value)");
+    expect(byteBounded.description).toContain("store(key, value)");
+    expect(executions).toBe(0);
+  });
+
+  test("propagates cancellation and bounds direct self-tool results", async () => {
+    const plan = frozenPlan();
+    const turn = new AbortController();
+    let observedSignal: AbortSignal | undefined;
+    const tools = createPiSelfTools({
+      plan,
+      request: {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "Inspect.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      signal: turn.signal,
+      adapter: {
+        inspect: async ({ signal }) => {
+          observedSignal = signal;
+          return "x".repeat(70_000);
+        },
+        remember: async ({ signal }) => {
+          observedSignal = signal;
+          return null;
+        },
+        adapt: async () => null,
+      },
+    });
+    const inspect = tools.find((tool) => tool.name === "inspect_self");
+    const remember = tools.find((tool) => tool.name === "remember");
+    if (!inspect || !remember) throw new Error("Expected direct self tools");
+
+    await expect(inspect.execute("inspect", {})).rejects.toThrow("result exceeds");
+    expect(observedSignal).toBeDefined();
+
+    const toolCall = new AbortController();
+    toolCall.abort("cancelled");
+    await expect(
+      remember.execute("remember", { memory: "m", scope: "turn", anticipatedUse: "later" }, toolCall.signal),
+    ).rejects.toThrow("cancelled before execution");
+  });
+
+  test("checks authentication before loading skills or preparing codemode", async () => {
+    const controlled = createControlledPiModels();
+    const plan = frozenPlan();
+    const auth = vi.spyOn(controlled.models, "getAuth").mockResolvedValue(undefined);
+    let snapshots = 0;
+    let preparations = 0;
+    const emptySnapshot = Object.freeze({
+      skills: Object.freeze([]),
+      diagnostics: Object.freeze([]),
+    });
+    const skills: PiSkillLibrary = {
+      snapshot: async () => {
+        snapshots += 1;
+        return emptySnapshot;
+      },
+      pinSnapshot: async () => emptySnapshot,
+      claimPinnedSnapshot: () => undefined,
+      discardPinnedSnapshot: () => undefined,
+      install: async () => undefined,
+      remove: async () => false,
+      update: async () => undefined,
+      configured: () => Object.freeze([]),
+    };
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      skills,
+      codeExecution: {
+        prepare: async () => {
+          preparations += 1;
+          throw new Error("must not prepare");
+        },
+        shutdown: async () => undefined,
+      },
+    });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "Do not start.",
+          activeCapabilities: [],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow("credentials are missing");
+    expect({ snapshots, preparations }).toEqual({ snapshots: 0, preparations: 0 });
+    auth.mockRestore();
   });
 
   test("fails before model execution when frozen non-prompt material has no exact resolver", async () => {

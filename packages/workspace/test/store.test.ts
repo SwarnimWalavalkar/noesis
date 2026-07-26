@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
@@ -106,6 +106,15 @@ describe("WorkspaceStore", () => {
       updatedAt: "2026-07-26T00:00:00.000Z",
       metadata: Object.freeze({}),
     });
+    const unfinishedSource = await first.artifacts.writeArtifact({
+      path: "codemode/execution-unfinished/source.mjs",
+      mediaType: "text/javascript",
+      bytes: text('return "exact";'),
+      actor,
+      relationshipRefs: Object.freeze([
+        { kind: "database_row" as const, table: "sessions" as const, rowId: "session-codemode" },
+      ]),
+    });
     await first.operational.codeExecutions.put({
       executionId: "execution-unfinished",
       logicalExecutionId: "logical-execution-unfinished",
@@ -113,6 +122,7 @@ describe("WorkspaceStore", () => {
       catalogId: "catalog-test",
       catalogDigest: digest("a"),
       sourceDigest: sha256(text('return "exact";')),
+      sourceArtifactId: unfinishedSource.artifactId,
       status: "running",
       callCount: 1,
       startedAt: "2026-07-26T00:00:00.000Z",
@@ -121,6 +131,7 @@ describe("WorkspaceStore", () => {
 
     const recovered = await createWorkspaceStore(root, {
       now: () => "2026-07-26T00:01:00.000Z",
+      recoverInterruptedOperations: true,
     });
 
     expect(await recovered.operational.codeExecutions.get("execution-unfinished")).toMatchObject({
@@ -129,6 +140,65 @@ describe("WorkspaceStore", () => {
       completedAt: "2026-07-26T00:01:00.000Z",
     });
     recovered.close();
+  });
+
+  test("keeps one live mutating runtime owner while allowing non-recovering readers", async () => {
+    const root = await temporary("runtime-owner");
+    const owner = await createWorkspaceStore(root, {
+      recoverInterruptedOperations: true,
+      runtimeOwnerId: "owner-one",
+    });
+    await owner.operational.sessions.put({
+      sessionId: "session-live-owner",
+      title: "Live owner",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const source = await owner.artifacts.writeArtifact({
+      path: "codemode/execution-live-owner/source.mjs",
+      mediaType: "text/javascript",
+      bytes: text('return "live";'),
+      actor,
+      relationshipRefs: Object.freeze([
+        { kind: "database_row" as const, table: "sessions" as const, rowId: "session-live-owner" },
+      ]),
+    });
+    await owner.operational.codeExecutions.put({
+      executionId: "execution-live-owner",
+      logicalExecutionId: "logical-live-owner",
+      sessionId: "session-live-owner",
+      catalogId: "catalog-test",
+      catalogDigest: digest("a"),
+      sourceDigest: sha256(text('return "live";')),
+      sourceArtifactId: source.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    const reader = await createWorkspaceStore(root);
+    expect(await reader.operational.codeExecutions.get("execution-live-owner")).toMatchObject({
+      status: "running",
+    });
+
+    await expect(
+      createWorkspaceStore(root, {
+        recoverInterruptedOperations: true,
+        runtimeOwnerId: "owner-two",
+      }),
+    ).rejects.toThrow("live runtime owner");
+
+    reader.close();
+    owner.close();
+    const successor = await createWorkspaceStore(root, {
+      recoverInterruptedOperations: true,
+      runtimeOwnerId: "owner-two",
+    });
+    successor.close();
   });
 
   test("pins exact codemode source and log artifacts across terminal updates", async () => {
@@ -151,6 +221,19 @@ describe("WorkspaceStore", () => {
         rowId: "session-artifacts",
       },
     ]);
+    await expect(
+      store.operational.codeExecutions.put({
+        executionId: "execution-missing-source",
+        logicalExecutionId: "execution-missing-source",
+        sessionId: "session-artifacts",
+        catalogId: "catalog-test",
+        catalogDigest: digest("a"),
+        sourceDigest: sha256(text('return "missing";')),
+        status: "running",
+        callCount: 0,
+        startedAt: "2026-07-26T00:00:00.000Z",
+      }),
+    ).rejects.toThrow("requires a source artifact");
     const source = await store.artifacts.writeArtifact({
       path: "codemode/execution-artifacts/source.mjs",
       mediaType: "text/javascript",
@@ -255,6 +338,15 @@ describe("WorkspaceStore", () => {
       bytes: text('{"name":"recover"}'),
       actor,
     });
+    const workflowSource = await first.artifacts.writeArtifact({
+      path: "codemode/execution-workflow-unfinished/source.mjs",
+      mediaType: "text/javascript",
+      bytes: text("return input;"),
+      actor,
+      relationshipRefs: Object.freeze([
+        { kind: "database_row" as const, table: "sessions" as const, rowId: "session-workflow" },
+      ]),
+    });
     await first.operational.workflows.putRun({
       runId: "workflow-run-unfinished",
       workflowName: "recover",
@@ -273,7 +365,8 @@ describe("WorkspaceStore", () => {
       sessionId: "session-workflow",
       catalogId: "catalog-test",
       catalogDigest: digest("c"),
-      sourceDigest: digest("d"),
+      sourceDigest: sha256(text("return input;")),
+      sourceArtifactId: workflowSource.artifactId,
       status: "running",
       callCount: 1,
       startedAt: "2026-07-26T00:00:00.000Z",
@@ -289,10 +382,79 @@ describe("WorkspaceStore", () => {
       executionId: "execution-workflow-unfinished",
       startedAt: "2026-07-26T00:00:00.000Z",
     });
+    await expect(
+      first.operational.workflows.putPhase({
+        runId: "workflow-run-unfinished",
+        phaseIndex: 1,
+        phaseName: "pending-cannot-start",
+        status: "pending",
+        attempt: 0,
+        input: { value: 1 },
+        startedAt: "2026-07-26T00:00:00.000Z",
+      }),
+    ).rejects.toThrow("cannot start");
+    await expect(
+      first.operational.workflows.putPhase({
+        runId: "workflow-run-unfinished",
+        phaseIndex: 1,
+        phaseName: "completed-must-start",
+        status: "completed",
+        attempt: 1,
+        input: { value: 1 },
+        output: { value: 1 },
+        completedAt: "2026-07-26T00:00:01.000Z",
+      }),
+    ).rejects.toThrow("requires a start time");
+    await first.operational.sessions.put({
+      sessionId: "session-other",
+      title: "Other session",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const otherSource = await first.artifacts.writeArtifact({
+      path: "codemode/execution-other-session/source.mjs",
+      mediaType: "text/javascript",
+      bytes: text("return input;"),
+      actor,
+      relationshipRefs: Object.freeze([
+        { kind: "database_row" as const, table: "sessions" as const, rowId: "session-other" },
+      ]),
+    });
+    await first.operational.codeExecutions.put({
+      executionId: "execution-other-session",
+      logicalExecutionId: "logical-other-session",
+      sessionId: "session-other",
+      catalogId: "catalog-test",
+      catalogDigest: digest("c"),
+      sourceDigest: sha256(text("return input;")),
+      sourceArtifactId: otherSource.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    await expect(
+      first.operational.workflows.putPhase({
+        runId: "workflow-run-unfinished",
+        phaseIndex: 1,
+        phaseName: "cross-session",
+        status: "running",
+        attempt: 1,
+        logicalExecutionId: "logical-other-session",
+        input: { value: 1 },
+        executionId: "execution-other-session",
+        startedAt: "2026-07-26T00:00:00.000Z",
+      }),
+    ).rejects.toThrow("does not belong to its run session");
     first.close();
 
     const recovered = await createWorkspaceStore(root, {
       now: () => "2026-07-26T00:01:00.000Z",
+      recoverInterruptedOperations: true,
     });
 
     expect(await recovered.operational.workflows.getRun("workflow-run-unfinished")).toMatchObject({
@@ -311,6 +473,27 @@ describe("WorkspaceStore", () => {
         completedAt: "2026-07-26T00:01:00.000Z",
       },
     ]);
+    await expect(
+      recovered.operational.workflows.claimPausedRun(
+        "workflow-run-unfinished",
+        "session-other",
+        "2026-07-26T00:02:00.000Z",
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      recovered.operational.workflows.claimPausedRun(
+        "workflow-run-unfinished",
+        "session-workflow",
+        "2026-07-26T00:02:00.000Z",
+      ),
+    ).resolves.toMatchObject({ status: "running" });
+    await expect(
+      recovered.operational.workflows.claimPausedRun(
+        "workflow-run-unfinished",
+        "session-workflow",
+        "2026-07-26T00:02:00.000Z",
+      ),
+    ).resolves.toBeUndefined();
     recovered.close();
   });
 
@@ -336,6 +519,46 @@ describe("WorkspaceStore", () => {
     database.close();
     expect(versions).toEqual(Array.from({ length: versions.length }, (_, index) => index + 1));
     expect(versions.at(-1)).toBeGreaterThanOrEqual(9);
+  });
+
+  test("upgrades a development workspace through the execution contract migrations", async () => {
+    const root = await temporary("development-migrations");
+    await mkdir(join(root, "database"), { recursive: true });
+    const seed = new DatabaseSync(join(root, "database", "noesis.sqlite"));
+    const migrationNames = (await readdir(new URL("../migrations/", import.meta.url)))
+      .filter((name) => /^\d{3}_.+\.sql$/u.test(name))
+      .sort()
+      .filter((name) => Number(name.slice(0, 3)) <= 18);
+    for (const name of migrationNames) {
+      const version = Number(name.slice(0, 3));
+      seed.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
+      seed
+        .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+        .run(version, name, "2026-07-26T00:00:00.000Z");
+    }
+    seed.close();
+
+    const upgraded = await createWorkspaceStore(root);
+    upgraded.close();
+
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    const versions = database
+      .prepare("SELECT version FROM schema_migrations ORDER BY version")
+      .all()
+      .map((row) => Reflect.get(row, "version"));
+    const ownerTable = database
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_owner'")
+      .get();
+    const lineageTrigger = database
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'codemode_execution_contract_insert'",
+      )
+      .get();
+    database.close();
+
+    expect(versions.at(-1)).toBe(20);
+    expect(ownerTable).toBeDefined();
+    expect(lineageTrigger).toBeDefined();
   });
 
   test("keeps authority grants, reservations, completions, and replay in SQLite", async () => {

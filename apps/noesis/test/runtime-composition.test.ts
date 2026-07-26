@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AgentRuntimeEvent, AgentRuntimeRequest, NoesisAgentRuntime } from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
 import { eventChecksum, type LedgerEvent } from "@noesis/domain";
-import { createPiAgentRoleRunner, createPiAgentRuntime } from "@noesis/runtime-pi";
+import { createPiAgentRoleRunner, createPiAgentRuntime, createPiSkillLibrary } from "@noesis/runtime-pi";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
@@ -226,12 +226,22 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const controlled = createControlledPiModels();
     const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const skills = createPiSkillLibrary({
+      cwd: home,
+      agentDirectory: join(home, "agent"),
+    });
     const requests: AgentRuntimeRequest[] = [];
     const seenConfigurations: unknown[] = [];
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution, selfTools) => {
-        const pi = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
+      skills,
+      createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) => {
+        const pi = createPiAgentRuntime(process.cwd(), controlled.models, {
+          codeExecution,
+          selfTools,
+          requirePinnedSkillSnapshot: true,
+          ...(skillLibrary ? { skills: skillLibrary } : {}),
+        });
         const capturingAgent: NoesisAgentRuntime = Object.freeze({
           ...pi,
           run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {

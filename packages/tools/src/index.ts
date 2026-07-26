@@ -8,12 +8,18 @@ import {
   sha256,
   toJsonValue,
 } from "@noesis/domain";
-import type { AuthorityBoundary, EffectDecision, EffectRequest } from "@noesis/policy";
+import {
+  createEffectExecutionFailure,
+  inspectEffectExecutionFailure,
+  type AuthorityBoundary,
+  type EffectDecision,
+  type EffectRequest,
+} from "@noesis/policy";
 import { z } from "zod";
+import { MAX_TOOL_RESULT_BYTES } from "./limits.ts";
 
 export * from "./builtins.ts";
-
-const MAX_TOOL_RESULT_BYTES = 64 * 1024;
+export * from "./limits.ts";
 
 export type ToolVisibility = "always" | "codemode_only";
 
@@ -59,27 +65,33 @@ export interface ToolAuthoringDefinition<Input, Output extends JsonValue> {
 export function defineTool<Input, Output extends JsonValue>(
   definition: ToolAuthoringDefinition<Input, Output>,
 ): ToolDefinition {
+  const name = definition.name;
+  const label = definition.label;
+  const description = definition.description;
+  const visibility = definition.visibility;
+  const inputSchema = definition.inputSchema;
+  const outputSchema = definition.outputSchema;
+  const deriveEffect = definition.effect;
+  const execute = definition.execute;
   const implementationDigest = sha256(
     canonicalJson({
-      effect: definition.effect.toString(),
-      execute: definition.execute.toString(),
+      effect: deriveEffect.toString(),
+      execute: execute.toString(),
       identityMaterial: definition.identityMaterial ?? null,
     }),
   );
   return Object.freeze({
-    name: definition.name,
-    label: definition.label,
-    description: definition.description,
-    visibility: definition.visibility,
+    name,
+    label,
+    description,
+    visibility,
     implementationDigest,
-    inputSchema: definition.inputSchema,
-    outputSchema: definition.outputSchema,
-    effect: (rawInput: unknown, context: ToolExecutionContext) =>
-      definition.effect(definition.inputSchema.parse(rawInput), context),
-    execute: async (rawInput: unknown, context: ToolExecutionContext) => {
-      const input = definition.inputSchema.parse(rawInput);
-      return definition.outputSchema.parse(await definition.execute(input, context));
-    },
+    inputSchema,
+    outputSchema,
+    // The broker is the sole validation boundary. These closures receive the already parsed value,
+    // preventing Zod transforms from running once for effect derivation and again for execution.
+    effect: (input: unknown, context: ToolExecutionContext) => deriveEffect(input as Input, context),
+    execute: async (input: unknown, context: ToolExecutionContext) => await execute(input as Input, context),
   });
 }
 
@@ -172,22 +184,45 @@ interface FrozenDefinition {
 }
 
 function schemaJson(schema: z.ZodType): JsonValue {
-  return toJsonValue(z.toJSONSchema(schema));
+  return deepFreezeJson(toJsonValue(z.toJSONSchema(schema, { unrepresentable: "any" })));
+}
+
+function deepFreezeJson(value: JsonValue): JsonValue {
+  if (Array.isArray(value)) {
+    for (const item of value) deepFreezeJson(item);
+    return Object.freeze(value);
+  }
+  if (typeof value === "object" && value !== null) {
+    for (const item of Object.values(value)) deepFreezeJson(item);
+    return Object.freeze(value);
+  }
+  return value;
 }
 
 function freezeDefinition(definition: ToolDefinition): FrozenDefinition {
-  const identity = Object.freeze({
+  const capturedDefinition: ToolDefinition = Object.freeze({
     name: definition.name,
     label: definition.label,
     description: definition.description,
     visibility: definition.visibility,
     implementationDigest: definition.implementationDigest,
-    inputSchema: schemaJson(definition.inputSchema),
-    outputSchema: schemaJson(definition.outputSchema),
+    inputSchema: definition.inputSchema,
+    outputSchema: definition.outputSchema,
+    effect: definition.effect,
+    execute: definition.execute,
+  });
+  const identity = Object.freeze({
+    name: capturedDefinition.name,
+    label: capturedDefinition.label,
+    description: capturedDefinition.description,
+    visibility: capturedDefinition.visibility,
+    implementationDigest: capturedDefinition.implementationDigest,
+    inputSchema: schemaJson(capturedDefinition.inputSchema),
+    outputSchema: schemaJson(capturedDefinition.outputSchema),
   });
   const revisionId = `tool_${sha256(canonicalJson(identity))}`;
   return Object.freeze({
-    definition,
+    definition: capturedDefinition,
     descriptor: Object.freeze({ ...identity, revisionId }),
   });
 }
@@ -233,6 +268,11 @@ export interface CreateToolBrokerOptions {
 
 export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
   const frozen = Object.freeze(options.definitions.map(freezeDefinition));
+  const permission: PermissionManifest = Object.freeze({
+    effects: Object.freeze([...options.permission.effects]),
+    resourcePatterns: Object.freeze([...options.permission.resourcePatterns]),
+    credentialRefs: Object.freeze([...options.permission.credentialRefs]),
+  });
   const names = new Set<string>();
   for (const entry of frozen) {
     if (!/^[a-z][a-z0-9_.-]{0,127}$/u.test(entry.descriptor.name))
@@ -311,7 +351,26 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
       await options.recorder?.record(Object.freeze({ ...baseRecord, status: "requested" as const }));
       await options.recorder?.record(Object.freeze({ ...baseRecord, status: "running" as const }));
     }
-    const effect = entry.definition.effect(parsedInput.data, context);
+    let effect: ToolEffect;
+    try {
+      effect = entry.definition.effect(parsedInput.data, context);
+    } catch (error) {
+      const executionFailure = inspectEffectExecutionFailure(error);
+      const result = failure(
+        executionFailure?.code ?? (context.signal.aborted ? "cancelled" : "failed"),
+        executionFailure?.message ?? (error instanceof Error ? error.message : String(error)),
+      );
+      if (!recordedIsTerminal)
+        await options.recorder?.record(
+          Object.freeze({
+            ...baseRecord,
+            status: "failed" as const,
+            completedAt: now().toISOString(),
+            error: result.message,
+          }),
+        );
+      return result;
+    }
     const requestDigest = sha256(
       canonicalJson({
         catalogDigest,
@@ -328,18 +387,32 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
       idempotencyKey: `tool:${callId}:${entry.descriptor.revisionId}`,
       requestDigest,
       execute: async () => {
-        if (context.signal.aborted) throw new Error("Execution was cancelled");
-        const rawOutput = await entry.definition.execute(parsedInput.data, context);
+        if (context.signal.aborted)
+          throw createEffectExecutionFailure("cancelled", "Execution was cancelled");
+        let rawOutput: JsonValue;
+        try {
+          rawOutput = await entry.definition.execute(parsedInput.data, context);
+        } catch (error) {
+          if (context.signal.aborted)
+            throw createEffectExecutionFailure("cancelled", "Execution was cancelled");
+          throw error;
+        }
         const parsedOutput = entry.definition.outputSchema.safeParse(rawOutput);
         if (!parsedOutput.success)
-          throw new Error(`Tool returned invalid output: ${z.prettifyError(parsedOutput.error)}`);
+          throw createEffectExecutionFailure(
+            "invalid_output",
+            `Tool returned invalid output: ${z.prettifyError(parsedOutput.error)}`,
+          );
         const output = JsonValueSchema.parse(parsedOutput.data);
         if (Buffer.byteLength(JSON.stringify(output), "utf8") > MAX_TOOL_RESULT_BYTES)
-          throw new Error(`Tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`);
+          throw createEffectExecutionFailure(
+            "result_too_large",
+            `Tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`,
+          );
         return output;
       },
     });
-    const decision = await options.authority.runForeground(request, options.permission);
+    const decision = await options.authority.runForeground(request, permission);
     const completedAt = now().toISOString();
     if (!decision.ok) {
       const result = decisionFailure(decision);

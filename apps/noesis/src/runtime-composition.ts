@@ -162,6 +162,17 @@ async function readStoredScript(
   workspace: NoesisWorkspaceStore,
   name: string,
 ): Promise<ScriptManifest | undefined> {
+  const current = await workspace.definitionMetadata.getCurrent("script", name);
+  if (!current) return undefined;
+  return ScriptManifestSchema.parse(
+    JSON.parse(decoder.decode(await workspace.reads.readRevision(current.definitionRevision))),
+  );
+}
+
+async function reconcileStoredScript(
+  workspace: NoesisWorkspaceStore,
+  name: string,
+): Promise<ScriptManifest | undefined> {
   let current = await workspace.definitionMetadata.getCurrent("script", name);
   if (!current) return undefined;
   let manifest = ScriptManifestSchema.parse(
@@ -236,7 +247,32 @@ async function listStoredScripts(workspace: NoesisWorkspaceStore): Promise<reado
   );
 }
 
+async function reconcileStoredScripts(workspace: NoesisWorkspaceStore): Promise<void> {
+  const current = await workspace.definitionMetadata.listCurrent("script");
+  for (const metadata of current) await reconcileStoredScript(workspace, metadata.definitionId);
+}
+
 async function readStoredWorkflow(
+  workspace: NoesisWorkspaceStore,
+  name: string,
+): Promise<
+  | {
+      readonly manifest: WorkflowManifest;
+      readonly definitionRevision: FileRevisionRef;
+    }
+  | undefined
+> {
+  const current = await workspace.definitionMetadata.getCurrent("workflow", name);
+  if (!current) return undefined;
+  return Object.freeze({
+    manifest: WorkflowManifestSchema.parse(
+      JSON.parse(decoder.decode(await workspace.reads.readRevision(current.definitionRevision))),
+    ),
+    definitionRevision: current.definitionRevision,
+  });
+}
+
+async function reconcileStoredWorkflow(
   workspace: NoesisWorkspaceStore,
   name: string,
 ): Promise<
@@ -324,6 +360,11 @@ async function listStoredWorkflows(workspace: NoesisWorkspaceStore): Promise<
   );
 }
 
+async function reconcileStoredWorkflows(workspace: NoesisWorkspaceStore): Promise<void> {
+  const current = await workspace.definitionMetadata.listCurrent("workflow");
+  for (const metadata of current) await reconcileStoredWorkflow(workspace, metadata.definitionId);
+}
+
 function withoutWorkflowTerminalFields(
   record: WorkflowRunRecord,
 ): Omit<WorkflowRunRecord, "error" | "completedAt"> {
@@ -363,6 +404,7 @@ export interface ApplicationRuntime extends NoesisTuiRuntime {
 
 export interface ApplicationRuntimeCompositionOptions {
   readonly config: ResolvedNoesisConfig;
+  readonly recoverInterruptedOperations?: boolean;
   readonly agent?: NoesisAgentRuntime;
   readonly createAgent?: (
     sessionTools: FrozenSessionToolResolver,
@@ -788,7 +830,9 @@ export async function createApplicationRuntimeComposition(
   options: ApplicationRuntimeCompositionOptions,
 ): Promise<ApplicationRuntime> {
   const agentDefaults = options.config.agent;
-  const workspace = await createWorkspaceStore(options.config.home);
+  const workspace = await createWorkspaceStore(options.config.home, {
+    recoverInterruptedOperations: options.recoverInterruptedOperations ?? true,
+  });
   const { authority, protectedRuntime } = createWorkspaceRuntimeInternals(workspace);
   await workspace.cutoverLegacyOperationalAuthority(
     options.config.home,
@@ -916,6 +960,8 @@ export async function createApplicationRuntimeComposition(
   ): Promise<ToolInvocationRecord["status"] | undefined> =>
     (await workspace.operational.toolCalls.get(callId))?.status;
   const prepareCodeExecution: PiCodeExecutionAdapter["prepare"] = async (plan, signal, resources) => {
+    await reconcileStoredScripts(workspace);
+    await reconcileStoredWorkflows(workspace);
     const sessionDefinitions = await resolveFrozenSessionToolDefinitions(plan, sessionTools, signal);
     const [frozenScripts, frozenWorkflows] = await Promise.all([
       listStoredScripts(workspace),
@@ -1035,7 +1081,7 @@ export async function createApplicationRuntimeComposition(
         }),
         execute: async ({ name, description, source, inputSchema, outputSchema, requiredTools }) => {
           const current = await workspace.definitionMetadata.getCurrent("script", name);
-          const currentManifest = current ? await readStoredScript(workspace, name) : undefined;
+          const currentManifest = current ? await reconcileStoredScript(workspace, name) : undefined;
           const reconciledCurrent = await workspace.definitionMetadata.getCurrent("script", name);
           const revision = (reconciledCurrent?.revision ?? 0) + 1;
           for (const requiredTool of requiredTools)
@@ -1267,6 +1313,7 @@ export async function createApplicationRuntimeComposition(
               if (!activeBroker?.describe(requiredTool))
                 throw new Error(`Workflow phase ${phase.name} requires unavailable tool ${requiredTool}`);
           }
+          await reconcileStoredWorkflow(workspace, name);
           const current = await workspace.definitionMetadata.getCurrent("workflow", name);
           const revision = (current?.revision ?? 0) + 1;
           const manifest = WorkflowManifestSchema.parse({
@@ -1364,6 +1411,8 @@ export async function createApplicationRuntimeComposition(
         execute: async ({ runId, correction }, context) => {
           const run = await workspace.operational.workflows.getRun(runId);
           if (!run) throw new Error(`Unknown workflow run ${runId}`);
+          if (run.sessionId !== plan.sessionId)
+            throw new Error(`Workflow run ${runId} belongs to another session`);
           if (run.status === "completed") {
             if (run.output === undefined) throw new Error(`Completed workflow run ${runId} has no output`);
             return {
@@ -1373,7 +1422,8 @@ export async function createApplicationRuntimeComposition(
               value: run.output,
             };
           }
-          if (run.status === "cancelled") throw new Error(`Workflow run ${runId} was cancelled`);
+          if (run.status !== "paused")
+            throw new Error(`Workflow run ${runId} is ${run.status} and cannot be resumed`);
           const stored = await readStoredWorkflowRevision(
             workspace,
             run.workflowName,
@@ -1475,13 +1525,29 @@ export async function createApplicationRuntimeComposition(
         kind: "noesis" as const,
       });
       const relationshipRefs = Object.freeze([foregroundEvidence(plan)]);
-      const sourceArtifact = await workspace.artifacts.writeArtifact({
-        path: `${artifactDirectory}/source.mjs`,
-        mediaType: "text/javascript",
-        bytes: encoder.encode(request.source),
-        actor: artifactActor,
-        relationshipRefs,
-      });
+      const [sourceArtifact, pendingStdoutArtifact, pendingStderrArtifact] = await Promise.all([
+        workspace.artifacts.writeArtifact({
+          path: `${artifactDirectory}/source.mjs`,
+          mediaType: "text/javascript",
+          bytes: encoder.encode(request.source),
+          actor: artifactActor,
+          relationshipRefs,
+        }),
+        workspace.artifacts.writeArtifact({
+          path: `${artifactDirectory}/stdout.pending.log`,
+          mediaType: "text/plain",
+          bytes: encoder.encode(""),
+          actor: artifactActor,
+          relationshipRefs,
+        }),
+        workspace.artifacts.writeArtifact({
+          path: `${artifactDirectory}/stderr.pending.log`,
+          mediaType: "text/plain",
+          bytes: encoder.encode(""),
+          actor: artifactActor,
+          relationshipRefs,
+        }),
+      ]);
       let callCount = 0;
       let capturedStdout = "";
       let capturedStderr = "";
@@ -1495,6 +1561,8 @@ export async function createApplicationRuntimeComposition(
         catalogDigest: broker.catalogDigest,
         sourceDigest: sha256(request.source),
         sourceArtifactId: sourceArtifact.artifactId,
+        stdoutArtifactId: pendingStdoutArtifact.artifactId,
+        stderrArtifactId: pendingStderrArtifact.artifactId,
         startedAt,
       });
       const persistLogs = async (stdout: string, stderr: string) => {
@@ -1546,10 +1614,11 @@ export async function createApplicationRuntimeComposition(
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const logArtifacts = await persistLogs(capturedStdout, capturedStderr);
+        const ambiguous = message.startsWith("ambiguous:");
         await workspace.operational.codeExecutions.put({
           ...base,
           ...logArtifacts,
-          status: request.signal?.aborted ? "cancelled" : "failed",
+          status: request.signal?.aborted ? "cancelled" : ambiguous ? "interrupted" : "failed",
           error: message,
           callCount,
           completedAt: new Date().toISOString(),
@@ -1571,17 +1640,26 @@ export async function createApplicationRuntimeComposition(
         ? await workspace.operational.workflows.getRun(existingRunId)
         : undefined;
       if (existingRunId && !existing) throw new Error(`Unknown workflow run ${existingRunId}`);
+      if (existing && existing.sessionId !== plan.sessionId)
+        throw new Error(`Workflow run ${existing.runId} belongs to another session`);
+      if (existing && existing.status !== "paused")
+        throw new Error(`Workflow run ${existing.runId} is ${existing.status} and cannot be resumed`);
       const permissionDigest = sha256(canonicalJson(plan.permissionSnapshot));
+      if (existing && (!existing.catalogId || !existing.catalogDigest))
+        throw new Error(`Workflow run ${existing.runId} has no frozen tool catalog pin`);
       if (
         existing &&
-        (existing.catalogId !== undefined || existing.catalogDigest !== undefined) &&
         (existing.catalogId !== broker.catalogId || existing.catalogDigest !== broker.catalogDigest)
       )
         throw new Error(
           `Workflow run ${existing.runId} is pinned to unavailable tool catalog ${existing.catalogId ?? "unknown"}`,
         );
-      if (existing?.permissionDigest && existing.permissionDigest !== permissionDigest)
+      if (existing && !existing.permissionDigest)
+        throw new Error(`Workflow run ${existing.runId} has no frozen permission pin`);
+      if (existing?.permissionDigest !== undefined && existing.permissionDigest !== permissionDigest)
         throw new Error(`Workflow run ${existing.runId} is pinned to a different permission snapshot`);
+      if (existing && (!existing.provider || !existing.model || existing.thinkingLevel === undefined))
+        throw new Error(`Workflow run ${existing.runId} has no frozen model routing pin`);
       if (
         existing?.provider &&
         (existing.provider !== plan.provider ||
@@ -1624,11 +1702,13 @@ export async function createApplicationRuntimeComposition(
             input,
           });
       } else {
-        await workspace.operational.workflows.putRun({
-          ...withoutWorkflowTerminalFields(existing),
-          status: "running",
-          updatedAt: new Date().toISOString(),
-        });
+        const claimed = await workspace.operational.workflows.claimPausedRun(
+          existing.runId,
+          plan.sessionId,
+          new Date().toISOString(),
+        );
+        if (!claimed)
+          throw new Error(`Workflow run ${existing.runId} changed state before it could be resumed`);
       }
       let value: JsonValue =
         resumeValue ??
@@ -1741,6 +1821,7 @@ export async function createApplicationRuntimeComposition(
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           const failedAt = new Date().toISOString();
+          const ambiguous = message.startsWith("ambiguous:");
           await workspace.operational.workflows.putPhase({
             runId,
             phaseIndex,
@@ -1758,19 +1839,33 @@ export async function createApplicationRuntimeComposition(
           if (current)
             await workspace.operational.workflows.putRun({
               ...current,
-              status: context.signal.aborted ? "cancelled" : "paused",
+              status: context.signal.aborted ? "cancelled" : ambiguous ? "failed" : "paused",
               currentPhase: phaseIndex,
               error: message,
               updatedAt: failedAt,
-              ...(context.signal.aborted ? { completedAt: failedAt } : {}),
+              ...(context.signal.aborted || ambiguous ? { completedAt: failedAt } : {}),
             });
           throw error;
         }
       }
-      z.fromJSONSchema(manifest.outputSchema).parse(value);
       const completedAt = new Date().toISOString();
       const current = await workspace.operational.workflows.getRun(runId);
       if (!current) throw new Error(`Workflow run ${runId} disappeared`);
+      try {
+        z.fromJSONSchema(manifest.outputSchema).parse(value);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await workspace.operational.workflows.putRun({
+          ...withoutWorkflowTerminalFields(current),
+          status: "failed",
+          currentPhase: manifest.phases.length,
+          output: value,
+          error: `Workflow output failed its schema: ${message}`,
+          updatedAt: completedAt,
+          completedAt,
+        });
+        throw error;
+      }
       await workspace.operational.workflows.putRun({
         ...withoutWorkflowTerminalFields(current),
         status: "completed",
@@ -2070,7 +2165,26 @@ export async function createApplicationRuntimeComposition(
     protectedRuntime,
     basePermissionManifest: Object.freeze({
       effects: Object.freeze(["read", "write", "execute", "network"]),
-      resourcePatterns: Object.freeze(["*"]),
+      resourcePatterns: Object.freeze([
+        `file:${process.cwd()}/*`,
+        `directory:${process.cwd()}`,
+        `directory:${process.cwd()}/*`,
+        `search:${process.cwd()}`,
+        `search:${process.cwd()}/*`,
+        `shell:${process.cwd()}:*`,
+        `shell:${process.cwd()}/*`,
+        "url:http://*",
+        "url:https://*",
+        "artifact:*",
+        "scripts:*",
+        "script:*",
+        "workflows:*",
+        "workflow:*",
+        "workflow-runs:*",
+        "workflow-run:*",
+        "skill:*",
+        "noesis-history:*",
+      ]),
       credentialRefs: Object.freeze([]),
     }),
     capabilities: Object.freeze({
@@ -2381,52 +2495,57 @@ export async function createApplicationRuntimeComposition(
         maxTokens: 8_000,
         maxFragmentTokens: 2_000,
       });
-      const result = await settlement.run({
-        sessionId: trailId,
-        turnId,
-        input,
-        occurredAt,
-        plan,
-        execute: async () => {
-          const agentResult = await agent.run(
-            {
-              trailId,
-              provider: plan.provider,
-              model: plan.model,
-              thinkingLevel: plan.thinkingLevel,
-              systemPrompt: plan.renderedSystemPrompt,
-              prompt: input,
-              activeCapabilities: plan.selectedCapabilities.map((selection) => ({
-                name: selection.name,
-                version: plan.activationRevision,
-              })),
+      await options.skills?.pinSnapshot(plan.planId);
+      try {
+        const result = await settlement.run({
+          sessionId: trailId,
+          turnId,
+          input,
+          occurredAt,
+          plan,
+          execute: async () => {
+            const agentResult = await agent.run(
+              {
+                trailId,
+                provider: plan.provider,
+                model: plan.model,
+                thinkingLevel: plan.thinkingLevel,
+                systemPrompt: plan.renderedSystemPrompt,
+                prompt: input,
+                activeCapabilities: plan.selectedCapabilities.map((selection) => ({
+                  name: selection.name,
+                  version: plan.activationRevision,
+                })),
+                frozenTurnPlan: plan,
+              },
+              runOptions?.onEvent ?? (() => undefined),
+            );
+            if (agentResult.stopReason === "error") throw new Error(agentResult.error);
+            return Object.freeze({
+              outcome: agentResult.stopReason === "aborted" ? ("aborted" as const) : ("completed" as const),
+              output: agentResult.text,
+              context,
+              usedCapabilities,
+              ...(agentResult.contextUsage ? { contextUsage: agentResult.contextUsage } : {}),
               frozenTurnPlan: plan,
-            },
-            runOptions?.onEvent ?? (() => undefined),
-          );
-          if (agentResult.stopReason === "error") throw new Error(agentResult.error);
-          return Object.freeze({
-            outcome: agentResult.stopReason === "aborted" ? ("aborted" as const) : ("completed" as const),
-            output: agentResult.text,
-            context,
-            usedCapabilities,
-            ...(agentResult.contextUsage ? { contextUsage: agentResult.contextUsage } : {}),
-            frozenTurnPlan: plan,
-          });
-        },
-      });
-      await persistTrail(
-        Object.freeze({
-          ...running,
-          status: result.outcome === "aborted" ? ("aborted" as const) : ("idle" as const),
-          capabilityVersions: usedCapabilities,
-          turns:
-            result.outcome === "completed"
-              ? Object.freeze([...running.turns, Object.freeze({ input, output: result.output })])
-              : running.turns,
-        }),
-      );
-      return result;
+            });
+          },
+        });
+        await persistTrail(
+          Object.freeze({
+            ...running,
+            status: result.outcome === "aborted" ? ("aborted" as const) : ("idle" as const),
+            capabilityVersions: usedCapabilities,
+            turns:
+              result.outcome === "completed"
+                ? Object.freeze([...running.turns, Object.freeze({ input, output: result.output })])
+                : running.turns,
+          }),
+        );
+        return result;
+      } finally {
+        options.skills?.discardPinnedSnapshot(plan.planId);
+      }
     } catch (error) {
       await persistTrail(Object.freeze({ ...running, status: "failed" as const }));
       throw error;
@@ -2479,8 +2598,9 @@ export async function createApplicationRuntimeComposition(
         })
       : undefined;
   };
-  const listScripts: NonNullable<NoesisTuiRuntime["listScripts"]> = async () =>
-    Object.freeze(
+  const listScripts: NonNullable<NoesisTuiRuntime["listScripts"]> = async () => {
+    await reconcileStoredScripts(workspace);
+    return Object.freeze(
       (await listStoredScripts(workspace)).map((script) =>
         Object.freeze({
           name: script.name,
@@ -2492,8 +2612,10 @@ export async function createApplicationRuntimeComposition(
         }),
       ),
     );
-  const listWorkflows: NonNullable<NoesisTuiRuntime["listWorkflows"]> = async () =>
-    Object.freeze(
+  };
+  const listWorkflows: NonNullable<NoesisTuiRuntime["listWorkflows"]> = async () => {
+    await reconcileStoredWorkflows(workspace);
+    return Object.freeze(
       (await listStoredWorkflows(workspace)).map(({ manifest, definitionRevision }) =>
         Object.freeze({
           name: manifest.name,
@@ -2505,7 +2627,9 @@ export async function createApplicationRuntimeComposition(
         }),
       ),
     );
+  };
   const inspectScript: NonNullable<NoesisTuiRuntime["inspectScript"]> = async (name) => {
+    await reconcileStoredScript(workspace, name);
     const script = await readStoredScript(workspace, name);
     if (!script) return undefined;
     return Object.freeze({
@@ -2521,6 +2645,7 @@ export async function createApplicationRuntimeComposition(
     });
   };
   const inspectWorkflow: NonNullable<NoesisTuiRuntime["inspectWorkflow"]> = async (name) => {
+    await reconcileStoredWorkflow(workspace, name);
     const stored = await readStoredWorkflow(workspace, name);
     if (!stored) return undefined;
     return Object.freeze({
@@ -2627,12 +2752,16 @@ export async function createApplicationRuntimeComposition(
         readArtifactPreview(code.stdoutArtifactId),
         readArtifactPreview(code.stderrArtifactId),
       ]);
-      const summary = (await listExecutions(sessionId)).find(
-        (candidate) => candidate.kind === "codemode" && candidate.executionId === executionId,
-      );
-      if (!summary) return undefined;
+      const calls = await workspace.operational.toolCalls.listForExecution(executionId);
       return Object.freeze({
-        ...summary,
+        kind: "codemode",
+        executionId: code.executionId,
+        label: "JavaScript",
+        status: code.status,
+        toolNames: Object.freeze([...new Set(calls.map((call) => call.toolName))].sort()),
+        callCount: code.callCount,
+        startedAt: code.startedAt,
+        ...(code.completedAt ? { completedAt: code.completedAt } : {}),
         ...(code.parentExecutionId ? { parentExecutionId: code.parentExecutionId } : {}),
         catalogDigest: code.catalogDigest,
         sourceDigest: code.sourceDigest,

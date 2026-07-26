@@ -452,6 +452,7 @@ export interface OperationalRepositories {
     readonly get: (toolCallId: string) => Promise<ToolCallRecord | undefined>;
     readonly put: (record: ToolCallRecord) => Promise<DatabaseRowRef>;
     readonly listForSession: (sessionId: string) => Promise<readonly ToolCallRecord[]>;
+    readonly listForExecution: (executionId: string) => Promise<readonly ToolCallRecord[]>;
   };
   readonly codeExecutions: {
     readonly get: (executionId: string) => Promise<CodeExecutionRecord | undefined>;
@@ -462,6 +463,11 @@ export interface OperationalRepositories {
   readonly workflows: {
     readonly getRun: (runId: string) => Promise<WorkflowRunRecord | undefined>;
     readonly putRun: (record: WorkflowRunRecord) => Promise<void>;
+    readonly claimPausedRun: (
+      runId: string,
+      sessionId: string,
+      claimedAt: string,
+    ) => Promise<WorkflowRunRecord | undefined>;
     readonly listRunsForSession: (sessionId: string) => Promise<readonly WorkflowRunRecord[]>;
     readonly putPhase: (record: WorkflowPhaseRunRecord) => Promise<void>;
     readonly listPhases: (runId: string) => Promise<readonly WorkflowPhaseRunRecord[]>;

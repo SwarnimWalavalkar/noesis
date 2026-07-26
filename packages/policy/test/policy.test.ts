@@ -1,6 +1,7 @@
 import type { Grant, JsonValue } from "@noesis/domain";
 import { describe, expect, test } from "vitest";
 import {
+  createEffectExecutionFailure,
   createDurableAuthorityBoundary,
   type DurableAuthorityOperation,
   type DurableAuthorityReservation,
@@ -107,7 +108,7 @@ describe("durable authority boundary", () => {
     await expect(
       authority.runForeground(request, {
         effects: ["write"],
-        resourcePatterns: ["workspace:"],
+        resourcePatterns: ["file:"],
         credentialRefs: [],
       }),
     ).resolves.toMatchObject({ ok: false, code: "denied" });
@@ -118,6 +119,80 @@ describe("durable authority boundary", () => {
         credentialRefs: [],
       }),
     ).resolves.toMatchObject({ ok: true });
+    expect(executions).toBe(1);
+  });
+
+  test("accepts only exact resources or one trailing wildcard and fails closed otherwise", async () => {
+    const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
+    const request = Object.freeze({
+      operationId: "operation-permission-pattern",
+      effect: "read" as const,
+      resource: "file:/workspace/notes.md",
+      estimatedCost: 0,
+      idempotencyKey: "permission-pattern",
+      requestDigest: "b".repeat(64),
+      execute: async () => null,
+    });
+
+    for (const pattern of ["", "*", "*notes.md", "file:*:notes.md", "file:**"])
+      await expect(
+        authority.runForeground(request, {
+          effects: ["read"],
+          resourcePatterns: [pattern],
+          credentialRefs: [],
+        }),
+      ).resolves.toMatchObject({ ok: false, code: "denied" });
+
+    await expect(
+      authority.runForeground(request, {
+        effects: ["read"],
+        resourcePatterns: ["file:/workspace/notes.md"],
+        credentialRefs: [],
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      authority.runForeground(
+        { ...request, idempotencyKey: "permission-pattern-prefix" },
+        {
+          effects: ["read"],
+          resourcePatterns: ["file:/workspace/*"],
+          credentialRefs: [],
+        },
+      ),
+    ).resolves.toMatchObject({ ok: true });
+  });
+
+  test("preserves typed execution failures across durable failed replays", async () => {
+    const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
+    let executions = 0;
+    const request = Object.freeze({
+      operationId: "operation-invalid-output",
+      effect: "read" as const,
+      resource: "tool:test",
+      estimatedCost: 0,
+      idempotencyKey: "invalid-output",
+      requestDigest: "c".repeat(64),
+      execute: async (): Promise<null> => {
+        executions += 1;
+        throw createEffectExecutionFailure("invalid_output", "Output did not match its schema");
+      },
+    });
+    const permission = {
+      effects: ["read"],
+      resourcePatterns: ["tool:test"],
+      credentialRefs: [],
+    };
+
+    await expect(authority.runForeground(request, permission)).resolves.toMatchObject({
+      ok: false,
+      code: "invalid_output",
+      reason: "Output did not match its schema",
+    });
+    await expect(authority.runForeground(request, permission)).resolves.toMatchObject({
+      ok: false,
+      code: "invalid_output",
+      reason: "Output did not match its schema",
+    });
     expect(executions).toBe(1);
   });
 

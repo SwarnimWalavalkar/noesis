@@ -6,9 +6,16 @@ import {
   type ToolInvocationRecord,
   type ToolInvocationRecorder,
 } from "@noesis/tools";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { createCodeModeRuntime } from "../src/index.ts";
+import { createCodeModeRuntime, type CodeModeRuntime } from "../src/index.ts";
+
+const runtimes = new Set<CodeModeRuntime>();
+
+afterEach(async () => {
+  await Promise.all([...runtimes].map(async (code) => await code.shutdown()));
+  runtimes.clear();
+});
 
 function authority(): Pick<AuthorityBoundary, "runForeground"> {
   return Object.freeze({
@@ -54,7 +61,9 @@ function runtime(
     ],
     ...(options.recorder ? { recorder: options.recorder } : {}),
   });
-  return createCodeModeRuntime({ cwd: process.cwd(), broker });
+  const code = createCodeModeRuntime({ cwd: process.cwd(), broker });
+  runtimes.add(code);
+  return code;
 }
 
 describe("codemode runtime", () => {
@@ -94,6 +103,28 @@ describe("codemode runtime", () => {
     );
     expect(result.value).toEqual({ joined: "a/b" });
     expect(events).toEqual([{ base: "noesis" }]);
+  });
+
+  it("persists store values across executions in the same session only", async () => {
+    const code = runtime();
+    await code.execute({
+      source: 'store("topic", { name: "Noesis" }); return null;',
+      sessionId: "session-1",
+    });
+
+    await expect(
+      code.execute({
+        source: 'return load("topic");',
+        sessionId: "session-1",
+      }),
+    ).resolves.toMatchObject({ value: { name: "Noesis" } });
+    await expect(
+      code.execute({
+        source: 'return load("topic") ?? null;',
+        sessionId: "session-2",
+      }),
+    ).resolves.toMatchObject({ value: null });
+    await code.shutdown();
   });
 
   it("derives stable host call identities from a logical execution across retries", async () => {
@@ -152,5 +183,43 @@ describe("codemode runtime", () => {
     });
     controller.abort();
     await expect(pending).rejects.toThrow("cancelled");
+  });
+
+  it("does not spawn work for an already-cancelled request", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      runtime().execute({
+        source: "return null;",
+        sessionId: "session-1",
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("cancelled");
+  });
+
+  it("bounds values before sending them across the child-process boundary", async () => {
+    await expect(
+      runtime().execute({
+        source: 'return "x".repeat(300 * 1024);',
+        sessionId: "session-1",
+      }),
+    ).rejects.toThrow("Codemode result exceeds");
+  });
+
+  it("does not leak a child when an event observer throws", async () => {
+    const code = runtime();
+    await expect(
+      code.execute({ executionId: "observer-error", source: "return 42;", sessionId: "session-1" }, () => {
+        throw new Error("observer failed");
+      }),
+    ).resolves.toMatchObject({ value: 42 });
+    await expect(
+      code.execute({
+        executionId: "observer-error",
+        source: "return 43;",
+        sessionId: "session-1",
+      }),
+    ).resolves.toMatchObject({ value: 43 });
+    await code.shutdown();
   });
 });

@@ -6,6 +6,8 @@ import { z } from "zod";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_CALLS = 128;
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
+const DEFAULT_MAX_STORE_BYTES = 256 * 1024;
+const DEFAULT_MAX_STORE_ENTRIES = 256;
 
 const childMessageSchema = z.union([
   z.strictObject({ type: z.literal("ready") }),
@@ -36,6 +38,7 @@ const childMessageSchema = z.union([
   z.strictObject({
     type: z.literal("result"),
     value: JsonValueSchema,
+    storeEntries: z.array(z.tuple([z.string(), JsonValueSchema])),
   }),
   z.strictObject({
     type: z.literal("failure"),
@@ -136,6 +139,7 @@ async function terminateChild(child: ChildProcess, closed: Promise<void>): Promi
 
 export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): CodeModeRuntime {
   const active = new Map<string, ActiveExecution>();
+  const sessionStores = new Map<string, ReadonlyMap<string, JsonValue>>();
   const maxCalls = options.maxCalls ?? DEFAULT_MAX_CALLS;
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
 
@@ -143,6 +147,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     if (!request.source.trim()) throw new Error("Codemode source must not be empty");
     if (Buffer.byteLength(request.source, "utf8") > 128 * 1024)
       throw new Error("Codemode source exceeds 128 KiB");
+    if (request.signal?.aborted) throw new Error("Codemode execution was cancelled");
     const executionId = request.executionId ?? createId("execution");
     const logicalExecutionId = request.logicalExecutionId ?? executionId;
     if (active.has(executionId)) throw new Error(`Codemode execution ${executionId} is already running`);
@@ -167,6 +172,13 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     let settlingResult = false;
     let timer: NodeJS.Timeout | undefined;
     const pendingSdkCalls = new Set<Promise<void>>();
+    const notify = (event: CodeExecutionEvent): void => {
+      try {
+        emit(event);
+      } catch {
+        // Event callbacks are observers and must not change execution lifecycle.
+      }
+    };
 
     const appendOutput = (kind: "stdout" | "stderr", chunk: string): void => {
       if (!chunk || outputBytes >= maxOutputBytes) return;
@@ -175,7 +187,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
       const accepted = bytes.subarray(0, remaining).toString("utf8");
       output[kind] += accepted;
       outputBytes += Buffer.byteLength(accepted, "utf8");
-      if (accepted) emit({ type: kind, executionId, text: accepted });
+      if (accepted) notify({ type: kind, executionId, text: accepted });
     };
 
     const abort = (): void => {
@@ -184,17 +196,18 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
     };
     request.signal?.addEventListener("abort", abort, { once: true });
+    if (request.signal?.aborted) abort();
     child.stdout?.on("data", (chunk: Buffer | string) => appendOutput("stdout", String(chunk)));
     child.stderr?.on("data", (chunk: Buffer | string) => appendOutput("stderr", String(chunk)));
-    emit({ type: "started", executionId });
 
     try {
       return await new Promise<CodeExecutionResult>((resolve, reject) => {
+        notify({ type: "started", executionId });
         const finishFailure = (error: Error, cancelled = false): void => {
           if (terminal) return;
           terminal = true;
           abort();
-          emit({
+          notify({
             type: cancelled ? "cancelled" : "failed",
             executionId,
             error: error.message,
@@ -208,7 +221,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
           if (terminal) return;
           terminal = true;
           const durationMs = Date.now() - startedAt;
-          emit({ type: "completed", executionId, calls, durationMs });
+          notify({ type: "completed", executionId, calls, durationMs });
           resolve(
             Object.freeze({
               executionId,
@@ -220,9 +233,22 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
             }),
           );
         };
+        if (controller.signal.aborted) {
+          finishFailure(new Error("Codemode execution was cancelled"), true);
+          return;
+        }
         const respond = (message: object): void => {
-          if (!child.connected) return;
-          child.send(message);
+          if (!child.connected) {
+            finishFailure(new Error("Codemode IPC channel closed before a response could be sent"));
+            return;
+          }
+          try {
+            child.send(message, (error) => {
+              if (error) finishFailure(error);
+            });
+          } catch (error) {
+            finishFailure(error instanceof Error ? error : new Error(String(error)));
+          }
         };
         const handleSdkCall = async (
           message: Extract<ChildMessage, { readonly type: "sdk-call" }>,
@@ -246,7 +272,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               : message.kind === "describe"
                 ? "noesis.describe"
                 : message.name;
-          emit({ type: "tool-start", executionId, name, callIndex });
+          notify({ type: "tool-start", executionId, name, callIndex });
           try {
             const value = toJsonValue(
               message.kind === "search"
@@ -270,7 +296,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               ok: true,
               value,
             });
-            emit({ type: "tool-end", executionId, name, callIndex, ok: true });
+            notify({ type: "tool-end", executionId, name, callIndex, ok: true });
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
             respond({
@@ -279,37 +305,53 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               ok: false,
               error: reason,
             });
-            emit({ type: "tool-end", executionId, name, callIndex, ok: false });
+            notify({ type: "tool-end", executionId, name, callIndex, ok: false });
           }
         };
         child.on("message", (raw: unknown) => {
-          const parsed = childMessageSchema.safeParse(raw);
-          if (!parsed.success) {
-            finishFailure(new Error(`Malformed codemode frame: ${z.prettifyError(parsed.error)}`));
-            return;
-          }
-          const message = parsed.data;
-          if (message.type === "ready") {
-            if (ready) {
-              finishFailure(new Error("Codemode child sent duplicate ready frame"));
+          try {
+            const parsed = childMessageSchema.safeParse(raw);
+            if (!parsed.success) {
+              finishFailure(new Error(`Malformed codemode frame: ${z.prettifyError(parsed.error)}`));
               return;
             }
-            ready = true;
-            child.send({
-              type: "run",
-              source: request.source,
-              ...(request.input === undefined ? {} : { input: request.input }),
-            });
-          } else if (message.type === "sdk-call") {
-            const pending = handleSdkCall(message);
-            pendingSdkCalls.add(pending);
-            void pending.finally(() => pendingSdkCalls.delete(pending));
-          } else if (message.type === "progress") {
-            emit({ type: "progress", executionId, value: message.value });
-          } else if (message.type === "result") {
-            void finishSuccess(message.value);
-          } else {
-            finishFailure(new Error(message.error));
+            const message = parsed.data;
+            if (message.type === "ready") {
+              if (ready) {
+                finishFailure(new Error("Codemode child sent duplicate ready frame"));
+                return;
+              }
+              ready = true;
+              respond({
+                type: "run",
+                source: request.source,
+                storeEntries: [...(sessionStores.get(request.sessionId) ?? new Map()).entries()],
+                ...(request.input === undefined ? {} : { input: request.input }),
+              });
+            } else if (message.type === "sdk-call") {
+              const pending = handleSdkCall(message);
+              pendingSdkCalls.add(pending);
+              void pending.finally(() => pendingSdkCalls.delete(pending));
+            } else if (message.type === "progress") {
+              notify({ type: "progress", executionId, value: message.value });
+            } else if (message.type === "result") {
+              if (message.storeEntries.length > DEFAULT_MAX_STORE_ENTRIES) {
+                finishFailure(
+                  new Error(`Codemode store exceeds ${String(DEFAULT_MAX_STORE_ENTRIES)} entries`),
+                );
+                return;
+              }
+              if (Buffer.byteLength(JSON.stringify(message.storeEntries), "utf8") > DEFAULT_MAX_STORE_BYTES) {
+                finishFailure(new Error(`Codemode store exceeds ${String(DEFAULT_MAX_STORE_BYTES)} bytes`));
+                return;
+              }
+              sessionStores.set(request.sessionId, new Map(message.storeEntries));
+              void finishSuccess(message.value);
+            } else {
+              finishFailure(new Error(message.error));
+            }
+          } catch (error) {
+            finishFailure(error instanceof Error ? error : new Error(String(error)));
           }
         });
         child.once("error", (error) => finishFailure(error));

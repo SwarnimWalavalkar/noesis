@@ -38,6 +38,13 @@ export const SearchConfigurationSchema = z.strictObject({
   updatedAt: z.string().min(1),
 });
 export const SensitivitySchema = z.enum(["normal", "private", "secret"]);
+const SessionStatusSchema = z.enum(["idle", "running", "completed", "aborted", "failed"]);
+const MessageRoleSchema = z.enum(["user", "assistant", "system", "tool"]);
+const ToolCallStatusSchema = z.enum(["requested", "running", "completed", "failed", "denied", "ambiguous"]);
+const CodeExecutionStatusSchema = z.enum(["running", "completed", "failed", "cancelled", "interrupted"]);
+const WorkflowRunStatusSchema = z.enum(["running", "paused", "completed", "failed", "cancelled"]);
+const WorkflowPhaseStatusSchema = z.enum(["pending", "running", "completed", "failed", "cancelled"]);
+const OutcomeStatusSchema = z.enum(["accepted", "corrected", "failed", "unknown"]);
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const ActivationEvidenceBindingSchema = z.strictObject({
@@ -81,7 +88,7 @@ export function decodeSession(row: unknown): SessionRecord {
     sessionId: requiredString(row, "session_id"),
     ...(parentSessionId === undefined ? {} : { parentSessionId }),
     title: requiredString(row, "title"),
-    status: requiredString(row, "status") as SessionRecord["status"],
+    status: SessionStatusSchema.parse(requiredString(row, "status")),
     provider: requiredString(row, "provider"),
     model: requiredString(row, "model"),
     runtime: requiredString(row, "runtime"),
@@ -95,9 +102,9 @@ export function decodeMessage(row: unknown): MessageRecord {
   return {
     messageId: requiredString(row, "message_id"),
     sessionId: requiredString(row, "session_id"),
-    role: requiredString(row, "role") as MessageRecord["role"],
+    role: MessageRoleSchema.parse(requiredString(row, "role")),
     content: requiredString(row, "content"),
-    sensitivity: requiredString(row, "sensitivity") as MessageRecord["sensitivity"],
+    sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
     createdAt: requiredString(row, "created_at"),
     metadata: JsonRecordSchema.parse(parseJson(requiredString(row, "metadata_json"))),
   };
@@ -114,8 +121,8 @@ export function decodeToolCall(row: unknown): ToolCallRecord {
     toolName: requiredString(row, "tool_name"),
     request: parseJson(requiredString(row, "request_json")),
     ...(response === undefined ? {} : { response: parseJson(response) }),
-    status: requiredString(row, "status") as ToolCallRecord["status"],
-    sensitivity: requiredString(row, "sensitivity") as ToolCallRecord["sensitivity"],
+    status: ToolCallStatusSchema.parse(requiredString(row, "status")),
+    sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
     createdAt: requiredString(row, "created_at"),
     ...(completedAt === undefined ? {} : { completedAt }),
   };
@@ -142,7 +149,7 @@ export function decodeCodeExecution(row: unknown): CodeExecutionRecord {
     ...(sourceArtifactId === undefined ? {} : { sourceArtifactId }),
     ...(stdoutArtifactId === undefined ? {} : { stdoutArtifactId }),
     ...(stderrArtifactId === undefined ? {} : { stderrArtifactId }),
-    status: requiredString(row, "status") as CodeExecutionRecord["status"],
+    status: CodeExecutionStatusSchema.parse(requiredString(row, "status")),
     ...(result === undefined ? {} : { result: JsonValueSchema.parse(parseJson(result)) }),
     ...(error === undefined ? {} : { error }),
     callCount: requiredNumber(row, "call_count"),
@@ -181,7 +188,7 @@ export function decodeWorkflowRun(row: unknown): WorkflowRunRecord {
         }),
     sessionId: requiredString(row, "session_id"),
     ...(turnId === undefined ? {} : { turnId }),
-    status: requiredString(row, "status") as WorkflowRunRecord["status"],
+    status: WorkflowRunStatusSchema.parse(requiredString(row, "status")),
     currentPhase: requiredNumber(row, "current_phase"),
     input: JsonValueSchema.parse(parseJson(requiredString(row, "input_json"))),
     ...(output === undefined ? {} : { output: JsonValueSchema.parse(parseJson(output)) }),
@@ -203,7 +210,7 @@ export function decodeWorkflowPhaseRun(row: unknown): WorkflowPhaseRunRecord {
     runId: requiredString(row, "run_id"),
     phaseIndex: requiredNumber(row, "phase_index"),
     phaseName: requiredString(row, "phase_name"),
-    status: requiredString(row, "status") as WorkflowPhaseRunRecord["status"],
+    status: WorkflowPhaseStatusSchema.parse(requiredString(row, "status")),
     attempt: requiredNumber(row, "attempt"),
     ...(logicalExecutionId === undefined ? {} : { logicalExecutionId }),
     input: JsonValueSchema.parse(parseJson(requiredString(row, "input_json"))),
@@ -221,9 +228,9 @@ export function decodeOutcome(row: unknown): OutcomeRecord {
     outcomeId: requiredString(row, "outcome_id"),
     sessionId: requiredString(row, "session_id"),
     ...(turnId === undefined ? {} : { turnId }),
-    status: requiredString(row, "status") as OutcomeRecord["status"],
+    status: OutcomeStatusSchema.parse(requiredString(row, "status")),
     summary: requiredString(row, "summary"),
-    sensitivity: requiredString(row, "sensitivity") as OutcomeRecord["sensitivity"],
+    sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
     createdAt: requiredString(row, "created_at"),
     metadata: JsonRecordSchema.parse(parseJson(requiredString(row, "metadata_json"))),
   };

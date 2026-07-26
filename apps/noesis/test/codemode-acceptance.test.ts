@@ -175,6 +175,8 @@ describe("production codemode journey", () => {
         execution.status === "completed" &&
         execution.result !== undefined,
     );
+    expect(firstScriptExecution).toBeDefined();
+    if (!firstScriptExecution) throw new Error("Expected a completed nested script execution");
     await writeFile(
       join(home, "definitions", "scripts", "double-value", "index.mjs"),
       "return { doubled: input.value * 3 };",
@@ -198,7 +200,7 @@ describe("production codemode journey", () => {
     expect(editedScripts).toMatchObject([{ name: "double-value", revision: 2 }]);
     expect(rerun.output).toBe("Script returned 63.");
     expect(
-      executionsAfterEdit.find((execution) => execution.executionId === firstScriptExecution?.executionId),
+      executionsAfterEdit.find((execution) => execution.executionId === firstScriptExecution.executionId),
     ).toEqual(firstScriptExecution);
     expect(
       executionsAfterEdit.some(

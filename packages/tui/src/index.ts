@@ -1,6 +1,5 @@
-import { Container, ProcessTerminal, TUI, matchesKey, type Terminal } from "@earendil-works/pi-tui";
+import { Container, matchesKey, ProcessTerminal, type Terminal, TUI } from "@earendil-works/pi-tui";
 import type { TrailState } from "@noesis/runtime";
-import { createSafeEditor, createSelectTheme } from "./safe-editor.ts";
 import {
   ANSI,
   createHelpView,
@@ -13,6 +12,7 @@ import {
   styled,
 } from "./rendering.ts";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
+import { createSafeEditor, createSelectTheme } from "./safe-editor.ts";
 import {
   createResponsiveSessionPicker,
   createSessionPickerItems,
@@ -21,13 +21,20 @@ import {
 } from "./session-picker.ts";
 import { initialTuiState } from "./state.ts";
 
-export * from "./runtime-port.ts";
-export * from "./state.ts";
 export * from "./rendering.ts";
+export * from "./runtime-port.ts";
 export * from "./safe-editor.ts";
 export * from "./session-picker.ts";
+export * from "./state.ts";
 
 const SHUTDOWN_GRACE_MS = 250;
+const INSPECTOR_PREVIEW_CHARACTERS = 24_000;
+
+export function boundedInspectorText(text: string): string {
+  const safe = safeTerminalText(text);
+  if (safe.length <= INSPECTOR_PREVIEW_CHARACTERS) return safe;
+  return `${safe.slice(0, INSPECTOR_PREVIEW_CHARACTERS)}\n\n… inspector preview truncated`;
+}
 
 export function streamingFrameDelay(activeCharacters: number, pendingCharacters: number): number {
   const total = Math.max(0, activeCharacters) + Math.max(0, pendingCharacters);
@@ -80,6 +87,7 @@ export async function startNoesisTui(
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
   let activeTurn: Promise<void> | undefined;
   let turnGeneration = 0;
+  let inspectorGeneration = 0;
   interface ActiveTurnToken {
     readonly generation: number;
     readonly trailId: string;
@@ -131,6 +139,7 @@ export async function startNoesisTui(
     shutdownPromise = (async () => {
       phase = "stopped";
       turnGeneration += 1;
+      inspectorGeneration += 1;
       activeTurnToken = undefined;
       if (streamRenderTimer) clearTimeout(streamRenderTimer);
       streamRenderTimer = undefined;
@@ -193,6 +202,20 @@ export async function startNoesisTui(
   editor.onSubmit = (text) => {
     void (async () => {
       if (!view.state.trailId || !text.trim()) return;
+      inspectorGeneration += 1;
+      const submittedInspectorGeneration = inspectorGeneration;
+      const submittedTrailId = view.state.trailId;
+      const publishInspector = (message: string): void => {
+        if (
+          phase !== "main" ||
+          inspectorGeneration !== submittedInspectorGeneration ||
+          view.state.trailId !== submittedTrailId ||
+          activeTurn
+        )
+          return;
+        view.dispatch({ type: "system-message", text: boundedInspectorText(message) });
+        tui.requestRender();
+      };
       if (text === "/quit") {
         await shutdown();
         return;
@@ -224,32 +247,36 @@ export async function startNoesisTui(
         return;
       }
       if (text === "/skills") {
-        const skills = (await runtime.listSkills?.()) ?? [];
-        view.dispatch({
-          type: "system-message",
-          text:
-            skills.length === 0
-              ? "No skills are installed or discoverable."
-              : [
-                  `Skills · ${skills.length}`,
-                  ...skills.map(
-                    (skill) =>
-                      `• ${skill.name}${skill.disableModelInvocation ? " · explicit only" : ""}\n  ${skill.description}\n  ${skill.filePath}`,
-                  ),
-                  "",
-                  "Install with: noesis skills install SOURCE [--workspace]",
-                  "Invoke with: /skill:<name> [instructions]",
-                ].join("\n"),
-        });
-        tui.requestRender();
+        if (!runtime.listSkills) {
+          publishInspector("Skill inspection is unavailable in this runtime.");
+          return;
+        }
+        const skills = await runtime.listSkills();
+        publishInspector(
+          skills.length === 0
+            ? "No skills are installed or discoverable."
+            : [
+                `Skills · ${skills.length}`,
+                ...skills.map(
+                  (skill) =>
+                    `• ${skill.name}${skill.disableModelInvocation ? " · explicit only" : ""}\n  ${skill.description}\n  ${skill.filePath}`,
+                ),
+                "",
+                "Install with: noesis skills install SOURCE [--workspace]",
+                "Invoke with: /skill:<name> [instructions]",
+              ].join("\n"),
+        );
         return;
       }
       if (text.startsWith("/skill ")) {
         const name = text.slice("/skill ".length).trim();
-        const skill = await runtime.inspectSkill?.(name);
-        view.dispatch({
-          type: "system-message",
-          text: skill
+        if (!runtime.inspectSkill) {
+          publishInspector("Skill detail inspection is unavailable in this runtime.");
+          return;
+        }
+        const skill = await runtime.inspectSkill(name);
+        publishInspector(
+          skill
             ? [
                 `${skill.name}${skill.disableModelInvocation ? " · explicit only" : ""}`,
                 skill.description,
@@ -259,36 +286,39 @@ export async function startNoesisTui(
                 skill.content,
               ].join("\n")
             : `Unknown skill: ${name}`,
-        });
-        tui.requestRender();
+        );
         return;
       }
       if (text === "/scripts") {
-        const scripts = (await runtime.listScripts?.()) ?? [];
-        view.dispatch({
-          type: "system-message",
-          text:
-            scripts.length === 0
-              ? "No reusable scripts have been saved yet."
-              : [
-                  `Scripts · ${scripts.length}`,
-                  ...scripts.map(
-                    (script) =>
-                      `• ${script.name} · r${String(script.revision)}\n  ${script.description}\n  ${script.requiredTools.join(", ") || "pure JavaScript"}\n  ${script.workingPath}`,
-                  ),
-                  "",
-                  "Ask Noesis to run one by name, or say “save that as a script” after useful work.",
-                ].join("\n"),
-        });
-        tui.requestRender();
+        if (!runtime.listScripts) {
+          publishInspector("Script inspection is unavailable in this runtime.");
+          return;
+        }
+        const scripts = await runtime.listScripts();
+        publishInspector(
+          scripts.length === 0
+            ? "No reusable scripts have been saved yet."
+            : [
+                `Scripts · ${scripts.length}`,
+                ...scripts.map(
+                  (script) =>
+                    `• ${script.name} · r${String(script.revision)}\n  ${script.description}\n  ${script.requiredTools.join(", ") || "pure JavaScript"}\n  ${script.workingPath}`,
+                ),
+                "",
+                "Ask Noesis to run one by name, or say “save that as a script” after useful work.",
+              ].join("\n"),
+        );
         return;
       }
       if (text.startsWith("/script ")) {
         const name = text.slice("/script ".length).trim();
-        const script = await runtime.inspectScript?.(name);
-        view.dispatch({
-          type: "system-message",
-          text: script
+        if (!runtime.inspectScript) {
+          publishInspector("Script detail inspection is unavailable in this runtime.");
+          return;
+        }
+        const script = await runtime.inspectScript(name);
+        publishInspector(
+          script
             ? [
                 `${script.name} · r${String(script.revision)}`,
                 script.description,
@@ -302,36 +332,39 @@ export async function startNoesisTui(
                 `Source\n${script.source}`,
               ].join("\n")
             : `Unknown script: ${name}`,
-        });
-        tui.requestRender();
+        );
         return;
       }
       if (text === "/workflows") {
-        const workflows = (await runtime.listWorkflows?.()) ?? [];
-        view.dispatch({
-          type: "system-message",
-          text:
-            workflows.length === 0
-              ? "No multi-phase workflows have been saved yet."
-              : [
-                  `Workflows · ${workflows.length}`,
-                  ...workflows.map(
-                    (workflow) =>
-                      `• ${workflow.name} · r${String(workflow.revision)} · ${workflow.phaseNames.length} phases\n  ${workflow.description}\n  ${workflow.phaseNames.join(" → ")}\n  ${workflow.workingPath}`,
-                  ),
-                  "",
-                  "Ask Noesis to run or resume a workflow by name.",
-                ].join("\n"),
-        });
-        tui.requestRender();
+        if (!runtime.listWorkflows) {
+          publishInspector("Workflow inspection is unavailable in this runtime.");
+          return;
+        }
+        const workflows = await runtime.listWorkflows();
+        publishInspector(
+          workflows.length === 0
+            ? "No multi-phase workflows have been saved yet."
+            : [
+                `Workflows · ${workflows.length}`,
+                ...workflows.map(
+                  (workflow) =>
+                    `• ${workflow.name} · r${String(workflow.revision)} · ${workflow.phaseNames.length} phases\n  ${workflow.description}\n  ${workflow.phaseNames.join(" → ")}\n  ${workflow.workingPath}`,
+                ),
+                "",
+                "Ask Noesis to run or resume a workflow by name.",
+              ].join("\n"),
+        );
         return;
       }
       if (text.startsWith("/workflow ")) {
         const name = text.slice("/workflow ".length).trim();
-        const workflow = await runtime.inspectWorkflow?.(name);
-        view.dispatch({
-          type: "system-message",
-          text: workflow
+        if (!runtime.inspectWorkflow) {
+          publishInspector("Workflow detail inspection is unavailable in this runtime.");
+          return;
+        }
+        const workflow = await runtime.inspectWorkflow(name);
+        publishInspector(
+          workflow
             ? [
                 `${workflow.name} · r${String(workflow.revision)}`,
                 workflow.description,
@@ -345,34 +378,37 @@ export async function startNoesisTui(
                 ]),
               ].join("\n")
             : `Unknown workflow: ${name}`,
-        });
-        tui.requestRender();
+        );
         return;
       }
       if (text === "/runs") {
-        const runs = (await runtime.listExecutions?.(view.state.trailId)) ?? [];
-        view.dispatch({
-          type: "system-message",
-          text:
-            runs.length === 0
-              ? "No codemode executions have run in this session."
-              : [
-                  `Runs · ${runs.length}`,
-                  ...runs.map(
-                    (run) =>
-                      `• ${run.kind} · ${run.label} · ${run.executionId}\n  ${run.status} · ${run.callCount} ${run.kind === "workflow" ? "phases" : "calls"} · ${run.toolNames.join(", ") || "no nested calls"}\n  ${run.startedAt}`,
-                  ),
-                ].join("\n"),
-        });
-        tui.requestRender();
+        if (!runtime.listExecutions) {
+          publishInspector("Run inspection is unavailable in this runtime.");
+          return;
+        }
+        const runs = await runtime.listExecutions(submittedTrailId);
+        publishInspector(
+          runs.length === 0
+            ? "No codemode executions have run in this session."
+            : [
+                `Runs · ${runs.length}`,
+                ...runs.map(
+                  (run) =>
+                    `• ${run.kind} · ${run.label} · ${run.executionId}\n  ${run.status} · ${run.callCount} ${run.kind === "workflow" ? "phases" : "calls"} · ${run.toolNames.join(", ") || "no nested calls"}\n  ${run.startedAt}`,
+                ),
+              ].join("\n"),
+        );
         return;
       }
       if (text.startsWith("/run ")) {
         const executionId = text.slice("/run ".length).trim();
-        const run = await runtime.inspectExecution?.(view.state.trailId, executionId);
-        view.dispatch({
-          type: "system-message",
-          text: run
+        if (!runtime.inspectExecution) {
+          publishInspector("Run detail inspection is unavailable in this runtime.");
+          return;
+        }
+        const run = await runtime.inspectExecution(submittedTrailId, executionId);
+        publishInspector(
+          run
             ? [
                 `${run.kind} · ${run.label}`,
                 `${run.executionId} · ${run.status}`,
@@ -408,8 +444,7 @@ export async function startNoesisTui(
                 ...(run.error ? ["", `Error\n${run.error}`] : []),
               ].join("\n")
             : `Unknown run in this session: ${executionId}`,
-        });
-        tui.requestRender();
+        );
         return;
       }
       if (text === "?" || text === "/help") {

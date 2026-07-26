@@ -20,6 +20,11 @@ import type {
   EffectRequest,
   GrantHandle,
 } from "./index.ts";
+import {
+  inspectEffectExecutionFailure,
+  parseEffectExecutionFailure,
+  serializeEffectExecutionFailure,
+} from "./effect-failures.ts";
 
 export interface DurableAuthorityOperation {
   readonly identity: ReturnType<typeof StableEffectOperationIdentitySchema.parse>;
@@ -161,19 +166,23 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
         value: reservation.result as T,
         replayed: true,
       });
-    if (reservation.status !== "reserved")
+    if (reservation.status !== "reserved") {
+      const executionFailure =
+        reservation.status === "failed" ? parseEffectExecutionFailure(reservation.reason) : undefined;
       return Object.freeze({
         ok: false,
         code:
-          reservation.status === "collision"
+          executionFailure?.code ??
+          (reservation.status === "collision"
             ? "collision"
             : reservation.status === "unresolved"
               ? "ambiguous"
               : reservation.status === "failed"
                 ? "failed"
-                : "denied",
-        reason: reservation.reason,
+                : "denied"),
+        reason: executionFailure?.message ?? reservation.reason,
       });
+    }
     const lineage = createReceipt(operation);
     try {
       const value = await request.execute(lineage.receipt);
@@ -185,14 +194,19 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
       });
       return Object.freeze({ ok: true, value, replayed: false });
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      const executionFailure = inspectEffectExecutionFailure(error);
+      const reason = executionFailure?.message ?? (error instanceof Error ? error.message : String(error));
       await state.fail({
         operation,
         grantId: reservation.grantId,
-        reason,
+        reason: serializeEffectExecutionFailure(error) ?? reason,
         receiptLineageId: lineage.lineageId,
       });
-      return Object.freeze({ ok: false, code: "failed", reason });
+      return Object.freeze({
+        ok: false,
+        code: executionFailure?.code ?? ("failed" as const),
+        reason,
+      });
     }
   };
 
@@ -294,9 +308,12 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
   const permits = (permission: PermissionManifest, effect: EffectClass, resource: string): boolean => {
     if (!permission.effects.includes(effect)) return false;
     return permission.resourcePatterns.some((pattern) => {
-      if (pattern === "*") return true;
+      if (pattern.length === 0) return false;
       const wildcard = pattern.indexOf("*");
-      return resource.startsWith(wildcard === -1 ? pattern : pattern.slice(0, wildcard));
+      if (wildcard === -1) return resource === pattern;
+      if (wildcard === 0 || wildcard !== pattern.length - 1 || pattern.lastIndexOf("*") !== wildcard)
+        return false;
+      return resource.startsWith(pattern.slice(0, -1));
     });
   };
 

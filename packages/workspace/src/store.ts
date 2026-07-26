@@ -111,6 +111,8 @@ import type {
 export interface WorkspaceStoreOptions {
   readonly now?: () => string;
   readonly createId?: (prefix: string) => string;
+  readonly recoverInterruptedOperations?: boolean;
+  readonly runtimeOwnerId?: string;
   readonly afterDefinitionCommitForTesting?: () => void;
   readonly beforeActivationCommitForTesting?: () => void;
   readonly duringActivationCommitForTesting?: () => void;
@@ -221,6 +223,34 @@ export async function createWorkspaceStore(
   const database = await openWorkspaceDatabase(paths, now);
   const db = database.connection;
   const authority = createWorkspaceAuthorityBoundary(database, now);
+  const runtimeOwnerId = options.recoverInterruptedOperations
+    ? (options.runtimeOwnerId ?? createId("runtime_owner"))
+    : undefined;
+  if (runtimeOwnerId) {
+    database.transaction(() => {
+      const current = db.prepare("SELECT owner_id, pid FROM runtime_owner WHERE singleton = 1").get();
+      if (current !== undefined) {
+        const ownerId = requiredString(current, "owner_id");
+        const pid = requiredNumber(current, "pid");
+        let live = true;
+        try {
+          process.kill(pid, 0);
+        } catch (error) {
+          live = !(error instanceof Error && "code" in error && Reflect.get(error, "code") === "ESRCH");
+        }
+        if (live)
+          throw new Error(`Workspace already has a live runtime owner (${ownerId}, pid ${String(pid)})`);
+      }
+      db.prepare(
+        `INSERT INTO runtime_owner(singleton, owner_id, pid, acquired_at)
+         VALUES (1, ?, ?, ?)
+         ON CONFLICT(singleton) DO UPDATE SET
+           owner_id = excluded.owner_id,
+           pid = excluded.pid,
+           acquired_at = excluded.acquired_at`,
+      ).run(runtimeOwnerId, process.pid, now());
+    });
+  }
 
   const recordActivity = (
     actor: ActorRef,
@@ -725,9 +755,11 @@ export async function createWorkspaceStore(
 
   const research = createResearchRepositories(database, recordActivity, now);
   const operational = createOperationalRepositories(database, recordActivity);
-  const interruptedAt = now();
-  await operational.codeExecutions.interruptRunning(interruptedAt);
-  await operational.workflows.interruptRunning(interruptedAt);
+  if (options.recoverInterruptedOperations) {
+    const interruptedAt = now();
+    await operational.codeExecutions.interruptRunning(interruptedAt);
+    await operational.workflows.interruptRunning(interruptedAt);
+  }
   const jobs = createDurableJobStore(database, recordActivity, (reference) =>
     assertStoredReference(db, reference),
   );
@@ -1262,7 +1294,13 @@ export async function createWorkspaceStore(
         writeArtifact,
       }),
     cutoverLegacyOperationalAuthority,
-    close: () => database.close(),
+    close: () => {
+      if (runtimeOwnerId)
+        database.transaction(() => {
+          db.prepare("DELETE FROM runtime_owner WHERE singleton = 1 AND owner_id = ?").run(runtimeOwnerId);
+        });
+      database.close();
+    },
     unsafeDatabasePathForTesting: paths.database,
     getArtifactMetadata,
   });
@@ -1603,6 +1641,11 @@ function createOperationalRepositories(
   };
   const putCodeExecution = async (record: CodeExecutionRecord): Promise<void> => {
     database.transaction(() => {
+      const currentRow = db
+        .prepare("SELECT * FROM codemode_executions WHERE execution_id = ?")
+        .get(record.executionId);
+      if (currentRow === undefined && !record.sourceArtifactId)
+        throw new Error(`Codemode execution ${record.executionId} requires a source artifact`);
       if (record.sourceArtifactId) {
         const sourceArtifact = db
           .prepare("SELECT content_digest FROM artifacts WHERE artifact_id = ?")
@@ -1615,9 +1658,30 @@ function createOperationalRepositories(
             `Codemode execution ${record.executionId} source artifact does not match its source digest`,
           );
       }
-      const currentRow = db
-        .prepare("SELECT * FROM codemode_executions WHERE execution_id = ?")
-        .get(record.executionId);
+      if (record.parentExecutionId) {
+        const parent = db
+          .prepare(
+            `SELECT session_id, turn_id
+             FROM codemode_executions
+             WHERE execution_id = ?`,
+          )
+          .get(record.parentExecutionId);
+        if (
+          parent === undefined ||
+          requiredString(parent, "session_id") !== record.sessionId ||
+          optionalString(parent, "turn_id") !== record.turnId
+        )
+          throw new Error(
+            `Codemode execution ${record.executionId} parent does not share its session and turn`,
+          );
+      }
+      if (record.turnId) {
+        const turn = db
+          .prepare("SELECT session_id FROM foreground_turns WHERE turn_id = ?")
+          .get(record.turnId);
+        if (turn === undefined || requiredString(turn, "session_id") !== record.sessionId)
+          throw new Error(`Codemode execution ${record.executionId} turn does not belong to its session`);
+      }
       if (currentRow !== undefined) {
         const current = decodeCodeExecution(currentRow);
         const transitions: Readonly<
@@ -1694,6 +1758,13 @@ function createOperationalRepositories(
   };
   const putWorkflowRun = async (record: WorkflowRunRecord): Promise<void> => {
     database.transaction(() => {
+      if (record.turnId) {
+        const turn = db
+          .prepare("SELECT session_id FROM foreground_turns WHERE turn_id = ?")
+          .get(record.turnId);
+        if (turn === undefined || requiredString(turn, "session_id") !== record.sessionId)
+          throw new Error(`Workflow run ${record.runId} turn does not belong to its session`);
+      }
       const currentRow = db.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get(record.runId);
       if (currentRow !== undefined) {
         const current = decodeWorkflowRun(currentRow);
@@ -1767,6 +1838,29 @@ function createOperationalRepositories(
   };
   const putWorkflowPhase = async (record: WorkflowPhaseRunRecord): Promise<void> => {
     database.transaction(() => {
+      if (record.status === "pending" && record.startedAt !== undefined)
+        throw new Error(`Pending workflow phase ${record.runId}/${String(record.phaseIndex)} cannot start`);
+      if (record.status === "completed" && record.startedAt === undefined)
+        throw new Error(
+          `Completed workflow phase ${record.runId}/${String(record.phaseIndex)} requires a start time`,
+        );
+      if (record.executionId) {
+        const lineage = db
+          .prepare(
+            `SELECT run.session_id AS run_session_id, execution.session_id AS execution_session_id
+             FROM workflow_runs AS run
+             JOIN codemode_executions AS execution ON execution.execution_id = ?
+             WHERE run.run_id = ?`,
+          )
+          .get(record.executionId, record.runId);
+        if (
+          lineage === undefined ||
+          requiredString(lineage, "run_session_id") !== requiredString(lineage, "execution_session_id")
+        )
+          throw new Error(
+            `Workflow phase ${record.runId}/${String(record.phaseIndex)} execution does not belong to its run session`,
+          );
+      }
       const currentRow = db
         .prepare("SELECT * FROM workflow_phase_runs WHERE run_id = ? AND phase_index = ?")
         .get(record.runId, record.phaseIndex);
@@ -1958,6 +2052,16 @@ function createOperationalRepositories(
           .prepare("SELECT * FROM tool_calls WHERE session_id = ? ORDER BY created_at, tool_call_id")
           .all(sessionId)
           .map(decodeToolCall),
+      listForExecution: async (executionId: string) =>
+        db
+          .prepare(
+            `SELECT *
+             FROM tool_calls
+             WHERE json_extract(request_json, '$.executionId') = ?
+             ORDER BY created_at, tool_call_id`,
+          )
+          .all(executionId)
+          .map(decodeToolCall),
     }),
     codeExecutions: Object.freeze({
       get: async (executionId: string) =>
@@ -1996,6 +2100,21 @@ function createOperationalRepositories(
           decodeWorkflowRun,
         ),
       putRun: putWorkflowRun,
+      claimPausedRun: async (runId: string, sessionId: string, claimedAt: string) =>
+        database.transaction(() => {
+          const claimed = db
+            .prepare(
+              `UPDATE workflow_runs
+               SET status = 'running', error = NULL, updated_at = ?, completed_at = NULL
+               WHERE run_id = ? AND session_id = ? AND status = 'paused'`,
+            )
+            .run(claimedAt, runId, sessionId);
+          if (Number(claimed.changes) !== 1) return undefined;
+          const row = db.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get(runId);
+          if (row === undefined) throw new Error(`Claimed workflow run ${runId} disappeared`);
+          recordActivity(systemActor, "workflow_run.claimed", "workflow_run", runId);
+          return decodeWorkflowRun(row);
+        }),
       listRunsForSession: async (sessionId: string) =>
         db
           .prepare("SELECT * FROM workflow_runs WHERE session_id = ? ORDER BY created_at, run_id")

@@ -1,19 +1,19 @@
 #!/usr/bin/env node
-import { Writable } from "node:stream";
-import { createInterface } from "node:readline";
 import { join, resolve } from "node:path";
+import { createInterface } from "node:readline";
+import { Writable } from "node:stream";
 import {
+  type ConfigOverrides,
   initializeNoesisConfig,
+  type ResolvedNoesisConfig,
   readNoesisConfig,
   resolveNoesisConfig,
-  type ConfigOverrides,
-  type ResolvedNoesisConfig,
   updateNoesisConfig,
 } from "@noesis/config";
 import {
-  createPiModelServices,
-  createPiAgentRuntime,
   createPiAgentRoleRunner,
+  createPiAgentRuntime,
+  createPiModelServices,
   createPiSkillLibrary,
   type NoesisAuthEvent,
   type NoesisAuthLoginCallbacks,
@@ -27,7 +27,7 @@ import {
   runFirstLaunchOnboarding,
   shouldAutoOnboard,
 } from "./onboarding.ts";
-import { createApplicationRuntimeComposition, type ApplicationRuntime } from "./runtime-composition.ts";
+import { type ApplicationRuntime, createApplicationRuntimeComposition } from "./runtime-composition.ts";
 
 interface CliInput {
   readonly args: readonly string[];
@@ -36,6 +36,7 @@ interface CliInput {
   readonly authProvider?: string;
   readonly skillSource?: string;
   readonly skillScope?: "personal" | "workspace";
+  readonly workspaceTrusted: boolean;
   readonly home: string;
   readonly overrides: ConfigOverrides;
   readonly session:
@@ -134,6 +135,11 @@ function parseArgs(argv: readonly string[]): CliInput {
   const workspaceIndexes = args.flatMap((argument, index) => (argument === "--workspace" ? [index] : []));
   if (workspaceIndexes.length > 1) throw new Error("--workspace may be specified only once");
   if (workspaceIndexes[0] !== undefined) consumed.add(workspaceIndexes[0]);
+  const trustWorkspaceIndexes = args.flatMap((argument, index) =>
+    argument === "--trust-workspace" ? [index] : [],
+  );
+  if (trustWorkspaceIndexes.length > 1) throw new Error("--trust-workspace may be specified only once");
+  if (trustWorkspaceIndexes[0] !== undefined) consumed.add(trustWorkspaceIndexes[0]);
   const operands = args.filter((argument, index) => !consumed.has(index) && !argument.startsWith("--"));
   const unknownOption = args.find((argument, index) => !consumed.has(index) && argument.startsWith("--"));
   if (unknownOption) throw new Error(`Unknown ${command} option ${unknownOption}`);
@@ -173,10 +179,13 @@ function parseArgs(argv: readonly string[]): CliInput {
   if (command === "tui") {
     allowedOptions.add("--resume");
     allowedOptions.add("--continue");
+    allowedOptions.add("--trust-workspace");
   }
   if (command === "skills") allowedOptions.add("--workspace");
   if (workspaceIndexes[0] !== undefined && !allowedOptions.has("--workspace"))
     throw new Error("--workspace is valid only for skills commands");
+  if (trustWorkspaceIndexes[0] !== undefined && !allowedOptions.has("--trust-workspace"))
+    throw new Error("--trust-workspace is valid only for the tui command");
   const startupOption =
     startup.session.mode === "new" ? [] : startup.session.mode === "continue" ? ["--continue"] : ["--resume"];
   for (const name of [...optionValues.keys(), ...startupOption]) {
@@ -198,6 +207,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     ...(command === "skills"
       ? { skillScope: workspaceIndexes[0] === undefined ? ("personal" as const) : ("workspace" as const) }
       : {}),
+    workspaceTrusted: trustWorkspaceIndexes[0] !== undefined,
     home,
     session: startup.session,
     overrides: {
@@ -211,7 +221,7 @@ function parseArgs(argv: readonly string[]): CliInput {
 const CLI_HELP = `Noesis
 
 Usage:
-  noesis [tui] [--home PATH] [agent options]
+  noesis [tui] [--home PATH] [--trust-workspace] [agent options]
   noesis [tui] --continue [--home PATH] [agent options]
   noesis [tui] --resume [SESSION_ID] [--home PATH] [agent options]
   noesis onboard [--home PATH]
@@ -233,23 +243,35 @@ Session startup:
 Agent options:
   --provider ID  --model ID  --thinking-level LEVEL
 
+Workspace trust:
+  --trust-workspace  Allow this launch to load workspace-selected skills.
+
 The latest session is ordered by last activity, then full trail ID ascending on ties.
 A session still marked running is not recovered or resumed automatically.
 Unknown options, conflicting startup arguments, and trailing operands are rejected.`;
 
-async function createRuntime(config: ResolvedNoesisConfig): Promise<ApplicationRuntime> {
+async function createRuntime(
+  config: ResolvedNoesisConfig,
+  options: {
+    readonly recoverInterruptedOperations: boolean;
+    readonly workspaceTrusted: boolean;
+  },
+): Promise<ApplicationRuntime> {
   const services = createPiModelServices(config.home);
   const skills = createPiSkillLibrary({
     cwd: process.cwd(),
     agentDirectory: join(config.home, "agent"),
+    workspaceTrusted: options.workspaceTrusted,
   });
   return await createApplicationRuntimeComposition({
     config,
     skills,
+    recoverInterruptedOperations: options.recoverInterruptedOperations,
     createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
       createPiAgentRuntime(process.cwd(), services.models, {
         codeExecution,
         selfTools,
+        requirePinnedSkillSnapshot: true,
         ...(skillLibrary ? { skills: skillLibrary } : {}),
       }),
     createRoleRunner: (configurations) =>
@@ -436,6 +458,7 @@ async function runSkills(input: CliInput): Promise<void> {
   const library = createPiSkillLibrary({
     cwd: process.cwd(),
     agentDirectory: join(input.home, "agent"),
+    workspaceTrusted: input.skillScope === "workspace",
   });
   const action = input.subcommand ?? "list";
   if (action === "list") {
@@ -466,7 +489,7 @@ async function runSkills(input: CliInput): Promise<void> {
     return;
   }
   if (action === "update") {
-    await library.update(input.skillSource);
+    await library.update(input.skillSource, input.skillScope ?? "personal");
     console.log(input.skillSource ? `Updated ${input.skillSource}.` : "Updated configured skill packages.");
     return;
   }
@@ -519,7 +542,10 @@ async function main(): Promise<void> {
       "No Noesis config found. Run `noesis onboard` in an interactive terminal or `noesis config init` for non-interactive setup.",
     );
   const config = await resolveNoesisConfig({ home: input.home, cli: input.overrides });
-  const runtime = await createRuntime(config);
+  const runtime = await createRuntime(config, {
+    recoverInterruptedOperations: input.command === "tui",
+    workspaceTrusted: input.workspaceTrusted,
+  });
   try {
     if (input.command === "rebuild") {
       const documents = await runtime.debug.workspace.search.rebuildDocuments();
