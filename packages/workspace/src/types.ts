@@ -55,13 +55,14 @@ export interface MessageRecord {
 }
 
 export type UserIntentMode = "turn" | "steer";
-export type UserIntentStatus = "pending" | "dispatching" | "delivered" | "withdrawn";
+export type UserIntentStatus = "pending" | "dispatching" | "unresolved" | "delivered" | "withdrawn";
 
 export interface UserIntentRecord {
   readonly intentId: string;
   readonly sessionId: string;
-  readonly text: string;
-  readonly initialMode: UserIntentMode;
+  /** Cleared after delivery; the durable message becomes the sole authority for delivered text. */
+  readonly text?: string;
+  readonly contentDigest: string;
   readonly deliveryMode: UserIntentMode;
   readonly status: UserIntentStatus;
   readonly queueSequence: number;
@@ -71,6 +72,7 @@ export interface UserIntentRecord {
   readonly updatedAt: string;
   readonly promotedAt?: string;
   readonly deliveredAt?: string;
+  readonly unresolvedAt?: string;
   readonly withdrawnAt?: string;
   readonly attemptCount: number;
 }
@@ -480,21 +482,21 @@ export interface OperationalRepositories {
       readonly intentId: string;
       readonly sessionId: string;
       readonly text: string;
-      readonly mode: UserIntentMode;
       readonly queuedBehindTurnId?: string;
       readonly createdAt: string;
     }) => Promise<UserIntentRecord>;
     readonly listPending: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
+    readonly listUnresolved: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
     readonly claimOldestPending: (request: {
       readonly sessionId: string;
       readonly targetTurnId: string;
       readonly claimedAt: string;
     }) => Promise<UserIntentRecord | undefined>;
-    readonly claimSteer: (request: {
+    readonly promotePendingToSteer: (request: {
       readonly sessionId: string;
       readonly intentId: string;
       readonly targetTurnId: string;
-      readonly claimedAt: string;
+      readonly promotedAt: string;
     }) => Promise<UserIntentRecord | undefined>;
     readonly promoteNewestPendingToSteer: (request: {
       readonly sessionId: string;
@@ -505,13 +507,33 @@ export interface OperationalRepositories {
       readonly sessionId: string;
       readonly withdrawnAt: string;
     }) => Promise<UserIntentRecord | undefined>;
+    readonly withdraw: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly withdrawnAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
     readonly markDelivered: (request: {
       readonly sessionId: string;
       readonly intentId: string;
       readonly targetTurnId: string;
       readonly deliveredAt: string;
     }) => Promise<UserIntentRecord | undefined>;
-    readonly releaseFailedDispatch: (request: {
+    readonly recordSteerDelivery: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly targetTurnId: string;
+      readonly text: string;
+      readonly sensitivity: Sensitivity;
+      readonly deliveredAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly markUnresolved: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly targetTurnId: string;
+      readonly unresolvedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    /** Release only when the caller has positive evidence that no delivery occurred. */
+    readonly releaseUnconsumedDispatch: (request: {
       readonly sessionId: string;
       readonly intentId: string;
       readonly releasedAt: string;

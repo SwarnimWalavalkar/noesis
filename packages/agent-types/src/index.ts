@@ -290,13 +290,24 @@ export type AgentRuntimeResult =
       readonly error: string;
     });
 
+/**
+ * Durable steering may only be acknowledged after Pi injects the queued user message into the
+ * active loop. Queue acceptance alone is not delivery.
+ */
+export type AgentSteerResult =
+  | { readonly status: "consumed" }
+  | {
+      readonly status: "not-consumed";
+      readonly reason: "not-running" | "turn-ended" | "aborted";
+    };
+
 export interface NoesisAgentRuntime {
   readonly name: string;
   readonly run: (
     request: AgentRuntimeRequest,
     emit: (event: AgentRuntimeEvent) => void,
   ) => Promise<AgentRuntimeResult>;
-  readonly steer: (trailId: string, text: string) => Promise<void>;
+  readonly steer: (trailId: string, text: string) => Promise<AgentSteerResult>;
   readonly abort: (trailId: string) => Promise<void>;
 }
 

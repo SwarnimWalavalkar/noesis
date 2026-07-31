@@ -191,7 +191,7 @@ describe("apps/noesis production control-plane composition", () => {
           provider: request.provider,
           model: request.model,
         }),
-      steer: noOp,
+      steer: async () => Object.freeze({ status: "consumed" as const }),
       abort: noOp,
     });
     const first = await createApplicationRuntimeComposition({
@@ -201,7 +201,7 @@ describe("apps/noesis production control-plane composition", () => {
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
     const trail = await first.startTrail({ title: "Aborted partial replay" });
-    const aborted = await first.runTurn(trail.trailId, "input attached to an aborted answer");
+    const aborted = await first.debug.runTurn(trail.trailId, "input attached to an aborted answer");
     expect(aborted).toMatchObject({
       outcome: "aborted",
       output: "partial answer that must not resume",
@@ -231,7 +231,7 @@ describe("apps/noesis production control-plane composition", () => {
           model: request.model,
         });
       },
-      steer: noOp,
+      steer: async () => Object.freeze({ status: "consumed" as const }),
       abort: noOp,
     });
     const reopened = await createApplicationRuntimeComposition({
@@ -242,7 +242,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
     expect(reopened.getTrail(trail.trailId).turns).toEqual([]);
     await reopened.resumeTrail(trail.trailId);
-    await reopened.runTurn(trail.trailId, "continue with clean context");
+    await reopened.debug.runTurn(trail.trailId, "continue with clean context");
     expect(requests[0]?.systemPrompt).not.toContain("partial answer that must not resume");
     expect(requests[0]?.systemPrompt).not.toContain("input attached to an aborted answer");
     expect(await reopened.debug.workspace.operational.messages.listForSession(trail.trailId)).toHaveLength(4);
@@ -482,7 +482,7 @@ describe("apps/noesis production control-plane composition", () => {
           model: request.model,
         });
       },
-      steer: noOp,
+      steer: async () => Object.freeze({ status: "consumed" as const }),
       abort: noOp,
     });
     const first = await createApplicationRuntimeComposition({
@@ -492,7 +492,7 @@ describe("apps/noesis production control-plane composition", () => {
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
     const trail = await first.startTrail({ title: "Durable actions" });
-    await first.runTurn(trail.trailId, "Use your full self tool surface");
+    await first.debug.runTurn(trail.trailId, "Use your full self tool surface");
     const beforeRestart = await first.getTranscript(trail.trailId);
     expect(beforeRestart.flatMap((entry) => (entry.kind === "action" ? [entry.name] : []))).toEqual([
       "inspect_self",
@@ -539,7 +539,8 @@ describe("apps/noesis production control-plane composition", () => {
     const steered: string[] = [];
     const interactionAgent: NoesisAgentRuntime = Object.freeze({
       name: runtimeIdentity,
-      run: async (request: AgentRuntimeRequest) => {
+      run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+        emit({ type: "status", status: "started" });
         markStarted?.();
         const outcome = await turnFinished;
         return outcome === "aborted"
@@ -560,6 +561,7 @@ describe("apps/noesis production control-plane composition", () => {
       },
       steer: async (_trailId: string, text: string) => {
         steered.push(text);
+        return Object.freeze({ status: "consumed" as const });
       },
       abort: async () => {
         finishTurn?.("aborted");
@@ -639,7 +641,7 @@ describe("apps/noesis production control-plane composition", () => {
             provider: request.provider,
             model: request.model,
           }),
-        steer: noOp,
+        steer: async () => Object.freeze({ status: "consumed" as const }),
         abort: noOp,
       }),
       createRoleRunner: (configurations) =>
@@ -667,6 +669,86 @@ describe("apps/noesis production control-plane composition", () => {
         },
       ],
     });
+    await runtime.shutdown();
+  });
+
+  test("builds future model context from completed turns and delivered steers in durable order", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-authoritative-model-history-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    let releaseActive: (() => void) | undefined;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    let markActiveStarted: (() => void) | undefined;
+    const activeStarted = new Promise<void>((resolve) => {
+      markActiveStarted = resolve;
+    });
+    const requests: AgentRuntimeRequest[] = [];
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      agent: Object.freeze({
+        name: runtimeIdentity,
+        run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+          requests.push(request);
+          emit({ type: "status", status: "started" });
+          if (request.prompt === "aborted input")
+            return Object.freeze({
+              outcome: "aborted" as const,
+              stopReason: "aborted" as const,
+              text: "aborted partial output",
+              provider: request.provider,
+              model: request.model,
+            });
+          if (request.prompt === "active input") {
+            markActiveStarted?.();
+            await activeGate;
+          }
+          return Object.freeze({
+            outcome: "completed" as const,
+            stopReason: "stop" as const,
+            text: `reply:${request.prompt}`,
+            provider: request.provider,
+            model: request.model,
+          });
+        },
+        steer: async () => Object.freeze({ status: "consumed" as const }),
+        abort: async () => undefined,
+      }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Authoritative model history" });
+    await runtime.debug.runTurn(trail.trailId, "accepted input");
+    await runtime.debug.runTurn(trail.trailId, "aborted input");
+    await runtime.interact(trail.trailId, { type: "submit", text: "active input" });
+    await activeStarted;
+    await runtime.interact(trail.trailId, { type: "steer", text: "delivered steering" });
+    releaseActive?.();
+    await waitUntil(() => runtime.getTrail(trail.trailId).turns.length === 2);
+    await runtime.debug.runTurn(trail.trailId, "inspect history");
+
+    const systemPrompt = requests.at(-1)?.systemPrompt ?? "";
+    const acceptedUser = systemPrompt.indexOf("User: accepted input");
+    const acceptedAssistant = systemPrompt.indexOf("Assistant: reply:accepted input");
+    const activeUser = systemPrompt.indexOf("User: active input");
+    const steer = systemPrompt.indexOf("User: delivered steering");
+    const activeAssistant = systemPrompt.indexOf("Assistant: reply:active input");
+    expect(
+      [acceptedUser, acceptedAssistant, activeUser, steer, activeAssistant].every((index) => index >= 0),
+    ).toBe(true);
+    expect(acceptedUser).toBeLessThan(acceptedAssistant);
+    expect(acceptedAssistant).toBeLessThan(activeUser);
+    expect(activeUser).toBeLessThan(steer);
+    expect(steer).toBeLessThan(activeAssistant);
+    expect(systemPrompt).not.toContain("aborted input");
+    expect(systemPrompt).not.toContain("aborted partial output");
     await runtime.shutdown();
   });
 
@@ -712,7 +794,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
 
     const trail = await runtime.startTrail({ title: "Composition acceptance" });
-    const result = await runtime.runTurn(trail.trailId, "Record this ordinary turn");
+    const result = await runtime.debug.runTurn(trail.trailId, "Record this ordinary turn");
     expect(result.outcome).toBe("completed");
     expect(config.schemaVersion).toBe(1);
     expect(await runtime.debug.workspace.operational.sessions.get(trail.trailId)).toMatchObject({
@@ -802,7 +884,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
 
     const trail = await runtime.startTrail({ title: "First correction" });
-    const result = await runtime.runTurn(trail.trailId, "Actually, keep this research brief concise.");
+    const result = await runtime.debug.runTurn(trail.trailId, "Actually, keep this research brief concise.");
     expect(result.frozenTurnPlan?.selectedCapabilities).toMatchObject([
       {
         capabilityId: "general-collaboration",
@@ -857,7 +939,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
 
     const trail = await runtime.startTrail({ title: "Bounded ambient shutdown" });
-    await runtime.runTurn(trail.trailId, "Actually, keep this research brief concise.");
+    await runtime.debug.runTurn(trail.trailId, "Actually, keep this research brief concise.");
     await reflectionStarted;
 
     let timeout: NodeJS.Timeout | undefined;
@@ -942,7 +1024,7 @@ describe("apps/noesis production control-plane composition", () => {
 
     try {
       const trail = await runtime.startTrail({ title: "Cooperative ambient shutdown" });
-      await runtime.runTurn(trail.trailId, "Actually, keep this research brief concise.");
+      await runtime.debug.runTurn(trail.trailId, "Actually, keep this research brief concise.");
       await reflectionStarted;
 
       await runtime.shutdown();

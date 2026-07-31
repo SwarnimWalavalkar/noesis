@@ -1,10 +1,15 @@
 CREATE TABLE user_intents (
   intent_id TEXT PRIMARY KEY CHECK (length(intent_id) > 0),
   session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE RESTRICT,
-  text TEXT NOT NULL CHECK (length(trim(text)) > 0),
-  initial_mode TEXT NOT NULL CHECK (initial_mode IN ('turn', 'steer')),
+  text TEXT,
+  content_digest TEXT NOT NULL CHECK (
+    length(content_digest) = 64
+    AND content_digest NOT GLOB '*[^0-9a-f]*'
+  ),
   delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('turn', 'steer')),
-  status TEXT NOT NULL CHECK (status IN ('pending', 'dispatching', 'delivered', 'withdrawn')),
+  status TEXT NOT NULL CHECK (
+    status IN ('pending', 'dispatching', 'unresolved', 'delivered', 'withdrawn')
+  ),
   queue_sequence INTEGER NOT NULL CHECK (queue_sequence > 0),
   queued_behind_turn_id TEXT,
   target_turn_id TEXT,
@@ -12,28 +17,37 @@ CREATE TABLE user_intents (
   updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
   promoted_at TEXT,
   delivered_at TEXT,
+  unresolved_at TEXT,
   withdrawn_at TEXT,
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
   CHECK (
-    (status = 'pending' AND target_turn_id IS NULL AND delivered_at IS NULL AND withdrawn_at IS NULL) OR
-    (
-      status = 'dispatching'
-      AND target_turn_id IS NOT NULL
-      AND delivered_at IS NULL
-      AND withdrawn_at IS NULL
-    ) OR
-    (
-      status = 'delivered'
-      AND target_turn_id IS NOT NULL
-      AND delivered_at IS NOT NULL
-      AND withdrawn_at IS NULL
-    ) OR
-    (
-      status = 'withdrawn'
+    (status = 'pending'
+      AND text IS NOT NULL AND length(trim(text)) > 0
+      AND delivery_mode = 'turn'
       AND target_turn_id IS NULL
-      AND delivered_at IS NULL
-      AND withdrawn_at IS NOT NULL
-    )
+      AND delivered_at IS NULL AND unresolved_at IS NULL AND withdrawn_at IS NULL) OR
+    (status = 'dispatching'
+      AND text IS NOT NULL AND length(trim(text)) > 0
+      AND target_turn_id IS NOT NULL
+      AND delivered_at IS NULL AND unresolved_at IS NULL AND withdrawn_at IS NULL) OR
+    (status = 'unresolved'
+      AND text IS NOT NULL AND length(trim(text)) > 0
+      AND delivery_mode = 'steer'
+      AND target_turn_id IS NOT NULL
+      AND delivered_at IS NULL AND unresolved_at IS NOT NULL AND withdrawn_at IS NULL) OR
+    (status = 'delivered'
+      AND text IS NULL
+      AND target_turn_id IS NOT NULL
+      AND delivered_at IS NOT NULL AND unresolved_at IS NULL AND withdrawn_at IS NULL) OR
+    (status = 'withdrawn'
+      AND text IS NOT NULL AND length(trim(text)) > 0
+      AND delivery_mode = 'turn'
+      AND target_turn_id IS NULL
+      AND delivered_at IS NULL AND unresolved_at IS NULL AND withdrawn_at IS NOT NULL)
+  ),
+  CHECK (
+    (delivery_mode = 'turn' AND promoted_at IS NULL) OR
+    (delivery_mode = 'steer' AND promoted_at IS NOT NULL)
   ),
   UNIQUE(session_id, queue_sequence)
 ) STRICT;
@@ -48,19 +62,30 @@ CREATE TRIGGER user_intent_identity_immutable
 BEFORE UPDATE OF
   intent_id,
   session_id,
-  text,
-  initial_mode,
+  content_digest,
   queue_sequence,
   queued_behind_turn_id,
   created_at
 ON user_intents
 WHEN OLD.intent_id IS NOT NEW.intent_id
   OR OLD.session_id IS NOT NEW.session_id
-  OR OLD.text IS NOT NEW.text
-  OR OLD.initial_mode IS NOT NEW.initial_mode
+  OR OLD.content_digest IS NOT NEW.content_digest
   OR OLD.queue_sequence IS NOT NEW.queue_sequence
   OR OLD.queued_behind_turn_id IS NOT NEW.queued_behind_turn_id
   OR OLD.created_at IS NOT NEW.created_at
 BEGIN
   SELECT RAISE(ABORT, 'User intent identity and provenance are immutable');
+END;
+
+CREATE TRIGGER user_intent_text_delivery_only
+BEFORE UPDATE OF text ON user_intents
+WHEN NOT (
+  OLD.text IS NEW.text OR
+  (OLD.text IS NOT NULL
+    AND NEW.text IS NULL
+    AND OLD.status IN ('dispatching', 'unresolved')
+    AND NEW.status = 'delivered')
+)
+BEGIN
+  SELECT RAISE(ABORT, 'User intent text may only be cleared by delivery');
 END;

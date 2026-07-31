@@ -6,6 +6,7 @@ import type {
   AgentRuntimeEvent,
   AgentRuntimeRequest,
   AgentRuntimeResult,
+  AgentSteerResult,
   FrozenTurnPlan,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
@@ -27,6 +28,7 @@ export type {
   AgentRuntimeEvent,
   AgentRuntimeRequest,
   AgentRuntimeResult,
+  AgentSteerResult,
   AgentThinkingLevel,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
@@ -52,6 +54,17 @@ export * from "./self-tools.ts";
 export * from "./skill-library.ts";
 
 function assistantText(message: { readonly content: readonly unknown[] }): string {
+  return message.content
+    .flatMap((part) => {
+      if (!part || typeof part !== "object" || !("type" in part) || part.type !== "text" || !("text" in part))
+        return [];
+      return typeof part.text === "string" ? [part.text] : [];
+    })
+    .join("");
+}
+
+function userMessageText(message: { readonly content: string | readonly unknown[] }): string {
+  if (typeof message.content === "string") return message.content;
   return message.content
     .flatMap((part) => {
       if (!part || typeof part !== "object" || !("type" in part) || part.type !== "text" || !("text" in part))
@@ -153,6 +166,8 @@ export function createPiAgentRuntime(
 ): PiAgentRuntime {
   interface ActivePiExecution {
     readonly controller: AbortController;
+    readonly pendingSteers: PendingPiSteer[];
+    acceptsSteering: boolean;
     harness?: AgentHarness;
     sessionId?: string;
     preparedCode?: PreparedPiCodeExecution;
@@ -160,6 +175,21 @@ export function createPiAgentRuntime(
     abortError?: unknown;
     abortStatusEmitted?: boolean;
   }
+
+  interface PendingPiSteer {
+    readonly text: string;
+    readonly promise: Promise<AgentSteerResult>;
+    readonly resolve: (result: AgentSteerResult) => void;
+  }
+
+  const notConsumed = (
+    reason: Extract<AgentSteerResult, { readonly status: "not-consumed" }>["reason"],
+  ): AgentSteerResult => Object.freeze({ status: "not-consumed", reason });
+
+  const settlePendingSteers = (execution: ActivePiExecution, result: AgentSteerResult): void => {
+    const pending = execution.pendingSteers.splice(0);
+    for (const receipt of pending) receipt.resolve(result);
+  };
 
   const active = new Map<string, ActivePiExecution>();
 
@@ -169,7 +199,11 @@ export function createPiAgentRuntime(
   ): Promise<AgentRuntimeResult> => {
     const plan = verifyFrozenRequest(request);
     if (active.has(request.trailId)) throw new Error(`Trail ${request.trailId} is already active`);
-    const execution: ActivePiExecution = { controller: new AbortController() };
+    const execution: ActivePiExecution = {
+      controller: new AbortController(),
+      pendingSteers: [],
+      acceptsSteering: false,
+    };
     active.set(request.trailId, execution);
     const abortedBeforePrompt = (): AgentRuntimeResult => {
       if (!execution.abortStatusEmitted) {
@@ -313,9 +347,21 @@ export function createPiAgentRuntime(
       execution.controller.signal.addEventListener("abort", abortHarness, { once: true });
       if (execution.controller.signal.aborted) await requestHarnessAbort();
       const assistantDeltas = createAssistantDeltaAggregator();
+      let initialUserMessageObserved = false;
       const unsubscribe = harness.subscribe((event) => {
         if (event.type === "message_start" && event.message.role === "assistant") {
           assistantDeltas.beginMessage();
+        } else if (event.type === "message_end" && event.message.role === "user") {
+          if (!initialUserMessageObserved) {
+            initialUserMessageObserved = true;
+            return;
+          }
+          const text = userMessageText(event.message);
+          const pendingIndex = execution.pendingSteers.findIndex((receipt) => receipt.text === text);
+          if (pendingIndex >= 0) {
+            const [receipt] = execution.pendingSteers.splice(pendingIndex, 1);
+            receipt?.resolve(Object.freeze({ status: "consumed" }));
+          }
         } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
           const delta = assistantDeltas.push(event.assistantMessageEvent.delta);
           if (delta) emit({ type: "delta", text: delta });
@@ -343,6 +389,7 @@ export function createPiAgentRuntime(
           });
         }
       });
+      execution.acceptsSteering = true;
       emit({ type: "status", status: "started" });
       try {
         const message = await harness.prompt(request.prompt);
@@ -377,9 +424,14 @@ export function createPiAgentRuntime(
         emit({ type: "status", status: "completed" });
         return { ...base, outcome: "completed", stopReason: message.stopReason };
       } finally {
+        execution.acceptsSteering = false;
         execution.controller.signal.removeEventListener("abort", abortHarness);
         unsubscribe();
         await abortPromise;
+        settlePendingSteers(
+          execution,
+          notConsumed(execution.controller.signal.aborted ? "aborted" : "turn-ended"),
+        );
       }
     } catch (error) {
       if (execution.controller.signal.aborted && !execution.harness) return abortedBeforePrompt();
@@ -396,20 +448,42 @@ export function createPiAgentRuntime(
           }
         }
       } finally {
+        execution.acceptsSteering = false;
+        settlePendingSteers(
+          execution,
+          notConsumed(execution.controller.signal.aborted ? "aborted" : "turn-ended"),
+        );
         if (active.get(request.trailId) === execution) active.delete(request.trailId);
       }
     }
   };
 
-  const steer = async (trailId: string, text: string): Promise<void> => {
-    const harness = active.get(trailId)?.harness;
-    if (!harness) throw new Error("Trail is not running");
-    await harness.steer(text);
+  const steer = async (trailId: string, text: string): Promise<AgentSteerResult> => {
+    const execution = active.get(trailId);
+    const harness = execution?.harness;
+    if (!execution || !harness) return notConsumed("not-running");
+    if (!execution.acceptsSteering)
+      return notConsumed(execution.controller.signal.aborted ? "aborted" : "turn-ended");
+    const deferred = Promise.withResolvers<AgentSteerResult>();
+    const receipt: PendingPiSteer = Object.freeze({
+      text,
+      promise: deferred.promise,
+      resolve: deferred.resolve,
+    });
+    execution.pendingSteers.push(receipt);
+    try {
+      await harness.steer(text);
+    } catch {
+      // Pi can fail after queue insertion while notifying queue observers. Keep the receipt pending:
+      // only a user message_end or terminal turn settlement can prove the outcome.
+    }
+    return receipt.promise;
   };
 
   const abort = async (trailId: string): Promise<void> => {
     const execution = active.get(trailId);
     if (!execution) return;
+    execution.acceptsSteering = false;
     execution.controller.abort();
     await execution.requestHarnessAbort?.();
     if (execution.abortError) throw execution.abortError;

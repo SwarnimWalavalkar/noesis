@@ -139,7 +139,6 @@ export interface NoesisRuntime {
   readonly getTranscript: (trailId: string) => Promise<readonly RuntimeTranscriptEntry[]>;
   readonly resumeTrail: (trailId: string) => Promise<TrailState>;
   readonly forkTrail: (trailId: string, title?: string) => Promise<TrailState>;
-  readonly runTurn: (trailId: string, input: string, options?: RunTurnOptions) => Promise<TurnResult>;
   readonly interact: (
     trailId: string,
     command: InteractionCommand,

@@ -240,9 +240,9 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     const { output, result } = await runPtyExit("picker-select-quit", async (home) => {
       const runtime = await createTestRuntime(home);
       const older = await runtime.startTrail({ title: "older" });
-      await runtime.runTurn(older.trailId, "older real PTY history");
+      await runtime.debug.runTurn(older.trailId, "older real PTY history");
       const selected = await runtime.startTrail({ title: "newer" });
-      await runtime.runTurn(selected.trailId, "selected real PTY history");
+      await runtime.debug.runTurn(selected.trailId, "selected real PTY history");
       selectedTrailId = selected.trailId;
       await runtime.shutdown();
       return ["--resume"];
@@ -262,11 +262,11 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     const { output, result } = await runPtyExit(action, async (home) => {
       const runtime = await createTestRuntime(home);
       const older = await runtime.startTrail({ title: "older continue" });
-      await runtime.runTurn(older.trailId, "older continue PTY history");
+      await runtime.debug.runTurn(older.trailId, "older continue PTY history");
       const selected = await runtime.startTrail({
         title: "latest continue",
       });
-      await runtime.runTurn(selected.trailId, "latest continue PTY history");
+      await runtime.debug.runTurn(selected.trailId, "latest continue PTY history");
       selectedTrailId = selected.trailId;
       await runtime.shutdown();
       return ["--continue"];
@@ -283,7 +283,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     const direct = await runPtyExit("quit-lf", async (home) => {
       const runtime = await createTestRuntime(home);
       const selected = await runtime.startTrail({ title: "direct" });
-      await runtime.runTurn(selected.trailId, "direct real PTY history");
+      await runtime.debug.runTurn(selected.trailId, "direct real PTY history");
       selectedTrailId = selected.trailId;
       await runtime.shutdown();
       return ["--resume", selected.trailId];
@@ -405,7 +405,6 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
   }, 7_000);
 
   test("captures a resumed narrow 70x22 shell without crowding it with ASCII art", async () => {
-    let selectedTrailId = "";
     const { output, result } = await runPtyExit(
       "quit-lf",
       async (home) => {
@@ -413,8 +412,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
         const selected = await runtime.startTrail({
           title: "narrow resumed",
         });
-        await runtime.runTurn(selected.trailId, "narrow history");
-        selectedTrailId = selected.trailId;
+        await runtime.debug.runTurn(selected.trailId, "narrow history");
         await runtime.shutdown();
         return ["--resume", selected.trailId];
       },

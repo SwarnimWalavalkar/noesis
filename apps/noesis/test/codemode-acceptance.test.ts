@@ -68,7 +68,7 @@ describe("production codemode journey", () => {
     });
     const trail = await runtime.startTrail({ title: "Codemode acceptance" });
 
-    const result = await runtime.runTurn(trail.trailId, "Inspect the repository package.");
+    const result = await runtime.debug.runTurn(trail.trailId, "Inspect the repository package.");
 
     expect(result.output).toBe("Repository inspected through codemode.");
     expect(observedToolNames).toEqual(["adapt", "execute", "inspect_self", "remember"]);
@@ -155,7 +155,7 @@ describe("production codemode journey", () => {
     });
     const trail = await runtime.startTrail({ title: "Shell permission acceptance" });
 
-    const result = await runtime.runTurn(trail.trailId, "Inspect an external host directory.");
+    const result = await runtime.debug.runTurn(trail.trailId, "Inspect an external host directory.");
 
     expect(result.output).toBe("External directory inspected.");
     expect(
@@ -234,9 +234,9 @@ describe("production codemode journey", () => {
     });
     const trail = await runtime.startTrail({ title: "Script acceptance" });
 
-    const saved = await runtime.runTurn(trail.trailId, "Save a reusable doubling script.");
+    const saved = await runtime.debug.runTurn(trail.trailId, "Save a reusable doubling script.");
     const scripts = await runtime.listScripts?.();
-    const run = await runtime.runTurn(trail.trailId, "Run the double-value script for 21.");
+    const run = await runtime.debug.runTurn(trail.trailId, "Run the double-value script for 21.");
     const executionsBeforeEdit = await runtime.debug.workspace.operational.codeExecutions.listForSession(
       trail.trailId,
     );
@@ -254,7 +254,10 @@ describe("production codemode journey", () => {
       "utf8",
     );
     const editedScripts = await runtime.listScripts?.();
-    const rerun = await runtime.runTurn(trail.trailId, "Run the double-value script after the direct edit.");
+    const rerun = await runtime.debug.runTurn(
+      trail.trailId,
+      "Run the double-value script after the direct edit.",
+    );
     const executionsAfterEdit = await runtime.debug.workspace.operational.codeExecutions.listForSession(
       trail.trailId,
     );
@@ -375,20 +378,23 @@ describe("production codemode journey", () => {
     });
     const trail = await runtime.startTrail({ title: "Workflow acceptance" });
 
-    const saved = await runtime.runTurn(trail.trailId, "Save a two-phase arithmetic workflow.");
+    const saved = await runtime.debug.runTurn(trail.trailId, "Save a two-phase arithmetic workflow.");
     const workflows = await runtime.listWorkflows?.();
-    const paused = await runtime.runTurn(trail.trailId, "Run increment-and-double for 20.");
+    const paused = await runtime.debug.runTurn(trail.trailId, "Run increment-and-double for 20.");
     const pausedRuns = await runtime.debug.workspace.operational.workflows.listRunsForSession(trail.trailId);
     const pausedPhases = pausedRuns[0]
       ? await runtime.debug.workspace.operational.workflows.listPhases(pausedRuns[0].runId)
       : [];
     const firstPhaseExecutionId = pausedPhases[0]?.executionId;
     const failedPhaseLogicalExecutionId = pausedPhases[1]?.logicalExecutionId;
-    const retried = await runtime.runTurn(trail.trailId, "Retry the workflow without changing its input.");
+    const retried = await runtime.debug.runTurn(
+      trail.trailId,
+      "Retry the workflow without changing its input.",
+    );
     const phasesAfterRetry = pausedRuns[0]
       ? await runtime.debug.workspace.operational.workflows.listPhases(pausedRuns[0].runId)
       : [];
-    const resumed = await runtime.runTurn(
+    const resumed = await runtime.debug.runTurn(
       trail.trailId,
       "Resume the workflow with an approved corrected value.",
     );

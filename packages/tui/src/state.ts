@@ -110,6 +110,7 @@ export interface TuiQueuedInput {
   readonly queueId: string;
   readonly text: string;
   readonly createdAt: string;
+  readonly status?: "pending" | "unresolved";
 }
 
 export interface TuiInteractionView {
@@ -132,6 +133,7 @@ export function interactionViewFromSnapshot(snapshot: TuiInteractionSnapshot): T
       queueId: input.intentId,
       text: input.text,
       createdAt: input.createdAt,
+      status: input.status,
     })),
   };
 }
@@ -178,6 +180,7 @@ export type NoesisTuiAction =
       readonly transcript: readonly RuntimeTranscriptEntry[];
     }
   | { readonly type: "prompt-submitted"; readonly text: string }
+  | { readonly type: "steer-delivered"; readonly text: string }
   | { readonly type: "stream-delta"; readonly text: string }
   | { readonly type: "stream-reconciled"; readonly text: string }
   | {
@@ -350,6 +353,11 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         timeline: [...state.timeline, { kind: "message", role: "user", text: action.text }],
       };
     }
+    case "steer-delivered":
+      return {
+        ...state,
+        timeline: [...state.timeline, { kind: "message", role: "user", text: action.text }],
+      };
     case "stream-delta": {
       const timeline = [...state.timeline];
       const last = timeline.at(-1);

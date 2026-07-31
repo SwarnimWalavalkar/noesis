@@ -1,4 +1,4 @@
-import type { NoesisTuiRuntime } from "./runtime-port.ts";
+import type { NoesisTuiRuntime, TuiInteractionResult } from "./runtime-port.ts";
 import type { NoesisTuiAction } from "./state.ts";
 
 export interface SlashCommandContext {
@@ -25,6 +25,13 @@ export const HELP_LINES = [
 export function isExclusiveSlashCommand(text: string): boolean {
   const command = text.trim();
   return command === "/compact" || command === "/fork" || command.startsWith("/model ");
+}
+
+export function steerFeedback(result: TuiInteractionResult, explicit: boolean): string | undefined {
+  if (result.effect === "unresolved")
+    return "Steer delivery could not be confirmed. It is held for inspection and will not retry automatically.";
+  if (result.effect !== "idle") return undefined;
+  return explicit ? "No active turn is available to steer." : "No queued message is available to promote.";
 }
 
 /**

@@ -1,6 +1,6 @@
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
 import { describe, expect, test } from "vitest";
-import { isExclusiveSlashCommand, runSlashCommand } from "../src/index.ts";
+import { isExclusiveSlashCommand, runSlashCommand, steerFeedback } from "../src/index.ts";
 import { createInMemoryTestRuntime } from "./support/in-memory-runtime.ts";
 
 const agent: NoesisAgentRuntime = {
@@ -14,11 +14,21 @@ const agent: NoesisAgentRuntime = {
       stopReason: "stop",
     };
   },
-  async steer() {},
+  async steer() {
+    return { status: "consumed" as const };
+  },
   async abort() {},
 };
 
 describe("Noesis slash commands", () => {
+  test("explains idle and unresolved steering without masking successful delivery", () => {
+    const snapshot = { sessionId: "session", phase: "idle" as const, queuePaused: true, pending: [] };
+    expect(steerFeedback({ effect: "idle", snapshot }, true)).toContain("No active turn");
+    expect(steerFeedback({ effect: "idle", snapshot }, false)).toContain("No queued message");
+    expect(steerFeedback({ effect: "unresolved", snapshot }, true)).toContain("will not retry");
+    expect(steerFeedback({ effect: "steered", snapshot }, true)).toBeUndefined();
+  });
+
   test("classifies normalized state-mutating commands as exclusive", () => {
     expect(isExclusiveSlashCommand("  /compact \n")).toBe(true);
     expect(isExclusiveSlashCommand("/fork")).toBe(true);

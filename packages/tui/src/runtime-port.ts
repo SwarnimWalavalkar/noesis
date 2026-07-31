@@ -106,7 +106,6 @@ export type NoesisTuiRuntime = Pick<
   | "inspectInteraction"
   | "resumeTrail"
   | "forkTrail"
-  | "runTurn"
   | "compact"
 > & {
   readonly home?: string;

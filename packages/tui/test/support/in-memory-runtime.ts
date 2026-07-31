@@ -9,13 +9,16 @@ import {
   type InteractionSnapshot,
   SESSION_PICKER_LIMIT,
   type NoesisRuntime,
+  type RunTurnOptions,
   type RuntimeTranscriptAction,
   type RuntimeTranscriptEntry,
   type TrailState,
   type TrailSummary,
+  type TurnResult,
 } from "@noesis/runtime";
 
 export interface TestNoesisRuntime extends NoesisRuntime {
+  readonly runTurn: (trailId: string, input: string, options?: RunTurnOptions) => Promise<TurnResult>;
   readonly resumedTrailIds: readonly string[];
   readonly failedTurnCount: number;
 }
@@ -151,7 +154,11 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     const stored = getStored(forked.trailId);
     return replaceState(stored, Object.freeze({ ...forked, parentTrailId: parent.trailId }));
   };
-  const runTurn: NoesisRuntime["runTurn"] = async (trailId, input, options = {}) => {
+  const runTurn = async (
+    trailId: string,
+    input: string,
+    options: RunTurnOptions = {},
+  ): Promise<TurnResult> => {
     const stored = getStored(trailId);
     if (stored.state.status === "running") throw new Error(`Session ${trailId} is already running`);
     replaceState(stored, Object.freeze({ ...stored.state, status: "running" }));
@@ -397,6 +404,7 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
           intentId,
           text: command.text,
           mode: "turn",
+          status: "pending",
           createdAt: timestamp(),
         }),
       );
@@ -408,11 +416,29 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
       const queued = command.text === undefined ? state.pending.pop() : undefined;
       const text = command.text ?? queued?.text;
       if (text) {
-        await agent.steer(trailId, text);
-        effect = "steered";
-        intentId = queued?.intentId;
+        const receipt = await agent.steer(trailId, text);
+        if (receipt.status === "consumed") {
+          effect = "steered";
+          intentId = queued?.intentId;
+          state.observer?.({
+            type: "steer-delivered",
+            sessionId: trailId,
+            intentId: queued?.intentId ?? `${trailId}:explicit-steer`,
+            turnId: state.active.turnId,
+            text,
+            deliveredAt: timestamp(),
+          });
+        } else if (command.text !== undefined) {
+          effect = "restored";
+          restoredText = command.text;
+        } else if (queued) {
+          state.pending.push(queued);
+          effect = "queued";
+        }
         emitInteractionState(trailId, state);
       }
+    } else if (command.type === "steer" && command.text !== undefined) {
+      restoredText = command.text;
     } else if (command.type === "restore-newest") {
       const restored = state.pending.pop();
       if (restored) {

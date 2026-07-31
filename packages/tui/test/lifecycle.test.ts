@@ -17,6 +17,8 @@ const containsC1 = (text: string): boolean =>
     return code >= 128 && code <= 159;
   });
 
+const consumeSteer: NoesisAgentRuntime["steer"] = async () => Object.freeze({ status: "consumed" as const });
+
 async function createRuntime(agent: NoesisAgentRuntime): Promise<TestNoesisRuntime> {
   return createInMemoryTestRuntime(agent);
 }
@@ -59,7 +61,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     let releaseInspector: (() => void) | undefined;
@@ -113,7 +115,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     let rejectInspector: ((error: Error) => void) | undefined;
@@ -161,7 +163,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     let releaseFork: (() => void) | undefined;
@@ -203,7 +205,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     let releaseModel: (() => void) | undefined;
@@ -248,7 +250,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     };
     const unsupported = await createRuntime(agent);
@@ -293,7 +295,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const runtime = Object.freeze({
@@ -335,7 +337,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -360,7 +362,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -400,7 +402,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const runtime = Object.freeze({
@@ -453,7 +455,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -479,7 +481,7 @@ describe("Noesis TUI lifecycle", () => {
     const turnGate = new Promise<void>((resolve) => {
       releaseTurn = resolve;
     });
-    const steer = vi.fn(async () => undefined);
+    const steer = vi.fn(async () => ({ status: "consumed" as const }));
     const runtime = await createRuntime({
       name: "steering-scripted",
       async run(request) {
@@ -534,7 +536,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {
         releaseTurn?.();
       },
@@ -578,7 +580,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {
         releaseTurn?.();
       },
@@ -614,7 +616,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -645,7 +647,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const historical = await runtime.startTrail({ title: "historical" });
@@ -689,7 +691,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const selected = await runtime.startTrail({ title: "selected" });
@@ -723,7 +725,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const selected = await base.startTrail({ title: "selected" });
@@ -840,7 +842,7 @@ describe("Noesis TUI lifecycle", () => {
           contextUsage,
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -892,7 +894,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -961,7 +963,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1017,7 +1019,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1067,7 +1069,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1127,7 +1129,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1162,7 +1164,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1200,7 +1202,7 @@ describe("Noesis TUI lifecycle", () => {
           error,
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1237,7 +1239,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const trail = await runtime.startTrail({ title: "unexpected failure" });
@@ -1286,7 +1288,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       abort,
     });
     const terminal = createTestTerminal();
@@ -1329,7 +1331,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const mainTerminal = createTestTerminal();
@@ -1369,7 +1371,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1400,7 +1402,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const selected = await runtime.startTrail({
@@ -1442,7 +1444,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const older = await runtime.startTrail({ title: "older" });
@@ -1481,7 +1483,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1504,7 +1506,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1527,7 +1529,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1551,7 +1553,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1592,7 +1594,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "aborted",
         };
       },
-      async steer() {},
+      steer: consumeSteer,
       abort,
     });
     const terminal = createTestTerminal();
@@ -1623,7 +1625,7 @@ describe("Noesis TUI lifecycle", () => {
         markStarted?.();
         return await new Promise<never>(() => undefined);
       },
-      async steer() {},
+      steer: consumeSteer,
       abort,
     });
     const terminal = createTestTerminal();

@@ -574,6 +574,134 @@ describe("agent runtime factories", () => {
     ).toBe(true);
   });
 
+  test("acknowledges steering only when Pi injects the user message into the active loop", async () => {
+    const responseStarted = Promise.withResolvers<void>();
+    const releaseResponse = Promise.withResolvers<void>();
+    let responses = 0;
+    const controlled = createControlledPiModels({
+      respond: async ({ lastUserText }) => {
+        responses += 1;
+        if (responses === 1) {
+          responseStarted.resolve();
+          await releaseResponse.promise;
+        }
+        return `response ${String(responses)} for ${lastUserText}`;
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+    const running = runtime.run(
+      {
+        trailId: "trail-steer-consumed",
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        thinkingLevel: "off",
+        systemPrompt: "Follow steering messages.",
+        prompt: "begin",
+        activeCapabilities: [],
+      },
+      () => undefined,
+    );
+    await responseStarted.promise;
+
+    const receipt = runtime.steer("trail-steer-consumed", "change direction");
+    const beforeConsumption = await Promise.race([
+      receipt.then(() => "settled" as const),
+      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
+    ]);
+    expect(beforeConsumption).toBe("pending");
+
+    releaseResponse.resolve();
+    await expect(receipt).resolves.toEqual({ status: "consumed" });
+    await expect(running).resolves.toMatchObject({ outcome: "completed" });
+    expect(responses).toBe(2);
+  });
+
+  test("settles queued steering as not consumed when the turn is aborted first", async () => {
+    const responseStarted = Promise.withResolvers<void>();
+    const releaseResponse = Promise.withResolvers<void>();
+    const controlled = createControlledPiModels({
+      respond: async () => {
+        responseStarted.resolve();
+        await releaseResponse.promise;
+        return "must not consume the queued steer";
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+    const running = runtime.run(
+      {
+        trailId: "trail-steer-aborted",
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        thinkingLevel: "off",
+        systemPrompt: "Follow steering messages.",
+        prompt: "begin",
+        activeCapabilities: [],
+      },
+      () => undefined,
+    );
+    await responseStarted.promise;
+
+    const receipt = runtime.steer("trail-steer-aborted", "never consumed");
+    const aborting = runtime.abort("trail-steer-aborted");
+    releaseResponse.resolve();
+
+    await expect(receipt).resolves.toEqual({ status: "not-consumed", reason: "aborted" });
+    await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+    await expect(aborting).resolves.toBeUndefined();
+  });
+
+  test("matches duplicate steering receipts in Pi queue order", async () => {
+    const firstResponseStarted = Promise.withResolvers<void>();
+    const releaseFirstResponse = Promise.withResolvers<void>();
+    const secondResponseStarted = Promise.withResolvers<void>();
+    const releaseSecondResponse = Promise.withResolvers<void>();
+    let responses = 0;
+    const controlled = createControlledPiModels({
+      respond: async () => {
+        responses += 1;
+        if (responses === 1) {
+          firstResponseStarted.resolve();
+          await releaseFirstResponse.promise;
+        } else if (responses === 2) {
+          secondResponseStarted.resolve();
+          await releaseSecondResponse.promise;
+        }
+        return `response ${String(responses)}`;
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+    const running = runtime.run(
+      {
+        trailId: "trail-duplicate-steers",
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        thinkingLevel: "off",
+        systemPrompt: "Follow steering messages.",
+        prompt: "same text",
+        activeCapabilities: [],
+      },
+      () => undefined,
+    );
+    await firstResponseStarted.promise;
+
+    const first = runtime.steer("trail-duplicate-steers", "same text");
+    const second = runtime.steer("trail-duplicate-steers", "same text");
+    releaseFirstResponse.resolve();
+
+    await secondResponseStarted.promise;
+    await expect(first).resolves.toEqual({ status: "consumed" });
+    const secondBeforeItsTurn = await Promise.race([
+      second.then(() => "settled" as const),
+      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
+    ]);
+    expect(secondBeforeItsTurn).toBe("pending");
+
+    releaseSecondResponse.resolve();
+    await expect(second).resolves.toEqual({ status: "consumed" });
+    await expect(running).resolves.toMatchObject({ outcome: "completed" });
+    expect(responses).toBe(3);
+  });
+
   test("rejects sabotaged immutable bytes and incomplete tool registration before prompting", async () => {
     const controlled = createControlledPiModels();
     const plan = frozenPlan();

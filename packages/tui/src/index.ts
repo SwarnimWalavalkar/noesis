@@ -9,7 +9,7 @@ import {
 import type { RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
 import { executionIdOf } from "./action-summary.ts";
 import { tuiActionForAgentEvent } from "./agent-event.ts";
-import { isExclusiveSlashCommand, runSlashCommand } from "./commands.ts";
+import { isExclusiveSlashCommand, runSlashCommand, steerFeedback } from "./commands.ts";
 import { editTextInExternalEditor } from "./external-editor.ts";
 import { boundedInspectorText, streamingFrameDelay } from "./lifecycle-utils.ts";
 import {
@@ -412,6 +412,12 @@ export async function startNoesisTui(
       tui.requestRender();
       return;
     }
+    if (interactionEvent.type === "steer-delivered") {
+      if (activeTurnToken) flushStreamDelta(activeTurnToken);
+      view.dispatch({ type: "steer-delivered", text: interactionEvent.text });
+      tui.requestRender();
+      return;
+    }
     if (interactionEvent.type === "turn-settled") {
       const token = activeTurnToken;
       if (token?.turnId === interactionEvent.turnId) {
@@ -599,13 +605,9 @@ export async function startNoesisTui(
           type: "steer",
           ...(steeringText ? { text: steeringText } : {}),
         });
-        if (result.effect === "idle")
-          view.dispatch({
-            type: "system-message",
-            text: steeringText
-              ? "No active turn is available to steer."
-              : "No queued message is available to promote.",
-          });
+        const feedback = steerFeedback(result, Boolean(steeringText));
+        if (feedback) view.dispatch({ type: "system-message", text: feedback });
+        if (result.restoredText) editor.setText(result.restoredText);
         tui.requestRender();
         return;
       }

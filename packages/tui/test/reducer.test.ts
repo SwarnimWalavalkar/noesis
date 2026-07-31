@@ -129,6 +129,21 @@ describe("Noesis TUI reducer", () => {
     expect(capabilities).toContain("capability> research@2");
   });
 
+  test("keeps a delivered steer inline between streamed assistant segments", () => {
+    let state = initialTuiState("fake");
+    state = reduceTui(state, { type: "prompt-submitted", text: "initial" });
+    state = reduceTui(state, { type: "stream-delta", text: "before steer" });
+    state = reduceTui(state, { type: "steer-delivered", text: "change direction" });
+    state = reduceTui(state, { type: "stream-delta", text: "after steer" });
+
+    expect(state.timeline).toEqual([
+      { kind: "message", role: "user", text: "initial" },
+      { kind: "message", role: "assistant", text: "before steer" },
+      { kind: "message", role: "user", text: "change direction" },
+      { kind: "message", role: "assistant", text: "after steer" },
+    ]);
+  });
+
   test("chooses deterministic responsive header modes and bounds inspection panes", () => {
     expect(createTuiLayout(120, 35)).toMatchObject({
       widthClass: "wide",

@@ -1715,20 +1715,48 @@ function createOperationalRepositories(
     )
       throw new Error(`Foreground turn ${turnId} is not running in session ${sessionId}`);
   };
-  const hasUserIntentMessage = (intent: UserIntentRecord): boolean =>
-    intent.targetTurnId !== undefined &&
-    db
+  const userIntentMessageState = (intent: UserIntentRecord): "missing" | "verified" => {
+    if (intent.targetTurnId === undefined) return "missing";
+    const messages = db
       .prepare(
-        `SELECT 1
+        `SELECT content
          FROM messages
          WHERE session_id = ?
            AND role = 'user'
            AND json_valid(metadata_json)
            AND json_extract(metadata_json, '$.turnId') = ?
-           AND json_extract(metadata_json, '$.sourceIntentId') = ?
-         LIMIT 1`,
+           AND json_extract(metadata_json, '$.sourceIntentId') = ?`,
       )
-      .get(intent.sessionId, intent.targetTurnId, intent.intentId) !== undefined;
+      .all(intent.sessionId, intent.targetTurnId, intent.intentId);
+    if (messages.length === 0) return "missing";
+    for (const message of messages) {
+      if (sha256(requiredString(message, "content")) !== intent.contentDigest)
+        throw new Error(`User intent ${intent.intentId} durable message content does not match its digest`);
+    }
+    return "verified";
+  };
+  const deliverUserIntent = (
+    intent: UserIntentRecord,
+    deliveredAt: string,
+    activityType: string,
+  ): UserIntentRecord | undefined => {
+    if (intent.targetTurnId === undefined) return undefined;
+    if (userIntentMessageState(intent) !== "verified")
+      throw new Error(`User intent ${intent.intentId} has no matching durable user message`);
+    const delivered = db
+      .prepare(
+        `UPDATE user_intents
+         SET status = 'delivered', text = NULL, delivered_at = ?, unresolved_at = NULL, updated_at = ?
+         WHERE intent_id = ? AND session_id = ? AND status IN ('dispatching', 'unresolved')
+           AND target_turn_id = ?`,
+      )
+      .run(deliveredAt, deliveredAt, intent.intentId, intent.sessionId, intent.targetTurnId);
+    if (Number(delivered.changes) !== 1) return undefined;
+    recordActivity(systemActor, activityType, "user_intent", intent.intentId, [
+      { targetTurnId: intent.targetTurnId },
+    ]);
+    return getUserIntent(intent.intentId, intent.sessionId);
+  };
   const enqueueUserIntent = async (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["enqueue"]>[0],
   ): Promise<UserIntentRecord> =>
@@ -1736,13 +1764,12 @@ function createOperationalRepositories(
       const intentId = z.string().min(1).parse(request.intentId);
       const sessionId = z.string().min(1).parse(request.sessionId);
       z.string().trim().min(1).parse(request.text);
-      const mode = z.enum(["turn", "steer"]).parse(request.mode);
       const createdAt = z.string().min(1).parse(request.createdAt);
+      const contentDigest = sha256(request.text);
       const existing = getUserIntent(intentId, sessionId);
       if (existing !== undefined) {
         if (
-          existing.text !== request.text ||
-          existing.initialMode !== mode ||
+          existing.contentDigest !== contentDigest ||
           existing.queuedBehindTurnId !== request.queuedBehindTurnId ||
           existing.createdAt !== createdAt
         )
@@ -1771,16 +1798,15 @@ function createOperationalRepositories(
       );
       db.prepare(
         `INSERT INTO user_intents(
-          intent_id, session_id, text, initial_mode, delivery_mode, status, queue_sequence,
+          intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
           queued_behind_turn_id, target_turn_id, created_at, updated_at,
-          promoted_at, delivered_at, withdrawn_at, attempt_count
-        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, NULL, ?, ?, NULL, NULL, NULL, 0)`,
+          promoted_at, delivered_at, unresolved_at, withdrawn_at, attempt_count
+        ) VALUES (?, ?, ?, ?, 'turn', 'pending', ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`,
       ).run(
         intentId,
         sessionId,
         request.text,
-        mode,
-        mode,
+        contentDigest,
         queueSequence,
         request.queuedBehindTurnId ?? null,
         createdAt,
@@ -1789,7 +1815,7 @@ function createOperationalRepositories(
       recordActivity(systemActor, "user_intent.enqueued", "user_intent", intentId, [
         {
           sessionId,
-          mode,
+          mode: "turn",
           ...(request.queuedBehindTurnId ? { queuedBehindTurnId: request.queuedBehindTurnId } : {}),
         },
       ]);
@@ -1835,26 +1861,30 @@ function createOperationalRepositories(
       ]);
       return getUserIntent(intentId, request.sessionId);
     });
-  const claimSteerUserIntent = async (
-    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["claimSteer"]>[0],
-  ): Promise<UserIntentRecord | undefined> =>
-    database.transaction(() => {
-      assertRunningTargetTurn(request.targetTurnId, request.sessionId);
-      const claimed = db
-        .prepare(
-          `UPDATE user_intents
-           SET status = 'dispatching', target_turn_id = ?, updated_at = ?,
+  const promotePendingUserIntentInTransaction = (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["promotePendingToSteer"]>[0],
+  ): UserIntentRecord | undefined => {
+    assertRunningTargetTurn(request.targetTurnId, request.sessionId);
+    const promoted = db
+      .prepare(
+        `UPDATE user_intents
+           SET status = 'dispatching', delivery_mode = 'steer', target_turn_id = ?,
+               promoted_at = ?, updated_at = ?,
                attempt_count = attempt_count + 1
            WHERE intent_id = ? AND session_id = ?
-             AND status = 'pending' AND delivery_mode = 'steer'`,
-        )
-        .run(request.targetTurnId, request.claimedAt, request.intentId, request.sessionId);
-      if (Number(claimed.changes) !== 1) return undefined;
-      recordActivity(systemActor, "user_intent.claimed_steer", "user_intent", request.intentId, [
-        { targetTurnId: request.targetTurnId },
-      ]);
-      return getUserIntent(request.intentId, request.sessionId);
-    });
+             AND status = 'pending' AND delivery_mode = 'turn'`,
+      )
+      .run(request.targetTurnId, request.promotedAt, request.promotedAt, request.intentId, request.sessionId);
+    if (Number(promoted.changes) !== 1) return undefined;
+    recordActivity(systemActor, "user_intent.promoted_to_steer", "user_intent", request.intentId, [
+      { targetTurnId: request.targetTurnId },
+    ]);
+    return getUserIntent(request.intentId, request.sessionId);
+  };
+  const promotePendingUserIntent = async (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["promotePendingToSteer"]>[0],
+  ): Promise<UserIntentRecord | undefined> =>
+    database.transaction(() => promotePendingUserIntentInTransaction(request));
   const promoteNewestPendingUserIntent = async (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["promoteNewestPendingToSteer"]>[0],
   ): Promise<UserIntentRecord | undefined> =>
@@ -1871,21 +1901,27 @@ function createOperationalRepositories(
         .get(request.sessionId);
       if (candidate === undefined) return undefined;
       const intentId = requiredString(candidate, "intent_id");
-      const promoted = db
-        .prepare(
-          `UPDATE user_intents
-           SET status = 'dispatching', delivery_mode = 'steer', target_turn_id = ?,
-               promoted_at = ?, updated_at = ?, attempt_count = attempt_count + 1
-           WHERE intent_id = ? AND session_id = ?
-             AND status = 'pending' AND delivery_mode = 'turn'`,
-        )
-        .run(request.targetTurnId, request.promotedAt, request.promotedAt, intentId, request.sessionId);
-      if (Number(promoted.changes) !== 1) return undefined;
-      recordActivity(systemActor, "user_intent.promoted_to_steer", "user_intent", intentId, [
-        { targetTurnId: request.targetTurnId },
-      ]);
-      return getUserIntent(intentId, request.sessionId);
+      return promotePendingUserIntentInTransaction({ ...request, intentId });
     });
+  const withdrawUserIntentInTransaction = (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["withdraw"]>[0],
+  ): UserIntentRecord | undefined => {
+    const withdrawn = db
+      .prepare(
+        `UPDATE user_intents
+           SET status = 'withdrawn', delivery_mode = 'turn', target_turn_id = NULL,
+               promoted_at = NULL, unresolved_at = NULL, withdrawn_at = ?, updated_at = ?
+           WHERE intent_id = ? AND session_id = ? AND status IN ('pending', 'unresolved')`,
+      )
+      .run(request.withdrawnAt, request.withdrawnAt, request.intentId, request.sessionId);
+    if (Number(withdrawn.changes) !== 1) return undefined;
+    recordActivity(systemActor, "user_intent.withdrawn", "user_intent", request.intentId);
+    return getUserIntent(request.intentId, request.sessionId);
+  };
+  const withdrawUserIntent = async (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["withdraw"]>[0],
+  ): Promise<UserIntentRecord | undefined> =>
+    database.transaction(() => withdrawUserIntentInTransaction(request));
   const withdrawNewestPendingUserIntent = async (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["withdrawNewestPending"]>[0],
   ): Promise<UserIntentRecord | undefined> =>
@@ -1901,16 +1937,7 @@ function createOperationalRepositories(
         .get(request.sessionId);
       if (candidate === undefined) return undefined;
       const intentId = requiredString(candidate, "intent_id");
-      const withdrawn = db
-        .prepare(
-          `UPDATE user_intents
-           SET status = 'withdrawn', withdrawn_at = ?, updated_at = ?
-           WHERE intent_id = ? AND session_id = ? AND status = 'pending'`,
-        )
-        .run(request.withdrawnAt, request.withdrawnAt, intentId, request.sessionId);
-      if (Number(withdrawn.changes) !== 1) return undefined;
-      recordActivity(systemActor, "user_intent.withdrawn", "user_intent", intentId);
-      return getUserIntent(intentId, request.sessionId);
+      return withdrawUserIntentInTransaction({ ...request, intentId });
     });
   const markUserIntentDelivered = async (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["markDelivered"]>[0],
@@ -1919,68 +1946,153 @@ function createOperationalRepositories(
       const current = getUserIntent(request.intentId, request.sessionId);
       if (current === undefined) return undefined;
       if (current.status === "delivered")
-        return current.targetTurnId === request.targetTurnId ? current : undefined;
-      if (current.status !== "dispatching" || current.targetTurnId !== request.targetTurnId) return undefined;
+        return current.targetTurnId === request.targetTurnId && userIntentMessageState(current) === "verified"
+          ? current
+          : undefined;
+      if (
+        (current.status !== "dispatching" && current.status !== "unresolved") ||
+        current.targetTurnId !== request.targetTurnId
+      )
+        return undefined;
+      if (current.deliveryMode === "steer")
+        throw new Error("Steer delivery must be committed with recordSteerDelivery");
       const target = db
         .prepare("SELECT session_id FROM foreground_turns WHERE turn_id = ?")
         .get(request.targetTurnId);
       if (target === undefined || requiredString(target, "session_id") !== request.sessionId)
         throw new Error(`User intent ${request.intentId} target turn does not belong to its session`);
-      if (!hasUserIntentMessage(current))
-        throw new Error(`User intent ${request.intentId} has no matching durable user message`);
-      const delivered = db
+      return deliverUserIntent(current, request.deliveredAt, "user_intent.delivered");
+    });
+  const recordSteerDelivery = async (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["recordSteerDelivery"]>[0],
+  ): Promise<UserIntentRecord | undefined> =>
+    database.transaction(() => {
+      const current = getUserIntent(request.intentId, request.sessionId);
+      if (current === undefined || current.targetTurnId !== request.targetTurnId) return undefined;
+      if (sha256(request.text) !== current.contentDigest)
+        throw new Error(`Steer delivery text for intent ${request.intentId} does not match its digest`);
+      if (
+        current.status !== "dispatching" &&
+        current.status !== "unresolved" &&
+        current.status !== "delivered"
+      )
+        return undefined;
+      if (current.deliveryMode !== "steer") return undefined;
+      if (current.status === "delivered")
+        return userIntentMessageState(current) === "verified" ? current : undefined;
+      const target = db
+        .prepare("SELECT session_id FROM foreground_turns WHERE turn_id = ?")
+        .get(request.targetTurnId);
+      if (target === undefined || requiredString(target, "session_id") !== request.sessionId)
+        throw new Error(`User intent ${request.intentId} target turn does not belong to its session`);
+
+      const messageId = `${request.targetTurnId}:steer:${request.intentId}`;
+      const metadata = Object.freeze({
+        turnId: request.targetTurnId,
+        sourceIntentId: request.intentId,
+        deliveryMode: "steer",
+      });
+      const existingMessage = decodeOptional(
+        db.prepare("SELECT * FROM messages WHERE message_id = ?").get(messageId),
+        decodeMessage,
+      );
+      if (existingMessage === undefined) {
+        db.prepare(
+          `INSERT INTO messages(message_id, session_id, role, content, sensitivity, created_at, metadata_json)
+           VALUES (?, ?, 'user', ?, ?, ?, ?)`,
+        ).run(
+          messageId,
+          request.sessionId,
+          request.text,
+          request.sensitivity,
+          request.deliveredAt,
+          JSON.stringify(metadata),
+        );
+        recordActivity(systemActor, "message.append", "message", messageId);
+      } else if (
+        existingMessage.sessionId !== request.sessionId ||
+        existingMessage.role !== "user" ||
+        existingMessage.content !== request.text ||
+        existingMessage.sensitivity !== request.sensitivity ||
+        existingMessage.createdAt !== request.deliveredAt ||
+        !isDeepStrictEqual(existingMessage.metadata, metadata)
+      ) {
+        throw new Error(`Steer delivery message ${messageId} already exists with different content`);
+      }
+      const refreshed = getUserIntent(request.intentId, request.sessionId);
+      if (refreshed === undefined) return undefined;
+      if (refreshed.status === "delivered")
+        return userIntentMessageState(refreshed) === "verified" ? refreshed : undefined;
+      return deliverUserIntent(refreshed, request.deliveredAt, "user_intent.delivered");
+    });
+  const markUserIntentUnresolved = async (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["markUnresolved"]>[0],
+  ): Promise<UserIntentRecord | undefined> =>
+    database.transaction(() => {
+      const current = getUserIntent(request.intentId, request.sessionId);
+      if (current === undefined) return undefined;
+      if (current.status === "delivered")
+        return current.targetTurnId === request.targetTurnId && userIntentMessageState(current) === "verified"
+          ? current
+          : undefined;
+      if (current.status === "unresolved")
+        return current.targetTurnId === request.targetTurnId ? current : undefined;
+      if (
+        current.status !== "dispatching" ||
+        current.deliveryMode !== "steer" ||
+        current.targetTurnId !== request.targetTurnId
+      )
+        return undefined;
+      if (userIntentMessageState(current) === "verified")
+        return deliverUserIntent(
+          current,
+          request.unresolvedAt,
+          "user_intent.delivery_confirmed_while_marking_unresolved",
+        );
+      const unresolved = db
         .prepare(
           `UPDATE user_intents
-           SET status = 'delivered', delivered_at = ?, updated_at = ?
-           WHERE intent_id = ? AND session_id = ?
-             AND status = 'dispatching' AND target_turn_id = ?`,
+           SET status = 'unresolved', unresolved_at = ?, updated_at = ?
+           WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'
+             AND delivery_mode = 'steer' AND target_turn_id = ?`,
         )
         .run(
-          request.deliveredAt,
-          request.deliveredAt,
+          request.unresolvedAt,
+          request.unresolvedAt,
           request.intentId,
           request.sessionId,
           request.targetTurnId,
         );
-      if (Number(delivered.changes) !== 1) return undefined;
-      recordActivity(systemActor, "user_intent.delivered", "user_intent", request.intentId, [
+      if (Number(unresolved.changes) !== 1) return undefined;
+      recordActivity(systemActor, "user_intent.delivery_unresolved", "user_intent", request.intentId, [
         { targetTurnId: request.targetTurnId },
       ]);
       return getUserIntent(request.intentId, request.sessionId);
     });
-  const releaseFailedUserIntentDispatch = async (
-    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["releaseFailedDispatch"]>[0],
+  const releaseUnconsumedUserIntentDispatch = async (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["releaseUnconsumedDispatch"]>[0],
   ): Promise<UserIntentRecord | undefined> =>
     database.transaction(() => {
       const current = getUserIntent(request.intentId, request.sessionId);
       if (current === undefined) return undefined;
       if (
         current.status === "pending" &&
-        current.deliveryMode === current.initialMode &&
+        current.deliveryMode === "turn" &&
         current.targetTurnId === undefined
       )
         return current;
       if (current.status !== "dispatching") return undefined;
-      if (hasUserIntentMessage(current)) {
-        db.prepare(
-          `UPDATE user_intents
-           SET status = 'delivered', delivered_at = ?, updated_at = ?
-           WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
-        ).run(request.releasedAt, request.releasedAt, request.intentId, request.sessionId);
-        recordActivity(
-          systemActor,
+      if (userIntentMessageState(current) === "verified")
+        return deliverUserIntent(
+          current,
+          request.releasedAt,
           "user_intent.delivery_confirmed_during_release",
-          "user_intent",
-          request.intentId,
-          [{ targetTurnId: current.targetTurnId }],
         );
-        return getUserIntent(request.intentId, request.sessionId);
-      }
       const released = db
         .prepare(
           `UPDATE user_intents
-           SET status = 'pending', delivery_mode = initial_mode, target_turn_id = NULL,
-               updated_at = ?
+           SET status = 'pending', delivery_mode = 'turn', target_turn_id = NULL,
+               promoted_at = NULL, updated_at = ?
            WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
         )
         .run(request.releasedAt, request.intentId, request.sessionId);
@@ -1994,7 +2106,7 @@ function createOperationalRepositories(
     database.transaction(() => {
       let released = 0;
       let delivered = 0;
-      const unresolved = 0;
+      let unresolved = 0;
       const rows = db
         .prepare(
           `SELECT *
@@ -2013,22 +2125,26 @@ function createOperationalRepositories(
                 .get(intent.targetTurnId);
         if (target !== undefined && requiredString(target, "session_id") !== request.sessionId)
           throw new Error(`User intent ${intent.intentId} target turn belongs to another session`);
-        if (hasUserIntentMessage(intent)) {
+        if (userIntentMessageState(intent) === "verified") {
+          deliverUserIntent(intent, request.recoveredAt, "user_intent.recovered_delivered");
+          delivered += 1;
+          continue;
+        }
+        if (intent.deliveryMode === "steer") {
           db.prepare(
             `UPDATE user_intents
-             SET status = 'delivered', delivered_at = ?, updated_at = ?
-             WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
+             SET status = 'unresolved', unresolved_at = ?, updated_at = ?
+             WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'
+               AND delivery_mode = 'steer'`,
           ).run(request.recoveredAt, request.recoveredAt, intent.intentId, request.sessionId);
-          recordActivity(systemActor, "user_intent.recovered_delivered", "user_intent", intent.intentId, [
-            { targetTurnId: intent.targetTurnId },
-          ]);
-          delivered += 1;
+          recordActivity(systemActor, "user_intent.recovered_unresolved", "user_intent", intent.intentId);
+          unresolved += 1;
           continue;
         }
         db.prepare(
           `UPDATE user_intents
-           SET status = 'pending', delivery_mode = initial_mode, target_turn_id = NULL,
-               updated_at = ?
+           SET status = 'pending', delivery_mode = 'turn', target_turn_id = NULL,
+               promoted_at = NULL, updated_at = ?
            WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
         ).run(request.recoveredAt, intent.intentId, request.sessionId);
         recordActivity(systemActor, "user_intent.recovered_pending", "user_intent", intent.intentId);
@@ -2572,12 +2688,25 @@ function createOperationalRepositories(
           )
           .all(sessionId)
           .map(decodeUserIntent),
+      listUnresolved: async (sessionId: string) =>
+        db
+          .prepare(
+            `SELECT *
+             FROM user_intents
+             WHERE session_id = ? AND status = 'unresolved'
+             ORDER BY queue_sequence`,
+          )
+          .all(sessionId)
+          .map(decodeUserIntent),
       claimOldestPending: claimOldestPendingUserIntent,
-      claimSteer: claimSteerUserIntent,
+      promotePendingToSteer: promotePendingUserIntent,
       promoteNewestPendingToSteer: promoteNewestPendingUserIntent,
       withdrawNewestPending: withdrawNewestPendingUserIntent,
+      withdraw: withdrawUserIntent,
       markDelivered: markUserIntentDelivered,
-      releaseFailedDispatch: releaseFailedUserIntentDispatch,
+      recordSteerDelivery,
+      markUnresolved: markUserIntentUnresolved,
+      releaseUnconsumedDispatch: releaseUnconsumedUserIntentDispatch,
       recoverDispatching: recoverDispatchingUserIntents,
     }),
     toolCalls: Object.freeze({
