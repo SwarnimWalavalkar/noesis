@@ -72,6 +72,7 @@ export function createPiSkillLibrary(input: {
   });
   let loading: Promise<PiSkillSnapshot> | undefined;
   const pinned = new Map<string, PiSkillSnapshot>();
+  const pinning = new Map<string, Promise<PiSkillSnapshot>>();
   const readSkillFile = input.readSkillFile ?? (async (path: string) => await readFile(path, "utf8"));
   const awaitWithSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Promise<Value> => {
     if (!signal) return promise;
@@ -100,33 +101,49 @@ export function createPiSkillLibrary(input: {
       const current = (async () => {
         await loader.reload();
         const loaded = loader.getSkills();
+        const resources = await Promise.all(
+          loaded.skills.map(async (skill) => {
+            try {
+              const content = await readSkillFile(skill.filePath);
+              return Object.freeze({
+                kind: "skill" as const,
+                value: Object.freeze({
+                  name: skill.name,
+                  description: skill.description,
+                  content,
+                  filePath: skill.filePath,
+                  contentDigest: sha256(content),
+                  disableModelInvocation: skill.disableModelInvocation ?? false,
+                }),
+              });
+            } catch (error) {
+              return Object.freeze({
+                kind: "diagnostic" as const,
+                value: Object.freeze({
+                  type: "error" as const,
+                  message: `Failed to read skill ${skill.name}: ${error instanceof Error ? error.message : String(error)}`,
+                  path: skill.filePath,
+                }),
+              });
+            }
+          }),
+        );
         return Object.freeze({
           skills: Object.freeze(
-            (
-              await Promise.all(
-                loaded.skills.map(async (skill) => {
-                  const content = await readSkillFile(skill.filePath);
-                  return Object.freeze({
-                    name: skill.name,
-                    description: skill.description,
-                    content,
-                    filePath: skill.filePath,
-                    contentDigest: sha256(content),
-                    disableModelInvocation: skill.disableModelInvocation ?? false,
-                  });
-                }),
-              )
-            ).sort((left, right) => left.name.localeCompare(right.name)),
+            resources
+              .flatMap((resource) => (resource.kind === "skill" ? [resource.value] : []))
+              .sort((left, right) => left.name.localeCompare(right.name)),
           ),
-          diagnostics: Object.freeze(
-            loaded.diagnostics.map((diagnostic) =>
+          diagnostics: Object.freeze([
+            ...loaded.diagnostics.map((diagnostic) =>
               Object.freeze({
                 type: diagnostic.type,
                 message: diagnostic.message,
                 ...(diagnostic.path ? { path: diagnostic.path } : {}),
               }),
             ),
-          ),
+            ...resources.flatMap((resource) => (resource.kind === "diagnostic" ? [resource.value] : [])),
+          ]),
         });
       })().finally(() => {
         if (loading === current) loading = undefined;
@@ -138,14 +155,25 @@ export function createPiSkillLibrary(input: {
   const pinSnapshot: PiSkillLibrary["pinSnapshot"] = async (key, signal, admit) => {
     const existing = pinned.get(key);
     if (existing) return existing;
-    const captured = await snapshot(signal);
-    const existingAfterLoad = pinned.get(key);
-    if (existingAfterLoad) return existingAfterLoad;
-    const admitted = admit ? await admit(captured) : captured;
-    const existingAfterAdmission = pinned.get(key);
-    if (existingAfterAdmission) return existingAfterAdmission;
-    pinned.set(key, admitted);
-    return admitted;
+    if (signal?.aborted) throw new Error("Skill loading was cancelled");
+    let inFlight = pinning.get(key);
+    if (!inFlight) {
+      const admission = (async (): Promise<PiSkillSnapshot> => {
+        const captured = await snapshot();
+        const existingAfterLoad = pinned.get(key);
+        if (existingAfterLoad) return existingAfterLoad;
+        const admitted = admit ? await admit(captured) : captured;
+        const existingAfterAdmission = pinned.get(key);
+        if (existingAfterAdmission) return existingAfterAdmission;
+        pinned.set(key, admitted);
+        return admitted;
+      })();
+      inFlight = admission.finally(() => {
+        if (pinning.get(key) === inFlight) pinning.delete(key);
+      });
+      pinning.set(key, inFlight);
+    }
+    return await awaitWithSignal(inFlight, signal);
   };
   const workspaceOption = (scope: "personal" | "workspace") =>
     scope === "workspace" ? Object.freeze({ local: true }) : undefined;

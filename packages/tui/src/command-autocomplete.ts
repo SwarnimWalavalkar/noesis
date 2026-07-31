@@ -40,6 +40,18 @@ export interface SkillSlashCommand {
   readonly disableModelInvocation?: boolean;
 }
 
+/** Skill discovery enriches autocomplete but must never gate TUI startup. */
+export async function loadSkillSlashCommands(
+  discover?: () => Promise<readonly SkillSlashCommand[]>,
+): Promise<readonly SkillSlashCommand[]> {
+  if (!discover) return Object.freeze([]);
+  try {
+    return await discover();
+  } catch {
+    return Object.freeze([]);
+  }
+}
+
 export const NOESIS_SLASH_COMMANDS = [
   {
     name: "help",

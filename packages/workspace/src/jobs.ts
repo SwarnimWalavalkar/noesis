@@ -5,7 +5,8 @@ import {
   type ActorRef,
   type DurableJobEnqueueRequest,
   type DurableJobFailure,
-  type DurableJobListCursor,
+  type DurableJobListRequest,
+  type DurableJobPage,
   type DurableJobRecord,
   type DurableJobStatus,
   type EvidenceRef,
@@ -117,14 +118,7 @@ export function createDurableJobStore(
     });
   };
 
-  const list = async (
-    request: {
-      readonly status?: DurableJobStatus;
-      readonly kind?: string;
-      readonly limit?: number;
-      readonly after?: DurableJobListCursor;
-    } = {},
-  ): Promise<readonly DurableJobRecord[]> => {
+  const list = async (request: DurableJobListRequest = {}): Promise<readonly DurableJobRecord[]> => {
     const limit = request.limit ?? 100;
     if (!Number.isInteger(limit) || limit < 1 || limit > 1_000)
       throw new Error("Durable job list limit must be between 1 and 1000");
@@ -139,6 +133,21 @@ export function createDurableJobStore(
       clauses.push("kind = ?");
       values.push(request.kind);
     }
+    if (request.payloadSessionId !== undefined) {
+      z.string().min(1).parse(request.payloadSessionId);
+      clauses.push("json_extract(payload_json, '$.turn.sessionId') = ?");
+      values.push(request.payloadSessionId);
+    }
+    if (request.payloadExperimentIds !== undefined) {
+      const experimentIds = z.array(z.string().min(1)).max(250).parse(request.payloadExperimentIds);
+      if (experimentIds.length === 0) clauses.push("0");
+      else {
+        clauses.push(
+          `json_extract(payload_json, '$.experimentId') IN (${experimentIds.map(() => "?").join(", ")})`,
+        );
+        values.push(...experimentIds);
+      }
+    }
     if (request.after) {
       z.string().datetime().parse(request.after.createdAt);
       z.string().min(1).parse(request.after.jobId);
@@ -150,6 +159,21 @@ export function createDurableJobStore(
       .prepare(`SELECT * FROM jobs${where} ORDER BY created_at, job_id LIMIT ?`)
       .all(...values, limit)
       .map(decodeDurableJob);
+  };
+
+  const listPage = async (request: DurableJobListRequest = {}): Promise<DurableJobPage> => {
+    const limit = request.limit ?? 100;
+    const records = await list(request);
+    const last = records.at(-1);
+    return Object.freeze({
+      records,
+      exhausted: records.length < limit,
+      ...(last
+        ? {
+            nextCursor: Object.freeze({ createdAt: last.createdAt, jobId: last.jobId }),
+          }
+        : {}),
+    });
   };
 
   const claim = async (request: {
@@ -353,6 +377,7 @@ export function createDurableJobStore(
     enqueue,
     get: async (jobId: string) => read(jobId),
     list,
+    listPage,
     claim,
     renew,
     complete,

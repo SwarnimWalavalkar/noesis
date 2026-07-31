@@ -320,16 +320,29 @@ export interface DurableJobListCursor {
   readonly jobId: string;
 }
 
+export interface DurableJobListRequest {
+  readonly status?: DurableJobStatus;
+  readonly kind?: string;
+  readonly limit?: number;
+  readonly after?: DurableJobListCursor;
+  /** Exact reflection-session selector over the authoritative JSON payload. */
+  readonly payloadSessionId?: string;
+  /** Exact experiment selector for authoring and preflight payloads. */
+  readonly payloadExperimentIds?: readonly string[];
+}
+
+export interface DurableJobPage {
+  readonly records: readonly DurableJobRecord[];
+  readonly exhausted: boolean;
+  readonly nextCursor?: DurableJobListCursor;
+}
+
 /** Atomic SQLite-backed scheduling primitives. Runtime owns job meanings and retry decisions. */
 export interface DurableJobStorePort {
   readonly enqueue: (request: DurableJobEnqueueRequest) => Promise<DurableJobRecord>;
   readonly get: (jobId: string) => Promise<DurableJobRecord | undefined>;
-  readonly list: (request?: {
-    readonly status?: DurableJobStatus;
-    readonly kind?: string;
-    readonly limit?: number;
-    readonly after?: DurableJobListCursor;
-  }) => Promise<readonly DurableJobRecord[]>;
+  readonly list: (request?: DurableJobListRequest) => Promise<readonly DurableJobRecord[]>;
+  readonly listPage: (request?: DurableJobListRequest) => Promise<DurableJobPage>;
   readonly claim: (request: {
     readonly workerId: string;
     readonly now: string;

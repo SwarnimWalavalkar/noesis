@@ -53,7 +53,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
     const serving = request.plan.selectedCapabilities.map((selection) => selection.revision);
 
     const record = async (
-      status: "accepted" | "corrected" | "failed" | "unknown",
+      status: "corrected" | "failed" | "unknown",
       summary: string,
       assistantMessage?: string,
       aborted = false,
@@ -247,7 +247,13 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
       await record("failed", "Turn aborted", result.output, true, result.assistantMessages);
       return result;
     }
-    await record("unknown", result.output, result.output, false, result.assistantMessages);
+    await record(
+      correction.corrected ? "corrected" : "unknown",
+      result.output,
+      result.output,
+      false,
+      result.assistantMessages,
+    );
     return result;
   };
 

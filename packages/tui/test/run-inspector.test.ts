@@ -228,6 +228,23 @@ describe("run inspector panel", () => {
     expect(rawBody).toContain("revision-18");
   });
 
+  test("sanitizes and bounds tool names before measuring discovery rows", () => {
+    const hostileName = `files.read${ESC}[31m\nforged-row\t${"x".repeat(10_000)}-TAIL`;
+    const state = stateWithAction("noesis.search", { query: "read" }, [
+      { name: hostileName, description: "Hostile persisted tool name", score: 1 },
+      { name: "files.write", description: "Normal tool", score: 0.5 },
+    ]);
+    const rows = render(state, 100, 100);
+    const body = rows.join("\n");
+
+    expect(body).toContain("files.read [31m forged-row");
+    expect(body).toContain("files.write");
+    expect(body).not.toContain(ESC);
+    expect(body).not.toContain("\t");
+    expect(body).not.toContain("-TAIL");
+    for (const row of rows) expect(visibleWidth(row)).toBe(100);
+  });
+
   test("renders noesis.search results as ranked tools with their useful provenance", () => {
     const state = stateWithAction("noesis.search", { query: "read files" }, [
       { name: "files.read", description: "Read a file", revisionId: "rev-read", score: 0.98 },

@@ -88,6 +88,7 @@ describe("runtime control-plane resident scheduling", () => {
       retry: async () => unsupported(),
       getJob: async () => undefined,
       listJobs: async () => Object.freeze([]),
+      listJobPage: async () => Object.freeze({ jobs: Object.freeze([]), exhausted: true }),
       getPreflightActivationHandoff: async () => undefined,
       stop: async () => undefined,
     });
@@ -163,6 +164,7 @@ describe("runtime control-plane resident scheduling", () => {
       retry: async () => unsupported(),
       getJob: async () => undefined,
       listJobs: async () => Object.freeze([]),
+      listJobPage: async () => Object.freeze({ jobs: Object.freeze([]), exhausted: true }),
       getPreflightActivationHandoff: async () => undefined,
       stop: async () => {
         coordinatorStops += 1;

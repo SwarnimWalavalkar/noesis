@@ -772,6 +772,36 @@ describe("automatic learning organ", () => {
     );
   });
 
+  test("does not count a current-turn file revision returned by history as recurrence", async () => {
+    const currentRevision = fileRef("current-turn-source.md");
+    const noRecurrence = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        recurrenceEvidenceCitationIndexes: Object.freeze([]),
+      }),
+    }) satisfies ScriptedLearningInferenceStep;
+    const harness = createHarness({
+      steps: [noRecurrence],
+      citations: [fileRevisionCitation(currentRevision.revisionId, "The current correction")],
+    });
+
+    const result = await harness.organ.observeTurn({
+      turn: turn({
+        correction: "Use primary sources.",
+        evidenceRef: currentRevision,
+      }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    if (result.status !== "experiment") throw new Error("Expected an experiment");
+    expect(result.brief.evidenceRefs).toEqual([currentRevision]);
+    expect(result.brief.citations).toEqual([]);
+    expect(result.brief.recurrenceCitations).toEqual([]);
+    expect(result.brief.recurrenceCount).toBe(0);
+  });
+
   test("retries one reflected turn without duplicating its feedback signal or hypothesis", async () => {
     const harness = createHarness({
       steps: [reflectionStep, reflectionStep],
@@ -861,13 +891,25 @@ describe("automatic learning organ", () => {
       capability,
     });
     if (first.status !== "experiment") throw new Error("Expected an experiment");
-    await harness.putExperiment(
-      Object.freeze({
-        ...harness.experiments()[0],
-        status: "completed",
-        outcome: "keep",
-      }) as Experiment,
-    );
+    const openExperiment = harness.experiments()[0];
+    if (!openExperiment) throw new Error("Expected the first experiment to be stored");
+    const completedExperiment: Experiment = Object.freeze({
+      experimentId: openExperiment.experimentId,
+      hypothesis: openExperiment.hypothesis,
+      scope: openExperiment.scope,
+      evidenceRefs: openExperiment.evidenceRefs,
+      baselineRevision: openExperiment.baselineRevision,
+      candidateRevisions: openExperiment.candidateRevisions,
+      feedbackSignalIds: openExperiment.feedbackSignalIds,
+      ...(openExperiment.preflightRef ? { preflightRef: openExperiment.preflightRef } : {}),
+      ...(openExperiment.activatedRevision ? { activatedRevision: openExperiment.activatedRevision } : {}),
+      ...(openExperiment.followUpExperimentId
+        ? { followUpExperimentId: openExperiment.followUpExperimentId }
+        : {}),
+      status: "completed",
+      outcome: "keep",
+    });
+    await harness.putExperiment(completedExperiment);
 
     const second = await harness.organ.observeTurn({
       turn: turn({

@@ -238,6 +238,7 @@ function createFakeWorkspaceStore(): WorkspaceStore {
       },
       get: async () => undefined,
       list: async () => [],
+      listPage: async () => Object.freeze({ records: Object.freeze([]), exhausted: true }),
       claim: async () => undefined,
       renew: async () => false,
       complete: async () => false,

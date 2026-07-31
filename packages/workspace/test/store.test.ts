@@ -906,6 +906,13 @@ describe("WorkspaceStore", () => {
          WHERE type = 'trigger' AND name = 'tool_call_action_sequence_required'`,
       )
       .get();
+    const learningJobIndexes = database
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'index' AND name IN ('jobs_reflection_session_created', 'jobs_experiment_created')
+         ORDER BY name`,
+      )
+      .all();
     database
       .prepare(
         `INSERT INTO sessions(
@@ -942,7 +949,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(23);
+    expect(versions.at(-1)).toBe(24);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
@@ -950,6 +957,10 @@ describe("WorkspaceStore", () => {
     });
     expect(phaseLineageTrigger).toBeDefined();
     expect(sequenceTrigger).toBeDefined();
+    expect(learningJobIndexes).toEqual([
+      { name: "jobs_experiment_created" },
+      { name: "jobs_reflection_session_created" },
+    ]);
   });
 
   test("keeps authority grants, reservations, completions, and replay in SQLite", async () => {
@@ -2295,6 +2306,80 @@ describe("WorkspaceStore", () => {
     expect(await store.research.feedbackSignals.getFeedbackSignal("feedback-1")).toMatchObject({
       experimentId: experiment.experimentId,
     });
+    store.close();
+  });
+
+  test("retries the exact completing experiment write against its merged stored provenance", async () => {
+    const store = await createWorkspaceStore(await temporary("experiment-completion-retry"));
+    const [initialEvidence, authoringEvidence, completingEvidence] = await Promise.all([
+      store.evidence.appendEvidence({
+        workingPath: "experiments/retry/initial",
+        bytes: text("initial"),
+        actor,
+        evidenceKind: "input",
+      }),
+      store.evidence.appendEvidence({
+        workingPath: "experiments/retry/authoring",
+        bytes: text("authoring"),
+        actor,
+        evidenceKind: "input",
+      }),
+      store.evidence.appendEvidence({
+        workingPath: "experiments/retry/completing",
+        bytes: text("completing"),
+        actor,
+        evidenceKind: "input",
+      }),
+    ]);
+    const baseline = revision("retry-baseline", "c");
+    const candidate = revision("retry-candidate", "d");
+    const initial: Experiment = {
+      experimentId: "experiment-completion-retry",
+      hypothesis: "completion retries preserve cumulative provenance",
+      scope: "research",
+      evidenceRefs: [initialEvidence],
+      baselineRevision: baseline,
+      candidateRevisions: [candidate],
+      feedbackSignalIds: ["feedback-initial"],
+      status: "hypothesis",
+    };
+    await store.research.experiments.putExperiment(initial);
+    await store.research.experiments.putExperiment({
+      ...initial,
+      evidenceRefs: [authoringEvidence],
+      feedbackSignalIds: ["feedback-authoring"],
+      status: "authoring",
+    });
+    await store.research.experiments.putExperiment({
+      ...initial,
+      evidenceRefs: [authoringEvidence],
+      feedbackSignalIds: ["feedback-authoring"],
+      status: "preflight",
+    });
+    const completing: Experiment = {
+      ...initial,
+      evidenceRefs: [completingEvidence],
+      feedbackSignalIds: ["feedback-completing"],
+      status: "completed",
+      outcome: "keep",
+    };
+
+    await store.research.experiments.putExperiment(completing);
+    const completed = await store.research.experiments.getExperiment(initial.experimentId);
+    await expect(store.research.experiments.putExperiment(completing)).resolves.toEqual({
+      kind: "database_row",
+      table: "experiments",
+      rowId: initial.experimentId,
+    });
+
+    expect(await store.research.experiments.getExperiment(initial.experimentId)).toEqual(completed);
+    expect(completed).toMatchObject({
+      evidenceRefs: [initialEvidence, authoringEvidence, completingEvidence],
+      feedbackSignalIds: ["feedback-initial", "feedback-authoring", "feedback-completing"],
+    });
+    await expect(
+      store.research.experiments.putExperiment({ ...completing, outcome: "revise" }),
+    ).rejects.toThrow(`Completed experiment ${initial.experimentId} is immutable`);
     store.close();
   });
 

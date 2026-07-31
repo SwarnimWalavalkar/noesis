@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -1356,6 +1356,72 @@ describe("apps/noesis production control-plane composition", () => {
     reopened.close();
   });
 
+  test("an ordinary production turn degrades around one persistently unreadable skill", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-partial-skill-load-"));
+    roots.push(home);
+    const skillPackage = join(home, "skill-package");
+    const validPath = join(skillPackage, "skills", "valid-work", "SKILL.md");
+    const brokenPath = join(skillPackage, "skills", "broken-work", "SKILL.md");
+    const validContent =
+      "---\nname: valid-work\ndescription: Valid work.\n---\n\nUse the valid workflow instructions.";
+    const brokenContent =
+      "---\nname: broken-work\ndescription: Broken work.\n---\n\nThese bytes cannot be loaded.";
+    await mkdir(join(skillPackage, "skills", "valid-work"), { recursive: true });
+    await mkdir(join(skillPackage, "skills", "broken-work"), { recursive: true });
+    await writeFile(validPath, validContent, "utf8");
+    await writeFile(brokenPath, brokenContent, "utf8");
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const skills = createPiSkillLibrary({
+      cwd: home,
+      agentDirectory: join(home, "agent"),
+      workspaceTrusted: true,
+      readSkillFile: async (path) => {
+        if (path === brokenPath) throw new Error("persistent skill read failure");
+        return await readFile(path, "utf8");
+      },
+    });
+    await skills.install(skillPackage, "workspace");
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      skills,
+      createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, {
+          codeExecution,
+          selfTools,
+          ...(skillLibrary ? { skills: skillLibrary } : {}),
+          requirePinnedSkillSnapshot: true,
+        }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Partial skill degradation" });
+
+    await expect(runtime.debug.runTurn(trail.trailId, "Answer this ordinary prompt.")).resolves.toMatchObject(
+      { outcome: "completed" },
+    );
+    const snapshot = await skills.snapshot();
+    expect(snapshot.skills.find((skill) => skill.name === "valid-work")).toMatchObject({
+      name: "valid-work",
+      content: validContent,
+    });
+    expect(snapshot.skills.some((skill) => skill.name === "broken-work")).toBe(false);
+    expect(snapshot.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "error",
+          path: brokenPath,
+          message: expect.stringContaining("persistent skill read failure"),
+        }),
+      ]),
+    );
+    await runtime.shutdown();
+  });
+
   test("an explicitly invoked skill remains inspectable from admitted bytes after its source is removed", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-skill-evidence-"));
     roots.push(home);
@@ -1496,7 +1562,7 @@ describe("apps/noesis production control-plane composition", () => {
     expect(reflectorRuns).toBe(1);
     const outcomes = await runtime.debug.workspace.operational.outcomes.listForSession(trail.trailId);
     expect(outcomes).toHaveLength(1);
-    expect(outcomes[0]).toMatchObject({ status: "unknown" });
+    expect(outcomes[0]).toMatchObject({ status: "corrected" });
     await runtime.shutdown();
   });
 

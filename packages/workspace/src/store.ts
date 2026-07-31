@@ -3530,16 +3530,13 @@ function createResearchRepositories(
             .prepare("SELECT status, data_json FROM experiments WHERE experiment_id = ?")
             .get(requested.experimentId);
           const stored = decodeExperiment(current);
-          const value =
-            stored?.status === "completed"
-              ? requested
-              : ExperimentSchema.parse({
-                  ...requested,
-                  evidenceRefs: mergeEvidenceReferences(stored?.evidenceRefs ?? [], requested.evidenceRefs),
-                  feedbackSignalIds: [
-                    ...new Set([...(stored?.feedbackSignalIds ?? []), ...requested.feedbackSignalIds]),
-                  ],
-                });
+          const value = ExperimentSchema.parse({
+            ...requested,
+            evidenceRefs: mergeEvidenceReferences(stored?.evidenceRefs ?? [], requested.evidenceRefs),
+            feedbackSignalIds: [
+              ...new Set([...(stored?.feedbackSignalIds ?? []), ...requested.feedbackSignalIds]),
+            ],
+          });
           const encoded = JSON.stringify(value);
           for (const ref of value.evidenceRefs) assertStoredReference(db, ref);
           if (value.preflightRef) assertStoredReference(db, value.preflightRef);

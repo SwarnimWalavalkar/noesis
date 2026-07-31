@@ -360,19 +360,39 @@ function stableSignalId(turn: LearningTurnInput, kind: NonNullable<ReturnType<ty
   ).slice(0, 32)}`;
 }
 
-function currentEvidenceKeys(turn: LearningTurnInput): ReadonlySet<string> {
-  return new Set(turn.evidenceRefs.map(evidenceKey));
+function citationSourceKey(citation: ExactCitation): string {
+  switch (citation.source.kind) {
+    case "database_row":
+      return `database_row:${citation.source.table}:${citation.source.rowId}`;
+    case "file_revision":
+      return `revision:${citation.source.revisionId}`;
+  }
+}
+
+function evidenceCitationSourceKey(reference: EvidenceRef): string {
+  switch (reference.kind) {
+    case "database_row":
+      return `database_row:${reference.table}:${reference.rowId}`;
+    case "file_revision":
+    case "evidence_revision":
+      return `revision:${reference.revisionId}`;
+    case "artifact_file":
+      return `artifact:${reference.artifactId}`;
+  }
+}
+
+function currentCitationSourceKeys(turn: LearningTurnInput): ReadonlySet<string> {
+  return new Set(turn.evidenceRefs.map(evidenceCitationSourceKey));
 }
 
 function distinctHistoricalCitations(
   turn: LearningTurnInput,
   citations: readonly ExactCitation[],
 ): readonly LearningCitation[] {
-  const current = currentEvidenceKeys(turn);
+  const current = currentCitationSourceKeys(turn);
   const distinct = new Map<string, LearningCitation>();
   for (const citation of citations) {
-    const reference = toEvidenceRef(citation);
-    if (reference && current.has(evidenceKey(reference))) continue;
+    if (current.has(citationSourceKey(citation))) continue;
     const key = canonicalJson({ source: citation.source, contentDigest: citation.contentDigest });
     // Distinct authoritative sources remain distinct even when they contain the same text.
     if (!distinct.has(key)) distinct.set(key, cloneCitation(citation));

@@ -5,11 +5,18 @@ import { DatabaseSync } from "node:sqlite";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import { compileContext } from "@noesis/context";
 import type { Capability, CapabilityRevisionRef } from "@noesis/domain";
+import {
+  createDeterministicEmbeddingPort,
+  createDeterministicRerankPort,
+  createHistoryPort,
+  createSessionSearchTools,
+  SESSION_RETRIEVAL_STRATEGIES,
+} from "@noesis/intelligence";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import {
-  createTurnSettlement,
   type ContinuousFeedbackController,
+  createTurnSettlement,
   type TurnOutcomeObservationInput,
 } from "../src/index.ts";
 
@@ -256,6 +263,54 @@ describe("turn settlement", () => {
       status: "failed",
       metadata: { aborted: true, replayEligible: false },
     });
+
+    const correctedPlan = turnPlan("session-1", "turn-corrected", [
+      { capabilityId: "general", name: "General", scope: "general" },
+    ]);
+    seedForegroundTurn(workspace, "session-1", "turn-corrected", correctedPlan.planId);
+    await expect(
+      settlement.run({
+        sessionId: "session-1",
+        turnId: "turn-corrected",
+        input: "Actually, cite the exact primary source.",
+        occurredAt: "2026-07-25T00:02:00.000Z",
+        plan: correctedPlan,
+        execute: async () => ({
+          outcome: "completed",
+          output: "Corrected response with an exact primary source.",
+          context,
+          usedCapabilities: Object.freeze({}),
+          frozenTurnPlan: correctedPlan,
+        }),
+      }),
+    ).rejects.toThrow("fixture stops after observing attribution");
+    expect(feedbackInputs.at(-1)?.status).toBe("corrected");
+    expect(observedLearningTurns.at(-1)?.outcome).toBe("corrected");
+    expect(await workspace.operational.outcomes.get("turn-corrected:outcome")).toMatchObject({
+      status: "corrected",
+    });
+
+    const history = createHistoryPort({
+      workspace,
+      embeddings: createDeterministicEmbeddingPort(),
+      reranker: createDeterministicRerankPort(),
+    });
+    const sessionTools = createSessionSearchTools({
+      workspace,
+      history,
+      authorization: { currentSessionId: "consumer-session" },
+    });
+    const corrections = await sessionTools.findCorrections({
+      topic: "exact primary source corrected response",
+      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
+    });
+    expect(corrections.ok).toBe(true);
+    if (corrections.ok)
+      expect(corrections.value.fragments[0]?.citation.identity).toEqual({
+        kind: "outcome",
+        sessionId: "session-1",
+        outcomeId: "turn-corrected:outcome",
+      });
   });
 });
 

@@ -21,6 +21,20 @@ const baseline = Object.freeze({
   bundleDigest: "a".repeat(64),
 });
 
+function isReflectionJob(job: CoordinatorJobView): job is CoordinatorJobView & {
+  readonly kind: "runtime.reflect_turn";
+  readonly payload: ReflectTurnJobPayload;
+} {
+  return job.kind === "runtime.reflect_turn";
+}
+
+function isExperimentJob(job: CoordinatorJobView): job is CoordinatorJobView & {
+  readonly kind: "runtime.author_revision" | "runtime.preflight";
+  readonly payload: AuthorRevisionJobPayload | PreflightJobPayload;
+} {
+  return job.kind === "runtime.author_revision" || job.kind === "runtime.preflight";
+}
+
 function record(input: {
   readonly jobId: string;
   readonly kind: string;
@@ -283,9 +297,20 @@ describe("ambient learning read model", () => {
       }),
       preflight(targetExperiment),
     ]);
-    const listJobs: RuntimeCoordinator["listJobs"] = async (request = {}) => {
+    const requests: Array<NonNullable<Parameters<RuntimeCoordinator["listJobPage"]>[0]>> = [];
+    const listJobPage: RuntimeCoordinator["listJobPage"] = async (request = {}) => {
+      requests.push(request);
       const ordered = jobs
         .filter(({ kind }) => !request.kind || kind === request.kind)
+        .filter(
+          (job) =>
+            !request.sessionId || (isReflectionJob(job) && job.payload.turn.sessionId === request.sessionId),
+        )
+        .filter(
+          (job) =>
+            !request.experimentIds ||
+            (isExperimentJob(job) && request.experimentIds.includes(job.payload.experimentId)),
+        )
         .filter(({ job }) => {
           if (!request.after) return true;
           return (
@@ -298,10 +323,17 @@ describe("ambient learning read model", () => {
             left.job.createdAt.localeCompare(right.job.createdAt) ||
             left.job.jobId.localeCompare(right.job.jobId),
         );
-      return Object.freeze(ordered.slice(0, request.limit ?? 100));
+      const limit = request.limit ?? 100;
+      const page = Object.freeze(ordered.slice(0, limit));
+      const last = page.at(-1)?.job;
+      return Object.freeze({
+        jobs: page,
+        exhausted: page.length < limit,
+        ...(last ? { nextCursor: Object.freeze({ createdAt: last.createdAt, jobId: last.jobId }) } : {}),
+      });
     };
 
-    const activity = await loadLearningActivityForSession({ listJobs }, "target-session");
+    const activity = await loadLearningActivityForSession({ listJobPage }, "target-session");
 
     expect(activity.map(({ jobId }) => jobId)).toEqual([
       "preflight-complete",
@@ -318,5 +350,53 @@ describe("ambient learning read model", () => {
       ]),
     );
     expect(activity.some(({ summary }) => summary === "Unrelated turn")).toBe(false);
+    expect(requests).toHaveLength(3);
+    expect(requests).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "runtime.reflect_turn", sessionId: "target-session" }),
+        expect.objectContaining({
+          kind: "runtime.author_revision",
+          experimentIds: [targetExperiment],
+        }),
+        expect.objectContaining({ kind: "runtime.preflight", experimentIds: [targetExperiment] }),
+      ]),
+    );
+    expect(
+      requests.every((request) => request.sessionId !== undefined || request.experimentIds !== undefined),
+    ).toBe(true);
+  });
+
+  test("continues after a full raw page decodes to no coordinator jobs", async () => {
+    const target = reflection({
+      jobId: "reflection-after-legacy-row",
+      sessionId: "target-session",
+      status: "completed",
+      updatedAt: "2026-08-01T00:00:02.000Z",
+      result: { status: "no_change", reason: "Valid reflection after legacy row" },
+    });
+    const legacyCursor = Object.freeze({
+      createdAt: "2026-08-01T00:00:00.000Z",
+      jobId: "legacy-undecodable-row",
+    });
+    const listJobPage: RuntimeCoordinator["listJobPage"] = async ({ kind, after, sessionId } = {}) => {
+      if (kind !== "runtime.reflect_turn") return Object.freeze({ jobs: Object.freeze([]), exhausted: true });
+      expect(sessionId).toBe("target-session");
+      if (!after)
+        return Object.freeze({
+          jobs: Object.freeze([]),
+          exhausted: false,
+          nextCursor: legacyCursor,
+        });
+      return Object.freeze({ jobs: Object.freeze([target]), exhausted: true });
+    };
+
+    const activity = await loadLearningActivityForSession({ listJobPage }, "target-session");
+
+    expect(activity).toEqual([
+      expect.objectContaining({
+        jobId: "reflection-after-legacy-row",
+        summary: "Valid reflection after legacy row",
+      }),
+    ]);
   });
 });

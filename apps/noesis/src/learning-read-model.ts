@@ -139,39 +139,61 @@ export function learningActivityForSession(
   );
 }
 
-const LEARNING_JOB_KINDS = Object.freeze([
-  "runtime.reflect_turn",
-  "runtime.author_revision",
-  "runtime.preflight",
-] satisfies readonly CoordinatorJobKind[]);
 const JOB_PAGE_SIZE = 1_000;
+const EXPERIMENT_QUERY_CHUNK_SIZE = 250;
 
-async function listAllJobsOfKind(
-  coordinator: Pick<RuntimeCoordinator, "listJobs">,
-  kind: CoordinatorJobKind,
+async function listAllScopedJobs(
+  coordinator: Pick<RuntimeCoordinator, "listJobPage">,
+  request: Readonly<{
+    kind: CoordinatorJobKind;
+    sessionId?: string;
+    experimentIds?: readonly string[];
+  }>,
 ): Promise<readonly CoordinatorJobView[]> {
   const jobs: CoordinatorJobView[] = [];
   let after: { readonly createdAt: string; readonly jobId: string } | undefined;
   while (true) {
-    const page = await coordinator.listJobs({
-      kind,
+    const page = await coordinator.listJobPage({
+      ...request,
       limit: JOB_PAGE_SIZE,
       ...(after ? { after } : {}),
     });
-    jobs.push(...page);
-    const last = page.at(-1)?.job;
-    if (!last || page.length < JOB_PAGE_SIZE) return Object.freeze(jobs);
-    after = Object.freeze({ createdAt: last.createdAt, jobId: last.jobId });
+    jobs.push(...page.jobs);
+    if (page.exhausted) return Object.freeze(jobs);
+    if (!page.nextCursor)
+      throw new Error(`Non-exhausted ${request.kind} job page did not provide an authoritative cursor`);
+    after = page.nextCursor;
   }
+}
+
+function chunks<Value>(values: readonly Value[], size: number): readonly (readonly Value[])[] {
+  const result: Value[][] = [];
+  for (let index = 0; index < values.length; index += size) result.push(values.slice(index, index + size));
+  return Object.freeze(result.map((chunk) => Object.freeze(chunk)));
 }
 
 /** Reads complete coordinator job chains before applying the pure session projection above. */
 export async function loadLearningActivityForSession(
-  coordinator: Pick<RuntimeCoordinator, "listJobs">,
+  coordinator: Pick<RuntimeCoordinator, "listJobPage">,
   sessionId: string,
 ): Promise<readonly TuiLearningActivitySummary[]> {
-  const pages = await Promise.all(
-    LEARNING_JOB_KINDS.map(async (kind) => await listAllJobsOfKind(coordinator, kind)),
+  const reflections = await listAllScopedJobs(coordinator, {
+    kind: "runtime.reflect_turn",
+    sessionId,
+  });
+  const experimentIds = Object.freeze(
+    [...new Set(reflections.flatMap((job) => resultExperimentId(job) ?? []))].sort(),
   );
-  return learningActivityForSession(pages.flat(), sessionId);
+  const linked = await Promise.all(
+    chunks(experimentIds, EXPERIMENT_QUERY_CHUNK_SIZE).flatMap((experimentChunk) =>
+      (["runtime.author_revision", "runtime.preflight"] as const).map(
+        async (kind) =>
+          await listAllScopedJobs(coordinator, {
+            kind,
+            experimentIds: experimentChunk,
+          }),
+      ),
+    ),
+  );
+  return learningActivityForSession([...reflections, ...linked.flat()], sessionId);
 }

@@ -281,6 +281,41 @@ describe("Noesis TUI lifecycle", () => {
     await emptyRun;
   });
 
+  test("starts with built-in autocomplete when skill discovery fails", async () => {
+    const base = await createRuntime({
+      name: "skill-discovery-failure-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    let discoveryAttempts = 0;
+    const runtime = Object.freeze({
+      ...base,
+      listSkills: async () => {
+        discoveryAttempts += 1;
+        throw new Error("broken skill package");
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    expect(discoveryAttempts).toBe(1);
+    expect(terminal.output).not.toContain("broken skill package");
+    terminal.type("/help\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("/model provider/model"));
+    terminal.type("/quit\n");
+    await running;
+  });
+
   test("serializes slash commands with prompts and other commands", async () => {
     let releaseCompact: (() => void) | undefined;
     const compactGate = new Promise<void>((resolve) => {

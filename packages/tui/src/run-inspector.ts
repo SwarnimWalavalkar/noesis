@@ -16,7 +16,14 @@ import {
 import { highlightCode } from "./syntax.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 
-export const INSPECTOR_HINT = "↑/↓ scroll · pgup/pgdn scroll · space exact · esc close";
+const SEMANTIC_INSPECTOR_HINT = "↑/↓ scroll · pgup/pgdn scroll · space exact · esc close";
+const RAW_INSPECTOR_HINT = "↑/↓ scroll · pgup/pgdn scroll · space semantic · esc close";
+/** Compatibility export for the inspector's default semantic view. */
+export const INSPECTOR_HINT = SEMANTIC_INSPECTOR_HINT;
+
+function inspectorHint(view: TuiInspectorState["view"]): string {
+  return view === "raw" ? RAW_INSPECTOR_HINT : SEMANTIC_INSPECTOR_HINT;
+}
 
 export interface RenderedRunInspector {
   readonly rows: readonly string[];
@@ -28,6 +35,7 @@ const ARTIFACT_PREVIEW_MAX_CHARACTERS = 20_000;
 const DIGEST_DISPLAY_CHARACTERS = 24;
 const CALL_SUMMARY_MAX_CHARACTERS = 256;
 const TOOL_DESCRIPTION_MAX_CHARACTERS = 180;
+const TOOL_NAME_MAX_CHARACTERS = 128;
 
 interface Section {
   readonly label: string;
@@ -190,10 +198,16 @@ function callsSection(children: readonly TuiAgentAction[], colorEnabled: boolean
 
 function toolListLines(tools: readonly PresentedTool[], colorEnabled: boolean): readonly string[] {
   const ordinalWidth = String(tools.length).length;
-  const nameWidth = Math.max(0, ...tools.map((tool) => tool.name.length));
+  const presented = tools.map((tool) =>
+    Object.freeze({
+      tool,
+      name: boundedInspectorScalar(tool.name, TOOL_NAME_MAX_CHARACTERS),
+    }),
+  );
+  const nameWidth = Math.max(0, ...presented.map(({ name }) => visibleWidth(name)));
   return [
     styled(colorEnabled, ANSI.dim, formatCount(tools.length, "tool")),
-    ...tools.map((tool, index) => {
+    ...presented.map(({ tool, name }, index) => {
       const metadata = [
         tool.score === undefined ? undefined : `score ${String(tool.score)}`,
         tool.revisionId ? `rev ${shortDigest(tool.revisionId)}` : undefined,
@@ -203,7 +217,7 @@ function toolListLines(tools: readonly PresentedTool[], colorEnabled: boolean): 
         : undefined;
       return [
         styled(colorEnabled, ANSI.dim, String(index + 1).padStart(ordinalWidth)),
-        tool.name.padEnd(nameWidth),
+        `${name}${" ".repeat(Math.max(0, nameWidth - visibleWidth(name)))}`,
         description ? styled(colorEnabled, ANSI.dim, `— ${description}`) : "",
         metadata.length > 0 ? styled(colorEnabled, ANSI.dim, `· ${metadata.join(" · ")}`) : "",
       ]
@@ -588,9 +602,7 @@ export function renderRunInspectorFrame(
       }),
       frameEdge(
         { left: "╰", right: "╯" },
-        dim(
-          inspector.view === "raw" ? INSPECTOR_HINT.replace("space exact", "space semantic") : INSPECTOR_HINT,
-        ),
+        dim(inspectorHint(inspector.view)),
         dim(position),
         width,
         colorEnabled,

@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
@@ -92,6 +92,49 @@ describe("Pi skill library adapter", () => {
     });
   });
 
+  test("keeps valid skills when one discovered resource persistently fails to load", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-skill-partial-load-"));
+    roots.push(root);
+    const project = join(root, "project");
+    const skillPackage = join(root, "package");
+    const validPath = join(skillPackage, "skills", "valid", "SKILL.md");
+    const brokenPath = join(skillPackage, "skills", "broken", "SKILL.md");
+    const validContent = "---\nname: valid\ndescription: Valid skill.\n---\n\nUseful instructions.";
+    const brokenContent = "---\nname: broken\ndescription: Broken skill.\n---\n\nUnreadable instructions.";
+    await mkdir(project, { recursive: true });
+    await mkdir(join(skillPackage, "skills", "valid"), { recursive: true });
+    await mkdir(join(skillPackage, "skills", "broken"), { recursive: true });
+    await writeFile(validPath, validContent, "utf8");
+    await writeFile(brokenPath, brokenContent, "utf8");
+    const library = createPiSkillLibrary({
+      cwd: project,
+      agentDirectory: join(root, "agent"),
+      workspaceTrusted: true,
+      readSkillFile: async (path) => {
+        if (path === brokenPath) throw new Error("persistent read failure");
+        return await readFile(path, "utf8");
+      },
+    });
+    await library.install(skillPackage, "workspace");
+
+    const snapshot = await library.pinSnapshot("partial-plan");
+
+    expect(snapshot.skills.find((skill) => skill.name === "valid")).toMatchObject({
+      name: "valid",
+      content: validContent,
+    });
+    expect(snapshot.skills.some((skill) => skill.name === "broken")).toBe(false);
+    expect(snapshot.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "error",
+          path: brokenPath,
+          message: expect.stringContaining("persistent read failure"),
+        }),
+      ]),
+    );
+  });
+
   test("pins exact skill bytes for admission and honors update scope", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-skill-pin-"));
     roots.push(root);
@@ -126,6 +169,72 @@ describe("Pi skill library adapter", () => {
     expect(live.skills.find((skill) => skill.name === "pinned")?.content).toContain("Changed instructions");
     await expect(library.update(skillPackage, "personal")).rejects.toThrow("No matching");
     await expect(library.update(skillPackage, "workspace")).resolves.toBeUndefined();
+  });
+
+  test("coalesces concurrent admission for one pin key into one immutable snapshot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-skill-pin-concurrency-"));
+    roots.push(root);
+    const project = join(root, "project");
+    const skillPackage = join(root, "package");
+    const skillPath = join(skillPackage, "skills", "shared-pin", "SKILL.md");
+    await mkdir(project, { recursive: true });
+    await mkdir(join(skillPackage, "skills", "shared-pin"), { recursive: true });
+    await writeFile(
+      skillPath,
+      "---\nname: shared-pin\ndescription: Shared pin.\n---\n\nPinned once.",
+      "utf8",
+    );
+    const library = createPiSkillLibrary({
+      cwd: project,
+      agentDirectory: join(root, "agent"),
+      workspaceTrusted: true,
+    });
+    await library.install(skillPackage, "workspace");
+    let releaseAdmission: (() => void) | undefined;
+    const admissionBarrier = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    let admissionStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      admissionStarted = resolve;
+    });
+    let admissions = 0;
+    const first = library.pinSnapshot("shared-plan", undefined, async (snapshot) => {
+      admissions += 1;
+      admissionStarted?.();
+      await admissionBarrier;
+      return Object.freeze({
+        ...snapshot,
+        skills: Object.freeze(
+          snapshot.skills.map((skill) =>
+            Object.freeze({
+              ...skill,
+              admittedRevision: Object.freeze({
+                kind: "evidence_revision" as const,
+                revisionId: "evidence-shared-pin",
+                workingPath: "evidence/shared-pin",
+                snapshotPath: "evidence/shared-pin",
+                contentDigest: skill.contentDigest,
+                evidenceKind: "input" as const,
+              }),
+            }),
+          ),
+        ),
+      });
+    });
+    await started;
+    const second = library.pinSnapshot("shared-plan", undefined, async () => {
+      admissions += 1;
+      throw new Error("Concurrent admission must be coalesced");
+    });
+    releaseAdmission?.();
+
+    const [firstSnapshot, secondSnapshot] = await Promise.all([first, second]);
+
+    expect(admissions).toBe(1);
+    expect(firstSnapshot).toBe(secondSnapshot);
+    expect(firstSnapshot.skills[0]?.admittedRevision?.revisionId).toBe("evidence-shared-pin");
+    expect(secondSnapshot.skills[0]?.admittedRevision).toBe(firstSnapshot.skills[0]?.admittedRevision);
   });
 
   test("does not trust repository-selected skill packages by default", async () => {

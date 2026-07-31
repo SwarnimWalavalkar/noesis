@@ -3,6 +3,7 @@ import { describe, expect, test, vi } from "vitest";
 import {
   createNoesisCommandAutocompleteProvider,
   createSafeEditor,
+  loadSkillSlashCommands,
   NOESIS_SLASH_COMMANDS,
 } from "../src/index.ts";
 
@@ -30,6 +31,20 @@ const suggestionsFor = async (text: string) =>
   });
 
 describe("Noesis slash command autocomplete", () => {
+  test("loads optional skill commands without allowing discovery failure to block startup", async () => {
+    const skills = Object.freeze([
+      Object.freeze({ name: "five-whys", description: "Find the underlying cause" }),
+    ]);
+
+    await expect(loadSkillSlashCommands(async () => skills)).resolves.toBe(skills);
+    await expect(
+      loadSkillSlashCommands(async () => {
+        throw new Error("broken skill package");
+      }),
+    ).resolves.toEqual([]);
+    await expect(loadSkillSlashCommands()).resolves.toEqual([]);
+  });
+
   test("offers every command implemented by the TUI", async () => {
     const suggestions = await suggestionsFor("/");
 

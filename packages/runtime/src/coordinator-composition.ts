@@ -1,8 +1,10 @@
-import type { AutomaticLearningOrgan, ExperimentBrief } from "@noesis/learning";
 import {
-  createWorkspaceExperimentBriefStore,
-  createWorkspaceLearningCandidateManifestStore,
-} from "@noesis/learning";
+  type CapabilityRevision,
+  type CapabilityRevisionRef,
+  capabilityRevisionRef,
+  sameCapabilityRevisionRef,
+  toJsonValue,
+} from "@noesis/domain";
 import {
   createLearningPreflightInput,
   type DynamicEvaluationConfig,
@@ -10,26 +12,24 @@ import {
   type EvaluationCriterionSet,
   type ProtectedEvaluationSuiteRevision,
 } from "@noesis/evals";
+import type { AutomaticLearningOrgan, ExperimentBrief } from "@noesis/learning";
 import {
-  capabilityRevisionRef,
-  sameCapabilityRevisionRef,
-  toJsonValue,
-  type CapabilityRevision,
-  type CapabilityRevisionRef,
-} from "@noesis/domain";
-import type { NoesisWorkspaceStore } from "@noesis/workspace";
+  createWorkspaceExperimentBriefStore,
+  createWorkspaceLearningCandidateManifestStore,
+} from "@noesis/learning";
 import type { AuthorityBoundary } from "@noesis/policy";
+import type { NoesisWorkspaceStore } from "@noesis/workspace";
+import { createRuntimeCoordinator, type RuntimeCoordinator } from "./coordinator.ts";
 import {
-  coordinatorOperationError,
   type AuthorRevisionJobPayload,
   type CoordinatorCandidateResult,
   type CoordinatorResearchTelemetry,
+  coordinatorOperationError,
   type PreflightJobPayload,
   type ReflectTurnJobPayload,
   type RuntimeCoordinatorConfig,
   type RuntimeCoordinatorResearchPort,
 } from "./coordinator-contracts.ts";
-import { createRuntimeCoordinator, type RuntimeCoordinator } from "./coordinator.ts";
 
 export interface CapabilityRevisionResolverPort {
   readonly resolve: (reference: CapabilityRevisionRef) => Promise<CapabilityRevision | undefined>;
@@ -150,7 +150,6 @@ export function createRuntimeCoordinatorComposition(
       );
       if (
         !experiment ||
-        (observed.status === "experiment" && experiment.status !== "hypothesis") ||
         experiment.hypothesis !== observed.brief.hypothesis ||
         experiment.scope !== observed.brief.scope ||
         !sameCapabilityRevisionRef(experiment.baselineRevision, observed.brief.baselineRevision)
@@ -159,25 +158,38 @@ export function createRuntimeCoordinatorComposition(
           `Reflection ${observed.brief.experimentId} did not persist its authoritative hypothesis`,
           { code: "experiment_hypothesis_missing", retryable: false },
         );
-      const hypothesisExperiment = Object.freeze({
-        experimentId: experiment.experimentId,
-        hypothesis: experiment.hypothesis,
-        scope: experiment.scope,
-        evidenceRefs: experiment.evidenceRefs,
-        baselineRevision: experiment.baselineRevision,
-        feedbackSignalIds: experiment.feedbackSignalIds,
-        status: "hypothesis" as const,
+      const reflectionTelemetry = telemetry({
+        reflectionRun: observed.reflectionRun,
+        retrievalStrategyId: payload.retrievalStrategyId,
+        routingStrategyId: payload.routingStrategyId,
+        recurrenceCount: observed.harvest.recurrenceCount,
       });
+      if (observed.status === "experiment") {
+        if (experiment.status !== "hypothesis")
+          throw coordinatorOperationError(
+            `Reflection ${observed.brief.experimentId} did not persist a new hypothesis experiment`,
+            { code: "experiment_hypothesis_missing", retryable: false },
+          );
+        return Object.freeze({
+          status: "experiment" as const,
+          experiment: Object.freeze({
+            experimentId: experiment.experimentId,
+            hypothesis: experiment.hypothesis,
+            scope: experiment.scope,
+            evidenceRefs: experiment.evidenceRefs,
+            baselineRevision: experiment.baselineRevision,
+            feedbackSignalIds: experiment.feedbackSignalIds,
+            status: "hypothesis" as const,
+          }),
+          hypothesisDedupeKey: observed.brief.hypothesisDedupeKey,
+          telemetry: reflectionTelemetry,
+        });
+      }
       return Object.freeze({
-        status: observed.status,
-        experiment: hypothesisExperiment,
+        status: "deduped" as const,
+        experiment,
         hypothesisDedupeKey: observed.brief.hypothesisDedupeKey,
-        telemetry: telemetry({
-          reflectionRun: observed.reflectionRun,
-          retrievalStrategyId: payload.retrievalStrategyId,
-          routingStrategyId: payload.routingStrategyId,
-          recurrenceCount: observed.harvest.recurrenceCount,
-        }),
+        telemetry: reflectionTelemetry,
       });
     },
 

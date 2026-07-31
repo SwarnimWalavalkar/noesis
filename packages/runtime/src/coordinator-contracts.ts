@@ -1,7 +1,7 @@
 import {
+  type CapabilityRevisionRef,
   CapabilityRevisionRefSchema,
   CapabilitySchema,
-  type CapabilityRevisionRef,
   type DatabaseRowRef,
   type DurableJobRecord,
   type EvidenceRef,
@@ -11,7 +11,7 @@ import {
   type PreflightDecision,
   type PreflightReport,
 } from "@noesis/domain";
-import { RetrievalStrategyIdSchema, type RetrievalStrategyId } from "@noesis/intelligence";
+import { type RetrievalStrategyId, RetrievalStrategyIdSchema } from "@noesis/intelligence";
 import { LearningTurnInputSchema } from "@noesis/learning";
 import { z } from "zod";
 
@@ -128,7 +128,7 @@ export type CoordinatorReflectionResult =
       readonly telemetry: CoordinatorResearchTelemetry;
     }
   | {
-      readonly status: "experiment" | "deduped";
+      readonly status: "experiment";
       readonly experiment: {
         readonly experimentId: string;
         readonly hypothesis: string;
@@ -138,6 +138,12 @@ export type CoordinatorReflectionResult =
         readonly feedbackSignalIds: readonly string[];
         readonly status: "hypothesis";
       };
+      readonly hypothesisDedupeKey: string;
+      readonly telemetry: CoordinatorResearchTelemetry;
+    }
+  | {
+      readonly status: "deduped";
+      readonly experiment: Experiment;
       readonly hypothesisDedupeKey: string;
       readonly telemetry: CoordinatorResearchTelemetry;
     };

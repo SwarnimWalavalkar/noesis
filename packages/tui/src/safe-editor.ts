@@ -11,6 +11,7 @@ import { ANSI, elideText, styled } from "./theme.ts";
 
 export {
   createNoesisCommandAutocompleteProvider,
+  loadSkillSlashCommands,
   NOESIS_SLASH_COMMANDS,
 } from "./command-autocomplete.ts";
 

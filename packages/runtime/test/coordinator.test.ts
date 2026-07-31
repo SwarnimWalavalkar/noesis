@@ -2,7 +2,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { CapabilityRevisionRef, FileRevisionRef, PreflightDecision } from "@noesis/domain";
+import type { CapabilityRevisionRef, Experiment, FileRevisionRef, PreflightDecision } from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
@@ -72,6 +72,8 @@ async function fixture(decision: PreflightDecision = "pass") {
   let preflightCalls = 0;
   let transientPreflightFailures = 0;
   let terminalAuthorFailure = false;
+  let briefPublicationCollisions = 0;
+  let dedupedStatus: "authoring" | "completed" | undefined;
   let blockingReflect: Promise<void> | undefined;
   let activeReflects = 0;
   let peakReflects = 0;
@@ -90,6 +92,10 @@ async function fixture(decision: PreflightDecision = "pass") {
   const research: RuntimeCoordinatorResearchPort = {
     reflect: async (payload, signal) => {
       reflectCalls += 1;
+      if (briefPublicationCollisions > 0) {
+        briefPublicationCollisions -= 1;
+        throw new Error(`Experiment brief publication collision for dedupe:${payload.turn.turnId}`);
+      }
       activeReflects += 1;
       peakReflects = Math.max(peakReflects, activeReflects);
       try {
@@ -98,6 +104,38 @@ async function fixture(decision: PreflightDecision = "pass") {
           throw coordinatorOperationError("cancelled", { code: "cancelled", retryable: false });
         if (!payload.turn.userMessage.includes("preserve"))
           return { status: "no_change", reason: "irrelevant", telemetry: { role: "fake-reflector" } };
+        if (dedupedStatus) {
+          const experiment: Experiment =
+            dedupedStatus === "completed"
+              ? {
+                  experimentId: `experiment:${payload.turn.turnId}`,
+                  hypothesis: "preserve voice",
+                  scope: payload.turn.scope,
+                  evidenceRefs: payload.turn.evidenceRefs,
+                  baselineRevision: payload.baselineRevision,
+                  candidateRevisions: [],
+                  feedbackSignalIds: [],
+                  status: "completed",
+                  outcome: "keep",
+                }
+              : {
+                  experimentId: `experiment:${payload.turn.turnId}`,
+                  hypothesis: "preserve voice",
+                  scope: payload.turn.scope,
+                  evidenceRefs: payload.turn.evidenceRefs,
+                  baselineRevision: payload.baselineRevision,
+                  candidateRevisions: [],
+                  feedbackSignalIds: [],
+                  status: "authoring",
+                };
+          await workspace.research.experiments.putExperiment(experiment);
+          return {
+            status: "deduped",
+            experiment,
+            hypothesisDedupeKey: `dedupe:${payload.turn.turnId}`,
+            telemetry: { role: "fake-reflector" },
+          };
+        }
         const experiment = {
           experimentId: `experiment:${payload.turn.turnId}`,
           hypothesis: "preserve voice",
@@ -296,6 +334,12 @@ async function fixture(decision: PreflightDecision = "pass") {
     setTerminalAuthorFailure: (value: boolean) => {
       terminalAuthorFailure = value;
     },
+    setBriefPublicationCollisions: (count: number) => {
+      briefPublicationCollisions = count;
+    },
+    setDedupedStatus: (status: "authoring" | "completed") => {
+      dedupedStatus = status;
+    },
     setBlockingReflect: (value: Promise<void> | undefined) => {
       blockingReflect = value;
     },
@@ -362,7 +406,7 @@ describe("automatic runtime coordinator", () => {
     f.workspace.close();
   });
 
-  test("paginates jobs with a stable authoritative cursor", async () => {
+  test("advances an authoritative page cursor past an undecodable legacy coordinator row", async () => {
     const f = await fixture();
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
@@ -370,27 +414,44 @@ describe("automatic runtime coordinator", () => {
       research: f.research,
       config: config(),
     });
-    await coordinator.observeCompletedTurn(f.turn("turn-page-a", "ordinary weather question"));
-    await coordinator.observeCompletedTurn(f.turn("turn-page-b", "ordinary weather question"));
+    await coordinator.stop();
+    await f.workspace.jobs.enqueue({
+      jobId: "000-legacy-reflection",
+      kind: "runtime.reflect_turn",
+      payload: Object.freeze({ turn: Object.freeze({ sessionId: "session-1" }), legacy: true }),
+      payloadRefs: Object.freeze([]),
+      operationId: "legacy-reflection-operation",
+      idempotencyKey: "legacy-reflection-idempotency",
+      notBefore: "2026-07-22T00:00:00.000Z",
+      maxAttempts: 1,
+      estimatedCost: 0,
+      budget: 0,
+    });
+    await coordinator.observeCompletedTurn(f.turn("turn-page-valid", "ordinary weather question"));
 
-    const firstPage = await coordinator.listJobs({ kind: "runtime.reflect_turn", limit: 1 });
-    const first = firstPage[0]?.job;
-    if (!first) throw new Error("Expected the first coordinator job page");
-    const secondPage = await coordinator.listJobs({
+    const firstPage = await coordinator.listJobPage({
       kind: "runtime.reflect_turn",
       limit: 1,
-      after: Object.freeze({ createdAt: first.createdAt, jobId: first.jobId }),
+      sessionId: "session-1",
+    });
+    expect(firstPage).toEqual({
+      jobs: [],
+      exhausted: false,
+      nextCursor: {
+        createdAt: "2026-07-22T00:00:00.000Z",
+        jobId: "000-legacy-reflection",
+      },
+    });
+    if (!firstPage.nextCursor) throw new Error("Expected an authoritative cursor");
+    const secondPage = await coordinator.listJobPage({
+      kind: "runtime.reflect_turn",
+      limit: 1,
+      after: firstPage.nextCursor,
+      sessionId: "session-1",
     });
 
-    expect(firstPage).toHaveLength(1);
-    expect(secondPage).toHaveLength(1);
-    expect(secondPage[0]?.job.jobId).not.toBe(first.jobId);
-    expect(
-      secondPage[0]?.job.createdAt === first.createdAt
-        ? (secondPage[0]?.job.jobId ?? "") > first.jobId
-        : (secondPage[0]?.job.createdAt ?? "") > first.createdAt,
-    ).toBe(true);
-    await coordinator.stop();
+    expect(secondPage.jobs).toHaveLength(1);
+    expect(secondPage.jobs[0]?.payload).toMatchObject({ turn: { turnId: "turn-page-valid" } });
     f.workspace.close();
   });
 
@@ -427,6 +488,52 @@ describe("automatic runtime coordinator", () => {
     expect((await terminal.getJob(failed.job.jobId))?.job.status).toBe("completed");
     f.workspace.close();
     second.workspace.close();
+  });
+
+  test("retries a cross-process experiment brief publication collision", async () => {
+    const f = await fixture();
+    f.setBriefPublicationCollisions(1);
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      research: f.research,
+      config: config(),
+    });
+
+    const observed = await coordinator.observeCompletedTurn(f.turn("turn-brief-collision"));
+    await coordinator.idle();
+
+    expect((await coordinator.getJob(observed.job.jobId))?.job).toMatchObject({
+      status: "completed",
+      attempt: 2,
+    });
+    expect(f.counts().reflectCalls).toBe(2);
+    f.workspace.close();
+  });
+
+  test.each([
+    "authoring",
+    "completed",
+  ] as const)("does not enqueue duplicate author work for an authoritative deduped %s experiment", async (status) => {
+    const f = await fixture();
+    f.setDedupedStatus(status);
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      research: f.research,
+      config: config(),
+    });
+
+    const observed = await coordinator.observeCompletedTurn(f.turn(`turn-deduped-${status}`));
+    await coordinator.idle();
+
+    expect((await coordinator.getJob(observed.job.jobId))?.job.result).toMatchObject({
+      status: "deduped",
+      telemetry: { existingExperimentStatus: status },
+    });
+    expect(await coordinator.listJobs({ kind: "runtime.author_revision" })).toEqual([]);
+    expect(f.counts()).toMatchObject({ reflectCalls: 1, authorCalls: 0, preflightCalls: 0 });
+    f.workspace.close();
   });
 
   test("bounds concurrency and budget and propagates cancellation", async () => {

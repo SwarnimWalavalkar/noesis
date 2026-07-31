@@ -16,11 +16,11 @@ import {
   type CompletedNormalTurn,
   CompletedNormalTurnSchema,
   type CoordinatorCandidateResult,
-  coordinatorOperationError,
   type CoordinatorJobKind,
   type CoordinatorJobView,
   type CoordinatorPreflightResult,
   coordinatorJobPayload,
+  coordinatorOperationError,
   DEFAULT_RUNTIME_COORDINATOR_CONFIG,
   type PreflightActivationHandoff,
   PreflightJobPayloadSchema,
@@ -52,6 +52,17 @@ export interface RuntimeCoordinator {
     readonly limit?: number;
     readonly after?: DurableJobListCursor;
   }) => Promise<readonly CoordinatorJobView[]>;
+  readonly listJobPage: (request?: {
+    readonly kind?: CoordinatorJobKind;
+    readonly limit?: number;
+    readonly after?: DurableJobListCursor;
+    readonly sessionId?: string;
+    readonly experimentIds?: readonly string[];
+  }) => Promise<{
+    readonly jobs: readonly CoordinatorJobView[];
+    readonly exhausted: boolean;
+    readonly nextCursor?: DurableJobListCursor;
+  }>;
   readonly getPreflightActivationHandoff: (
     experimentId: string,
   ) => Promise<PreflightActivationHandoff | undefined>;
@@ -85,14 +96,18 @@ function errorMessage(error: unknown): string {
 }
 
 function failureFrom(error: unknown): DurableJobFailure {
+  const experimentBriefCollision =
+    error instanceof Error && error.message.startsWith("Experiment brief publication collision for ");
   const code =
     error instanceof Error && typeof Reflect.get(error, "coordinatorCode") === "string"
       ? String(Reflect.get(error, "coordinatorCode"))
-      : "coordinator_operation_failed";
+      : experimentBriefCollision
+        ? "experiment_brief_publication_collision"
+        : "coordinator_operation_failed";
   const retryable =
     error instanceof Error && typeof Reflect.get(error, "coordinatorRetryable") === "boolean"
       ? Reflect.get(error, "coordinatorRetryable") === true
-      : false;
+      : experimentBriefCollision;
   const ambiguous =
     error instanceof Error && typeof Reflect.get(error, "coordinatorAmbiguous") === "boolean"
       ? Reflect.get(error, "coordinatorAmbiguous") === true
@@ -522,6 +537,33 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       }
     });
 
+  const listJobPage: RuntimeCoordinator["listJobPage"] = async (request = {}) => {
+    if (request.sessionId && request.kind !== "runtime.reflect_turn")
+      throw new Error("Session-scoped coordinator job pages are only valid for reflection jobs");
+    if (request.experimentIds && request.kind === "runtime.reflect_turn")
+      throw new Error("Experiment-scoped coordinator job pages are not valid for reflection jobs");
+    const page = await options.workspace.jobs.listPage({
+      ...(request.kind ? { kind: request.kind } : {}),
+      ...(request.limit === undefined ? {} : { limit: request.limit }),
+      ...(request.after ? { after: request.after } : {}),
+      ...(request.sessionId ? { payloadSessionId: request.sessionId } : {}),
+      ...(request.experimentIds ? { payloadExperimentIds: request.experimentIds } : {}),
+    });
+    return Object.freeze({
+      jobs: Object.freeze(
+        page.records.flatMap((job) => {
+          try {
+            return [coordinatorJobPayload(job)];
+          } catch {
+            return [];
+          }
+        }),
+      ),
+      exhausted: page.exhausted,
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+    });
+  };
+
   const getPreflightActivationHandoff = async (
     experimentId: string,
   ): Promise<PreflightActivationHandoff | undefined> => {
@@ -559,6 +601,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     retry,
     getJob,
     listJobs,
+    listJobPage,
     getPreflightActivationHandoff,
     stop,
   });

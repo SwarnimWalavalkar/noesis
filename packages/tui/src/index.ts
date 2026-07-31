@@ -30,7 +30,7 @@ import {
   type TuiInteractionResult,
   type TuiInteractionSnapshot,
 } from "./runtime-port.ts";
-import { createSafeEditor, createSelectTheme } from "./safe-editor.ts";
+import { createSafeEditor, createSelectTheme, loadSkillSlashCommands } from "./safe-editor.ts";
 import {
   createResponsiveSessionPicker,
   createSessionPickerItems,
@@ -91,7 +91,7 @@ export async function startNoesisTui(
   const colorEnabled =
     terminal instanceof ProcessTerminal && shouldUseColor(process.env) && process.stdout.hasColors();
   const selectTheme = createSelectTheme(colorEnabled);
-  const skillCommands = runtime.listSkills ? await runtime.listSkills() : Object.freeze([]);
+  const skillCommands = await loadSkillSlashCommands(runtime.listSkills);
   const view = createNoesisView(
     initialTuiState(runtime.agentName ?? "runtime", {
       provider: requestedProvider,
