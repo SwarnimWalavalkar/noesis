@@ -126,16 +126,21 @@ function parseEditorCommand(
 }
 
 const windowsCommandMetaCharacter = /([()\][%!^"`<>&|;, *?])/gu;
+const windowsCommandShim = /(?:^|[\\/])node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/iu;
 
 function escapeWindowsCommand(value: string): string {
   return value.replace(windowsCommandMetaCharacter, "^$1");
 }
 
-function escapeWindowsCommandArgument(value: string): string | undefined {
+function escapeWindowsCommandArgument(
+  value: string,
+  doubleEscapeMetaCharacters: boolean,
+): string | undefined {
   if (/[\0\r\n]/u.test(value)) return undefined;
   const escapedQuotes = value.replace(/(?=(\\+?)?)\1"/gu, '$1$1\\"');
   const escapedTrailingBackslashes = escapedQuotes.replace(/(?=(\\+?)?)\1$/u, "$1$1");
-  return `"${escapedTrailingBackslashes}"`.replace(windowsCommandMetaCharacter, "^$1");
+  const escaped = `"${escapedTrailingBackslashes}"`.replace(windowsCommandMetaCharacter, "^$1");
+  return doubleEscapeMetaCharacters ? escaped.replace(windowsCommandMetaCharacter, "^$1") : escaped;
 }
 
 /** Build a host-independent process launch, including the Windows batch-file boundary. */
@@ -160,7 +165,11 @@ export function prepareExternalEditorLaunch(
   if (/[\0\r\n]/u.test(parsed.executable)) {
     return { status: "failed", error: "invalid Windows batch editor command" };
   }
-  const escapedArgs = editorArgs.map(escapeWindowsCommandArgument);
+  // npm-style cmd shims replay their arguments through a second cmd.exe parse.
+  const doubleEscapeMetaCharacters = windowsCommandShim.test(parsed.executable);
+  const escapedArgs = editorArgs.map((argument) =>
+    escapeWindowsCommandArgument(argument, doubleEscapeMetaCharacters),
+  );
   if (escapedArgs.some((argument) => argument === undefined)) {
     return { status: "failed", error: "invalid Windows batch editor argument" };
   }
@@ -174,7 +183,7 @@ export function prepareExternalEditorLaunch(
   return {
     status: "complete",
     executable: commandProcessor,
-    args: ["/d", "/s", "/c", `"${shellCommand}"`],
+    args: ["/d", "/s", "/v:off", "/c", `"${shellCommand}"`],
     windowsVerbatimArguments: true,
   };
 }

@@ -130,8 +130,53 @@ process.exit(7);`,
       args: [
         "/d",
         "/s",
+        "/v:off",
         "/c",
         `"C:\\Program^ Files\\Noesis^ Editor.${extension} ^"--wait^" ^"C:\\Temp\\prompt^ ^&^ notes.md^""`,
+      ],
+      windowsVerbatimArguments: true,
+    });
+  });
+
+  test("double-escapes arguments passed through a node_modules command shim", () => {
+    expect(
+      prepareExternalEditorLaunch(
+        "C:\\workspace\\node_modules\\.bin\\editor.cmd --label=%TEMP%",
+        "C:\\Temp\\prompt & notes.md",
+        { ComSpec: "cmd.exe" },
+        "win32",
+      ),
+    ).toEqual({
+      status: "complete",
+      executable: "cmd.exe",
+      args: [
+        "/d",
+        "/s",
+        "/v:off",
+        "/c",
+        '"C:\\workspace\\node_modules\\.bin\\editor.cmd ^^^"--label=^^^%TEMP^^^%^^^" ^^^"C:\\Temp\\prompt^^^ ^^^&^^^ notes.md^^^""',
+      ],
+      windowsVerbatimArguments: true,
+    });
+  });
+
+  test("caret-escapes percent expansion in ordinary Windows batch launches", () => {
+    expect(
+      prepareExternalEditorLaunch(
+        '"C:\\Editors\\%CD%\\editor.cmd" "%TEMP%"',
+        "C:\\Users\\%USERNAME%\\prompt.md",
+        { ComSpec: "cmd.exe" },
+        "win32",
+      ),
+    ).toEqual({
+      status: "complete",
+      executable: "cmd.exe",
+      args: [
+        "/d",
+        "/s",
+        "/v:off",
+        "/c",
+        '"C:\\Editors\\^%CD^%\\editor.cmd ^"^%TEMP^%^" ^"C:\\Users\\^%USERNAME^%\\prompt.md^""',
       ],
       windowsVerbatimArguments: true,
     });
