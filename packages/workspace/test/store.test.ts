@@ -232,6 +232,111 @@ describe("WorkspaceStore", () => {
     recovered.close();
   });
 
+  test("recovers running sessions on both sides of foreground admission without changing settled sessions", async () => {
+    const root = await temporary("runtime-session-recovery-windows");
+    const first = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:00:00.000Z",
+    });
+    const session = (sessionId: string, status: "idle" | "running" | "completed" | "aborted" | "failed") =>
+      Object.freeze({
+        sessionId,
+        title: sessionId,
+        status,
+        provider: "controlled",
+        model: "controlled",
+        runtime: "pi",
+        createdAt: "2026-07-26T00:00:00.000Z",
+        updatedAt: "2026-07-26T00:00:00.000Z",
+        metadata: Object.freeze({}),
+      });
+    await first.operational.sessions.put(session("session-before-admission", "running"));
+    await first.operational.sessions.put(session("session-after-settlement", "running"));
+    await first.operational.sessions.put(session("session-idle", "idle"));
+    await first.operational.sessions.put(session("session-completed", "completed"));
+    await first.operational.sessions.put(session("session-aborted", "aborted"));
+    await first.operational.sessions.put(session("session-failed", "failed"));
+
+    const protectedRuntime = createWorkspaceRuntimeInternals(first).protectedRuntime;
+    await protectedRuntime.activations.bootstrapGenesis({
+      capabilityRevision: {
+        kind: "capability_revision",
+        capabilityId: "general-collaboration",
+        capabilityRevisionId: "general-collaboration-genesis-v1",
+        bundleDigest: digest("a"),
+      },
+      activeDefinitions: Object.freeze({}),
+    });
+    await protectedRuntime.activations.admitTurnPlan(
+      runningTurnPlan("session-after-settlement", "turn-already-settled"),
+    );
+    await first.operational.outcomes.put({
+      outcomeId: "turn-already-settled:outcome",
+      sessionId: "session-after-settlement",
+      turnId: "turn-already-settled",
+      status: "accepted",
+      summary: "Already settled before the process exited",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:01.000Z",
+      metadata: Object.freeze({ replayEligible: true }),
+    });
+    await first.operational.foregroundTurns.settle({
+      turnId: "turn-already-settled",
+      outcomeId: "turn-already-settled:outcome",
+      status: "completed",
+      settledAt: "2026-07-26T00:00:01.000Z",
+    });
+    // Recreate the process-exit window after the foreground transaction settled but before
+    // the owning runtime persisted its final idle trail state.
+    await first.operational.sessions.put(session("session-after-settlement", "running"));
+    first.close();
+
+    const recovered = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:01:00.000Z",
+      recoverInterruptedOperations: true,
+      runtimeOwnerId: "successor-owner",
+    });
+
+    for (const sessionId of ["session-before-admission", "session-after-settlement"])
+      expect(await recovered.operational.sessions.get(sessionId)).toMatchObject({
+        status: "aborted",
+        updatedAt: "2026-07-26T00:01:00.000Z",
+      });
+    expect(await recovered.operational.foregroundTurns.get("turn-already-settled")).toMatchObject({
+      status: "completed",
+      settledAt: "2026-07-26T00:00:01.000Z",
+    });
+    expect(await recovered.operational.outcomes.listForSession("session-before-admission")).toEqual([]);
+    for (const status of ["idle", "completed", "aborted", "failed"] as const)
+      expect(await recovered.operational.sessions.get(`session-${status}`)).toMatchObject({
+        status,
+        updatedAt: "2026-07-26T00:00:00.000Z",
+      });
+
+    const inspection = new DatabaseSync(recovered.unsafeDatabasePathForTesting, { readOnly: true });
+    const recoveryActivities = inspection
+      .prepare(
+        `SELECT activity_kind, subject_id, references_json
+         FROM activity_log
+         WHERE activity_kind = 'session.interrupted'
+         ORDER BY subject_id`,
+      )
+      .all();
+    inspection.close();
+    expect(recoveryActivities).toMatchObject([
+      {
+        activity_kind: "session.interrupted",
+        subject_id: "session-after-settlement",
+        references_json: '[{"reason":"runtime_owner_recovery","interruptedTurnIds":[]}]',
+      },
+      {
+        activity_kind: "session.interrupted",
+        subject_id: "session-before-admission",
+        references_json: '[{"reason":"runtime_owner_recovery","interruptedTurnIds":[]}]',
+      },
+    ]);
+    recovered.close();
+  });
+
   test("keeps one live mutating runtime owner while allowing non-recovering readers", async () => {
     const root = await temporary("runtime-owner");
     const owner = await createWorkspaceStore(root, {

@@ -295,7 +295,7 @@ export async function createWorkspaceStore(
   };
   const systemActor: ActorRef = { actorId: "workspace-store", kind: "system" };
 
-  const recoverInterruptedForegroundTurns = (interruptedAt: string): number =>
+  const recoverInterruptedRuntimeSessions = (interruptedAt: string): number =>
     database.transaction(() => {
       const runningTurns = db
         .prepare(
@@ -334,11 +334,6 @@ export async function createWorkspaceStore(
            SET status = 'aborted', settled_at = ?
            WHERE turn_id = ? AND status = 'running'`,
         ).run(interruptedAt, turnId);
-        db.prepare(
-          `UPDATE sessions
-           SET status = 'aborted', updated_at = ?
-           WHERE session_id = ?`,
-        ).run(interruptedAt, sessionId);
         recordActivity(systemActor, "foreground_turn.interrupted", "foreground_turn", turnId, [
           {
             sessionId,
@@ -347,7 +342,32 @@ export async function createWorkspaceStore(
           },
         ]);
       }
-      return runningTurns.length;
+      const runningSessions = db
+        .prepare(
+          `SELECT session_id
+           FROM sessions
+           WHERE status = 'running'
+           ORDER BY created_at, session_id`,
+        )
+        .all();
+      for (const row of runningSessions) {
+        const sessionId = requiredString(row, "session_id");
+        const interruptedTurnIds = runningTurns
+          .filter((turn) => requiredString(turn, "session_id") === sessionId)
+          .map((turn) => requiredString(turn, "turn_id"));
+        db.prepare(
+          `UPDATE sessions
+           SET status = 'aborted', updated_at = ?
+           WHERE session_id = ? AND status = 'running'`,
+        ).run(interruptedAt, sessionId);
+        recordActivity(systemActor, "session.interrupted", "session", sessionId, [
+          {
+            reason: "runtime_owner_recovery",
+            interruptedTurnIds,
+          },
+        ]);
+      }
+      return runningSessions.length;
     });
 
   const pathsForDefinition = (
@@ -1373,7 +1393,7 @@ export async function createWorkspaceStore(
     options.afterRuntimeOwnerAcquiredForTesting?.();
     if (options.recoverInterruptedOperations) {
       const interruptedAt = now();
-      recoverInterruptedForegroundTurns(interruptedAt);
+      recoverInterruptedRuntimeSessions(interruptedAt);
       await operational.codeExecutions.interruptRunning(interruptedAt);
       await operational.workflows.interruptRunning(interruptedAt);
     }

@@ -4,6 +4,7 @@ import {
   initialTuiState,
   reduceTui,
   renderRunInspector,
+  renderRunInspectorFrame,
   type NoesisTuiAction,
   type NoesisTuiState,
   type TuiExecutionDetail,
@@ -184,7 +185,7 @@ describe("run inspector panel", () => {
     expect(body).toMatch(/\n│ {4}\S/u);
   });
 
-  test("labels a truncated durable source preview", () => {
+  test("labels a truncated durable source preview when no exact action source exists", () => {
     const detail: TuiExecutionDetail = {
       ...DETAIL,
       sourceArtifact: {
@@ -195,10 +196,77 @@ describe("run inspector panel", () => {
         truncated: true,
       },
     };
-    const body = render(stateWithRun({ detail }), 88, 60).join("\n");
+    const state = stateWithRun({ detail });
+    const timeline = state.timeline.map((entry) =>
+      entry.kind === "action" && entry.actionId === "x1" ? { ...entry, input: undefined } : entry,
+    );
+    const body = render({ ...state, timeline }, 88, 60).join("\n");
 
     expect(body).toContain("SOURCE preview truncated");
     expect(body).toContain("1  const partial = true;");
+  });
+
+  test("scrolls to the exact tail of a large resumed action result", () => {
+    const exactTail = "EXACT-PERSISTED-TAIL";
+    const largeResult = `${"x".repeat(30_000)}${exactTail}`;
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "trail-selected",
+      trail: {
+        trailId: "resumed-session",
+        title: "resumed",
+        status: "idle",
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        runtime: "pi",
+        turns: [],
+        capabilityVersions: {},
+      },
+    });
+    state = reduceTui(state, {
+      type: "transcript-hydrated",
+      trailId: "resumed-session",
+      transcript: [
+        {
+          kind: "action",
+          actionId: "resumed-action",
+          turnId: "turn-1",
+          name: "files.read",
+          status: "completed",
+          input: { path: "large.txt" },
+          update: { progress: "complete" },
+          output: { content: largeResult },
+          startedAt: "2026-07-31T10:00:01.000Z",
+          completedAt: "2026-07-31T10:00:02.000Z",
+        },
+      ],
+    });
+    state = reduceTui(state, { type: "inspector-opened", actionId: "resumed-action" });
+    state = reduceTui(state, {
+      type: "inspector-loaded",
+      actionId: "resumed-action",
+      detail: { ...DETAIL, result: '{ "content": "artifact preview only" }' },
+    });
+
+    const firstFrame = renderRunInspectorFrame(state, 88, 12);
+    expect(firstFrame.maxScroll).toBeGreaterThan(250);
+    expect(firstFrame.rows.join("\n")).not.toContain(exactTail);
+
+    let tailFrame: readonly string[] | undefined;
+    for (let scroll = 0; scroll <= firstFrame.maxScroll; scroll += 10) {
+      const candidate = reduceTui(state, {
+        type: "inspector-scrolled",
+        delta: scroll,
+        maxScroll: firstFrame.maxScroll,
+      });
+      const rows = renderRunInspectorFrame(candidate, 88, 12).rows;
+      if (rows.join("\n").includes(exactTail)) {
+        tailFrame = rows;
+        break;
+      }
+    }
+
+    expect(tailFrame?.join("\n")).toContain(exactTail);
+    expect(tailFrame?.join("\n")).not.toContain("artifact preview only");
   });
 
   test("puts the error above the program and does not repeat it as a result", () => {
@@ -340,10 +408,10 @@ describe("run inspector panel", () => {
     const scrolled = render(stateWithRun({ detail: DETAIL, scroll: 6 }), 88, 12);
     const overscrolled = render(stateWithRun({ detail: DETAIL, scroll: 900 }), 88, 12);
 
-    expect(whole.at(-1)).toContain("25 rows");
-    expect(scrolled.at(-1)).toContain("7–16 of 25");
+    expect(whole.at(-1)).toContain("29 rows");
+    expect(scrolled.at(-1)).toContain("7–16 of 29");
     // Scrolling past the end settles on the last screen instead of running off it.
-    expect(overscrolled.at(-1)).toContain("16–25 of 25");
+    expect(overscrolled.at(-1)).toContain("20–29 of 29");
   });
 
   test("renders nothing without an open inspector or usable space", () => {

@@ -331,6 +331,113 @@ describe("apps/noesis production control-plane composition", () => {
     await runtime.shutdown();
   });
 
+  test("hydrates and resumes running sessions left before admission or after turn settlement", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-session-window-recovery-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const seed = await createWorkspaceStore(home, {
+      now: () => "2026-07-26T00:00:00.000Z",
+    });
+    const runningSession = (sessionId: string) =>
+      Object.freeze({
+        sessionId,
+        title: sessionId,
+        status: "running" as const,
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        runtime: runtimeIdentity,
+        createdAt: "2026-07-26T00:00:00.000Z",
+        updatedAt: "2026-07-26T00:00:00.000Z",
+        metadata: Object.freeze({}),
+      });
+    await seed.operational.sessions.put(runningSession("session-before-admission"));
+    await seed.operational.sessions.put(runningSession("session-after-settlement"));
+
+    const protectedRuntime = createWorkspaceRuntimeInternals(seed).protectedRuntime;
+    await protectedRuntime.activations.bootstrapGenesis({
+      capabilityRevision: {
+        kind: "capability_revision",
+        capabilityId: "general-collaboration",
+        capabilityRevisionId: "general-collaboration-genesis-v1",
+        bundleDigest: "a".repeat(64),
+      },
+      activeDefinitions: Object.freeze({}),
+    });
+    await protectedRuntime.activations.admitTurnPlan(
+      recoveryTurnPlan("session-after-settlement", "turn-before-idle-persist"),
+    );
+    await seed.operational.messages.put({
+      messageId: "turn-before-idle-persist:user",
+      sessionId: "session-after-settlement",
+      role: "user",
+      content: "A completed request",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:01.000Z",
+      metadata: Object.freeze({ turnId: "turn-before-idle-persist" }),
+    });
+    await seed.operational.messages.put({
+      messageId: "turn-before-idle-persist:assistant",
+      sessionId: "session-after-settlement",
+      role: "assistant",
+      content: "A completed response",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:02.000Z",
+      metadata: Object.freeze({ turnId: "turn-before-idle-persist" }),
+    });
+    await seed.operational.outcomes.put({
+      outcomeId: "turn-before-idle-persist:outcome",
+      sessionId: "session-after-settlement",
+      turnId: "turn-before-idle-persist",
+      status: "accepted",
+      summary: "A completed response",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:03.000Z",
+      metadata: Object.freeze({ replayEligible: true, aborted: false }),
+    });
+    await seed.operational.foregroundTurns.settle({
+      turnId: "turn-before-idle-persist",
+      outcomeId: "turn-before-idle-persist:outcome",
+      status: "completed",
+      settledAt: "2026-07-26T00:00:03.000Z",
+    });
+    // Recreate the process-exit window after durable turn settlement but before the runtime's
+    // final trail-state write restored the session to idle.
+    await seed.operational.sessions.put(runningSession("session-after-settlement"));
+    seed.close();
+
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+
+    expect(runtime.getTrail("session-before-admission")).toMatchObject({ status: "aborted", turns: [] });
+    expect(runtime.getTrail("session-after-settlement")).toMatchObject({
+      status: "aborted",
+      turns: [{ input: "A completed request", output: "A completed response" }],
+    });
+    await expect(runtime.resumeTrail("session-before-admission")).resolves.toMatchObject({
+      status: "idle",
+      turns: [],
+    });
+    await expect(runtime.resumeTrail("session-after-settlement")).resolves.toMatchObject({
+      status: "idle",
+      turns: [{ input: "A completed request", output: "A completed response" }],
+    });
+    expect(
+      await runtime.debug.workspace.operational.outcomes.listForSession("session-before-admission"),
+    ).toEqual([]);
+    await runtime.shutdown();
+  });
+
   test("persists every top-level model action and exposes the same transcript after restart", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-durable-actions-"));
     roots.push(home);
