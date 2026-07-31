@@ -39,6 +39,15 @@ type EditorProcessResult =
       readonly error?: string;
     };
 
+export type ExternalEditorLaunch =
+  | {
+      readonly status: "complete";
+      readonly executable: string;
+      readonly args: readonly string[];
+      readonly windowsVerbatimArguments?: true;
+    }
+  | { readonly status: "failed"; readonly error: string };
+
 const nonEmpty = (value: string | undefined): string | undefined => {
   const normalized = value?.trim();
   return normalized ? normalized : undefined;
@@ -116,6 +125,60 @@ function parseEditorCommand(
     : { status: "failed", error: "invalid editor command: no executable" };
 }
 
+const windowsCommandMetaCharacter = /([()\][%!^"`<>&|;, *?])/gu;
+
+function escapeWindowsCommand(value: string): string {
+  return value.replace(windowsCommandMetaCharacter, "^$1");
+}
+
+function escapeWindowsCommandArgument(value: string): string | undefined {
+  if (/[\0\r\n]/u.test(value)) return undefined;
+  const escapedQuotes = value.replace(/(?=(\\+?)?)\1"/gu, '$1$1\\"');
+  const escapedTrailingBackslashes = escapedQuotes.replace(/(?=(\\+?)?)\1$/u, "$1$1");
+  return `"${escapedTrailingBackslashes}"`.replace(windowsCommandMetaCharacter, "^$1");
+}
+
+/** Build a host-independent process launch, including the Windows batch-file boundary. */
+export function prepareExternalEditorLaunch(
+  command: string,
+  filePath: string,
+  environment: ExternalEditorEnvironment,
+  platform: NodeJS.Platform,
+): ExternalEditorLaunch {
+  const parsed = parseEditorCommand(command, platform);
+  if (parsed.status === "failed") return parsed;
+
+  const editorArgs = [...parsed.args, filePath];
+  if (platform !== "win32" || !/\.(?:bat|cmd)$/iu.test(parsed.executable)) {
+    return {
+      status: "complete",
+      executable: parsed.executable,
+      args: editorArgs,
+    };
+  }
+
+  if (/[\0\r\n]/u.test(parsed.executable)) {
+    return { status: "failed", error: "invalid Windows batch editor command" };
+  }
+  const escapedArgs = editorArgs.map(escapeWindowsCommandArgument);
+  if (escapedArgs.some((argument) => argument === undefined)) {
+    return { status: "failed", error: "invalid Windows batch editor argument" };
+  }
+  const shellCommand = [escapeWindowsCommand(parsed.executable), ...escapedArgs].join(" ");
+  const commandProcessor =
+    environment["ComSpec"] ??
+    environment["COMSPEC"] ??
+    process.env["ComSpec"] ??
+    process.env["COMSPEC"] ??
+    "cmd.exe";
+  return {
+    status: "complete",
+    executable: commandProcessor,
+    args: ["/d", "/s", "/c", `"${shellCommand}"`],
+    windowsVerbatimArguments: true,
+  };
+}
+
 async function runEditor(
   command: string,
   filePath: string,
@@ -146,20 +209,23 @@ async function runEditor(
       settled = true;
       resolve(result);
     };
-    const parsed = parseEditorCommand(command, platform);
-    if (parsed.status === "failed") {
+    const launch = prepareExternalEditorLaunch(command, filePath, environment, platform);
+    if (launch.status === "failed") {
       settle({
         status: "failed",
         reason: "launch-failed",
-        error: parsed.error,
+        error: launch.error,
       });
       return;
     }
     const childEnvironment = { ...process.env, ...environment };
-    const child = spawn(parsed.executable, [...parsed.args, filePath], {
+    const child = spawn(launch.executable, launch.args, {
       env: childEnvironment,
       shell: false,
       stdio: "inherit",
+      ...(launch.windowsVerbatimArguments
+        ? { windowsVerbatimArguments: launch.windowsVerbatimArguments }
+        : {}),
     });
     child.once("error", (error) =>
       settle({

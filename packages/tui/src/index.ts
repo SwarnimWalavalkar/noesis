@@ -101,6 +101,13 @@ export async function startNoesisTui(
     () => terminal.rows,
   );
   const editor = createSafeEditor(tui, colorEnabled, selectTheme, () => terminal.rows);
+  const reportFailure = (error: unknown): void => {
+    view.dispatch({
+      type: "failed",
+      error: safeTerminalText(error instanceof Error ? error.message : String(error)),
+    });
+    tui.requestRender();
+  };
   const headerView = createHeaderView(colorEnabled, () => terminal.rows);
   let inspectorMaxScroll = 0;
   const inspectorOverlay = createRunInspectorOverlay(
@@ -281,10 +288,6 @@ export async function startNoesisTui(
   const handleTranscriptKey = (data: string): boolean => {
     const state = view.state;
     if (state.inspector) {
-      if (matchesKey(data, "escape")) {
-        closeRunInspector();
-        return true;
-      }
       if (matchesKey(data, "up"))
         view.dispatch({
           type: "inspector-scrolled",
@@ -309,12 +312,12 @@ export async function startNoesisTui(
           delta: INSPECTOR_PAGE_ROWS,
           maxScroll: inspectorMaxScroll,
         });
+      else return false;
       tui.requestRender();
       return true;
     }
     if (state.actionCursor) {
-      if (matchesKey(data, "escape") || matchesKey(data, "ctrl+o"))
-        view.dispatch({ type: "action-cursor-cleared" });
+      if (matchesKey(data, "ctrl+o")) view.dispatch({ type: "action-cursor-cleared" });
       else if (matchesKey(data, "up")) view.dispatch({ type: "action-cursor-moved", direction: "previous" });
       else if (matchesKey(data, "down")) view.dispatch({ type: "action-cursor-moved", direction: "next" });
       else if (matchesKey(data, "space"))
@@ -325,7 +328,7 @@ export async function startNoesisTui(
       else if (matchesKey(data, "enter")) {
         openRunInspector(state.actionCursor);
         return true;
-      }
+      } else return false;
       tui.requestRender();
       return true;
     }
@@ -383,11 +386,7 @@ export async function startNoesisTui(
       },
       (error: unknown) => {
         if (phase !== "main" || view.state.trailId !== trailId) return;
-        view.dispatch({
-          type: "failed",
-          error: safeTerminalText(error instanceof Error ? error.message : String(error)),
-        });
-        tui.requestRender();
+        reportFailure(error);
       },
     );
   };
@@ -400,8 +399,7 @@ export async function startNoesisTui(
     }
     if (interactionEvent.sessionId !== view.state.trailId) return;
     if (interactionEvent.type === "interaction-failed") {
-      view.dispatch({ type: "failed", error: safeTerminalText(interactionEvent.error) });
-      tui.requestRender();
+      reportFailure(interactionEvent.error);
       return;
     }
     if (interactionEvent.type === "turn-started") {
@@ -431,10 +429,7 @@ export async function startNoesisTui(
       if (interactionEvent.outcome === "aborted") {
         view.dispatch({ type: "turn-aborted" });
       } else if (interactionEvent.outcome === "failed") {
-        view.dispatch({
-          type: "failed",
-          error: safeTerminalText(interactionEvent.error ?? "Turn failed."),
-        });
+        reportFailure(interactionEvent.error ?? "Turn failed.");
       }
       reconcileSettledTurn(
         interactionEvent.sessionId,
@@ -478,22 +473,39 @@ export async function startNoesisTui(
     return interact(stopVisibleInteraction(visibleTurnId));
   };
 
+  editor.createStandaloneEscapeHandler = () => {
+    if (phase !== "main") return undefined;
+    const inspectedActionId = view.state.inspector?.actionId;
+    if (inspectedActionId)
+      return () => {
+        if (view.state.inspector?.actionId === inspectedActionId) closeRunInspector();
+        return true;
+      };
+    const selectedActionId = view.state.actionCursor;
+    if (selectedActionId)
+      return () => {
+        if (view.state.actionCursor === selectedActionId) view.dispatch({ type: "action-cursor-cleared" });
+        tui.requestRender();
+        return true;
+      };
+    if (view.state.interaction.phase === "idle") return undefined;
+    const visibleTurnId = view.state.interaction.active?.turnId;
+    if (!visibleTurnId) return () => true;
+    return () => {
+      if (view.state.interaction.active?.turnId !== visibleTurnId) return true;
+      if (view.state.interaction.phase !== "interrupting" && view.state.execution !== "aborting")
+        void interruptActiveTurn().catch(reportFailure);
+      return true;
+    };
+  };
+
   const restoreNewestQueuedInput = (): void => {
-    void interact({ type: "restore-newest" }).then(
-      (result) => {
-        if (result.effect !== "restored" || !result.restoredText) return;
-        const draft = editor.getText();
-        editor.setText(draft ? `${draft}\n${result.restoredText}` : result.restoredText);
-        tui.requestRender();
-      },
-      (error: unknown) => {
-        view.dispatch({
-          type: "failed",
-          error: safeTerminalText(error instanceof Error ? error.message : String(error)),
-        });
-        tui.requestRender();
-      },
-    );
+    void interact({ type: "restore-newest" }).then((result) => {
+      if (result.effect !== "restored" || !result.restoredText) return;
+      const draft = editor.getText();
+      editor.setText(draft ? `${draft}\n${result.restoredText}` : result.restoredText);
+      tui.requestRender();
+    }, reportFailure);
   };
 
   const openExternalEditor = (): void => {
@@ -534,6 +546,7 @@ export async function startNoesisTui(
       }
       return undefined;
     }
+    if (editor.capturePotentialPasteInput(data)) return { consume: true };
     // Global shortcuts must not reinterpret controls that are still quarantined as paste.
     if (!editor.acceptsUnbracketedCommandInput()) return undefined;
     if (matchesKey(data, "ctrl+c")) {
@@ -547,17 +560,6 @@ export async function startNoesisTui(
     }
     if (matchesKey(data, "alt+up")) {
       restoreNewestQueuedInput();
-      return { consume: true };
-    }
-    if (matchesKey(data, "escape") && view.state.interaction.phase !== "idle") {
-      if (view.state.interaction.phase !== "interrupting" && view.state.execution !== "aborting")
-        void interruptActiveTurn().catch((error: unknown) => {
-          view.dispatch({
-            type: "failed",
-            error: safeTerminalText(error instanceof Error ? error.message : String(error)),
-          });
-          tui.requestRender();
-        });
       return { consume: true };
     }
     if (data.endsWith("\n") && `${editor.getText()}${data}` === "/quit\n") {
@@ -681,11 +683,7 @@ export async function startNoesisTui(
       await interact({ type: "submit", text });
     })().catch((error: unknown) => {
       if (!isCurrentSubmission()) return;
-      view.dispatch({
-        type: "failed",
-        error: safeTerminalText(error instanceof Error ? error.message : String(error)),
-      });
-      tui.requestRender();
+      reportFailure(error);
     });
   };
   tui.addChild(root);

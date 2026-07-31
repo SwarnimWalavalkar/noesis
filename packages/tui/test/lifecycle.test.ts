@@ -1328,6 +1328,52 @@ describe("Noesis TUI lifecycle", () => {
     expect(terminal.stops).toBe(1);
   });
 
+  test("does not treat a fragmented bracketed-paste opener as active-turn Escape", async () => {
+    let releaseBlocked: (() => void) | undefined;
+    const abort = vi.fn(async () => {
+      releaseBlocked?.();
+    });
+    const runtime = await createRuntime({
+      name: "fragmented-paste-active-turn-scripted",
+      async run(request, emit) {
+        emit({ type: "delta", text: "still running" });
+        await new Promise<void>((resolve) => {
+          releaseBlocked = resolve;
+        });
+        return {
+          text: "",
+          provider: request.provider,
+          model: request.model,
+          outcome: "aborted",
+          stopReason: "aborted",
+        };
+      },
+      steer: consumeSteer,
+      abort,
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    terminal.type("block this turn\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("still running"));
+
+    terminal.send("\u001b");
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    terminal.send("[20");
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    terminal.send("0~pasted\u0003\r\u001b[201~");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    expect(abort).not.toHaveBeenCalled();
+    expect(terminal.stops).toBe(0);
+    expect(terminal.output).toContain("● STREAMING");
+
+    terminal.send("\u0003");
+    await running;
+    expect(abort).toHaveBeenCalledOnce();
+    expect(terminal.stops).toBe(1);
+  });
+
   test("does not let delayed Escape feedback abort the successor to the visible turn", async () => {
     let releaseFirst: (() => void) | undefined;
     let releaseSecond: (() => void) | undefined;

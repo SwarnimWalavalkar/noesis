@@ -117,6 +117,8 @@ describe("Noesis safe editor key path", () => {
   test("recognizes a paste start fragmented beyond pi-tui's assembly window", async () => {
     vi.useFakeTimers();
     const editor = createSafeEditor(new TUI(inertTerminal));
+    const standaloneEscape = vi.fn(() => true);
+    editor.createStandaloneEscapeHandler = () => standaloneEscape;
     editor.handleInput?.("\u001b");
     await vi.advanceTimersByTimeAsync(20);
     editor.handleInput?.("[20");
@@ -127,6 +129,22 @@ describe("Noesis safe editor key path", () => {
     await settleSafeEditorAmbiguity();
 
     expect(editor.getText()).toBe("safe");
+    expect(standaloneEscape).not.toHaveBeenCalled();
+  });
+
+  test("routes a settled standalone Escape only after paste ambiguity expires", async () => {
+    vi.useFakeTimers();
+    const editor = createSafeEditor(new TUI(inertTerminal));
+    const standaloneEscape = vi.fn(() => true);
+    editor.createStandaloneEscapeHandler = () => standaloneEscape;
+
+    editor.handleInput?.("\u001b");
+    await vi.advanceTimersByTimeAsync(49);
+    expect(standaloneEscape).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(standaloneEscape).toHaveBeenCalledOnce();
+    expect(editor.getText()).toBe("");
   });
 
   test("sanitizes a bracketed-paste payload when its closing marker is split across chunks", async () => {
