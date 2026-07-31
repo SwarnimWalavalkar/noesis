@@ -92,10 +92,24 @@ export function actionDepth(action: TuiAgentAction, actions: readonly TuiAgentAc
 }
 
 const statusGlyph = (status: TuiAgentAction["status"]): string =>
-  status === "running" ? "●" : status === "failed" ? "×" : "✓";
+  status === "running"
+    ? "●"
+    : status === "completed"
+      ? "✓"
+      : status === "failed"
+        ? "×"
+        : status === "cancelled" || status === "interrupted"
+          ? "■"
+          : "!";
 
 const statusColor = (status: TuiAgentAction["status"]): string =>
-  status === "running" ? ANSI.cyan : status === "failed" ? ANSI.red : ANSI.green;
+  status === "running"
+    ? ANSI.cyan
+    : status === "completed"
+      ? ANSI.green
+      : status === "failed"
+        ? ANSI.red
+        : ANSI.yellow;
 
 export interface ActionBlockOptions {
   readonly expanded?: boolean;

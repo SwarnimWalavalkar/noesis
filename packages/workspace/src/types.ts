@@ -57,10 +57,16 @@ export interface MessageRecord {
 export interface ToolCallRecord {
   readonly toolCallId: string;
   readonly sessionId: string;
+  readonly turnId?: string;
   readonly messageId?: string;
+  readonly parentToolCallId?: string;
+  readonly executionId?: string;
   readonly toolName: string;
   readonly request: unknown;
+  readonly update?: unknown;
   readonly response?: unknown;
+  /** Assigned by WorkspaceStore on first persistence and immutable thereafter. */
+  readonly sequence?: number;
   readonly status: "requested" | "running" | "completed" | "failed" | "denied" | "ambiguous";
   readonly sensitivity: Sensitivity;
   readonly createdAt: string;
@@ -453,6 +459,7 @@ export interface OperationalRepositories {
     readonly put: (record: ToolCallRecord) => Promise<DatabaseRowRef>;
     readonly listForSession: (sessionId: string) => Promise<readonly ToolCallRecord[]>;
     readonly listForExecution: (executionId: string) => Promise<readonly ToolCallRecord[]>;
+    readonly interruptRunningForTurn: (turnId: string, interruptedAt: string) => Promise<number>;
   };
   readonly codeExecutions: {
     readonly get: (executionId: string) => Promise<CodeExecutionRecord | undefined>;

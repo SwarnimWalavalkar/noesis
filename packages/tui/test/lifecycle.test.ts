@@ -1,4 +1,5 @@
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
+import type { RuntimeTranscriptEntry } from "@noesis/runtime";
 import { describe, expect, test, vi } from "vitest";
 import { boundedInspectorText, startNoesisTui } from "../src/index.ts";
 import { createInMemoryTestRuntime, type TestNoesisRuntime } from "./support/in-memory-runtime.ts";
@@ -517,6 +518,90 @@ describe("Noesis TUI lifecycle", () => {
     await running;
 
     expect(runtime.resumedTrailIds.at(-1)).toBe(selected.trailId);
+  });
+
+  test("restores durable tool calls as expandable transcript rows", async () => {
+    const base = await createRuntime({
+      name: "resume-actions-scripted",
+      async run(request) {
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {},
+      async followUp() {},
+      async abort() {},
+    });
+    const selected = await base.startTrail({ title: "selected" });
+    const transcript: readonly RuntimeTranscriptEntry[] = [
+      {
+        kind: "message",
+        messageId: "message-user",
+        turnId: "turn-1",
+        role: "user",
+        text: "where am I?",
+        createdAt: "2026-07-31T10:00:00.000Z",
+      },
+      {
+        kind: "action",
+        actionId: "execute-1",
+        turnId: "turn-1",
+        executionId: "execution-1",
+        name: "execute",
+        status: "completed",
+        input: { source: "return await tools.shell.run({ command: 'pwd' });" },
+        output: { calls: 1 },
+        startedAt: "2026-07-31T10:00:01.000Z",
+        completedAt: "2026-07-31T10:00:02.000Z",
+      },
+      {
+        kind: "action",
+        actionId: "shell-1",
+        turnId: "turn-1",
+        parentActionId: "execute-1",
+        name: "shell.run",
+        status: "completed",
+        input: { command: "pwd" },
+        output: { stdout: "/workspace", exitCode: 0 },
+        startedAt: "2026-07-31T10:00:01.250Z",
+        completedAt: "2026-07-31T10:00:01.750Z",
+      },
+      {
+        kind: "message",
+        messageId: "message-assistant",
+        turnId: "turn-1",
+        role: "assistant",
+        text: "You are in /workspace.",
+        createdAt: "2026-07-31T10:00:03.000Z",
+      },
+    ];
+    const runtime = Object.freeze({
+      ...base,
+      getTranscript: async (trailId: string) =>
+        trailId === selected.trailId ? transcript : base.getTranscript(trailId),
+    });
+    const terminal = createTestTerminal();
+
+    const running = startNoesisTui(
+      runtime,
+      { session: { mode: "resume", trailId: selected.trailId } },
+      terminal,
+    );
+    await vi.waitFor(() => expect(terminal.output).toContain("shell.run"));
+    expect(terminal.output).toContain("You are in /workspace.");
+
+    terminal.type("\u000f");
+    terminal.type(" ");
+    await vi.waitFor(() => expect(terminal.output).toContain('"command": "pwd"'));
+    expect(terminal.output).toContain('"stdout": "/workspace"');
+
+    terminal.type("\u001b");
+    terminal.type("/quit\n");
+    await running;
   });
 
   test("renders lifecycle and usage updates from real runtime events", async () => {

@@ -476,7 +476,7 @@ describe("Noesis TUI reducer", () => {
     ]);
   });
 
-  test("reconstructs a resumed trail as an ordered message timeline", () => {
+  test("waits for the authoritative transcript instead of reconstructing trail turns", () => {
     const state = reduceTui(initialTuiState("fake"), {
       type: "trail-selected",
       trail: {
@@ -494,14 +494,165 @@ describe("Noesis TUI reducer", () => {
       },
     });
 
-    expect(state.timeline).toEqual([
-      { kind: "message", role: "user", text: "first" },
-      { kind: "message", role: "assistant", text: "one" },
-      { kind: "message", role: "user", text: "second" },
-      { kind: "message", role: "assistant", text: "two" },
-    ]);
+    expect(state.timeline).toEqual([]);
     expect(state.execution).toBe("idle");
     expect(state.turnCount).toBe(2);
+  });
+
+  test("hydrates the authoritative transcript with interleaved inspectable actions", () => {
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "trail-selected",
+      trail: {
+        trailId: "trail-1",
+        title: "resumed",
+        status: "idle",
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        runtime: "pi",
+        turns: [{ input: "legacy", output: "fallback" }],
+        capabilityVersions: {},
+      },
+    });
+    state = reduceTui(state, {
+      type: "transcript-hydrated",
+      trailId: "trail-1",
+      transcript: [
+        {
+          kind: "message",
+          messageId: "message-user",
+          turnId: "turn-1",
+          role: "user",
+          text: "inspect the repo",
+          createdAt: "2026-07-31T10:00:00.000Z",
+        },
+        {
+          kind: "action",
+          actionId: "execute-1",
+          turnId: "turn-1",
+          executionId: "execution-1",
+          name: "execute",
+          status: "completed",
+          input: { source: "return await tools.files.read({ path: 'README.md' });" },
+          output: { calls: 1 },
+          startedAt: "2026-07-31T10:00:01.000Z",
+          completedAt: "2026-07-31T10:00:03.500Z",
+        },
+        {
+          kind: "action",
+          actionId: "call-1",
+          turnId: "turn-1",
+          parentActionId: "execute-1",
+          name: "files.read",
+          status: "cancelled",
+          input: { path: "README.md" },
+          output: { error: "cancelled by user" },
+          startedAt: "2026-07-31T10:00:02.000Z",
+          completedAt: "2026-07-31T10:00:02.250Z",
+        },
+        {
+          kind: "message",
+          messageId: "message-assistant",
+          turnId: "turn-1",
+          role: "assistant",
+          text: "I stopped before finishing.",
+          createdAt: "2026-07-31T10:00:04.000Z",
+        },
+      ],
+    });
+
+    expect(state.timeline).toEqual([
+      {
+        kind: "message",
+        messageId: "message-user",
+        turnId: "turn-1",
+        role: "user",
+        text: "inspect the repo",
+        createdAt: "2026-07-31T10:00:00.000Z",
+      },
+      {
+        kind: "action",
+        actionId: "execute-1",
+        turnId: "turn-1",
+        executionId: "execution-1",
+        name: "execute",
+        status: "completed",
+        input: { source: "return await tools.files.read({ path: 'README.md' });" },
+        output: { calls: 1 },
+        startedAt: Date.parse("2026-07-31T10:00:01.000Z"),
+        durationMs: 2_500,
+      },
+      {
+        kind: "action",
+        actionId: "call-1",
+        turnId: "turn-1",
+        parentActionId: "execute-1",
+        name: "files.read",
+        status: "cancelled",
+        input: { path: "README.md" },
+        output: { error: "cancelled by user" },
+        startedAt: Date.parse("2026-07-31T10:00:02.000Z"),
+        durationMs: 250,
+      },
+      {
+        kind: "message",
+        messageId: "message-assistant",
+        turnId: "turn-1",
+        role: "assistant",
+        text: "I stopped before finishing.",
+        createdAt: "2026-07-31T10:00:04.000Z",
+      },
+    ]);
+    expect(renderNoesisState(state, 100, 30).join("\n")).toContain("■ files.read  README.md · cancelled");
+  });
+
+  test("ignores transcript hydration from a superseded session", () => {
+    const state = reduceTui(
+      reduceTui(
+        reduceTui(initialTuiState("fake"), {
+          type: "trail-selected",
+          trail: {
+            trailId: "trail-current",
+            title: "current",
+            status: "idle",
+            provider: "fake",
+            model: "model",
+            runtime: "fake",
+            turns: [{ input: "current", output: "answer" }],
+            capabilityVersions: {},
+          },
+        }),
+        {
+          type: "transcript-hydrated",
+          trailId: "trail-current",
+          transcript: [
+            {
+              kind: "message",
+              messageId: "current-user",
+              turnId: "turn-current",
+              role: "user",
+              text: "current",
+              createdAt: "2026-07-31T10:00:00.000Z",
+            },
+          ],
+        },
+      ),
+      {
+        type: "transcript-hydrated",
+        trailId: "trail-stale",
+        transcript: [],
+      },
+    );
+
+    expect(state.timeline).toEqual([
+      {
+        kind: "message",
+        messageId: "current-user",
+        turnId: "turn-current",
+        role: "user",
+        text: "current",
+        createdAt: "2026-07-31T10:00:00.000Z",
+      },
+    ]);
   });
 
   test("records action durations from the dispatched clock", () => {

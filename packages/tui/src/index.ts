@@ -6,7 +6,7 @@ import {
   type Terminal,
   TUI,
 } from "@earendil-works/pi-tui";
-import type { TrailState } from "@noesis/runtime";
+import type { RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
 import { executionIdOf } from "./action-summary.ts";
 import { isExclusiveSlashCommand, runSlashCommand } from "./commands.ts";
 import {
@@ -550,12 +550,19 @@ export async function startNoesisTui(
     });
   };
   tui.addChild(root);
-  const mountMain = (trail: TrailState): void => {
+  const loadTranscript = async (trail: TrailState): Promise<readonly RuntimeTranscriptEntry[]> =>
+    runtime.getTranscript(trail.trailId);
+  const mountMain = (trail: TrailState, transcript: readonly RuntimeTranscriptEntry[]): void => {
     phase = "main";
     cancelPicker = undefined;
     inspectorHandle?.hide();
     inspectorHandle = undefined;
     view.dispatch({ type: "trail-selected", trail });
+    view.dispatch({
+      type: "transcript-hydrated",
+      trailId: trail.trailId,
+      transcript,
+    });
     root.clear();
     root.addChild(headerView);
     root.addChild(view);
@@ -614,7 +621,8 @@ export async function startNoesisTui(
       return;
     }
     try {
-      mountMain(await resumableTrail(runtime, trailId));
+      const trail = await resumableTrail(runtime, trailId);
+      mountMain(trail, await loadTranscript(trail));
     } catch (error) {
       await shutdown();
       throw error;
@@ -628,7 +636,7 @@ export async function startNoesisTui(
             provider: requestedProvider,
             model: requestedModel,
           });
-    mountMain(trail);
+    mountMain(trail, await loadTranscript(trail));
     tui.start();
   }
   await shutdownCompleted;

@@ -4,6 +4,7 @@ import {
   compareTrailRecency,
   SESSION_PICKER_LIMIT,
   type NoesisRuntime,
+  type RuntimeTranscriptEntry,
   type TrailState,
   type TrailSummary,
 } from "@noesis/runtime";
@@ -55,6 +56,32 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
   const listTrails = (): readonly TrailState[] =>
     Object.freeze([...trails.values()].map(({ state }) => state));
   const getTrail = (trailId: string): TrailState => getStored(trailId).state;
+  const getTranscript = async (trailId: string): Promise<readonly RuntimeTranscriptEntry[]> => {
+    const stored = getStored(trailId);
+    return Object.freeze(
+      stored.state.turns.flatMap((turn, index): readonly RuntimeTranscriptEntry[] => {
+        const turnId = `${trailId}:turn:${String(index)}`;
+        return [
+          Object.freeze({
+            kind: "message",
+            messageId: `${turnId}:user`,
+            turnId,
+            role: "user",
+            text: turn.input,
+            createdAt: stored.createdAt,
+          }),
+          Object.freeze({
+            kind: "message",
+            messageId: `${turnId}:assistant`,
+            turnId,
+            role: "assistant",
+            text: turn.output,
+            createdAt: stored.updatedAt,
+          }),
+        ];
+      }),
+    );
+  };
   const listTrailSummaries = (): readonly TrailSummary[] =>
     Object.freeze(
       [...trails.values()]
@@ -175,6 +202,7 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     listTrails,
     listTrailSummaries,
     getTrail,
+    getTranscript,
     resumeTrail,
     forkTrail,
     runTurn,

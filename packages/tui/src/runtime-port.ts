@@ -90,6 +90,7 @@ export type NoesisTuiRuntime = Pick<
   | "startTrail"
   | "listTrailSummaries"
   | "getTrail"
+  | "getTranscript"
   | "resumeTrail"
   | "forkTrail"
   | "runTurn"

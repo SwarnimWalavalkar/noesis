@@ -1622,11 +1622,40 @@ function createOperationalRepositories(
   };
   const putToolCall = async (record: ToolCallRecord): Promise<DatabaseRowRef> => {
     database.transaction(() => {
-      const current = db
-        .prepare("SELECT status, response_json FROM tool_calls WHERE tool_call_id = ?")
-        .get(record.toolCallId);
-      if (current !== undefined) {
-        const from = requiredString(current, "status");
+      const currentRow = db.prepare("SELECT * FROM tool_calls WHERE tool_call_id = ?").get(record.toolCallId);
+      const current = currentRow === undefined ? undefined : decodeToolCall(currentRow);
+      if (record.turnId) {
+        const turn = db
+          .prepare("SELECT session_id FROM foreground_turns WHERE turn_id = ?")
+          .get(record.turnId);
+        if (turn === undefined || requiredString(turn, "session_id") !== record.sessionId)
+          throw new Error(`Tool call ${record.toolCallId} turn does not belong to its session`);
+      }
+      if (record.parentToolCallId) {
+        const parent = db
+          .prepare("SELECT session_id, turn_id FROM tool_calls WHERE tool_call_id = ?")
+          .get(record.parentToolCallId);
+        if (
+          parent === undefined ||
+          requiredString(parent, "session_id") !== record.sessionId ||
+          optionalString(parent, "turn_id") !== record.turnId
+        )
+          throw new Error(`Tool call ${record.toolCallId} parent does not share its session and turn`);
+      }
+      if (record.executionId) {
+        const execution = db
+          .prepare("SELECT session_id, turn_id FROM codemode_executions WHERE execution_id = ?")
+          .get(record.executionId);
+        if (
+          execution === undefined ||
+          requiredString(execution, "session_id") !== record.sessionId ||
+          optionalString(execution, "turn_id") !== record.turnId
+        )
+          throw new Error(`Tool call ${record.toolCallId} execution does not share its session and turn`);
+      }
+      if (currentRow !== undefined) {
+        if (!current) throw new Error(`Tool call ${record.toolCallId} could not be decoded`);
+        const from = current.status;
         const allowed: Readonly<Record<string, readonly ToolCallRecord["status"][]>> = {
           requested: ["running", "completed", "failed", "denied", "ambiguous"],
           running: ["completed", "failed", "denied", "ambiguous"],
@@ -1637,28 +1666,74 @@ function createOperationalRepositories(
         };
         if (from !== record.status && !allowed[from]?.includes(record.status))
           throw new Error(`Invalid tool-call transition ${from} -> ${record.status}`);
-        const nextResponse = record.response === undefined ? undefined : JSON.stringify(record.response);
+        if (current.executionId && current.executionId !== record.executionId)
+          throw new Error(`Tool call ${record.toolCallId} changed its execution lineage`);
+        if (record.sequence !== undefined && record.sequence !== current.sequence)
+          throw new Error(`Tool call ${record.toolCallId} changed its action sequence`);
+        const normalizedRecord = { ...record, sequence: current.sequence };
+        const currentIdentity = {
+          ...current,
+          executionId: record.executionId,
+          update: record.update,
+          response: record.response,
+          status: record.status,
+          completedAt: record.completedAt,
+        };
+        if (
+          !isDeepStrictEqual(
+            JSON.parse(JSON.stringify(currentIdentity)),
+            JSON.parse(JSON.stringify(normalizedRecord)),
+          )
+        )
+          throw new Error(`Tool call ${record.toolCallId} changed its immutable identity`);
         if (
           allowed[from]?.length === 0 &&
-          (optionalString(current, "response_json") !== nextResponse || from !== record.status)
+          !isDeepStrictEqual(
+            JSON.parse(JSON.stringify(current)),
+            JSON.parse(JSON.stringify(normalizedRecord)),
+          )
         )
           throw new Error(`Terminal tool call ${record.toolCallId} is immutable`);
       }
+      const actionSequence =
+        current === undefined
+          ? requiredNumber(
+              db
+                .prepare(
+                  `SELECT COALESCE(MAX(action_sequence), 0) + 1 AS next_sequence
+                   FROM tool_calls
+                   WHERE session_id = ?`,
+                )
+                .get(record.sessionId),
+              "next_sequence",
+            )
+          : (() => {
+              if (current.sequence === undefined)
+                throw new Error(`Tool call ${record.toolCallId} has no durable action sequence`);
+              return current.sequence;
+            })();
       db.prepare(
         `INSERT INTO tool_calls(
-          tool_call_id, session_id, message_id, tool_name, request_json, response_json,
+          tool_call_id, session_id, turn_id, message_id, parent_tool_call_id, execution_id,
+          tool_name, request_json, update_json, response_json, action_sequence,
           status, sensitivity, created_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(tool_call_id) DO UPDATE SET
+          execution_id = excluded.execution_id, update_json = excluded.update_json,
           response_json = excluded.response_json, status = excluded.status,
           completed_at = excluded.completed_at`,
       ).run(
         record.toolCallId,
         record.sessionId,
+        record.turnId ?? null,
         record.messageId ?? null,
+        record.parentToolCallId ?? null,
+        record.executionId ?? null,
         record.toolName,
         JSON.stringify(record.request),
+        record.update === undefined ? null : JSON.stringify(record.update),
         record.response === undefined ? null : JSON.stringify(record.response),
+        actionSequence,
         record.status,
         record.sensitivity,
         record.createdAt,
@@ -2086,11 +2161,34 @@ function createOperationalRepositories(
           .prepare(
             `SELECT *
              FROM tool_calls
-             WHERE json_extract(request_json, '$.executionId') = ?
+             WHERE execution_id = ?
+                OR json_extract(request_json, '$.executionId') = ?
              ORDER BY created_at, tool_call_id`,
           )
-          .all(executionId)
+          .all(executionId, executionId)
           .map(decodeToolCall),
+      interruptRunningForTurn: async (turnId: string, interruptedAt: string) =>
+        database.transaction(() => {
+          const running = db
+            .prepare(
+              `SELECT tool_call_id
+               FROM tool_calls
+               WHERE turn_id = ? AND status IN ('requested', 'running')`,
+            )
+            .all(turnId);
+          for (const row of running) {
+            const toolCallId = requiredString(row, "tool_call_id");
+            db.prepare(
+              `UPDATE tool_calls
+               SET status = 'failed',
+                   response_json = '{"error":"Turn interrupted","reason":"interrupted"}',
+                   completed_at = ?
+               WHERE tool_call_id = ? AND status IN ('requested', 'running')`,
+            ).run(interruptedAt, toolCallId);
+            recordActivity(systemActor, "tool_call.interrupted", "tool_call", toolCallId);
+          }
+          return running.length;
+        }),
     }),
     codeExecutions: Object.freeze({
       get: async (executionId: string) =>

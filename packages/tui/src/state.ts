@@ -1,5 +1,10 @@
 import type { ContextSnapshot } from "@noesis/context";
-import type { RuntimeAgentDefaults, TrailState } from "@noesis/runtime";
+import type {
+  RuntimeAgentDefaults,
+  RuntimeTranscriptEntry,
+  RuntimeTranscriptAction,
+  TrailState,
+} from "@noesis/runtime";
 import type { TuiExecutionDetail } from "./runtime-port.ts";
 
 export type Pane = "trail" | "context" | "capabilities";
@@ -7,13 +12,18 @@ export type Pane = "trail" | "context" | "capabilities";
 export interface TuiMessage {
   readonly role: "user" | "assistant" | "system";
   readonly text: string;
+  readonly messageId?: string;
+  readonly turnId?: string;
+  readonly createdAt?: string;
 }
 
 export interface TuiAgentAction {
   readonly actionId: string;
+  readonly turnId?: string;
   readonly parentActionId?: string;
+  readonly executionId?: string;
   readonly name: string;
-  readonly status: "running" | "completed" | "failed";
+  readonly status: "running" | "completed" | "failed" | "denied" | "ambiguous" | "cancelled" | "interrupted";
   readonly input?: unknown;
   readonly update?: unknown;
   readonly output?: unknown;
@@ -30,6 +40,55 @@ export interface TuiAgentActionEntry extends TuiAgentAction {
 }
 
 export type TuiTimelineEntry = TuiMessageEntry | TuiAgentActionEntry;
+
+function parsedTimestamp(timestamp: string): number | undefined {
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function actionDuration(action: RuntimeTranscriptAction): number | undefined {
+  if (!action.completedAt) return undefined;
+  const startedAt = parsedTimestamp(action.startedAt);
+  const completedAt = parsedTimestamp(action.completedAt);
+  if (startedAt === undefined || completedAt === undefined) return undefined;
+  return Math.max(0, completedAt - startedAt);
+}
+
+/**
+ * The runtime owns transcript ordering and durable payloads. This adapter only converts their
+ * representation into the same immutable entry shape used by live TUI events.
+ */
+export function tuiTimelineFromRuntime(
+  transcript: readonly RuntimeTranscriptEntry[],
+): readonly TuiTimelineEntry[] {
+  return transcript.map((entry): TuiTimelineEntry => {
+    if (entry.kind === "message")
+      return {
+        kind: "message",
+        role: entry.role,
+        text: entry.text,
+        messageId: entry.messageId,
+        ...(entry.turnId ? { turnId: entry.turnId } : {}),
+        createdAt: entry.createdAt,
+      };
+    const startedAt = parsedTimestamp(entry.startedAt);
+    const durationMs = actionDuration(entry);
+    return {
+      kind: "action",
+      actionId: entry.actionId,
+      turnId: entry.turnId,
+      ...(entry.parentActionId ? { parentActionId: entry.parentActionId } : {}),
+      ...(entry.executionId ? { executionId: entry.executionId } : {}),
+      name: entry.name,
+      status: entry.status,
+      ...(entry.input === undefined ? {} : { input: entry.input }),
+      ...(entry.update === undefined ? {} : { update: entry.update }),
+      ...(entry.output === undefined ? {} : { output: entry.output }),
+      ...(startedAt === undefined ? {} : { startedAt }),
+      ...(durationMs === undefined ? {} : { durationMs }),
+    };
+  });
+}
 
 export function isTuiMessageEntry(entry: TuiTimelineEntry): entry is TuiMessageEntry {
   return entry.kind === "message";
@@ -82,6 +141,11 @@ export interface NoesisTuiState {
 
 export type NoesisTuiAction =
   | { readonly type: "trail-selected"; readonly trail: TrailState }
+  | {
+      readonly type: "transcript-hydrated";
+      readonly trailId: string;
+      readonly transcript: readonly RuntimeTranscriptEntry[];
+    }
   | { readonly type: "prompt-submitted"; readonly text: string }
   | { readonly type: "stream-delta"; readonly text: string }
   | { readonly type: "stream-reconciled"; readonly text: string }
@@ -221,10 +285,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         title: action.trail.title,
         provider: action.trail.provider,
         model: action.trail.model,
-        timeline: action.trail.turns.flatMap((turn): readonly TuiMessageEntry[] => [
-          { kind: "message", role: "user", text: turn.input },
-          { kind: "message", role: "assistant", text: turn.output },
-        ]),
+        timeline: [],
         ...(action.trail.context ? { context: action.trail.context } : {}),
         capabilityVersions: { ...action.trail.capabilityVersions },
         expandedActionIds: NO_EXPANDED_ACTIONS,
@@ -232,6 +293,13 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         execution: "idle",
       };
     }
+    case "transcript-hydrated":
+      if (state.trailId !== action.trailId) return state;
+      return {
+        ...state,
+        timeline: tuiTimelineFromRuntime(action.transcript),
+        expandedActionIds: NO_EXPANDED_ACTIONS,
+      };
     case "prompt-submitted": {
       const { error: _error, ...rest } = state;
       return {

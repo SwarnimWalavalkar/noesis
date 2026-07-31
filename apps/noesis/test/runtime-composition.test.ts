@@ -216,6 +216,81 @@ describe("apps/noesis production control-plane composition", () => {
     await reopened.shutdown();
   });
 
+  test("persists every top-level model action and exposes the same transcript after restart", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-durable-actions-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const noOp = async (): Promise<void> => undefined;
+    const actionAgent: NoesisAgentRuntime = Object.freeze({
+      name: runtimeIdentity,
+      run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+        for (const [index, name] of ["inspect_self", "remember", "adapt", "execute"].entries()) {
+          const actionId = `action-${String(index + 1)}`;
+          emit({
+            type: "tool-start",
+            actionId,
+            name,
+            input: { fixture: name },
+          });
+          emit({
+            type: "tool-end",
+            actionId,
+            name,
+            isError: false,
+            result: { status: "completed", fixture: name },
+          });
+        }
+        return Object.freeze({
+          outcome: "completed" as const,
+          stopReason: "stop" as const,
+          text: "All actions completed.",
+          provider: request.provider,
+          model: request.model,
+        });
+      },
+      steer: noOp,
+      followUp: noOp,
+      abort: noOp,
+    });
+    const first = await createApplicationRuntimeComposition({
+      config,
+      agent: actionAgent,
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await first.startTrail({ title: "Durable actions" });
+    await first.runTurn(trail.trailId, "Use your full self tool surface");
+    const beforeRestart = await first.getTranscript(trail.trailId);
+    expect(beforeRestart.flatMap((entry) => (entry.kind === "action" ? [entry.name] : []))).toEqual([
+      "inspect_self",
+      "remember",
+      "adapt",
+      "execute",
+    ]);
+    expect(beforeRestart.flatMap((entry) => (entry.kind === "action" ? [entry.actionId] : []))).toEqual([
+      expect.stringMatching(/:action-1$/u),
+      expect.stringMatching(/:action-2$/u),
+      expect.stringMatching(/:action-3$/u),
+      expect.stringMatching(/:action-4$/u),
+    ]);
+    await first.shutdown();
+
+    const reopened = await createApplicationRuntimeComposition({
+      config,
+      agent: actionAgent,
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    expect(await reopened.getTranscript(trail.trailId)).toEqual(beforeRestart);
+    await reopened.shutdown();
+  });
+
   test("a real app turn pins admission and records exact durable operational work", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-control-plane-"));
     roots.push(home);

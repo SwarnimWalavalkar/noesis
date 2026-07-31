@@ -39,6 +39,7 @@ function booleanField(value: unknown, key: string): boolean | undefined {
 }
 
 export function executionIdOf(action: TuiAgentAction): string | undefined {
+  if (action.executionId) return action.executionId;
   const details = isRecord(action.output) ? action.output["details"] : undefined;
   if (stringField(details, "kind") === "result") {
     const completedExecutionId = stringField(details, "executionId");
@@ -238,10 +239,11 @@ export function summarizeNestedAction(action: TuiAgentAction): ActionSummary {
   const outcome =
     action.status === "running"
       ? undefined
-      : (summarized?.outcome ??
-        (action.status === "failed"
+      : action.status === "completed"
+        ? (summarized?.outcome ?? genericOutcome(action.output))
+        : action.status === "failed"
           ? (stringField(action.output, "error") ?? "failed")
-          : genericOutcome(action.output)));
+          : action.status;
   return createActionSummary(action.name, subject, outcome);
 }
 
@@ -267,6 +269,7 @@ export function summarizeExecuteAction(
     ...(callCount > 0 ? [formatCount(callCount, "call")] : []),
     ...summarizeNestedCalls(children),
     ...(failures > 0 ? [`${formatCount(failures, "failure")}`] : []),
+    ...(action.status === "running" || action.status === "completed" ? [] : [action.status]),
     ...(action.durationMs === undefined ? [] : [formatDuration(action.durationMs)]),
   ];
   // Once nested calls are visible beneath the row they describe the work better than the opening

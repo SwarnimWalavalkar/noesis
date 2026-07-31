@@ -1,4 +1,10 @@
-import type { FrozenBaselineRef, FrozenTurnPlan, NoesisAgentRuntime } from "@noesis/agent-types";
+import type {
+  AgentActionEvent,
+  AgentRuntimeEvent,
+  FrozenBaselineRef,
+  FrozenTurnPlan,
+  NoesisAgentRuntime,
+} from "@noesis/agent-types";
 import { createAtomicCapabilityRegistry, createWorkspaceCapabilityControlStore } from "@noesis/capabilities";
 import {
   createCodeModeRuntime,
@@ -57,6 +63,7 @@ import {
   type ExperimentOutcomeProposal,
   type NoesisRuntime,
   type RuntimeControlPlane,
+  loadRuntimeTranscript,
   compareTrailRecency,
   SESSION_PICKER_LIMIT,
   type TrailState,
@@ -938,6 +945,8 @@ export async function createApplicationRuntimeComposition(
     await workspace.operational.toolCalls.put({
       toolCallId: record.callId,
       sessionId: record.sessionId,
+      ...(record.turnId ? { turnId: record.turnId } : {}),
+      executionId: record.executionId,
       toolName: record.toolName,
       request: Object.freeze({
         executionId: record.executionId,
@@ -965,6 +974,68 @@ export async function createApplicationRuntimeComposition(
     callId: string,
   ): Promise<ToolInvocationRecord["status"] | undefined> =>
     (await workspace.operational.toolCalls.get(callId))?.status;
+
+  const actionExecutionId = (...values: readonly unknown[]): string | undefined => {
+    for (const value of values) {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+      const executionId = Reflect.get(value, "executionId");
+      if (typeof executionId === "string" && executionId) return executionId;
+    }
+    return undefined;
+  };
+
+  const persistTopLevelAction = async (
+    sessionId: string,
+    turnId: string,
+    event: AgentActionEvent,
+  ): Promise<void> => {
+    // Nested codemode calls are already recorded by the broker with their exact call IDs and
+    // effect results. Persisting the adapter's display aliases as well would create a second,
+    // competing record for the same action.
+    if (event.parentActionId) return;
+    const current = await workspace.operational.toolCalls.get(event.actionId);
+    const occurredAt = new Date().toISOString();
+    if (event.type === "tool-start") {
+      await workspace.operational.toolCalls.put({
+        toolCallId: event.actionId,
+        sessionId,
+        turnId,
+        toolName: event.name,
+        request: event.input,
+        status: "running",
+        sensitivity: "normal",
+        createdAt: occurredAt,
+      });
+      return;
+    }
+    if (!current) throw new Error(`Agent action ${event.actionId} emitted ${event.type} before tool-start`);
+    if (current.sessionId !== sessionId || current.turnId !== turnId || current.toolName !== event.name)
+      throw new Error(`Agent action ${event.actionId} changed its durable identity`);
+    if (event.type === "tool-update") {
+      const executionId = actionExecutionId(event.update);
+      await workspace.operational.toolCalls.put({
+        ...current,
+        ...(executionId ? { executionId } : {}),
+        update: event.update,
+        status: "running",
+      });
+      return;
+    }
+    const executionId = actionExecutionId(event.result, current.update);
+    await workspace.operational.toolCalls.put({
+      ...current,
+      ...(executionId && !current.executionId ? { executionId } : {}),
+      response: event.result,
+      status: event.isError ? "failed" : "completed",
+      completedAt: occurredAt,
+    });
+  };
+  const durableActionEvent = (turnId: string, event: AgentActionEvent): AgentActionEvent =>
+    Object.freeze({
+      ...event,
+      actionId: `${turnId}:${event.actionId}`,
+      ...(event.parentActionId ? { parentActionId: `${turnId}:${event.parentActionId}` } : {}),
+    });
   const prepareCodeExecution: PiCodeExecutionAdapter["prepare"] = async (plan, signal, resources) => {
     await reconcileStoredScripts(workspace);
     await reconcileStoredWorkflows(workspace);
@@ -2353,6 +2424,10 @@ export async function createApplicationRuntimeComposition(
     if (!trail) throw new Error(`Trail not found: ${trailId}`);
     return trail;
   };
+  const getTranscript: NoesisRuntime["getTranscript"] = async (trailId) => {
+    getTrail(trailId);
+    return await loadRuntimeTranscript(workspace, trailId);
+  };
   const listTrails: NoesisRuntime["listTrails"] = () => Object.freeze([...trailStates.values()]);
   const listTrailSummaries: NoesisRuntime["listTrailSummaries"] = () =>
     Object.freeze(
@@ -2516,22 +2591,44 @@ export async function createApplicationRuntimeComposition(
           occurredAt,
           plan,
           execute: async () => {
-            const agentResult = await agent.run(
-              {
-                trailId,
-                provider: plan.provider,
-                model: plan.model,
-                thinkingLevel: plan.thinkingLevel,
-                systemPrompt: plan.renderedSystemPrompt,
-                prompt: input,
-                activeCapabilities: plan.selectedCapabilities.map((selection) => ({
-                  name: selection.name,
-                  version: plan.activationRevision,
-                })),
-                frozenTurnPlan: plan,
-              },
-              runOptions?.onEvent ?? (() => undefined),
-            );
+            let actionPersistence = Promise.resolve();
+            const emit = (event: AgentRuntimeEvent): void => {
+              if (event.type === "tool-start" || event.type === "tool-update" || event.type === "tool-end") {
+                const durableEvent = durableActionEvent(turnId, event);
+                runOptions?.onEvent?.(durableEvent);
+                actionPersistence = actionPersistence.then(async () => {
+                  await persistTopLevelAction(trailId, turnId, durableEvent);
+                });
+                return;
+              }
+              runOptions?.onEvent?.(event);
+            };
+            let agentResult: Awaited<ReturnType<NoesisAgentRuntime["run"]>>;
+            try {
+              agentResult = await agent.run(
+                {
+                  trailId,
+                  provider: plan.provider,
+                  model: plan.model,
+                  thinkingLevel: plan.thinkingLevel,
+                  systemPrompt: plan.renderedSystemPrompt,
+                  prompt: input,
+                  activeCapabilities: plan.selectedCapabilities.map((selection) => ({
+                    name: selection.name,
+                    version: plan.activationRevision,
+                  })),
+                  frozenTurnPlan: plan,
+                },
+                emit,
+              );
+              await actionPersistence;
+            } catch (error) {
+              await actionPersistence.catch(() => undefined);
+              await workspace.operational.toolCalls.interruptRunningForTurn(turnId, new Date().toISOString());
+              throw error;
+            }
+            if (agentResult.stopReason === "aborted" || agentResult.stopReason === "error")
+              await workspace.operational.toolCalls.interruptRunningForTurn(turnId, new Date().toISOString());
             if (agentResult.stopReason === "error") throw new Error(agentResult.error);
             return Object.freeze({
               outcome: agentResult.stopReason === "aborted" ? ("aborted" as const) : ("completed" as const),
@@ -2873,6 +2970,7 @@ export async function createApplicationRuntimeComposition(
     listTrails,
     listTrailSummaries,
     getTrail,
+    getTranscript,
     resumeTrail,
     forkTrail,
     runTurn,

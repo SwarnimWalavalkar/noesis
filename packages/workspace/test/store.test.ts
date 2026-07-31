@@ -706,7 +706,7 @@ describe("WorkspaceStore", () => {
       .get();
     database.close();
 
-    expect(versions.at(-1)).toBe(21);
+    expect(versions.at(-1)).toBe(22);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

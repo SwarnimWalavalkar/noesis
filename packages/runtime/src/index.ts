@@ -5,7 +5,7 @@ import type {
   FrozenTurnPlan,
 } from "@noesis/agent-types";
 import type { ContextSnapshot } from "@noesis/context";
-import type { TrailStatus } from "@noesis/domain";
+import type { JsonValue, TrailStatus } from "@noesis/domain";
 
 export * from "./coordinator-contracts.ts";
 export * from "./coordinator.ts";
@@ -18,7 +18,36 @@ export * from "./compounding-metrics.ts";
 export * from "./control-plane.ts";
 export * from "./turn-intelligence.ts";
 export * from "./turn-settlement.ts";
+export * from "./transcript.ts";
 export * from "./scheduled-execution.ts";
+
+export interface RuntimeTranscriptMessage {
+  readonly kind: "message";
+  readonly messageId: string;
+  readonly turnId?: string;
+  readonly role: "user" | "assistant" | "system";
+  readonly text: string;
+  readonly createdAt: string;
+}
+
+export interface RuntimeTranscriptAction {
+  readonly kind: "action";
+  readonly actionId: string;
+  /** Monotonic session-local order assigned when the action is first persisted. */
+  readonly sequence?: number;
+  readonly turnId: string;
+  readonly parentActionId?: string;
+  readonly executionId?: string;
+  readonly name: string;
+  readonly status: "running" | "completed" | "failed" | "denied" | "ambiguous" | "cancelled" | "interrupted";
+  readonly input?: JsonValue;
+  readonly update?: JsonValue;
+  readonly output?: JsonValue;
+  readonly startedAt: string;
+  readonly completedAt?: string;
+}
+
+export type RuntimeTranscriptEntry = RuntimeTranscriptMessage | RuntimeTranscriptAction;
 
 export interface TrailState {
   readonly trailId: string;
@@ -99,6 +128,8 @@ export interface NoesisRuntime {
   /** Returns at most SESSION_PICKER_LIMIT sessions, newest activity first. */
   readonly listTrailSummaries: () => readonly TrailSummary[];
   readonly getTrail: (trailId: string) => TrailState;
+  /** Loads the SQLite-authoritative conversation and action projection for this session. */
+  readonly getTranscript: (trailId: string) => Promise<readonly RuntimeTranscriptEntry[]>;
   readonly resumeTrail: (trailId: string) => Promise<TrailState>;
   readonly forkTrail: (trailId: string, title?: string) => Promise<TrailState>;
   readonly runTurn: (trailId: string, input: string, options?: RunTurnOptions) => Promise<TurnResult>;

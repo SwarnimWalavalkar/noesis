@@ -111,16 +111,25 @@ export function decodeMessage(row: unknown): MessageRecord {
 }
 
 export function decodeToolCall(row: unknown): ToolCallRecord {
+  const turnId = optionalString(row, "turn_id");
   const response = optionalString(row, "response_json");
+  const update = optionalString(row, "update_json");
   const messageId = optionalString(row, "message_id");
+  const parentToolCallId = optionalString(row, "parent_tool_call_id");
+  const executionId = optionalString(row, "execution_id");
   const completedAt = optionalString(row, "completed_at");
   return {
     toolCallId: requiredString(row, "tool_call_id"),
     sessionId: requiredString(row, "session_id"),
+    ...(turnId === undefined ? {} : { turnId }),
     ...(messageId === undefined ? {} : { messageId }),
+    ...(parentToolCallId === undefined ? {} : { parentToolCallId }),
+    ...(executionId === undefined ? {} : { executionId }),
     toolName: requiredString(row, "tool_name"),
     request: parseJson(requiredString(row, "request_json")),
+    ...(update === undefined ? {} : { update: parseJson(update) }),
     ...(response === undefined ? {} : { response: parseJson(response) }),
+    sequence: requiredNumber(row, "action_sequence"),
     status: ToolCallStatusSchema.parse(requiredString(row, "status")),
     sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
     createdAt: requiredString(row, "created_at"),

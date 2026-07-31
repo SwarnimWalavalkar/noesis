@@ -49,7 +49,7 @@ const markerPrefixSuffixLength = (text: string, marker: string): number => {
 };
 
 export function sanitizeEditorText(text: string): string {
-  return [...text]
+  return [...text.replaceAll("\r\n", "\n")]
     .map((character) => {
       const code = character.codePointAt(0) ?? 0;
       if (code === 9 || code === 10) return character;
@@ -63,6 +63,8 @@ export interface SafeEditor extends Component, Focusable {
   onSubmit: ((text: string) => void) | undefined;
   disableSubmit: boolean;
   readonly getText: () => string;
+  readonly setText: (text: string) => void;
+  readonly insertText: (text: string) => void;
 }
 
 export function createSafeEditor(
@@ -228,6 +230,14 @@ export function createSafeEditor(
       editor.disableSubmit = disabled;
     },
     getText: () => editor.getExpandedText(),
+    setText: (text) => {
+      editor.setText(sanitizeEditorText(text));
+      tui.requestRender();
+    },
+    insertText: (text) => {
+      editor.insertTextAtCursor(sanitizeEditorText(text));
+      tui.requestRender();
+    },
     handleInput,
     invalidate: () => editor.invalidate(),
     render: (width) => {

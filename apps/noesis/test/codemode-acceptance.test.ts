@@ -72,15 +72,25 @@ describe("production codemode journey", () => {
 
     expect(result.output).toBe("Repository inspected through codemode.");
     expect(observedToolNames).toEqual(["adapt", "execute", "inspect_self", "remember"]);
-    expect(await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId)).toMatchObject([
-      {
-        toolName: "files.read",
-        status: "completed",
-      },
-    ]);
+    expect(
+      (await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId)).find(
+        (call) => call.toolName === "files.read",
+      ),
+    ).toMatchObject({
+      toolName: "files.read",
+      status: "completed",
+    });
     const executions = await runtime.debug.workspace.operational.codeExecutions.listForSession(trail.trailId);
     const execution = executions[0];
     if (!execution) throw new Error("Expected a recorded codemode execution");
+    const transcriptActions = (await runtime.getTranscript(trail.trailId)).filter(
+      (entry) => entry.kind === "action",
+    );
+    expect(transcriptActions.map((action) => action.name)).toEqual(["execute", "files.read"]);
+    expect(transcriptActions[1]).toMatchObject({
+      parentActionId: transcriptActions[0]?.actionId,
+      executionId: execution.executionId,
+    });
     const inspected = await runtime.inspectExecution?.(trail.trailId, execution.executionId);
     expect(execution).toMatchObject({
       sourceArtifactId: expect.any(String),
@@ -148,18 +158,20 @@ describe("production codemode journey", () => {
     const result = await runtime.runTurn(trail.trailId, "Inspect an external host directory.");
 
     expect(result.output).toBe("External directory inspected.");
-    expect(await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId)).toMatchObject([
-      {
-        toolName: "shell.run",
-        status: "completed",
-        response: {
-          output: {
-            exitCode: 0,
-            stdout: `${physicalOutsideCwd}\n`,
-          },
+    expect(
+      (await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId)).find(
+        (call) => call.toolName === "shell.run",
+      ),
+    ).toMatchObject({
+      toolName: "shell.run",
+      status: "completed",
+      response: {
+        output: {
+          exitCode: 0,
+          stdout: `${physicalOutsideCwd}\n`,
         },
       },
-    ]);
+    });
     await runtime.shutdown();
   });
 
@@ -270,7 +282,11 @@ describe("production codemode journey", () => {
       ),
     ).toBe(true);
     const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
-    expect(calls.map((call) => call.toolName)).toEqual(["scripts.save", "scripts.run", "scripts.run"]);
+    expect(calls.filter((call) => call.toolName !== "execute").map((call) => call.toolName)).toEqual([
+      "scripts.save",
+      "scripts.run",
+      "scripts.run",
+    ]);
     await runtime.shutdown();
   });
 
