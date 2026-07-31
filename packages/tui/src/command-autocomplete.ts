@@ -24,6 +24,16 @@ const completeModelProvider = (argumentPrefix: string): AutocompleteItem[] => {
   return MODEL_PROVIDER_COMPLETIONS.filter((item) => item.value.includes(normalizedPrefix));
 };
 
+const completeQueueCommand = (argumentPrefix: string): AutocompleteItem[] => {
+  const normalizedPrefix = argumentPrefix.trim().toLowerCase();
+  const item = {
+    value: "resume",
+    label: "resume",
+    description: "Resume delivery of queued messages after reopening a session",
+  };
+  return !normalizedPrefix || item.value.startsWith(normalizedPrefix) ? [item] : [];
+};
+
 export const NOESIS_SLASH_COMMANDS = [
   {
     name: "help",
@@ -88,8 +98,19 @@ export const NOESIS_SLASH_COMMANDS = [
     description: "Compact the current context",
   },
   {
+    name: "steer",
+    description: "Redirect active work, or promote the newest queued message",
+    argumentHint: "[message]",
+  },
+  {
+    name: "queue",
+    description: "Control pending messages",
+    argumentHint: "<resume>",
+    getArgumentCompletions: completeQueueCommand,
+  },
+  {
     name: "abort",
-    description: "Stop the active turn",
+    description: "Interrupt active work",
   },
   {
     name: "quit",

@@ -14,7 +14,9 @@ export const HELP_LINES = [
   "/model provider/model · /context · /capabilities",
   "/skills · /scripts · /workflows · /runs",
   "/skill NAME · /script NAME · /workflow NAME · /run ID",
-  "/fork · /compact · /abort",
+  "/fork · /compact · /steer [MESSAGE] · /queue resume",
+  "enter queues during work · alt+↑ edits newest queued · esc interrupts",
+  "shift+enter newline · ctrl+g external editor",
   "ctrl+o inspect runs · space expand · enter open the run inspector",
   "/quit · learning, experiments, activation, and revert run ambiently",
 ] as const;

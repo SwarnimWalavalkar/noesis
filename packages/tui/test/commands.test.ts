@@ -15,7 +15,6 @@ const agent: NoesisAgentRuntime = {
     };
   },
   async steer() {},
-  async followUp() {},
   async abort() {},
 };
 

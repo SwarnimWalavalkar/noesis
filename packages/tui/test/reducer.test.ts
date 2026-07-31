@@ -6,11 +6,13 @@ import {
   createTuiLayout,
   elideText,
   formatContextUsage,
+  helpHint,
   initialTuiState,
   renderBottomChrome,
   reduceTui,
   renderHeader,
   renderNoesisState,
+  renderQueuedInputs,
   safeTerminalText,
   sessionPickerVisibleCount,
   shouldUseColor,
@@ -240,6 +242,52 @@ describe("Noesis TUI reducer", () => {
     expect(narrow).toContain("openai-codex/gpt-5.6-sol");
     expect(narrow).toContain("ctx  28%");
     expect(narrow).not.toContain("session");
+  });
+
+  test("renders the newest queued inputs with delivery state and interaction shortcuts", () => {
+    const state = reduceTui(initialTuiState("fake"), {
+      type: "interaction-changed",
+      interaction: {
+        phase: "running",
+        queuePaused: false,
+        active: {
+          intentId: "intent-active",
+          turnId: "turn-active",
+          text: "active",
+        },
+        queuedInputs: [
+          { queueId: "q1", text: "first\nmessage", createdAt: "2026-07-31T10:00:00.000Z" },
+          { queueId: "q2", text: "second", createdAt: "2026-07-31T10:00:01.000Z" },
+          { queueId: "q3", text: "third", createdAt: "2026-07-31T10:00:02.000Z" },
+          { queueId: "q4", text: "newest", createdAt: "2026-07-31T10:00:03.000Z" },
+        ],
+      },
+    });
+
+    const queue = renderQueuedInputs(state, 60).join("\n");
+    expect(queue).toContain("QUEUED · 4");
+    expect(queue).toContain("… 1 earlier");
+    expect(queue).not.toContain("first message");
+    expect(queue).toContain("4  newest");
+    expect(createStatusFields(state, createTuiLayout(120, 35))).toContain("q 4");
+    expect(helpHint(state)).toContain("enter queue");
+    expect(helpHint(state)).toContain("/steer redirect");
+    expect(helpHint(state)).toContain("esc interrupt");
+  });
+
+  test("shows a resumed queue as paused until explicitly resumed", () => {
+    const state = reduceTui(initialTuiState("fake"), {
+      type: "interaction-changed",
+      interaction: {
+        phase: "idle",
+        queuePaused: true,
+        queuedInputs: [{ queueId: "q1", text: "continue later", createdAt: "2026-07-31T10:00:00.000Z" }],
+      },
+    });
+
+    expect(renderQueuedInputs(state, 60).join("\n")).toContain("QUEUED · 1 · paused");
+    expect(createStatusFields(state, createTuiLayout(90, 28))).toContain("q 1 paused");
+    expect(helpHint(state)).toContain("/queue resume");
   });
 
   test("maps lifecycle actions to supported execution states", () => {

@@ -1,9 +1,15 @@
-import type { NoesisAgentRuntime } from "@noesis/agent-types";
+import type { AgentActionEvent, NoesisAgentRuntime } from "@noesis/agent-types";
 import { compileContext } from "@noesis/context";
 import {
   compareTrailRecency,
+  type InteractionCommand,
+  type InteractionDispatchOptions,
+  type InteractionDispatchResult,
+  type InteractionPendingIntent,
+  type InteractionSnapshot,
   SESSION_PICKER_LIMIT,
   type NoesisRuntime,
+  type RuntimeTranscriptAction,
   type RuntimeTranscriptEntry,
   type TrailState,
   type TrailSummary,
@@ -12,6 +18,20 @@ import {
 export interface TestNoesisRuntime extends NoesisRuntime {
   readonly resumedTrailIds: readonly string[];
   readonly failedTurnCount: number;
+}
+
+interface TestInteractionState {
+  phase: InteractionSnapshot["phase"];
+  queuePaused: boolean;
+  active?: {
+    readonly intentId: string;
+    readonly turnId: string;
+    readonly text: string;
+    readonly mode: "turn" | "steer";
+  };
+  readonly pending: InteractionPendingIntent[];
+  observer?: NonNullable<InteractionDispatchOptions["onEvent"]>;
+  drain?: Promise<void>;
 }
 
 interface StoredTrail {
@@ -24,7 +44,11 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
   const trails = new Map<string, StoredTrail>();
   const resumedTrailIds: string[] = [];
   let sequence = 0;
+  let interactionSequence = 0;
   let failedTurnCount = 0;
+  const interactions = new Map<string, TestInteractionState>();
+  const turnIdsByTrail = new Map<string, string[]>();
+  const actionsByTrail = new Map<string, RuntimeTranscriptAction[]>();
   const timestamp = (): string => new Date(Date.now() + sequence).toISOString();
   const getStored = (trailId: string): StoredTrail => {
     const trail = trails.get(trailId);
@@ -58,9 +82,11 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
   const getTrail = (trailId: string): TrailState => getStored(trailId).state;
   const getTranscript = async (trailId: string): Promise<readonly RuntimeTranscriptEntry[]> => {
     const stored = getStored(trailId);
+    const turnIds = turnIdsByTrail.get(trailId) ?? [];
+    const actions = actionsByTrail.get(trailId) ?? [];
     return Object.freeze(
       stored.state.turns.flatMap((turn, index): readonly RuntimeTranscriptEntry[] => {
-        const turnId = `${trailId}:turn:${String(index)}`;
+        const turnId = turnIds[index] ?? `${trailId}:turn:${String(index)}`;
         return [
           Object.freeze({
             kind: "message",
@@ -70,6 +96,7 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
             text: turn.input,
             createdAt: stored.createdAt,
           }),
+          ...actions.filter((action) => action.turnId === turnId),
           Object.freeze({
             kind: "message",
             messageId: `${turnId}:assistant`,
@@ -109,6 +136,8 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     if (stored.state.status === "running")
       throw new Error(`Session ${trailId} is already running and cannot be resumed`);
     resumedTrailIds.push(trailId);
+    const interaction = interactions.get(trailId);
+    if (interaction?.pending.length) interaction.queuePaused = true;
     stored.updatedAt = timestamp();
     return stored.state;
   };
@@ -191,6 +220,226 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
       ...(result.contextUsage === undefined ? {} : { contextUsage: result.contextUsage }),
     });
   };
+  const interactionState = (trailId: string): TestInteractionState => {
+    const existing = interactions.get(trailId);
+    if (existing) return existing;
+    getStored(trailId);
+    const created: TestInteractionState = {
+      phase: "idle",
+      queuePaused: false,
+      pending: [],
+    };
+    interactions.set(trailId, created);
+    return created;
+  };
+  const interactionSnapshot = (trailId: string, state = interactionState(trailId)): InteractionSnapshot =>
+    Object.freeze({
+      sessionId: trailId,
+      phase: state.phase,
+      queuePaused: state.queuePaused,
+      ...(state.active ? { active: Object.freeze({ ...state.active }) } : {}),
+      pending: Object.freeze(state.pending.map((intent) => Object.freeze({ ...intent }))),
+    });
+  const emitInteractionState = (trailId: string, state: TestInteractionState): void => {
+    state.observer?.({
+      type: "state",
+      snapshot: interactionSnapshot(trailId, state),
+    });
+  };
+  const persistAction = (trailId: string, turnId: string, event: AgentActionEvent): AgentActionEvent => {
+    const durableEvent = Object.freeze({
+      ...event,
+      actionId: `${turnId}:${event.actionId}`,
+      ...(event.parentActionId ? { parentActionId: `${turnId}:${event.parentActionId}` } : {}),
+    });
+    const actions = actionsByTrail.get(trailId) ?? [];
+    actionsByTrail.set(trailId, actions);
+    const existingIndex = actions.findIndex((action) => action.actionId === durableEvent.actionId);
+    const current = existingIndex < 0 ? undefined : actions[existingIndex];
+    const occurredAt = timestamp();
+    const next: RuntimeTranscriptAction =
+      durableEvent.type === "tool-start"
+        ? Object.freeze({
+            kind: "action",
+            actionId: durableEvent.actionId,
+            turnId,
+            ...(durableEvent.parentActionId ? { parentActionId: durableEvent.parentActionId } : {}),
+            name: durableEvent.name,
+            status: "running",
+            input: durableEvent.input,
+            startedAt: occurredAt,
+          })
+        : durableEvent.type === "tool-update"
+          ? Object.freeze({
+              ...(current ?? {
+                kind: "action" as const,
+                actionId: durableEvent.actionId,
+                turnId,
+                ...(durableEvent.parentActionId ? { parentActionId: durableEvent.parentActionId } : {}),
+                name: durableEvent.name,
+                status: "running" as const,
+                startedAt: occurredAt,
+              }),
+              update: durableEvent.update,
+            })
+          : Object.freeze({
+              ...(current ?? {
+                kind: "action" as const,
+                actionId: durableEvent.actionId,
+                turnId,
+                ...(durableEvent.parentActionId ? { parentActionId: durableEvent.parentActionId } : {}),
+                name: durableEvent.name,
+                startedAt: occurredAt,
+              }),
+              status: durableEvent.isError ? ("failed" as const) : ("completed" as const),
+              output: durableEvent.result,
+              completedAt: occurredAt,
+            });
+    if (existingIndex < 0) actions.push(next);
+    else actions[existingIndex] = next;
+    return durableEvent;
+  };
+  const scheduleInteractionDrain = (trailId: string, state: TestInteractionState): void => {
+    if (state.drain || state.queuePaused || state.pending.length === 0) return;
+    const drain = new Promise<void>((resolve) => setTimeout(resolve, 0)).then(async () => {
+      while (!state.queuePaused) {
+        const intent = state.pending.shift();
+        if (!intent) break;
+        interactionSequence += 1;
+        const turnId = `${trailId}:interaction:${String(interactionSequence)}`;
+        state.active = {
+          intentId: intent.intentId,
+          turnId,
+          text: intent.text,
+          mode: intent.mode,
+        };
+        state.phase = "running";
+        emitInteractionState(trailId, state);
+        state.observer?.({
+          type: "turn-started",
+          sessionId: trailId,
+          intentId: intent.intentId,
+          turnId,
+          text: intent.text,
+        });
+        try {
+          const result = await runTurn(trailId, intent.text, {
+            onEvent: (event) => {
+              const emitted =
+                event.type === "tool-start" || event.type === "tool-update" || event.type === "tool-end"
+                  ? persistAction(trailId, turnId, event)
+                  : event;
+              state.observer?.({
+                type: "agent",
+                sessionId: trailId,
+                turnId,
+                event: emitted,
+              });
+            },
+          });
+          if (result.outcome === "completed") {
+            const turnIds = turnIdsByTrail.get(trailId) ?? [];
+            turnIds.push(turnId);
+            turnIdsByTrail.set(trailId, turnIds);
+          }
+          if (result.outcome === "aborted")
+            state.pending.unshift(
+              Object.freeze({
+                ...intent,
+                mode: "turn",
+              }),
+            );
+          state.observer?.({
+            type: "turn-settled",
+            sessionId: trailId,
+            intentId: intent.intentId,
+            turnId,
+            outcome: result.outcome === "aborted" ? "aborted" : "completed",
+          });
+        } catch (error) {
+          state.observer?.({
+            type: "turn-settled",
+            sessionId: trailId,
+            intentId: intent.intentId,
+            turnId,
+            outcome: "failed",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        delete state.active;
+        state.phase = "idle";
+        emitInteractionState(trailId, state);
+      }
+    });
+    state.drain = drain;
+    void drain.finally(() => {
+      delete state.drain;
+      if (!state.queuePaused && state.pending.length > 0) scheduleInteractionDrain(trailId, state);
+    });
+  };
+  const inspectInteraction: NoesisRuntime["inspectInteraction"] = async (trailId) =>
+    interactionSnapshot(trailId);
+  const interact: NoesisRuntime["interact"] = async (
+    trailId: string,
+    command: InteractionCommand,
+    options: InteractionDispatchOptions = {},
+  ): Promise<InteractionDispatchResult> => {
+    const state = interactionState(trailId);
+    if (options.onEvent) state.observer = options.onEvent;
+    let effect: InteractionDispatchResult["effect"] = "idle";
+    let restoredText: string | undefined;
+    let intentId: string | undefined;
+    if (command.type === "submit") {
+      interactionSequence += 1;
+      intentId = `${trailId}:intent:${String(interactionSequence)}`;
+      state.pending.push(
+        Object.freeze({
+          intentId,
+          text: command.text,
+          mode: "turn",
+          createdAt: timestamp(),
+        }),
+      );
+      state.queuePaused = false;
+      effect = "queued";
+      emitInteractionState(trailId, state);
+      scheduleInteractionDrain(trailId, state);
+    } else if (command.type === "steer" && state.active) {
+      const queued = command.text === undefined ? state.pending.pop() : undefined;
+      const text = command.text ?? queued?.text;
+      if (text) {
+        await agent.steer(trailId, text);
+        effect = "steered";
+        intentId = queued?.intentId;
+        emitInteractionState(trailId, state);
+      }
+    } else if (command.type === "restore-newest") {
+      const restored = state.pending.pop();
+      if (restored) {
+        effect = "restored";
+        restoredText = restored.text;
+        intentId = restored.intentId;
+        emitInteractionState(trailId, state);
+      }
+    } else if (command.type === "resume-queue" && state.pending.length > 0) {
+      state.queuePaused = false;
+      effect = "resumed";
+      emitInteractionState(trailId, state);
+      scheduleInteractionDrain(trailId, state);
+    } else if (command.type === "interrupt" && state.active) {
+      state.phase = "interrupting";
+      state.queuePaused = true;
+      effect = "interrupted";
+      emitInteractionState(trailId, state);
+      await agent.abort(trailId);
+    }
+    return Object.freeze({
+      effect,
+      snapshot: interactionSnapshot(trailId, state),
+      ...(restoredText === undefined ? {} : { restoredText }),
+      ...(intentId === undefined ? {} : { intentId }),
+    });
+  };
 
   return Object.freeze({
     agentDefaults: Object.freeze({
@@ -203,12 +452,11 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     listTrailSummaries,
     getTrail,
     getTranscript,
+    interact,
+    inspectInteraction,
     resumeTrail,
     forkTrail,
     runTurn,
-    steer: agent.steer,
-    followUp: agent.followUp,
-    abort: agent.abort,
     compact: async () => undefined,
     get resumedTrailIds() {
       return Object.freeze([...resumedTrailIds]);

@@ -65,6 +65,8 @@ export interface SafeEditor extends Component, Focusable {
   readonly getText: () => string;
   readonly setText: (text: string) => void;
   readonly insertText: (text: string) => void;
+  /** True only when raw input cannot be part of a bracketed-paste marker or payload. */
+  readonly acceptsUnbracketedCommandInput: () => boolean;
 }
 
 export function createSafeEditor(
@@ -238,6 +240,7 @@ export function createSafeEditor(
       editor.insertTextAtCursor(sanitizeEditorText(text));
       tui.requestRender();
     },
+    acceptsUnbracketedCommandInput: () => inputState.kind === "keyboard" && inputState.pending.length === 0,
     handleInput,
     invalidate: () => editor.invalidate(),
     render: (width) => {

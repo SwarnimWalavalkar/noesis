@@ -407,12 +407,6 @@ export function createPiAgentRuntime(
     await harness.steer(text);
   };
 
-  const followUp = async (trailId: string, text: string): Promise<void> => {
-    const harness = active.get(trailId)?.harness;
-    if (!harness) throw new Error("Trail is not running");
-    await harness.followUp(text);
-  };
-
   const abort = async (trailId: string): Promise<void> => {
     const execution = active.get(trailId);
     if (!execution) return;
@@ -421,5 +415,5 @@ export function createPiAgentRuntime(
     if (execution.abortError) throw execution.abortError;
   };
 
-  return Object.freeze({ name: "pi-agent-harness-0.80.6", run, steer, followUp, abort });
+  return Object.freeze({ name: "pi-agent-harness-0.80.6", run, steer, abort });
 }

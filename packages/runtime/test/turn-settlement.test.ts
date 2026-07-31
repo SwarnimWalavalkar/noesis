@@ -169,6 +169,7 @@ describe("turn settlement", () => {
         sessionId: "session-1",
         turnId: "turn-accepted",
         input: "Write the Noesis research note",
+        sourceIntentId: "intent-accepted",
         occurredAt: "2026-07-25T00:00:00.000Z",
         plan,
         execute: async () => ({
@@ -184,6 +185,10 @@ describe("turn settlement", () => {
     expect(feedbackInputs[0]?.outcomeId).toBe("turn-accepted:outcome");
     expect(observedBaselines).toEqual([revisionRef("noesis-research")]);
     expect(await workspace.operational.outcomes.listForSession("session-1")).toHaveLength(1);
+    expect((await workspace.operational.messages.get("turn-accepted:user"))?.metadata).toMatchObject({
+      turnId: "turn-accepted",
+      sourceIntentId: "intent-accepted",
+    });
 
     const abortedPlan = turnPlan("session-1", "turn-aborted", [
       { capabilityId: "general", name: "General", scope: "general" },

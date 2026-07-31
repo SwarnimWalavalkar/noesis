@@ -24,6 +24,7 @@ import type {
   SessionRecord,
   ToolCallRecord,
   TurnActivationPinRecord,
+  UserIntentRecord,
   WorkflowPhaseRunRecord,
   WorkflowRunRecord,
 } from "./types.ts";
@@ -40,6 +41,8 @@ export const SearchConfigurationSchema = z.strictObject({
 export const SensitivitySchema = z.enum(["normal", "private", "secret"]);
 const SessionStatusSchema = z.enum(["idle", "running", "completed", "aborted", "failed"]);
 const MessageRoleSchema = z.enum(["user", "assistant", "system", "tool"]);
+const UserIntentModeSchema = z.enum(["turn", "steer"]);
+const UserIntentStatusSchema = z.enum(["pending", "dispatching", "delivered", "withdrawn"]);
 const ToolCallStatusSchema = z.enum(["requested", "running", "completed", "failed", "denied", "ambiguous"]);
 const CodeExecutionStatusSchema = z.enum(["running", "completed", "failed", "cancelled", "interrupted"]);
 const WorkflowRunStatusSchema = z.enum(["running", "paused", "completed", "failed", "cancelled"]);
@@ -108,6 +111,31 @@ export function decodeMessage(row: unknown): MessageRecord {
     createdAt: requiredString(row, "created_at"),
     metadata: JsonRecordSchema.parse(parseJson(requiredString(row, "metadata_json"))),
   };
+}
+
+export function decodeUserIntent(row: unknown): UserIntentRecord {
+  const queuedBehindTurnId = optionalString(row, "queued_behind_turn_id");
+  const targetTurnId = optionalString(row, "target_turn_id");
+  const promotedAt = optionalString(row, "promoted_at");
+  const deliveredAt = optionalString(row, "delivered_at");
+  const withdrawnAt = optionalString(row, "withdrawn_at");
+  return Object.freeze({
+    intentId: requiredString(row, "intent_id"),
+    sessionId: requiredString(row, "session_id"),
+    text: requiredString(row, "text"),
+    initialMode: UserIntentModeSchema.parse(requiredString(row, "initial_mode")),
+    deliveryMode: UserIntentModeSchema.parse(requiredString(row, "delivery_mode")),
+    status: UserIntentStatusSchema.parse(requiredString(row, "status")),
+    queueSequence: requiredNumber(row, "queue_sequence"),
+    ...(queuedBehindTurnId === undefined ? {} : { queuedBehindTurnId }),
+    ...(targetTurnId === undefined ? {} : { targetTurnId }),
+    createdAt: requiredString(row, "created_at"),
+    updatedAt: requiredString(row, "updated_at"),
+    ...(promotedAt === undefined ? {} : { promotedAt }),
+    ...(deliveredAt === undefined ? {} : { deliveredAt }),
+    ...(withdrawnAt === undefined ? {} : { withdrawnAt }),
+    attemptCount: requiredNumber(row, "attempt_count"),
+  });
 }
 
 export function decodeToolCall(row: unknown): ToolCallRecord {

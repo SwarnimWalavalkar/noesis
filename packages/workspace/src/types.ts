@@ -54,6 +54,27 @@ export interface MessageRecord {
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 
+export type UserIntentMode = "turn" | "steer";
+export type UserIntentStatus = "pending" | "dispatching" | "delivered" | "withdrawn";
+
+export interface UserIntentRecord {
+  readonly intentId: string;
+  readonly sessionId: string;
+  readonly text: string;
+  readonly initialMode: UserIntentMode;
+  readonly deliveryMode: UserIntentMode;
+  readonly status: UserIntentStatus;
+  readonly queueSequence: number;
+  readonly queuedBehindTurnId?: string;
+  readonly targetTurnId?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly promotedAt?: string;
+  readonly deliveredAt?: string;
+  readonly withdrawnAt?: string;
+  readonly attemptCount: number;
+}
+
 export interface ToolCallRecord {
   readonly toolCallId: string;
   readonly sessionId: string;
@@ -453,6 +474,56 @@ export interface OperationalRepositories {
     readonly get: (messageId: string) => Promise<MessageRecord | undefined>;
     readonly put: (record: MessageRecord) => Promise<DatabaseRowRef>;
     readonly listForSession: (sessionId: string) => Promise<readonly MessageRecord[]>;
+  };
+  readonly userIntents: {
+    readonly enqueue: (request: {
+      readonly intentId: string;
+      readonly sessionId: string;
+      readonly text: string;
+      readonly mode: UserIntentMode;
+      readonly queuedBehindTurnId?: string;
+      readonly createdAt: string;
+    }) => Promise<UserIntentRecord>;
+    readonly listPending: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
+    readonly claimOldestPending: (request: {
+      readonly sessionId: string;
+      readonly targetTurnId: string;
+      readonly claimedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly claimSteer: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly targetTurnId: string;
+      readonly claimedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly promoteNewestPendingToSteer: (request: {
+      readonly sessionId: string;
+      readonly targetTurnId: string;
+      readonly promotedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly withdrawNewestPending: (request: {
+      readonly sessionId: string;
+      readonly withdrawnAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly markDelivered: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly targetTurnId: string;
+      readonly deliveredAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly releaseFailedDispatch: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly releasedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly recoverDispatching: (request: {
+      readonly sessionId: string;
+      readonly recoveredAt: string;
+    }) => Promise<{
+      readonly released: number;
+      readonly delivered: number;
+      readonly unresolved: number;
+    }>;
   };
   readonly toolCalls: {
     readonly get: (toolCallId: string) => Promise<ToolCallRecord | undefined>;

@@ -58,6 +58,7 @@ import {
   createRuntimeControlPlane,
   createRuntimeCoordinatorComposition,
   createTurnIntelligencePlanner,
+  createTurnInteractionController,
   createTurnSettlement,
   type ExperimentOutcomeJudge,
   type ExperimentOutcomeProposal,
@@ -2518,7 +2519,17 @@ export async function createApplicationRuntimeComposition(
     return fork;
   };
 
-  const runTurn: NoesisRuntime["runTurn"] = async (trailId, input, runOptions): Promise<TurnResult> => {
+  const executeTurn = async (
+    trailId: string,
+    input: string,
+    turnId: string,
+    runOptions?: Parameters<NoesisRuntime["runTurn"]>[2],
+    sourceIntentId?: string,
+    interactionControl?: {
+      readonly onReady: () => void;
+      readonly isInterruptRequested: () => boolean;
+    },
+  ): Promise<TurnResult> => {
     const trail = getTrail(trailId);
     if (trail.status === "running") throw new Error("Trail is already running");
     if (trail.runtime !== agent.name)
@@ -2526,7 +2537,6 @@ export async function createApplicationRuntimeComposition(
         `Trail ${trailId} is pinned to runtime ${trail.runtime}; active runtime is ${agent.name}.`,
       );
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
-    const turnId = createId("turn");
     const thinkingLevel = runOptions?.thinkingLevel ?? agentDefaults.thinkingLevel;
     const recentConversation = running.turns
       .slice(-8)
@@ -2588,9 +2598,19 @@ export async function createApplicationRuntimeComposition(
           sessionId: trailId,
           turnId,
           input,
+          ...(sourceIntentId ? { sourceIntentId } : {}),
           occurredAt,
           plan,
           execute: async () => {
+            interactionControl?.onReady();
+            if (interactionControl?.isInterruptRequested())
+              return Object.freeze({
+                outcome: "aborted" as const,
+                output: "",
+                context,
+                usedCapabilities,
+                frozenTurnPlan: plan,
+              });
             let actionPersistence = Promise.resolve();
             const emit = (event: AgentRuntimeEvent): void => {
               if (event.type === "tool-start" || event.type === "tool-update" || event.type === "tool-end") {
@@ -2645,6 +2665,12 @@ export async function createApplicationRuntimeComposition(
             ...running,
             status: result.outcome === "aborted" ? ("aborted" as const) : ("idle" as const),
             capabilityVersions: usedCapabilities,
+            ...(result.outcome === "completed"
+              ? {
+                  contextSnapshotId: result.context.snapshotId,
+                  context: result.context,
+                }
+              : {}),
             turns:
               result.outcome === "completed"
                 ? Object.freeze([...running.turns, Object.freeze({ input, output: result.output })])
@@ -2660,19 +2686,66 @@ export async function createApplicationRuntimeComposition(
       throw error;
     }
   };
-  const steer: NoesisRuntime["steer"] = async (trailId, text) => {
+  const runTurn: NoesisRuntime["runTurn"] = async (trailId, input, runOptions) =>
+    await executeTurn(trailId, input, createId("turn"), runOptions);
+  const interactions = createTurnInteractionController({
+    intents: workspace.operational.userIntents,
+    createIntentId: () => createId("intent"),
+    createTurnId: () => createId("turn"),
+    runTurn: async ({
+      sessionId,
+      intentId,
+      turnId,
+      text,
+      thinkingLevel,
+      onEvent,
+      onReady,
+      isInterruptRequested,
+    }) => {
+      const result = await executeTurn(
+        sessionId,
+        text,
+        turnId,
+        {
+          onEvent,
+          ...(thinkingLevel ? { thinkingLevel } : {}),
+        },
+        intentId,
+        { onReady, isInterruptRequested },
+      );
+      return Object.freeze({ outcome: result.outcome });
+    },
+    steer: async (sessionId, text) => {
+      await agent.steer(sessionId, text);
+    },
+    recordSteerDelivery: async ({ sessionId, intentId, turnId, text, deliveredAt }) => {
+      await workspace.operational.messages.put(
+        Object.freeze({
+          messageId: `${turnId}:steer:${intentId}`,
+          sessionId,
+          role: "user" as const,
+          content: text,
+          sensitivity: "normal" as const,
+          createdAt: deliveredAt,
+          metadata: Object.freeze({
+            turnId,
+            sourceIntentId: intentId,
+            deliveryMode: "steer",
+          }),
+        }),
+      );
+    },
+    interrupt: async (sessionId) => {
+      await agent.abort(sessionId);
+    },
+  });
+  const interact: NoesisRuntime["interact"] = async (trailId, command, interactionOptions) => {
     getTrail(trailId);
-    await agent.steer(trailId, text);
+    return await interactions.dispatch(trailId, command, interactionOptions);
   };
-  const followUp: NoesisRuntime["followUp"] = async (trailId, text) => {
+  const inspectInteraction: NoesisRuntime["inspectInteraction"] = async (trailId) => {
     getTrail(trailId);
-    await agent.followUp(trailId, text);
-  };
-  const abort: NoesisRuntime["abort"] = async (trailId) => {
-    const trail = getTrail(trailId);
-    await agent.abort(trailId);
-    if (trail.status === "running")
-      await persistTrail(Object.freeze({ ...trail, status: "aborted" as const }));
+    return await interactions.inspect(trailId);
   };
   const compact: NoesisRuntime["compact"] = async (trailId) => {
     const trail = getTrail(trailId);
@@ -2911,6 +2984,7 @@ export async function createApplicationRuntimeComposition(
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
     shutdownPromise ??= (async () => {
+      interactions.close();
       const stop = Promise.all([controlPlane.stop(), codeExecution.shutdown()]).then(() => undefined);
       let graceTimer: NodeJS.Timeout | undefined;
       const settlement = await Promise.race<
@@ -2974,9 +3048,8 @@ export async function createApplicationRuntimeComposition(
     resumeTrail,
     forkTrail,
     runTurn,
-    steer,
-    followUp,
-    abort,
+    interact,
+    inspectInteraction,
     compact,
     listSkills,
     inspectSkill,

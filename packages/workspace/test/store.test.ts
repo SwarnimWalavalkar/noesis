@@ -901,7 +901,7 @@ describe("WorkspaceStore", () => {
       .get();
     database.close();
 
-    expect(versions.at(-1)).toBe(22);
+    expect(versions.at(-1)).toBe(23);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
@@ -1158,6 +1158,275 @@ describe("WorkspaceStore", () => {
         (message) => message.role,
       ),
     ).toEqual(["user", "assistant"]);
+    store.close();
+  });
+
+  test("keeps queued turns and explicit steers durable, ordered, and session isolated", async () => {
+    const store = await createWorkspaceStore(await temporary("user-intents"));
+    await store.operational.sessions.put(session("session-intents"));
+    await store.operational.sessions.put(session("session-other-intents"));
+    seedForegroundTurn(store, {
+      turnId: "turn-active",
+      sessionId: "session-intents",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await store.operational.userIntents.enqueue({
+      intentId: "intent-z-first",
+      sessionId: "session-intents",
+      text: "first",
+      mode: "turn",
+      queuedBehindTurnId: "turn-active",
+      createdAt: "2026-01-01T00:01:00.000Z",
+    });
+    await store.operational.userIntents.enqueue({
+      intentId: "intent-a-second",
+      sessionId: "session-intents",
+      text: "second",
+      mode: "turn",
+      queuedBehindTurnId: "turn-active",
+      createdAt: "2026-01-01T00:01:00.000Z",
+    });
+    await store.operational.userIntents.enqueue({
+      intentId: "intent-other",
+      sessionId: "session-other-intents",
+      text: "other session",
+      mode: "turn",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(
+      (await store.operational.userIntents.listPending("session-intents")).map((intent) => intent.intentId),
+    ).toEqual(["intent-z-first", "intent-a-second"]);
+    await expect(
+      store.operational.userIntents.withdrawNewestPending({
+        sessionId: "session-intents",
+        withdrawnAt: "2026-01-01T00:03:00.000Z",
+      }),
+    ).resolves.toMatchObject({
+      intentId: "intent-a-second",
+      status: "withdrawn",
+    });
+    await expect(
+      store.operational.userIntents.claimOldestPending({
+        sessionId: "session-intents",
+        targetTurnId: "turn-first",
+        claimedAt: "2026-01-01T00:04:00.000Z",
+      }),
+    ).resolves.toMatchObject({
+      intentId: "intent-z-first",
+      status: "dispatching",
+      targetTurnId: "turn-first",
+      attemptCount: 1,
+    });
+    await expect(
+      store.operational.userIntents.releaseFailedDispatch({
+        sessionId: "session-other-intents",
+        intentId: "intent-z-first",
+        releasedAt: "2026-01-01T00:05:00.000Z",
+      }),
+    ).resolves.toBeUndefined();
+
+    await store.operational.userIntents.enqueue({
+      intentId: "intent-steer",
+      sessionId: "session-intents",
+      text: "change direction",
+      mode: "steer",
+      queuedBehindTurnId: "turn-active",
+      createdAt: "2026-01-01T00:05:00.000Z",
+    });
+    await expect(
+      store.operational.userIntents.claimSteer({
+        sessionId: "session-intents",
+        intentId: "intent-steer",
+        targetTurnId: "turn-active",
+        claimedAt: "2026-01-01T00:06:00.000Z",
+      }),
+    ).resolves.toMatchObject({
+      initialMode: "steer",
+      deliveryMode: "steer",
+      status: "dispatching",
+      targetTurnId: "turn-active",
+    });
+    await store.operational.messages.put({
+      messageId: "turn-active:steer:intent-steer",
+      sessionId: "session-intents",
+      role: "user",
+      content: "change direction",
+      sensitivity: "normal",
+      createdAt: "2026-01-01T00:06:30.000Z",
+      metadata: { turnId: "turn-active", sourceIntentId: "intent-steer" },
+    });
+    await expect(
+      store.operational.userIntents.markDelivered({
+        sessionId: "session-intents",
+        intentId: "intent-steer",
+        targetTurnId: "turn-active",
+        deliveredAt: "2026-01-01T00:07:00.000Z",
+      }),
+    ).resolves.toMatchObject({ status: "delivered" });
+
+    await store.operational.userIntents.enqueue({
+      intentId: "intent-third",
+      sessionId: "session-intents",
+      text: "third",
+      mode: "turn",
+      createdAt: "2026-01-01T00:08:00.000Z",
+    });
+    await store.operational.userIntents.enqueue({
+      intentId: "intent-fourth",
+      sessionId: "session-intents",
+      text: "fourth",
+      mode: "turn",
+      createdAt: "2026-01-01T00:09:00.000Z",
+    });
+    await expect(
+      store.operational.userIntents.promoteNewestPendingToSteer({
+        sessionId: "session-intents",
+        targetTurnId: "turn-active",
+        promotedAt: "2026-01-01T00:10:00.000Z",
+      }),
+    ).resolves.toMatchObject({
+      intentId: "intent-fourth",
+      initialMode: "turn",
+      deliveryMode: "steer",
+      status: "dispatching",
+    });
+    await expect(
+      store.operational.userIntents.releaseFailedDispatch({
+        sessionId: "session-intents",
+        intentId: "intent-fourth",
+        releasedAt: "2026-01-01T00:11:00.000Z",
+      }),
+    ).resolves.toMatchObject({
+      status: "pending",
+      deliveryMode: "turn",
+      attemptCount: 1,
+    });
+    expect(
+      (await store.operational.userIntents.listPending("session-intents")).map((intent) => intent.intentId),
+    ).toEqual(["intent-third", "intent-fourth"]);
+    expect(
+      (await store.operational.userIntents.listPending("session-other-intents")).map(
+        (intent) => intent.intentId,
+      ),
+    ).toEqual(["intent-other"]);
+    store.close();
+  });
+
+  test("claims one pending user intent exactly once across store instances", async () => {
+    const root = await temporary("user-intent-claim-contention");
+    const first = await createWorkspaceStore(root);
+    await first.operational.sessions.put(session("session-claim"));
+    await first.operational.userIntents.enqueue({
+      intentId: "intent-only",
+      sessionId: "session-claim",
+      text: "only once",
+      mode: "turn",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const second = await createWorkspaceStore(root);
+
+    const claims = await Promise.all([
+      first.operational.userIntents.claimOldestPending({
+        sessionId: "session-claim",
+        targetTurnId: "turn-worker-one",
+        claimedAt: "2026-01-01T00:01:00.000Z",
+      }),
+      second.operational.userIntents.claimOldestPending({
+        sessionId: "session-claim",
+        targetTurnId: "turn-worker-two",
+        claimedAt: "2026-01-01T00:01:00.000Z",
+      }),
+    ]);
+
+    expect(claims.filter((claim) => claim !== undefined)).toHaveLength(1);
+    expect(claims.filter((claim) => claim === undefined)).toHaveLength(1);
+    expect(await first.operational.userIntents.listPending("session-claim")).toEqual([]);
+    second.close();
+    first.close();
+  });
+
+  test("recovers dispatching user intents from durable message provenance", async () => {
+    const store = await createWorkspaceStore(await temporary("user-intent-recovery"));
+    await store.operational.sessions.put(session("session-recovery"));
+    const targets = [
+      ["intent-missing", "turn-missing"],
+      ["intent-completed", "turn-completed"],
+      ["intent-failed", "turn-failed"],
+      ["intent-running", "turn-running"],
+    ] as const;
+    for (const [index, [intentId, targetTurnId]] of targets.entries()) {
+      await store.operational.userIntents.enqueue({
+        intentId,
+        sessionId: "session-recovery",
+        text: intentId,
+        mode: "turn",
+        createdAt: `2026-01-01T00:0${String(index)}:00.000Z`,
+      });
+      await store.operational.userIntents.claimOldestPending({
+        sessionId: "session-recovery",
+        targetTurnId,
+        claimedAt: `2026-01-01T00:0${String(index)}:30.000Z`,
+      });
+    }
+    seedForegroundTurn(store, {
+      turnId: "turn-running",
+      sessionId: "session-recovery",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+    seedForegroundTurn(store, {
+      turnId: "turn-completed",
+      sessionId: "session-recovery",
+      status: "completed",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+      settledAt: "2026-01-01T00:00:30.000Z",
+    });
+    seedForegroundTurn(store, {
+      turnId: "turn-failed",
+      sessionId: "session-recovery",
+      status: "failed",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+      settledAt: "2026-01-01T00:00:30.000Z",
+    });
+    for (const [intentId, turnId] of [
+      ["intent-completed", "turn-completed"],
+      ["intent-failed", "turn-failed"],
+    ] as const) {
+      await store.operational.messages.put({
+        messageId: `${turnId}:user`,
+        sessionId: "session-recovery",
+        role: "user",
+        content: intentId,
+        sensitivity: "normal",
+        createdAt: "2026-01-01T00:09:00.000Z",
+        metadata: { turnId, sourceIntentId: intentId },
+      });
+    }
+
+    await expect(
+      store.operational.userIntents.recoverDispatching({
+        sessionId: "session-recovery",
+        recoveredAt: "2026-01-01T00:10:00.000Z",
+      }),
+    ).resolves.toEqual({ released: 2, delivered: 2, unresolved: 0 });
+    expect(
+      (await store.operational.userIntents.listPending("session-recovery")).map((intent) => [
+        intent.intentId,
+        intent.attemptCount,
+      ]),
+    ).toEqual([
+      ["intent-missing", 1],
+      ["intent-running", 1],
+    ]);
+    await expect(
+      store.operational.userIntents.recoverDispatching({
+        sessionId: "session-recovery",
+        recoveredAt: "2026-01-01T00:11:00.000Z",
+      }),
+    ).resolves.toEqual({ released: 0, delivered: 0, unresolved: 0 });
     store.close();
   });
 
@@ -1429,6 +1698,35 @@ describe("WorkspaceStore", () => {
     store.close();
   });
 });
+
+function seedForegroundTurn(
+  store: NoesisWorkspaceStore,
+  input: {
+    readonly turnId: string;
+    readonly sessionId: string;
+    readonly status: "running" | "completed" | "aborted" | "failed";
+    readonly admittedAt: string;
+    readonly settledAt?: string;
+  },
+): void {
+  const database = new DatabaseSync(store.unsafeDatabasePathForTesting);
+  database.exec("PRAGMA foreign_keys = OFF");
+  database
+    .prepare(
+      `INSERT INTO foreground_turns(
+        turn_id, session_id, plan_id, status, outcome_id, admitted_at, settled_at
+      ) VALUES (?, ?, ?, ?, NULL, ?, ?)`,
+    )
+    .run(
+      input.turnId,
+      input.sessionId,
+      `plan:${input.turnId}`,
+      input.status,
+      input.admittedAt,
+      input.settledAt ?? null,
+    );
+  database.close();
+}
 
 function session(sessionId: string) {
   return {

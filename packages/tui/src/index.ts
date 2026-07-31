@@ -8,17 +8,27 @@ import {
 } from "@earendil-works/pi-tui";
 import type { RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
 import { executionIdOf } from "./action-summary.ts";
+import { tuiActionForAgentEvent } from "./agent-event.ts";
 import { isExclusiveSlashCommand, runSlashCommand } from "./commands.ts";
+import { editTextInExternalEditor } from "./external-editor.ts";
+import { boundedInspectorText, streamingFrameDelay } from "./lifecycle-utils.ts";
 import {
   createHeaderView,
   createHelpView,
   createInputLabelView,
   createNoesisView,
+  createQueuedInputsView,
   createRunInspectorOverlay,
   createStaticLineView,
   createStatusView,
 } from "./rendering.ts";
-import type { NoesisTuiRuntime } from "./runtime-port.ts";
+import type {
+  NoesisTuiRuntime,
+  TuiInteractionCommand,
+  TuiInteractionEvent,
+  TuiInteractionResult,
+  TuiInteractionSnapshot,
+} from "./runtime-port.ts";
 import { createSafeEditor, createSelectTheme } from "./safe-editor.ts";
 import {
   createResponsiveSessionPicker,
@@ -26,11 +36,14 @@ import {
   resumableTrail,
   type TuiStartOptions,
 } from "./session-picker.ts";
-import { initialTuiState, timelineActions } from "./state.ts";
+import { initialTuiState, interactionViewFromSnapshot, timelineActions } from "./state.ts";
 import { ANSI, safeTerminalText, shouldUseColor, styled } from "./theme.ts";
 
 export * from "./action-summary.ts";
+export * from "./agent-event.ts";
 export * from "./commands.ts";
+export * from "./external-editor.ts";
+export * from "./lifecycle-utils.ts";
 export * from "./onboarding.ts";
 export * from "./rendering.ts";
 export * from "./runtime-port.ts";
@@ -39,19 +52,8 @@ export * from "./session-picker.ts";
 export * from "./state.ts";
 
 const SHUTDOWN_GRACE_MS = 250;
-const INSPECTOR_PREVIEW_CHARACTERS = 24_000;
+const INTERRUPT_FEEDBACK_MS = 20;
 const INSPECTOR_PAGE_ROWS = 10;
-
-export function boundedInspectorText(text: string): string {
-  const safe = safeTerminalText(text);
-  if (safe.length <= INSPECTOR_PREVIEW_CHARACTERS) return safe;
-  return `${safe.slice(0, INSPECTOR_PREVIEW_CHARACTERS)}\n\n… inspector preview truncated`;
-}
-
-export function streamingFrameDelay(activeCharacters: number, pendingCharacters: number): number {
-  const total = Math.max(0, activeCharacters) + Math.max(0, pendingCharacters);
-  return Math.min(80, 16 + Math.floor(total / 4_000) * 8);
-}
 
 type ShutdownSettlement =
   | { readonly status: "settled" }
@@ -108,23 +110,28 @@ export async function startNoesisTui(
   );
   let inspectorHandle: OverlayHandle | undefined;
   const statusView = createStatusView(view, () => terminal.rows);
+  const queuedInputsView = createQueuedInputsView(view, () => terminal.rows);
   const inputLabelView = createInputLabelView(colorEnabled, () => terminal.rows);
   const helpView = createHelpView(view, () => terminal.rows);
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
-  let activeTurn: Promise<void> | undefined;
   let activeExclusiveCommand: Promise<boolean> | undefined;
+  let externalEditorActive = false;
   let turnGeneration = 0;
   let inspectorGeneration = 0;
   interface ActiveTurnToken {
     readonly generation: number;
     readonly trailId: string;
+    readonly turnId: string;
   }
   let activeTurnToken: ActiveTurnToken | undefined;
   let pendingStream: { readonly token: ActiveTurnToken; readonly text: string } | undefined;
   let streamRenderTimer: NodeJS.Timeout | undefined;
   let streamRenderTimerToken: ActiveTurnToken | undefined;
   const isCurrentTurn = (token: ActiveTurnToken): boolean =>
-    phase === "main" && activeTurnToken === token && token.generation === turnGeneration;
+    phase === "main" &&
+    activeTurnToken === token &&
+    token.generation === turnGeneration &&
+    view.state.trailId === token.trailId;
   const flushStreamDelta = (token: ActiveTurnToken): void => {
     if (streamRenderTimer && streamRenderTimerToken !== token) return;
     if (streamRenderTimer) clearTimeout(streamRenderTimer);
@@ -187,17 +194,15 @@ export async function startNoesisTui(
         }
       }
       const trailId = view.state.trailId;
-      const turn = activeTurn;
       const exclusiveCommand = activeExclusiveCommand;
       let shutdownFailure: { readonly error: unknown } | undefined;
-      if (turn && trailId) {
-        const abortAndSettle = (async () => {
-          await runtime.abort(trailId);
-          await turn;
-        })().then<ShutdownSettlement, ShutdownSettlement>(
-          () => ({ status: "settled" }),
-          (error: unknown) => ({ status: "rejected", error }),
-        );
+      if (trailId && view.state.interaction.phase !== "idle") {
+        const abortAndSettle = runtime
+          .interact(trailId, { type: "interrupt" })
+          .then<ShutdownSettlement, ShutdownSettlement>(
+            () => ({ status: "settled" }),
+            (error: unknown) => ({ status: "rejected", error }),
+          );
         let graceTimer: NodeJS.Timeout | undefined;
         // Terminal ownership is already released. Give a cooperative runtime a brief chance to
         // settle, then detach the abortable turn: a broken runtime must not keep the CLI lifecycle
@@ -329,15 +334,222 @@ export async function startNoesisTui(
     return false;
   };
 
+  const applyInteractionSnapshot = (snapshot: TuiInteractionSnapshot): void => {
+    if (view.state.trailId !== snapshot.sessionId) return;
+    view.dispatch({
+      type: "interaction-changed",
+      interaction: interactionViewFromSnapshot(snapshot),
+    });
+    if (snapshot.phase === "interrupting")
+      view.dispatch({ type: "execution-changed", execution: "aborting" });
+    else if (snapshot.phase === "idle" && view.state.execution !== "error")
+      view.dispatch({ type: "execution-changed", execution: "idle" });
+    else if (view.state.execution === "idle")
+      view.dispatch({ type: "execution-changed", execution: "thinking" });
+    tui.requestRender(snapshot.phase === "interrupting");
+  };
+
+  const reconcileSettledTurn = (
+    trailId: string,
+    generation: number,
+    outcome: "completed" | "aborted" | "failed",
+  ): void => {
+    void Promise.all([runtime.getTranscript(trailId), Promise.resolve(runtime.getTrail(trailId))]).then(
+      ([transcript, trail]) => {
+        if (
+          phase !== "main" ||
+          view.state.trailId !== trailId ||
+          turnGeneration !== generation ||
+          activeTurnToken
+        )
+          return;
+        view.dispatch({
+          type: "transcript-hydrated",
+          trailId,
+          transcript,
+        });
+        if (outcome === "completed" && trail.context)
+          view.dispatch({
+            type: "turn-completed",
+            context: trail.context,
+            capabilityVersions: trail.capabilityVersions,
+            turnCount: trail.turns.length,
+            ...(view.state.contextUsage ? { contextUsage: view.state.contextUsage } : {}),
+          });
+        else if (outcome === "aborted") {
+          view.dispatch({ type: "execution-changed", execution: "idle" });
+          view.dispatch({ type: "system-message", text: "Turn interrupted." });
+        }
+        tui.requestRender();
+      },
+      (error: unknown) => {
+        if (phase !== "main" || view.state.trailId !== trailId) return;
+        view.dispatch({
+          type: "failed",
+          error: safeTerminalText(error instanceof Error ? error.message : String(error)),
+        });
+        tui.requestRender();
+      },
+    );
+  };
+
+  const onInteractionEvent = (interactionEvent: TuiInteractionEvent): void => {
+    if (phase !== "main") return;
+    if (interactionEvent.type === "state") {
+      applyInteractionSnapshot(interactionEvent.snapshot);
+      return;
+    }
+    if (interactionEvent.sessionId !== view.state.trailId) return;
+    if (interactionEvent.type === "turn-started") {
+      turnGeneration += 1;
+      const token: ActiveTurnToken = {
+        generation: turnGeneration,
+        trailId: interactionEvent.sessionId,
+        turnId: interactionEvent.turnId,
+      };
+      activeTurnToken = token;
+      view.dispatch({ type: "prompt-submitted", text: interactionEvent.text });
+      tui.requestRender();
+      return;
+    }
+    if (interactionEvent.type === "turn-settled") {
+      const token = activeTurnToken;
+      if (token?.turnId === interactionEvent.turnId) {
+        flushStreamDelta(token);
+        activeTurnToken = undefined;
+      }
+      if (interactionEvent.outcome === "aborted") {
+        view.dispatch({ type: "turn-aborted" });
+      } else if (interactionEvent.outcome === "failed") {
+        view.dispatch({
+          type: "failed",
+          error: safeTerminalText(interactionEvent.error ?? "Turn failed."),
+        });
+      }
+      reconcileSettledTurn(
+        interactionEvent.sessionId,
+        token?.generation ?? turnGeneration,
+        interactionEvent.outcome,
+      );
+      tui.requestRender();
+      return;
+    }
+    const token = activeTurnToken;
+    if (!token || token.turnId !== interactionEvent.turnId || !isCurrentTurn(token)) return;
+    const event = interactionEvent.event;
+    if (event.type === "delta") {
+      queueStreamDelta(token, event.text);
+      return;
+    }
+    flushStreamDelta(token);
+    const action = tuiActionForAgentEvent(event);
+    if (action) view.dispatch(action);
+    tui.requestRender();
+  };
+
+  const interact = async (command: TuiInteractionCommand): Promise<TuiInteractionResult> => {
+    const trailId = view.state.trailId;
+    if (!trailId) throw new Error("No active session is available for this interaction.");
+    const result = await runtime.interact(trailId, command, {
+      onEvent: onInteractionEvent,
+      ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
+    });
+    applyInteractionSnapshot(result.snapshot);
+    return result;
+  };
+
+  const interruptActiveTurn = async (): Promise<TuiInteractionResult> => {
+    if (view.state.interaction.phase !== "idle") {
+      view.dispatch({ type: "execution-changed", execution: "aborting" });
+      tui.requestRender(true);
+      await new Promise<void>((resolve) => setTimeout(resolve, INTERRUPT_FEEDBACK_MS));
+    }
+    return interact({ type: "interrupt" });
+  };
+
+  const restoreNewestQueuedInput = (): void => {
+    void interact({ type: "restore-newest" }).then(
+      (result) => {
+        if (result.effect !== "restored" || !result.restoredText) return;
+        const draft = editor.getText();
+        editor.setText(draft ? `${draft}\n${result.restoredText}` : result.restoredText);
+        tui.requestRender();
+      },
+      (error: unknown) => {
+        view.dispatch({
+          type: "failed",
+          error: safeTerminalText(error instanceof Error ? error.message : String(error)),
+        });
+        tui.requestRender();
+      },
+    );
+  };
+
+  const openExternalEditor = (): void => {
+    if (externalEditorActive) return;
+    externalEditorActive = true;
+    const original = editor.getText();
+    editor.disableSubmit = true;
+    tui.stop();
+    void editTextInExternalEditor({
+      content: original,
+      ...(options.externalEditorCommand ? { configuredCommand: options.externalEditorCommand } : {}),
+    })
+      .then((result) => {
+        if (phase !== "main") return;
+        if (result.status === "edited") editor.setText(result.content);
+        else
+          view.dispatch({
+            type: "system-message",
+            text: `External editor left the draft unchanged (${result.reason}).`,
+          });
+      })
+      .finally(() => {
+        externalEditorActive = false;
+        if (phase !== "main") return;
+        editor.disableSubmit = false;
+        tui.start();
+        tui.setFocus(editor);
+        tui.requestRender(true);
+      });
+  };
+
   removeExitInputListener = tui.addInputListener((data) => {
+    if (phase !== "main") {
+      if (matchesKey(data, "ctrl+c")) {
+        cancelPicker?.();
+        void shutdown();
+        return { consume: true };
+      }
+      return undefined;
+    }
+    // Global shortcuts must not reinterpret controls that are still quarantined as paste.
+    if (!editor.acceptsUnbracketedCommandInput()) return undefined;
     if (matchesKey(data, "ctrl+c")) {
-      cancelPicker?.();
       void shutdown();
       return { consume: true };
     }
-    if (phase !== "main") return undefined;
     if (handleTranscriptKey(data)) return { consume: true };
-    if (data === "\n" && editor.getText().trim() === "/quit") {
+    if (matchesKey(data, "ctrl+g")) {
+      openExternalEditor();
+      return { consume: true };
+    }
+    if (matchesKey(data, "alt+up")) {
+      restoreNewestQueuedInput();
+      return { consume: true };
+    }
+    if (matchesKey(data, "escape") && view.state.interaction.phase !== "idle") {
+      if (view.state.interaction.phase !== "interrupting" && view.state.execution !== "aborting")
+        void interruptActiveTurn().catch((error: unknown) => {
+          view.dispatch({
+            type: "failed",
+            error: safeTerminalText(error instanceof Error ? error.message : String(error)),
+          });
+          tui.requestRender();
+        });
+      return { consume: true };
+    }
+    if (data.endsWith("\n") && `${editor.getText()}${data}` === "/quit\n") {
       void shutdown();
       return { consume: true };
     }
@@ -367,7 +579,7 @@ export async function startNoesisTui(
       inspectorGeneration === submittedInspectorGeneration &&
       view.state.trailId === ownedTrailId;
     const publishInspector = (message: string): void => {
-      if (!isCurrentSubmission() || activeTurn) return;
+      if (!isCurrentSubmission() || view.state.interaction.phase !== "idle") return;
       view.dispatch({
         type: "system-message",
         text: boundedInspectorText(message),
@@ -375,24 +587,45 @@ export async function startNoesisTui(
       tui.requestRender();
     };
     void (async () => {
-      if (activeTurn) {
-        if (normalizedInput === "/abort") {
-          view.dispatch({ type: "execution-changed", execution: "aborting" });
-          tui.requestRender();
-          // Keep ABORTING observable for one throttled TUI render frame before a cooperative runtime settles.
-          await new Promise<void>((resolve) => setTimeout(resolve, 20));
-          await runtime.abort(submittedTrailId);
-        } else {
-          view.dispatch({
-            type: "system-message",
-            text: "A turn is active. Use /abort to stop it before submitting another command.",
-          });
-          tui.requestRender();
-        }
+      if (normalizedInput === "/abort") {
+        const result = await interruptActiveTurn();
+        if (result.effect === "idle") view.dispatch({ type: "system-message", text: "No turn is active." });
+        tui.requestRender();
         return;
       }
-      if (normalizedInput === "/abort") {
-        view.dispatch({ type: "system-message", text: "No turn is active." });
+      if (normalizedInput === "/steer" || normalizedInput.startsWith("/steer ")) {
+        const steeringText = normalizedInput.slice("/steer".length).trim();
+        const result = await interact({
+          type: "steer",
+          ...(steeringText ? { text: steeringText } : {}),
+        });
+        if (result.effect === "idle")
+          view.dispatch({
+            type: "system-message",
+            text: steeringText
+              ? "No active turn is available to steer."
+              : "No queued message is available to promote.",
+          });
+        tui.requestRender();
+        return;
+      }
+      if (normalizedInput === "/queue resume") {
+        const result = await interact({ type: "resume-queue" });
+        if (result.effect === "idle")
+          view.dispatch({ type: "system-message", text: "The queue is already idle." });
+        tui.requestRender();
+        return;
+      }
+      if (normalizedInput === "/queue" || normalizedInput.startsWith("/queue ")) {
+        view.dispatch({ type: "system-message", text: "Use /queue resume." });
+        tui.requestRender();
+        return;
+      }
+      if (view.state.interaction.phase !== "idle" && isExclusiveSlashCommand(normalizedInput)) {
+        view.dispatch({
+          type: "system-message",
+          text: "That command changes the session. Wait for the turn to finish or press Esc to interrupt it.",
+        });
         tui.requestRender();
         return;
       }
@@ -419,127 +652,26 @@ export async function startNoesisTui(
           if (activeExclusiveCommand === commandWork) activeExclusiveCommand = undefined;
         }
       }
-      if (handled) return;
-
-      view.dispatch({ type: "prompt-submitted", text });
-      tui.requestRender();
-      const trailId = view.state.trailId;
-      if (!trailId) return;
-      turnGeneration += 1;
-      const token: ActiveTurnToken = { generation: turnGeneration, trailId };
-      const actionIdForView = (actionId: string): string => `${String(token.generation)}:${actionId}`;
-      activeTurnToken = token;
-      const turn = (async () => {
-        try {
-          const result = await runtime.runTurn(trailId, text, {
-            ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
-            onEvent: (event) => {
-              if (!isCurrentTurn(token)) return;
-              if (event.type === "delta") {
-                queueStreamDelta(token, event.text);
-                return;
-              } else if (event.type === "tool-start") {
-                flushStreamDelta(token);
-                view.dispatch({
-                  type: "action-started",
-                  actionId: actionIdForView(event.actionId),
-                  ...(event.parentActionId ? { parentActionId: actionIdForView(event.parentActionId) } : {}),
-                  name: event.name,
-                  input: event.input,
-                  at: Date.now(),
-                });
-              } else if (event.type === "tool-update") {
-                flushStreamDelta(token);
-                view.dispatch({
-                  type: "action-updated",
-                  actionId: actionIdForView(event.actionId),
-                  update: event.update,
-                });
-              } else if (event.type === "tool-end") {
-                flushStreamDelta(token);
-                view.dispatch({
-                  type: "action-ended",
-                  actionId: actionIdForView(event.actionId),
-                  output: event.result,
-                  isError: event.isError,
-                  at: Date.now(),
-                });
-              } else if (event.type === "model") {
-                flushStreamDelta(token);
-                view.dispatch({
-                  type: "model-metadata",
-                  provider: event.provider,
-                  model: event.model,
-                  contextWindow: event.contextWindow,
-                });
-              } else if (event.type === "usage") {
-                flushStreamDelta(token);
-                view.dispatch({
-                  type: "usage-updated",
-                  usedTokens: event.usedTokens,
-                  contextWindow: event.contextWindow,
-                  accuracy: event.accuracy,
-                });
-              } else if (event.type === "status" && event.status === "started") {
-                flushStreamDelta(token);
-                view.dispatch({
-                  type: "execution-changed",
-                  execution: "thinking",
-                });
-              } else if (event.type === "status" && event.status === "aborted") {
-                flushStreamDelta(token);
-                view.dispatch({ type: "execution-changed", execution: "idle" });
-              } else if (event.type === "status" && event.status === "failed") {
-                flushStreamDelta(token);
-                view.dispatch({
-                  type: "failed",
-                  error: safeTerminalText(event.error),
-                });
-              }
-              tui.requestRender();
-            },
-          });
-          flushStreamDelta(token);
-          if (!isCurrentTurn(token)) return;
-          // Intermediate tool-loop messages are useful while a turn is live, but durable runtime
-          // output is authoritative at settlement and replaces the current assistant block exactly.
-          view.dispatch({
-            type: "stream-reconciled",
-            text: safeTerminalText(result.output),
-          });
-          if (result.outcome === "aborted") {
-            view.dispatch({ type: "turn-aborted" });
-            view.dispatch({ type: "system-message", text: "Turn aborted." });
-          } else {
+      if (handled) {
+        const selectedTrailId = ownedTrailId;
+        if (selectedTrailId && selectedTrailId !== submittedTrailId) {
+          const [transcript, interaction] = await Promise.all([
+            runtime.getTranscript(selectedTrailId),
+            runtime.inspectInteraction(selectedTrailId),
+          ]);
+          if (isCurrentSubmission()) {
             view.dispatch({
-              type: "turn-completed",
-              context: result.context,
-              capabilityVersions: result.usedCapabilities,
-              turnCount: runtime.getTrail(trailId).turns.length,
-              ...(result.contextUsage ? { contextUsage: result.contextUsage } : {}),
+              type: "transcript-hydrated",
+              trailId: selectedTrailId,
+              transcript,
             });
-          }
-        } catch (error) {
-          flushStreamDelta(token);
-          if (!isCurrentTurn(token)) return;
-          view.dispatch({
-            type: "failed",
-            error: safeTerminalText(error instanceof Error ? error.message : String(error)),
-          });
-        } finally {
-          if (activeTurnToken === token) {
-            activeTurnToken = undefined;
-            pendingStream = undefined;
-            if (streamRenderTimer) clearTimeout(streamRenderTimer);
-            streamRenderTimer = undefined;
-            streamRenderTimerToken = undefined;
-            tui.requestRender();
+            applyInteractionSnapshot(interaction);
           }
         }
-      })();
-      activeTurn = turn;
-      await turn;
-      if (activeTurn === turn) activeTurn = undefined;
+        return;
+      }
+
+      await interact({ type: "submit", text });
     })().catch((error: unknown) => {
       if (!isCurrentSubmission()) return;
       view.dispatch({
@@ -552,7 +684,11 @@ export async function startNoesisTui(
   tui.addChild(root);
   const loadTranscript = async (trail: TrailState): Promise<readonly RuntimeTranscriptEntry[]> =>
     runtime.getTranscript(trail.trailId);
-  const mountMain = (trail: TrailState, transcript: readonly RuntimeTranscriptEntry[]): void => {
+  const mountMain = (
+    trail: TrailState,
+    transcript: readonly RuntimeTranscriptEntry[],
+    interaction: TuiInteractionSnapshot,
+  ): void => {
     phase = "main";
     cancelPicker = undefined;
     inspectorHandle?.hide();
@@ -563,9 +699,11 @@ export async function startNoesisTui(
       trailId: trail.trailId,
       transcript,
     });
+    applyInteractionSnapshot(interaction);
     root.clear();
     root.addChild(headerView);
     root.addChild(view);
+    root.addChild(queuedInputsView);
     root.addChild(inputLabelView);
     root.addChild(editor);
     root.addChild(statusView);
@@ -622,7 +760,11 @@ export async function startNoesisTui(
     }
     try {
       const trail = await resumableTrail(runtime, trailId);
-      mountMain(trail, await loadTranscript(trail));
+      const [transcript, interaction] = await Promise.all([
+        loadTranscript(trail),
+        runtime.inspectInteraction(trail.trailId),
+      ]);
+      mountMain(trail, transcript, interaction);
     } catch (error) {
       await shutdown();
       throw error;
@@ -636,7 +778,11 @@ export async function startNoesisTui(
             provider: requestedProvider,
             model: requestedModel,
           });
-    mountMain(trail, await loadTranscript(trail));
+    const [transcript, interaction] = await Promise.all([
+      loadTranscript(trail),
+      runtime.inspectInteraction(trail.trailId),
+    ]);
+    mountMain(trail, transcript, interaction);
     tui.start();
   }
   await shutdownCompleted;

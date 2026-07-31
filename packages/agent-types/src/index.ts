@@ -297,7 +297,6 @@ export interface NoesisAgentRuntime {
     emit: (event: AgentRuntimeEvent) => void,
   ) => Promise<AgentRuntimeResult>;
   readonly steer: (trailId: string, text: string) => Promise<void>;
-  readonly followUp: (trailId: string, text: string) => Promise<void>;
   readonly abort: (trailId: string) => Promise<void>;
 }
 

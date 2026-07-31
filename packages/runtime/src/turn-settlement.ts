@@ -10,6 +10,7 @@ export interface TurnSettlementRequest {
   readonly sessionId: string;
   readonly turnId: string;
   readonly input: string;
+  readonly sourceIntentId?: string;
   readonly occurredAt: string;
   readonly plan: FrozenTurnPlan;
   readonly execute: () => Promise<TurnResult>;
@@ -42,6 +43,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         createdAt: request.occurredAt,
         metadata: Object.freeze({
           turnId: request.turnId,
+          ...(request.sourceIntentId ? { sourceIntentId: request.sourceIntentId } : {}),
           frozenTurnPlanId: request.plan.planId,
           frozenTurnPlanDigest: request.plan.canonicalDigest,
         }),

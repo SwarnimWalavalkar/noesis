@@ -6,6 +6,12 @@ import type {
 } from "@noesis/agent-types";
 import type { ContextSnapshot } from "@noesis/context";
 import type { JsonValue, TrailStatus } from "@noesis/domain";
+import type {
+  InteractionCommand,
+  InteractionDispatchOptions,
+  InteractionDispatchResult,
+  InteractionSnapshot,
+} from "./turn-interaction.ts";
 
 export * from "./coordinator-contracts.ts";
 export * from "./coordinator.ts";
@@ -19,6 +25,7 @@ export * from "./control-plane.ts";
 export * from "./turn-intelligence.ts";
 export * from "./turn-settlement.ts";
 export * from "./transcript.ts";
+export * from "./turn-interaction.ts";
 export * from "./scheduled-execution.ts";
 
 export interface RuntimeTranscriptMessage {
@@ -133,8 +140,11 @@ export interface NoesisRuntime {
   readonly resumeTrail: (trailId: string) => Promise<TrailState>;
   readonly forkTrail: (trailId: string, title?: string) => Promise<TrailState>;
   readonly runTurn: (trailId: string, input: string, options?: RunTurnOptions) => Promise<TurnResult>;
-  readonly steer: (trailId: string, text: string) => Promise<void>;
-  readonly followUp: (trailId: string, text: string) => Promise<void>;
-  readonly abort: (trailId: string) => Promise<void>;
+  readonly interact: (
+    trailId: string,
+    command: InteractionCommand,
+    options?: InteractionDispatchOptions,
+  ) => Promise<InteractionDispatchResult>;
+  readonly inspectInteraction: (trailId: string) => Promise<InteractionSnapshot>;
   readonly compact: (trailId: string) => Promise<void>;
 }

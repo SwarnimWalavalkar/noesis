@@ -12,6 +12,8 @@ export interface TuiStartOptions {
   readonly provider?: string;
   readonly model?: string;
   readonly thinkingLevel?: RuntimeAgentDefaults["thinkingLevel"];
+  /** Overrides $VISUAL/$EDITOR for Ctrl+G composer editing. */
+  readonly externalEditorCommand?: string;
   readonly session?:
     | { readonly mode: "new" }
     | { readonly mode: "pick" }

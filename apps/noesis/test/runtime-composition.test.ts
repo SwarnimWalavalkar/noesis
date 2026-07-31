@@ -1,11 +1,12 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  AgentRuntimeEvent,
-  AgentRuntimeRequest,
-  FrozenTurnPlan,
-  NoesisAgentRuntime,
+import {
+  frozenTurnPlanDigest,
+  type AgentRuntimeEvent,
+  type AgentRuntimeRequest,
+  type FrozenTurnPlan,
+  type NoesisAgentRuntime,
 } from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
 import { eventChecksum, type LedgerEvent } from "@noesis/domain";
@@ -13,7 +14,6 @@ import { createPiAgentRoleRunner, createPiAgentRuntime, createPiSkillLibrary } f
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
-import { frozenTurnPlanDigest } from "../../../packages/agent-types/src/index.ts";
 import {
   CONTROLLED_PI_MODEL,
   CONTROLLED_PI_PROVIDER,
@@ -44,6 +44,14 @@ const recoveryTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => 
   };
   return Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) });
 };
+
+async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<void> {
+  for (let index = 0; index < 200; index += 1) {
+    if (await predicate()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for runtime interaction");
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
@@ -184,7 +192,6 @@ describe("apps/noesis production control-plane composition", () => {
           model: request.model,
         }),
       steer: noOp,
-      followUp: noOp,
       abort: noOp,
     });
     const first = await createApplicationRuntimeComposition({
@@ -225,7 +232,6 @@ describe("apps/noesis production control-plane composition", () => {
         });
       },
       steer: noOp,
-      followUp: noOp,
       abort: noOp,
     });
     const reopened = await createApplicationRuntimeComposition({
@@ -477,7 +483,6 @@ describe("apps/noesis production control-plane composition", () => {
         });
       },
       steer: noOp,
-      followUp: noOp,
       abort: noOp,
     });
     const first = await createApplicationRuntimeComposition({
@@ -511,6 +516,158 @@ describe("apps/noesis production control-plane composition", () => {
     });
     expect(await reopened.getTranscript(trail.trailId)).toEqual(beforeRestart);
     await reopened.shutdown();
+  });
+
+  test("runs queued turns through the durable interaction controller and records successful steering", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-interaction-controller-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    let finishTurn: ((outcome: "completed" | "aborted") => void) | undefined;
+    const turnFinished = new Promise<"completed" | "aborted">((resolve) => {
+      finishTurn = resolve;
+    });
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const steered: string[] = [];
+    const interactionAgent: NoesisAgentRuntime = Object.freeze({
+      name: runtimeIdentity,
+      run: async (request: AgentRuntimeRequest) => {
+        markStarted?.();
+        const outcome = await turnFinished;
+        return outcome === "aborted"
+          ? Object.freeze({
+              outcome: "aborted" as const,
+              stopReason: "aborted" as const,
+              text: "partial",
+              provider: request.provider,
+              model: request.model,
+            })
+          : Object.freeze({
+              outcome: "completed" as const,
+              stopReason: "stop" as const,
+              text: "completed",
+              provider: request.provider,
+              model: request.model,
+            });
+      },
+      steer: async (_trailId: string, text: string) => {
+        steered.push(text);
+      },
+      abort: async () => {
+        finishTurn?.("aborted");
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      agent: interactionAgent,
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Durable interaction" });
+
+    const queued = await runtime.interact(trail.trailId, {
+      type: "submit",
+      text: "Run this as its own turn",
+    });
+    expect(queued.effect).toBe("queued");
+    await started;
+    const steeredResult = await runtime.interact(trail.trailId, {
+      type: "steer",
+      text: "Focus on the durable evidence",
+    });
+    expect(steeredResult.effect).toBe("steered");
+    expect(steered).toEqual(["Focus on the durable evidence"]);
+    const messages = await runtime.debug.workspace.operational.messages.listForSession(trail.trailId);
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: "Run this as its own turn",
+          metadata: expect.objectContaining({ sourceIntentId: queued.intentId }),
+        }),
+        expect.objectContaining({
+          role: "user",
+          content: "Focus on the durable evidence",
+          metadata: expect.objectContaining({
+            sourceIntentId: steeredResult.intentId,
+            deliveryMode: "steer",
+          }),
+        }),
+      ]),
+    );
+
+    await runtime.interact(trail.trailId, {
+      type: "submit",
+      text: "Preserve this queued turn",
+    });
+    await runtime.interact(trail.trailId, { type: "interrupt" });
+    await waitUntil(async () => (await runtime.inspectInteraction(trail.trailId)).phase === "idle");
+    expect((await runtime.inspectInteraction(trail.trailId)).pending.map((item) => item.text)).toEqual([
+      "Preserve this queued turn",
+    ]);
+    await runtime.shutdown();
+  });
+
+  test("settles an interacted completion into the authoritative trail context and turns", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-interacted-settlement-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const noOp = async (): Promise<void> => undefined;
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      agent: Object.freeze({
+        name: runtimeIdentity,
+        run: async (request: AgentRuntimeRequest) =>
+          Object.freeze({
+            outcome: "completed" as const,
+            stopReason: "stop" as const,
+            text: "durably completed",
+            provider: request.provider,
+            model: request.model,
+          }),
+        steer: noOp,
+        abort: noOp,
+      }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Interacted settlement" });
+
+    await runtime.interact(trail.trailId, {
+      type: "submit",
+      text: "Complete through the interaction controller",
+    });
+    await waitUntil(() => runtime.getTrail(trail.trailId).turns.length === 1);
+
+    expect(runtime.getTrail(trail.trailId)).toMatchObject({
+      status: "idle",
+      contextSnapshotId: expect.any(String),
+      context: {
+        snapshotId: expect.any(String),
+        usedTokens: expect.any(Number),
+      },
+      turns: [
+        {
+          input: "Complete through the interaction controller",
+          output: "durably completed",
+        },
+      ],
+    });
+    await runtime.shutdown();
   });
 
   test("a real app turn pins admission and records exact durable operational work", async () => {

@@ -5,7 +5,7 @@ import type {
   RuntimeTranscriptAction,
   TrailState,
 } from "@noesis/runtime";
-import type { TuiExecutionDetail } from "./runtime-port.ts";
+import type { TuiExecutionDetail, TuiInteractionSnapshot } from "./runtime-port.ts";
 
 export type Pane = "trail" | "context" | "capabilities";
 
@@ -106,6 +106,36 @@ export interface TuiContextUsage {
   readonly accuracy: "reported" | "estimated";
 }
 
+export interface TuiQueuedInput {
+  readonly queueId: string;
+  readonly text: string;
+  readonly createdAt: string;
+}
+
+export interface TuiInteractionView {
+  readonly phase: "idle" | "running" | "interrupting";
+  readonly queuePaused: boolean;
+  readonly active?: {
+    readonly intentId: string;
+    readonly turnId: string;
+    readonly text: string;
+  };
+  readonly queuedInputs: readonly TuiQueuedInput[];
+}
+
+export function interactionViewFromSnapshot(snapshot: TuiInteractionSnapshot): TuiInteractionView {
+  return {
+    phase: snapshot.phase,
+    queuePaused: snapshot.queuePaused,
+    ...(snapshot.active ? { active: { ...snapshot.active } } : {}),
+    queuedInputs: snapshot.pending.map((input) => ({
+      queueId: input.intentId,
+      text: input.text,
+      createdAt: input.createdAt,
+    })),
+  };
+}
+
 /** Overlay state for the run inspector opened from a transcript action. */
 export interface TuiInspectorState {
   readonly actionId: string;
@@ -132,6 +162,7 @@ export interface NoesisTuiState {
   readonly inspector?: TuiInspectorState;
   readonly context?: ContextSnapshot;
   readonly contextUsage?: TuiContextUsage;
+  readonly interaction: TuiInteractionView;
   readonly turnCount: number;
   readonly capabilityVersions: Readonly<Record<string, number>>;
   readonly colorEnabled: boolean;
@@ -196,6 +227,10 @@ export type NoesisTuiAction =
     }
   | ({ readonly type: "usage-updated" } & TuiContextUsage)
   | {
+      readonly type: "interaction-changed";
+      readonly interaction: TuiInteractionView;
+    }
+  | {
       readonly type: "turn-completed";
       readonly context: ContextSnapshot;
       readonly capabilityVersions: Readonly<Record<string, number>>;
@@ -209,6 +244,11 @@ export type NoesisTuiAction =
   | { readonly type: "system-message"; readonly text: string };
 
 const NO_EXPANDED_ACTIONS: ReadonlySet<string> = new Set<string>();
+const EMPTY_INTERACTION: TuiInteractionView = Object.freeze({
+  phase: "idle",
+  queuePaused: false,
+  queuedInputs: Object.freeze([]),
+});
 
 export const initialTuiState = (
   runtime: string,
@@ -228,6 +268,7 @@ export const initialTuiState = (
   pane: "trail",
   timeline: [],
   expandedActionIds: NO_EXPANDED_ACTIONS,
+  interaction: EMPTY_INTERACTION,
   turnCount: 0,
   capabilityVersions: {},
   colorEnabled: options.colorEnabled ?? false,
@@ -289,6 +330,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         ...(action.trail.context ? { context: action.trail.context } : {}),
         capabilityVersions: { ...action.trail.capabilityVersions },
         expandedActionIds: NO_EXPANDED_ACTIONS,
+        interaction: EMPTY_INTERACTION,
         turnCount: action.trail.turns.length,
         execution: "idle",
       };
@@ -452,6 +494,16 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
           usedTokens: action.usedTokens,
           contextWindow: action.contextWindow,
           accuracy: action.accuracy,
+        },
+      };
+    case "interaction-changed":
+      return {
+        ...state,
+        interaction: {
+          phase: action.interaction.phase,
+          queuePaused: action.interaction.queuePaused,
+          ...(action.interaction.active ? { active: { ...action.interaction.active } } : {}),
+          queuedInputs: [...action.interaction.queuedInputs],
         },
       };
     case "turn-completed": {
