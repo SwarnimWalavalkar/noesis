@@ -130,6 +130,43 @@ const ActorSchema = z.strictObject({
   kind: z.enum(["user", "noesis", "external_system", "system"]),
 });
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+
+const persistedJsonValue = (value: unknown): unknown => {
+  const encoded = JSON.stringify(value);
+  return encoded === undefined ? undefined : JSON.parse(encoded);
+};
+
+const immutableToolCallIdentity = (
+  record: ToolCallRecord,
+  sequence: number,
+  timelineSequence = record.timelineSequence,
+) => ({
+  toolCallId: record.toolCallId,
+  sessionId: record.sessionId,
+  turnId: record.turnId ?? null,
+  messageId: record.messageId ?? null,
+  parentToolCallId: record.parentToolCallId ?? null,
+  toolName: record.toolName,
+  request: persistedJsonValue(record.request),
+  sequence,
+  timelineSequence: timelineSequence ?? null,
+  sensitivity: record.sensitivity,
+  createdAt: record.createdAt,
+});
+
+const persistedToolCall = (
+  record: ToolCallRecord,
+  sequence: number,
+  timelineSequence = record.timelineSequence,
+) => ({
+  ...immutableToolCallIdentity(record, sequence, timelineSequence),
+  executionId: record.executionId ?? null,
+  update: persistedJsonValue(record.update),
+  response: persistedJsonValue(record.response),
+  status: record.status,
+  completedAt: record.completedAt ?? null,
+});
+
 const LegacyImportReportSchema = z.strictObject({
   sourceId: z.string().min(1),
   alreadyImported: z.boolean(),
@@ -2598,6 +2635,8 @@ function createOperationalRepositories(
       }
       if (currentRow !== undefined) {
         if (!current) throw new Error(`Tool call ${record.toolCallId} could not be decoded`);
+        if (current.sequence === undefined)
+          throw new Error(`Tool call ${record.toolCallId} has no durable action sequence`);
         const from = current.status;
         const allowed: Readonly<Record<string, readonly ToolCallRecord["status"][]>> = {
           requested: ["running", "completed", "failed", "denied", "ambiguous"],
@@ -2615,31 +2654,18 @@ function createOperationalRepositories(
           throw new Error(`Tool call ${record.toolCallId} changed its action sequence`);
         if (record.timelineSequence !== undefined && record.timelineSequence !== current.timelineSequence)
           throw new Error(`Tool call ${record.toolCallId} changed its turn timeline position`);
-        const normalizedRecord = {
-          ...record,
-          sequence: current.sequence,
-          ...(current.timelineSequence === undefined ? {} : { timelineSequence: current.timelineSequence }),
-        };
-        const currentIdentity = {
-          ...current,
-          executionId: record.executionId,
-          update: record.update,
-          response: record.response,
-          status: record.status,
-          completedAt: record.completedAt,
-        };
         if (
           !isDeepStrictEqual(
-            JSON.parse(JSON.stringify(currentIdentity)),
-            JSON.parse(JSON.stringify(normalizedRecord)),
+            immutableToolCallIdentity(current, current.sequence),
+            immutableToolCallIdentity(record, current.sequence, current.timelineSequence),
           )
         )
           throw new Error(`Tool call ${record.toolCallId} changed its immutable identity`);
         if (
           allowed[from]?.length === 0 &&
           !isDeepStrictEqual(
-            JSON.parse(JSON.stringify(current)),
-            JSON.parse(JSON.stringify(normalizedRecord)),
+            persistedToolCall(current, current.sequence),
+            persistedToolCall(record, current.sequence, current.timelineSequence),
           )
         )
           throw new Error(`Terminal tool call ${record.toolCallId} is immutable`);

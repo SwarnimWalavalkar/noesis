@@ -100,6 +100,12 @@ export function createSafeEditor(
     ambiguityTimer = undefined;
   };
 
+  const resetBufferedInput = (): void => {
+    clearAmbiguityTimer();
+    inputState = { kind: "keyboard", pending: "" };
+    pendingSubmissionText = undefined;
+  };
+
   const delegateKeyboardInput = (data: string): void => {
     // Outside bracketed paste, preserve terminal key events for pi-tui to interpret. In
     // particular, ordinary Backspace is DEL (0x7f) in most terminals and BS (0x08) in
@@ -124,7 +130,9 @@ export function createSafeEditor(
 
   const boundPasteBuffer = (text: string, retainedSuffix: number): string => {
     if (text.length <= SAFE_EDITOR_MAX_BUFFERED_CHARACTERS) return text;
-    const flushLength = Math.max(0, text.length - retainedSuffix);
+    let flushLength = Math.max(0, text.length - retainedSuffix);
+    // Keep CR with the next chunk so a CRLF split at the size boundary is normalized once.
+    if (text[flushLength - 1] === "\r") flushLength -= 1;
     insertSanitizedPaste(text.slice(0, flushLength));
     return text.slice(flushLength);
   };
@@ -233,10 +241,12 @@ export function createSafeEditor(
     },
     getText: () => editor.getExpandedText(),
     setText: (text) => {
+      resetBufferedInput();
       editor.setText(sanitizeEditorText(text));
       tui.requestRender();
     },
     insertText: (text) => {
+      resetBufferedInput();
       editor.insertTextAtCursor(sanitizeEditorText(text));
       tui.requestRender();
     },

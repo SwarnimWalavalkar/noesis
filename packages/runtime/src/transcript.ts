@@ -37,13 +37,6 @@ const inheritedHistorySequence = (metadata: Readonly<Record<string, unknown>>): 
 const nonnegativeSequence = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 
-const messageTieRank = (point: TranscriptPoint): number => {
-  if (point.entry.kind !== "message") return Number.MAX_SAFE_INTEGER;
-  if (point.entry.role === "system") return 0;
-  if (point.entry.role === "user") return point.steer === true ? 2 : 1;
-  return 3;
-};
-
 const jsonValue = (value: unknown): JsonValue | undefined => {
   const result = JsonValueSchema.safeParse(value);
   return result.success ? result.data : undefined;
@@ -82,11 +75,11 @@ const actionStatus = (
   return interruptedResponse(record.response) ? "interrupted" : "failed";
 };
 
-const entryRank = (entry: RuntimeTranscriptEntry): number => {
-  if (entry.kind === "action") return 2;
-  if (entry.role === "system") return 0;
-  if (entry.role === "user") return 1;
-  return 3;
+const pointTieRank = (point: TranscriptPoint): number => {
+  if (point.entry.kind === "action") return 3;
+  if (point.entry.role === "system") return 0;
+  if (point.entry.role === "user") return point.steer === true ? 2 : 1;
+  return 4;
 };
 
 const compareActionIdentity = (left: RuntimeTranscriptAction, right: RuntimeTranscriptAction): number =>
@@ -122,16 +115,32 @@ const actionOrderAtTimestampTies = (
 
 const compareTranscriptPoints = (
   tiedActionOrder: ReadonlyMap<string, number>,
+  turnAnchors: ReadonlyMap<string, string>,
+  completeTimelineTurns: ReadonlySet<string>,
   left: TranscriptPoint,
   right: TranscriptPoint,
 ): number => {
+  const leftInherited = left.inheritedHistorySequence !== undefined;
+  const rightInherited = right.inheritedHistorySequence !== undefined;
+  if (leftInherited !== rightInherited) return leftInherited ? -1 : 1;
   if (left.inheritedHistorySequence !== undefined && right.inheritedHistorySequence !== undefined) {
     const inheritedOrder = left.inheritedHistorySequence - right.inheritedHistorySequence;
     if (inheritedOrder !== 0) return inheritedOrder;
   }
+  if (!leftInherited && !rightInherited) {
+    const leftAnchor = left.turnId ? (turnAnchors.get(left.turnId) ?? left.occurredAt) : left.occurredAt;
+    const rightAnchor = right.turnId ? (turnAnchors.get(right.turnId) ?? right.occurredAt) : right.occurredAt;
+    const anchorOrder = leftAnchor.localeCompare(rightAnchor);
+    if (anchorOrder !== 0) return anchorOrder;
+    const leftGroup = left.turnId ? `turn:${left.turnId}` : `entry:${entryId(left.entry)}`;
+    const rightGroup = right.turnId ? `turn:${right.turnId}` : `entry:${entryId(right.entry)}`;
+    const groupOrder = leftGroup.localeCompare(rightGroup);
+    if (groupOrder !== 0) return groupOrder;
+  }
   if (
     left.turnId !== undefined &&
     left.turnId === right.turnId &&
+    completeTimelineTurns.has(left.turnId) &&
     left.timelineSequence !== undefined &&
     right.timelineSequence !== undefined
   ) {
@@ -140,6 +149,8 @@ const compareTranscriptPoints = (
   }
   const chronological = left.occurredAt.localeCompare(right.occurredAt);
   if (chronological !== 0) return chronological;
+  const ranked = pointTieRank(left) - pointTieRank(right);
+  if (ranked !== 0) return ranked;
   if (left.entry.kind === "action" && right.entry.kind === "action") {
     return (
       (tiedActionOrder.get(left.entry.actionId) ?? Number.MAX_SAFE_INTEGER) -
@@ -147,24 +158,42 @@ const compareTranscriptPoints = (
       compareActionIdentity(left.entry, right.entry)
     );
   }
-  if (left.entry.kind === "message" && right.entry.kind === "message") {
-    const messageRank = messageTieRank(left) - messageTieRank(right);
-    if (messageRank !== 0) return messageRank;
-    if (
-      left.steer === true &&
-      right.steer === true &&
-      left.interactionSequence !== undefined &&
-      right.interactionSequence !== undefined
-    ) {
-      const interactionOrder = left.interactionSequence - right.interactionSequence;
-      if (interactionOrder !== 0) return interactionOrder;
-    }
+  if (
+    left.steer === true &&
+    right.steer === true &&
+    left.interactionSequence !== undefined &&
+    right.interactionSequence !== undefined
+  ) {
+    const interactionOrder = left.interactionSequence - right.interactionSequence;
+    if (interactionOrder !== 0) return interactionOrder;
   }
-  const ranked = entryRank(left.entry) - entryRank(right.entry);
-  if (ranked !== 0) return ranked;
-  const leftId = left.entry.kind === "action" ? left.entry.actionId : left.entry.messageId;
-  const rightId = right.entry.kind === "action" ? right.entry.actionId : right.entry.messageId;
-  return leftId.localeCompare(rightId);
+  return entryId(left.entry).localeCompare(entryId(right.entry));
+};
+
+const entryId = (entry: RuntimeTranscriptEntry): string =>
+  entry.kind === "action" ? entry.actionId : entry.messageId;
+
+const transcriptTurnOrder = (
+  points: readonly TranscriptPoint[],
+): {
+  readonly anchors: ReadonlyMap<string, string>;
+  readonly completeTimelines: ReadonlySet<string>;
+} => {
+  const anchors = new Map<string, string>();
+  const incompleteTimelines = new Set<string>();
+  const seenTurns = new Set<string>();
+  for (const point of points) {
+    if (point.inheritedHistorySequence !== undefined || !point.turnId) continue;
+    seenTurns.add(point.turnId);
+    const currentAnchor = anchors.get(point.turnId);
+    if (currentAnchor === undefined || point.occurredAt < currentAnchor)
+      anchors.set(point.turnId, point.occurredAt);
+    if (point.timelineSequence === undefined) incompleteTimelines.add(point.turnId);
+  }
+  return Object.freeze({
+    anchors,
+    completeTimelines: new Set([...seenTurns].filter((turnId) => !incompleteTimelines.has(turnId))),
+  });
 };
 
 /**
@@ -212,7 +241,7 @@ export async function loadRuntimeTranscript(
       kind: "action" as const,
       actionId: call.toolCallId,
       sequence: call.sequence ?? Number.MAX_SAFE_INTEGER,
-      ...(call.turnId ? { turnId: call.turnId } : { turnId: "" }),
+      ...(call.turnId ? { turnId: call.turnId } : {}),
       ...(derivedParent ? { parentActionId: derivedParent } : {}),
       ...(!nested && executionId && knownExecutionIds.has(executionId) ? { executionId } : {}),
       name: call.toolName,
@@ -263,9 +292,12 @@ export async function loadRuntimeTranscript(
     );
   }
   const tiedActionOrder = actionOrderAtTimestampTies(actions);
+  const turnOrder = transcriptTurnOrder(points);
   return Object.freeze(
     points
-      .sort((left, right) => compareTranscriptPoints(tiedActionOrder, left, right))
+      .sort((left, right) =>
+        compareTranscriptPoints(tiedActionOrder, turnOrder.anchors, turnOrder.completeTimelines, left, right),
+      )
       .map((point) => point.entry),
   );
 }

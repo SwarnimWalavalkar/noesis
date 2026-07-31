@@ -277,10 +277,10 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
   }
 
   if (command === "/fork") {
-    dispatch({
-      type: "trail-selected",
-      trail: await runtime.forkTrail(trailId),
-    });
+    const trail = await runtime.forkTrail(trailId);
+    const transcript = await runtime.getTranscript(trail.trailId);
+    dispatch({ type: "trail-selected", trail });
+    dispatch({ type: "transcript-hydrated", trailId: trail.trailId, transcript });
     requestRender();
     return true;
   }

@@ -627,8 +627,6 @@ async function replayEligibleHistoryMessages(workspace: NoesisWorkspaceStore, se
             : typeof message.metadata["legacyEventId"] === "string"
               ? message.metadata["legacyEventId"]
               : undefined;
-        if (message.role === "user" && message.metadata["deliveryMode"] === "steer")
-          return turnId !== undefined && eligibleTurnIds.has(turnId);
         return turnId !== undefined && eligibleTurnIds.has(turnId);
       })
       .sort((left, right) => {
@@ -2793,6 +2791,10 @@ export async function createApplicationRuntimeComposition(
             let actionPersistence = Promise.resolve();
             let assistantPersistence = Promise.resolve();
             let interactionReady = false;
+            let actionPersistenceFailure: unknown;
+            const recordActionPersistenceFailure = (error: unknown): void => {
+              actionPersistenceFailure ??= error;
+            };
             const emit = (event: AgentRuntimeEvent): void => {
               if (event.type === "status" && event.status === "started" && !interactionReady) {
                 interactionReady = true;
@@ -2815,13 +2817,19 @@ export async function createApplicationRuntimeComposition(
                 }
                 runOptions?.onEvent?.(durableEvent);
                 if (durableEvent.type === "tool-start") {
-                  const currentPersistence = persistTopLevelAction(trailId, turnId, durableEvent);
+                  const currentPersistence = persistTopLevelAction(trailId, turnId, durableEvent).catch(
+                    recordActionPersistenceFailure,
+                  );
                   actionPersistence = Promise.all([actionPersistence, currentPersistence]).then(
                     () => undefined,
                   );
                 } else {
                   actionPersistence = actionPersistence.then(async () => {
-                    await persistTopLevelAction(trailId, turnId, durableEvent);
+                    try {
+                      await persistTopLevelAction(trailId, turnId, durableEvent);
+                    } catch (error) {
+                      recordActionPersistenceFailure(error);
+                    }
                   });
                 }
                 if (durableEvent.type === "tool-end" && durableEvent.parentActionId)
@@ -2855,35 +2863,44 @@ export async function createApplicationRuntimeComposition(
               }
               runOptions?.onEvent?.(event);
             };
-            let agentResult: Awaited<ReturnType<NoesisAgentRuntime["run"]>>;
+            let agentOutcome:
+              | {
+                  readonly status: "completed";
+                  readonly result: Awaited<ReturnType<NoesisAgentRuntime["run"]>>;
+                }
+              | { readonly status: "failed"; readonly error: unknown };
             try {
-              agentResult = await agent.run(
-                {
-                  trailId,
-                  provider: plan.provider,
-                  model: plan.model,
-                  thinkingLevel: plan.thinkingLevel,
-                  systemPrompt: plan.renderedSystemPrompt,
-                  prompt: input,
-                  activeCapabilities: plan.selectedCapabilities.map((selection) => ({
-                    name: selection.name,
-                    version: plan.activationRevision,
-                  })),
-                  frozenTurnPlan: plan,
-                },
-                emit,
-              );
-              await Promise.all([actionPersistence, assistantPersistence]);
+              agentOutcome = {
+                status: "completed",
+                result: await agent.run(
+                  {
+                    trailId,
+                    provider: plan.provider,
+                    model: plan.model,
+                    thinkingLevel: plan.thinkingLevel,
+                    systemPrompt: plan.renderedSystemPrompt,
+                    prompt: input,
+                    activeCapabilities: plan.selectedCapabilities.map((selection) => ({
+                      name: selection.name,
+                      version: plan.activationRevision,
+                    })),
+                    frozenTurnPlan: plan,
+                  },
+                  emit,
+                ),
+              };
             } catch (error) {
-              await Promise.all([
-                actionPersistence.catch(() => undefined),
-                assistantPersistence.catch(() => undefined),
-              ]);
-              await workspace.operational.toolCalls.interruptRunningForTurn(turnId, new Date().toISOString());
-              throw error;
+              agentOutcome = { status: "failed", error };
             }
-            if (agentResult.stopReason === "aborted" || agentResult.stopReason === "error")
-              await workspace.operational.toolCalls.interruptRunningForTurn(turnId, new Date().toISOString());
+            const [, assistantPersistenceResult] = await Promise.allSettled([
+              actionPersistence,
+              assistantPersistence,
+            ]);
+            await workspace.operational.toolCalls.interruptRunningForTurn(turnId, new Date().toISOString());
+            if (agentOutcome.status === "failed") throw agentOutcome.error;
+            if (actionPersistenceFailure !== undefined) throw actionPersistenceFailure;
+            if (assistantPersistenceResult.status === "rejected") throw assistantPersistenceResult.reason;
+            const agentResult = agentOutcome.result;
             if (agentResult.stopReason === "error") throw new Error(agentResult.error);
             return Object.freeze({
               outcome: agentResult.stopReason === "aborted" ? ("aborted" as const) : ("completed" as const),

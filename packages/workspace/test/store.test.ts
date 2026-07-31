@@ -877,7 +877,7 @@ describe("WorkspaceStore", () => {
     const upgraded = await createWorkspaceStore(root);
     upgraded.close();
 
-    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"));
     const versions = database
       .prepare("SELECT version FROM schema_migrations ORDER BY version")
       .all()
@@ -899,6 +899,47 @@ describe("WorkspaceStore", () => {
          WHERE type = 'trigger' AND name = 'workflow_phase_lineage_immutable'`,
       )
       .get();
+    const sequenceTrigger = database
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE type = 'trigger' AND name = 'tool_call_action_sequence_required'`,
+      )
+      .get();
+    database
+      .prepare(
+        `INSERT INTO sessions(
+          session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "session-null-sequence",
+        "Null sequence",
+        "idle",
+        "controlled",
+        "controlled",
+        "pi",
+        "2026-07-26T00:00:00.000Z",
+        "2026-07-26T00:00:00.000Z",
+        "{}",
+      );
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO tool_calls(
+            tool_call_id, session_id, tool_name, request_json, status, sensitivity, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "action-null-sequence",
+          "session-null-sequence",
+          "inspect_self",
+          "{}",
+          "requested",
+          "normal",
+          "2026-07-26T00:00:00.000Z",
+        ),
+    ).toThrow(/action sequence is required/iu);
     database.close();
 
     expect(versions.at(-1)).toBe(23);
@@ -908,6 +949,7 @@ describe("WorkspaceStore", () => {
       sql: expect.stringContaining("source_digest"),
     });
     expect(phaseLineageTrigger).toBeDefined();
+    expect(sequenceTrigger).toBeDefined();
   });
 
   test("keeps authority grants, reservations, completions, and replay in SQLite", async () => {

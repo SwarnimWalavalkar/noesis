@@ -152,7 +152,14 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
       model: parent.model,
     });
     const stored = getStored(forked.trailId);
-    return replaceState(stored, Object.freeze({ ...forked, parentTrailId: parent.trailId }));
+    return replaceState(
+      stored,
+      Object.freeze({
+        ...forked,
+        parentTrailId: parent.trailId,
+        turns: Object.freeze([...parent.turns]),
+      }),
+    );
   };
   const runTurn = async (
     trailId: string,

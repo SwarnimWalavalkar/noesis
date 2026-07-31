@@ -440,6 +440,86 @@ describe("runtime transcript projection", () => {
     reopened.close();
   });
 
+  test("uses one total order for same-timestamp entries from different turns", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-cross-turn-order-"));
+    roots.push(root);
+    const workspace = await createWorkspaceStore(root);
+    await workspace.operational.sessions.put({
+      sessionId: "session-cross-turn",
+      title: "Cross-turn order",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
+    await protectedRuntime.activations.bootstrapGenesis({
+      capabilityRevision: {
+        kind: "capability_revision",
+        capabilityId: "general-collaboration",
+        capabilityRevisionId: "general-collaboration-genesis-v1",
+        bundleDigest: "a".repeat(64),
+      },
+      activeDefinitions: {},
+    });
+    await protectedRuntime.activations.admitTurnPlan(plan("session-cross-turn", "turn-a"));
+    await protectedRuntime.activations.admitTurnPlan(plan("session-cross-turn", "turn-b"));
+    const createdAt = "2026-07-30T00:00:01.000Z";
+    await workspace.operational.messages.put({
+      messageId: "z-assistant-a",
+      sessionId: "session-cross-turn",
+      role: "assistant",
+      content: "assistant A",
+      sensitivity: "normal",
+      createdAt,
+      metadata: Object.freeze({ turnId: "turn-a" }),
+      timelineSequence: 1,
+    });
+    await workspace.operational.messages.put({
+      messageId: "a-steer-a",
+      sessionId: "session-cross-turn",
+      role: "user",
+      content: "steer B",
+      sensitivity: "normal",
+      createdAt,
+      metadata: Object.freeze({
+        turnId: "turn-a",
+        deliveryMode: "steer",
+        interactionSequence: 1,
+      }),
+      timelineSequence: 2,
+    });
+    await workspace.operational.toolCalls.put({
+      toolCallId: "action-c",
+      sessionId: "session-cross-turn",
+      turnId: "turn-b",
+      toolName: "inspect_self",
+      request: {},
+      response: {},
+      timelineSequence: 0,
+      status: "completed",
+      sensitivity: "normal",
+      createdAt,
+      completedAt: createdAt,
+    });
+
+    const beforeRestart = await loadRuntimeTranscript(workspace, "session-cross-turn");
+    workspace.close();
+    const reopened = await createWorkspaceStore(root);
+    const afterRestart = await loadRuntimeTranscript(reopened, "session-cross-turn");
+
+    expect(afterRestart).toEqual(beforeRestart);
+    expect(afterRestart.map((entry) => (entry.kind === "message" ? entry.text : "tool C"))).toEqual([
+      "assistant A",
+      "steer B",
+      "tool C",
+    ]);
+    reopened.close();
+  });
+
   test("marks running actions interrupted without losing their request", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-interrupt-"));
     roots.push(root);
@@ -492,6 +572,40 @@ describe("runtime transcript projection", () => {
         completedAt: "2026-07-30T00:00:02.000Z",
       }),
     ]);
+    workspace.close();
+  });
+
+  test("omits turn identity for legacy actions that predate foreground turns", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-legacy-action-"));
+    roots.push(root);
+    const workspace = await createWorkspaceStore(root);
+    await workspace.operational.sessions.put({
+      sessionId: "session-legacy",
+      title: "Legacy action",
+      status: "idle",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    await workspace.operational.toolCalls.put({
+      toolCallId: "legacy-action",
+      sessionId: "session-legacy",
+      toolName: "legacy.tool",
+      request: { value: 1 },
+      response: { value: 2 },
+      status: "completed",
+      sensitivity: "normal",
+      createdAt: "2026-07-30T00:00:01.000Z",
+      completedAt: "2026-07-30T00:00:02.000Z",
+    });
+
+    const [action] = await loadRuntimeTranscript(workspace, "session-legacy");
+
+    expect(action).toMatchObject({ kind: "action", actionId: "legacy-action" });
+    expect(action).not.toHaveProperty("turnId");
     workspace.close();
   });
 });

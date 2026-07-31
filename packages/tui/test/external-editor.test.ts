@@ -6,10 +6,10 @@ import { editTextInExternalEditor, resolveExternalEditorCommand } from "../src/e
 
 const temporaryPaths: string[] = [];
 
-async function createEditorScript(source: string): Promise<string> {
+async function createEditorScript(source: string, fileName = "editor.sh"): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "noesis-editor-test-"));
   temporaryPaths.push(directory);
-  const script = join(directory, "editor.sh");
+  const script = join(directory, fileName);
   await writeFile(script, `#!/bin/sh\n${source}\n`, "utf8");
   await chmod(script, 0o700);
   return script;
@@ -84,5 +84,25 @@ describe("external editor", () => {
     if (result.status === "edited") throw new Error("unreachable");
     expect(result.reason).toBe("launch-failed");
     expect(result.error).toContain("ENOENT");
+  });
+
+  test("preserves Windows path separators and passes arguments without a shell", async () => {
+    const script = await createEditorScript(
+      `test "$1" = "--wait" || exit 8\nprintf 'windows-safe' > "$2"`,
+      "C:\\Program Files\\Noesis Editor.exe",
+    );
+
+    const result = await editTextInExternalEditor({
+      content: "original",
+      configuredCommand: `"${script}" --wait`,
+      environment: {},
+      platform: "win32",
+    });
+
+    expect(result).toEqual({
+      status: "edited",
+      command: `"${script}" --wait`,
+      content: "windows-safe",
+    });
   });
 });

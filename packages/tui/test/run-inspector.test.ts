@@ -1,5 +1,5 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   initialTuiState,
   reduceTui,
@@ -208,7 +208,7 @@ describe("run inspector panel", () => {
 
   test("scrolls to the exact tail of a large resumed action result", () => {
     const exactTail = "EXACT-PERSISTED-TAIL";
-    const largeResult = `${"x".repeat(30_000)}${exactTail}`;
+    const largeResult = `${"x".repeat(2 * 1024 * 1024)}${exactTail}`;
     let state = reduceTui(initialTuiState("fake"), {
       type: "trail-selected",
       trail: {
@@ -247,26 +247,32 @@ describe("run inspector panel", () => {
       detail: { ...DETAIL, result: '{ "content": "artifact preview only" }' },
     });
 
-    const firstFrame = renderRunInspectorFrame(state, 88, 12);
-    expect(firstFrame.maxScroll).toBeGreaterThan(250);
-    expect(firstFrame.rows.join("\n")).not.toContain(exactTail);
-
-    let tailFrame: readonly string[] | undefined;
-    for (let scroll = 0; scroll <= firstFrame.maxScroll; scroll += 10) {
-      const candidate = reduceTui(state, {
-        type: "inspector-scrolled",
-        delta: scroll,
-        maxScroll: firstFrame.maxScroll,
-      });
-      const rows = renderRunInspectorFrame(candidate, 88, 12).rows;
-      if (rows.join("\n").includes(exactTail)) {
-        tailFrame = rows;
-        break;
+    const stringify = vi.spyOn(JSON, "stringify");
+    try {
+      const firstFrame = renderRunInspectorFrame(state, 88, 12);
+      expect(firstFrame.maxScroll).toBeGreaterThan(20_000);
+      expect(firstFrame.rows.join("\n")).not.toContain(exactTail);
+      const stringifyCalls = stringify.mock.calls.length;
+      let tailFrame: readonly string[] | undefined;
+      for (let offset = 40; offset >= 0; offset -= 1) {
+        const tailState = reduceTui(state, {
+          type: "inspector-scrolled",
+          delta: firstFrame.maxScroll - offset,
+          maxScroll: firstFrame.maxScroll,
+        });
+        const candidate = renderRunInspectorFrame(tailState, 88, 12).rows;
+        if (candidate.join("\n").includes(exactTail)) {
+          tailFrame = candidate;
+          break;
+        }
       }
-    }
 
-    expect(tailFrame?.join("\n")).toContain(exactTail);
-    expect(tailFrame?.join("\n")).not.toContain("artifact preview only");
+      expect(tailFrame?.join("\n")).toContain(exactTail);
+      expect(tailFrame?.join("\n")).not.toContain("artifact preview only");
+      expect(stringify.mock.calls).toHaveLength(stringifyCalls);
+    } finally {
+      stringify.mockRestore();
+    }
   });
 
   test("puts the error above the program and does not repeat it as a result", () => {
