@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { frozenTurnPlanDigest, type FrozenTurnPlan } from "@noesis/agent-types";
+import { type FrozenTurnPlan, frozenTurnPlanDigest } from "@noesis/agent-types";
 import { sha256 } from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
@@ -152,11 +152,34 @@ describe("runtime transcript projection", () => {
       parentToolCallId: "action-execute",
       toolName: "shell.run",
       request: { executionId: "execution-1", input: { command: "pwd" } },
-      response: { output: { stdout: "/workspace\n" } },
+      response: { output: { stdout: "/workspace\n", exitCode: 0 } },
       status: "completed",
       sensitivity: "normal",
-      createdAt: "2026-07-30T00:00:02.200Z",
+      createdAt: "2026-07-30T00:00:02.000Z",
       completedAt: "2026-07-30T00:00:02.800Z",
+    });
+    await workspace.operational.messages.put({
+      messageId: "turn-1:steer",
+      sessionId: "session-1",
+      role: "user",
+      content: "Also check the failing command.",
+      sensitivity: "normal",
+      createdAt: "2026-07-30T00:00:02.500Z",
+      metadata: Object.freeze({ turnId: "turn-1" }),
+    });
+    await workspace.operational.toolCalls.put({
+      toolCallId: "broker-call-2",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      executionId: "execution-1",
+      parentToolCallId: "action-execute",
+      toolName: "shell.run",
+      request: { executionId: "execution-1", input: { command: "false" } },
+      response: { error: "Command exited with status 1" },
+      status: "failed",
+      sensitivity: "normal",
+      createdAt: "2026-07-30T00:00:02.700Z",
+      completedAt: "2026-07-30T00:00:02.900Z",
     });
     await workspace.operational.messages.put({
       messageId: "turn-1:assistant",
@@ -183,15 +206,31 @@ describe("runtime transcript projection", () => {
       "action:inspect_self",
       "action:execute",
       "action:shell.run",
+      "message:user",
+      "action:shell.run",
       "message:assistant",
     ]);
     expect(afterRestart.at(3)).toMatchObject({
       kind: "action",
       actionId: "broker-call-1",
       parentActionId: "action-execute",
-      executionId: "execution-1",
       status: "completed",
+      input: { command: "pwd" },
+      output: { stdout: "/workspace\n", exitCode: 0 },
     });
+    expect(afterRestart.at(3)).not.toHaveProperty("executionId");
+    expect(afterRestart.at(4)).toMatchObject({
+      kind: "message",
+      messageId: "turn-1:steer",
+    });
+    expect(afterRestart.at(5)).toMatchObject({
+      kind: "action",
+      actionId: "broker-call-2",
+      input: { command: "false" },
+      output: { error: "Command exited with status 1" },
+      status: "failed",
+    });
+    expect(afterRestart.at(5)).not.toHaveProperty("executionId");
     reopened.close();
   });
 

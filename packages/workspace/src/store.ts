@@ -293,6 +293,62 @@ export async function createWorkspaceStore(
     );
     return databaseRef("activity_log", activityId);
   };
+  const systemActor: ActorRef = { actorId: "workspace-store", kind: "system" };
+
+  const recoverInterruptedForegroundTurns = (interruptedAt: string): number =>
+    database.transaction(() => {
+      const runningTurns = db
+        .prepare(
+          `SELECT turn_id, session_id
+           FROM foreground_turns
+           WHERE status = 'running'
+           ORDER BY admitted_at, turn_id`,
+        )
+        .all();
+      for (const row of runningTurns) {
+        const turnId = requiredString(row, "turn_id");
+        const sessionId = requiredString(row, "session_id");
+        const runningCalls = db
+          .prepare(
+            `SELECT tool_call_id
+             FROM tool_calls
+             WHERE turn_id = ? AND status IN ('requested', 'running')
+             ORDER BY action_sequence, tool_call_id`,
+          )
+          .all(turnId);
+        for (const call of runningCalls) {
+          const toolCallId = requiredString(call, "tool_call_id");
+          db.prepare(
+            `UPDATE tool_calls
+             SET status = 'failed',
+                 response_json = '{"error":"Runtime exited before turn settled","reason":"interrupted"}',
+                 completed_at = ?
+             WHERE tool_call_id = ? AND status IN ('requested', 'running')`,
+          ).run(interruptedAt, toolCallId);
+          recordActivity(systemActor, "tool_call.interrupted", "tool_call", toolCallId, [
+            { sessionId, turnId, reason: "interrupted" },
+          ]);
+        }
+        db.prepare(
+          `UPDATE foreground_turns
+           SET status = 'aborted', settled_at = ?
+           WHERE turn_id = ? AND status = 'running'`,
+        ).run(interruptedAt, turnId);
+        db.prepare(
+          `UPDATE sessions
+           SET status = 'aborted', updated_at = ?
+           WHERE session_id = ?`,
+        ).run(interruptedAt, sessionId);
+        recordActivity(systemActor, "foreground_turn.interrupted", "foreground_turn", turnId, [
+          {
+            sessionId,
+            reason: "interrupted",
+            toolCallIds: runningCalls.map((call) => requiredString(call, "tool_call_id")),
+          },
+        ]);
+      }
+      return runningTurns.length;
+    });
 
   const pathsForDefinition = (
     workingPath: string,
@@ -1317,6 +1373,7 @@ export async function createWorkspaceStore(
     options.afterRuntimeOwnerAcquiredForTesting?.();
     if (options.recoverInterruptedOperations) {
       const interruptedAt = now();
+      recoverInterruptedForegroundTurns(interruptedAt);
       await operational.codeExecutions.interruptRunning(interruptedAt);
       await operational.workflows.interruptRunning(interruptedAt);
     }

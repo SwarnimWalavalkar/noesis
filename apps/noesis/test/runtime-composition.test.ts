@@ -1,13 +1,19 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentRuntimeEvent, AgentRuntimeRequest, NoesisAgentRuntime } from "@noesis/agent-types";
+import type {
+  AgentRuntimeEvent,
+  AgentRuntimeRequest,
+  FrozenTurnPlan,
+  NoesisAgentRuntime,
+} from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
 import { eventChecksum, type LedgerEvent } from "@noesis/domain";
 import { createPiAgentRoleRunner, createPiAgentRuntime, createPiSkillLibrary } from "@noesis/runtime-pi";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
+import { frozenTurnPlanDigest } from "../../../packages/agent-types/src/index.ts";
 import {
   CONTROLLED_PI_MODEL,
   CONTROLLED_PI_PROVIDER,
@@ -17,6 +23,27 @@ import { createScriptedAgentRoleRunner } from "../../../packages/runtime-pi/test
 import { createApplicationRuntimeComposition } from "../src/runtime-composition.ts";
 
 const roots: string[] = [];
+
+const recoveryTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
+  const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
+    schemaVersion: 1,
+    planId: `plan-${turnId}`,
+    sessionId,
+    turnId,
+    activationId: "activation_genesis",
+    activationRevision: 1,
+    selectedCapabilities: [],
+    renderedSystemPrompt: "Noesis recovery fixture",
+    provider: CONTROLLED_PI_PROVIDER,
+    model: CONTROLLED_PI_MODEL,
+    thinkingLevel: "off",
+    permissionSnapshot: { effects: [], resourcePatterns: [], credentialRefs: [] },
+    retrievalCitations: [],
+    routing: { strategyId: "baseline", reason: "Recovery fixture" },
+    createdAt: "2026-07-26T00:00:00.000Z",
+  };
+  return Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) });
+};
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
@@ -214,6 +241,94 @@ describe("apps/noesis production control-plane composition", () => {
     expect(requests[0]?.systemPrompt).not.toContain("input attached to an aborted answer");
     expect(await reopened.debug.workspace.operational.messages.listForSession(trail.trailId)).toHaveLength(4);
     await reopened.shutdown();
+  });
+
+  test("recovers a process-killed foreground turn before hydration and keeps its action inspectable", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-foreground-recovery-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const seed = await createWorkspaceStore(home, {
+      now: () => "2026-07-26T00:00:00.000Z",
+    });
+    await seed.operational.sessions.put({
+      sessionId: "session-process-killed",
+      title: "Process-killed turn",
+      status: "running",
+      provider: CONTROLLED_PI_PROVIDER,
+      model: CONTROLLED_PI_MODEL,
+      runtime: runtimeIdentity,
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const protectedRuntime = createWorkspaceRuntimeInternals(seed).protectedRuntime;
+    await protectedRuntime.activations.bootstrapGenesis({
+      capabilityRevision: {
+        kind: "capability_revision",
+        capabilityId: "general-collaboration",
+        capabilityRevisionId: "general-collaboration-genesis-v1",
+        bundleDigest: "a".repeat(64),
+      },
+      activeDefinitions: Object.freeze({}),
+    });
+    await protectedRuntime.activations.admitTurnPlan(
+      recoveryTurnPlan("session-process-killed", "turn-process-killed"),
+    );
+    await seed.operational.messages.put({
+      messageId: "turn-process-killed:user",
+      sessionId: "session-process-killed",
+      role: "user",
+      content: "Inspect this interrupted work",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:01.000Z",
+      metadata: Object.freeze({ turnId: "turn-process-killed" }),
+    });
+    await seed.operational.toolCalls.put({
+      toolCallId: "action-process-killed",
+      sessionId: "session-process-killed",
+      turnId: "turn-process-killed",
+      toolName: "shell.run",
+      request: Object.freeze({ command: "long-running-command" }),
+      status: "running",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:02.000Z",
+    });
+    seed.close();
+
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+
+    expect(runtime.getTrail("session-process-killed")).toMatchObject({ status: "aborted", turns: [] });
+    expect(await runtime.getTranscript("session-process-killed")).toMatchObject([
+      { kind: "message", role: "user", text: "Inspect this interrupted work" },
+      {
+        kind: "action",
+        actionId: "action-process-killed",
+        status: "interrupted",
+        output: { error: "Runtime exited before turn settled", reason: "interrupted" },
+      },
+    ]);
+    await expect(runtime.resumeTrail("session-process-killed")).resolves.toMatchObject({
+      status: "idle",
+      turns: [],
+    });
+    expect(
+      (await runtime.debug.workspace.operational.messages.listForSession("session-process-killed")).filter(
+        (message) => message.role === "assistant",
+      ),
+    ).toEqual([]);
+    await runtime.shutdown();
   });
 
   test("persists every top-level model action and exposes the same transcript after restart", async () => {

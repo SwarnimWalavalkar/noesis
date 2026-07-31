@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:f
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
+import { frozenTurnPlanDigest, type FrozenTurnPlan } from "@noesis/agent-types";
 import {
   eventChecksum,
   effectOperationFingerprint,
@@ -23,6 +24,27 @@ const actor = { actorId: "test-user", kind: "user" as const };
 const text = (value: string): Uint8Array => Buffer.from(value);
 const digest = (character: string): string => character.repeat(64);
 const authority = (store: NoesisWorkspaceStore) => createWorkspaceRuntimeInternals(store).authority;
+
+const runningTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
+  const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
+    schemaVersion: 1,
+    planId: `plan-${turnId}`,
+    sessionId,
+    turnId,
+    activationId: "activation_genesis",
+    activationRevision: 1,
+    selectedCapabilities: [],
+    renderedSystemPrompt: "Noesis recovery fixture",
+    provider: "controlled",
+    model: "controlled",
+    thinkingLevel: "off",
+    permissionSnapshot: { effects: [], resourcePatterns: [], credentialRefs: [] },
+    retrievalCitations: [],
+    routing: { strategyId: "baseline", reason: "Recovery fixture" },
+    createdAt: "2026-07-26T00:00:00.000Z",
+  };
+  return Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) });
+};
 
 describe("WorkspaceStore", () => {
   let roots: string[] = [];
@@ -139,6 +161,74 @@ describe("WorkspaceStore", () => {
       error: "Process exited before execution settled",
       completedAt: "2026-07-26T00:01:00.000Z",
     });
+    recovered.close();
+  });
+
+  test("recovers orphaned foreground turns and their actions under the successor runtime owner", async () => {
+    const root = await temporary("foreground-turn-recovery");
+    const first = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:00:00.000Z",
+    });
+    await first.operational.sessions.put({
+      sessionId: "session-interrupted-turn",
+      title: "Interrupted foreground turn",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const protectedRuntime = createWorkspaceRuntimeInternals(first).protectedRuntime;
+    await protectedRuntime.activations.bootstrapGenesis({
+      capabilityRevision: {
+        kind: "capability_revision",
+        capabilityId: "general-collaboration",
+        capabilityRevisionId: "general-collaboration-genesis-v1",
+        bundleDigest: digest("a"),
+      },
+      activeDefinitions: Object.freeze({}),
+    });
+    await protectedRuntime.activations.admitTurnPlan(
+      runningTurnPlan("session-interrupted-turn", "turn-interrupted"),
+    );
+    await first.operational.toolCalls.put({
+      toolCallId: "action-interrupted",
+      sessionId: "session-interrupted-turn",
+      turnId: "turn-interrupted",
+      toolName: "shell.run",
+      request: Object.freeze({ command: "long-running-command" }),
+      status: "running",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:01.000Z",
+    });
+    first.close();
+
+    const recovered = await createWorkspaceStore(root, {
+      now: () => "2026-07-26T00:01:00.000Z",
+      recoverInterruptedOperations: true,
+      runtimeOwnerId: "successor-owner",
+    });
+
+    expect(await recovered.operational.sessions.get("session-interrupted-turn")).toMatchObject({
+      status: "aborted",
+      updatedAt: "2026-07-26T00:01:00.000Z",
+    });
+    expect(await recovered.operational.foregroundTurns.get("turn-interrupted")).toMatchObject({
+      status: "aborted",
+      settledAt: "2026-07-26T00:01:00.000Z",
+    });
+    expect(await recovered.operational.toolCalls.get("action-interrupted")).toMatchObject({
+      turnId: "turn-interrupted",
+      status: "failed",
+      response: {
+        error: "Runtime exited before turn settled",
+        reason: "interrupted",
+      },
+      completedAt: "2026-07-26T00:01:00.000Z",
+    });
+    expect(await recovered.operational.outcomes.listForSession("session-interrupted-turn")).toEqual([]);
     recovered.close();
   });
 

@@ -1,11 +1,10 @@
-import { JsonValueSchema, type JsonValue } from "@noesis/domain";
+import { type JsonValue, JsonValueSchema } from "@noesis/domain";
 import type { NoesisWorkspaceStore, ToolCallRecord } from "@noesis/workspace";
 import type { RuntimeTranscriptAction, RuntimeTranscriptEntry, RuntimeTranscriptMessage } from "./index.ts";
 
-type TranscriptBlock = Readonly<{
+type TranscriptPoint = Readonly<{
   occurredAt: string;
-  tieBreak: string;
-  entries: readonly RuntimeTranscriptEntry[];
+  entry: RuntimeTranscriptEntry;
 }>;
 
 const optionalTurnId = (metadata: Readonly<Record<string, unknown>>): string | undefined => {
@@ -18,6 +17,12 @@ const optionalTurnId = (metadata: Readonly<Record<string, unknown>>): string | u
 const jsonValue = (value: unknown): JsonValue | undefined => {
   const result = JsonValueSchema.safeParse(value);
   return result.success ? result.data : undefined;
+};
+
+const nestedBrokerPayload = (value: unknown, field: "input" | "output"): unknown => {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
+  if (!Object.hasOwn(value, field)) return value;
+  return Reflect.get(value, field);
 };
 
 const executionIdFrom = (...values: readonly unknown[]): string | undefined => {
@@ -47,37 +52,70 @@ const actionStatus = (
   return interruptedResponse(record.response) ? "interrupted" : "failed";
 };
 
-const sortActions = (actions: readonly RuntimeTranscriptAction[]): readonly RuntimeTranscriptAction[] => {
-  const byParent = new Map<string | undefined, RuntimeTranscriptAction[]>();
+const entryRank = (entry: RuntimeTranscriptEntry): number => {
+  if (entry.kind === "action") return 2;
+  if (entry.role === "system") return 0;
+  if (entry.role === "user") return 1;
+  return 3;
+};
+
+const compareActionIdentity = (left: RuntimeTranscriptAction, right: RuntimeTranscriptAction): number =>
+  (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER) ||
+  left.actionId.localeCompare(right.actionId);
+
+const actionOrderAtTimestampTies = (
+  actions: readonly RuntimeTranscriptAction[],
+): ReadonlyMap<string, number> => {
+  const byTimestamp = new Map<string, RuntimeTranscriptAction[]>();
   for (const action of actions) {
-    const siblings = byParent.get(action.parentActionId) ?? [];
-    siblings.push(action);
-    byParent.set(action.parentActionId, siblings);
+    const group = byTimestamp.get(action.startedAt) ?? [];
+    group.push(action);
+    byTimestamp.set(action.startedAt, group);
   }
-  const compare = (left: RuntimeTranscriptAction, right: RuntimeTranscriptAction): number =>
-    (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER) ||
-    left.actionId.localeCompare(right.actionId);
-  for (const siblings of byParent.values()) siblings.sort(compare);
-  const ordered: RuntimeTranscriptAction[] = [];
-  const visited = new Set<string>();
-  const append = (action: RuntimeTranscriptAction): void => {
-    if (visited.has(action.actionId)) return;
-    visited.add(action.actionId);
-    ordered.push(action);
-    for (const child of byParent.get(action.actionId) ?? []) append(child);
-  };
-  for (const action of byParent.get(undefined) ?? []) append(action);
-  // Preserve malformed or legacy orphaned actions instead of dropping evidence.
-  for (const action of [...actions].sort(compare)) append(action);
-  return Object.freeze(ordered);
+  const order = new Map<string, number>();
+  for (const group of byTimestamp.values()) {
+    const pending = new Map(group.map((action) => [action.actionId, action]));
+    let index = 0;
+    while (pending.size > 0) {
+      const ready = [...pending.values()]
+        .filter((action) => !action.parentActionId || !pending.has(action.parentActionId))
+        .sort(compareActionIdentity);
+      const next = ready.at(0) ?? [...pending.values()].sort(compareActionIdentity).at(0);
+      if (!next) break;
+      order.set(next.actionId, index);
+      index += 1;
+      pending.delete(next.actionId);
+    }
+  }
+  return order;
+};
+
+const compareTranscriptPoints = (
+  tiedActionOrder: ReadonlyMap<string, number>,
+  left: TranscriptPoint,
+  right: TranscriptPoint,
+): number => {
+  const chronological = left.occurredAt.localeCompare(right.occurredAt);
+  if (chronological !== 0) return chronological;
+  if (left.entry.kind === "action" && right.entry.kind === "action") {
+    return (
+      (tiedActionOrder.get(left.entry.actionId) ?? Number.MAX_SAFE_INTEGER) -
+        (tiedActionOrder.get(right.entry.actionId) ?? Number.MAX_SAFE_INTEGER) ||
+      compareActionIdentity(left.entry, right.entry)
+    );
+  }
+  const ranked = entryRank(left.entry) - entryRank(right.entry);
+  if (ranked !== 0) return ranked;
+  const leftId = left.entry.kind === "action" ? left.entry.actionId : left.entry.messageId;
+  const rightId = right.entry.kind === "action" ? right.entry.actionId : right.entry.messageId;
+  return leftId.localeCompare(rightId);
 };
 
 /**
  * Builds the one runtime transcript read model from authoritative operational rows.
  *
- * Historical assistant text was stored as one settled message, so a resumed transcript cannot
- * invent text fragments around tool calls. Within each turn the honest projection is therefore
- * user message, recorded actions, then the final assistant message.
+ * Historical assistant text is one settled message, but all durable entries still retain their
+ * cross-type chronology. This lets later user steering interleave honestly with recorded actions.
  */
 export async function loadRuntimeTranscript(
   workspace: NoesisWorkspaceStore,
@@ -100,23 +138,27 @@ export async function loadRuntimeTranscript(
     const turn = await workspace.operational.foregroundTurns.get(turnId);
     turnStatus.set(turnId, turn?.status === "running" ? undefined : turn?.status);
   }
-  const actionsByTurn = new Map<string, RuntimeTranscriptAction[]>();
-  const orphanActions: RuntimeTranscriptAction[] = [];
+  const points: TranscriptPoint[] = [];
+  const actions: RuntimeTranscriptAction[] = [];
   for (const call of toolCalls) {
     const executionId = call.executionId ?? executionIdFrom(call.update, call.response, call.request);
     const derivedParent =
       call.parentToolCallId ??
       (executionId && call.toolName !== "execute" ? executionToTopAction.get(executionId) : undefined);
-    const input = jsonValue(call.request);
+    const nested = derivedParent !== undefined;
+    const input = jsonValue(nested ? nestedBrokerPayload(call.request, "input") : call.request);
     const update = call.update === undefined ? undefined : jsonValue(call.update);
-    const output = call.response === undefined ? undefined : jsonValue(call.response);
+    const output =
+      call.response === undefined
+        ? undefined
+        : jsonValue(nested ? nestedBrokerPayload(call.response, "output") : call.response);
     const action = Object.freeze({
       kind: "action" as const,
       actionId: call.toolCallId,
       sequence: call.sequence ?? Number.MAX_SAFE_INTEGER,
       ...(call.turnId ? { turnId: call.turnId } : { turnId: "" }),
       ...(derivedParent ? { parentActionId: derivedParent } : {}),
-      ...(executionId && knownExecutionIds.has(executionId) ? { executionId } : {}),
+      ...(!nested && executionId && knownExecutionIds.has(executionId) ? { executionId } : {}),
       name: call.toolName,
       status: actionStatus(call, call.turnId ? turnStatus.get(call.turnId) : undefined),
       ...(input === undefined ? {} : { input }),
@@ -125,16 +167,10 @@ export async function loadRuntimeTranscript(
       startedAt: call.createdAt,
       ...(call.completedAt ? { completedAt: call.completedAt } : {}),
     }) satisfies RuntimeTranscriptAction;
-    if (!call.turnId) orphanActions.push(action);
-    else {
-      const turnActions = actionsByTurn.get(call.turnId) ?? [];
-      turnActions.push(action);
-      actionsByTurn.set(call.turnId, turnActions);
-    }
+    actions.push(action);
+    points.push(Object.freeze({ occurredAt: action.startedAt, entry: action }));
   }
 
-  const messagesByTurn = new Map<string, RuntimeTranscriptMessage[]>();
-  const blocks: TranscriptBlock[] = [];
   for (const message of messages) {
     if (message.role === "tool") continue;
     const turnId = optionalTurnId(message.metadata);
@@ -146,62 +182,12 @@ export async function loadRuntimeTranscript(
       text: message.content,
       createdAt: message.createdAt,
     }) satisfies RuntimeTranscriptMessage;
-    if (!turnId) {
-      blocks.push(
-        Object.freeze({
-          occurredAt: message.createdAt,
-          tieBreak: `message:${message.messageId}`,
-          entries: Object.freeze([entry]),
-        }),
-      );
-      continue;
-    }
-    const turnMessages = messagesByTurn.get(turnId) ?? [];
-    turnMessages.push(entry);
-    messagesByTurn.set(turnId, turnMessages);
+    points.push(Object.freeze({ occurredAt: entry.createdAt, entry }));
   }
-  for (const [turnId, turnMessages] of messagesByTurn) {
-    const users = turnMessages.filter((message) => message.role === "user");
-    const assistants = turnMessages.filter((message) => message.role === "assistant");
-    const systems = turnMessages.filter((message) => message.role === "system");
-    const actions = sortActions(actionsByTurn.get(turnId) ?? []);
-    const entries = Object.freeze([...systems, ...users, ...actions, ...assistants]);
-    const occurredAt =
-      users.at(0)?.createdAt ??
-      systems.at(0)?.createdAt ??
-      actions.at(0)?.startedAt ??
-      assistants.at(0)?.createdAt;
-    if (!occurredAt) continue;
-    blocks.push(Object.freeze({ occurredAt, tieBreak: `turn:${turnId}`, entries }));
-    actionsByTurn.delete(turnId);
-  }
-  for (const [turnId, actions] of actionsByTurn) {
-    const ordered = sortActions(actions);
-    const first = ordered.at(0);
-    if (!first) continue;
-    blocks.push(
-      Object.freeze({
-        occurredAt: first.startedAt,
-        tieBreak: `turn:${turnId}`,
-        entries: ordered,
-      }),
-    );
-  }
-  for (const action of orphanActions) {
-    blocks.push(
-      Object.freeze({
-        occurredAt: action.startedAt,
-        tieBreak: `action:${action.actionId}`,
-        entries: Object.freeze([action]),
-      }),
-    );
-  }
+  const tiedActionOrder = actionOrderAtTimestampTies(actions);
   return Object.freeze(
-    blocks
-      .sort(
-        (left, right) =>
-          left.occurredAt.localeCompare(right.occurredAt) || left.tieBreak.localeCompare(right.tieBreak),
-      )
-      .flatMap((block) => block.entries),
+    points
+      .sort((left, right) => compareTranscriptPoints(tiedActionOrder, left, right))
+      .map((point) => point.entry),
   );
 }

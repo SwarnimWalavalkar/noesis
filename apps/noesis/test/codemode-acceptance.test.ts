@@ -89,8 +89,8 @@ describe("production codemode journey", () => {
     expect(transcriptActions.map((action) => action.name)).toEqual(["execute", "files.read"]);
     expect(transcriptActions[1]).toMatchObject({
       parentActionId: transcriptActions[0]?.actionId,
-      executionId: execution.executionId,
     });
+    expect(transcriptActions[1]).not.toHaveProperty("executionId");
     const inspected = await runtime.inspectExecution?.(trail.trailId, execution.executionId);
     expect(execution).toMatchObject({
       sourceArtifactId: expect.any(String),
