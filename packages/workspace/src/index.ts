@@ -45,6 +45,7 @@ export type {
   UserIntentMode,
   UserIntentRecord,
   UserIntentStatus,
+  UserIntentSteerOrigin,
   WorkflowPhaseRunRecord,
   WorkflowRunRecord,
   TurnActivationPinRecord,

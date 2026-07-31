@@ -332,6 +332,99 @@ describe("runtime transcript projection", () => {
     workspace.close();
   });
 
+  test("uses one durable turn timeline across assistant boundaries, actions, and steering", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-turn-timeline-"));
+    roots.push(root);
+    const workspace = await createWorkspaceStore(root);
+    await workspace.operational.sessions.put({
+      sessionId: "session-turn-timeline",
+      title: "Turn timeline",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
+    await protectedRuntime.activations.bootstrapGenesis({
+      capabilityRevision: {
+        kind: "capability_revision",
+        capabilityId: "general-collaboration",
+        capabilityRevisionId: "general-collaboration-genesis-v1",
+        bundleDigest: "a".repeat(64),
+      },
+      activeDefinitions: {},
+    });
+    await protectedRuntime.activations.admitTurnPlan(plan("session-turn-timeline", "turn-timeline"));
+    const createdAt = "2026-07-30T00:00:01.000Z";
+    for (const message of [
+      {
+        messageId: "turn-timeline:user",
+        role: "user" as const,
+        content: "start",
+        timelineSequence: 0,
+      },
+      {
+        messageId: "turn-timeline:assistant:1",
+        role: "assistant" as const,
+        content: "First boundary",
+        timelineSequence: 1,
+      },
+      {
+        messageId: "turn-timeline:steer:intent",
+        role: "user" as const,
+        content: "steer",
+        timelineSequence: 3,
+      },
+      {
+        messageId: "turn-timeline:assistant:4",
+        role: "assistant" as const,
+        content: "Second boundary",
+        timelineSequence: 4,
+      },
+    ]) {
+      await workspace.operational.messages.put({
+        ...message,
+        sessionId: "session-turn-timeline",
+        sensitivity: "normal",
+        createdAt,
+        metadata: Object.freeze({
+          turnId: "turn-timeline",
+          ...(message.timelineSequence === 3 ? { deliveryMode: "steer" } : {}),
+        }),
+      });
+    }
+    await workspace.operational.toolCalls.put({
+      toolCallId: "turn-timeline:tool",
+      sessionId: "session-turn-timeline",
+      turnId: "turn-timeline",
+      toolName: "inspect_self",
+      request: {},
+      response: {},
+      timelineSequence: 2,
+      status: "completed",
+      sensitivity: "normal",
+      createdAt,
+      completedAt: createdAt,
+    });
+
+    const beforeRestart = await loadRuntimeTranscript(workspace, "session-turn-timeline");
+    workspace.close();
+    const reopened = await createWorkspaceStore(root);
+    const afterRestart = await loadRuntimeTranscript(reopened, "session-turn-timeline");
+    expect(afterRestart).toEqual(beforeRestart);
+    expect(afterRestart.map((entry) => (entry.kind === "message" ? entry.text : entry.name))).toEqual([
+      "start",
+      "First boundary",
+      "inspect_self",
+      "steer",
+      "Second boundary",
+    ]);
+    reopened.close();
+  });
+
   test("marks running actions interrupted without losing their request", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-interrupt-"));
     roots.push(root);

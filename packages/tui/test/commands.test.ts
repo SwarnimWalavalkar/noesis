@@ -15,7 +15,11 @@ const agent: NoesisAgentRuntime = {
     };
   },
   async steer() {
-    return { status: "consumed" as const };
+    return {
+      status: "consumed" as const,
+      timelineSequence: 1,
+      consumedAt: "2026-07-31T00:00:00.000Z",
+    };
   },
   async abort() {},
 };

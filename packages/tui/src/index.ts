@@ -22,12 +22,13 @@ import {
   createStaticLineView,
   createStatusView,
 } from "./rendering.ts";
-import type {
-  NoesisTuiRuntime,
-  TuiInteractionCommand,
-  TuiInteractionEvent,
-  TuiInteractionResult,
-  TuiInteractionSnapshot,
+import {
+  stopVisibleInteraction,
+  type NoesisTuiRuntime,
+  type TuiInteractionCommand,
+  type TuiInteractionEvent,
+  type TuiInteractionResult,
+  type TuiInteractionSnapshot,
 } from "./runtime-port.ts";
 import { createSafeEditor, createSelectTheme } from "./safe-editor.ts";
 import {
@@ -171,6 +172,7 @@ export async function startNoesisTui(
   });
   const shutdown = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
+    const visibleTurnId = view.state.interaction.active?.turnId;
     shutdownPromise = (async () => {
       phase = "stopped";
       turnGeneration += 1;
@@ -198,7 +200,7 @@ export async function startNoesisTui(
       let shutdownFailure: { readonly error: unknown } | undefined;
       if (trailId && view.state.interaction.phase !== "idle") {
         const abortAndSettle = runtime
-          .interact(trailId, { type: "interrupt" })
+          .interact(trailId, stopVisibleInteraction(visibleTurnId))
           .then<ShutdownSettlement, ShutdownSettlement>(
             () => ({ status: "settled" }),
             (error: unknown) => ({ status: "rejected", error }),
@@ -400,6 +402,11 @@ export async function startNoesisTui(
       return;
     }
     if (interactionEvent.sessionId !== view.state.trailId) return;
+    if (interactionEvent.type === "interaction-failed") {
+      view.dispatch({ type: "failed", error: safeTerminalText(interactionEvent.error) });
+      tui.requestRender();
+      return;
+    }
     if (interactionEvent.type === "turn-started") {
       turnGeneration += 1;
       const token: ActiveTurnToken = {
@@ -465,12 +472,13 @@ export async function startNoesisTui(
   };
 
   const interruptActiveTurn = async (): Promise<TuiInteractionResult> => {
+    const visibleTurnId = view.state.interaction.active?.turnId;
     if (view.state.interaction.phase !== "idle") {
       view.dispatch({ type: "execution-changed", execution: "aborting" });
       tui.requestRender(true);
       await new Promise<void>((resolve) => setTimeout(resolve, INTERRUPT_FEEDBACK_MS));
     }
-    return interact({ type: "interrupt" });
+    return interact(stopVisibleInteraction(visibleTurnId));
   };
 
   const restoreNewestQueuedInput = (): void => {

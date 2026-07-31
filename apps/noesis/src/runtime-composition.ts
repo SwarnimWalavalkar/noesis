@@ -518,7 +518,7 @@ async function replayEligibleTurns(
     if (!turnId) continue;
     const pair = messagesByTurn.get(turnId) ?? { firstIndex: index };
     if (message.role === "user" && pair.user === undefined) pair.user = message;
-    if (message.role === "assistant" && pair.assistant === undefined) pair.assistant = message;
+    if (message.role === "assistant") pair.assistant = message;
     messagesByTurn.set(turnId, pair);
   }
   const replayable: Array<{
@@ -583,6 +583,14 @@ function interactionSequence(message: MessageRecord): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
+function sameTurnTimelineOrder(left: MessageRecord, right: MessageRecord): number {
+  const leftTurnId = metadataString(left, "turnId");
+  const rightTurnId = metadataString(right, "turnId");
+  if (leftTurnId === undefined || leftTurnId !== rightTurnId) return 0;
+  if (left.timelineSequence === undefined || right.timelineSequence === undefined) return 0;
+  return left.timelineSequence - right.timelineSequence;
+}
+
 function replayMessageTieRank(message: MessageRecord): number {
   if (message.role === "assistant") return 2;
   return replayHistoryKind(message) === "steer" ? 1 : 0;
@@ -595,6 +603,14 @@ async function replayEligibleHistoryMessages(workspace: NoesisWorkspaceStore, se
   ]);
   const eligibleTurnIds = await replayEligibleTurnIds(workspace, sessionId, outcomes);
   const sourceOrder = new Map(messages.map((message, index) => [message.messageId, index]));
+  const turnChronology = new Map<string, { readonly createdAt: string; readonly sourceIndex: number }>();
+  for (const [sourceIndex, message] of messages.entries()) {
+    const turnId = metadataString(message, "turnId");
+    if (turnId === undefined) continue;
+    const current = turnChronology.get(turnId);
+    if (current === undefined || message.timelineSequence === 0)
+      turnChronology.set(turnId, Object.freeze({ createdAt: message.createdAt, sourceIndex }));
+  }
   return Object.freeze(
     messages
       .filter((message) => {
@@ -617,9 +633,18 @@ async function replayEligibleHistoryMessages(workspace: NoesisWorkspaceStore, se
         const rightSequence = historySequence(right);
         const leftInteractionSequence = interactionSequence(left);
         const rightInteractionSequence = interactionSequence(right);
+        const leftTurnId = metadataString(left, "turnId");
+        const rightTurnId = metadataString(right, "turnId");
+        const leftTurn = leftTurnId === undefined ? undefined : turnChronology.get(leftTurnId);
+        const rightTurn = rightTurnId === undefined ? undefined : turnChronology.get(rightTurnId);
         return (
-          left.createdAt.localeCompare(right.createdAt) ||
           (leftSequence !== undefined && rightSequence !== undefined ? leftSequence - rightSequence : 0) ||
+          sameTurnTimelineOrder(left, right) ||
+          (leftTurnId !== rightTurnId && leftTurn !== undefined && rightTurn !== undefined
+            ? leftTurn.createdAt.localeCompare(rightTurn.createdAt) ||
+              leftTurn.sourceIndex - rightTurn.sourceIndex
+            : 0) ||
+          left.createdAt.localeCompare(right.createdAt) ||
           replayMessageTieRank(left) - replayMessageTieRank(right) ||
           (replayHistoryKind(left) === "steer" &&
           replayHistoryKind(right) === "steer" &&
@@ -1098,7 +1123,6 @@ export async function createApplicationRuntimeComposition(
     // effect results. Persisting the adapter's display aliases as well would create a second,
     // competing record for the same action.
     if (event.parentActionId) return;
-    const current = await workspace.operational.toolCalls.get(event.actionId);
     const occurredAt = new Date().toISOString();
     if (event.type === "tool-start") {
       await workspace.operational.toolCalls.put({
@@ -1110,9 +1134,11 @@ export async function createApplicationRuntimeComposition(
         status: "running",
         sensitivity: "normal",
         createdAt: occurredAt,
+        ...(event.timelineSequence === undefined ? {} : { timelineSequence: event.timelineSequence }),
       });
       return;
     }
+    const current = await workspace.operational.toolCalls.get(event.actionId);
     if (!current) throw new Error(`Agent action ${event.actionId} emitted ${event.type} before tool-start`);
     if (current.sessionId !== sessionId || current.turnId !== turnId || current.toolName !== event.name)
       throw new Error(`Agent action ${event.actionId} changed its durable identity`);
@@ -2729,6 +2755,7 @@ export async function createApplicationRuntimeComposition(
                 frozenTurnPlan: plan,
               });
             let actionPersistence = Promise.resolve();
+            let assistantPersistence = Promise.resolve();
             let interactionReady = false;
             const emit = (event: AgentRuntimeEvent): void => {
               if (event.type === "status" && event.status === "started" && !interactionReady) {
@@ -2739,9 +2766,37 @@ export async function createApplicationRuntimeComposition(
               if (event.type === "tool-start" || event.type === "tool-update" || event.type === "tool-end") {
                 const durableEvent = durableActionEvent(turnId, event);
                 runOptions?.onEvent?.(durableEvent);
-                actionPersistence = actionPersistence.then(async () => {
-                  await persistTopLevelAction(trailId, turnId, durableEvent);
+                if (durableEvent.type === "tool-start") {
+                  const currentPersistence = persistTopLevelAction(trailId, turnId, durableEvent);
+                  actionPersistence = Promise.all([actionPersistence, currentPersistence]).then(
+                    () => undefined,
+                  );
+                } else {
+                  actionPersistence = actionPersistence.then(async () => {
+                    await persistTopLevelAction(trailId, turnId, durableEvent);
+                  });
+                }
+                return;
+              }
+              if (event.type === "assistant-message") {
+                const boundary = event;
+                const messageId = `${turnId}:assistant:${String(boundary.timelineSequence)}`;
+                const currentPersistence = workspace.operational.messages.put({
+                  messageId,
+                  sessionId: trailId,
+                  role: "assistant",
+                  content: boundary.text,
+                  sensitivity: "normal",
+                  createdAt: boundary.createdAt,
+                  metadata: Object.freeze({
+                    turnId,
+                    frozenTurnPlanId: plan.planId,
+                  }),
+                  timelineSequence: boundary.timelineSequence,
                 });
+                assistantPersistence = Promise.all([assistantPersistence, currentPersistence]).then(
+                  () => undefined,
+                );
                 return;
               }
               runOptions?.onEvent?.(event);
@@ -2764,9 +2819,12 @@ export async function createApplicationRuntimeComposition(
                 },
                 emit,
               );
-              await actionPersistence;
+              await Promise.all([actionPersistence, assistantPersistence]);
             } catch (error) {
-              await actionPersistence.catch(() => undefined);
+              await Promise.all([
+                actionPersistence.catch(() => undefined),
+                assistantPersistence.catch(() => undefined),
+              ]);
               await workspace.operational.toolCalls.interruptRunningForTurn(turnId, new Date().toISOString());
               throw error;
             }
@@ -2779,6 +2837,7 @@ export async function createApplicationRuntimeComposition(
               context,
               usedCapabilities,
               ...(agentResult.contextUsage ? { contextUsage: agentResult.contextUsage } : {}),
+              ...(agentResult.assistantMessages ? { assistantMessages: agentResult.assistantMessages } : {}),
               frozenTurnPlan: plan,
             });
           },
@@ -2844,13 +2903,14 @@ export async function createApplicationRuntimeComposition(
     steer: async (sessionId, text) => {
       return await agent.steer(sessionId, text);
     },
-    recordSteerDelivery: async ({ sessionId, intentId, turnId, text, deliveredAt }) => {
+    recordSteerDelivery: async ({ sessionId, intentId, turnId, text, timelineSequence, deliveredAt }) => {
       const delivered = await workspace.operational.userIntents.recordSteerDelivery({
         sessionId,
         intentId,
         targetTurnId: turnId,
         text,
         sensitivity: "normal",
+        timelineSequence,
         deliveredAt,
       });
       if (delivered?.status !== "delivered")

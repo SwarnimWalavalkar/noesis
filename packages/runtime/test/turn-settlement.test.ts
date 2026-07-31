@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import { compileContext } from "@noesis/context";
 import type { Capability, CapabilityRevisionRef } from "@noesis/domain";
@@ -163,6 +164,7 @@ describe("turn settlement", () => {
         scope: "project/noesis/research",
       },
     ]);
+    seedForegroundTurn(workspace, "session-1", "turn-accepted", plan.planId);
 
     await expect(
       settlement.run({
@@ -193,6 +195,7 @@ describe("turn settlement", () => {
     const abortedPlan = turnPlan("session-1", "turn-aborted", [
       { capabilityId: "general", name: "General", scope: "general" },
     ]);
+    seedForegroundTurn(workspace, "session-1", "turn-aborted", abortedPlan.planId);
     await expect(
       settlement.run({
         sessionId: "session-1",
@@ -218,3 +221,21 @@ describe("turn settlement", () => {
     });
   });
 });
+
+function seedForegroundTurn(
+  workspace: NoesisWorkspaceStore,
+  sessionId: string,
+  turnId: string,
+  planId: string,
+): void {
+  const database = new DatabaseSync(workspace.unsafeDatabasePathForTesting);
+  database.exec("PRAGMA foreign_keys = OFF");
+  database
+    .prepare(
+      `INSERT INTO foreground_turns(
+        turn_id, session_id, plan_id, status, outcome_id, admitted_at, settled_at
+      ) VALUES (?, ?, ?, 'running', NULL, ?, NULL)`,
+    )
+    .run(turnId, sessionId, planId, "2026-07-25T00:00:00.000Z");
+  database.close();
+}

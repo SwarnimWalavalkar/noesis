@@ -11,6 +11,9 @@ export type TuiInteractionSnapshot = InteractionSnapshot;
 export type TuiInteractionEvent = TurnInteractionEvent;
 export type TuiInteractionResult = InteractionDispatchResult;
 
+export const stopVisibleInteraction = (turnId?: string): TuiInteractionCommand =>
+  turnId ? { type: "interrupt", turnId } : { type: "pause-queue" };
+
 export interface TuiSkillSummary {
   readonly name: string;
   readonly description: string;

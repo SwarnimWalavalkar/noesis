@@ -1,5 +1,6 @@
 import type {
   AgentContextUsage,
+  AgentAssistantMessageBoundary,
   AgentRuntimeEvent,
   AgentThinkingLevel,
   FrozenTurnPlan,
@@ -122,6 +123,7 @@ export interface TurnResult {
   readonly usedCapabilities: Readonly<Record<string, number>>;
   readonly contextUsage?: AgentContextUsage;
   readonly frozenTurnPlan?: FrozenTurnPlan;
+  readonly assistantMessages?: readonly AgentAssistantMessageBoundary[];
 }
 
 /**

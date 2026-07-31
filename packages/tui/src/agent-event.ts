@@ -55,6 +55,7 @@ export function tuiActionForAgentEvent(
       contextWindow: event.contextWindow,
       accuracy: event.accuracy,
     };
+  if (event.type === "assistant-message") return undefined;
   if (event.status === "started") return { type: "execution-changed", execution: "thinking" };
   if (event.status === "aborted") return { type: "execution-changed", execution: "idle" };
   if (event.status === "failed") return { type: "failed", error: safeTerminalText(event.error) };

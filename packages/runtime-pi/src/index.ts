@@ -3,6 +3,7 @@ import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { MutableModels } from "@earendil-works/pi-ai";
 import type {
   AgentContextUsage,
+  AgentAssistantMessageBoundary,
   AgentRuntimeEvent,
   AgentRuntimeRequest,
   AgentRuntimeResult,
@@ -157,6 +158,7 @@ export interface CreatePiAgentRuntimeOptions {
   readonly selfTools?: PiSelfToolAdapter;
   readonly skills?: PiSkillLibrary;
   readonly requirePinnedSkillSnapshot?: boolean;
+  readonly now?: () => string;
 }
 
 export function createPiAgentRuntime(
@@ -204,6 +206,14 @@ export function createPiAgentRuntime(
       pendingSteers: [],
       acceptsSteering: false,
     };
+    const now = options.now ?? (() => new Date().toISOString());
+    let nextTimelineSequence = 1;
+    const claimTimelineSequence = (): number => {
+      const sequence = nextTimelineSequence;
+      nextTimelineSequence += 1;
+      return sequence;
+    };
+    const assistantMessages: AgentAssistantMessageBoundary[] = [];
     active.set(request.trailId, execution);
     const abortedBeforePrompt = (): AgentRuntimeResult => {
       if (!execution.abortStatusEmitted) {
@@ -212,6 +222,7 @@ export function createPiAgentRuntime(
       }
       return Object.freeze({
         text: "",
+        assistantMessages: Object.freeze([]),
         provider: request.provider,
         model: request.model,
         outcome: "aborted" as const,
@@ -293,6 +304,7 @@ export function createPiAgentRuntime(
                   parentActionId,
                   name: event.name,
                   input: toAgentActionPayload(event.input ?? {}),
+                  timelineSequence: claimTimelineSequence(),
                 });
               else if (event.type === "tool-end")
                 emit({
@@ -360,8 +372,22 @@ export function createPiAgentRuntime(
           const pendingIndex = execution.pendingSteers.findIndex((receipt) => receipt.text === text);
           if (pendingIndex >= 0) {
             const [receipt] = execution.pendingSteers.splice(pendingIndex, 1);
-            receipt?.resolve(Object.freeze({ status: "consumed" }));
+            receipt?.resolve(
+              Object.freeze({
+                status: "consumed",
+                timelineSequence: claimTimelineSequence(),
+                consumedAt: now(),
+              }),
+            );
           }
+        } else if (event.type === "message_end" && event.message.role === "assistant") {
+          const boundary = Object.freeze({
+            text: assistantText(event.message),
+            timelineSequence: claimTimelineSequence(),
+            createdAt: now(),
+          });
+          assistantMessages.push(boundary);
+          emit({ type: "assistant-message", ...boundary });
         } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
           const delta = assistantDeltas.push(event.assistantMessageEvent.delta);
           if (delta) emit({ type: "delta", text: delta });
@@ -371,6 +397,7 @@ export function createPiAgentRuntime(
             actionId: event.toolCallId,
             name: event.toolName,
             input: toAgentActionPayload(event.args),
+            timelineSequence: claimTimelineSequence(),
           });
         } else if (event.type === "tool_execution_update") {
           emit({
@@ -393,7 +420,20 @@ export function createPiAgentRuntime(
       emit({ type: "status", status: "started" });
       try {
         const message = await harness.prompt(request.prompt);
-        const text = assistantText(message);
+        const finalText = assistantText(message);
+        if (assistantMessages.length === 0) {
+          const boundary = Object.freeze({
+            text: finalText,
+            timelineSequence: claimTimelineSequence(),
+            createdAt: now(),
+          });
+          assistantMessages.push(boundary);
+          emit({ type: "assistant-message", ...boundary });
+        }
+        const text = assistantMessages
+          .map((boundary) => boundary.text)
+          .filter((part) => part.length > 0)
+          .join("\n\n");
         const usedTokens =
           message.usage.totalTokens ||
           message.usage.input + message.usage.output + message.usage.cacheRead + message.usage.cacheWrite;
@@ -408,6 +448,7 @@ export function createPiAgentRuntime(
         if (contextUsage) emit({ type: "usage", ...contextUsage });
         const base = {
           text,
+          assistantMessages: Object.freeze([...assistantMessages]),
           provider: message.provider,
           model: message.model,
           ...(contextUsage ? { contextUsage } : {}),

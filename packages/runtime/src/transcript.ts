@@ -7,6 +7,8 @@ type TranscriptPoint = Readonly<{
   entry: RuntimeTranscriptEntry;
   inheritedHistorySequence?: number;
   interactionSequence?: number;
+  turnId?: string;
+  timelineSequence?: number;
   steer?: boolean;
 }>;
 
@@ -123,6 +125,19 @@ const compareTranscriptPoints = (
   left: TranscriptPoint,
   right: TranscriptPoint,
 ): number => {
+  if (left.inheritedHistorySequence !== undefined && right.inheritedHistorySequence !== undefined) {
+    const inheritedOrder = left.inheritedHistorySequence - right.inheritedHistorySequence;
+    if (inheritedOrder !== 0) return inheritedOrder;
+  }
+  if (
+    left.turnId !== undefined &&
+    left.turnId === right.turnId &&
+    left.timelineSequence !== undefined &&
+    right.timelineSequence !== undefined
+  ) {
+    const timelineOrder = left.timelineSequence - right.timelineSequence;
+    if (timelineOrder !== 0) return timelineOrder;
+  }
   const chronological = left.occurredAt.localeCompare(right.occurredAt);
   if (chronological !== 0) return chronological;
   if (left.entry.kind === "action" && right.entry.kind === "action") {
@@ -133,10 +148,6 @@ const compareTranscriptPoints = (
     );
   }
   if (left.entry.kind === "message" && right.entry.kind === "message") {
-    if (left.inheritedHistorySequence !== undefined && right.inheritedHistorySequence !== undefined) {
-      const inheritedOrder = left.inheritedHistorySequence - right.inheritedHistorySequence;
-      if (inheritedOrder !== 0) return inheritedOrder;
-    }
     const messageRank = messageTieRank(left) - messageTieRank(right);
     if (messageRank !== 0) return messageRank;
     if (
@@ -213,7 +224,14 @@ export async function loadRuntimeTranscript(
       ...(call.completedAt ? { completedAt: call.completedAt } : {}),
     }) satisfies RuntimeTranscriptAction;
     actions.push(action);
-    points.push(Object.freeze({ occurredAt: action.startedAt, entry: action }));
+    points.push(
+      Object.freeze({
+        occurredAt: action.startedAt,
+        entry: action,
+        ...(call.turnId ? { turnId: call.turnId } : {}),
+        ...(call.timelineSequence === undefined ? {} : { timelineSequence: call.timelineSequence }),
+      }),
+    );
   }
 
   for (const message of messages) {
@@ -239,6 +257,8 @@ export async function loadRuntimeTranscript(
         ...(sequence === undefined ? {} : { inheritedHistorySequence: sequence }),
         ...(interactionSequence === undefined ? {} : { interactionSequence }),
         ...(steer ? { steer: true } : {}),
+        ...(turnId ? { turnId } : {}),
+        ...(message.timelineSequence === undefined ? {} : { timelineSequence: message.timelineSequence }),
       }),
     );
   }

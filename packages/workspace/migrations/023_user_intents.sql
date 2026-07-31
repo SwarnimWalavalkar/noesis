@@ -8,31 +8,39 @@ CREATE TABLE user_intents (
   ),
   delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('turn', 'steer')),
   status TEXT NOT NULL CHECK (
-    status IN ('pending', 'dispatching', 'unresolved', 'delivered', 'withdrawn')
+    status IN ('pending', 'held', 'dispatching', 'unresolved', 'delivered', 'withdrawn')
   ),
   queue_sequence INTEGER NOT NULL CHECK (queue_sequence > 0),
   queued_behind_turn_id TEXT,
   target_turn_id TEXT,
   created_at TEXT NOT NULL CHECK (length(created_at) > 0),
   updated_at TEXT NOT NULL CHECK (length(updated_at) > 0),
+  held_at TEXT,
   promoted_at TEXT,
   delivered_at TEXT,
   unresolved_at TEXT,
   withdrawn_at TEXT,
+  steer_origin TEXT CHECK (steer_origin IS NULL OR steer_origin IN ('explicit', 'queued')),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
   CHECK (
     (status = 'pending'
       AND text IS NOT NULL AND length(trim(text)) > 0
       AND delivery_mode = 'turn'
       AND target_turn_id IS NULL
-      AND delivered_at IS NULL AND unresolved_at IS NULL AND withdrawn_at IS NULL) OR
+      AND held_at IS NULL AND delivered_at IS NULL AND unresolved_at IS NULL AND withdrawn_at IS NULL) OR
+    (status = 'held'
+      AND text IS NOT NULL AND length(trim(text)) > 0
+      AND delivery_mode = 'steer'
+      AND target_turn_id IS NOT NULL
+      AND held_at IS NOT NULL AND promoted_at IS NULL
+      AND delivered_at IS NULL AND unresolved_at IS NULL AND withdrawn_at IS NULL
+      AND steer_origin IS NOT NULL) OR
     (status = 'dispatching'
       AND text IS NOT NULL AND length(trim(text)) > 0
       AND target_turn_id IS NOT NULL
       AND delivered_at IS NULL AND unresolved_at IS NULL AND withdrawn_at IS NULL) OR
     (status = 'unresolved'
       AND text IS NOT NULL AND length(trim(text)) > 0
-      AND delivery_mode = 'steer'
       AND target_turn_id IS NOT NULL
       AND delivered_at IS NULL AND unresolved_at IS NOT NULL AND withdrawn_at IS NULL) OR
     (status = 'delivered'
@@ -46,8 +54,14 @@ CREATE TABLE user_intents (
       AND delivered_at IS NULL AND unresolved_at IS NULL AND withdrawn_at IS NOT NULL)
   ),
   CHECK (
-    (delivery_mode = 'turn' AND promoted_at IS NULL) OR
-    (delivery_mode = 'steer' AND promoted_at IS NOT NULL)
+    (delivery_mode = 'turn' AND promoted_at IS NULL AND steer_origin IS NULL) OR
+    (delivery_mode = 'steer' AND steer_origin IS NOT NULL
+      AND (
+        (status = 'held' AND promoted_at IS NULL) OR
+        (status = 'unresolved' AND held_at IS NOT NULL AND promoted_at IS NULL) OR
+        (status NOT IN ('held', 'unresolved') AND promoted_at IS NOT NULL) OR
+        (status = 'unresolved' AND promoted_at IS NOT NULL)
+      ))
   ),
   UNIQUE(session_id, queue_sequence)
 ) STRICT;
@@ -57,6 +71,15 @@ CREATE INDEX user_intents_pending_fifo
 
 CREATE INDEX user_intents_target
   ON user_intents(session_id, target_turn_id, intent_id);
+
+CREATE TABLE turn_timeline_entries (
+  turn_id TEXT NOT NULL REFERENCES foreground_turns(turn_id) ON DELETE RESTRICT,
+  timeline_sequence INTEGER NOT NULL CHECK (timeline_sequence >= 0),
+  entry_kind TEXT NOT NULL CHECK (entry_kind IN ('message', 'tool_call')),
+  entry_id TEXT NOT NULL CHECK (length(entry_id) > 0),
+  PRIMARY KEY(turn_id, timeline_sequence),
+  UNIQUE(entry_kind, entry_id)
+) STRICT;
 
 CREATE TRIGGER user_intent_identity_immutable
 BEFORE UPDATE OF

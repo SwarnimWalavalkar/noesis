@@ -232,6 +232,8 @@ export interface AgentActionStartEvent {
   readonly parentActionId?: string;
   readonly name: string;
   readonly input: JsonValue;
+  /** Position in the adapter-observed mixed interaction timeline for this turn. */
+  readonly timelineSequence?: number;
 }
 
 export interface AgentActionUpdateEvent {
@@ -255,6 +257,12 @@ export interface AgentActionEndEvent {
 
 export type AgentActionEvent = AgentActionStartEvent | AgentActionUpdateEvent | AgentActionEndEvent;
 
+export interface AgentAssistantMessageBoundary {
+  readonly text: string;
+  readonly timelineSequence: number;
+  readonly createdAt: string;
+}
+
 export type AgentRuntimeEvent =
   | { readonly type: "delta"; readonly text: string }
   | {
@@ -264,12 +272,14 @@ export type AgentRuntimeEvent =
       readonly contextWindow: number;
     }
   | ({ readonly type: "usage" } & AgentContextUsage)
+  | ({ readonly type: "assistant-message" } & AgentAssistantMessageBoundary)
   | AgentActionEvent
   | { readonly type: "status"; readonly status: "started" | "completed" | "aborted" }
   | { readonly type: "status"; readonly status: "failed"; readonly error: string };
 
 interface AgentRuntimeResultBase {
   readonly text: string;
+  readonly assistantMessages?: readonly AgentAssistantMessageBoundary[];
   readonly provider: string;
   readonly model: string;
   readonly contextUsage?: AgentContextUsage;
@@ -295,7 +305,11 @@ export type AgentRuntimeResult =
  * active loop. Queue acceptance alone is not delivery.
  */
 export type AgentSteerResult =
-  | { readonly status: "consumed" }
+  | {
+      readonly status: "consumed";
+      readonly timelineSequence: number;
+      readonly consumedAt: string;
+    }
   | {
       readonly status: "not-consumed";
       readonly reason: "not-running" | "turn-ended" | "aborted";

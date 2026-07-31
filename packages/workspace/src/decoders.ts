@@ -42,7 +42,15 @@ export const SensitivitySchema = z.enum(["normal", "private", "secret"]);
 const SessionStatusSchema = z.enum(["idle", "running", "completed", "aborted", "failed"]);
 const MessageRoleSchema = z.enum(["user", "assistant", "system", "tool"]);
 const UserIntentModeSchema = z.enum(["turn", "steer"]);
-const UserIntentStatusSchema = z.enum(["pending", "dispatching", "unresolved", "delivered", "withdrawn"]);
+const UserIntentStatusSchema = z.enum([
+  "pending",
+  "held",
+  "dispatching",
+  "unresolved",
+  "delivered",
+  "withdrawn",
+]);
+const UserIntentSteerOriginSchema = z.enum(["explicit", "queued"]);
 const ToolCallStatusSchema = z.enum(["requested", "running", "completed", "failed", "denied", "ambiguous"]);
 const CodeExecutionStatusSchema = z.enum(["running", "completed", "failed", "cancelled", "interrupted"]);
 const WorkflowRunStatusSchema = z.enum(["running", "paused", "completed", "failed", "cancelled"]);
@@ -102,6 +110,7 @@ export function decodeSession(row: unknown): SessionRecord {
 }
 
 export function decodeMessage(row: unknown): MessageRecord {
+  const timelineSequence = Reflect.get(row as object, "timeline_sequence");
   return {
     messageId: requiredString(row, "message_id"),
     sessionId: requiredString(row, "session_id"),
@@ -110,6 +119,9 @@ export function decodeMessage(row: unknown): MessageRecord {
     sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
     createdAt: requiredString(row, "created_at"),
     metadata: JsonRecordSchema.parse(parseJson(requiredString(row, "metadata_json"))),
+    ...(timelineSequence === null || timelineSequence === undefined
+      ? {}
+      : { timelineSequence: z.number().int().nonnegative().parse(timelineSequence) }),
   };
 }
 
@@ -118,9 +130,11 @@ export function decodeUserIntent(row: unknown): UserIntentRecord {
   const queuedBehindTurnId = optionalString(row, "queued_behind_turn_id");
   const targetTurnId = optionalString(row, "target_turn_id");
   const promotedAt = optionalString(row, "promoted_at");
+  const heldAt = optionalString(row, "held_at");
   const deliveredAt = optionalString(row, "delivered_at");
   const unresolvedAt = optionalString(row, "unresolved_at");
   const withdrawnAt = optionalString(row, "withdrawn_at");
+  const steerOrigin = optionalString(row, "steer_origin");
   return Object.freeze({
     intentId: requiredString(row, "intent_id"),
     sessionId: requiredString(row, "session_id"),
@@ -133,10 +147,12 @@ export function decodeUserIntent(row: unknown): UserIntentRecord {
     ...(targetTurnId === undefined ? {} : { targetTurnId }),
     createdAt: requiredString(row, "created_at"),
     updatedAt: requiredString(row, "updated_at"),
+    ...(heldAt === undefined ? {} : { heldAt }),
     ...(promotedAt === undefined ? {} : { promotedAt }),
     ...(deliveredAt === undefined ? {} : { deliveredAt }),
     ...(unresolvedAt === undefined ? {} : { unresolvedAt }),
     ...(withdrawnAt === undefined ? {} : { withdrawnAt }),
+    ...(steerOrigin === undefined ? {} : { steerOrigin: UserIntentSteerOriginSchema.parse(steerOrigin) }),
     attemptCount: requiredNumber(row, "attempt_count"),
   });
 }
@@ -149,6 +165,7 @@ export function decodeToolCall(row: unknown): ToolCallRecord {
   const parentToolCallId = optionalString(row, "parent_tool_call_id");
   const executionId = optionalString(row, "execution_id");
   const completedAt = optionalString(row, "completed_at");
+  const timelineSequence = Reflect.get(row as object, "timeline_sequence");
   return {
     toolCallId: requiredString(row, "tool_call_id"),
     sessionId: requiredString(row, "session_id"),
@@ -161,6 +178,9 @@ export function decodeToolCall(row: unknown): ToolCallRecord {
     ...(update === undefined ? {} : { update: parseJson(update) }),
     ...(response === undefined ? {} : { response: parseJson(response) }),
     sequence: requiredNumber(row, "action_sequence"),
+    ...(timelineSequence === null || timelineSequence === undefined
+      ? {}
+      : { timelineSequence: z.number().int().nonnegative().parse(timelineSequence) }),
     status: ToolCallStatusSchema.parse(requiredString(row, "status")),
     sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
     createdAt: requiredString(row, "created_at"),

@@ -17,7 +17,12 @@ const containsC1 = (text: string): boolean =>
     return code >= 128 && code <= 159;
   });
 
-const consumeSteer: NoesisAgentRuntime["steer"] = async () => Object.freeze({ status: "consumed" as const });
+const consumeSteer: NoesisAgentRuntime["steer"] = async () =>
+  Object.freeze({
+    status: "consumed" as const,
+    timelineSequence: 1,
+    consumedAt: "2026-07-31T00:00:00.000Z",
+  });
 
 async function createRuntime(agent: NoesisAgentRuntime): Promise<TestNoesisRuntime> {
   return createInMemoryTestRuntime(agent);
@@ -481,7 +486,11 @@ describe("Noesis TUI lifecycle", () => {
     const turnGate = new Promise<void>((resolve) => {
       releaseTurn = resolve;
     });
-    const steer = vi.fn(async () => ({ status: "consumed" as const }));
+    const steer = vi.fn(async () => ({
+      status: "consumed" as const,
+      timelineSequence: 1,
+      consumedAt: "2026-07-31T00:00:00.000Z",
+    }));
     const runtime = await createRuntime({
       name: "steering-scripted",
       async run(request) {
@@ -1317,6 +1326,53 @@ describe("Noesis TUI lifecycle", () => {
     terminal.type("/quit\n");
     await running;
     expect(terminal.stops).toBe(1);
+  });
+
+  test("does not let delayed Escape feedback abort the successor to the visible turn", async () => {
+    let releaseFirst: (() => void) | undefined;
+    let releaseSecond: (() => void) | undefined;
+    let runs = 0;
+    const abort = vi.fn(async () => undefined);
+    const runtime = await createRuntime({
+      name: "stale-interrupt-scripted",
+      async run(request, emit) {
+        runs += 1;
+        const currentRun = runs;
+        emit({ type: "delta", text: `running ${String(currentRun)}` });
+        await new Promise<void>((resolve) => {
+          if (currentRun === 1) releaseFirst = resolve;
+          else releaseSecond = resolve;
+        });
+        return {
+          text: `finished ${String(currentRun)}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      abort,
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("first\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("running 1"));
+    terminal.type("second\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
+    terminal.send("\u001b");
+    releaseFirst?.();
+    await vi.waitFor(() => expect(runs).toBe(2));
+    await new Promise<void>((resolve) => setTimeout(resolve, 40));
+
+    expect(abort).not.toHaveBeenCalled();
+    expect(terminal.output).toContain("running 2");
+    releaseSecond?.();
+    await vi.waitFor(() => expect(terminal.output).toContain("finished 2"));
+    terminal.type("/quit\n");
+    await running;
   });
 
   test("reflows the main shell and picker from current terminal dimensions", async () => {

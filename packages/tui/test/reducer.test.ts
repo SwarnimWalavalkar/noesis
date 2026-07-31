@@ -274,16 +274,22 @@ describe("Noesis TUI reducer", () => {
           { queueId: "q1", text: "first\nmessage", createdAt: "2026-07-31T10:00:00.000Z" },
           { queueId: "q2", text: "second", createdAt: "2026-07-31T10:00:01.000Z" },
           { queueId: "q3", text: "third", createdAt: "2026-07-31T10:00:02.000Z" },
-          { queueId: "q4", text: "newest", createdAt: "2026-07-31T10:00:03.000Z" },
+          {
+            queueId: "q4",
+            text: "newest",
+            createdAt: "2026-07-31T10:00:03.000Z",
+            status: "held",
+          },
         ],
       },
     });
 
     const queue = renderQueuedInputs(state, 60).join("\n");
     expect(queue).toContain("QUEUED · 4");
+    expect(queue).toContain("holding steer");
     expect(queue).toContain("… 1 earlier");
     expect(queue).not.toContain("first message");
-    expect(queue).toContain("4  newest");
+    expect(queue).toContain("4→ newest");
     expect(createStatusFields(state, createTuiLayout(120, 35))).toContain("q 4");
     expect(helpHint(state)).toContain("enter queue");
     expect(helpHint(state)).toContain("/steer redirect");

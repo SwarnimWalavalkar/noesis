@@ -1655,6 +1655,48 @@ function createOperationalRepositories(
 ): NoesisWorkspaceStore["operational"] {
   const db = database.connection;
   const systemActor: ActorRef = { actorId: "workspace-store", kind: "system" };
+  const registerTurnTimelineEntry = (
+    turnId: string,
+    timelineSequence: number,
+    entryKind: "message" | "tool_call",
+    entryId: string,
+  ): void => {
+    z.number().int().nonnegative().parse(timelineSequence);
+    const existingByPosition = db
+      .prepare(
+        `SELECT entry_kind, entry_id
+         FROM turn_timeline_entries
+         WHERE turn_id = ? AND timeline_sequence = ?`,
+      )
+      .get(turnId, timelineSequence);
+    if (existingByPosition !== undefined) {
+      if (
+        requiredString(existingByPosition, "entry_kind") !== entryKind ||
+        requiredString(existingByPosition, "entry_id") !== entryId
+      )
+        throw new Error(`Turn ${turnId} timeline position ${String(timelineSequence)} is already occupied`);
+      return;
+    }
+    const existingByEntry = db
+      .prepare(
+        `SELECT turn_id, timeline_sequence
+         FROM turn_timeline_entries
+         WHERE entry_kind = ? AND entry_id = ?`,
+      )
+      .get(entryKind, entryId);
+    if (existingByEntry !== undefined) {
+      if (
+        requiredString(existingByEntry, "turn_id") !== turnId ||
+        requiredNumber(existingByEntry, "timeline_sequence") !== timelineSequence
+      )
+        throw new Error(`Timeline entry ${entryKind}:${entryId} already has a different position`);
+      return;
+    }
+    db.prepare(
+      `INSERT INTO turn_timeline_entries(turn_id, timeline_sequence, entry_kind, entry_id)
+       VALUES (?, ?, ?, ?)`,
+    ).run(turnId, timelineSequence, entryKind, entryId);
+  };
   const putSession = async (record: SessionRecord): Promise<DatabaseRowRef> => {
     database.transaction(() => {
       db.prepare(
@@ -1683,6 +1725,17 @@ function createOperationalRepositories(
   };
   const putMessage = async (record: MessageRecord): Promise<DatabaseRowRef> => {
     database.transaction(() => {
+      const turnId =
+        typeof record.metadata["turnId"] === "string" && record.metadata["turnId"].length > 0
+          ? record.metadata["turnId"]
+          : undefined;
+      if (record.timelineSequence !== undefined && turnId === undefined)
+        throw new Error(`Message ${record.messageId} has a timeline position without a turn`);
+      if (record.timelineSequence !== undefined && turnId !== undefined) {
+        const turn = db.prepare("SELECT session_id FROM foreground_turns WHERE turn_id = ?").get(turnId);
+        if (turn === undefined || requiredString(turn, "session_id") !== record.sessionId)
+          throw new Error(`Message ${record.messageId} turn does not belong to its session`);
+      }
       db.prepare(
         `INSERT INTO messages(message_id, session_id, role, content, sensitivity, created_at, metadata_json)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -1695,6 +1748,8 @@ function createOperationalRepositories(
         record.createdAt,
         JSON.stringify(record.metadata),
       );
+      if (record.timelineSequence !== undefined && turnId !== undefined)
+        registerTurnTimelineEntry(turnId, record.timelineSequence, "message", record.messageId);
       recordActivity(systemActor, "message.append", "message", record.messageId);
     });
     return databaseRef("messages", record.messageId);
@@ -1714,6 +1769,19 @@ function createOperationalRepositories(
       requiredString(turn, "status") !== "running"
     )
       throw new Error(`Foreground turn ${turnId} is not running in session ${sessionId}`);
+  };
+  const targetTurnStatus = (
+    turnId: string | undefined,
+    sessionId: string,
+  ): "running" | "completed" | "aborted" | "failed" | undefined => {
+    if (turnId === undefined) return undefined;
+    const target = db
+      .prepare("SELECT session_id, status FROM foreground_turns WHERE turn_id = ?")
+      .get(turnId);
+    if (target === undefined) return undefined;
+    if (requiredString(target, "session_id") !== sessionId)
+      throw new Error(`Foreground turn ${turnId} does not belong to session ${sessionId}`);
+    return z.enum(["running", "completed", "aborted", "failed"]).parse(requiredString(target, "status"));
   };
   const userIntentMessageState = (intent: UserIntentRecord): "missing" | "verified" => {
     if (intent.targetTurnId === undefined) return "missing";
@@ -1877,8 +1945,8 @@ function createOperationalRepositories(
         `INSERT INTO user_intents(
           intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
           queued_behind_turn_id, target_turn_id, created_at, updated_at,
-          promoted_at, delivered_at, unresolved_at, withdrawn_at, attempt_count
-        ) VALUES (?, ?, ?, ?, 'steer', 'dispatching', ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 1)`,
+          held_at, promoted_at, delivered_at, unresolved_at, withdrawn_at, steer_origin, attempt_count
+        ) VALUES (?, ?, ?, ?, 'steer', 'dispatching', ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, 'explicit', 1)`,
       ).run(
         intentId,
         sessionId,
@@ -1901,6 +1969,180 @@ function createOperationalRepositories(
       if (inserted === undefined)
         throw new Error(`User intent ${intentId} disappeared after atomic steer promotion`);
       return inserted;
+    });
+  const holdExplicitUserIntentSteer = async (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["holdExplicitSteer"]>[0],
+  ): Promise<UserIntentRecord> =>
+    database.transaction(() => {
+      const intentId = z.string().min(1).parse(request.intentId);
+      const sessionId = z.string().min(1).parse(request.sessionId);
+      z.string().trim().min(1).parse(request.text);
+      const text = request.text;
+      const targetTurnId = z.string().min(1).parse(request.targetTurnId);
+      const createdAt = z.string().min(1).parse(request.createdAt);
+      const heldAt = z.string().min(1).parse(request.heldAt);
+      const contentDigest = sha256(text);
+      const existing = getUserIntent(intentId, sessionId);
+      if (existing !== undefined) {
+        if (
+          existing.contentDigest !== contentDigest ||
+          existing.targetTurnId !== targetTurnId ||
+          existing.createdAt !== createdAt ||
+          existing.heldAt !== heldAt ||
+          existing.steerOrigin !== "explicit"
+        )
+          throw new Error(`User intent ${intentId} already exists with a different identity`);
+        return existing;
+      }
+      assertRunningTargetTurn(targetTurnId, sessionId);
+      const queueSequence = requiredNumber(
+        db
+          .prepare(
+            `SELECT COALESCE(MAX(queue_sequence), 0) + 1 AS next_sequence
+             FROM user_intents WHERE session_id = ?`,
+          )
+          .get(sessionId),
+        "next_sequence",
+      );
+      db.prepare(
+        `INSERT INTO user_intents(
+          intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
+          queued_behind_turn_id, target_turn_id, created_at, updated_at,
+          held_at, promoted_at, delivered_at, unresolved_at, withdrawn_at, steer_origin, attempt_count
+        ) VALUES (?, ?, ?, ?, 'steer', 'held', ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'explicit', 0)`,
+      ).run(
+        intentId,
+        sessionId,
+        text,
+        contentDigest,
+        queueSequence,
+        targetTurnId,
+        targetTurnId,
+        createdAt,
+        heldAt,
+        heldAt,
+      );
+      recordActivity(systemActor, "user_intent.held_explicit_steer", "user_intent", intentId, [
+        { targetTurnId },
+      ]);
+      const inserted = getUserIntent(intentId, sessionId);
+      if (inserted === undefined) throw new Error(`User intent ${intentId} disappeared after hold`);
+      return inserted;
+    });
+  const holdNewestPendingUserIntentToSteer = async (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["holdNewestPendingToSteer"]>[0],
+  ): Promise<UserIntentRecord | undefined> =>
+    database.transaction(() => {
+      const target = db
+        .prepare("SELECT session_id, status FROM foreground_turns WHERE turn_id = ?")
+        .get(request.targetTurnId);
+      if (
+        target === undefined ||
+        requiredString(target, "session_id") !== request.sessionId ||
+        requiredString(target, "status") !== "running"
+      )
+        return undefined;
+      const candidate = db
+        .prepare(
+          `SELECT intent_id FROM user_intents
+           WHERE session_id = ? AND status = 'pending' AND delivery_mode = 'turn'
+           ORDER BY queue_sequence DESC LIMIT 1`,
+        )
+        .get(request.sessionId);
+      if (candidate === undefined) return undefined;
+      const intentId = requiredString(candidate, "intent_id");
+      const held = db
+        .prepare(
+          `UPDATE user_intents
+           SET status = 'held', delivery_mode = 'steer', target_turn_id = ?, held_at = ?,
+               steer_origin = 'queued', updated_at = ?
+           WHERE intent_id = ? AND session_id = ? AND status = 'pending' AND delivery_mode = 'turn'`,
+        )
+        .run(request.targetTurnId, request.heldAt, request.heldAt, intentId, request.sessionId);
+      if (Number(held.changes) !== 1) return undefined;
+      recordActivity(systemActor, "user_intent.held_queued_steer", "user_intent", intentId, [
+        { targetTurnId: request.targetTurnId },
+      ]);
+      return getUserIntent(intentId, request.sessionId);
+    });
+  const activateHeldUserIntentSteer = async (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["activateHeldSteer"]>[0],
+  ): Promise<UserIntentRecord | undefined> =>
+    database.transaction(() => {
+      const current = getUserIntent(request.intentId, request.sessionId);
+      if (current === undefined) return undefined;
+      if (current.status === "dispatching")
+        return current.targetTurnId === request.targetTurnId ? current : undefined;
+      if (
+        current.status !== "held" ||
+        current.deliveryMode !== "steer" ||
+        current.targetTurnId !== request.targetTurnId
+      )
+        return undefined;
+      const target = db
+        .prepare("SELECT session_id, status FROM foreground_turns WHERE turn_id = ?")
+        .get(request.targetTurnId);
+      if (
+        target === undefined ||
+        requiredString(target, "session_id") !== request.sessionId ||
+        requiredString(target, "status") !== "running"
+      )
+        return undefined;
+      const activated = db
+        .prepare(
+          `UPDATE user_intents
+           SET status = 'dispatching', promoted_at = ?, updated_at = ?, attempt_count = attempt_count + 1
+           WHERE intent_id = ? AND session_id = ? AND status = 'held'
+             AND delivery_mode = 'steer' AND target_turn_id = ?`,
+        )
+        .run(
+          request.promotedAt,
+          request.promotedAt,
+          request.intentId,
+          request.sessionId,
+          request.targetTurnId,
+        );
+      if (Number(activated.changes) !== 1) return undefined;
+      recordActivity(systemActor, "user_intent.held_steer_activated", "user_intent", request.intentId, [
+        { targetTurnId: request.targetTurnId },
+      ]);
+      return getUserIntent(request.intentId, request.sessionId);
+    });
+  const releaseHeldUserIntentSteer = async (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["releaseHeldSteer"]>[0],
+  ): Promise<UserIntentRecord | undefined> =>
+    database.transaction(() => {
+      const current = getUserIntent(request.intentId, request.sessionId);
+      if (
+        current === undefined ||
+        current.status !== "held" ||
+        current.deliveryMode !== "steer" ||
+        current.targetTurnId !== request.targetTurnId
+      )
+        return undefined;
+      if (current.steerOrigin === "queued") {
+        db.prepare(
+          `UPDATE user_intents
+           SET status = 'pending', delivery_mode = 'turn', target_turn_id = NULL,
+               held_at = NULL, steer_origin = NULL, updated_at = ?
+           WHERE intent_id = ? AND session_id = ? AND status = 'held'`,
+        ).run(request.releasedAt, request.intentId, request.sessionId);
+        recordActivity(systemActor, "user_intent.held_steer_requeued", "user_intent", request.intentId);
+      } else {
+        db.prepare(
+          `UPDATE user_intents
+           SET status = 'withdrawn', delivery_mode = 'turn', target_turn_id = NULL,
+               held_at = NULL, steer_origin = NULL, withdrawn_at = ?, updated_at = ?
+           WHERE intent_id = ? AND session_id = ? AND status = 'held'`,
+        ).run(request.releasedAt, request.releasedAt, request.intentId, request.sessionId);
+        recordActivity(
+          systemActor,
+          "user_intent.held_explicit_steer_withdrawn",
+          "user_intent",
+          request.intentId,
+        );
+      }
+      return getUserIntent(request.intentId, request.sessionId);
     });
   const claimOldestPendingUserIntent = async (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["claimOldestPending"]>[0],
@@ -1944,7 +2186,15 @@ function createOperationalRepositories(
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["promoteNewestPendingToSteer"]>[0],
   ): Promise<UserIntentRecord | undefined> =>
     database.transaction(() => {
-      assertRunningTargetTurn(request.targetTurnId, request.sessionId);
+      const target = db
+        .prepare("SELECT session_id, status FROM foreground_turns WHERE turn_id = ?")
+        .get(request.targetTurnId);
+      if (
+        target === undefined ||
+        requiredString(target, "session_id") !== request.sessionId ||
+        requiredString(target, "status") !== "running"
+      )
+        return undefined;
       const candidate = db
         .prepare(
           `SELECT intent_id
@@ -1960,7 +2210,7 @@ function createOperationalRepositories(
         .prepare(
           `UPDATE user_intents
            SET status = 'dispatching', delivery_mode = 'steer', target_turn_id = ?,
-               promoted_at = ?, updated_at = ?,
+               promoted_at = ?, steer_origin = 'queued', updated_at = ?,
                attempt_count = attempt_count + 1
            WHERE intent_id = ? AND session_id = ?
              AND status = 'pending' AND delivery_mode = 'turn'`,
@@ -1979,7 +2229,8 @@ function createOperationalRepositories(
       .prepare(
         `UPDATE user_intents
            SET status = 'withdrawn', delivery_mode = 'turn', target_turn_id = NULL,
-               promoted_at = NULL, unresolved_at = NULL, withdrawn_at = ?, updated_at = ?
+               held_at = NULL, promoted_at = NULL, unresolved_at = NULL, steer_origin = NULL,
+               withdrawn_at = ?, updated_at = ?
            WHERE intent_id = ? AND session_id = ? AND status IN ('pending', 'unresolved')`,
       )
       .run(request.withdrawnAt, request.withdrawnAt, request.intentId, request.sessionId);
@@ -2015,7 +2266,8 @@ function createOperationalRepositories(
         .prepare(
           `UPDATE user_intents
            SET status = 'withdrawn', delivery_mode = 'turn', target_turn_id = NULL,
-               promoted_at = NULL, unresolved_at = NULL, withdrawn_at = ?, updated_at = ?
+               held_at = NULL, promoted_at = NULL, unresolved_at = NULL, steer_origin = NULL,
+               withdrawn_at = ?, updated_at = ?
            WHERE intent_id = ? AND session_id = ?
              AND status = 'dispatching' AND delivery_mode = 'steer' AND target_turn_id = ?`,
         )
@@ -2049,11 +2301,7 @@ function createOperationalRepositories(
         return undefined;
       if (current.deliveryMode === "steer")
         throw new Error("Steer delivery must be committed with recordSteerDelivery");
-      const target = db
-        .prepare("SELECT session_id FROM foreground_turns WHERE turn_id = ?")
-        .get(request.targetTurnId);
-      if (target === undefined || requiredString(target, "session_id") !== request.sessionId)
-        throw new Error(`User intent ${request.intentId} target turn does not belong to its session`);
+      if (targetTurnStatus(request.targetTurnId, request.sessionId) !== "completed") return undefined;
       return deliverUserIntent(current, request.deliveredAt, "user_intent.delivered");
     });
   const recordSteerDelivery = async (
@@ -2071,23 +2319,46 @@ function createOperationalRepositories(
       )
         return undefined;
       if (current.deliveryMode !== "steer") return undefined;
-      if (current.status === "delivered")
-        return userIntentMessageState(current) === "verified" ? current : undefined;
+      const messageId = `${request.targetTurnId}:steer:${request.intentId}`;
+      if (current.status === "delivered") {
+        const existing = decodeOptional(
+          db
+            .prepare(
+              `SELECT m.*, timeline.timeline_sequence
+               FROM messages AS m
+               LEFT JOIN turn_timeline_entries AS timeline
+                 ON timeline.entry_kind = 'message' AND timeline.entry_id = m.message_id
+               WHERE m.message_id = ?`,
+            )
+            .get(messageId),
+          decodeMessage,
+        );
+        return userIntentMessageState(current) === "verified" &&
+          existing?.timelineSequence === request.timelineSequence
+          ? current
+          : undefined;
+      }
       const target = db
         .prepare("SELECT session_id FROM foreground_turns WHERE turn_id = ?")
         .get(request.targetTurnId);
       if (target === undefined || requiredString(target, "session_id") !== request.sessionId)
         throw new Error(`User intent ${request.intentId} target turn does not belong to its session`);
 
-      const messageId = `${request.targetTurnId}:steer:${request.intentId}`;
       const metadata = Object.freeze({
         turnId: request.targetTurnId,
         sourceIntentId: request.intentId,
         deliveryMode: "steer",
-        interactionSequence: current.queueSequence,
       });
       const existingMessage = decodeOptional(
-        db.prepare("SELECT * FROM messages WHERE message_id = ?").get(messageId),
+        db
+          .prepare(
+            `SELECT m.*, timeline.timeline_sequence
+             FROM messages AS m
+             LEFT JOIN turn_timeline_entries AS timeline
+               ON timeline.entry_kind = 'message' AND timeline.entry_id = m.message_id
+             WHERE m.message_id = ?`,
+          )
+          .get(messageId),
         decodeMessage,
       );
       if (existingMessage === undefined) {
@@ -2102,6 +2373,7 @@ function createOperationalRepositories(
           request.deliveredAt,
           JSON.stringify(metadata),
         );
+        registerTurnTimelineEntry(request.targetTurnId, request.timelineSequence, "message", messageId);
         recordActivity(systemActor, "message.append", "message", messageId);
       } else if (
         existingMessage.sessionId !== request.sessionId ||
@@ -2109,6 +2381,7 @@ function createOperationalRepositories(
         existingMessage.content !== request.text ||
         existingMessage.sensitivity !== request.sensitivity ||
         existingMessage.createdAt !== request.deliveredAt ||
+        existingMessage.timelineSequence !== request.timelineSequence ||
         !isDeepStrictEqual(existingMessage.metadata, metadata)
       ) {
         throw new Error(`Steer delivery message ${messageId} already exists with different content`);
@@ -2131,13 +2404,11 @@ function createOperationalRepositories(
           : undefined;
       if (current.status === "unresolved")
         return current.targetTurnId === request.targetTurnId ? current : undefined;
+      if (current.status !== "dispatching" || current.targetTurnId !== request.targetTurnId) return undefined;
       if (
-        current.status !== "dispatching" ||
-        current.deliveryMode !== "steer" ||
-        current.targetTurnId !== request.targetTurnId
+        userIntentMessageState(current) === "verified" &&
+        targetTurnStatus(current.targetTurnId, current.sessionId) === "completed"
       )
-        return undefined;
-      if (userIntentMessageState(current) === "verified")
         return deliverUserIntent(
           current,
           request.unresolvedAt,
@@ -2148,7 +2419,7 @@ function createOperationalRepositories(
           `UPDATE user_intents
            SET status = 'unresolved', unresolved_at = ?, updated_at = ?
            WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'
-             AND delivery_mode = 'steer' AND target_turn_id = ?`,
+             AND target_turn_id = ?`,
         )
         .run(
           request.unresolvedAt,
@@ -2176,22 +2447,38 @@ function createOperationalRepositories(
       )
         return current;
       if (current.status !== "dispatching") return undefined;
-      if (userIntentMessageState(current) === "verified")
+      const messageState = userIntentMessageState(current);
+      const turnStatus = targetTurnStatus(current.targetTurnId, current.sessionId);
+      if (messageState === "verified" && turnStatus === "completed")
         return deliverUserIntent(
           current,
           request.releasedAt,
           "user_intent.delivery_confirmed_during_release",
         );
-      const released = db
-        .prepare(
-          `UPDATE user_intents
-           SET status = 'pending', delivery_mode = 'turn', target_turn_id = NULL,
-               promoted_at = NULL, updated_at = ?
-           WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
-        )
-        .run(request.releasedAt, request.intentId, request.sessionId);
+      const hasCrashVisibleDispatch = messageState === "verified";
+      const released = hasCrashVisibleDispatch
+        ? db
+            .prepare(
+              `UPDATE user_intents
+               SET status = 'unresolved', unresolved_at = ?, updated_at = ?
+               WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
+            )
+            .run(request.releasedAt, request.releasedAt, request.intentId, request.sessionId)
+        : db
+            .prepare(
+              `UPDATE user_intents
+               SET status = 'pending', delivery_mode = 'turn', target_turn_id = NULL,
+                   held_at = NULL, promoted_at = NULL, steer_origin = NULL, updated_at = ?
+               WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
+            )
+            .run(request.releasedAt, request.intentId, request.sessionId);
       if (Number(released.changes) !== 1) return undefined;
-      recordActivity(systemActor, "user_intent.dispatch_released", "user_intent", request.intentId);
+      recordActivity(
+        systemActor,
+        hasCrashVisibleDispatch ? "user_intent.delivery_unresolved" : "user_intent.dispatch_released",
+        "user_intent",
+        request.intentId,
+      );
       return getUserIntent(request.intentId, request.sessionId);
     });
   const recoverDispatchingUserIntents = async (
@@ -2201,6 +2488,34 @@ function createOperationalRepositories(
       let released = 0;
       let delivered = 0;
       let unresolved = 0;
+      const heldRows = db
+        .prepare(
+          `SELECT * FROM user_intents
+           WHERE session_id = ? AND status = 'held'
+           ORDER BY queue_sequence`,
+        )
+        .all(request.sessionId)
+        .map(decodeUserIntent);
+      for (const intent of heldRows) {
+        if (intent.steerOrigin === "queued") {
+          db.prepare(
+            `UPDATE user_intents
+             SET status = 'pending', delivery_mode = 'turn', target_turn_id = NULL,
+                 held_at = NULL, steer_origin = NULL, updated_at = ?
+             WHERE intent_id = ? AND session_id = ? AND status = 'held'`,
+          ).run(request.recoveredAt, intent.intentId, request.sessionId);
+          recordActivity(systemActor, "user_intent.recovered_pending", "user_intent", intent.intentId);
+          released += 1;
+          continue;
+        }
+        db.prepare(
+          `UPDATE user_intents
+           SET status = 'unresolved', unresolved_at = ?, updated_at = ?
+           WHERE intent_id = ? AND session_id = ? AND status = 'held'`,
+        ).run(request.recoveredAt, request.recoveredAt, intent.intentId, request.sessionId);
+        recordActivity(systemActor, "user_intent.recovered_unresolved", "user_intent", intent.intentId);
+        unresolved += 1;
+      }
       const rows = db
         .prepare(
           `SELECT *
@@ -2211,25 +2526,18 @@ function createOperationalRepositories(
         .all(request.sessionId)
         .map(decodeUserIntent);
       for (const intent of rows) {
-        const target =
-          intent.targetTurnId === undefined
-            ? undefined
-            : db
-                .prepare("SELECT session_id FROM foreground_turns WHERE turn_id = ?")
-                .get(intent.targetTurnId);
-        if (target !== undefined && requiredString(target, "session_id") !== request.sessionId)
-          throw new Error(`User intent ${intent.intentId} target turn belongs to another session`);
-        if (userIntentMessageState(intent) === "verified") {
+        const turnStatus = targetTurnStatus(intent.targetTurnId, request.sessionId);
+        const messageState = userIntentMessageState(intent);
+        if (messageState === "verified" && turnStatus === "completed") {
           deliverUserIntent(intent, request.recoveredAt, "user_intent.recovered_delivered");
           delivered += 1;
           continue;
         }
-        if (intent.deliveryMode === "steer") {
+        if (intent.deliveryMode === "steer" || messageState === "verified" || turnStatus !== undefined) {
           db.prepare(
             `UPDATE user_intents
              SET status = 'unresolved', unresolved_at = ?, updated_at = ?
-             WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'
-               AND delivery_mode = 'steer'`,
+             WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
           ).run(request.recoveredAt, request.recoveredAt, intent.intentId, request.sessionId);
           recordActivity(systemActor, "user_intent.recovered_unresolved", "user_intent", intent.intentId);
           unresolved += 1;
@@ -2238,7 +2546,7 @@ function createOperationalRepositories(
         db.prepare(
           `UPDATE user_intents
            SET status = 'pending', delivery_mode = 'turn', target_turn_id = NULL,
-               promoted_at = NULL, updated_at = ?
+               held_at = NULL, promoted_at = NULL, steer_origin = NULL, updated_at = ?
            WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
         ).run(request.recoveredAt, intent.intentId, request.sessionId);
         recordActivity(systemActor, "user_intent.recovered_pending", "user_intent", intent.intentId);
@@ -2248,8 +2556,18 @@ function createOperationalRepositories(
     });
   const putToolCall = async (record: ToolCallRecord): Promise<DatabaseRowRef> => {
     database.transaction(() => {
-      const currentRow = db.prepare("SELECT * FROM tool_calls WHERE tool_call_id = ?").get(record.toolCallId);
+      const currentRow = db
+        .prepare(
+          `SELECT calls.*, timeline.timeline_sequence
+           FROM tool_calls AS calls
+           LEFT JOIN turn_timeline_entries AS timeline
+             ON timeline.entry_kind = 'tool_call' AND timeline.entry_id = calls.tool_call_id
+           WHERE calls.tool_call_id = ?`,
+        )
+        .get(record.toolCallId);
       const current = currentRow === undefined ? undefined : decodeToolCall(currentRow);
+      if (record.timelineSequence !== undefined && record.turnId === undefined)
+        throw new Error(`Tool call ${record.toolCallId} has a timeline position without a turn`);
       if (record.turnId) {
         const turn = db
           .prepare("SELECT session_id FROM foreground_turns WHERE turn_id = ?")
@@ -2296,7 +2614,13 @@ function createOperationalRepositories(
           throw new Error(`Tool call ${record.toolCallId} changed its execution lineage`);
         if (record.sequence !== undefined && record.sequence !== current.sequence)
           throw new Error(`Tool call ${record.toolCallId} changed its action sequence`);
-        const normalizedRecord = { ...record, sequence: current.sequence };
+        if (record.timelineSequence !== undefined && record.timelineSequence !== current.timelineSequence)
+          throw new Error(`Tool call ${record.toolCallId} changed its turn timeline position`);
+        const normalizedRecord = {
+          ...record,
+          sequence: current.sequence,
+          ...(current.timelineSequence === undefined ? {} : { timelineSequence: current.timelineSequence }),
+        };
         const currentIdentity = {
           ...current,
           executionId: record.executionId,
@@ -2365,6 +2689,9 @@ function createOperationalRepositories(
         record.createdAt,
         record.completedAt ?? null,
       );
+      const timelineSequence = record.timelineSequence ?? current?.timelineSequence;
+      if (timelineSequence !== undefined && record.turnId !== undefined)
+        registerTurnTimelineEntry(record.turnId, timelineSequence, "tool_call", record.toolCallId);
       recordActivity(systemActor, "tool_call.put", "tool_call", record.toolCallId);
     });
     return databaseRef("tool_calls", record.toolCallId);
@@ -2760,25 +3087,53 @@ function createOperationalRepositories(
     messages: Object.freeze({
       get: async (messageId: string) =>
         decodeOptional(
-          db.prepare("SELECT * FROM messages WHERE message_id = ?").get(messageId),
+          db
+            .prepare(
+              `SELECT m.*, timeline.timeline_sequence
+               FROM messages AS m
+               LEFT JOIN turn_timeline_entries AS timeline
+                 ON timeline.entry_kind = 'message' AND timeline.entry_id = m.message_id
+               WHERE m.message_id = ?`,
+            )
+            .get(messageId),
           decodeMessage,
         ),
       put: putMessage,
       listForSession: async (sessionId: string) =>
         db
-          .prepare("SELECT * FROM messages WHERE session_id = ? ORDER BY created_at, rowid")
+          .prepare(
+            `SELECT m.*, timeline.timeline_sequence
+             FROM messages AS m
+             LEFT JOIN turn_timeline_entries AS timeline
+               ON timeline.entry_kind = 'message' AND timeline.entry_id = m.message_id
+             WHERE m.session_id = ? ORDER BY m.created_at, m.rowid`,
+          )
           .all(sessionId)
           .map(decodeMessage),
     }),
     userIntents: Object.freeze({
       enqueue: enqueueUserIntent,
       enqueueAndPromoteToSteer: enqueueAndPromoteUserIntentToSteer,
+      holdExplicitSteer: holdExplicitUserIntentSteer,
+      holdNewestPendingToSteer: holdNewestPendingUserIntentToSteer,
+      activateHeldSteer: activateHeldUserIntentSteer,
+      releaseHeldSteer: releaseHeldUserIntentSteer,
       listPending: async (sessionId: string) =>
         db
           .prepare(
             `SELECT *
              FROM user_intents
              WHERE session_id = ? AND status = 'pending'
+             ORDER BY queue_sequence`,
+          )
+          .all(sessionId)
+          .map(decodeUserIntent),
+      listHeld: async (sessionId: string) =>
+        db
+          .prepare(
+            `SELECT *
+             FROM user_intents
+             WHERE session_id = ? AND status = 'held'
              ORDER BY queue_sequence`,
           )
           .all(sessionId)
@@ -2806,23 +3161,39 @@ function createOperationalRepositories(
     toolCalls: Object.freeze({
       get: async (toolCallId: string) =>
         decodeOptional(
-          db.prepare("SELECT * FROM tool_calls WHERE tool_call_id = ?").get(toolCallId),
+          db
+            .prepare(
+              `SELECT calls.*, timeline.timeline_sequence
+               FROM tool_calls AS calls
+               LEFT JOIN turn_timeline_entries AS timeline
+                 ON timeline.entry_kind = 'tool_call' AND timeline.entry_id = calls.tool_call_id
+               WHERE calls.tool_call_id = ?`,
+            )
+            .get(toolCallId),
           decodeToolCall,
         ),
       put: putToolCall,
       listForSession: async (sessionId: string) =>
         db
-          .prepare("SELECT * FROM tool_calls WHERE session_id = ? ORDER BY created_at, tool_call_id")
+          .prepare(
+            `SELECT calls.*, timeline.timeline_sequence
+             FROM tool_calls AS calls
+             LEFT JOIN turn_timeline_entries AS timeline
+               ON timeline.entry_kind = 'tool_call' AND timeline.entry_id = calls.tool_call_id
+             WHERE calls.session_id = ? ORDER BY calls.created_at, calls.tool_call_id`,
+          )
           .all(sessionId)
           .map(decodeToolCall),
       listForExecution: async (executionId: string) =>
         db
           .prepare(
-            `SELECT *
-             FROM tool_calls
-             WHERE execution_id = ?
-                OR json_extract(request_json, '$.executionId') = ?
-             ORDER BY created_at, tool_call_id`,
+            `SELECT calls.*, timeline.timeline_sequence
+             FROM tool_calls AS calls
+             LEFT JOIN turn_timeline_entries AS timeline
+               ON timeline.entry_kind = 'tool_call' AND timeline.entry_id = calls.tool_call_id
+             WHERE calls.execution_id = ?
+                OR json_extract(calls.request_json, '$.executionId') = ?
+             ORDER BY calls.created_at, calls.tool_call_id`,
           )
           .all(executionId, executionId)
           .map(decodeToolCall),

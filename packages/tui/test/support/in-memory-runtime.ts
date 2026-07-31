@@ -452,7 +452,10 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
       effect = "resumed";
       emitInteractionState(trailId, state);
       scheduleInteractionDrain(trailId, state);
-    } else if (command.type === "interrupt" && state.active) {
+    } else if (command.type === "pause-queue") {
+      state.queuePaused = true;
+      emitInteractionState(trailId, state);
+    } else if (command.type === "interrupt" && state.active && command.turnId === state.active.turnId) {
       state.phase = "interrupting";
       state.queuePaused = true;
       effect = "interrupted";

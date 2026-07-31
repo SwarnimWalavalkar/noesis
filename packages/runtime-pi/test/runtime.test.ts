@@ -337,7 +337,9 @@ describe("agent runtime factories", () => {
   test("fails before model execution when frozen non-prompt material has no exact resolver", async () => {
     const controlled = createControlledPiModels();
     const plan = frozenPlan();
-    const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
 
     await expect(
       runtime.run(
@@ -520,19 +522,27 @@ describe("agent runtime factories", () => {
     );
 
     expect(result).toMatchObject({ outcome: "completed", text: "Done." });
-    expect(events).toContainEqual({
-      type: "tool-start",
-      actionId: "call-execute-visible",
-      name: "execute",
-      input: { source: "return await tools.shell.run({ command: 'pwd' });" },
-    });
-    expect(events).toContainEqual({
-      type: "tool-start",
-      actionId: "call-execute-visible:call:0",
-      parentActionId: "call-execute-visible",
-      name: "shell.run",
-      input: { command: "pwd" },
-    });
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "tool-start",
+          actionId: "call-execute-visible",
+          name: "execute",
+          input: { source: "return await tools.shell.run({ command: 'pwd' });" },
+        }),
+      ]),
+    );
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "tool-start",
+          actionId: "call-execute-visible:call:0",
+          parentActionId: "call-execute-visible",
+          name: "shell.run",
+          input: { command: "pwd" },
+        }),
+      ]),
+    );
     expect(events).toContainEqual({
       type: "tool-end",
       actionId: "call-execute-visible:call:0",
@@ -588,7 +598,10 @@ describe("agent runtime factories", () => {
         return `response ${String(responses)} for ${lastUserText}`;
       },
     });
-    const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
+    const events: AgentRuntimeEvent[] = [];
     const running = runtime.run(
       {
         trailId: "trail-steer-consumed",
@@ -599,7 +612,7 @@ describe("agent runtime factories", () => {
         prompt: "begin",
         activeCapabilities: [],
       },
-      () => undefined,
+      (event) => events.push(event),
     );
     await responseStarted.promise;
 
@@ -611,8 +624,31 @@ describe("agent runtime factories", () => {
     expect(beforeConsumption).toBe("pending");
 
     releaseResponse.resolve();
-    await expect(receipt).resolves.toEqual({ status: "consumed" });
+    await expect(receipt).resolves.toEqual({
+      status: "consumed",
+      timelineSequence: 2,
+      consumedAt: "2026-01-01T00:00:00.000Z",
+    });
     await expect(running).resolves.toMatchObject({ outcome: "completed" });
+    expect(
+      events.filter(
+        (event): event is Extract<AgentRuntimeEvent, { readonly type: "assistant-message" }> =>
+          event.type === "assistant-message",
+      ),
+    ).toEqual([
+      {
+        type: "assistant-message",
+        text: "response 1 for begin",
+        timelineSequence: 1,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        type: "assistant-message",
+        text: "response 2 for change direction",
+        timelineSequence: 3,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
     expect(responses).toBe(2);
   });
 
@@ -626,7 +662,9 @@ describe("agent runtime factories", () => {
         return "must not consume the queued steer";
       },
     });
-    const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
     const running = runtime.run(
       {
         trailId: "trail-steer-aborted",
@@ -669,7 +707,9 @@ describe("agent runtime factories", () => {
         return `response ${String(responses)}`;
       },
     });
-    const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
     const running = runtime.run(
       {
         trailId: "trail-duplicate-steers",
@@ -689,7 +729,11 @@ describe("agent runtime factories", () => {
     releaseFirstResponse.resolve();
 
     await secondResponseStarted.promise;
-    await expect(first).resolves.toEqual({ status: "consumed" });
+    await expect(first).resolves.toEqual({
+      status: "consumed",
+      timelineSequence: 2,
+      consumedAt: "2026-01-01T00:00:00.000Z",
+    });
     const secondBeforeItsTurn = await Promise.race([
       second.then(() => "settled" as const),
       new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
@@ -697,7 +741,11 @@ describe("agent runtime factories", () => {
     expect(secondBeforeItsTurn).toBe("pending");
 
     releaseSecondResponse.resolve();
-    await expect(second).resolves.toEqual({ status: "consumed" });
+    await expect(second).resolves.toEqual({
+      status: "consumed",
+      timelineSequence: 4,
+      consumedAt: "2026-01-01T00:00:00.000Z",
+    });
     await expect(running).resolves.toMatchObject({ outcome: "completed" });
     expect(responses).toBe(3);
   });

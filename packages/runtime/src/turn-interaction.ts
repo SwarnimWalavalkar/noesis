@@ -6,13 +6,14 @@ export type InteractionCommand =
   | { readonly type: "steer"; readonly text?: string }
   | { readonly type: "restore-newest" }
   | { readonly type: "resume-queue" }
-  | { readonly type: "interrupt" };
+  | { readonly type: "pause-queue" }
+  | { readonly type: "interrupt"; readonly turnId: string };
 
 export interface InteractionPendingIntent {
   readonly intentId: string;
   readonly text: string;
   readonly mode: "turn" | "steer";
-  readonly status: "pending" | "unresolved";
+  readonly status: "pending" | "held" | "unresolved";
   readonly createdAt: string;
 }
 
@@ -61,6 +62,11 @@ export type TurnInteractionEvent =
       readonly turnId: string;
       readonly outcome: "completed" | "aborted" | "failed";
       readonly error?: string;
+    }
+  | {
+      readonly type: "interaction-failed";
+      readonly sessionId: string;
+      readonly error: string;
     };
 
 export interface InteractionDispatchOptions {
@@ -88,6 +94,7 @@ export interface TurnInteractionIntentStore {
     readonly createdAt: string;
   }) => Promise<UserIntentRecord>;
   readonly listPending: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
+  readonly listHeld: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
   readonly listUnresolved: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
   readonly claimOldestPending: (request: {
     readonly sessionId: string;
@@ -106,6 +113,31 @@ export interface TurnInteractionIntentStore {
     readonly targetTurnId: string;
     readonly createdAt: string;
     readonly promotedAt: string;
+  }) => Promise<UserIntentRecord | undefined>;
+  readonly holdExplicitSteer: (request: {
+    readonly intentId: string;
+    readonly sessionId: string;
+    readonly text: string;
+    readonly targetTurnId: string;
+    readonly createdAt: string;
+    readonly heldAt: string;
+  }) => Promise<UserIntentRecord>;
+  readonly holdNewestPendingToSteer: (request: {
+    readonly sessionId: string;
+    readonly targetTurnId: string;
+    readonly heldAt: string;
+  }) => Promise<UserIntentRecord | undefined>;
+  readonly activateHeldSteer: (request: {
+    readonly sessionId: string;
+    readonly intentId: string;
+    readonly targetTurnId: string;
+    readonly promotedAt: string;
+  }) => Promise<UserIntentRecord | undefined>;
+  readonly releaseHeldSteer: (request: {
+    readonly sessionId: string;
+    readonly intentId: string;
+    readonly targetTurnId: string;
+    readonly releasedAt: string;
   }) => Promise<UserIntentRecord | undefined>;
   readonly withdraw: (request: {
     readonly sessionId: string;
@@ -167,6 +199,7 @@ export interface TurnInteractionControllerOptions {
     readonly intentId: string;
     readonly turnId: string;
     readonly text: string;
+    readonly timelineSequence: number;
     readonly deliveredAt: string;
   }) => Promise<void>;
   readonly interrupt: (sessionId: string) => Promise<void>;
@@ -190,13 +223,24 @@ interface SessionInteractionState {
   recovery?: Promise<void>;
   commandTail: Promise<void>;
   drain?: Promise<void>;
+  drainFailure?: unknown;
   steerDeliveries: Set<Promise<InteractionDispatchResult>>;
+  steerDeliveryTail: Promise<void>;
+  steerReadiness?: TurnSteerReadiness;
   cancelScheduled?: () => void;
   wakeRequested: boolean;
   resumeGeneration: number;
   cancellationGeneration: number;
   interruptRequested: boolean;
+  steerAdmissionTurnId?: string;
   steerableIntentId?: string;
+}
+
+interface TurnSteerReadiness {
+  readonly turnId: string;
+  readonly promise: Promise<boolean>;
+  readonly settle: (ready: boolean) => void;
+  settled: boolean;
 }
 
 const defaultSchedule = (task: () => void): (() => void) => {
@@ -215,7 +259,12 @@ const pendingIntent = (record: UserIntentRecord): InteractionPendingIntent =>
     intentId: record.intentId,
     text: intentText(record),
     mode: record.deliveryMode,
-    status: record.status === "unresolved" ? ("unresolved" as const) : ("pending" as const),
+    status:
+      record.status === "unresolved"
+        ? ("unresolved" as const)
+        : record.status === "held"
+          ? ("held" as const)
+          : ("pending" as const),
     createdAt: record.createdAt,
   });
 
@@ -237,6 +286,7 @@ export function createTurnInteractionController(
       queuePaused: true,
       commandTail: Promise.resolve(),
       steerDeliveries: new Set(),
+      steerDeliveryTail: Promise.resolve(),
       wakeRequested: false,
       resumeGeneration: 0,
       cancellationGeneration: 0,
@@ -265,11 +315,12 @@ export function createTurnInteractionController(
     sessionId: string,
     state: SessionInteractionState,
   ): Promise<InteractionSnapshot> => {
-    const [pending, unresolved] = await Promise.all([
+    const [pending, held, unresolved] = await Promise.all([
       options.intents.listPending(sessionId),
+      options.intents.listHeld(sessionId),
       options.intents.listUnresolved(sessionId),
     ]);
-    const available = [...pending, ...unresolved].sort(
+    const available = [...pending, ...held, ...unresolved].sort(
       (left, right) =>
         left.queueSequence - right.queueSequence || left.intentId.localeCompare(right.intentId),
     );
@@ -286,14 +337,49 @@ export function createTurnInteractionController(
     notify(state, { type: "state", snapshot: await snapshot(sessionId, state) });
   };
 
+  const createSteerReadiness = (turnId: string): TurnSteerReadiness => {
+    let resolveReady: ((ready: boolean) => void) | undefined;
+    const promise = new Promise<boolean>((resolve) => {
+      resolveReady = resolve;
+    });
+    const readiness: TurnSteerReadiness = {
+      turnId,
+      promise,
+      settled: false,
+      settle: (ready) => {
+        if (readiness.settled) return;
+        readiness.settled = true;
+        resolveReady?.(ready);
+      },
+    };
+    return readiness;
+  };
+
+  const enqueueSteerDelivery = (
+    state: SessionInteractionState,
+    deliver: () => Promise<InteractionDispatchResult>,
+  ): Promise<InteractionDispatchResult> => {
+    const settlement = state.steerDeliveryTail.then(deliver);
+    state.steerDeliveryTail = settlement.then(
+      () => undefined,
+      () => undefined,
+    );
+    state.steerDeliveries.add(settlement);
+    return settlement;
+  };
+
   const settleSteerDeliveries = async (state: SessionInteractionState): Promise<string | undefined> => {
     // Stop admitting new steers, then let any serialized command which already observed this turn
     // install its delivery settlement before taking the barrier snapshot.
+    delete state.steerAdmissionTurnId;
     delete state.steerableIntentId;
+    state.steerReadiness?.settle(false);
     await state.commandTail;
     const deliveries = [...state.steerDeliveries];
     const settlements = await Promise.allSettled(deliveries);
     for (const delivery of deliveries) state.steerDeliveries.delete(delivery);
+    state.steerDeliveryTail = Promise.resolve();
+    delete state.steerReadiness;
     const rejected = settlements.find(
       (settlement): settlement is PromiseRejectedResult => settlement.status === "rejected",
     );
@@ -372,7 +458,10 @@ export function createTurnInteractionController(
       state.active = active;
       state.phase = "running";
       state.interruptRequested = false;
+      state.steerAdmissionTurnId = turnId;
       delete state.steerableIntentId;
+      const steerReadiness = createSteerReadiness(turnId);
+      state.steerReadiness = steerReadiness;
       const resumeGenerationAtStart = state.resumeGeneration;
       await notifyState(sessionId, state);
       try {
@@ -387,6 +476,7 @@ export function createTurnInteractionController(
             if (state.active?.intentId !== active.intentId) return;
             if (state.steerableIntentId === active.intentId) return;
             state.steerableIntentId = active.intentId;
+            steerReadiness.settle(true);
             notify(state, {
               type: "turn-started",
               sessionId,
@@ -449,12 +539,54 @@ export function createTurnInteractionController(
     state.cancelScheduled = schedule(() => {
       delete state.cancelScheduled;
       if (closed || state.queuePaused) return;
-      const running = drain(sessionId, state, thinkingLevel);
+      const running = drain(sessionId, state, thinkingLevel).catch(async (error: unknown) => {
+        state.queuePaused = true;
+        const active = state.active;
+        state.steerReadiness?.settle(false);
+        await state.commandTail;
+        await Promise.allSettled(state.steerDeliveries);
+        state.steerDeliveries.clear();
+        state.steerDeliveryTail = Promise.resolve();
+        let recoveryFailure: unknown;
+        try {
+          await options.intents.recoverDispatching({ sessionId, recoveredAt: now() });
+        } catch (recoveryError) {
+          recoveryFailure = recoveryError;
+        }
+        delete state.active;
+        delete state.steerAdmissionTurnId;
+        delete state.steerableIntentId;
+        delete state.steerReadiness;
+        state.interruptRequested = false;
+        state.phase = "idle";
+        const failure =
+          recoveryFailure === undefined
+            ? error
+            : new AggregateError([error, recoveryFailure], "Interaction drain and recovery failed");
+        state.drainFailure = failure;
+        const message = failure instanceof Error ? failure.message : String(failure);
+        if (active)
+          notify(state, {
+            type: "turn-settled",
+            sessionId,
+            intentId: active.intentId,
+            turnId: active.turnId,
+            outcome: "failed",
+            error: message,
+          });
+        else notify(state, { type: "interaction-failed", sessionId, error: message });
+        try {
+          await notifyState(sessionId, state);
+        } catch {
+          // The original failure remains owned and visible to shutdown even if the read model is unavailable.
+        }
+      });
       state.drain = running;
-      void running.finally(() => {
+      const finish = (): void => {
         delete state.drain;
         if (state.wakeRequested && !state.queuePaused) scheduleDrain(sessionId, state, thinkingLevel);
-      });
+      };
+      void running.then(finish, finish);
     });
   };
 
@@ -499,6 +631,7 @@ export function createTurnInteractionController(
           createdAt: now(),
         });
         state.queuePaused = false;
+        delete state.drainFailure;
         state.resumeGeneration += 1;
         const current = await snapshot(sessionId, state);
         scheduleDrain(sessionId, state, dispatchOptions.thinkingLevel);
@@ -508,22 +641,50 @@ export function createTurnInteractionController(
       }
       if (command.type === "resume-queue") {
         state.queuePaused = false;
+        delete state.drainFailure;
         state.resumeGeneration += 1;
         const current = await snapshot(sessionId, state);
         notify(state, { type: "state", snapshot: current });
         scheduleDrain(sessionId, state, dispatchOptions.thinkingLevel);
         return Object.freeze({ result: Object.freeze({ effect: "resumed" as const, snapshot: current }) });
       }
+      if (command.type === "pause-queue") {
+        state.queuePaused = true;
+        state.cancellationGeneration += 1;
+        state.cancelScheduled?.();
+        delete state.cancelScheduled;
+        const current = await snapshot(sessionId, state);
+        notify(state, { type: "state", snapshot: current });
+        return Object.freeze({ result: Object.freeze({ effect: "idle" as const, snapshot: current }) });
+      }
       if (command.type === "restore-newest") {
         const available = (await snapshot(sessionId, state)).pending;
         const newest = available.at(-1);
-        const restored = newest
-          ? await options.intents.withdraw({
-              sessionId,
-              intentId: newest.intentId,
-              withdrawnAt: now(),
-            })
-          : undefined;
+        let restored: UserIntentRecord | undefined;
+        if (newest?.status === "held" && state.active) {
+          const released = await options.intents.releaseHeldSteer({
+            sessionId,
+            intentId: newest.intentId,
+            targetTurnId: state.active.turnId,
+            releasedAt: now(),
+          });
+          restored =
+            released?.status === "pending"
+              ? await options.intents.withdraw({
+                  sessionId,
+                  intentId: released.intentId,
+                  withdrawnAt: now(),
+                })
+              : released?.status === "withdrawn"
+                ? released
+                : undefined;
+        } else if (newest) {
+          restored = await options.intents.withdraw({
+            sessionId,
+            intentId: newest.intentId,
+            withdrawnAt: now(),
+          });
+        }
         const current = await snapshot(sessionId, state);
         notify(state, { type: "state", snapshot: current });
         return Object.freeze(
@@ -540,17 +701,18 @@ export function createTurnInteractionController(
         );
       }
       if (command.type === "interrupt") {
+        if (!command.turnId) throw new Error("Interrupt requires a visible active turn identity");
         state.queuePaused = true;
         state.cancellationGeneration += 1;
-        state.interruptRequested = true;
         state.cancelScheduled?.();
         delete state.cancelScheduled;
         const active = state.active;
-        if (!active) {
+        if (!active || command.turnId !== active.turnId) {
           const current = await snapshot(sessionId, state);
           notify(state, { type: "state", snapshot: current });
           return Object.freeze({ result: Object.freeze({ effect: "idle" as const, snapshot: current }) });
         }
+        state.interruptRequested = true;
         state.phase = "interrupting";
         await notifyState(sessionId, state);
         await options.interrupt(sessionId);
@@ -568,7 +730,7 @@ export function createTurnInteractionController(
       }
 
       const active =
-        state.phase === "running" && state.steerableIntentId === state.active?.intentId
+        state.phase === "running" && state.steerAdmissionTurnId === state.active?.turnId
           ? state.active
           : undefined;
       if (!active && command.text !== undefined) {
@@ -587,17 +749,29 @@ export function createTurnInteractionController(
         });
       let steeringIntent: UserIntentRecord | undefined;
       const explicit = command.text !== undefined;
+      const ready = state.steerableIntentId === active.intentId;
+      const readiness = state.steerReadiness;
+      const held = !ready;
       if (command.text !== undefined) {
         if (!command.text) throw new Error("Cannot steer with an empty message");
         const createdAt = now();
-        steeringIntent = await options.intents.enqueueAndPromoteToSteer({
-          intentId: options.createIntentId(),
-          sessionId,
-          text: command.text,
-          targetTurnId: active.turnId,
-          createdAt,
-          promotedAt: now(),
-        });
+        steeringIntent = ready
+          ? await options.intents.enqueueAndPromoteToSteer({
+              intentId: options.createIntentId(),
+              sessionId,
+              text: command.text,
+              targetTurnId: active.turnId,
+              createdAt,
+              promotedAt: now(),
+            })
+          : await options.intents.holdExplicitSteer({
+              intentId: options.createIntentId(),
+              sessionId,
+              text: command.text,
+              targetTurnId: active.turnId,
+              createdAt,
+              heldAt: now(),
+            });
         if (!steeringIntent) {
           return Object.freeze({
             result: Object.freeze({
@@ -608,19 +782,56 @@ export function createTurnInteractionController(
           });
         }
       } else {
-        steeringIntent = await options.intents.promoteNewestPendingToSteer({
-          sessionId,
-          targetTurnId: active.turnId,
-          promotedAt: now(),
-        });
+        steeringIntent = ready
+          ? await options.intents.promoteNewestPendingToSteer({
+              sessionId,
+              targetTurnId: active.turnId,
+              promotedAt: now(),
+            })
+          : await options.intents.holdNewestPendingToSteer({
+              sessionId,
+              targetTurnId: active.turnId,
+              heldAt: now(),
+            });
         if (!steeringIntent)
           return Object.freeze({
             result: Object.freeze({ effect: "idle" as const, snapshot: await snapshot(sessionId, state) }),
           });
       }
-      const intent = steeringIntent;
-      const text = intentText(intent);
-      const settlement = (async (): Promise<InteractionDispatchResult> => {
+      const heldIntent = steeringIntent;
+      const settlement = enqueueSteerDelivery(state, async (): Promise<InteractionDispatchResult> => {
+        let intent: UserIntentRecord | undefined = heldIntent;
+        if (held) {
+          const becameReady = readiness?.turnId === active.turnId ? await readiness.promise : false;
+          intent = becameReady
+            ? await options.intents.activateHeldSteer({
+                sessionId,
+                intentId: heldIntent.intentId,
+                targetTurnId: active.turnId,
+                promotedAt: now(),
+              })
+            : undefined;
+          if (!intent) {
+            const released = await options.intents.releaseHeldSteer({
+              sessionId,
+              intentId: heldIntent.intentId,
+              targetTurnId: active.turnId,
+              releasedAt: now(),
+            });
+            const current = await snapshot(sessionId, state);
+            notify(state, { type: "state", snapshot: current });
+            if (!released) return Object.freeze({ effect: "idle" as const, snapshot: current });
+            return explicit
+              ? Object.freeze({
+                  effect: "restored" as const,
+                  intentId: released.intentId,
+                  restoredText: intentText(released),
+                  snapshot: current,
+                })
+              : Object.freeze({ effect: "queued" as const, intentId: released.intentId, snapshot: current });
+          }
+        }
+        const text = intentText(intent);
         let receipt: AgentSteerResult;
         try {
           receipt = await options.steer(sessionId, text);
@@ -665,13 +876,14 @@ export function createTurnInteractionController(
           notify(state, { type: "state", snapshot: current });
           return Object.freeze({ effect: "queued", intentId: intent.intentId, snapshot: current });
         }
-        const deliveredAt = now();
+        const deliveredAt = receipt.consumedAt;
         try {
           await options.recordSteerDelivery({
             sessionId,
             intentId: intent.intentId,
             turnId: active.turnId,
             text,
+            timelineSequence: receipt.timelineSequence,
             deliveredAt,
           });
         } catch {
@@ -697,8 +909,7 @@ export function createTurnInteractionController(
         const current = await snapshot(sessionId, state);
         notify(state, { type: "state", snapshot: current });
         return Object.freeze({ effect: "steered", intentId: intent.intentId, snapshot: current });
-      })();
-      state.steerDeliveries.add(settlement);
+      });
       return Object.freeze({ settlement });
     });
     return "settlement" in serialized ? await serialized.settlement : serialized.result;
@@ -716,6 +927,7 @@ export function createTurnInteractionController(
         delete state.cancelScheduled;
         if (state.active) state.phase = "interrupting";
         state.interruptRequested = true;
+        state.steerReadiness?.settle(false);
         interrupts.push(
           options.interrupt(sessionId).catch((error: unknown) => {
             interruptFailures.push(error);
@@ -733,7 +945,9 @@ export function createTurnInteractionController(
       for (const state of sessions.values()) delete state.observer;
       observedSessionId = undefined;
       const failure =
-        interruptFailures[0] ?? settlements.find((settlement) => settlement.status === "rejected")?.reason;
+        interruptFailures[0] ??
+        settlements.find((settlement) => settlement.status === "rejected")?.reason ??
+        [...sessions.values()].find((state) => state.drainFailure !== undefined)?.drainFailure;
       if (failure !== undefined) throw failure;
     })();
     return closePromise;

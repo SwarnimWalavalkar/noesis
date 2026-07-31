@@ -1246,6 +1246,7 @@ describe("WorkspaceStore", () => {
       targetTurnId: "turn-active",
       text: "change direction",
       sensitivity: "normal",
+      timelineSequence: 1,
       deliveredAt: "2026-01-01T00:07:00.000Z",
     });
     expect(deliveredSteer).toMatchObject({ status: "delivered" });
@@ -1265,8 +1266,8 @@ describe("WorkspaceStore", () => {
         turnId: "turn-active",
         sourceIntentId: "intent-steer",
         deliveryMode: "steer",
-        interactionSequence: 3,
       },
+      timelineSequence: 1,
     });
 
     await store.operational.userIntents.enqueue({
@@ -1414,6 +1415,156 @@ describe("WorkspaceStore", () => {
       database.prepare("SELECT count(*) AS count FROM activity_log WHERE subject_kind = 'user_intent'").get(),
     ).toMatchObject({ count: 0 });
     database.close();
+    store.close();
+  });
+
+  test("does not mutate queued work when steer promotion races turn settlement", async () => {
+    const store = await createWorkspaceStore(await temporary("queued-steer-settlement-race"));
+    await store.operational.sessions.put(session("session-steer-race"));
+    seedForegroundTurn(store, {
+      turnId: "turn-steer-race",
+      sessionId: "session-steer-race",
+      status: "completed",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+      settledAt: "2026-01-01T00:00:01.000Z",
+    });
+    await store.operational.userIntents.enqueue({
+      intentId: "intent-stays-pending",
+      sessionId: "session-steer-race",
+      text: "keep me queued",
+      createdAt: "2026-01-01T00:00:02.000Z",
+    });
+
+    await expect(
+      store.operational.userIntents.promoteNewestPendingToSteer({
+        sessionId: "session-steer-race",
+        targetTurnId: "turn-steer-race",
+        promotedAt: "2026-01-01T00:00:03.000Z",
+      }),
+    ).resolves.toBeUndefined();
+    await expect(store.operational.userIntents.listPending("session-steer-race")).resolves.toMatchObject([
+      { intentId: "intent-stays-pending", status: "pending", deliveryMode: "turn" },
+    ]);
+    store.close();
+  });
+
+  test("holds pre-ready steers durably and restores each origin without FIFO delivery", async () => {
+    const store = await createWorkspaceStore(await temporary("held-steers"));
+    await store.operational.sessions.put(session("session-held-steers"));
+    seedForegroundTurn(store, {
+      turnId: "turn-held-steers",
+      sessionId: "session-held-steers",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await store.operational.userIntents.enqueue({
+      intentId: "intent-queued-held",
+      sessionId: "session-held-steers",
+      text: "queued then steered",
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await expect(
+      store.operational.userIntents.holdNewestPendingToSteer({
+        sessionId: "session-held-steers",
+        targetTurnId: "turn-held-steers",
+        heldAt: "2026-01-01T00:00:02.000Z",
+      }),
+    ).resolves.toMatchObject({
+      intentId: "intent-queued-held",
+      status: "held",
+      deliveryMode: "steer",
+      steerOrigin: "queued",
+      attemptCount: 0,
+    });
+    await expect(
+      store.operational.userIntents.holdExplicitSteer({
+        intentId: "intent-explicit-held",
+        sessionId: "session-held-steers",
+        text: "explicit steer",
+        targetTurnId: "turn-held-steers",
+        createdAt: "2026-01-01T00:00:03.000Z",
+        heldAt: "2026-01-01T00:00:03.000Z",
+      }),
+    ).resolves.toMatchObject({
+      status: "held",
+      steerOrigin: "explicit",
+      attemptCount: 0,
+    });
+    expect(await store.operational.userIntents.listPending("session-held-steers")).toEqual([]);
+    await expect(store.operational.userIntents.listHeld("session-held-steers")).resolves.toMatchObject([
+      { intentId: "intent-queued-held" },
+      { intentId: "intent-explicit-held" },
+    ]);
+
+    await expect(
+      store.operational.userIntents.activateHeldSteer({
+        sessionId: "session-held-steers",
+        intentId: "intent-explicit-held",
+        targetTurnId: "turn-held-steers",
+        promotedAt: "2026-01-01T00:00:04.000Z",
+      }),
+    ).resolves.toMatchObject({ status: "dispatching", attemptCount: 1 });
+    await expect(
+      store.operational.userIntents.releaseHeldSteer({
+        sessionId: "session-held-steers",
+        intentId: "intent-queued-held",
+        targetTurnId: "turn-held-steers",
+        releasedAt: "2026-01-01T00:00:05.000Z",
+      }),
+    ).resolves.toMatchObject({ status: "pending", deliveryMode: "turn" });
+    expect(await store.operational.userIntents.listUnresolved("session-held-steers")).toEqual([]);
+    store.close();
+  });
+
+  test("recovers held explicit steers as inspectable uncertainty and held queued steers as pending", async () => {
+    const store = await createWorkspaceStore(await temporary("held-steer-recovery"));
+    await store.operational.sessions.put(session("session-held-recovery"));
+    seedForegroundTurn(store, {
+      turnId: "turn-held-recovery",
+      sessionId: "session-held-recovery",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await store.operational.userIntents.enqueue({
+      intentId: "intent-held-queued",
+      sessionId: "session-held-recovery",
+      text: "queued",
+      createdAt: "2026-01-01T00:00:01.000Z",
+    });
+    await store.operational.userIntents.holdNewestPendingToSteer({
+      sessionId: "session-held-recovery",
+      targetTurnId: "turn-held-recovery",
+      heldAt: "2026-01-01T00:00:02.000Z",
+    });
+    await store.operational.userIntents.holdExplicitSteer({
+      intentId: "intent-held-explicit",
+      sessionId: "session-held-recovery",
+      text: "explicit",
+      targetTurnId: "turn-held-recovery",
+      createdAt: "2026-01-01T00:00:03.000Z",
+      heldAt: "2026-01-01T00:00:03.000Z",
+    });
+
+    await expect(
+      store.operational.userIntents.recoverDispatching({
+        sessionId: "session-held-recovery",
+        recoveredAt: "2026-01-01T00:00:04.000Z",
+      }),
+    ).resolves.toEqual({ released: 1, delivered: 0, unresolved: 1 });
+    await expect(store.operational.userIntents.listPending("session-held-recovery")).resolves.toMatchObject([
+      { intentId: "intent-held-queued", status: "pending" },
+    ]);
+    await expect(
+      store.operational.userIntents.listUnresolved("session-held-recovery"),
+    ).resolves.toMatchObject([
+      {
+        intentId: "intent-held-explicit",
+        status: "unresolved",
+        deliveryMode: "steer",
+        steerOrigin: "explicit",
+      },
+    ]);
+    expect(await store.operational.userIntents.listHeld("session-held-recovery")).toEqual([]);
     store.close();
   });
 
@@ -1598,7 +1749,7 @@ describe("WorkspaceStore", () => {
     first.close();
   });
 
-  test("records immutable interaction sequence for same-millisecond steer delivery", async () => {
+  test("records immutable turn timeline sequence for same-millisecond steer delivery", async () => {
     const store = await createWorkspaceStore(await temporary("steer-interaction-sequence"));
     await store.operational.sessions.put(session("session-steer-sequence"));
     seedForegroundTurn(store, {
@@ -1618,13 +1769,14 @@ describe("WorkspaceStore", () => {
       });
     }
     const deliveredAt = "2026-01-01T00:02:00.000Z";
-    for (const intentId of ["intent-steer-second", "intent-steer-first"]) {
+    for (const [index, intentId] of ["intent-steer-second", "intent-steer-first"].entries()) {
       await store.operational.userIntents.recordSteerDelivery({
         sessionId: "session-steer-sequence",
         intentId,
         targetTurnId: "turn-steer-sequence",
         text: intentId,
         sensitivity: "normal",
+        timelineSequence: index + 1,
         deliveredAt,
       });
     }
@@ -1632,15 +1784,16 @@ describe("WorkspaceStore", () => {
     const steers = (await store.operational.messages.listForSession("session-steer-sequence")).filter(
       (message) => message.metadata["deliveryMode"] === "steer",
     );
-    expect(steers.map((message) => message.metadata["interactionSequence"])).toEqual([2, 1]);
+    expect(steers.map((message) => message.timelineSequence)).toEqual([1, 2]);
     expect(
       steers
         .toSorted(
           (left, right) =>
-            Number(left.metadata["interactionSequence"]) - Number(right.metadata["interactionSequence"]),
+            (left.timelineSequence ?? Number.MAX_SAFE_INTEGER) -
+            (right.timelineSequence ?? Number.MAX_SAFE_INTEGER),
         )
         .map((message) => message.metadata["sourceIntentId"]),
-    ).toEqual(["intent-steer-first", "intent-steer-second"]);
+    ).toEqual(["intent-steer-second", "intent-steer-first"]);
     store.close();
   });
 
@@ -1670,6 +1823,7 @@ describe("WorkspaceStore", () => {
         targetTurnId: "turn-canonical-text",
         text: "wrong steer",
         sensitivity: "normal",
+        timelineSequence: 1,
         deliveredAt: "2026-01-01T00:03:00.000Z",
       }),
     ).rejects.toThrow(/does not match its digest/u);
@@ -1683,6 +1837,7 @@ describe("WorkspaceStore", () => {
       targetTurnId: "turn-canonical-text",
       text: "canonical steer",
       sensitivity: "normal",
+      timelineSequence: 1,
       deliveredAt: "2026-01-01T00:03:00.000Z",
     });
     expect(delivered).toMatchObject({
@@ -1697,9 +1852,21 @@ describe("WorkspaceStore", () => {
         targetTurnId: "turn-canonical-text",
         text: "canonical steer",
         sensitivity: "normal",
+        timelineSequence: 1,
         deliveredAt: "2026-01-01T00:04:00.000Z",
       }),
     ).resolves.toMatchObject({ status: "delivered", deliveredAt: "2026-01-01T00:03:00.000Z" });
+    await expect(
+      store.operational.userIntents.recordSteerDelivery({
+        sessionId: "session-canonical-text",
+        intentId: "intent-canonical-text",
+        targetTurnId: "turn-canonical-text",
+        text: "canonical steer",
+        sensitivity: "normal",
+        timelineSequence: 2,
+        deliveredAt: "2026-01-01T00:04:00.000Z",
+      }),
+    ).resolves.toBeUndefined();
     expect(
       (await store.operational.messages.listForSession("session-canonical-text")).filter(
         (message) => message.metadata["sourceIntentId"] === "intent-canonical-text",
@@ -1817,6 +1984,7 @@ describe("WorkspaceStore", () => {
     for (const [intentId, turnId] of [
       ["intent-completed", "turn-completed"],
       ["intent-failed", "turn-failed"],
+      ["intent-running", "turn-running"],
     ] as const) {
       await store.operational.messages.put({
         messageId: `${turnId}:user`,
@@ -1834,17 +2002,16 @@ describe("WorkspaceStore", () => {
         sessionId: "session-recovery",
         recoveredAt: "2026-01-01T00:10:00.000Z",
       }),
-    ).resolves.toEqual({ released: 2, delivered: 2, unresolved: 1 });
+    ).resolves.toEqual({ released: 1, delivered: 1, unresolved: 3 });
     expect(
       (await store.operational.userIntents.listPending("session-recovery")).map((intent) => [
         intent.intentId,
         intent.attemptCount,
       ]),
-    ).toEqual([
-      ["intent-missing", 1],
-      ["intent-running", 1],
-    ]);
+    ).toEqual([["intent-missing", 1]]);
     await expect(store.operational.userIntents.listUnresolved("session-recovery")).resolves.toMatchObject([
+      { intentId: "intent-failed", status: "unresolved", deliveryMode: "turn" },
+      { intentId: "intent-running", status: "unresolved", deliveryMode: "turn" },
       {
         intentId: "intent-steer-uncertain",
         status: "unresolved",

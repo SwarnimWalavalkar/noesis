@@ -191,7 +191,12 @@ describe("apps/noesis production control-plane composition", () => {
           provider: request.provider,
           model: request.model,
         }),
-      steer: async () => Object.freeze({ status: "consumed" as const }),
+      steer: async () =>
+        Object.freeze({
+          status: "consumed" as const,
+          timelineSequence: 1,
+          consumedAt: "2026-01-01T00:00:00.000Z",
+        }),
       abort: noOp,
     });
     const first = await createApplicationRuntimeComposition({
@@ -231,7 +236,12 @@ describe("apps/noesis production control-plane composition", () => {
           model: request.model,
         });
       },
-      steer: async () => Object.freeze({ status: "consumed" as const }),
+      steer: async () =>
+        Object.freeze({
+          status: "consumed" as const,
+          timelineSequence: 1,
+          consumedAt: "2026-01-01T00:00:00.000Z",
+        }),
       abort: noOp,
     });
     const reopened = await createApplicationRuntimeComposition({
@@ -458,6 +468,12 @@ describe("apps/noesis production control-plane composition", () => {
     const actionAgent: NoesisAgentRuntime = Object.freeze({
       name: runtimeIdentity,
       run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+        const firstBoundary = Object.freeze({
+          text: "Starting.",
+          timelineSequence: 1,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+        emit({ type: "assistant-message", ...firstBoundary });
         for (const [index, name] of ["inspect_self", "remember", "adapt", "execute"].entries()) {
           const actionId = `action-${String(index + 1)}`;
           emit({
@@ -465,6 +481,7 @@ describe("apps/noesis production control-plane composition", () => {
             actionId,
             name,
             input: { fixture: name },
+            timelineSequence: index + 2,
           });
           emit({
             type: "tool-end",
@@ -474,15 +491,27 @@ describe("apps/noesis production control-plane composition", () => {
             result: { status: "completed", fixture: name },
           });
         }
+        const finalBoundary = Object.freeze({
+          text: "All actions completed.",
+          timelineSequence: 6,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+        emit({ type: "assistant-message", ...finalBoundary });
         return Object.freeze({
           outcome: "completed" as const,
           stopReason: "stop" as const,
-          text: "All actions completed.",
+          text: "Starting.\n\nAll actions completed.",
+          assistantMessages: Object.freeze([firstBoundary, finalBoundary]),
           provider: request.provider,
           model: request.model,
         });
       },
-      steer: async () => Object.freeze({ status: "consumed" as const }),
+      steer: async () =>
+        Object.freeze({
+          status: "consumed" as const,
+          timelineSequence: 1,
+          consumedAt: "2026-01-01T00:00:00.000Z",
+        }),
       abort: noOp,
     });
     const first = await createApplicationRuntimeComposition({
@@ -505,6 +534,15 @@ describe("apps/noesis production control-plane composition", () => {
       expect.stringMatching(/:action-2$/u),
       expect.stringMatching(/:action-3$/u),
       expect.stringMatching(/:action-4$/u),
+    ]);
+    expect(beforeRestart.map((entry) => (entry.kind === "message" ? entry.text : entry.name))).toEqual([
+      "Use your full self tool surface",
+      "Starting.",
+      "inspect_self",
+      "remember",
+      "adapt",
+      "execute",
+      "All actions completed.",
     ]);
     await first.shutdown();
 
@@ -561,7 +599,11 @@ describe("apps/noesis production control-plane composition", () => {
       },
       steer: async (_trailId: string, text: string) => {
         steered.push(text);
-        return Object.freeze({ status: "consumed" as const });
+        return Object.freeze({
+          status: "consumed" as const,
+          timelineSequence: 1,
+          consumedAt: "2026-01-01T00:00:00.000Z",
+        });
       },
       abort: async () => {
         finishTurn?.("aborted");
@@ -610,9 +652,12 @@ describe("apps/noesis production control-plane composition", () => {
       type: "submit",
       text: "Preserve this queued turn",
     });
-    await runtime.interact(trail.trailId, { type: "interrupt" });
+    const activeTurnId = (await runtime.inspectInteraction(trail.trailId)).active?.turnId;
+    if (!activeTurnId) throw new Error("Expected an active turn before interrupt");
+    await runtime.interact(trail.trailId, { type: "interrupt", turnId: activeTurnId });
     await waitUntil(async () => (await runtime.inspectInteraction(trail.trailId)).phase === "idle");
     expect((await runtime.inspectInteraction(trail.trailId)).pending.map((item) => item.text)).toEqual([
+      "Run this as its own turn",
       "Preserve this queued turn",
     ]);
     await runtime.shutdown();
@@ -641,7 +686,12 @@ describe("apps/noesis production control-plane composition", () => {
             provider: request.provider,
             model: request.model,
           }),
-        steer: async () => Object.freeze({ status: "consumed" as const }),
+        steer: async () =>
+          Object.freeze({
+            status: "consumed" as const,
+            timelineSequence: 1,
+            consumedAt: "2026-01-01T00:00:00.000Z",
+          }),
         abort: noOp,
       }),
       createRoleRunner: (configurations) =>
@@ -718,7 +768,12 @@ describe("apps/noesis production control-plane composition", () => {
             model: request.model,
           });
         },
-        steer: async () => Object.freeze({ status: "consumed" as const }),
+        steer: async () =>
+          Object.freeze({
+            status: "consumed" as const,
+            timelineSequence: 1,
+            consumedAt: "2026-01-01T00:00:00.000Z",
+          }),
         abort: async () => undefined,
       }),
       createRoleRunner: (configurations) =>
@@ -799,7 +854,12 @@ describe("apps/noesis production control-plane composition", () => {
             model: request.model,
           });
         },
-        steer: async () => Object.freeze({ status: "consumed" as const }),
+        steer: async () =>
+          Object.freeze({
+            status: "consumed" as const,
+            timelineSequence: 1,
+            consumedAt: "2026-01-01T00:00:00.000Z",
+          }),
         abort: async () => undefined,
       }),
       createRoleRunner: (configurations) =>
@@ -825,7 +885,11 @@ describe("apps/noesis production control-plane composition", () => {
       "delivered source steer",
       "reply:active source input",
     ];
-    const inheritedMessages = await first.debug.workspace.operational.messages.listForSession(fork.trailId);
+    const inheritedMessages = (
+      await first.debug.workspace.operational.messages.listForSession(fork.trailId)
+    ).toSorted(
+      (left, right) => Number(left.metadata["historySequence"]) - Number(right.metadata["historySequence"]),
+    );
     expect(inheritedMessages.map((message) => message.content)).toEqual(expectedInheritedText);
     expect(inheritedMessages.map((message) => message.metadata["historyKind"])).toEqual([
       "turn",
@@ -888,7 +952,12 @@ describe("apps/noesis production control-plane composition", () => {
             model: request.model,
           });
         },
-        steer: async () => Object.freeze({ status: "consumed" as const }),
+        steer: async () =>
+          Object.freeze({
+            status: "consumed" as const,
+            timelineSequence: 1,
+            consumedAt: "2026-01-01T00:00:00.000Z",
+          }),
         abort: async () => undefined,
       }),
       createRoleRunner: (configurations) =>
@@ -902,6 +971,10 @@ describe("apps/noesis production control-plane composition", () => {
     expect(
       (await reopened.debug.workspace.operational.messages.listForSession(fork.trailId))
         .filter((message) => message.metadata["replayEligible"] === true)
+        .toSorted(
+          (left, right) =>
+            Number(left.metadata["historySequence"]) - Number(right.metadata["historySequence"]),
+        )
         .map((message) => message.messageId),
     ).toEqual(inheritedMessageIds);
     await reopened.resumeTrail(fork.trailId);
