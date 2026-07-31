@@ -538,7 +538,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     });
 
   const listJobPage: RuntimeCoordinator["listJobPage"] = async (request = {}) => {
-    if (request.sessionId && request.kind !== "runtime.reflect_turn")
+    if (request.sessionId !== undefined && request.kind !== "runtime.reflect_turn")
       throw new Error("Session-scoped coordinator job pages are only valid for reflection jobs");
     if (request.experimentIds && request.kind === "runtime.reflect_turn")
       throw new Error("Experiment-scoped coordinator job pages are not valid for reflection jobs");
@@ -546,7 +546,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       ...(request.kind ? { kind: request.kind } : {}),
       ...(request.limit === undefined ? {} : { limit: request.limit }),
       ...(request.after ? { after: request.after } : {}),
-      ...(request.sessionId ? { payloadSessionId: request.sessionId } : {}),
+      ...(request.sessionId === undefined ? {} : { payloadSessionId: request.sessionId }),
       ...(request.experimentIds ? { payloadExperimentIds: request.experimentIds } : {}),
     });
     return Object.freeze({

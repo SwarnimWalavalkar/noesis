@@ -455,6 +455,21 @@ describe("automatic runtime coordinator", () => {
     f.workspace.close();
   });
 
+  test("rejects an explicitly empty reflection session selector", async () => {
+    const f = await fixture();
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      research: f.research,
+      config: config(),
+    });
+
+    await expect(coordinator.listJobPage({ kind: "runtime.reflect_turn", sessionId: "" })).rejects.toThrow();
+
+    await coordinator.stop();
+    f.workspace.close();
+  });
+
   test("retries transient role failure but keeps terminal failure inspectable and manually retryable", async () => {
     const f = await fixture();
     f.setTransientPreflightFailures(1);
