@@ -1,4 +1,18 @@
-import type { NoesisRuntime } from "@noesis/runtime";
+import type {
+  InteractionCommand,
+  InteractionDispatchResult,
+  InteractionSnapshot,
+  NoesisRuntime,
+  TurnInteractionEvent,
+} from "@noesis/runtime";
+
+export type TuiInteractionCommand = InteractionCommand;
+export type TuiInteractionSnapshot = InteractionSnapshot;
+export type TuiInteractionEvent = TurnInteractionEvent;
+export type TuiInteractionResult = InteractionDispatchResult;
+
+export const stopVisibleInteraction = (turnId?: string): TuiInteractionCommand =>
+  turnId ? { type: "interrupt", turnId } : { type: "pause-queue" };
 
 export interface TuiSkillSummary {
   readonly name: string;
@@ -90,12 +104,11 @@ export type NoesisTuiRuntime = Pick<
   | "startTrail"
   | "listTrailSummaries"
   | "getTrail"
+  | "getTranscript"
+  | "interact"
+  | "inspectInteraction"
   | "resumeTrail"
   | "forkTrail"
-  | "runTurn"
-  | "steer"
-  | "followUp"
-  | "abort"
   | "compact"
 > & {
   readonly home?: string;

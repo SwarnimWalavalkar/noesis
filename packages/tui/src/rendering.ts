@@ -1,7 +1,7 @@
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import { renderRunInspectorFrame } from "./run-inspector.ts";
 import { createTranscriptRenderer, type TranscriptRenderer } from "./transcript.ts";
-import { ANSI, elideText, NOESIS_WORDMARK, styled } from "./theme.ts";
+import { ANSI, elideText, NOESIS_WORDMARK, safeTerminalText, styled } from "./theme.ts";
 import { reduceTui, type NoesisTuiAction, type NoesisTuiState, type TuiContextUsage } from "./state.ts";
 
 export * from "./action-summary.ts";
@@ -67,6 +67,10 @@ export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): re
   const session = `session ${shortSessionId(state.trailId)}`;
   const turns = `${String(state.turnCount).padStart(3)} ${state.turnCount === 1 ? "turn" : "turns"}`;
   const capabilities = Object.keys(state.capabilityVersions).length;
+  const queue =
+    state.interaction.queuedInputs.length > 0
+      ? `q ${String(state.interaction.queuedInputs.length)}${state.interaction.queuePaused ? " paused" : ""}`
+      : undefined;
   if (layout.widthClass === "wide")
     return [
       execution,
@@ -76,6 +80,7 @@ export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): re
       ...(context.tokens ? [context.tokens] : []),
       session,
       turns,
+      ...(queue ? [queue] : []),
       ...(capabilities > 0 ? [`${String(capabilities)} caps`] : []),
     ];
   if (layout.widthClass === "normal")
@@ -86,8 +91,9 @@ export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): re
       context.percent,
       `s ${shortSessionId(state.trailId)}`,
       `${String(state.turnCount).padStart(3)}t`,
+      ...(queue ? [queue] : []),
     ];
-  return [execution, model, context.percent, turns];
+  return [execution, model, context.percent, turns, ...(queue ? [queue] : [])];
 }
 
 export function fitStatusFields(fields: readonly string[], width: number): readonly string[] {
@@ -127,8 +133,41 @@ export function renderStatusLine(state: NoesisTuiState, width: number, height = 
 export function helpHint(state: NoesisTuiState): string {
   if (state.inspector) return "↑/↓ scroll · esc close";
   if (state.actionCursor) return "↑/↓ select · space expand · enter inspect · esc leave · ctrl+c quit";
-  return "? help · ctrl+o inspect runs · /quit exit · ctrl+c quit";
+  if (state.interaction.phase !== "idle")
+    return "enter queue · /steer redirect · alt+↑ edit newest · esc interrupt";
+  if (state.interaction.queuePaused && state.interaction.queuedInputs.length > 0)
+    return "/queue resume · alt+↑ edit newest";
+  return "? help · ctrl+o inspect runs · shift+enter newline · ctrl+g editor · ctrl+c quit";
 }
+
+export function renderQueuedInputs(state: NoesisTuiState, width: number, maxVisible = 3): readonly string[] {
+  const safeWidth = Math.max(0, Math.floor(width));
+  const queued = state.interaction.queuedInputs;
+  if (safeWidth <= 0 || queued.length === 0) return [];
+  const shown = queued.slice(-Math.max(1, maxVisible));
+  const hidden = Math.max(0, queued.length - shown.length);
+  const heading = [
+    `QUEUED · ${String(queued.length)}`,
+    ...(state.interaction.queuePaused ? ["paused"] : []),
+    ...(queued.some((item) => item.status === "held") ? ["holding steer"] : []),
+    ...(queued.some((item) => item.status === "unresolved") ? ["unresolved"] : []),
+  ].join(" · ");
+  return [
+    elideText(styled(state.colorEnabled, `${ANSI.bold}${ANSI.yellow}`, heading), safeWidth),
+    ...(hidden > 0
+      ? [elideText(styled(state.colorEnabled, ANSI.dim, `… ${String(hidden)} earlier`), safeWidth)]
+      : []),
+    ...shown.map((item, index) =>
+      elideText(
+        `${styled(state.colorEnabled, ANSI.dim, `${String(hidden + index + 1)}${item.status === "unresolved" ? "?" : item.status === "held" ? "→" : " "} `)}${safeTerminalQueueText(item.text)}`,
+        safeWidth,
+      ),
+    ),
+  ];
+}
+
+const safeTerminalQueueText = (text: string): string =>
+  safeTerminalText(text).replaceAll(/\s+/gu, " ").trim() || "(empty)";
 
 export function renderBottomChrome(state: NoesisTuiState, width: number, height = 30): string[] {
   const safeWidth = Math.max(0, Math.floor(width));
@@ -267,6 +306,16 @@ export function createInputLabelView(colorEnabled: boolean, height: () => number
     render(width) {
       if (height() < 6) return [];
       return [elideText(styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), width)];
+    },
+  };
+}
+
+export function createQueuedInputsView(view: NoesisView, height: () => number): Component {
+  return {
+    invalidate() {},
+    render(width) {
+      if (height() < 7) return [];
+      return [...renderQueuedInputs(view.state, Math.max(0, width))];
     },
   };
 }

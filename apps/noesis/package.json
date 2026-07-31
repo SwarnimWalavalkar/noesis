@@ -7,6 +7,7 @@
     "noesis": "./src/cli.ts"
   },
   "dependencies": {
+    "@noesis/agent-types": "workspace:*",
     "@noesis/capabilities": "workspace:*",
     "@noesis/config": "workspace:*",
     "@noesis/codemode": "workspace:*",

@@ -18,8 +18,8 @@ export interface RenderedRunInspector {
   readonly maxScroll: number;
 }
 
-/** Codemode results carry whole file contents, so every section is bounded before it is styled. */
-const SECTION_MAX_CHARACTERS = 20_000;
+/** Artifact detail is a convenience preview. Exact action payloads stay available through scroll. */
+const ARTIFACT_PREVIEW_MAX_CHARACTERS = 20_000;
 const DIGEST_DISPLAY_CHARACTERS = 24;
 const CALL_SUMMARY_MAX_CHARACTERS = 256;
 
@@ -30,12 +30,14 @@ interface Section {
   readonly lines: readonly string[];
 }
 
-function boundedText(text: string): string {
+function boundedArtifactPreview(text: string): string {
   const safe = safeTerminalText(text);
-  return safe.length <= SECTION_MAX_CHARACTERS
+  return safe.length <= ARTIFACT_PREVIEW_MAX_CHARACTERS
     ? safe
-    : `${safe.slice(0, SECTION_MAX_CHARACTERS)}\n… truncated`;
+    : `${safe.slice(0, ARTIFACT_PREVIEW_MAX_CHARACTERS)}\n… truncated`;
 }
+
+const exactText = (text: string): string => safeTerminalText(text);
 
 /** Inspector metadata occupies one framed row; controls and embedded rows are never structural. */
 function safeInspectorScalar(text: string): string {
@@ -71,7 +73,7 @@ function numberedCode(
   width: number,
   colorEnabled: boolean,
 ): readonly string[] {
-  const lines = highlightCode(boundedText(source), language, colorEnabled);
+  const lines = highlightCode(exactText(source), language, colorEnabled);
   const gutter = String(lines.length).length;
   const indent = " ".repeat(gutter + 2);
   const codeWidth = Math.max(8, width - gutter - 2);
@@ -125,7 +127,9 @@ function artifactSection(
     {
       label,
       note: `${safeInspectorScalar(artifact.path)}${artifact.truncated ? " · preview truncated" : ""}`,
-      lines: preview ? boundedText(preview).split("\n") : [styled(colorEnabled, ANSI.dim, "(empty)")],
+      lines: preview
+        ? boundedArtifactPreview(preview).split("\n")
+        : [styled(colorEnabled, ANSI.dim, "(empty)")],
     },
   ];
 }
@@ -179,7 +183,7 @@ function phasesSection(detail: TuiExecutionDetail | undefined, colorEnabled: boo
       lines: phases.flatMap((phase) => {
         const name = safeInspectorScalar(phase.name);
         const status = safeInspectorScalar(phase.status);
-        const error = phase.error ? boundedText(phase.error) : undefined;
+        const error = phase.error ? boundedArtifactPreview(phase.error) : undefined;
         return [
           `${styled(colorEnabled, ANSI.dim, String(phase.index + 1))} ${styled(
             colorEnabled,
@@ -237,19 +241,21 @@ function buildSections(
   colorEnabled: boolean,
 ): readonly Section[] {
   const error = errorText(action, detail);
-  const source = detail?.sourceArtifact?.preview ?? sourceOf(action);
+  // The transcript action is authoritative. Execution artifacts are intentionally bounded
+  // previews, so they are only a fallback for older/in-memory actions without an exact payload.
+  const exactSource = sourceOf(action);
+  const source = exactSource ?? detail?.sourceArtifact?.preview;
   // A failure reported through the action output is already the error section; showing the same
   // payload again as a result would just push the useful sections further down.
   const result =
-    detail?.result ??
-    (action.output === undefined || (error && !detail?.error) ? undefined : encodeJson(action.output));
+    action.output === undefined || (error && !detail?.error) ? detail?.result : encodeJson(action.output);
   return [
     // The reason a failed run gets opened is the error, so it never sits below the program.
     ...(error
       ? [
           {
             label: "error",
-            lines: boundedText(error)
+            lines: exactText(error)
               .split("\n")
               .map((line) => styled(colorEnabled, ANSI.red, line)),
           },
@@ -261,7 +267,7 @@ function buildSections(
       ? [
           {
             label: "source",
-            ...(detail?.sourceArtifact?.truncated ? { note: "preview truncated" } : {}),
+            ...(!exactSource && detail?.sourceArtifact?.truncated ? { note: "preview truncated" } : {}),
             lines: numberedCode(source, "js", width, colorEnabled),
           },
         ]
@@ -270,14 +276,22 @@ function buildSections(
         : [
             {
               label: "input",
-              lines: highlightCode(boundedText(encodeJson(action.input)), "json", colorEnabled),
+              lines: highlightCode(exactText(encodeJson(action.input)), "json", colorEnabled),
             },
           ]),
+    ...(action.update === undefined
+      ? []
+      : [
+          {
+            label: "update",
+            lines: highlightCode(exactText(encodeJson(action.update)), "json", colorEnabled),
+          },
+        ]),
     ...(result
       ? [
           {
             label: "result",
-            lines: highlightCode(boundedText(result), "json", colorEnabled),
+            lines: highlightCode(exactText(result), "json", colorEnabled),
           },
         ]
       : []),
@@ -349,6 +363,87 @@ function frameEdge(
   );
 }
 
+interface WrappedViewport {
+  readonly rows: readonly string[];
+  readonly totalRows: number;
+  readonly scroll: number;
+}
+
+interface PreparedInspectorDocument {
+  readonly action: TuiAgentAction | undefined;
+  readonly children: readonly TuiAgentAction[];
+  readonly detail: TuiExecutionDetail | undefined;
+  readonly inspectorStatus: TuiInspectorState["status"];
+  readonly width: number;
+  readonly colorEnabled: boolean;
+  readonly rows: readonly string[];
+}
+
+let preparedInspectorDocument: PreparedInspectorDocument | undefined;
+
+const sameActionReferences = (left: readonly TuiAgentAction[], right: readonly TuiAgentAction[]): boolean =>
+  left.length === right.length && left.every((action, index) => action === right[index]);
+
+function prepareInspectorDocument(
+  action: TuiAgentAction | undefined,
+  children: readonly TuiAgentAction[],
+  inspector: TuiInspectorState,
+  width: number,
+  colorEnabled: boolean,
+): readonly string[] {
+  const cached = preparedInspectorDocument;
+  if (
+    cached &&
+    cached.action === action &&
+    cached.detail === inspector.detail &&
+    cached.inspectorStatus === inspector.status &&
+    cached.width === width &&
+    cached.colorEnabled === colorEnabled &&
+    sameActionReferences(cached.children, children)
+  )
+    return cached.rows;
+
+  const body = action
+    ? [
+        ...identityLines(action, children, inspector, colorEnabled),
+        ...buildSections(action, children, inspector.detail, width, colorEnabled).flatMap((section) => [
+          "",
+          sectionRule(section, width, colorEnabled),
+          ...section.lines,
+        ]),
+      ]
+    : ["This run is no longer available."];
+  const rows = body.flatMap((line) => {
+    const parts = wrapTextWithAnsi(line, width);
+    return parts.length > 0 ? parts : [""];
+  });
+  preparedInspectorDocument = {
+    action,
+    children: [...children],
+    detail: inspector.detail,
+    inspectorStatus: inspector.status,
+    width,
+    colorEnabled,
+    rows,
+  };
+  return rows;
+}
+
+/** Slice a prepared document without re-encoding, highlighting, or wrapping its payload. */
+function wrappedViewport(
+  rows: readonly string[],
+  requestedScroll: number,
+  visibleRows: number,
+): WrappedViewport {
+  const maxScroll = Math.max(0, rows.length - visibleRows);
+  const scroll = Math.min(requestedScroll, maxScroll);
+  return {
+    rows: rows.slice(scroll, scroll + visibleRows),
+    totalRows: rows.length,
+    scroll,
+  };
+}
+
 export function renderRunInspectorFrame(
   state: NoesisTuiState,
   width: number,
@@ -360,25 +455,13 @@ export function renderRunInspectorFrame(
   const actions = timelineActions(state.timeline);
   const action = actions.find((candidate) => candidate.actionId === inspector.actionId);
   const inner = width - 4;
-  const body = action
-    ? [
-        ...identityLines(action, childActions(actions, action.actionId), inspector, colorEnabled),
-        ...buildSections(
-          action,
-          childActions(actions, action.actionId),
-          inspector.detail,
-          inner,
-          colorEnabled,
-        ).flatMap((section) => ["", sectionRule(section, inner, colorEnabled), ...section.lines]),
-      ]
-    : ["This run is no longer available."];
-  const wrapped = body.flatMap((line) => wrapTextWithAnsi(line, inner));
-
+  const children = action ? childActions(actions, action.actionId) : [];
+  const documentRows = prepareInspectorDocument(action, children, inspector, inner, colorEnabled);
   // Two rows of chrome: the top and bottom frame edges.
   const visibleRows = Math.max(1, height - 2);
-  const maxScroll = Math.max(0, wrapped.length - visibleRows);
-  const scroll = Math.min(inspector.scroll, maxScroll);
-  const rows = wrapped.slice(scroll, scroll + visibleRows);
+  const viewport = wrappedViewport(documentRows, inspector.scroll, visibleRows);
+  const maxScroll = Math.max(0, viewport.totalRows - visibleRows);
+  const { rows, scroll } = viewport;
   const status = safeInspectorScalar(inspector.detail?.status ?? action?.status ?? "unknown");
   const title = `${styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "RUN")}${
     action
@@ -391,11 +474,12 @@ export function renderRunInspectorFrame(
   }`;
   const position =
     maxScroll > 0
-      ? `${String(scroll + 1)}–${String(scroll + rows.length)} of ${String(wrapped.length)}`
-      : formatCount(wrapped.length, "row");
+      ? `${String(scroll + 1)}–${String(scroll + rows.length)} of ${String(viewport.totalRows)}`
+      : formatCount(viewport.totalRows, "row");
 
   // The right frame edge doubles as a scrollbar track so the panel shows how much lies below.
-  const thumbSize = maxScroll > 0 ? Math.max(1, Math.round((visibleRows / wrapped.length) * visibleRows)) : 0;
+  const thumbSize =
+    maxScroll > 0 ? Math.max(1, Math.round((visibleRows / viewport.totalRows) * visibleRows)) : 0;
   const thumbStart = maxScroll > 0 ? Math.round((scroll / maxScroll) * (visibleRows - thumbSize)) : 0;
   const dim = (text: string): string => styled(colorEnabled, ANSI.dim, text);
   return {

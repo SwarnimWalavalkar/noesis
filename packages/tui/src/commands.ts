@@ -1,4 +1,4 @@
-import type { NoesisTuiRuntime } from "./runtime-port.ts";
+import type { NoesisTuiRuntime, TuiInteractionResult } from "./runtime-port.ts";
 import type { NoesisTuiAction } from "./state.ts";
 
 export interface SlashCommandContext {
@@ -14,7 +14,9 @@ export const HELP_LINES = [
   "/model provider/model · /context · /capabilities",
   "/skills · /scripts · /workflows · /runs",
   "/skill NAME · /script NAME · /workflow NAME · /run ID",
-  "/fork · /compact · /abort",
+  "/fork · /compact · /steer [MESSAGE] · /queue resume",
+  "enter queues during work · alt+↑ edits newest queued · esc interrupts",
+  "shift+enter newline · ctrl+g external editor",
   "ctrl+o inspect runs · space expand · enter open the run inspector",
   "/quit · learning, experiments, activation, and revert run ambiently",
 ] as const;
@@ -23,6 +25,13 @@ export const HELP_LINES = [
 export function isExclusiveSlashCommand(text: string): boolean {
   const command = text.trim();
   return command === "/compact" || command === "/fork" || command.startsWith("/model ");
+}
+
+export function steerFeedback(result: TuiInteractionResult, explicit: boolean): string | undefined {
+  if (result.effect === "unresolved")
+    return "Steer delivery could not be confirmed. It is held for inspection and will not retry automatically.";
+  if (result.effect !== "idle") return undefined;
+  return explicit ? "No active turn is available to steer." : "No queued message is available to promote.";
 }
 
 /**
@@ -268,10 +277,10 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
   }
 
   if (command === "/fork") {
-    dispatch({
-      type: "trail-selected",
-      trail: await runtime.forkTrail(trailId),
-    });
+    const trail = await runtime.forkTrail(trailId);
+    const transcript = await runtime.getTranscript(trail.trailId);
+    dispatch({ type: "trail-selected", trail });
+    dispatch({ type: "transcript-hydrated", trailId: trail.trailId, transcript });
     requestRender();
     return true;
   }

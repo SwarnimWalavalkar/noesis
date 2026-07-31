@@ -88,21 +88,35 @@ describe("codemode runtime", () => {
       pair: [{ value: 16 }, { value: 6 }],
     });
     expect(result.calls).toBe(3);
-    expect(events).toContainEqual({
-      type: "tool-start",
-      executionId: result.executionId,
-      name: "math.double",
-      callIndex: 1,
-      input: { value: 4 },
-    });
-    expect(events).toContainEqual({
-      type: "tool-end",
-      executionId: result.executionId,
-      name: "math.double",
-      callIndex: 1,
-      ok: true,
-      result: { value: 8 },
-    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool-start",
+        executionId: result.executionId,
+        name: "math.double",
+        callIndex: 1,
+        input: { value: 4 },
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool-end",
+        executionId: result.executionId,
+        name: "math.double",
+        callIndex: 1,
+        ok: true,
+        result: { value: 8 },
+      }),
+    );
+    const firstStart = events.find(
+      (event): event is Extract<CodeExecutionEvent, { readonly type: "tool-start" }> =>
+        event.type === "tool-start" && event.callIndex === 1,
+    );
+    const firstEnd = events.find(
+      (event): event is Extract<CodeExecutionEvent, { readonly type: "tool-end" }> =>
+        event.type === "tool-end" && event.callIndex === 1,
+    );
+    expect(firstStart?.callId).toMatch(/^tool_call_[a-f0-9]{64}$/u);
+    expect(firstEnd?.callId).toBe(firstStart?.callId);
   });
 
   it("supports Node imports and progress", async () => {

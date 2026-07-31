@@ -379,6 +379,7 @@ def main() -> int:
                         and sent_exit
                         and b"Controlled Pi completion for:" in output
                         and "● IDLE".encode() in output
+                        and b"ctx   0%" in output
                     ):
                         os.write(master, b"/quit\n")
                         action = "prompt-selected"

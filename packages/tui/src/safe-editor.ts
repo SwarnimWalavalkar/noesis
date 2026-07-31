@@ -41,6 +41,9 @@ type SafeEditorInputState =
       readonly trailing: string;
     };
 
+type StandaloneEscapeHandler = () => boolean;
+type StandaloneEscapeHandlerFactory = () => StandaloneEscapeHandler | undefined;
+
 const markerPrefixSuffixLength = (text: string, marker: string): number => {
   for (let length = Math.min(text.length, marker.length - 1); length > 0; length -= 1) {
     if (marker.startsWith(text.slice(-length))) return length;
@@ -49,7 +52,7 @@ const markerPrefixSuffixLength = (text: string, marker: string): number => {
 };
 
 export function sanitizeEditorText(text: string): string {
-  return [...text]
+  return [...text.replaceAll("\r\n", "\n")]
     .map((character) => {
       const code = character.codePointAt(0) ?? 0;
       if (code === 9 || code === 10) return character;
@@ -61,8 +64,15 @@ export function sanitizeEditorText(text: string): string {
 
 export interface SafeEditor extends Component, Focusable {
   onSubmit: ((text: string) => void) | undefined;
+  createStandaloneEscapeHandler: StandaloneEscapeHandlerFactory | undefined;
   disableSubmit: boolean;
   readonly getText: () => string;
+  readonly setText: (text: string) => void;
+  readonly insertText: (text: string) => void;
+  /** Consumes raw input when the editor must resolve paste-marker ambiguity itself. */
+  readonly capturePotentialPasteInput: (data: string) => boolean;
+  /** True only when raw input cannot be part of a bracketed-paste marker or payload. */
+  readonly acceptsUnbracketedCommandInput: () => boolean;
 }
 
 export function createSafeEditor(
@@ -84,6 +94,8 @@ export function createSafeEditor(
   let inputState: SafeEditorInputState = { kind: "keyboard", pending: "" };
   let ambiguityTimer: NodeJS.Timeout | undefined;
   let submit: ((text: string) => void) | undefined;
+  let createStandaloneEscapeHandler: StandaloneEscapeHandlerFactory | undefined;
+  let pendingStandaloneEscape: StandaloneEscapeHandler | undefined;
   let pendingSubmissionText: string | undefined;
   editor.onSubmit = (text) => {
     const submittedText = pendingSubmissionText ?? text;
@@ -94,6 +106,13 @@ export function createSafeEditor(
   const clearAmbiguityTimer = (): void => {
     if (ambiguityTimer) clearTimeout(ambiguityTimer);
     ambiguityTimer = undefined;
+  };
+
+  const resetBufferedInput = (): void => {
+    clearAmbiguityTimer();
+    inputState = { kind: "keyboard", pending: "" };
+    pendingStandaloneEscape = undefined;
+    pendingSubmissionText = undefined;
   };
 
   const delegateKeyboardInput = (data: string): void => {
@@ -108,6 +127,11 @@ export function createSafeEditor(
       })
       .join("");
     if (!safe) return;
+    if (matchesKey(safe, "escape")) {
+      const standaloneEscape = pendingStandaloneEscape;
+      pendingStandaloneEscape = undefined;
+      if (standaloneEscape?.()) return;
+    }
     if (matchesKey(safe, "enter")) pendingSubmissionText = editor.getExpandedText();
     editor.handleInput(safe);
   };
@@ -120,7 +144,9 @@ export function createSafeEditor(
 
   const boundPasteBuffer = (text: string, retainedSuffix: number): string => {
     if (text.length <= SAFE_EDITOR_MAX_BUFFERED_CHARACTERS) return text;
-    const flushLength = Math.max(0, text.length - retainedSuffix);
+    let flushLength = Math.max(0, text.length - retainedSuffix);
+    // Keep CR with the next chunk so a CRLF split at the size boundary is normalized once.
+    if (text[flushLength - 1] === "\r") flushLength -= 1;
     insertSanitizedPaste(text.slice(0, flushLength));
     return text.slice(flushLength);
   };
@@ -150,9 +176,19 @@ export function createSafeEditor(
   const handleInput = (data: string): void => {
     clearAmbiguityTimer();
     if (inputState.kind === "keyboard") {
+      const previousPending = inputState.pending;
       const combined = `${inputState.pending}${data}`;
+      const continuesPasteStart =
+        BRACKETED_PASTE_START.startsWith(combined) || combined.startsWith(BRACKETED_PASTE_START);
+      if (previousPending === "\u001b" && !continuesPasteStart) {
+        inputState = { kind: "keyboard", pending: "" };
+        delegateKeyboardInput(previousPending);
+        handleInput(data);
+        return;
+      }
       const start = combined.indexOf(BRACKETED_PASTE_START);
       if (start >= 0) {
+        pendingStandaloneEscape = undefined;
         delegateKeyboardInput(combined.slice(0, start));
         inputState = { kind: "paste", text: "" };
         handleInput(combined.slice(start + BRACKETED_PASTE_START.length));
@@ -163,6 +199,12 @@ export function createSafeEditor(
       delegateKeyboardInput(combined.slice(0, readyLength));
       const pending = combined.slice(readyLength);
       inputState = { kind: "keyboard", pending };
+      if (pending === "\u001b") {
+        if (previousPending !== "\u001b" || readyLength > 0)
+          pendingStandaloneEscape = createStandaloneEscapeHandler?.();
+      } else {
+        pendingStandaloneEscape = undefined;
+      }
       if (pendingLength > 0)
         scheduleAmbiguitySettlement(
           pending === "\u001b" ? SAFE_EDITOR_ESCAPE_AMBIGUITY_MS : SAFE_EDITOR_MARKER_AMBIGUITY_MS,
@@ -221,6 +263,12 @@ export function createSafeEditor(
     set onSubmit(next: ((text: string) => void) | undefined) {
       submit = next;
     },
+    get createStandaloneEscapeHandler() {
+      return createStandaloneEscapeHandler;
+    },
+    set createStandaloneEscapeHandler(next: StandaloneEscapeHandlerFactory | undefined) {
+      createStandaloneEscapeHandler = next;
+    },
     get disableSubmit() {
       return editor.disableSubmit;
     },
@@ -228,6 +276,26 @@ export function createSafeEditor(
       editor.disableSubmit = disabled;
     },
     getText: () => editor.getExpandedText(),
+    setText: (text) => {
+      resetBufferedInput();
+      editor.setText(sanitizeEditorText(text));
+      tui.requestRender();
+    },
+    insertText: (text) => {
+      resetBufferedInput();
+      editor.insertTextAtCursor(sanitizeEditorText(text));
+      tui.requestRender();
+    },
+    capturePotentialPasteInput: (data) => {
+      const captures =
+        inputState.kind !== "keyboard" ||
+        inputState.pending.length > 0 ||
+        data.includes(BRACKETED_PASTE_START) ||
+        markerPrefixSuffixLength(data, BRACKETED_PASTE_START) > 0;
+      if (captures) handleInput(data);
+      return captures;
+    },
+    acceptsUnbracketedCommandInput: () => inputState.kind === "keyboard" && inputState.pending.length === 0,
     handleInput,
     invalidate: () => editor.invalidate(),
     render: (width) => {

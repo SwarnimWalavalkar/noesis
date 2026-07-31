@@ -1,11 +1,17 @@
-import type { FrozenBaselineRef, FrozenTurnPlan, NoesisAgentRuntime } from "@noesis/agent-types";
+import type {
+  AgentActionEvent,
+  AgentRuntimeEvent,
+  FrozenBaselineRef,
+  FrozenTurnPlan,
+  NoesisAgentRuntime,
+} from "@noesis/agent-types";
 import { createAtomicCapabilityRegistry, createWorkspaceCapabilityControlStore } from "@noesis/capabilities";
 import {
-  createCodeModeRuntime,
   type CodeExecutionEvent,
   type CodeExecutionRequest,
   type CodeExecutionResult,
   type CodeModeRuntime,
+  createCodeModeRuntime,
 } from "@noesis/codemode";
 import {
   createUserCriterionRepository,
@@ -19,8 +25,8 @@ import {
   canonicalJson,
   capabilityRevisionRef,
   createId,
-  FileRevisionRefSchema,
   type FileRevisionRef,
+  FileRevisionRefSchema,
   type JsonValue,
   JsonValueSchema,
   sameCapabilityRevisionRef,
@@ -47,17 +53,20 @@ import {
 import {
   type ActivationCandidateResolver,
   type CoordinatorPreflightPreparation,
+  compareTrailRecency,
   createAtomicActivationController,
   createContinuousFeedbackController,
   createRuntimeControlPlane,
   createRuntimeCoordinatorComposition,
   createTurnIntelligencePlanner,
+  createTurnInteractionController,
   createTurnSettlement,
   type ExperimentOutcomeJudge,
   type ExperimentOutcomeProposal,
+  loadRuntimeTranscript,
   type NoesisRuntime,
+  type RunTurnOptions,
   type RuntimeControlPlane,
-  compareTrailRecency,
   SESSION_PICKER_LIMIT,
   type TrailState,
   type TrailSummary,
@@ -66,25 +75,31 @@ import {
 import {
   createRestrictedRoleContextPolicy,
   createStructuredInferencePort,
-  frozenPlanMaterialUses,
-  resolveFrozenSessionToolDefinitions,
-  type PiCodeExecutionAdapter,
-  type PiSkillLibrary,
-  type PiSelfToolAdapter,
   type FrozenSessionToolResolver,
+  frozenPlanMaterialUses,
+  type PiCodeExecutionAdapter,
+  type PiSelfToolAdapter,
+  type PiSkillLibrary,
   type RoleVariantConfiguration,
   type RuntimePiAgentRoleRunner,
+  resolveFrozenSessionToolDefinitions,
 } from "@noesis/runtime-pi";
 import {
   createLocalWorkTools,
   createToolBroker,
   defineTool,
-  type ToolDefinition,
   type ToolBroker,
+  type ToolDefinition,
   type ToolInvocationRecord,
 } from "@noesis/tools";
 import type { NoesisTuiRuntime } from "@noesis/tui";
-import { createWorkspaceStore, type NoesisWorkspaceStore, type WorkflowRunRecord } from "@noesis/workspace";
+import {
+  createWorkspaceStore,
+  type MessageRecord,
+  type NoesisWorkspaceStore,
+  type OutcomeRecord,
+  type WorkflowRunRecord,
+} from "@noesis/workspace";
 import { z } from "zod";
 import {
   createWorkspaceRuntimeInternals,
@@ -382,6 +397,8 @@ export interface ApplicationRuntime extends NoesisTuiRuntime {
   /** Explicit diagnostic/test seam. Product and TUI callers receive no raw durable surfaces. */
   readonly debug: {
     readonly workspace: NoesisWorkspaceStore;
+    /** Drives one foreground turn without the product interaction surface. Tests only. */
+    readonly runTurn: (trailId: string, input: string, options?: RunTurnOptions) => Promise<TurnResult>;
     readonly adaptations: {
       readonly activations: Pick<
         ProtectedWorkspaceRuntime["activations"],
@@ -452,41 +469,14 @@ function sessionDefinitionsForBroker(
   );
 }
 
-async function replayEligibleTurns(
+async function replayEligibleTurnIds(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
-): Promise<readonly { readonly input: string; readonly output: string }[]> {
-  const [messages, outcomes] = await Promise.all([
-    workspace.operational.messages.listForSession(sessionId),
-    workspace.operational.outcomes.listForSession(sessionId),
-  ]);
-  const messagesByTurn = new Map<
-    string,
-    { user?: (typeof messages)[number]; assistant?: (typeof messages)[number] }
-  >();
-  for (const message of messages) {
-    const turnId =
-      typeof message.metadata["turnId"] === "string"
-        ? message.metadata["turnId"]
-        : typeof message.metadata["legacyEventId"] === "string"
-          ? message.metadata["legacyEventId"]
-          : undefined;
-    if (!turnId) continue;
-    const pair = messagesByTurn.get(turnId) ?? {};
-    if (message.role === "user" && pair.user === undefined) pair.user = message;
-    if (message.role === "assistant" && pair.assistant === undefined) pair.assistant = message;
-    messagesByTurn.set(turnId, pair);
-  }
-  const replayable: Array<{
-    readonly occurredAt: string;
-    readonly turnId: string;
-    readonly input: string;
-    readonly output: string;
-  }> = [];
+  outcomes: readonly OutcomeRecord[],
+): Promise<ReadonlySet<string>> {
+  const eligible = new Set<string>();
   for (const outcome of outcomes) {
     if (!outcome.turnId) continue;
-    const pair = messagesByTurn.get(outcome.turnId);
-    if (!pair?.user || !pair.assistant) continue;
     const legacyCompleted =
       typeof outcome.metadata["legacyEventId"] === "string" && outcome.status === "unknown";
     const modernReplayEligible =
@@ -504,22 +494,170 @@ async function replayEligibleTurns(
       )
         continue;
     }
+    eligible.add(outcome.turnId);
+  }
+  return eligible;
+}
+
+async function replayEligibleTurns(
+  workspace: NoesisWorkspaceStore,
+  sessionId: string,
+): Promise<readonly { readonly input: string; readonly output: string }[]> {
+  const messages = await replayEligibleHistoryMessages(workspace, sessionId);
+  const messagesByTurn = new Map<
+    string,
+    {
+      readonly firstIndex: number;
+      user?: (typeof messages)[number];
+      readonly assistants: Array<(typeof messages)[number]>;
+    }
+  >();
+  for (const [index, message] of messages.entries()) {
+    if (replayHistoryKind(message) === "steer") continue;
+    const turnId = replayHistoryTurnKey(message);
+    if (!turnId) continue;
+    const pair = messagesByTurn.get(turnId) ?? { firstIndex: index, assistants: [] };
+    if (message.role === "user" && pair.user === undefined) pair.user = message;
+    if (message.role === "assistant") pair.assistants.push(message);
+    messagesByTurn.set(turnId, pair);
+  }
+  const replayable: Array<{
+    readonly firstIndex: number;
+    readonly input: string;
+    readonly output: string;
+  }> = [];
+  for (const pair of messagesByTurn.values()) {
+    if (!pair?.user || pair.assistants.length === 0) continue;
     replayable.push(
       Object.freeze({
-        occurredAt: pair.user.createdAt,
-        turnId: outcome.turnId,
+        firstIndex: pair.firstIndex,
         input: pair.user.content,
-        output: pair.assistant.content,
+        output: pair.assistants
+          .map((message) => message.content)
+          .filter((content) => content.length > 0)
+          .join("\n\n"),
       }),
     );
   }
   return Object.freeze(
     replayable
-      .sort(
-        (left, right) =>
-          left.occurredAt.localeCompare(right.occurredAt) || left.turnId.localeCompare(right.turnId),
-      )
+      .sort((left, right) => left.firstIndex - right.firstIndex)
       .map(({ input, output }) => Object.freeze({ input, output })),
+  );
+}
+
+function metadataString(message: MessageRecord, key: string): string | undefined {
+  const value = message.metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function inheritedReplayKind(message: MessageRecord): "turn" | "steer" | undefined {
+  if (
+    message.metadata["replayEligible"] !== true ||
+    metadataString(message, "inheritedFromSessionId") === undefined ||
+    metadataString(message, "inheritedFromMessageId") === undefined
+  )
+    return undefined;
+  const kind = message.metadata["historyKind"];
+  return kind === "turn" || kind === "steer" ? kind : undefined;
+}
+
+function replayHistoryKind(message: MessageRecord): "turn" | "steer" {
+  const inherited = inheritedReplayKind(message);
+  if (inherited !== undefined) return inherited;
+  return message.role === "user" && message.metadata["deliveryMode"] === "steer" ? "steer" : "turn";
+}
+
+function replayHistoryTurnKey(message: MessageRecord): string | undefined {
+  const inherited = inheritedReplayKind(message);
+  if (inherited === "steer") return undefined;
+  if (inherited === "turn") return metadataString(message, "historyTurnKey");
+  const turnId = metadataString(message, "turnId") ?? metadataString(message, "legacyEventId");
+  return turnId === undefined ? undefined : `${message.sessionId}:${turnId}`;
+}
+
+function historySequence(message: MessageRecord): number | undefined {
+  const value = message.metadata["historySequence"];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function interactionSequence(message: MessageRecord): number | undefined {
+  const value = message.metadata["interactionSequence"];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function sameTurnTimelineOrder(left: MessageRecord, right: MessageRecord): number {
+  const leftTurnId = metadataString(left, "turnId");
+  const rightTurnId = metadataString(right, "turnId");
+  if (leftTurnId === undefined || leftTurnId !== rightTurnId) return 0;
+  if (left.timelineSequence === undefined || right.timelineSequence === undefined) return 0;
+  return left.timelineSequence - right.timelineSequence;
+}
+
+function replayMessageTieRank(message: MessageRecord): number {
+  if (message.role === "assistant") return 2;
+  return replayHistoryKind(message) === "steer" ? 1 : 0;
+}
+
+async function replayEligibleHistoryMessages(workspace: NoesisWorkspaceStore, sessionId: string) {
+  const [messages, outcomes] = await Promise.all([
+    workspace.operational.messages.listForSession(sessionId),
+    workspace.operational.outcomes.listForSession(sessionId),
+  ]);
+  const eligibleTurnIds = await replayEligibleTurnIds(workspace, sessionId, outcomes);
+  const sourceOrder = new Map(messages.map((message, index) => [message.messageId, index]));
+  const turnChronology = new Map<string, { readonly createdAt: string; readonly sourceIndex: number }>();
+  for (const [sourceIndex, message] of messages.entries()) {
+    const turnId = metadataString(message, "turnId");
+    if (turnId === undefined) continue;
+    const current = turnChronology.get(turnId);
+    if (current === undefined || message.timelineSequence === 0)
+      turnChronology.set(turnId, Object.freeze({ createdAt: message.createdAt, sourceIndex }));
+  }
+  return Object.freeze(
+    messages
+      .filter((message) => {
+        if (message.role !== "user" && message.role !== "assistant") return false;
+        const inheritedKind = inheritedReplayKind(message);
+        if (inheritedKind === "steer") return message.role === "user";
+        if (inheritedKind === "turn") return replayHistoryTurnKey(message) !== undefined;
+        const turnId =
+          typeof message.metadata["turnId"] === "string"
+            ? message.metadata["turnId"]
+            : typeof message.metadata["legacyEventId"] === "string"
+              ? message.metadata["legacyEventId"]
+              : undefined;
+        return turnId !== undefined && eligibleTurnIds.has(turnId);
+      })
+      .sort((left, right) => {
+        const leftSequence = historySequence(left);
+        const rightSequence = historySequence(right);
+        const leftInteractionSequence = interactionSequence(left);
+        const rightInteractionSequence = interactionSequence(right);
+        const leftTurnId = metadataString(left, "turnId");
+        const rightTurnId = metadataString(right, "turnId");
+        const leftTurn = leftTurnId === undefined ? undefined : turnChronology.get(leftTurnId);
+        const rightTurn = rightTurnId === undefined ? undefined : turnChronology.get(rightTurnId);
+        return (
+          (leftSequence !== undefined && rightSequence !== undefined ? leftSequence - rightSequence : 0) ||
+          sameTurnTimelineOrder(left, right) ||
+          (leftTurnId !== rightTurnId && leftTurn !== undefined && rightTurn !== undefined
+            ? leftTurn.createdAt.localeCompare(rightTurn.createdAt) ||
+              leftTurn.sourceIndex - rightTurn.sourceIndex
+            : 0) ||
+          left.createdAt.localeCompare(right.createdAt) ||
+          replayMessageTieRank(left) - replayMessageTieRank(right) ||
+          (replayHistoryKind(left) === "steer" &&
+          replayHistoryKind(right) === "steer" &&
+          leftInteractionSequence !== undefined &&
+          rightInteractionSequence !== undefined
+            ? leftInteractionSequence - rightInteractionSequence
+            : 0) ||
+          (sourceOrder.get(left.messageId) ?? Number.MAX_SAFE_INTEGER) -
+            (sourceOrder.get(right.messageId) ?? Number.MAX_SAFE_INTEGER) ||
+          left.messageId.localeCompare(right.messageId)
+        );
+      }),
   );
 }
 
@@ -934,10 +1072,23 @@ export async function createApplicationRuntimeComposition(
     },
   });
   const activeCodeRuntimes = new Set<CodeModeRuntime>();
+  const nestedActionBindings = new Map<
+    string,
+    {
+      readonly parentToolCallId: string;
+      readonly timelineSequence: number;
+      readonly parentReady: Promise<void>;
+    }
+  >();
   const recordToolInvocation = async (record: ToolInvocationRecord): Promise<void> => {
+    const binding = nestedActionBindings.get(record.callId);
+    await binding?.parentReady;
     await workspace.operational.toolCalls.put({
       toolCallId: record.callId,
       sessionId: record.sessionId,
+      ...(record.turnId ? { turnId: record.turnId } : {}),
+      ...(binding ? { parentToolCallId: binding.parentToolCallId } : {}),
+      executionId: record.executionId,
       toolName: record.toolName,
       request: Object.freeze({
         executionId: record.executionId,
@@ -959,12 +1110,84 @@ export async function createApplicationRuntimeComposition(
       sensitivity: "normal",
       createdAt: record.occurredAt,
       ...(record.completedAt ? { completedAt: record.completedAt } : {}),
+      ...(binding ? { timelineSequence: binding.timelineSequence } : {}),
     });
+    if (
+      binding &&
+      (record.status === "completed" ||
+        record.status === "failed" ||
+        record.status === "denied" ||
+        record.status === "ambiguous")
+    )
+      nestedActionBindings.delete(record.callId);
   };
   const recordedToolInvocationStatus = async (
     callId: string,
   ): Promise<ToolInvocationRecord["status"] | undefined> =>
     (await workspace.operational.toolCalls.get(callId))?.status;
+
+  const actionExecutionId = (...values: readonly unknown[]): string | undefined => {
+    for (const value of values) {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+      const executionId = Reflect.get(value, "executionId");
+      if (typeof executionId === "string" && executionId) return executionId;
+    }
+    return undefined;
+  };
+
+  const persistTopLevelAction = async (
+    sessionId: string,
+    turnId: string,
+    event: AgentActionEvent,
+  ): Promise<void> => {
+    // Nested codemode calls are already recorded by the broker with their exact call IDs and
+    // effect results. Persisting the adapter's display aliases as well would create a second,
+    // competing record for the same action.
+    if (event.parentActionId) return;
+    const occurredAt = new Date().toISOString();
+    if (event.type === "tool-start") {
+      await workspace.operational.toolCalls.put({
+        toolCallId: event.actionId,
+        sessionId,
+        turnId,
+        toolName: event.name,
+        request: event.input,
+        status: "running",
+        sensitivity: "normal",
+        createdAt: occurredAt,
+        ...(event.timelineSequence === undefined ? {} : { timelineSequence: event.timelineSequence }),
+      });
+      return;
+    }
+    const current = await workspace.operational.toolCalls.get(event.actionId);
+    if (!current) throw new Error(`Agent action ${event.actionId} emitted ${event.type} before tool-start`);
+    if (current.sessionId !== sessionId || current.turnId !== turnId || current.toolName !== event.name)
+      throw new Error(`Agent action ${event.actionId} changed its durable identity`);
+    if (event.type === "tool-update") {
+      const executionId = actionExecutionId(event.update);
+      await workspace.operational.toolCalls.put({
+        ...current,
+        ...(executionId ? { executionId } : {}),
+        update: event.update,
+        status: "running",
+      });
+      return;
+    }
+    const executionId = actionExecutionId(event.result, current.update);
+    await workspace.operational.toolCalls.put({
+      ...current,
+      ...(executionId && !current.executionId ? { executionId } : {}),
+      response: event.result,
+      status: event.isError ? "failed" : "completed",
+      completedAt: occurredAt,
+    });
+  };
+  const durableActionEvent = (turnId: string, event: AgentActionEvent): AgentActionEvent =>
+    Object.freeze({
+      ...event,
+      actionId: event.parentActionId ? event.actionId : `${turnId}:${event.actionId}`,
+      ...(event.parentActionId ? { parentActionId: `${turnId}:${event.parentActionId}` } : {}),
+    });
   const prepareCodeExecution: PiCodeExecutionAdapter["prepare"] = async (plan, signal, resources) => {
     await reconcileStoredScripts(workspace);
     await reconcileStoredWorkflows(workspace);
@@ -1914,6 +2137,7 @@ export async function createApplicationRuntimeComposition(
             else if (event.type === "tool-start")
               emit({
                 type: "tool-start",
+                callId: event.callId,
                 name: event.name,
                 callIndex: event.callIndex,
                 input: event.input,
@@ -1921,6 +2145,7 @@ export async function createApplicationRuntimeComposition(
             else if (event.type === "tool-end")
               emit({
                 type: "tool-end",
+                callId: event.callId,
                 name: event.name,
                 callIndex: event.callIndex,
                 ok: event.ok,
@@ -2304,8 +2529,17 @@ export async function createApplicationRuntimeComposition(
 
   const sessionTimes = new Map<string, { readonly createdAt: string; readonly updatedAt: string }>();
   const trailStates = new Map<string, TrailState>();
+  const messageCounts = new Map<string, number>();
+  const refreshMessageCount = async (sessionId: string): Promise<number> => {
+    const count = (await workspace.operational.messages.listForSession(sessionId)).length;
+    messageCounts.set(sessionId, count);
+    return count;
+  };
   for (const session of await workspace.operational.sessions.list()) {
-    const turns = await replayEligibleTurns(workspace, session.sessionId);
+    const [turns] = await Promise.all([
+      replayEligibleTurns(workspace, session.sessionId),
+      refreshMessageCount(session.sessionId),
+    ]);
     trailStates.set(
       session.sessionId,
       Object.freeze({
@@ -2344,6 +2578,7 @@ export async function createApplicationRuntimeComposition(
       }),
     );
     sessionTimes.set(trail.trailId, { createdAt: times.createdAt, updatedAt: timestamp });
+    if (!messageCounts.has(trail.trailId)) messageCounts.set(trail.trailId, 0);
     const frozen = Object.freeze(trail);
     trailStates.set(trail.trailId, frozen);
     return frozen;
@@ -2352,6 +2587,10 @@ export async function createApplicationRuntimeComposition(
     const trail = trailStates.get(trailId);
     if (!trail) throw new Error(`Trail not found: ${trailId}`);
     return trail;
+  };
+  const getTranscript: NoesisRuntime["getTranscript"] = async (trailId) => {
+    getTrail(trailId);
+    return await loadRuntimeTranscript(workspace, trailId);
   };
   const listTrails: NoesisRuntime["listTrails"] = () => Object.freeze([...trailStates.values()]);
   const listTrailSummaries: NoesisRuntime["listTrailSummaries"] = () =>
@@ -2371,7 +2610,7 @@ export async function createApplicationRuntimeComposition(
             createdAt: times?.createdAt ?? "",
             updatedAt: times?.updatedAt ?? "",
             turnCount: trail.turns.length,
-            messageCount: trail.turns.length * 2,
+            messageCount: messageCounts.get(trail.trailId) ?? 0,
             preview: latest?.output ?? latest?.input ?? "",
           });
         })
@@ -2405,45 +2644,70 @@ export async function createApplicationRuntimeComposition(
   };
   const forkTrail: NoesisRuntime["forkTrail"] = async (trailId, title) => {
     const source = getTrail(trailId);
-    const fork = await persistTrail(
+    const inheritedHistory = await replayEligibleHistoryMessages(workspace, trailId);
+    let fork = await persistTrail(
       Object.freeze({
         ...source,
         trailId: createId("trail"),
         parentTrailId: trailId,
         title: title ?? `${source.title} (fork)`,
         status: "idle" as const,
-        turns: Object.freeze([...source.turns]),
+        turns: Object.freeze([]),
       }),
     );
-    for (const [index, turn] of source.turns.entries()) {
-      const createdAt = new Date().toISOString();
-      await workspace.operational.messages.put(
-        Object.freeze({
-          messageId: `${fork.trailId}:inherited:${index}:user`,
-          sessionId: fork.trailId,
-          role: "user" as const,
-          content: turn.input,
-          sensitivity: "normal" as const,
-          createdAt,
-          metadata: Object.freeze({ inheritedFrom: trailId }),
+    for (const [index, message] of inheritedHistory.entries()) {
+      const historyKind = replayHistoryKind(message);
+      const historyTurnKey = replayHistoryTurnKey(message);
+      if (historyKind === "turn" && historyTurnKey === undefined)
+        throw new Error(`Replay-eligible message ${message.messageId} has no conversation turn identity`);
+      const messageId = `${fork.trailId}:inherited:${sha256(
+        canonicalJson({ sourceSessionId: trailId, sourceMessageId: message.messageId }),
+      ).slice(0, 32)}`;
+      const inherited = Object.freeze({
+        messageId,
+        sessionId: fork.trailId,
+        role: message.role,
+        content: message.content,
+        sensitivity: message.sensitivity,
+        createdAt: message.createdAt,
+        metadata: Object.freeze({
+          replayEligible: true,
+          historyKind,
+          historySequence: index,
+          ...(historyTurnKey ? { historyTurnKey } : {}),
+          inheritedFromSessionId: trailId,
+          inheritedFromMessageId: message.messageId,
         }),
-      );
-      await workspace.operational.messages.put(
-        Object.freeze({
-          messageId: `${fork.trailId}:inherited:${index}:assistant`,
-          sessionId: fork.trailId,
-          role: "assistant" as const,
-          content: turn.output,
-          sensitivity: "normal" as const,
-          createdAt,
-          metadata: Object.freeze({ inheritedFrom: trailId }),
-        }),
-      );
+      }) satisfies MessageRecord;
+      const existing = await workspace.operational.messages.get(messageId);
+      if (existing !== undefined) {
+        if (canonicalJson(existing) !== canonicalJson(inherited))
+          throw new Error(`Inherited message identity collision: ${messageId}`);
+        continue;
+      }
+      await workspace.operational.messages.put(inherited);
     }
+    await refreshMessageCount(fork.trailId);
+    fork = await persistTrail(
+      Object.freeze({
+        ...fork,
+        turns: await replayEligibleTurns(workspace, fork.trailId),
+      }),
+    );
     return fork;
   };
 
-  const runTurn: NoesisRuntime["runTurn"] = async (trailId, input, runOptions): Promise<TurnResult> => {
+  const executeTurn = async (
+    trailId: string,
+    input: string,
+    turnId: string,
+    runOptions?: RunTurnOptions,
+    sourceIntentId?: string,
+    interactionControl?: {
+      readonly onReady: () => void;
+      readonly isInterruptRequested: () => boolean;
+    },
+  ): Promise<TurnResult> => {
     const trail = getTrail(trailId);
     if (trail.status === "running") throw new Error("Trail is already running");
     if (trail.runtime !== agent.name)
@@ -2451,11 +2715,10 @@ export async function createApplicationRuntimeComposition(
         `Trail ${trailId} is pinned to runtime ${trail.runtime}; active runtime is ${agent.name}.`,
       );
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
-    const turnId = createId("turn");
     const thinkingLevel = runOptions?.thinkingLevel ?? agentDefaults.thinkingLevel;
-    const recentConversation = running.turns
-      .slice(-8)
-      .map((turn) => `User: ${turn.input}\nAssistant: ${turn.output}`)
+    const historyMessages = (await replayEligibleHistoryMessages(workspace, trailId)).slice(-16);
+    const recentConversation = historyMessages
+      .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`)
       .join("\n\n");
     try {
       const plan = await turnPlanner.planAndAdmit({
@@ -2481,12 +2744,12 @@ export async function createApplicationRuntimeComposition(
           provenance: Object.freeze([plan.planId]),
           priority: 100,
         }),
-        ...running.turns.slice(-8).map((turn, index) =>
+        ...historyMessages.map((message, index) =>
           Object.freeze({
             id: `${turnId}:history:${index}`,
             kind: "trail" as const,
-            content: `User: ${turn.input}\nAssistant: ${turn.output}`,
-            provenance: Object.freeze([trailId]),
+            content: `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`,
+            provenance: Object.freeze([message.messageId]),
             priority: 70,
           }),
         ),
@@ -2513,25 +2776,131 @@ export async function createApplicationRuntimeComposition(
           sessionId: trailId,
           turnId,
           input,
+          ...(sourceIntentId ? { sourceIntentId } : {}),
           occurredAt,
           plan,
           execute: async () => {
-            const agentResult = await agent.run(
-              {
-                trailId,
-                provider: plan.provider,
-                model: plan.model,
-                thinkingLevel: plan.thinkingLevel,
-                systemPrompt: plan.renderedSystemPrompt,
-                prompt: input,
-                activeCapabilities: plan.selectedCapabilities.map((selection) => ({
-                  name: selection.name,
-                  version: plan.activationRevision,
-                })),
+            if (interactionControl?.isInterruptRequested())
+              return Object.freeze({
+                outcome: "aborted" as const,
+                output: "",
+                context,
+                usedCapabilities,
                 frozenTurnPlan: plan,
-              },
-              runOptions?.onEvent ?? (() => undefined),
-            );
+              });
+            let actionPersistence = Promise.resolve();
+            let assistantPersistence = Promise.resolve();
+            let interactionReady = false;
+            let actionPersistenceFailure: unknown;
+            const recordActionPersistenceFailure = (error: unknown): void => {
+              actionPersistenceFailure ??= error;
+            };
+            const emit = (event: AgentRuntimeEvent): void => {
+              if (event.type === "status" && event.status === "started" && !interactionReady) {
+                interactionReady = true;
+                if (interactionControl?.isInterruptRequested()) void agent.abort(trailId);
+                else interactionControl?.onReady();
+              }
+              if (event.type === "tool-start" || event.type === "tool-update" || event.type === "tool-end") {
+                const durableEvent = durableActionEvent(turnId, event);
+                if (durableEvent.type === "tool-start" && durableEvent.parentActionId) {
+                  if (durableEvent.timelineSequence === undefined)
+                    throw new Error(`Nested action ${durableEvent.actionId} has no turn timeline position`);
+                  nestedActionBindings.set(
+                    durableEvent.actionId,
+                    Object.freeze({
+                      parentToolCallId: durableEvent.parentActionId,
+                      timelineSequence: durableEvent.timelineSequence,
+                      parentReady: actionPersistence,
+                    }),
+                  );
+                }
+                runOptions?.onEvent?.(durableEvent);
+                if (durableEvent.type === "tool-start") {
+                  const currentPersistence = persistTopLevelAction(trailId, turnId, durableEvent).catch(
+                    recordActionPersistenceFailure,
+                  );
+                  actionPersistence = Promise.all([actionPersistence, currentPersistence]).then(
+                    () => undefined,
+                  );
+                } else {
+                  actionPersistence = actionPersistence.then(async () => {
+                    try {
+                      await persistTopLevelAction(trailId, turnId, durableEvent);
+                    } catch (error) {
+                      recordActionPersistenceFailure(error);
+                    }
+                  });
+                }
+                if (durableEvent.type === "tool-end" && durableEvent.parentActionId)
+                  nestedActionBindings.delete(durableEvent.actionId);
+                return;
+              }
+              if (event.type === "assistant-message") {
+                const boundary = event;
+                const messageId = `${turnId}:assistant:${String(boundary.timelineSequence)}`;
+                const currentPersistence = workspace.operational.messages
+                  .put({
+                    messageId,
+                    sessionId: trailId,
+                    role: "assistant",
+                    content: boundary.text,
+                    sensitivity: "normal",
+                    createdAt: boundary.createdAt,
+                    metadata: Object.freeze({
+                      turnId,
+                      frozenTurnPlanId: plan.planId,
+                    }),
+                    timelineSequence: boundary.timelineSequence,
+                  })
+                  .then(async () => {
+                    await refreshMessageCount(trailId);
+                  });
+                assistantPersistence = Promise.all([assistantPersistence, currentPersistence]).then(
+                  () => undefined,
+                );
+                return;
+              }
+              runOptions?.onEvent?.(event);
+            };
+            let agentOutcome:
+              | {
+                  readonly status: "completed";
+                  readonly result: Awaited<ReturnType<NoesisAgentRuntime["run"]>>;
+                }
+              | { readonly status: "failed"; readonly error: unknown };
+            try {
+              agentOutcome = {
+                status: "completed",
+                result: await agent.run(
+                  {
+                    trailId,
+                    provider: plan.provider,
+                    model: plan.model,
+                    thinkingLevel: plan.thinkingLevel,
+                    systemPrompt: plan.renderedSystemPrompt,
+                    prompt: input,
+                    activeCapabilities: plan.selectedCapabilities.map((selection) => ({
+                      name: selection.name,
+                      version: plan.activationRevision,
+                    })),
+                    frozenTurnPlan: plan,
+                  },
+                  emit,
+                ),
+              };
+            } catch (error) {
+              agentOutcome = { status: "failed", error };
+            }
+            const [, assistantPersistenceResult] = await Promise.allSettled([
+              actionPersistence,
+              assistantPersistence,
+            ]);
+            await workspace.operational.toolCalls.interruptRunningForTurn(turnId, new Date().toISOString());
+            if (agentOutcome.status === "failed") throw agentOutcome.error;
+            if (actionPersistenceFailure !== undefined) throw actionPersistenceFailure;
+            if (assistantPersistenceResult.status === "rejected") throw assistantPersistenceResult.reason;
+            const agentResult = agentOutcome.result;
             if (agentResult.stopReason === "error") throw new Error(agentResult.error);
             return Object.freeze({
               outcome: agentResult.stopReason === "aborted" ? ("aborted" as const) : ("completed" as const),
@@ -2539,6 +2908,7 @@ export async function createApplicationRuntimeComposition(
               context,
               usedCapabilities,
               ...(agentResult.contextUsage ? { contextUsage: agentResult.contextUsage } : {}),
+              ...(agentResult.assistantMessages ? { assistantMessages: agentResult.assistantMessages } : {}),
               frozenTurnPlan: plan,
             });
           },
@@ -2548,6 +2918,12 @@ export async function createApplicationRuntimeComposition(
             ...running,
             status: result.outcome === "aborted" ? ("aborted" as const) : ("idle" as const),
             capabilityVersions: usedCapabilities,
+            ...(result.outcome === "completed"
+              ? {
+                  contextSnapshotId: result.context.snapshotId,
+                  context: result.context,
+                }
+              : {}),
             turns:
               result.outcome === "completed"
                 ? Object.freeze([...running.turns, Object.freeze({ input, output: result.output })])
@@ -2561,21 +2937,70 @@ export async function createApplicationRuntimeComposition(
     } catch (error) {
       await persistTrail(Object.freeze({ ...running, status: "failed" as const }));
       throw error;
+    } finally {
+      await refreshMessageCount(trailId);
     }
   };
-  const steer: NoesisRuntime["steer"] = async (trailId, text) => {
+  const debugRunTurn = async (
+    trailId: string,
+    input: string,
+    runOptions?: RunTurnOptions,
+  ): Promise<TurnResult> => await executeTurn(trailId, input, createId("turn"), runOptions);
+  const interactions = createTurnInteractionController({
+    intents: workspace.operational.userIntents,
+    createIntentId: () => createId("intent"),
+    createTurnId: () => createId("turn"),
+    runTurn: async ({
+      sessionId,
+      intentId,
+      turnId,
+      text,
+      thinkingLevel,
+      onEvent,
+      onReady,
+      isInterruptRequested,
+    }) => {
+      const result = await executeTurn(
+        sessionId,
+        text,
+        turnId,
+        {
+          onEvent,
+          ...(thinkingLevel ? { thinkingLevel } : {}),
+        },
+        intentId,
+        { onReady, isInterruptRequested },
+      );
+      return Object.freeze({ outcome: result.outcome });
+    },
+    steer: async (sessionId, text) => {
+      return await agent.steer(sessionId, text);
+    },
+    recordSteerDelivery: async ({ sessionId, intentId, turnId, text, timelineSequence, deliveredAt }) => {
+      const delivered = await workspace.operational.userIntents.recordSteerDelivery({
+        sessionId,
+        intentId,
+        targetTurnId: turnId,
+        text,
+        sensitivity: "normal",
+        timelineSequence,
+        deliveredAt,
+      });
+      if (delivered?.status !== "delivered")
+        throw new Error(`Steer intent ${intentId} could not be committed as delivered`);
+      await refreshMessageCount(sessionId);
+    },
+    interrupt: async (sessionId) => {
+      await agent.abort(sessionId);
+    },
+  });
+  const interact: NoesisRuntime["interact"] = async (trailId, command, interactionOptions) => {
     getTrail(trailId);
-    await agent.steer(trailId, text);
+    return await interactions.dispatch(trailId, command, interactionOptions);
   };
-  const followUp: NoesisRuntime["followUp"] = async (trailId, text) => {
+  const inspectInteraction: NoesisRuntime["inspectInteraction"] = async (trailId) => {
     getTrail(trailId);
-    await agent.followUp(trailId, text);
-  };
-  const abort: NoesisRuntime["abort"] = async (trailId) => {
-    const trail = getTrail(trailId);
-    await agent.abort(trailId);
-    if (trail.status === "running")
-      await persistTrail(Object.freeze({ ...trail, status: "aborted" as const }));
+    return await interactions.inspect(trailId);
   };
   const compact: NoesisRuntime["compact"] = async (trailId) => {
     const trail = getTrail(trailId);
@@ -2814,7 +3239,9 @@ export async function createApplicationRuntimeComposition(
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
     shutdownPromise ??= (async () => {
-      const stop = Promise.all([controlPlane.stop(), codeExecution.shutdown()]).then(() => undefined);
+      const stop = Promise.all([interactions.close(), controlPlane.stop(), codeExecution.shutdown()]).then(
+        () => undefined,
+      );
       let graceTimer: NodeJS.Timeout | undefined;
       const settlement = await Promise.race<
         | { readonly status: "settled" }
@@ -2848,6 +3275,7 @@ export async function createApplicationRuntimeComposition(
     controlPlane,
     debug: Object.freeze({
       workspace,
+      runTurn: debugRunTurn,
       adaptations: Object.freeze({
         activations: Object.freeze({
           current: protectedRuntime.activations.current,
@@ -2873,12 +3301,11 @@ export async function createApplicationRuntimeComposition(
     listTrails,
     listTrailSummaries,
     getTrail,
+    getTranscript,
     resumeTrail,
     forkTrail,
-    runTurn,
-    steer,
-    followUp,
-    abort,
+    interact,
+    inspectInteraction,
     compact,
     listSkills,
     inspectSkill,

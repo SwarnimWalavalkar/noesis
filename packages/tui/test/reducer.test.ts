@@ -5,18 +5,28 @@ import {
   createStatusFields,
   createTuiLayout,
   elideText,
+  executionForInteractionPhase,
   formatContextUsage,
+  helpHint,
   initialTuiState,
   renderBottomChrome,
   reduceTui,
   renderHeader,
   renderNoesisState,
+  renderQueuedInputs,
   safeTerminalText,
   sessionPickerVisibleCount,
   shouldUseColor,
 } from "../src/index.ts";
 
 describe("Noesis TUI reducer", () => {
+  test("derives execution state from interaction lifecycle without hiding active work", () => {
+    expect(executionForInteractionPhase("aborting", "running")).toBe("thinking");
+    expect(executionForInteractionPhase("tool", "running")).toBeUndefined();
+    expect(executionForInteractionPhase("error", "idle")).toBeUndefined();
+    expect(executionForInteractionPhase("streaming", "interrupting")).toBe("aborting");
+  });
+
   test("uses the built-in Codex model and reasoning defaults", () => {
     expect(initialTuiState("pi")).toMatchObject({
       provider: "openai-codex",
@@ -125,6 +135,21 @@ describe("Noesis TUI reducer", () => {
     expect(renderBottomChrome(state, 100, 30).join("\n")).toContain("ctx   —");
     expect(context).toContain("NOESIS");
     expect(capabilities).toContain("capability> research@2");
+  });
+
+  test("keeps a delivered steer inline between streamed assistant segments", () => {
+    let state = initialTuiState("fake");
+    state = reduceTui(state, { type: "prompt-submitted", text: "initial" });
+    state = reduceTui(state, { type: "stream-delta", text: "before steer" });
+    state = reduceTui(state, { type: "steer-delivered", text: "change direction" });
+    state = reduceTui(state, { type: "stream-delta", text: "after steer" });
+
+    expect(state.timeline).toEqual([
+      { kind: "message", role: "user", text: "initial" },
+      { kind: "message", role: "assistant", text: "before steer" },
+      { kind: "message", role: "user", text: "change direction" },
+      { kind: "message", role: "assistant", text: "after steer" },
+    ]);
   });
 
   test("chooses deterministic responsive header modes and bounds inspection panes", () => {
@@ -240,6 +265,59 @@ describe("Noesis TUI reducer", () => {
     expect(narrow).toContain("openai-codex/gpt-5.6-sol");
     expect(narrow).toContain("ctx  28%");
     expect(narrow).not.toContain("session");
+  });
+
+  test("renders the newest queued inputs with delivery state and interaction shortcuts", () => {
+    const state = reduceTui(initialTuiState("fake"), {
+      type: "interaction-changed",
+      interaction: {
+        phase: "running",
+        queuePaused: false,
+        active: {
+          intentId: "intent-active",
+          turnId: "turn-active",
+          text: "active",
+        },
+        queuedInputs: [
+          { queueId: "q1", text: "first\nmessage", createdAt: "2026-07-31T10:00:00.000Z" },
+          { queueId: "q2", text: "second", createdAt: "2026-07-31T10:00:01.000Z" },
+          { queueId: "q3", text: "third", createdAt: "2026-07-31T10:00:02.000Z" },
+          {
+            queueId: "q4",
+            text: "newest",
+            createdAt: "2026-07-31T10:00:03.000Z",
+            status: "held",
+          },
+        ],
+      },
+    });
+
+    const queue = renderQueuedInputs(state, 60).join("\n");
+    expect(queue).toContain("QUEUED · 4");
+    expect(queue).toContain("holding steer");
+    expect(queue).toContain("… 1 earlier");
+    expect(queue).not.toContain("first message");
+    expect(queue).toContain("4→ newest");
+    expect(createStatusFields(state, createTuiLayout(120, 35))).toContain("q 4");
+    expect(helpHint(state)).toContain("enter queue");
+    expect(helpHint(state)).toContain("/steer redirect");
+    expect(helpHint(state)).toContain("esc interrupt");
+  });
+
+  test("shows a resumed queue as paused until explicitly resumed", () => {
+    const state = reduceTui(initialTuiState("fake"), {
+      type: "interaction-changed",
+      interaction: {
+        phase: "idle",
+        queuePaused: true,
+        queuedInputs: [{ queueId: "q1", text: "continue later", createdAt: "2026-07-31T10:00:00.000Z" }],
+      },
+    });
+
+    expect(renderQueuedInputs(state, 60).join("\n")).toContain("QUEUED · 1 · paused");
+    expect(createStatusFields(state, createTuiLayout(90, 28))).toContain("q 1 paused");
+    expect(helpHint(state)).toContain("/queue resume");
+    expect(helpHint(state)).not.toContain("/steer promote newest");
   });
 
   test("maps lifecycle actions to supported execution states", () => {
@@ -476,7 +554,7 @@ describe("Noesis TUI reducer", () => {
     ]);
   });
 
-  test("reconstructs a resumed trail as an ordered message timeline", () => {
+  test("waits for the authoritative transcript instead of reconstructing trail turns", () => {
     const state = reduceTui(initialTuiState("fake"), {
       type: "trail-selected",
       trail: {
@@ -494,14 +572,165 @@ describe("Noesis TUI reducer", () => {
       },
     });
 
-    expect(state.timeline).toEqual([
-      { kind: "message", role: "user", text: "first" },
-      { kind: "message", role: "assistant", text: "one" },
-      { kind: "message", role: "user", text: "second" },
-      { kind: "message", role: "assistant", text: "two" },
-    ]);
+    expect(state.timeline).toEqual([]);
     expect(state.execution).toBe("idle");
     expect(state.turnCount).toBe(2);
+  });
+
+  test("hydrates the authoritative transcript with interleaved inspectable actions", () => {
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "trail-selected",
+      trail: {
+        trailId: "trail-1",
+        title: "resumed",
+        status: "idle",
+        provider: "openai-codex",
+        model: "gpt-5.6-sol",
+        runtime: "pi",
+        turns: [{ input: "legacy", output: "fallback" }],
+        capabilityVersions: {},
+      },
+    });
+    state = reduceTui(state, {
+      type: "transcript-hydrated",
+      trailId: "trail-1",
+      transcript: [
+        {
+          kind: "message",
+          messageId: "message-user",
+          turnId: "turn-1",
+          role: "user",
+          text: "inspect the repo",
+          createdAt: "2026-07-31T10:00:00.000Z",
+        },
+        {
+          kind: "action",
+          actionId: "execute-1",
+          turnId: "turn-1",
+          executionId: "execution-1",
+          name: "execute",
+          status: "completed",
+          input: { source: "return await tools.files.read({ path: 'README.md' });" },
+          output: { calls: 1 },
+          startedAt: "2026-07-31T10:00:01.000Z",
+          completedAt: "2026-07-31T10:00:03.500Z",
+        },
+        {
+          kind: "action",
+          actionId: "call-1",
+          turnId: "turn-1",
+          parentActionId: "execute-1",
+          name: "files.read",
+          status: "cancelled",
+          input: { path: "README.md" },
+          output: { error: "cancelled by user" },
+          startedAt: "2026-07-31T10:00:02.000Z",
+          completedAt: "2026-07-31T10:00:02.250Z",
+        },
+        {
+          kind: "message",
+          messageId: "message-assistant",
+          turnId: "turn-1",
+          role: "assistant",
+          text: "I stopped before finishing.",
+          createdAt: "2026-07-31T10:00:04.000Z",
+        },
+      ],
+    });
+
+    expect(state.timeline).toEqual([
+      {
+        kind: "message",
+        messageId: "message-user",
+        turnId: "turn-1",
+        role: "user",
+        text: "inspect the repo",
+        createdAt: "2026-07-31T10:00:00.000Z",
+      },
+      {
+        kind: "action",
+        actionId: "execute-1",
+        turnId: "turn-1",
+        executionId: "execution-1",
+        name: "execute",
+        status: "completed",
+        input: { source: "return await tools.files.read({ path: 'README.md' });" },
+        output: { calls: 1 },
+        startedAt: Date.parse("2026-07-31T10:00:01.000Z"),
+        durationMs: 2_500,
+      },
+      {
+        kind: "action",
+        actionId: "call-1",
+        turnId: "turn-1",
+        parentActionId: "execute-1",
+        name: "files.read",
+        status: "cancelled",
+        input: { path: "README.md" },
+        output: { error: "cancelled by user" },
+        startedAt: Date.parse("2026-07-31T10:00:02.000Z"),
+        durationMs: 250,
+      },
+      {
+        kind: "message",
+        messageId: "message-assistant",
+        turnId: "turn-1",
+        role: "assistant",
+        text: "I stopped before finishing.",
+        createdAt: "2026-07-31T10:00:04.000Z",
+      },
+    ]);
+    expect(renderNoesisState(state, 100, 30).join("\n")).toContain("■ files.read  README.md · cancelled");
+  });
+
+  test("ignores transcript hydration from a superseded session", () => {
+    const state = reduceTui(
+      reduceTui(
+        reduceTui(initialTuiState("fake"), {
+          type: "trail-selected",
+          trail: {
+            trailId: "trail-current",
+            title: "current",
+            status: "idle",
+            provider: "fake",
+            model: "model",
+            runtime: "fake",
+            turns: [{ input: "current", output: "answer" }],
+            capabilityVersions: {},
+          },
+        }),
+        {
+          type: "transcript-hydrated",
+          trailId: "trail-current",
+          transcript: [
+            {
+              kind: "message",
+              messageId: "current-user",
+              turnId: "turn-current",
+              role: "user",
+              text: "current",
+              createdAt: "2026-07-31T10:00:00.000Z",
+            },
+          ],
+        },
+      ),
+      {
+        type: "transcript-hydrated",
+        trailId: "trail-stale",
+        transcript: [],
+      },
+    );
+
+    expect(state.timeline).toEqual([
+      {
+        kind: "message",
+        messageId: "current-user",
+        turnId: "turn-current",
+        role: "user",
+        text: "current",
+        createdAt: "2026-07-31T10:00:00.000Z",
+      },
+    ]);
   });
 
   test("records action durations from the dispatched clock", () => {

@@ -45,7 +45,7 @@ describe("credential-free Pi application acceptance", () => {
       if (!genesis) return;
 
       const correctionSession = await runtime.startTrail({ title: "Learning correction" });
-      await runtime.runTurn(
+      await runtime.debug.runTurn(
         correctionSession.trailId,
         "No, for every research brief separate cited evidence from inference.",
       );
@@ -68,7 +68,7 @@ describe("credential-free Pi application acceptance", () => {
       expect(experiment.preflightRef).toBeDefined();
 
       const relatedSession = await runtime.startTrail({ title: "Related return" });
-      const related = await runtime.runTurn(
+      const related = await runtime.debug.runTurn(
         relatedSession.trailId,
         "Prepare a research brief about continual learning.",
       );
@@ -82,7 +82,7 @@ describe("credential-free Pi application acceptance", () => {
       );
 
       const unrelatedSession = await runtime.startTrail({ title: "Unrelated return" });
-      const unrelated = await runtime.runTurn(unrelatedSession.trailId, "Draft a meeting agenda.");
+      const unrelated = await runtime.debug.runTurn(unrelatedSession.trailId, "Draft a meeting agenda.");
       expect(
         unrelated.frozenTurnPlan?.selectedCapabilities.some(
           (selection) => selection.capabilityId === candidateRevision.capabilityId,
@@ -93,7 +93,7 @@ describe("credential-free Pi application acceptance", () => {
         "No, revise this research brief and keep evidence distinct from inference.",
         "No, undo that adaptation for this research brief.",
       ])
-        await runtime.runTurn(relatedSession.trailId, input);
+        await runtime.debug.runTurn(relatedSession.trailId, input);
       await runtime.controlPlane.idle();
 
       const outcome = await runtime.debug.adaptations.feedback.getOutcome(experiment.experimentId);

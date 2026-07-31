@@ -52,15 +52,51 @@ export interface MessageRecord {
   readonly sensitivity: Sensitivity;
   readonly createdAt: string;
   readonly metadata: Readonly<Record<string, unknown>>;
+  /** One adapter-authored, SQLite-validated position in this turn's mixed interaction timeline. */
+  readonly timelineSequence?: number;
+}
+
+export type UserIntentMode = "turn" | "steer";
+export type UserIntentStatus = "pending" | "held" | "dispatching" | "unresolved" | "delivered" | "withdrawn";
+export type UserIntentSteerOrigin = "explicit" | "queued";
+
+export interface UserIntentRecord {
+  readonly intentId: string;
+  readonly sessionId: string;
+  /** Cleared after delivery; the durable message becomes the sole authority for delivered text. */
+  readonly text?: string;
+  readonly contentDigest: string;
+  readonly deliveryMode: UserIntentMode;
+  readonly status: UserIntentStatus;
+  readonly queueSequence: number;
+  readonly queuedBehindTurnId?: string;
+  readonly targetTurnId?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly heldAt?: string;
+  readonly promotedAt?: string;
+  readonly deliveredAt?: string;
+  readonly unresolvedAt?: string;
+  readonly withdrawnAt?: string;
+  readonly steerOrigin?: UserIntentSteerOrigin;
+  readonly attemptCount: number;
 }
 
 export interface ToolCallRecord {
   readonly toolCallId: string;
   readonly sessionId: string;
+  readonly turnId?: string;
   readonly messageId?: string;
+  readonly parentToolCallId?: string;
+  readonly executionId?: string;
   readonly toolName: string;
   readonly request: unknown;
+  readonly update?: unknown;
   readonly response?: unknown;
+  /** Assigned by WorkspaceStore on first persistence and immutable thereafter. */
+  readonly sequence?: number;
+  /** Adapter-authored position shared with messages in this turn's durable timeline. */
+  readonly timelineSequence?: number;
   readonly status: "requested" | "running" | "completed" | "failed" | "denied" | "ambiguous";
   readonly sensitivity: Sensitivity;
   readonly createdAt: string;
@@ -448,11 +484,129 @@ export interface OperationalRepositories {
     readonly put: (record: MessageRecord) => Promise<DatabaseRowRef>;
     readonly listForSession: (sessionId: string) => Promise<readonly MessageRecord[]>;
   };
+  readonly userIntents: {
+    readonly enqueue: (request: {
+      readonly intentId: string;
+      readonly sessionId: string;
+      readonly text: string;
+      readonly queuedBehindTurnId?: string;
+      readonly createdAt: string;
+    }) => Promise<UserIntentRecord>;
+    /**
+     * Atomically creates a turn intent and promotes it into a steer bound to a
+     * running foreground turn. Returns undefined without inserting when the
+     * target turn cannot be bound.
+     */
+    readonly enqueueAndPromoteToSteer: (request: {
+      readonly intentId: string;
+      readonly sessionId: string;
+      readonly text: string;
+      readonly targetTurnId: string;
+      readonly createdAt: string;
+      readonly promotedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    /**
+     * Durably records an explicit steer until the live adapter reports readiness.
+     * Returns undefined without inserting when the target turn cannot be bound.
+     */
+    readonly holdExplicitSteer: (request: {
+      readonly intentId: string;
+      readonly sessionId: string;
+      readonly text: string;
+      readonly targetTurnId: string;
+      readonly createdAt: string;
+      readonly heldAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    /** Moves the newest queued turn into durable held-steer state. */
+    readonly holdNewestPendingToSteer: (request: {
+      readonly sessionId: string;
+      readonly targetTurnId: string;
+      readonly heldAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    /** Promotes a held steer to dispatching once the adapter can accept it. */
+    readonly activateHeldSteer: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly targetTurnId: string;
+      readonly promotedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    /** Releases a held steer without losing whether it was explicit or queued. */
+    readonly releaseHeldSteer: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly targetTurnId: string;
+      readonly releasedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly listPending: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
+    readonly listHeld: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
+    readonly listUnresolved: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
+    readonly claimOldestPending: (request: {
+      readonly sessionId: string;
+      readonly targetTurnId: string;
+      readonly claimedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly promoteNewestPendingToSteer: (request: {
+      readonly sessionId: string;
+      readonly targetTurnId: string;
+      readonly promotedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly withdraw: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly withdrawnAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    /**
+     * Withdraws an explicit steer only when the caller has positive evidence
+     * that it was not consumed. The steer never passes through pending state.
+     */
+    readonly withdrawUnconsumedSteerDispatch: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly targetTurnId: string;
+      readonly withdrawnAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly markDelivered: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly targetTurnId: string;
+      readonly deliveredAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly recordSteerDelivery: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly targetTurnId: string;
+      readonly text: string;
+      readonly sensitivity: Sensitivity;
+      readonly timelineSequence: number;
+      readonly deliveredAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly markUnresolved: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly targetTurnId: string;
+      readonly unresolvedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    /** Release only when the caller has positive evidence that no delivery occurred. */
+    readonly releaseUnconsumedDispatch: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly releasedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    readonly recoverDispatching: (request: {
+      readonly sessionId: string;
+      readonly recoveredAt: string;
+    }) => Promise<{
+      readonly released: number;
+      readonly delivered: number;
+      readonly unresolved: number;
+    }>;
+  };
   readonly toolCalls: {
     readonly get: (toolCallId: string) => Promise<ToolCallRecord | undefined>;
     readonly put: (record: ToolCallRecord) => Promise<DatabaseRowRef>;
     readonly listForSession: (sessionId: string) => Promise<readonly ToolCallRecord[]>;
     readonly listForExecution: (executionId: string) => Promise<readonly ToolCallRecord[]>;
+    readonly interruptRunningForTurn: (turnId: string, interruptedAt: string) => Promise<number>;
   };
   readonly codeExecutions: {
     readonly get: (executionId: string) => Promise<CodeExecutionRecord | undefined>;

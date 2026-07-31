@@ -16,9 +16,9 @@ import {
   createPiSelfTools,
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
-  type PreparedPiCodeExecution,
   type PiCodeExecutionAdapter,
   type PiSkillLibrary,
+  type PreparedPiCodeExecution,
   resolveFrozenSessionToolDefinitions,
   toAgentActionPayload,
 } from "../src/index.ts";
@@ -337,7 +337,9 @@ describe("agent runtime factories", () => {
   test("fails before model execution when frozen non-prompt material has no exact resolver", async () => {
     const controlled = createControlledPiModels();
     const plan = frozenPlan();
-    const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
 
     await expect(
       runtime.run(
@@ -475,12 +477,14 @@ describe("agent runtime factories", () => {
           emit({ type: "progress", value: { message: "Starting shell" } });
           emit({
             type: "tool-start",
+            callId: "tool_call_nested-visible",
             name: "shell.run",
             callIndex: 0,
             input: { command: "pwd" },
           });
           emit({
             type: "tool-end",
+            callId: "tool_call_nested-visible",
             name: "shell.run",
             callIndex: 0,
             ok: true,
@@ -520,22 +524,30 @@ describe("agent runtime factories", () => {
     );
 
     expect(result).toMatchObject({ outcome: "completed", text: "Done." });
-    expect(events).toContainEqual({
-      type: "tool-start",
-      actionId: "call-execute-visible",
-      name: "execute",
-      input: { source: "return await tools.shell.run({ command: 'pwd' });" },
-    });
-    expect(events).toContainEqual({
-      type: "tool-start",
-      actionId: "call-execute-visible:call:0",
-      parentActionId: "call-execute-visible",
-      name: "shell.run",
-      input: { command: "pwd" },
-    });
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "tool-start",
+          actionId: "call-execute-visible",
+          name: "execute",
+          input: { source: "return await tools.shell.run({ command: 'pwd' });" },
+        }),
+      ]),
+    );
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "tool-start",
+          actionId: "tool_call_nested-visible",
+          parentActionId: "call-execute-visible",
+          name: "shell.run",
+          input: { command: "pwd" },
+        }),
+      ]),
+    );
     expect(events).toContainEqual({
       type: "tool-end",
-      actionId: "call-execute-visible:call:0",
+      actionId: "tool_call_nested-visible",
       parentActionId: "call-execute-visible",
       name: "shell.run",
       isError: false,
@@ -572,6 +584,172 @@ describe("agent runtime factories", () => {
           !event.isError,
       ),
     ).toBe(true);
+  });
+
+  test("acknowledges steering only when Pi injects the user message into the active loop", async () => {
+    const responseStarted = Promise.withResolvers<void>();
+    const releaseResponse = Promise.withResolvers<void>();
+    let responses = 0;
+    const controlled = createControlledPiModels({
+      respond: async ({ lastUserText }) => {
+        responses += 1;
+        if (responses === 1) {
+          responseStarted.resolve();
+          await releaseResponse.promise;
+        }
+        return `response ${String(responses)} for ${lastUserText}`;
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
+    const events: AgentRuntimeEvent[] = [];
+    const running = runtime.run(
+      {
+        trailId: "trail-steer-consumed",
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        thinkingLevel: "off",
+        systemPrompt: "Follow steering messages.",
+        prompt: "begin",
+        activeCapabilities: [],
+      },
+      (event) => events.push(event),
+    );
+    await responseStarted.promise;
+
+    const receipt = runtime.steer("trail-steer-consumed", "change direction");
+    const beforeConsumption = await Promise.race([
+      receipt.then(() => "settled" as const),
+      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
+    ]);
+    expect(beforeConsumption).toBe("pending");
+
+    releaseResponse.resolve();
+    await expect(receipt).resolves.toEqual({
+      status: "consumed",
+      timelineSequence: 2,
+      consumedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await expect(running).resolves.toMatchObject({ outcome: "completed" });
+    expect(
+      events.filter(
+        (event): event is Extract<AgentRuntimeEvent, { readonly type: "assistant-message" }> =>
+          event.type === "assistant-message",
+      ),
+    ).toEqual([
+      {
+        type: "assistant-message",
+        text: "response 1 for begin",
+        timelineSequence: 1,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        type: "assistant-message",
+        text: "response 2 for change direction",
+        timelineSequence: 3,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    expect(responses).toBe(2);
+  });
+
+  test("settles queued steering as not consumed when the turn is aborted first", async () => {
+    const responseStarted = Promise.withResolvers<void>();
+    const releaseResponse = Promise.withResolvers<void>();
+    const controlled = createControlledPiModels({
+      respond: async () => {
+        responseStarted.resolve();
+        await releaseResponse.promise;
+        return "must not consume the queued steer";
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
+    const running = runtime.run(
+      {
+        trailId: "trail-steer-aborted",
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        thinkingLevel: "off",
+        systemPrompt: "Follow steering messages.",
+        prompt: "begin",
+        activeCapabilities: [],
+      },
+      () => undefined,
+    );
+    await responseStarted.promise;
+
+    const receipt = runtime.steer("trail-steer-aborted", "never consumed");
+    const aborting = runtime.abort("trail-steer-aborted");
+    releaseResponse.resolve();
+
+    await expect(receipt).resolves.toEqual({ status: "not-consumed", reason: "aborted" });
+    await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+    await expect(aborting).resolves.toBeUndefined();
+  });
+
+  test("matches duplicate steering receipts in Pi queue order", async () => {
+    const firstResponseStarted = Promise.withResolvers<void>();
+    const releaseFirstResponse = Promise.withResolvers<void>();
+    const secondResponseStarted = Promise.withResolvers<void>();
+    const releaseSecondResponse = Promise.withResolvers<void>();
+    let responses = 0;
+    const controlled = createControlledPiModels({
+      respond: async () => {
+        responses += 1;
+        if (responses === 1) {
+          firstResponseStarted.resolve();
+          await releaseFirstResponse.promise;
+        } else if (responses === 2) {
+          secondResponseStarted.resolve();
+          await releaseSecondResponse.promise;
+        }
+        return `response ${String(responses)}`;
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
+    const running = runtime.run(
+      {
+        trailId: "trail-duplicate-steers",
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        thinkingLevel: "off",
+        systemPrompt: "Follow steering messages.",
+        prompt: "same text",
+        activeCapabilities: [],
+      },
+      () => undefined,
+    );
+    await firstResponseStarted.promise;
+
+    const first = runtime.steer("trail-duplicate-steers", "same text");
+    const second = runtime.steer("trail-duplicate-steers", "same text");
+    releaseFirstResponse.resolve();
+
+    await secondResponseStarted.promise;
+    await expect(first).resolves.toEqual({
+      status: "consumed",
+      timelineSequence: 2,
+      consumedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const secondBeforeItsTurn = await Promise.race([
+      second.then(() => "settled" as const),
+      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
+    ]);
+    expect(secondBeforeItsTurn).toBe("pending");
+
+    releaseSecondResponse.resolve();
+    await expect(second).resolves.toEqual({
+      status: "consumed",
+      timelineSequence: 4,
+      consumedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await expect(running).resolves.toMatchObject({ outcome: "completed" });
+    expect(responses).toBe(3);
   });
 
   test("rejects sabotaged immutable bytes and incomplete tool registration before prompting", async () => {

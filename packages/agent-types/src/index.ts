@@ -232,6 +232,8 @@ export interface AgentActionStartEvent {
   readonly parentActionId?: string;
   readonly name: string;
   readonly input: JsonValue;
+  /** Position in the adapter-observed mixed interaction timeline for this turn. */
+  readonly timelineSequence?: number;
 }
 
 export interface AgentActionUpdateEvent {
@@ -255,6 +257,12 @@ export interface AgentActionEndEvent {
 
 export type AgentActionEvent = AgentActionStartEvent | AgentActionUpdateEvent | AgentActionEndEvent;
 
+export interface AgentAssistantMessageBoundary {
+  readonly text: string;
+  readonly timelineSequence: number;
+  readonly createdAt: string;
+}
+
 export type AgentRuntimeEvent =
   | { readonly type: "delta"; readonly text: string }
   | {
@@ -264,12 +272,14 @@ export type AgentRuntimeEvent =
       readonly contextWindow: number;
     }
   | ({ readonly type: "usage" } & AgentContextUsage)
+  | ({ readonly type: "assistant-message" } & AgentAssistantMessageBoundary)
   | AgentActionEvent
   | { readonly type: "status"; readonly status: "started" | "completed" | "aborted" }
   | { readonly type: "status"; readonly status: "failed"; readonly error: string };
 
 interface AgentRuntimeResultBase {
   readonly text: string;
+  readonly assistantMessages?: readonly AgentAssistantMessageBoundary[];
   readonly provider: string;
   readonly model: string;
   readonly contextUsage?: AgentContextUsage;
@@ -290,14 +300,28 @@ export type AgentRuntimeResult =
       readonly error: string;
     });
 
+/**
+ * Durable steering may only be acknowledged after Pi injects the queued user message into the
+ * active loop. Queue acceptance alone is not delivery.
+ */
+export type AgentSteerResult =
+  | {
+      readonly status: "consumed";
+      readonly timelineSequence: number;
+      readonly consumedAt: string;
+    }
+  | {
+      readonly status: "not-consumed";
+      readonly reason: "not-running" | "turn-ended" | "aborted";
+    };
+
 export interface NoesisAgentRuntime {
   readonly name: string;
   readonly run: (
     request: AgentRuntimeRequest,
     emit: (event: AgentRuntimeEvent) => void,
   ) => Promise<AgentRuntimeResult>;
-  readonly steer: (trailId: string, text: string) => Promise<void>;
-  readonly followUp: (trailId: string, text: string) => Promise<void>;
+  readonly steer: (trailId: string, text: string) => Promise<AgentSteerResult>;
   readonly abort: (trailId: string) => Promise<void>;
 }
 

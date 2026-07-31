@@ -10,6 +10,7 @@ export interface TurnSettlementRequest {
   readonly sessionId: string;
   readonly turnId: string;
   readonly input: string;
+  readonly sourceIntentId?: string;
   readonly occurredAt: string;
   readonly plan: FrozenTurnPlan;
   readonly execute: () => Promise<TurnResult>;
@@ -42,9 +43,11 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         createdAt: request.occurredAt,
         metadata: Object.freeze({
           turnId: request.turnId,
+          ...(request.sourceIntentId ? { sourceIntentId: request.sourceIntentId } : {}),
           frozenTurnPlanId: request.plan.planId,
           frozenTurnPlanDigest: request.plan.canonicalDigest,
         }),
+        timelineSequence: 0,
       }),
     );
     const serving = request.plan.selectedCapabilities.map((selection) => selection.revision);
@@ -54,27 +57,81 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
       summary: string,
       assistantMessage?: string,
       aborted = false,
+      assistantBoundaries: TurnResult["assistantMessages"] = [],
     ): Promise<void> => {
-      const assistantRef = assistantMessage
-        ? await options.workspace.operational.messages.put(
-            Object.freeze({
-              messageId: `${request.turnId}:assistant`,
-              sessionId: request.sessionId,
-              role: "assistant" as const,
-              content: assistantMessage,
-              sensitivity: "normal" as const,
-              createdAt: now(),
-              metadata: Object.freeze({
-                turnId: request.turnId,
-                frozenTurnPlanId: request.plan.planId,
-              }),
-            }),
+      for (const boundary of assistantBoundaries) {
+        const messageId = `${request.turnId}:assistant:${String(boundary.timelineSequence)}`;
+        const existing = await options.workspace.operational.messages.get(messageId);
+        if (existing !== undefined) {
+          if (
+            existing.sessionId !== request.sessionId ||
+            existing.role !== "assistant" ||
+            existing.content !== boundary.text ||
+            existing.createdAt !== boundary.createdAt ||
+            existing.timelineSequence !== boundary.timelineSequence
           )
-        : undefined;
-      const evidenceRefs: readonly EvidenceRef[] = Object.freeze([
-        userRef,
-        ...(assistantRef ? [assistantRef] : []),
-      ]);
+            throw new Error(`Assistant boundary ${messageId} has conflicting durable content`);
+          continue;
+        }
+        await options.workspace.operational.messages.put(
+          Object.freeze({
+            messageId,
+            sessionId: request.sessionId,
+            role: "assistant" as const,
+            content: boundary.text,
+            sensitivity: "normal" as const,
+            createdAt: boundary.createdAt,
+            metadata: Object.freeze({
+              turnId: request.turnId,
+              frozenTurnPlanId: request.plan.planId,
+            }),
+            timelineSequence: boundary.timelineSequence,
+          }),
+        );
+      }
+      const durableAssistantMessages = (
+        await options.workspace.operational.messages.listForSession(request.sessionId)
+      )
+        .filter((message) => message.role === "assistant" && message.metadata["turnId"] === request.turnId)
+        .sort(
+          (left, right) =>
+            (left.timelineSequence ?? Number.MAX_SAFE_INTEGER) -
+              (right.timelineSequence ?? Number.MAX_SAFE_INTEGER) ||
+            left.createdAt.localeCompare(right.createdAt) ||
+            left.messageId.localeCompare(right.messageId),
+        );
+      if (durableAssistantMessages.length === 0 && assistantMessage) {
+        await options.workspace.operational.messages.put(
+          Object.freeze({
+            messageId: `${request.turnId}:assistant`,
+            sessionId: request.sessionId,
+            role: "assistant" as const,
+            content: assistantMessage,
+            sensitivity: "normal" as const,
+            createdAt: now(),
+            metadata: Object.freeze({
+              turnId: request.turnId,
+              frozenTurnPlanId: request.plan.planId,
+            }),
+          }),
+        );
+      }
+      const settledAssistantMessages =
+        durableAssistantMessages.length > 0
+          ? durableAssistantMessages
+          : (await options.workspace.operational.messages.listForSession(request.sessionId)).filter(
+              (message) => message.role === "assistant" && message.metadata["turnId"] === request.turnId,
+            );
+      const assistantRefs: readonly EvidenceRef[] = Object.freeze(
+        settledAssistantMessages.map((message) =>
+          Object.freeze({
+            kind: "database_row" as const,
+            table: "messages" as const,
+            rowId: message.messageId,
+          }),
+        ),
+      );
+      const evidenceRefs: readonly EvidenceRef[] = Object.freeze([userRef, ...assistantRefs]);
       await options.workspace.operational.outcomes.put(
         Object.freeze({
           outcomeId: `${request.turnId}:outcome`,
@@ -168,10 +225,16 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
       throw error;
     }
     if (result.outcome === "aborted") {
-      await record("failed", "Turn aborted", result.output, true);
+      await record("failed", "Turn aborted", result.output, true, result.assistantMessages);
       return result;
     }
-    await record(correction.corrected ? "corrected" : "accepted", result.output, result.output);
+    await record(
+      correction.corrected ? "corrected" : "accepted",
+      result.output,
+      result.output,
+      false,
+      result.assistantMessages,
+    );
     return result;
   };
 

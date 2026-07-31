@@ -1,22 +1,57 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentRuntimeEvent, AgentRuntimeRequest, NoesisAgentRuntime } from "@noesis/agent-types";
+import {
+  type AgentRuntimeEvent,
+  type AgentRuntimeRequest,
+  type FrozenTurnPlan,
+  frozenTurnPlanDigest,
+  type NoesisAgentRuntime,
+} from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
 import { eventChecksum, type LedgerEvent } from "@noesis/domain";
 import { createPiAgentRoleRunner, createPiAgentRuntime, createPiSkillLibrary } from "@noesis/runtime-pi";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
-import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
 import {
   CONTROLLED_PI_MODEL,
   CONTROLLED_PI_PROVIDER,
   createControlledPiModels,
 } from "../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 import { createScriptedAgentRoleRunner } from "../../../packages/runtime-pi/test/support/scripted-role-runner.ts";
+import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
 import { createApplicationRuntimeComposition } from "../src/runtime-composition.ts";
 
 const roots: string[] = [];
+
+const recoveryTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
+  const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
+    schemaVersion: 1,
+    planId: `plan-${turnId}`,
+    sessionId,
+    turnId,
+    activationId: "activation_genesis",
+    activationRevision: 1,
+    selectedCapabilities: [],
+    renderedSystemPrompt: "Noesis recovery fixture",
+    provider: CONTROLLED_PI_PROVIDER,
+    model: CONTROLLED_PI_MODEL,
+    thinkingLevel: "off",
+    permissionSnapshot: { effects: [], resourcePatterns: [], credentialRefs: [] },
+    retrievalCitations: [],
+    routing: { strategyId: "baseline", reason: "Recovery fixture" },
+    createdAt: "2026-07-26T00:00:00.000Z",
+  };
+  return Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) });
+};
+
+async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<void> {
+  for (let index = 0; index < 200; index += 1) {
+    if (await predicate()) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting for runtime interaction");
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
@@ -156,8 +191,12 @@ describe("apps/noesis production control-plane composition", () => {
           provider: request.provider,
           model: request.model,
         }),
-      steer: noOp,
-      followUp: noOp,
+      steer: async () =>
+        Object.freeze({
+          status: "consumed" as const,
+          timelineSequence: 1,
+          consumedAt: "2026-01-01T00:00:00.000Z",
+        }),
       abort: noOp,
     });
     const first = await createApplicationRuntimeComposition({
@@ -167,7 +206,7 @@ describe("apps/noesis production control-plane composition", () => {
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
     const trail = await first.startTrail({ title: "Aborted partial replay" });
-    const aborted = await first.runTurn(trail.trailId, "input attached to an aborted answer");
+    const aborted = await first.debug.runTurn(trail.trailId, "input attached to an aborted answer");
     expect(aborted).toMatchObject({
       outcome: "aborted",
       output: "partial answer that must not resume",
@@ -197,8 +236,12 @@ describe("apps/noesis production control-plane composition", () => {
           model: request.model,
         });
       },
-      steer: noOp,
-      followUp: noOp,
+      steer: async () =>
+        Object.freeze({
+          status: "consumed" as const,
+          timelineSequence: 1,
+          consumedAt: "2026-01-01T00:00:00.000Z",
+        }),
       abort: noOp,
     });
     const reopened = await createApplicationRuntimeComposition({
@@ -209,11 +252,890 @@ describe("apps/noesis production control-plane composition", () => {
     });
     expect(reopened.getTrail(trail.trailId).turns).toEqual([]);
     await reopened.resumeTrail(trail.trailId);
-    await reopened.runTurn(trail.trailId, "continue with clean context");
+    await reopened.debug.runTurn(trail.trailId, "continue with clean context");
     expect(requests[0]?.systemPrompt).not.toContain("partial answer that must not resume");
     expect(requests[0]?.systemPrompt).not.toContain("input attached to an aborted answer");
     expect(await reopened.debug.workspace.operational.messages.listForSession(trail.trailId)).toHaveLength(4);
     await reopened.shutdown();
+  });
+
+  test("recovers a process-killed foreground turn before hydration and keeps its action inspectable", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-foreground-recovery-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const seed = await createWorkspaceStore(home, {
+      now: () => "2026-07-26T00:00:00.000Z",
+    });
+    await seed.operational.sessions.put({
+      sessionId: "session-process-killed",
+      title: "Process-killed turn",
+      status: "running",
+      provider: CONTROLLED_PI_PROVIDER,
+      model: CONTROLLED_PI_MODEL,
+      runtime: runtimeIdentity,
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const protectedRuntime = createWorkspaceRuntimeInternals(seed).protectedRuntime;
+    await protectedRuntime.activations.bootstrapGenesis({
+      capabilityRevision: {
+        kind: "capability_revision",
+        capabilityId: "general-collaboration",
+        capabilityRevisionId: "general-collaboration-genesis-v1",
+        bundleDigest: "a".repeat(64),
+      },
+      activeDefinitions: Object.freeze({}),
+    });
+    await protectedRuntime.activations.admitTurnPlan(
+      recoveryTurnPlan("session-process-killed", "turn-process-killed"),
+    );
+    await seed.operational.messages.put({
+      messageId: "turn-process-killed:user",
+      sessionId: "session-process-killed",
+      role: "user",
+      content: "Inspect this interrupted work",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:01.000Z",
+      metadata: Object.freeze({ turnId: "turn-process-killed" }),
+    });
+    await seed.operational.toolCalls.put({
+      toolCallId: "action-process-killed",
+      sessionId: "session-process-killed",
+      turnId: "turn-process-killed",
+      toolName: "shell.run",
+      request: Object.freeze({ command: "long-running-command" }),
+      status: "running",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:02.000Z",
+    });
+    seed.close();
+
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+
+    expect(runtime.getTrail("session-process-killed")).toMatchObject({ status: "aborted", turns: [] });
+    expect(await runtime.getTranscript("session-process-killed")).toMatchObject([
+      { kind: "message", role: "user", text: "Inspect this interrupted work" },
+      {
+        kind: "action",
+        actionId: "action-process-killed",
+        status: "interrupted",
+        output: { error: "Runtime exited before turn settled", reason: "interrupted" },
+      },
+    ]);
+    await expect(runtime.resumeTrail("session-process-killed")).resolves.toMatchObject({
+      status: "idle",
+      turns: [],
+    });
+    expect(
+      (await runtime.debug.workspace.operational.messages.listForSession("session-process-killed")).filter(
+        (message) => message.role === "assistant",
+      ),
+    ).toEqual([]);
+    await runtime.shutdown();
+  });
+
+  test("hydrates and resumes running sessions left before admission or after turn settlement", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-session-window-recovery-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const seed = await createWorkspaceStore(home, {
+      now: () => "2026-07-26T00:00:00.000Z",
+    });
+    const runningSession = (sessionId: string) =>
+      Object.freeze({
+        sessionId,
+        title: sessionId,
+        status: "running" as const,
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        runtime: runtimeIdentity,
+        createdAt: "2026-07-26T00:00:00.000Z",
+        updatedAt: "2026-07-26T00:00:00.000Z",
+        metadata: Object.freeze({}),
+      });
+    await seed.operational.sessions.put(runningSession("session-before-admission"));
+    await seed.operational.sessions.put(runningSession("session-after-settlement"));
+
+    const protectedRuntime = createWorkspaceRuntimeInternals(seed).protectedRuntime;
+    await protectedRuntime.activations.bootstrapGenesis({
+      capabilityRevision: {
+        kind: "capability_revision",
+        capabilityId: "general-collaboration",
+        capabilityRevisionId: "general-collaboration-genesis-v1",
+        bundleDigest: "a".repeat(64),
+      },
+      activeDefinitions: Object.freeze({}),
+    });
+    await protectedRuntime.activations.admitTurnPlan(
+      recoveryTurnPlan("session-after-settlement", "turn-before-idle-persist"),
+    );
+    await seed.operational.messages.put({
+      messageId: "turn-before-idle-persist:user",
+      sessionId: "session-after-settlement",
+      role: "user",
+      content: "A completed request",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:01.000Z",
+      metadata: Object.freeze({ turnId: "turn-before-idle-persist" }),
+    });
+    await seed.operational.messages.put({
+      messageId: "turn-before-idle-persist:assistant",
+      sessionId: "session-after-settlement",
+      role: "assistant",
+      content: "A completed response",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:02.000Z",
+      metadata: Object.freeze({ turnId: "turn-before-idle-persist" }),
+    });
+    await seed.operational.outcomes.put({
+      outcomeId: "turn-before-idle-persist:outcome",
+      sessionId: "session-after-settlement",
+      turnId: "turn-before-idle-persist",
+      status: "accepted",
+      summary: "A completed response",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:03.000Z",
+      metadata: Object.freeze({ replayEligible: true, aborted: false }),
+    });
+    await seed.operational.foregroundTurns.settle({
+      turnId: "turn-before-idle-persist",
+      outcomeId: "turn-before-idle-persist:outcome",
+      status: "completed",
+      settledAt: "2026-07-26T00:00:03.000Z",
+    });
+    // Recreate the process-exit window after durable turn settlement but before the runtime's
+    // final trail-state write restored the session to idle.
+    await seed.operational.sessions.put(runningSession("session-after-settlement"));
+    seed.close();
+
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+
+    expect(runtime.getTrail("session-before-admission")).toMatchObject({ status: "aborted", turns: [] });
+    expect(runtime.getTrail("session-after-settlement")).toMatchObject({
+      status: "aborted",
+      turns: [{ input: "A completed request", output: "A completed response" }],
+    });
+    await expect(runtime.resumeTrail("session-before-admission")).resolves.toMatchObject({
+      status: "idle",
+      turns: [],
+    });
+    await expect(runtime.resumeTrail("session-after-settlement")).resolves.toMatchObject({
+      status: "idle",
+      turns: [{ input: "A completed request", output: "A completed response" }],
+    });
+    expect(
+      await runtime.debug.workspace.operational.outcomes.listForSession("session-before-admission"),
+    ).toEqual([]);
+    await runtime.shutdown();
+  });
+
+  test("persists every top-level model action and exposes the same transcript after restart", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-durable-actions-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const noOp = async (): Promise<void> => undefined;
+    const actionAgent: NoesisAgentRuntime = Object.freeze({
+      name: runtimeIdentity,
+      run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+        const firstBoundary = Object.freeze({
+          text: "Starting.",
+          timelineSequence: 1,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+        emit({ type: "assistant-message", ...firstBoundary });
+        for (const [index, name] of ["inspect_self", "remember", "adapt", "execute"].entries()) {
+          const actionId = `action-${String(index + 1)}`;
+          emit({
+            type: "tool-start",
+            actionId,
+            name,
+            input: { fixture: name },
+            timelineSequence: index + 2,
+          });
+          emit({
+            type: "tool-end",
+            actionId,
+            name,
+            isError: false,
+            result: { status: "completed", fixture: name },
+          });
+        }
+        emit({
+          type: "tool-start",
+          actionId: "action-unmatched",
+          name: "remember",
+          input: { fixture: "unmatched" },
+          timelineSequence: 6,
+        });
+        const finalBoundary = Object.freeze({
+          text: "All actions completed.",
+          timelineSequence: 7,
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+        emit({ type: "assistant-message", ...finalBoundary });
+        return Object.freeze({
+          outcome: "completed" as const,
+          stopReason: "stop" as const,
+          text: "Starting.\n\nAll actions completed.",
+          assistantMessages: Object.freeze([firstBoundary, finalBoundary]),
+          provider: request.provider,
+          model: request.model,
+        });
+      },
+      steer: async () =>
+        Object.freeze({
+          status: "consumed" as const,
+          timelineSequence: 1,
+          consumedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      abort: noOp,
+    });
+    const first = await createApplicationRuntimeComposition({
+      config,
+      agent: actionAgent,
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await first.startTrail({ title: "Durable actions" });
+    await first.debug.runTurn(trail.trailId, "Use your full self tool surface");
+    expect(first.getTrail(trail.trailId).turns).toEqual([
+      {
+        input: "Use your full self tool surface",
+        output: "Starting.\n\nAll actions completed.",
+      },
+    ]);
+    expect(first.listTrailSummaries().find((summary) => summary.trailId === trail.trailId)).toMatchObject({
+      turnCount: 1,
+      messageCount: 3,
+    });
+    const beforeRestart = await first.getTranscript(trail.trailId);
+    expect(beforeRestart.flatMap((entry) => (entry.kind === "action" ? [entry.name] : []))).toEqual([
+      "inspect_self",
+      "remember",
+      "adapt",
+      "execute",
+      "remember",
+    ]);
+    expect(beforeRestart.flatMap((entry) => (entry.kind === "action" ? [entry.actionId] : []))).toEqual([
+      expect.stringMatching(/:action-1$/u),
+      expect.stringMatching(/:action-2$/u),
+      expect.stringMatching(/:action-3$/u),
+      expect.stringMatching(/:action-4$/u),
+      expect.stringMatching(/:action-unmatched$/u),
+    ]);
+    expect(beforeRestart.map((entry) => (entry.kind === "message" ? entry.text : entry.name))).toEqual([
+      "Use your full self tool surface",
+      "Starting.",
+      "inspect_self",
+      "remember",
+      "adapt",
+      "execute",
+      "remember",
+      "All actions completed.",
+    ]);
+    expect(
+      beforeRestart.find((entry) => entry.kind === "action" && entry.actionId.endsWith("unmatched")),
+    ).toMatchObject({
+      kind: "action",
+      name: "remember",
+      status: "interrupted",
+    });
+    await first.shutdown();
+
+    const reopened = await createApplicationRuntimeComposition({
+      config,
+      agent: actionAgent,
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    expect(reopened.getTrail(trail.trailId).turns).toEqual([
+      {
+        input: "Use your full self tool surface",
+        output: "Starting.\n\nAll actions completed.",
+      },
+    ]);
+    expect(reopened.listTrailSummaries().find((summary) => summary.trailId === trail.trailId)).toMatchObject({
+      turnCount: 1,
+      messageCount: 3,
+    });
+    expect(await reopened.getTranscript(trail.trailId)).toEqual(beforeRestart);
+    await reopened.shutdown();
+  });
+
+  test("runs queued turns through the durable interaction controller and records successful steering", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-interaction-controller-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    let finishTurn: ((outcome: "completed" | "aborted") => void) | undefined;
+    const turnFinished = new Promise<"completed" | "aborted">((resolve) => {
+      finishTurn = resolve;
+    });
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const steered: string[] = [];
+    const interactionAgent: NoesisAgentRuntime = Object.freeze({
+      name: runtimeIdentity,
+      run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+        emit({ type: "status", status: "started" });
+        markStarted?.();
+        const outcome = await turnFinished;
+        return outcome === "aborted"
+          ? Object.freeze({
+              outcome: "aborted" as const,
+              stopReason: "aborted" as const,
+              text: "partial",
+              provider: request.provider,
+              model: request.model,
+            })
+          : Object.freeze({
+              outcome: "completed" as const,
+              stopReason: "stop" as const,
+              text: "completed",
+              provider: request.provider,
+              model: request.model,
+            });
+      },
+      steer: async (_trailId: string, text: string) => {
+        steered.push(text);
+        return Object.freeze({
+          status: "consumed" as const,
+          timelineSequence: 1,
+          consumedAt: "2026-01-01T00:00:00.000Z",
+        });
+      },
+      abort: async () => {
+        finishTurn?.("aborted");
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      agent: interactionAgent,
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Durable interaction" });
+
+    const queued = await runtime.interact(trail.trailId, {
+      type: "submit",
+      text: "Run this as its own turn",
+    });
+    expect(queued.effect).toBe("queued");
+    await started;
+    const steeredResult = await runtime.interact(trail.trailId, {
+      type: "steer",
+      text: "Focus on the durable evidence",
+    });
+    expect(steeredResult.effect).toBe("steered");
+    expect(steered).toEqual(["Focus on the durable evidence"]);
+    const messages = await runtime.debug.workspace.operational.messages.listForSession(trail.trailId);
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: "Run this as its own turn",
+          metadata: expect.objectContaining({ sourceIntentId: queued.intentId }),
+        }),
+        expect.objectContaining({
+          role: "user",
+          content: "Focus on the durable evidence",
+          metadata: expect.objectContaining({
+            sourceIntentId: steeredResult.intentId,
+            deliveryMode: "steer",
+          }),
+        }),
+      ]),
+    );
+
+    await runtime.interact(trail.trailId, {
+      type: "submit",
+      text: "Preserve this queued turn",
+    });
+    const activeTurnId = (await runtime.inspectInteraction(trail.trailId)).active?.turnId;
+    if (!activeTurnId) throw new Error("Expected an active turn before interrupt");
+    await runtime.interact(trail.trailId, { type: "interrupt", turnId: activeTurnId });
+    await waitUntil(async () => (await runtime.inspectInteraction(trail.trailId)).phase === "idle");
+    expect((await runtime.inspectInteraction(trail.trailId)).pending.map((item) => item.text)).toEqual([
+      "Run this as its own turn",
+      "Preserve this queued turn",
+    ]);
+    await runtime.shutdown();
+  });
+
+  test("settles an interacted completion into the authoritative trail context and turns", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-interacted-settlement-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const noOp = async (): Promise<void> => undefined;
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      agent: Object.freeze({
+        name: runtimeIdentity,
+        run: async (request: AgentRuntimeRequest) =>
+          Object.freeze({
+            outcome: "completed" as const,
+            stopReason: "stop" as const,
+            text: "durably completed",
+            provider: request.provider,
+            model: request.model,
+          }),
+        steer: async () =>
+          Object.freeze({
+            status: "consumed" as const,
+            timelineSequence: 1,
+            consumedAt: "2026-01-01T00:00:00.000Z",
+          }),
+        abort: noOp,
+      }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Interacted settlement" });
+
+    await runtime.interact(trail.trailId, {
+      type: "submit",
+      text: "Complete through the interaction controller",
+    });
+    await waitUntil(() => runtime.getTrail(trail.trailId).turns.length === 1);
+
+    expect(runtime.getTrail(trail.trailId)).toMatchObject({
+      status: "idle",
+      contextSnapshotId: expect.any(String),
+      context: {
+        snapshotId: expect.any(String),
+        usedTokens: expect.any(Number),
+      },
+      turns: [
+        {
+          input: "Complete through the interaction controller",
+          output: "durably completed",
+        },
+      ],
+    });
+    await runtime.shutdown();
+  });
+
+  test("builds future model context from completed turns and delivered steers in durable order", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-authoritative-model-history-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    let releaseActive: (() => void) | undefined;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    let markActiveStarted: (() => void) | undefined;
+    const activeStarted = new Promise<void>((resolve) => {
+      markActiveStarted = resolve;
+    });
+    const requests: AgentRuntimeRequest[] = [];
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      agent: Object.freeze({
+        name: runtimeIdentity,
+        run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+          requests.push(request);
+          emit({ type: "status", status: "started" });
+          if (request.prompt === "aborted input")
+            return Object.freeze({
+              outcome: "aborted" as const,
+              stopReason: "aborted" as const,
+              text: "aborted partial output",
+              provider: request.provider,
+              model: request.model,
+            });
+          if (request.prompt === "active input") {
+            markActiveStarted?.();
+            await activeGate;
+          }
+          return Object.freeze({
+            outcome: "completed" as const,
+            stopReason: "stop" as const,
+            text: `reply:${request.prompt}`,
+            provider: request.provider,
+            model: request.model,
+          });
+        },
+        steer: async () =>
+          Object.freeze({
+            status: "consumed" as const,
+            timelineSequence: 1,
+            consumedAt: "2026-01-01T00:00:00.000Z",
+          }),
+        abort: async () => undefined,
+      }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Authoritative model history" });
+    await runtime.debug.runTurn(trail.trailId, "accepted input");
+    await runtime.debug.runTurn(trail.trailId, "aborted input");
+    await runtime.interact(trail.trailId, { type: "submit", text: "active input" });
+    await activeStarted;
+    await runtime.interact(trail.trailId, { type: "steer", text: "delivered steering" });
+    releaseActive?.();
+    await waitUntil(() => runtime.getTrail(trail.trailId).turns.length === 2);
+    await runtime.debug.runTurn(trail.trailId, "inspect history");
+
+    const systemPrompt = requests.at(-1)?.systemPrompt ?? "";
+    const acceptedUser = systemPrompt.indexOf("User: accepted input");
+    const acceptedAssistant = systemPrompt.indexOf("Assistant: reply:accepted input");
+    const activeUser = systemPrompt.indexOf("User: active input");
+    const steer = systemPrompt.indexOf("User: delivered steering");
+    const activeAssistant = systemPrompt.indexOf("Assistant: reply:active input");
+    expect(
+      [acceptedUser, acceptedAssistant, activeUser, steer, activeAssistant].every((index) => index >= 0),
+    ).toBe(true);
+    expect(acceptedUser).toBeLessThan(acceptedAssistant);
+    expect(acceptedAssistant).toBeLessThan(activeUser);
+    expect(activeUser).toBeLessThan(steer);
+    expect(steer).toBeLessThan(activeAssistant);
+    expect(systemPrompt).not.toContain("aborted input");
+    expect(systemPrompt).not.toContain("aborted partial output");
+    await runtime.shutdown();
+  });
+
+  test("forks authoritative replay history with steer provenance across immediate use and restart", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-fork-history-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    let releaseActive: (() => void) | undefined;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    let markActiveStarted: (() => void) | undefined;
+    const activeStarted = new Promise<void>((resolve) => {
+      markActiveStarted = resolve;
+    });
+    const firstRequests: AgentRuntimeRequest[] = [];
+    const first = await createApplicationRuntimeComposition({
+      config,
+      agent: Object.freeze({
+        name: runtimeIdentity,
+        run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+          firstRequests.push(request);
+          emit({ type: "status", status: "started" });
+          if (request.prompt === "accepted source input") {
+            const firstBoundary = Object.freeze({
+              text: "A",
+              timelineSequence: 1,
+              createdAt: "2026-01-01T00:00:00.000Z",
+            });
+            const secondBoundary = Object.freeze({
+              text: "B",
+              timelineSequence: 2,
+              createdAt: "2026-01-01T00:00:00.000Z",
+            });
+            emit({ type: "assistant-message", ...firstBoundary });
+            emit({ type: "assistant-message", ...secondBoundary });
+            return Object.freeze({
+              outcome: "completed" as const,
+              stopReason: "stop" as const,
+              text: "A\n\nB",
+              assistantMessages: Object.freeze([firstBoundary, secondBoundary]),
+              provider: request.provider,
+              model: request.model,
+            });
+          }
+          if (request.prompt === "failed source input") throw new Error("source turn failed");
+          if (request.prompt === "aborted source input")
+            return Object.freeze({
+              outcome: "aborted" as const,
+              stopReason: "aborted" as const,
+              text: "aborted source output",
+              provider: request.provider,
+              model: request.model,
+            });
+          if (request.prompt === "active source input") {
+            markActiveStarted?.();
+            await activeGate;
+          }
+          return Object.freeze({
+            outcome: "completed" as const,
+            stopReason: "stop" as const,
+            text: `reply:${request.prompt}`,
+            provider: request.provider,
+            model: request.model,
+          });
+        },
+        steer: async () =>
+          Object.freeze({
+            status: "consumed" as const,
+            timelineSequence: 1,
+            consumedAt: "2026-01-01T00:00:00.000Z",
+          }),
+        abort: async () => undefined,
+      }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const source = await first.startTrail({ title: "Fork source" });
+    await first.debug.runTurn(source.trailId, "accepted source input");
+    await expect(first.debug.runTurn(source.trailId, "failed source input")).rejects.toThrow(
+      "source turn failed",
+    );
+    await first.debug.runTurn(source.trailId, "aborted source input");
+    await first.interact(source.trailId, { type: "submit", text: "active source input" });
+    await activeStarted;
+    await first.interact(source.trailId, { type: "steer", text: "delivered source steer" });
+    releaseActive?.();
+    await waitUntil(() => first.getTrail(source.trailId).turns.length === 2);
+
+    const fork = await first.forkTrail(source.trailId, "Authoritative fork");
+    const expectedInheritedText = [
+      "accepted source input",
+      "A",
+      "B",
+      "active source input",
+      "delivered source steer",
+      "reply:active source input",
+    ];
+    const inheritedMessages = (
+      await first.debug.workspace.operational.messages.listForSession(fork.trailId)
+    ).toSorted(
+      (left, right) => Number(left.metadata["historySequence"]) - Number(right.metadata["historySequence"]),
+    );
+    expect(inheritedMessages.map((message) => message.content)).toEqual(expectedInheritedText);
+    expect(inheritedMessages.map((message) => message.metadata["historyKind"])).toEqual([
+      "turn",
+      "turn",
+      "turn",
+      "turn",
+      "steer",
+      "turn",
+    ]);
+    expect(inheritedMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          messageId: expect.stringMatching(new RegExp(`^${fork.trailId}:inherited:`)),
+          metadata: expect.objectContaining({
+            replayEligible: true,
+            inheritedFromSessionId: source.trailId,
+            inheritedFromMessageId: expect.any(String),
+          }),
+        }),
+      ]),
+    );
+    expect(inheritedMessages.map((message) => message.metadata["historySequence"])).toEqual([
+      0, 1, 2, 3, 4, 5,
+    ]);
+    expect(
+      (await first.getTranscript(fork.trailId)).flatMap((entry) =>
+        entry.kind === "message" ? [entry.text] : [],
+      ),
+    ).toEqual(expectedInheritedText);
+    expect(first.getTrail(fork.trailId).turns).toEqual([
+      { input: "accepted source input", output: "A\n\nB" },
+      { input: "active source input", output: "reply:active source input" },
+    ]);
+    expect(first.listTrailSummaries().find((summary) => summary.trailId === fork.trailId)).toMatchObject({
+      turnCount: 2,
+      messageCount: 6,
+    });
+
+    await first.debug.runTurn(source.trailId, "source-only future input");
+    await first.debug.runTurn(fork.trailId, "immediate fork input");
+    const immediatePrompt = firstRequests.find(
+      (request) => request.prompt === "immediate fork input",
+    )?.systemPrompt;
+    expect(immediatePrompt).toContain("User: accepted source input");
+    expect(immediatePrompt).toContain("Assistant: A");
+    expect(immediatePrompt).toContain("Assistant: B");
+    expect(immediatePrompt).toContain("User: active source input");
+    expect(immediatePrompt).toContain("User: delivered source steer");
+    expect(immediatePrompt).toContain("Assistant: reply:active source input");
+    expect(immediatePrompt).not.toContain("failed source input");
+    expect(immediatePrompt).not.toContain("aborted source input");
+    expect(immediatePrompt).not.toContain("source-only future input");
+    const inheritedMessageIds = inheritedMessages.map((message) => message.messageId);
+    await first.shutdown();
+
+    const reopenedRequests: AgentRuntimeRequest[] = [];
+    const reopened = await createApplicationRuntimeComposition({
+      config,
+      agent: Object.freeze({
+        name: runtimeIdentity,
+        run: async (request: AgentRuntimeRequest) => {
+          reopenedRequests.push(request);
+          return Object.freeze({
+            outcome: "completed" as const,
+            stopReason: "stop" as const,
+            text: `reopened:${request.prompt}`,
+            provider: request.provider,
+            model: request.model,
+          });
+        },
+        steer: async () =>
+          Object.freeze({
+            status: "consumed" as const,
+            timelineSequence: 1,
+            consumedAt: "2026-01-01T00:00:00.000Z",
+          }),
+        abort: async () => undefined,
+      }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    expect(reopened.getTrail(fork.trailId).turns).toEqual([
+      { input: "accepted source input", output: "A\n\nB" },
+      { input: "active source input", output: "reply:active source input" },
+      { input: "immediate fork input", output: "reply:immediate fork input" },
+    ]);
+    expect(reopened.listTrailSummaries().find((summary) => summary.trailId === fork.trailId)).toMatchObject({
+      turnCount: 3,
+      messageCount: 8,
+    });
+    expect(
+      (await reopened.debug.workspace.operational.messages.listForSession(fork.trailId))
+        .filter((message) => message.metadata["replayEligible"] === true)
+        .toSorted(
+          (left, right) =>
+            Number(left.metadata["historySequence"]) - Number(right.metadata["historySequence"]),
+        )
+        .map((message) => message.messageId),
+    ).toEqual(inheritedMessageIds);
+    await reopened.resumeTrail(fork.trailId);
+    await reopened.debug.runTurn(fork.trailId, "restarted fork input");
+    const restartedPrompt = reopenedRequests.at(-1)?.systemPrompt;
+    expect(restartedPrompt).toContain("User: delivered source steer");
+    expect(restartedPrompt).toContain("User: immediate fork input");
+    expect(restartedPrompt).toContain("Assistant: reply:immediate fork input");
+    expect(restartedPrompt).not.toContain("failed source input");
+    expect(restartedPrompt).not.toContain("aborted source input");
+    expect(restartedPrompt).not.toContain("source-only future input");
+    await reopened.shutdown();
+  });
+
+  test("continues persisting later action events after an earlier write fails", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-action-persistence-drain-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const noOp = async (): Promise<void> => undefined;
+    const actionAgent: NoesisAgentRuntime = Object.freeze({
+      name: runtimeIdentity,
+      run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+        emit({
+          type: "tool-start",
+          actionId: "duplicate",
+          name: "remember",
+          input: { value: 1 },
+          timelineSequence: 1,
+        });
+        emit({
+          type: "tool-start",
+          actionId: "duplicate",
+          name: "remember",
+          input: { value: 2 },
+          timelineSequence: 2,
+        });
+        emit({
+          type: "tool-start",
+          actionId: "later",
+          name: "adapt",
+          input: { value: 3 },
+          timelineSequence: 3,
+        });
+        emit({
+          type: "tool-end",
+          actionId: "later",
+          name: "adapt",
+          isError: false,
+          result: { status: "completed" },
+        });
+        return Object.freeze({
+          outcome: "completed" as const,
+          stopReason: "stop" as const,
+          text: "The durable queue should report its failure.",
+          provider: request.provider,
+          model: request.model,
+        });
+      },
+      steer: async () =>
+        Object.freeze({
+          status: "consumed" as const,
+          timelineSequence: 1,
+          consumedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      abort: noOp,
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      agent: actionAgent,
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Action persistence drain" });
+
+    await expect(runtime.debug.runTurn(trail.trailId, "Exercise the persistence queue")).rejects.toThrow(
+      "changed its turn timeline position",
+    );
+    expect(await runtime.getTranscript(trail.trailId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "action", name: "adapt", status: "completed" }),
+      ]),
+    );
+    await runtime.shutdown();
   });
 
   test("a real app turn pins admission and records exact durable operational work", async () => {
@@ -258,7 +1180,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
 
     const trail = await runtime.startTrail({ title: "Composition acceptance" });
-    const result = await runtime.runTurn(trail.trailId, "Record this ordinary turn");
+    const result = await runtime.debug.runTurn(trail.trailId, "Record this ordinary turn");
     expect(result.outcome).toBe("completed");
     expect(config.schemaVersion).toBe(1);
     expect(await runtime.debug.workspace.operational.sessions.get(trail.trailId)).toMatchObject({
@@ -348,7 +1270,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
 
     const trail = await runtime.startTrail({ title: "First correction" });
-    const result = await runtime.runTurn(trail.trailId, "Actually, keep this research brief concise.");
+    const result = await runtime.debug.runTurn(trail.trailId, "Actually, keep this research brief concise.");
     expect(result.frozenTurnPlan?.selectedCapabilities).toMatchObject([
       {
         capabilityId: "general-collaboration",
@@ -403,7 +1325,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
 
     const trail = await runtime.startTrail({ title: "Bounded ambient shutdown" });
-    await runtime.runTurn(trail.trailId, "Actually, keep this research brief concise.");
+    await runtime.debug.runTurn(trail.trailId, "Actually, keep this research brief concise.");
     await reflectionStarted;
 
     let timeout: NodeJS.Timeout | undefined;
@@ -488,7 +1410,7 @@ describe("apps/noesis production control-plane composition", () => {
 
     try {
       const trail = await runtime.startTrail({ title: "Cooperative ambient shutdown" });
-      await runtime.runTurn(trail.trailId, "Actually, keep this research brief concise.");
+      await runtime.debug.runTurn(trail.trailId, "Actually, keep this research brief concise.");
       await reflectionStarted;
 
       await runtime.shutdown();

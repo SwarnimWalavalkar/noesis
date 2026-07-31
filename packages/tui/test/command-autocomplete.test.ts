@@ -66,6 +66,19 @@ describe("Noesis slash command autocomplete", () => {
     );
   });
 
+  test("suggests queue control and explicit steering commands", async () => {
+    const queue = await suggestionsFor("/queue r");
+    const steer = await suggestionsFor("/ste");
+
+    expect(queue?.items).toContainEqual(expect.objectContaining({ value: "resume" }));
+    expect(steer?.items).toContainEqual(
+      expect.objectContaining({
+        value: "steer",
+        description: expect.stringContaining("[message]"),
+      }),
+    );
+  });
+
   test("does not turn Tab outside slash commands into file completion", () => {
     const provider = createNoesisCommandAutocompleteProvider();
 

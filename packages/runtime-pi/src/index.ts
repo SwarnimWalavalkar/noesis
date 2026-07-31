@@ -2,20 +2,22 @@ import { AgentHarness, formatSkillsForSystemPrompt, type Skill } from "@earendil
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { MutableModels } from "@earendil-works/pi-ai";
 import type {
+  AgentAssistantMessageBoundary,
   AgentContextUsage,
   AgentRuntimeEvent,
   AgentRuntimeRequest,
   AgentRuntimeResult,
+  AgentSteerResult,
   FrozenTurnPlan,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
 import { validateFrozenTurnPlan } from "@noesis/agent-types";
+import { toAgentActionPayload } from "./action-payload.ts";
 import {
   createPiExecuteTool,
   type PiCodeExecutionAdapter,
   type PreparedPiCodeExecution,
 } from "./execute-tool.ts";
-import { toAgentActionPayload } from "./action-payload.ts";
 import { frozenPlanMaterialUses } from "./frozen-session-tools.ts";
 import { createPiSelfTools, type PiSelfToolAdapter } from "./self-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
@@ -27,6 +29,7 @@ export type {
   AgentRuntimeEvent,
   AgentRuntimeRequest,
   AgentRuntimeResult,
+  AgentSteerResult,
   AgentThinkingLevel,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
@@ -52,6 +55,17 @@ export * from "./self-tools.ts";
 export * from "./skill-library.ts";
 
 function assistantText(message: { readonly content: readonly unknown[] }): string {
+  return message.content
+    .flatMap((part) => {
+      if (!part || typeof part !== "object" || !("type" in part) || part.type !== "text" || !("text" in part))
+        return [];
+      return typeof part.text === "string" ? [part.text] : [];
+    })
+    .join("");
+}
+
+function userMessageText(message: { readonly content: string | readonly unknown[] }): string {
+  if (typeof message.content === "string") return message.content;
   return message.content
     .flatMap((part) => {
       if (!part || typeof part !== "object" || !("type" in part) || part.type !== "text" || !("text" in part))
@@ -111,10 +125,6 @@ export function createAssistantDeltaAggregator(): AssistantDeltaAggregator {
   };
 }
 
-export function nestedCodeActionId(parentActionId: string, callIndex: number): string {
-  return `${parentActionId}:call:${String(callIndex)}`;
-}
-
 function piToolUpdatePayload(value: unknown): unknown {
   if (!value || typeof value !== "object" || !("details" in value)) return value;
   const details = value.details;
@@ -144,6 +154,7 @@ export interface CreatePiAgentRuntimeOptions {
   readonly selfTools?: PiSelfToolAdapter;
   readonly skills?: PiSkillLibrary;
   readonly requirePinnedSkillSnapshot?: boolean;
+  readonly now?: () => string;
 }
 
 export function createPiAgentRuntime(
@@ -153,6 +164,8 @@ export function createPiAgentRuntime(
 ): PiAgentRuntime {
   interface ActivePiExecution {
     readonly controller: AbortController;
+    readonly pendingSteers: PendingPiSteer[];
+    acceptsSteering: boolean;
     harness?: AgentHarness;
     sessionId?: string;
     preparedCode?: PreparedPiCodeExecution;
@@ -160,6 +173,21 @@ export function createPiAgentRuntime(
     abortError?: unknown;
     abortStatusEmitted?: boolean;
   }
+
+  interface PendingPiSteer {
+    readonly text: string;
+    readonly promise: Promise<AgentSteerResult>;
+    readonly resolve: (result: AgentSteerResult) => void;
+  }
+
+  const notConsumed = (
+    reason: Extract<AgentSteerResult, { readonly status: "not-consumed" }>["reason"],
+  ): AgentSteerResult => Object.freeze({ status: "not-consumed", reason });
+
+  const settlePendingSteers = (execution: ActivePiExecution, result: AgentSteerResult): void => {
+    const pending = execution.pendingSteers.splice(0);
+    for (const receipt of pending) receipt.resolve(result);
+  };
 
   const active = new Map<string, ActivePiExecution>();
 
@@ -169,7 +197,19 @@ export function createPiAgentRuntime(
   ): Promise<AgentRuntimeResult> => {
     const plan = verifyFrozenRequest(request);
     if (active.has(request.trailId)) throw new Error(`Trail ${request.trailId} is already active`);
-    const execution: ActivePiExecution = { controller: new AbortController() };
+    const execution: ActivePiExecution = {
+      controller: new AbortController(),
+      pendingSteers: [],
+      acceptsSteering: false,
+    };
+    const now = options.now ?? (() => new Date().toISOString());
+    let nextTimelineSequence = 1;
+    const claimTimelineSequence = (): number => {
+      const sequence = nextTimelineSequence;
+      nextTimelineSequence += 1;
+      return sequence;
+    };
+    const assistantMessages: AgentAssistantMessageBoundary[] = [];
     active.set(request.trailId, execution);
     const abortedBeforePrompt = (): AgentRuntimeResult => {
       if (!execution.abortStatusEmitted) {
@@ -178,6 +218,7 @@ export function createPiAgentRuntime(
       }
       return Object.freeze({
         text: "",
+        assistantMessages: Object.freeze([]),
         provider: request.provider,
         model: request.model,
         outcome: "aborted" as const,
@@ -255,15 +296,16 @@ export function createPiAgentRuntime(
               if (event.type === "tool-start")
                 emit({
                   type: "tool-start",
-                  actionId: nestedCodeActionId(parentActionId, event.callIndex),
+                  actionId: event.callId,
                   parentActionId,
                   name: event.name,
                   input: toAgentActionPayload(event.input ?? {}),
+                  timelineSequence: claimTimelineSequence(),
                 });
               else if (event.type === "tool-end")
                 emit({
                   type: "tool-end",
-                  actionId: nestedCodeActionId(parentActionId, event.callIndex),
+                  actionId: event.callId,
                   parentActionId,
                   name: event.name,
                   isError: !event.ok,
@@ -313,9 +355,35 @@ export function createPiAgentRuntime(
       execution.controller.signal.addEventListener("abort", abortHarness, { once: true });
       if (execution.controller.signal.aborted) await requestHarnessAbort();
       const assistantDeltas = createAssistantDeltaAggregator();
+      let initialUserMessageObserved = false;
       const unsubscribe = harness.subscribe((event) => {
         if (event.type === "message_start" && event.message.role === "assistant") {
           assistantDeltas.beginMessage();
+        } else if (event.type === "message_end" && event.message.role === "user") {
+          if (!initialUserMessageObserved) {
+            initialUserMessageObserved = true;
+            return;
+          }
+          const text = userMessageText(event.message);
+          const pendingIndex = execution.pendingSteers.findIndex((receipt) => receipt.text === text);
+          if (pendingIndex >= 0) {
+            const [receipt] = execution.pendingSteers.splice(pendingIndex, 1);
+            receipt?.resolve(
+              Object.freeze({
+                status: "consumed",
+                timelineSequence: claimTimelineSequence(),
+                consumedAt: now(),
+              }),
+            );
+          }
+        } else if (event.type === "message_end" && event.message.role === "assistant") {
+          const boundary = Object.freeze({
+            text: assistantText(event.message),
+            timelineSequence: claimTimelineSequence(),
+            createdAt: now(),
+          });
+          assistantMessages.push(boundary);
+          emit({ type: "assistant-message", ...boundary });
         } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
           const delta = assistantDeltas.push(event.assistantMessageEvent.delta);
           if (delta) emit({ type: "delta", text: delta });
@@ -325,6 +393,7 @@ export function createPiAgentRuntime(
             actionId: event.toolCallId,
             name: event.toolName,
             input: toAgentActionPayload(event.args),
+            timelineSequence: claimTimelineSequence(),
           });
         } else if (event.type === "tool_execution_update") {
           emit({
@@ -343,10 +412,24 @@ export function createPiAgentRuntime(
           });
         }
       });
+      execution.acceptsSteering = true;
       emit({ type: "status", status: "started" });
       try {
         const message = await harness.prompt(request.prompt);
-        const text = assistantText(message);
+        const finalText = assistantText(message);
+        if (assistantMessages.length === 0) {
+          const boundary = Object.freeze({
+            text: finalText,
+            timelineSequence: claimTimelineSequence(),
+            createdAt: now(),
+          });
+          assistantMessages.push(boundary);
+          emit({ type: "assistant-message", ...boundary });
+        }
+        const text = assistantMessages
+          .map((boundary) => boundary.text)
+          .filter((part) => part.length > 0)
+          .join("\n\n");
         const usedTokens =
           message.usage.totalTokens ||
           message.usage.input + message.usage.output + message.usage.cacheRead + message.usage.cacheWrite;
@@ -361,6 +444,7 @@ export function createPiAgentRuntime(
         if (contextUsage) emit({ type: "usage", ...contextUsage });
         const base = {
           text,
+          assistantMessages: Object.freeze([...assistantMessages]),
           provider: message.provider,
           model: message.model,
           ...(contextUsage ? { contextUsage } : {}),
@@ -377,9 +461,14 @@ export function createPiAgentRuntime(
         emit({ type: "status", status: "completed" });
         return { ...base, outcome: "completed", stopReason: message.stopReason };
       } finally {
+        execution.acceptsSteering = false;
         execution.controller.signal.removeEventListener("abort", abortHarness);
         unsubscribe();
         await abortPromise;
+        settlePendingSteers(
+          execution,
+          notConsumed(execution.controller.signal.aborted ? "aborted" : "turn-ended"),
+        );
       }
     } catch (error) {
       if (execution.controller.signal.aborted && !execution.harness) return abortedBeforePrompt();
@@ -396,30 +485,46 @@ export function createPiAgentRuntime(
           }
         }
       } finally {
+        execution.acceptsSteering = false;
+        settlePendingSteers(
+          execution,
+          notConsumed(execution.controller.signal.aborted ? "aborted" : "turn-ended"),
+        );
         if (active.get(request.trailId) === execution) active.delete(request.trailId);
       }
     }
   };
 
-  const steer = async (trailId: string, text: string): Promise<void> => {
-    const harness = active.get(trailId)?.harness;
-    if (!harness) throw new Error("Trail is not running");
-    await harness.steer(text);
-  };
-
-  const followUp = async (trailId: string, text: string): Promise<void> => {
-    const harness = active.get(trailId)?.harness;
-    if (!harness) throw new Error("Trail is not running");
-    await harness.followUp(text);
+  const steer = async (trailId: string, text: string): Promise<AgentSteerResult> => {
+    const execution = active.get(trailId);
+    const harness = execution?.harness;
+    if (!execution || !harness) return notConsumed("not-running");
+    if (!execution.acceptsSteering)
+      return notConsumed(execution.controller.signal.aborted ? "aborted" : "turn-ended");
+    const deferred = Promise.withResolvers<AgentSteerResult>();
+    const receipt: PendingPiSteer = Object.freeze({
+      text,
+      promise: deferred.promise,
+      resolve: deferred.resolve,
+    });
+    execution.pendingSteers.push(receipt);
+    try {
+      await harness.steer(text);
+    } catch {
+      // Pi can fail after queue insertion while notifying queue observers. Keep the receipt pending:
+      // only a user message_end or terminal turn settlement can prove the outcome.
+    }
+    return receipt.promise;
   };
 
   const abort = async (trailId: string): Promise<void> => {
     const execution = active.get(trailId);
     if (!execution) return;
+    execution.acceptsSteering = false;
     execution.controller.abort();
     await execution.requestHarnessAbort?.();
     if (execution.abortError) throw execution.abortError;
   };
 
-  return Object.freeze({ name: "pi-agent-harness-0.80.6", run, steer, followUp, abort });
+  return Object.freeze({ name: "pi-agent-harness-0.80.6", run, steer, abort });
 }

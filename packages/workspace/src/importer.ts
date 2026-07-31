@@ -255,20 +255,25 @@ export async function importLegacyWorkspace(
     const insertToolCall = db.prepare(
       `INSERT OR IGNORE INTO tool_calls(
         tool_call_id, session_id, message_id, tool_name, request_json, response_json,
-        status, sensitivity, created_at, completed_at
-      ) VALUES (?, ?, NULL, ?, ?, ?, ?, 'normal', ?, ?)`,
+        action_sequence, status, sensitivity, created_at, completed_at
+      ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 'normal', ?, ?)`,
     );
-    for (const toolCall of toolCalls)
+    const toolCallSequenceBySession = new Map<string, number>();
+    for (const toolCall of toolCalls) {
+      const sequence = (toolCallSequenceBySession.get(toolCall.sessionId) ?? 0) + 1;
+      toolCallSequenceBySession.set(toolCall.sessionId, sequence);
       insertToolCall.run(
         toolCall.toolCallId,
         toolCall.sessionId,
         toolCall.toolName,
         JSON.stringify(toolCall.request),
         toolCall.response === undefined ? null : JSON.stringify(toolCall.response),
+        sequence,
         toolCall.status,
         toolCall.createdAt,
         toolCall.completedAt ?? null,
       );
+    }
     const insertJob = db.prepare(
       `INSERT OR IGNORE INTO jobs(
         job_id, kind, payload_json, status, lease_owner, lease_until, attempt,

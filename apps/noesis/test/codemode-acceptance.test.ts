@@ -68,19 +68,32 @@ describe("production codemode journey", () => {
     });
     const trail = await runtime.startTrail({ title: "Codemode acceptance" });
 
-    const result = await runtime.runTurn(trail.trailId, "Inspect the repository package.");
+    const result = await runtime.debug.runTurn(trail.trailId, "Inspect the repository package.");
 
     expect(result.output).toBe("Repository inspected through codemode.");
     expect(observedToolNames).toEqual(["adapt", "execute", "inspect_self", "remember"]);
-    expect(await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId)).toMatchObject([
-      {
-        toolName: "files.read",
-        status: "completed",
-      },
-    ]);
+    const storedCalls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    const nestedCall = storedCalls.find((call) => call.toolName === "files.read");
+    expect(nestedCall).toMatchObject({
+      toolName: "files.read",
+      status: "completed",
+      parentToolCallId: expect.stringContaining(":"),
+      timelineSequence: 3,
+    });
     const executions = await runtime.debug.workspace.operational.codeExecutions.listForSession(trail.trailId);
     const execution = executions[0];
     if (!execution) throw new Error("Expected a recorded codemode execution");
+    const transcriptActions = (await runtime.getTranscript(trail.trailId)).filter(
+      (entry) => entry.kind === "action",
+    );
+    expect(transcriptActions.map((action) => action.name)).toEqual(["execute", "files.read"]);
+    expect(storedCalls).toHaveLength(2);
+    expect(transcriptActions[1]?.actionId).toBe(nestedCall?.toolCallId);
+    expect(storedCalls.some((call) => call.toolCallId.includes(":call:"))).toBe(false);
+    expect(transcriptActions[1]).toMatchObject({
+      parentActionId: transcriptActions[0]?.actionId,
+    });
+    expect(transcriptActions[1]).not.toHaveProperty("executionId");
     const inspected = await runtime.inspectExecution?.(trail.trailId, execution.executionId);
     expect(execution).toMatchObject({
       sourceArtifactId: expect.any(String),
@@ -101,7 +114,28 @@ describe("production codemode journey", () => {
         truncated: false,
       },
     });
+    const beforeRestart = await runtime.getTranscript(trail.trailId);
+    expect(beforeRestart.map((entry) => (entry.kind === "message" ? entry.text : entry.name))).toEqual([
+      "Inspect the repository package.",
+      "",
+      "execute",
+      "files.read",
+      "Repository inspected through codemode.",
+    ]);
     await runtime.shutdown();
+
+    const reopened = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({ text: '{"decision":"no_change","reason":"disabled in acceptance"}' }),
+        }),
+    });
+    expect(await reopened.getTranscript(trail.trailId)).toEqual(beforeRestart);
+    await reopened.shutdown();
   });
 
   test("the production permission snapshot admits shell execution from an arbitrary host directory", async () => {
@@ -145,21 +179,23 @@ describe("production codemode journey", () => {
     });
     const trail = await runtime.startTrail({ title: "Shell permission acceptance" });
 
-    const result = await runtime.runTurn(trail.trailId, "Inspect an external host directory.");
+    const result = await runtime.debug.runTurn(trail.trailId, "Inspect an external host directory.");
 
     expect(result.output).toBe("External directory inspected.");
-    expect(await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId)).toMatchObject([
-      {
-        toolName: "shell.run",
-        status: "completed",
-        response: {
-          output: {
-            exitCode: 0,
-            stdout: `${physicalOutsideCwd}\n`,
-          },
+    expect(
+      (await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId)).find(
+        (call) => call.toolName === "shell.run",
+      ),
+    ).toMatchObject({
+      toolName: "shell.run",
+      status: "completed",
+      response: {
+        output: {
+          exitCode: 0,
+          stdout: `${physicalOutsideCwd}\n`,
         },
       },
-    ]);
+    });
     await runtime.shutdown();
   });
 
@@ -222,9 +258,9 @@ describe("production codemode journey", () => {
     });
     const trail = await runtime.startTrail({ title: "Script acceptance" });
 
-    const saved = await runtime.runTurn(trail.trailId, "Save a reusable doubling script.");
+    const saved = await runtime.debug.runTurn(trail.trailId, "Save a reusable doubling script.");
     const scripts = await runtime.listScripts?.();
-    const run = await runtime.runTurn(trail.trailId, "Run the double-value script for 21.");
+    const run = await runtime.debug.runTurn(trail.trailId, "Run the double-value script for 21.");
     const executionsBeforeEdit = await runtime.debug.workspace.operational.codeExecutions.listForSession(
       trail.trailId,
     );
@@ -242,7 +278,10 @@ describe("production codemode journey", () => {
       "utf8",
     );
     const editedScripts = await runtime.listScripts?.();
-    const rerun = await runtime.runTurn(trail.trailId, "Run the double-value script after the direct edit.");
+    const rerun = await runtime.debug.runTurn(
+      trail.trailId,
+      "Run the double-value script after the direct edit.",
+    );
     const executionsAfterEdit = await runtime.debug.workspace.operational.codeExecutions.listForSession(
       trail.trailId,
     );
@@ -270,7 +309,11 @@ describe("production codemode journey", () => {
       ),
     ).toBe(true);
     const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
-    expect(calls.map((call) => call.toolName)).toEqual(["scripts.save", "scripts.run", "scripts.run"]);
+    expect(calls.filter((call) => call.toolName !== "execute").map((call) => call.toolName)).toEqual([
+      "scripts.save",
+      "scripts.run",
+      "scripts.run",
+    ]);
     await runtime.shutdown();
   });
 
@@ -359,20 +402,23 @@ describe("production codemode journey", () => {
     });
     const trail = await runtime.startTrail({ title: "Workflow acceptance" });
 
-    const saved = await runtime.runTurn(trail.trailId, "Save a two-phase arithmetic workflow.");
+    const saved = await runtime.debug.runTurn(trail.trailId, "Save a two-phase arithmetic workflow.");
     const workflows = await runtime.listWorkflows?.();
-    const paused = await runtime.runTurn(trail.trailId, "Run increment-and-double for 20.");
+    const paused = await runtime.debug.runTurn(trail.trailId, "Run increment-and-double for 20.");
     const pausedRuns = await runtime.debug.workspace.operational.workflows.listRunsForSession(trail.trailId);
     const pausedPhases = pausedRuns[0]
       ? await runtime.debug.workspace.operational.workflows.listPhases(pausedRuns[0].runId)
       : [];
     const firstPhaseExecutionId = pausedPhases[0]?.executionId;
     const failedPhaseLogicalExecutionId = pausedPhases[1]?.logicalExecutionId;
-    const retried = await runtime.runTurn(trail.trailId, "Retry the workflow without changing its input.");
+    const retried = await runtime.debug.runTurn(
+      trail.trailId,
+      "Retry the workflow without changing its input.",
+    );
     const phasesAfterRetry = pausedRuns[0]
       ? await runtime.debug.workspace.operational.workflows.listPhases(pausedRuns[0].runId)
       : [];
-    const resumed = await runtime.runTurn(
+    const resumed = await runtime.debug.runTurn(
       trail.trailId,
       "Resume the workflow with an approved corrected value.",
     );

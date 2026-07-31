@@ -34,6 +34,9 @@ importers:
 
   apps/noesis:
     dependencies:
+      '@noesis/agent-types':
+        specifier: workspace:*
+        version: link:../../packages/agent-types
       '@noesis/capabilities':
         specifier: workspace:*
         version: link:../../packages/capabilities

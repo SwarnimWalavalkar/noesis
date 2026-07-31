@@ -59,6 +59,32 @@ const settleSafeEditorAmbiguity = async (): Promise<void> => {
 
 describe("Noesis safe editor key path", () => {
   test.each([
+    ["Shift+Enter", "\u001b[27;2;13~"],
+    ["Ctrl+J", "\n"],
+  ] as const)("preserves pi-tui native %s multiline input", (_key, sequence) => {
+    const submitted: string[] = [];
+    const editor = createSafeEditor(new TUI(inertTerminal));
+    editor.onSubmit = (text) => submitted.push(text);
+    editor.handleInput?.("first");
+
+    editor.handleInput?.(sequence);
+    editor.handleInput?.("second");
+
+    expect(editor.getText()).toBe("first\nsecond");
+    expect(submitted).toEqual([]);
+  });
+
+  test("sanitizes programmatic buffer replacement and insertion", () => {
+    const editor = createSafeEditor(new TUI(inertTerminal));
+
+    editor.setText("first\u001b[2J\r\nsecond");
+    editor.insertText("\u0007\nthird");
+
+    expect(editor.getText()).toBe("first [2J\nsecond \nthird");
+    expect(containsUnsafeTextControl(editor.getText())).toBe(false);
+  });
+
+  test.each([
     ["DEL", "\u007f"],
     ["BS", "\u0008"],
   ] as const)("delegates ordinary %s Backspace to pi-tui", (_variant, backspace) => {
@@ -91,6 +117,8 @@ describe("Noesis safe editor key path", () => {
   test("recognizes a paste start fragmented beyond pi-tui's assembly window", async () => {
     vi.useFakeTimers();
     const editor = createSafeEditor(new TUI(inertTerminal));
+    const standaloneEscape = vi.fn(() => true);
+    editor.createStandaloneEscapeHandler = () => standaloneEscape;
     editor.handleInput?.("\u001b");
     await vi.advanceTimersByTimeAsync(20);
     editor.handleInput?.("[20");
@@ -101,6 +129,22 @@ describe("Noesis safe editor key path", () => {
     await settleSafeEditorAmbiguity();
 
     expect(editor.getText()).toBe("safe");
+    expect(standaloneEscape).not.toHaveBeenCalled();
+  });
+
+  test("routes a settled standalone Escape only after paste ambiguity expires", async () => {
+    vi.useFakeTimers();
+    const editor = createSafeEditor(new TUI(inertTerminal));
+    const standaloneEscape = vi.fn(() => true);
+    editor.createStandaloneEscapeHandler = () => standaloneEscape;
+
+    editor.handleInput?.("\u001b");
+    await vi.advanceTimersByTimeAsync(49);
+    expect(standaloneEscape).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(standaloneEscape).toHaveBeenCalledOnce();
+    expect(editor.getText()).toBe("");
   });
 
   test("sanitizes a bracketed-paste payload when its closing marker is split across chunks", async () => {
@@ -159,6 +203,30 @@ describe("Noesis safe editor key path", () => {
     editor.handleInput?.("\u001b[3~");
 
     expect(editor.getText()).toBe("ab");
+  });
+
+  test("normalizes one CRLF when a large paste flush splits the pair", async () => {
+    vi.useFakeTimers();
+    const editor = createSafeEditor(new TUI(inertTerminal));
+    const prefix = "x".repeat(1024 * 1024 - 5);
+
+    editor.handleInput?.(`\u001b[200~${prefix}\r\nabcx\u001b[201~`);
+    await settleSafeEditorAmbiguity();
+
+    expect(editor.getText()).toBe(`${prefix}\nabcx`);
+  });
+
+  test("programmatic edits discard partial terminal input and its timers", async () => {
+    vi.useFakeTimers();
+    const editor = createSafeEditor(new TUI(inertTerminal));
+    editor.handleInput?.("\u001b[200~discarded paste");
+
+    editor.setText("replacement");
+    editor.handleInput?.("\u001b");
+    editor.insertText(" + inserted");
+    await settleSafeEditorAmbiguity();
+
+    expect(editor.getText()).toBe("replacement + inserted");
   });
 });
 
@@ -242,6 +310,17 @@ describe("Noesis transcript rendering", () => {
         output: { content: [{ type: "text", text: "execution failed" }] },
       }),
     ).toBe("execution-failed");
+  });
+
+  test("uses a durable execution identity directly after session hydration", () => {
+    expect(
+      executionIdOf({
+        actionId: "action-hydrated",
+        executionId: "execution-hydrated",
+        name: "execute",
+        status: "interrupted",
+      }),
+    ).toBe("execution-hydrated");
   });
 
   test("reveals the codemode program only when its row is expanded", () => {

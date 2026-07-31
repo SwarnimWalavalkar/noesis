@@ -1,6 +1,7 @@
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
+import type { RuntimeTranscriptEntry } from "@noesis/runtime";
 import { describe, expect, test, vi } from "vitest";
-import { boundedInspectorText, startNoesisTui } from "../src/index.ts";
+import { actionIdentityForView, boundedInspectorText, startNoesisTui } from "../src/index.ts";
 import { createInMemoryTestRuntime, type TestNoesisRuntime } from "./support/in-memory-runtime.ts";
 import { createTestTerminal } from "./support/test-terminal.ts";
 
@@ -16,6 +17,13 @@ const containsC1 = (text: string): boolean =>
     return code >= 128 && code <= 159;
   });
 
+const consumeSteer: NoesisAgentRuntime["steer"] = async () =>
+  Object.freeze({
+    status: "consumed" as const,
+    timelineSequence: 1,
+    consumedAt: "2026-07-31T00:00:00.000Z",
+  });
+
 async function createRuntime(agent: NoesisAgentRuntime): Promise<TestNoesisRuntime> {
   return createInMemoryTestRuntime(agent);
 }
@@ -27,6 +35,23 @@ describe("Noesis TUI lifecycle", () => {
     expect(inspected).not.toContain("\u001b[2J");
     expect(inspected).toContain("inspector preview truncated");
     expect(inspected.length).toBeLessThan(25_000);
+  });
+
+  test("keeps runtime action identities byte-identical to hydrated transcript identities", () => {
+    const persistedActionId = "turn_42:execute_7";
+    const persistedParentActionId = "turn_42:execute_1";
+    expect(
+      actionIdentityForView({
+        type: "tool-start",
+        actionId: persistedActionId,
+        parentActionId: persistedParentActionId,
+        name: "shell.run",
+        input: { command: "pwd" },
+      }),
+    ).toEqual({
+      actionId: persistedActionId,
+      parentActionId: persistedParentActionId,
+    });
   });
 
   test("drops stale inspector results when a prompt supersedes them", async () => {
@@ -41,8 +66,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     let releaseInspector: (() => void) | undefined;
@@ -96,8 +120,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     let rejectInspector: ((error: Error) => void) | undefined;
@@ -145,8 +168,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     let releaseFork: (() => void) | undefined;
@@ -188,8 +210,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     let releaseModel: (() => void) | undefined;
@@ -234,8 +255,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     };
     const unsupported = await createRuntime(agent);
@@ -280,8 +300,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const runtime = Object.freeze({
@@ -311,6 +330,62 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
+  test("recognizes a coalesced /quit plus LF chunk", async () => {
+    const runtime = await createRuntime({
+      name: "coalesced-quit-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.send("/quit\n");
+
+    await running;
+    expect(terminal.stops).toBe(1);
+  });
+
+  test("never recognizes /quit plus LF while bracketed paste owns the input", async () => {
+    const runtime = await createRuntime({
+      name: "pasted-quit-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.send("\u001b[200~");
+    terminal.send("/quit\n");
+    terminal.send("\u001b[201~");
+    terminal.send("\u0007");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    expect(terminal.stops).toBe(0);
+    expect(terminal.starts).toBe(1);
+    terminal.send("\u0003");
+    await running;
+  });
+
   test.each([
     ["/quit", "/quit\r"],
     ["Ctrl+C", "\u0003"],
@@ -332,8 +407,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const runtime = Object.freeze({
@@ -367,7 +441,7 @@ describe("Noesis TUI lifecycle", () => {
     expect(terminal.stops).toBe(1);
   });
 
-  test("claims conversational turn ownership before another prompt can start", async () => {
+  test("queues prompts submitted during a turn and drains them in FIFO order", async () => {
     let releaseTurn: (() => void) | undefined;
     const turnGate = new Promise<void>((resolve) => {
       releaseTurn = resolve;
@@ -386,8 +460,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -396,11 +469,144 @@ describe("Noesis TUI lifecycle", () => {
 
     terminal.type("first prompt\r");
     terminal.type("second prompt\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("A turn is active."));
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
+    expect(terminal.output).toContain("second prompt");
     expect(prompts).toEqual(["first prompt"]);
 
     releaseTurn?.();
     await vi.waitFor(() => expect(terminal.output).toContain("reply:first prompt"));
+    await vi.waitFor(() => expect(prompts).toEqual(["first prompt", "second prompt"]));
+    await vi.waitFor(() => expect(terminal.output).toContain("reply:second prompt"));
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("promotes the newest queued prompt to a steer and accepts explicit steering text", async () => {
+    let releaseTurn: (() => void) | undefined;
+    const turnGate = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const steer = vi.fn(async () => ({
+      status: "consumed" as const,
+      timelineSequence: 1,
+      consumedAt: "2026-07-31T00:00:00.000Z",
+    }));
+    const runtime = await createRuntime({
+      name: "steering-scripted",
+      async run(request) {
+        await turnGate;
+        return {
+          text: "done",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer,
+      async abort() {
+        releaseTurn?.();
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("first\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("● THINKING"));
+    terminal.type("promote me\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
+    terminal.type("/steer\r");
+    await vi.waitFor(() => expect(steer).toHaveBeenCalledWith(expect.any(String), "promote me"));
+    terminal.type("/steer redirect now\r");
+    await vi.waitFor(() => expect(steer).toHaveBeenCalledWith(expect.any(String), "redirect now"));
+
+    releaseTurn?.();
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("restores the newest queued prompt into the current draft with Alt+Up", async () => {
+    let releaseTurn: (() => void) | undefined;
+    const turnGate = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const prompts: string[] = [];
+    const runtime = await createRuntime({
+      name: "restore-queued-scripted",
+      async run(request) {
+        prompts.push(request.prompt);
+        await turnGate;
+        return {
+          text: "done",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {
+        releaseTurn?.();
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("first\r");
+    terminal.type("queued message\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
+    terminal.type("draft prefix");
+    terminal.send("\u001bp");
+    const trail = runtime.listTrails()[0];
+    if (!trail) throw new Error("Expected active trail");
+    await vi.waitFor(async () =>
+      expect((await runtime.inspectInteraction(trail.trailId)).pending).toHaveLength(0),
+    );
+    terminal.send("\r");
+    releaseTurn?.();
+    await vi.waitFor(() => expect(prompts).toContain("draft prefix\nqueued message"));
+
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("blocks session-mutating slash commands while a turn is active", async () => {
+    let releaseTurn: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const base = await createRuntime({
+      name: "active-command-guard-scripted",
+      async run(request) {
+        await gate;
+        return {
+          text: "done",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {
+        releaseTurn?.();
+      },
+    });
+    const compact = vi.fn(base.compact);
+    const runtime = Object.freeze({ ...base, compact });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("first\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("● THINKING"));
+    terminal.type("/compact\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("changes the session"));
+    expect(compact).not.toHaveBeenCalled();
+
+    releaseTurn?.();
     terminal.type("/quit\n");
     await running;
   });
@@ -419,8 +625,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -451,8 +656,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const historical = await runtime.startTrail({ title: "historical" });
@@ -496,8 +700,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const selected = await runtime.startTrail({ title: "selected" });
@@ -517,6 +720,89 @@ describe("Noesis TUI lifecycle", () => {
     await running;
 
     expect(runtime.resumedTrailIds.at(-1)).toBe(selected.trailId);
+  });
+
+  test("restores durable tool calls as expandable transcript rows", async () => {
+    const base = await createRuntime({
+      name: "resume-actions-scripted",
+      async run(request) {
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const selected = await base.startTrail({ title: "selected" });
+    const transcript: readonly RuntimeTranscriptEntry[] = [
+      {
+        kind: "message",
+        messageId: "message-user",
+        turnId: "turn-1",
+        role: "user",
+        text: "where am I?",
+        createdAt: "2026-07-31T10:00:00.000Z",
+      },
+      {
+        kind: "action",
+        actionId: "execute-1",
+        turnId: "turn-1",
+        executionId: "execution-1",
+        name: "execute",
+        status: "completed",
+        input: { source: "return await tools.shell.run({ command: 'pwd' });" },
+        output: { calls: 1 },
+        startedAt: "2026-07-31T10:00:01.000Z",
+        completedAt: "2026-07-31T10:00:02.000Z",
+      },
+      {
+        kind: "action",
+        actionId: "shell-1",
+        turnId: "turn-1",
+        parentActionId: "execute-1",
+        name: "shell.run",
+        status: "completed",
+        input: { command: "pwd" },
+        output: { stdout: "/workspace", exitCode: 0 },
+        startedAt: "2026-07-31T10:00:01.250Z",
+        completedAt: "2026-07-31T10:00:01.750Z",
+      },
+      {
+        kind: "message",
+        messageId: "message-assistant",
+        turnId: "turn-1",
+        role: "assistant",
+        text: "You are in /workspace.",
+        createdAt: "2026-07-31T10:00:03.000Z",
+      },
+    ];
+    const runtime = Object.freeze({
+      ...base,
+      getTranscript: async (trailId: string) =>
+        trailId === selected.trailId ? transcript : base.getTranscript(trailId),
+    });
+    const terminal = createTestTerminal();
+
+    const running = startNoesisTui(
+      runtime,
+      { session: { mode: "resume", trailId: selected.trailId } },
+      terminal,
+    );
+    await vi.waitFor(() => expect(terminal.output).toContain("shell.run"));
+    expect(terminal.output).toContain("You are in /workspace.");
+
+    terminal.type("\u000f");
+    terminal.type(" ");
+    await vi.waitFor(() => expect(terminal.output).toContain('"command": "pwd"'));
+    expect(terminal.output).toContain('"stdout": "/workspace"');
+
+    terminal.type("\u001b");
+    terminal.type("/quit\n");
+    await running;
   });
 
   test("renders lifecycle and usage updates from real runtime events", async () => {
@@ -565,8 +851,7 @@ describe("Noesis TUI lifecycle", () => {
           contextUsage,
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -618,8 +903,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -688,8 +972,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -745,8 +1028,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -796,8 +1078,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -857,8 +1138,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -893,8 +1173,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -932,8 +1211,7 @@ describe("Noesis TUI lifecycle", () => {
           error,
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -970,8 +1248,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const trail = await runtime.startTrail({ title: "unexpected failure" });
@@ -985,7 +1262,7 @@ describe("Noesis TUI lifecycle", () => {
     expect(runtime.getTrail(trail.trailId).turns).toEqual([{ input: "second", output: "recovered" }]);
   });
 
-  test("submits /abort during a blocked turn and remains usable without concurrent turns", async () => {
+  test("interrupts gracefully, preserves queued work, and resumes only on request", async () => {
     let releaseBlocked: (() => void) | undefined;
     let runs = 0;
     const abort = vi.fn(async () => {
@@ -1020,8 +1297,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       abort,
     });
     const terminal = createTestTerminal();
@@ -1031,24 +1307,132 @@ describe("Noesis TUI lifecycle", () => {
     terminal.type("block this turn\r");
     await vi.waitFor(() => expect(terminal.output).toContain("● STREAMING"));
     terminal.type("another turn\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("A turn is active. Use /abort"));
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
     expect(runs).toBe(1);
 
-    terminal.type("/abort\r");
+    terminal.send("\u001b");
     await vi.waitFor(() => expect(terminal.output).toContain("● ABORTING"));
-    await vi.waitFor(() => expect(terminal.output).toContain("Turn aborted."));
+    await vi.waitFor(() => expect(terminal.output).toContain("Turn interrupted."));
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
     expect(abort).toHaveBeenCalledOnce();
     expect(terminal.stops).toBe(0);
+    expect(runs).toBe(1);
+    expect(terminal.output).toContain("paused");
 
-    terminal.type("a usable follow-up\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("usable again"));
-    expect(runs).toBe(2);
-    await vi.waitFor(() => expect(runtime.listTrails()[0]?.turns).toHaveLength(1));
+    terminal.type("/queue resume\r");
+    await vi.waitFor(() => expect(runs).toBe(3));
+    await vi.waitFor(() => expect(runtime.listTrails()[0]?.turns).toHaveLength(2));
 
     terminal.type("/quit\n");
     await running;
     expect(terminal.stops).toBe(1);
+  });
+
+  test("does not treat a fragmented bracketed-paste opener as active-turn Escape", async () => {
+    let releaseBlocked: (() => void) | undefined;
+    const abort = vi.fn(async () => {
+      releaseBlocked?.();
+    });
+    const runtime = await createRuntime({
+      name: "fragmented-paste-active-turn-scripted",
+      async run(request, emit) {
+        emit({ type: "delta", text: "still running" });
+        await new Promise<void>((resolve) => {
+          releaseBlocked = resolve;
+        });
+        return {
+          text: "",
+          provider: request.provider,
+          model: request.model,
+          outcome: "aborted",
+          stopReason: "aborted",
+        };
+      },
+      steer: consumeSteer,
+      abort,
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    terminal.type("block this turn\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("still running"));
+
+    terminal.send("\u001b");
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    terminal.send("[20");
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    terminal.send("0~pasted\u0003\r\u001b[201~");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+
+    expect(abort).not.toHaveBeenCalled();
+    expect(terminal.stops).toBe(0);
+    expect(terminal.output).toContain("● STREAMING");
+
+    terminal.send("\u0003");
+    await running;
+    expect(abort).toHaveBeenCalledOnce();
+    expect(terminal.stops).toBe(1);
+  });
+
+  test("does not let delayed Escape feedback abort the successor to the visible turn", async () => {
+    let releaseFirst: (() => void) | undefined;
+    let releaseSecond: (() => void) | undefined;
+    let secondInterrupted = false;
+    let runs = 0;
+    const abort = vi.fn(async () => {
+      secondInterrupted = true;
+      releaseSecond?.();
+    });
+    const runtime = await createRuntime({
+      name: "stale-interrupt-scripted",
+      async run(request, emit) {
+        runs += 1;
+        const currentRun = runs;
+        if (currentRun === 1) emit({ type: "delta", text: "running 1" });
+        await new Promise<void>((resolve) => {
+          if (currentRun === 1) releaseFirst = resolve;
+          else releaseSecond = resolve;
+        });
+        if (currentRun === 2 && secondInterrupted)
+          return {
+            text: "finished 2",
+            provider: request.provider,
+            model: request.model,
+            outcome: "aborted",
+            stopReason: "aborted",
+          };
+        return {
+          text: `finished ${String(currentRun)}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      abort,
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("first\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("running 1"));
+    terminal.type("second\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
+    terminal.send("\u001b");
+    releaseFirst?.();
+    await vi.waitFor(() => expect(runs).toBe(2));
+    await new Promise<void>((resolve) => setTimeout(resolve, 40));
+
+    expect(abort).not.toHaveBeenCalled();
+    expect(terminal.output).toContain("● THINKING");
+
+    terminal.send("\u001b");
+    await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(terminal.output).toContain("Turn interrupted."));
+    terminal.type("/quit\n");
+    await running;
   });
 
   test("reflows the main shell and picker from current terminal dimensions", async () => {
@@ -1063,8 +1447,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const mainTerminal = createTestTerminal();
@@ -1104,8 +1487,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1136,8 +1518,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const selected = await runtime.startTrail({
@@ -1179,8 +1560,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const older = await runtime.startTrail({ title: "older" });
@@ -1219,8 +1599,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1243,8 +1622,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1267,8 +1645,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1292,8 +1669,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "stop",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       async abort() {},
     });
     const terminal = createTestTerminal();
@@ -1334,8 +1710,7 @@ describe("Noesis TUI lifecycle", () => {
           stopReason: "aborted",
         };
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       abort,
     });
     const terminal = createTestTerminal();
@@ -1366,8 +1741,7 @@ describe("Noesis TUI lifecycle", () => {
         markStarted?.();
         return await new Promise<never>(() => undefined);
       },
-      async steer() {},
-      async followUp() {},
+      steer: consumeSteer,
       abort,
     });
     const terminal = createTestTerminal();
