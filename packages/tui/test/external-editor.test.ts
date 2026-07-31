@@ -1,18 +1,21 @@
-import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { editTextInExternalEditor, resolveExternalEditorCommand } from "../src/external-editor.ts";
+import {
+  editTextInExternalEditor,
+  prepareExternalEditorLaunch,
+  resolveExternalEditorCommand,
+} from "../src/external-editor.ts";
 
 const temporaryPaths: string[] = [];
 
-async function createEditorScript(source: string, fileName = "editor.sh"): Promise<string> {
+async function createEditorCommand(source: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "noesis-editor-test-"));
   temporaryPaths.push(directory);
-  const script = join(directory, fileName);
-  await writeFile(script, `#!/bin/sh\n${source}\n`, "utf8");
-  await chmod(script, 0o700);
-  return script;
+  const script = join(directory, "editor.mjs");
+  await writeFile(script, `${source}\n`, "utf8");
+  return `"${process.execPath}" "${script}"`;
 }
 
 afterEach(async () => {
@@ -37,19 +40,23 @@ describe("external editor", () => {
     const observedPathDirectory = await mkdtemp(join(tmpdir(), "noesis-editor-observed-"));
     temporaryPaths.push(observedPathDirectory);
     const observedPath = join(observedPathDirectory, "path");
-    const script = await createEditorScript(
-      `test "$1" = "--label" || exit 8\ntest "$2" = "two words" || exit 9\nprintf '%s' "$3" > ${JSON.stringify(observedPath)}\nprintf 'edited\\ncontent' > "$3"`,
+    const command = await createEditorCommand(
+      `import { writeFile } from "node:fs/promises";
+if (process.argv[2] !== "--label") process.exit(8);
+if (process.argv[3] !== "two words") process.exit(9);
+await writeFile(${JSON.stringify(observedPath)}, process.argv[4], "utf8");
+await writeFile(process.argv[4], "edited\\ncontent", "utf8");`,
     );
 
     const result = await editTextInExternalEditor({
       content: "original",
-      configuredCommand: `${script} --label "two words"`,
+      configuredCommand: `${command} --label "two words"`,
       environment: {},
     });
 
     expect(result).toEqual({
       status: "edited",
-      command: `${script} --label "two words"`,
+      command: `${command} --label "two words"`,
       content: "edited\ncontent",
     });
     const temporaryFile = await readFile(observedPath, "utf8");
@@ -57,17 +64,21 @@ describe("external editor", () => {
   });
 
   test("leaves the caller's content untouched when the editor exits unsuccessfully", async () => {
-    const script = await createEditorScript("printf 'discarded' > \"$1\"\nexit 7");
+    const command = await createEditorCommand(
+      `import { writeFile } from "node:fs/promises";
+await writeFile(process.argv[2], "discarded", "utf8");
+process.exit(7);`,
+    );
 
     const result = await editTextInExternalEditor({
       content: "original",
-      configuredCommand: script,
+      configuredCommand: command,
       environment: {},
     });
 
     expect(result).toEqual({
       status: "unchanged",
-      command: script,
+      command,
       reason: "editor-exit",
       exitCode: 7,
     });
@@ -86,23 +97,43 @@ describe("external editor", () => {
     expect(result.error).toContain("ENOENT");
   });
 
-  test("preserves Windows path separators and passes arguments without a shell", async () => {
-    const script = await createEditorScript(
-      `test "$1" = "--wait" || exit 8\nprintf 'windows-safe' > "$2"`,
-      "C:\\Program Files\\Noesis Editor.exe",
-    );
-
-    const result = await editTextInExternalEditor({
-      content: "original",
-      configuredCommand: `"${script}" --wait`,
-      environment: {},
-      platform: "win32",
+  test("preserves Windows paths while keeping native editors on the direct-spawn path", () => {
+    expect(
+      prepareExternalEditorLaunch(
+        '"C:\\Program Files\\Noesis Editor.exe" --wait',
+        "C:\\Temp\\prompt.md",
+        {},
+        "win32",
+      ),
+    ).toEqual({
+      status: "complete",
+      executable: "C:\\Program Files\\Noesis Editor.exe",
+      args: ["--wait", "C:\\Temp\\prompt.md"],
     });
+  });
 
-    expect(result).toEqual({
-      status: "edited",
-      command: `"${script}" --wait`,
-      content: "windows-safe",
+  test.each(["cmd", "bat"])("runs Windows .%s editors through the command processor", (extension) => {
+    const command = `"C:\\Program Files\\Noesis Editor.${extension}" --wait`;
+
+    expect(
+      prepareExternalEditorLaunch(
+        command,
+        "C:\\Temp\\prompt & notes.md",
+        {
+          ComSpec: "C:\\Windows\\System32\\cmd.exe",
+        },
+        "win32",
+      ),
+    ).toEqual({
+      status: "complete",
+      executable: "C:\\Windows\\System32\\cmd.exe",
+      args: [
+        "/d",
+        "/s",
+        "/c",
+        `"C:\\Program^ Files\\Noesis^ Editor.${extension} ^"--wait^" ^"C:\\Temp\\prompt^ ^&^ notes.md^""`,
+      ],
+      windowsVerbatimArguments: true,
     });
   });
 });
