@@ -100,6 +100,16 @@ export function isTuiAgentActionEntry(entry: TuiTimelineEntry): entry is TuiAgen
 
 export type ExecutionState = "idle" | "thinking" | "streaming" | "tool" | "compacting" | "aborting" | "error";
 
+export function executionForInteractionPhase(
+  current: ExecutionState,
+  phase: TuiInteractionView["phase"],
+): ExecutionState | undefined {
+  if (phase === "interrupting") return "aborting";
+  if (phase === "idle" && current !== "error") return "idle";
+  if (phase === "running" && (current === "idle" || current === "aborting")) return "thinking";
+  return undefined;
+}
+
 export interface TuiContextUsage {
   readonly usedTokens: number;
   readonly contextWindow: number;

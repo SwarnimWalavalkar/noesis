@@ -1331,18 +1331,30 @@ describe("Noesis TUI lifecycle", () => {
   test("does not let delayed Escape feedback abort the successor to the visible turn", async () => {
     let releaseFirst: (() => void) | undefined;
     let releaseSecond: (() => void) | undefined;
+    let secondInterrupted = false;
     let runs = 0;
-    const abort = vi.fn(async () => undefined);
+    const abort = vi.fn(async () => {
+      secondInterrupted = true;
+      releaseSecond?.();
+    });
     const runtime = await createRuntime({
       name: "stale-interrupt-scripted",
       async run(request, emit) {
         runs += 1;
         const currentRun = runs;
-        emit({ type: "delta", text: `running ${String(currentRun)}` });
+        if (currentRun === 1) emit({ type: "delta", text: "running 1" });
         await new Promise<void>((resolve) => {
           if (currentRun === 1) releaseFirst = resolve;
           else releaseSecond = resolve;
         });
+        if (currentRun === 2 && secondInterrupted)
+          return {
+            text: "finished 2",
+            provider: request.provider,
+            model: request.model,
+            outcome: "aborted",
+            stopReason: "aborted",
+          };
         return {
           text: `finished ${String(currentRun)}`,
           provider: request.provider,
@@ -1368,9 +1380,11 @@ describe("Noesis TUI lifecycle", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 40));
 
     expect(abort).not.toHaveBeenCalled();
-    expect(terminal.output).toContain("running 2");
-    releaseSecond?.();
-    await vi.waitFor(() => expect(terminal.output).toContain("finished 2"));
+    expect(terminal.output).toContain("● THINKING");
+
+    terminal.send("\u001b");
+    await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(terminal.output).toContain("Turn interrupted."));
     terminal.type("/quit\n");
     await running;
   });

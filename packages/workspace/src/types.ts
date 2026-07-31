@@ -505,7 +505,10 @@ export interface OperationalRepositories {
       readonly createdAt: string;
       readonly promotedAt: string;
     }) => Promise<UserIntentRecord | undefined>;
-    /** Durably records an explicit steer until the live adapter reports readiness. */
+    /**
+     * Durably records an explicit steer until the live adapter reports readiness.
+     * Returns undefined without inserting when the target turn cannot be bound.
+     */
     readonly holdExplicitSteer: (request: {
       readonly intentId: string;
       readonly sessionId: string;
@@ -513,7 +516,7 @@ export interface OperationalRepositories {
       readonly targetTurnId: string;
       readonly createdAt: string;
       readonly heldAt: string;
-    }) => Promise<UserIntentRecord>;
+    }) => Promise<UserIntentRecord | undefined>;
     /** Moves the newest queued turn into durable held-steer state. */
     readonly holdNewestPendingToSteer: (request: {
       readonly sessionId: string;

@@ -5,6 +5,7 @@ import {
   createStatusFields,
   createTuiLayout,
   elideText,
+  executionForInteractionPhase,
   formatContextUsage,
   helpHint,
   initialTuiState,
@@ -19,6 +20,13 @@ import {
 } from "../src/index.ts";
 
 describe("Noesis TUI reducer", () => {
+  test("derives execution state from interaction lifecycle without hiding active work", () => {
+    expect(executionForInteractionPhase("aborting", "running")).toBe("thinking");
+    expect(executionForInteractionPhase("tool", "running")).toBeUndefined();
+    expect(executionForInteractionPhase("error", "idle")).toBeUndefined();
+    expect(executionForInteractionPhase("streaming", "interrupting")).toBe("aborting");
+  });
+
   test("uses the built-in Codex model and reasoning defaults", () => {
     expect(initialTuiState("pi")).toMatchObject({
       provider: "openai-codex",
@@ -309,6 +317,7 @@ describe("Noesis TUI reducer", () => {
     expect(renderQueuedInputs(state, 60).join("\n")).toContain("QUEUED · 1 · paused");
     expect(createStatusFields(state, createTuiLayout(90, 28))).toContain("q 1 paused");
     expect(helpHint(state)).toContain("/queue resume");
+    expect(helpHint(state)).not.toContain("/steer promote newest");
   });
 
   test("maps lifecycle actions to supported execution states", () => {

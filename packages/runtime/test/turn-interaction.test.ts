@@ -866,6 +866,51 @@ describe("TurnInteractionController", () => {
     await controller.close();
   });
 
+  test("restores a pre-ready explicit steer when its durable target can no longer be bound", async () => {
+    const baseIntents = createIntentStore();
+    const intents: TurnInteractionIntentStore & {
+      readonly records: () => readonly UserIntentRecord[];
+    } = Object.freeze({
+      ...baseIntents,
+      holdExplicitSteer: async () => undefined,
+    });
+    const scheduler = createScheduler();
+    const active = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const runEntered = deferred<void>();
+    let id = 0;
+    const controller = createTurnInteractionController({
+      intents,
+      createIntentId: () => `intent-${String(++id)}`,
+      createTurnId: () => `turn-${String(++id)}`,
+      now: () => timestamp(++id),
+      schedule: scheduler.schedule,
+      runTurn: async () => {
+        runEntered.resolve();
+        return await active.promise;
+      },
+      steer: async () => consumedSteer(),
+      recordSteerDelivery: async () => undefined,
+      interrupt: async () => undefined,
+    });
+
+    await controller.dispatch("session-1", { type: "submit", text: "active" });
+    scheduler.flushOne();
+    await runEntered.promise;
+
+    await expect(
+      controller.dispatch("session-1", { type: "steer", text: "keep this in the editor" }),
+    ).resolves.toMatchObject({
+      effect: "idle",
+      restoredText: "keep this in the editor",
+    });
+    expect(intents.records()).toHaveLength(1);
+    expect(intents.records()[0]).toMatchObject({ text: "active", status: "dispatching" });
+
+    active.resolve({ outcome: "aborted" });
+    await waitUntil(async () => (await controller.inspect("session-1")).phase === "idle");
+    await controller.close();
+  });
+
   test("does not let an unacknowledged steer block interrupt and lets the user restore it", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();

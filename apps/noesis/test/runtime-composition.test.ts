@@ -2,10 +2,10 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  frozenTurnPlanDigest,
   type AgentRuntimeEvent,
   type AgentRuntimeRequest,
   type FrozenTurnPlan,
+  frozenTurnPlanDigest,
   type NoesisAgentRuntime,
 } from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
@@ -13,13 +13,13 @@ import { eventChecksum, type LedgerEvent } from "@noesis/domain";
 import { createPiAgentRoleRunner, createPiAgentRuntime, createPiSkillLibrary } from "@noesis/runtime-pi";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
-import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
 import {
   CONTROLLED_PI_MODEL,
   CONTROLLED_PI_PROVIDER,
   createControlledPiModels,
 } from "../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 import { createScriptedAgentRoleRunner } from "../../../packages/runtime-pi/test/support/scripted-role-runner.ts";
+import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
 import { createApplicationRuntimeComposition } from "../src/runtime-composition.ts";
 
 const roots: string[] = [];
@@ -522,6 +522,16 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const trail = await first.startTrail({ title: "Durable actions" });
     await first.debug.runTurn(trail.trailId, "Use your full self tool surface");
+    expect(first.getTrail(trail.trailId).turns).toEqual([
+      {
+        input: "Use your full self tool surface",
+        output: "Starting.\n\nAll actions completed.",
+      },
+    ]);
+    expect(first.listTrailSummaries().find((summary) => summary.trailId === trail.trailId)).toMatchObject({
+      turnCount: 1,
+      messageCount: 3,
+    });
     const beforeRestart = await first.getTranscript(trail.trailId);
     expect(beforeRestart.flatMap((entry) => (entry.kind === "action" ? [entry.name] : []))).toEqual([
       "inspect_self",
@@ -551,6 +561,16 @@ describe("apps/noesis production control-plane composition", () => {
       agent: actionAgent,
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    expect(reopened.getTrail(trail.trailId).turns).toEqual([
+      {
+        input: "Use your full self tool surface",
+        output: "Starting.\n\nAll actions completed.",
+      },
+    ]);
+    expect(reopened.listTrailSummaries().find((summary) => summary.trailId === trail.trailId)).toMatchObject({
+      turnCount: 1,
+      messageCount: 3,
     });
     expect(await reopened.getTranscript(trail.trailId)).toEqual(beforeRestart);
     await reopened.shutdown();
@@ -833,6 +853,28 @@ describe("apps/noesis production control-plane composition", () => {
         run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
           firstRequests.push(request);
           emit({ type: "status", status: "started" });
+          if (request.prompt === "accepted source input") {
+            const firstBoundary = Object.freeze({
+              text: "A",
+              timelineSequence: 1,
+              createdAt: "2026-01-01T00:00:00.000Z",
+            });
+            const secondBoundary = Object.freeze({
+              text: "B",
+              timelineSequence: 2,
+              createdAt: "2026-01-01T00:00:00.000Z",
+            });
+            emit({ type: "assistant-message", ...firstBoundary });
+            emit({ type: "assistant-message", ...secondBoundary });
+            return Object.freeze({
+              outcome: "completed" as const,
+              stopReason: "stop" as const,
+              text: "A\n\nB",
+              assistantMessages: Object.freeze([firstBoundary, secondBoundary]),
+              provider: request.provider,
+              model: request.model,
+            });
+          }
           if (request.prompt === "failed source input") throw new Error("source turn failed");
           if (request.prompt === "aborted source input")
             return Object.freeze({
@@ -880,7 +922,8 @@ describe("apps/noesis production control-plane composition", () => {
     const fork = await first.forkTrail(source.trailId, "Authoritative fork");
     const expectedInheritedText = [
       "accepted source input",
-      "reply:accepted source input",
+      "A",
+      "B",
       "active source input",
       "delivered source steer",
       "reply:active source input",
@@ -892,6 +935,7 @@ describe("apps/noesis production control-plane composition", () => {
     );
     expect(inheritedMessages.map((message) => message.content)).toEqual(expectedInheritedText);
     expect(inheritedMessages.map((message) => message.metadata["historyKind"])).toEqual([
+      "turn",
       "turn",
       "turn",
       "turn",
@@ -910,16 +954,22 @@ describe("apps/noesis production control-plane composition", () => {
         }),
       ]),
     );
-    expect(inheritedMessages.map((message) => message.metadata["historySequence"])).toEqual([0, 1, 2, 3, 4]);
+    expect(inheritedMessages.map((message) => message.metadata["historySequence"])).toEqual([
+      0, 1, 2, 3, 4, 5,
+    ]);
     expect(
       (await first.getTranscript(fork.trailId)).flatMap((entry) =>
         entry.kind === "message" ? [entry.text] : [],
       ),
     ).toEqual(expectedInheritedText);
     expect(first.getTrail(fork.trailId).turns).toEqual([
-      { input: "accepted source input", output: "reply:accepted source input" },
+      { input: "accepted source input", output: "A\n\nB" },
       { input: "active source input", output: "reply:active source input" },
     ]);
+    expect(first.listTrailSummaries().find((summary) => summary.trailId === fork.trailId)).toMatchObject({
+      turnCount: 2,
+      messageCount: 6,
+    });
 
     await first.debug.runTurn(source.trailId, "source-only future input");
     await first.debug.runTurn(fork.trailId, "immediate fork input");
@@ -927,7 +977,8 @@ describe("apps/noesis production control-plane composition", () => {
       (request) => request.prompt === "immediate fork input",
     )?.systemPrompt;
     expect(immediatePrompt).toContain("User: accepted source input");
-    expect(immediatePrompt).toContain("Assistant: reply:accepted source input");
+    expect(immediatePrompt).toContain("Assistant: A");
+    expect(immediatePrompt).toContain("Assistant: B");
     expect(immediatePrompt).toContain("User: active source input");
     expect(immediatePrompt).toContain("User: delivered source steer");
     expect(immediatePrompt).toContain("Assistant: reply:active source input");
@@ -964,10 +1015,14 @@ describe("apps/noesis production control-plane composition", () => {
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
     expect(reopened.getTrail(fork.trailId).turns).toEqual([
-      { input: "accepted source input", output: "reply:accepted source input" },
+      { input: "accepted source input", output: "A\n\nB" },
       { input: "active source input", output: "reply:active source input" },
       { input: "immediate fork input", output: "reply:immediate fork input" },
     ]);
+    expect(reopened.listTrailSummaries().find((summary) => summary.trailId === fork.trailId)).toMatchObject({
+      turnCount: 3,
+      messageCount: 8,
+    });
     expect(
       (await reopened.debug.workspace.operational.messages.listForSession(fork.trailId))
         .filter((message) => message.metadata["replayEligible"] === true)

@@ -136,7 +136,7 @@ export function helpHint(state: NoesisTuiState): string {
   if (state.interaction.phase !== "idle")
     return "enter queue · /steer redirect · alt+↑ edit newest · esc interrupt";
   if (state.interaction.queuePaused && state.interaction.queuedInputs.length > 0)
-    return "/queue resume · /steer promote newest · alt+↑ edit newest";
+    return "/queue resume · alt+↑ edit newest";
   return "? help · ctrl+o inspect runs · shift+enter newline · ctrl+g editor · ctrl+c quit";
 }
 

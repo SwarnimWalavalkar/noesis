@@ -121,7 +121,7 @@ export interface TurnInteractionIntentStore {
     readonly targetTurnId: string;
     readonly createdAt: string;
     readonly heldAt: string;
-  }) => Promise<UserIntentRecord>;
+  }) => Promise<UserIntentRecord | undefined>;
   readonly holdNewestPendingToSteer: (request: {
     readonly sessionId: string;
     readonly targetTurnId: string;

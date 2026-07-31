@@ -1448,6 +1448,51 @@ describe("WorkspaceStore", () => {
     store.close();
   });
 
+  test("does not hold an explicit steer when a previously running target settles first", async () => {
+    const root = await temporary("held-explicit-steer-settlement-race");
+    const store = await createWorkspaceStore(root);
+    await store.operational.sessions.put(session("session-held-explicit-race"));
+    seedForegroundTurn(store, {
+      turnId: "turn-held-explicit-race",
+      sessionId: "session-held-explicit-race",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const settlement = new DatabaseSync(store.unsafeDatabasePathForTesting);
+    settlement
+      .prepare(
+        `UPDATE foreground_turns
+         SET status = 'completed', settled_at = ?
+         WHERE turn_id = ? AND status = 'running'`,
+      )
+      .run("2026-01-01T00:00:01.000Z", "turn-held-explicit-race");
+    settlement.close();
+
+    await expect(
+      store.operational.userIntents.holdExplicitSteer({
+        intentId: "intent-held-explicit-race",
+        sessionId: "session-held-explicit-race",
+        text: "restore this draft",
+        targetTurnId: "turn-held-explicit-race",
+        createdAt: "2026-01-01T00:00:02.000Z",
+        heldAt: "2026-01-01T00:00:02.000Z",
+      }),
+    ).resolves.toBeUndefined();
+
+    const inspection = new DatabaseSync(store.unsafeDatabasePathForTesting, { readOnly: true });
+    expect(inspection.prepare("SELECT count(*) AS count FROM user_intents").get()).toMatchObject({
+      count: 0,
+    });
+    expect(
+      inspection
+        .prepare("SELECT count(*) AS count FROM activity_log WHERE subject_kind = 'user_intent'")
+        .get(),
+    ).toMatchObject({ count: 0 });
+    inspection.close();
+    store.close();
+  });
+
   test("holds pre-ready steers durably and restores each origin without FIFO delivery", async () => {
     const store = await createWorkspaceStore(await temporary("held-steers"));
     await store.operational.sessions.put(session("session-held-steers"));

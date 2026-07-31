@@ -19,12 +19,14 @@ export type PiCodeExecutionEvent =
   | { readonly type: "progress"; readonly value: JsonValue }
   | {
       readonly type: "tool-start";
+      readonly callId: string;
       readonly name: string;
       readonly callIndex: number;
       readonly input?: JsonValue;
     }
   | {
       readonly type: "tool-end";
+      readonly callId: string;
       readonly name: string;
       readonly callIndex: number;
       readonly ok: boolean;

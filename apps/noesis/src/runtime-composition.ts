@@ -7,11 +7,11 @@ import type {
 } from "@noesis/agent-types";
 import { createAtomicCapabilityRegistry, createWorkspaceCapabilityControlStore } from "@noesis/capabilities";
 import {
-  createCodeModeRuntime,
   type CodeExecutionEvent,
   type CodeExecutionRequest,
   type CodeExecutionResult,
   type CodeModeRuntime,
+  createCodeModeRuntime,
 } from "@noesis/codemode";
 import {
   createUserCriterionRepository,
@@ -25,8 +25,8 @@ import {
   canonicalJson,
   capabilityRevisionRef,
   createId,
-  FileRevisionRefSchema,
   type FileRevisionRef,
+  FileRevisionRefSchema,
   type JsonValue,
   JsonValueSchema,
   sameCapabilityRevisionRef,
@@ -53,6 +53,7 @@ import {
 import {
   type ActivationCandidateResolver,
   type CoordinatorPreflightPreparation,
+  compareTrailRecency,
   createAtomicActivationController,
   createContinuousFeedbackController,
   createRuntimeControlPlane,
@@ -62,34 +63,33 @@ import {
   createTurnSettlement,
   type ExperimentOutcomeJudge,
   type ExperimentOutcomeProposal,
-  type NoesisRuntime,
-  type RuntimeControlPlane,
   loadRuntimeTranscript,
-  compareTrailRecency,
+  type NoesisRuntime,
+  type RunTurnOptions,
+  type RuntimeControlPlane,
   SESSION_PICKER_LIMIT,
   type TrailState,
   type TrailSummary,
-  type RunTurnOptions,
   type TurnResult,
 } from "@noesis/runtime";
 import {
   createRestrictedRoleContextPolicy,
   createStructuredInferencePort,
-  frozenPlanMaterialUses,
-  resolveFrozenSessionToolDefinitions,
-  type PiCodeExecutionAdapter,
-  type PiSkillLibrary,
-  type PiSelfToolAdapter,
   type FrozenSessionToolResolver,
+  frozenPlanMaterialUses,
+  type PiCodeExecutionAdapter,
+  type PiSelfToolAdapter,
+  type PiSkillLibrary,
   type RoleVariantConfiguration,
   type RuntimePiAgentRoleRunner,
+  resolveFrozenSessionToolDefinitions,
 } from "@noesis/runtime-pi";
 import {
   createLocalWorkTools,
   createToolBroker,
   defineTool,
-  type ToolDefinition,
   type ToolBroker,
+  type ToolDefinition,
   type ToolInvocationRecord,
 } from "@noesis/tools";
 import type { NoesisTuiRuntime } from "@noesis/tui";
@@ -509,16 +509,16 @@ async function replayEligibleTurns(
     {
       readonly firstIndex: number;
       user?: (typeof messages)[number];
-      assistant?: (typeof messages)[number];
+      readonly assistants: Array<(typeof messages)[number]>;
     }
   >();
   for (const [index, message] of messages.entries()) {
     if (replayHistoryKind(message) === "steer") continue;
     const turnId = replayHistoryTurnKey(message);
     if (!turnId) continue;
-    const pair = messagesByTurn.get(turnId) ?? { firstIndex: index };
+    const pair = messagesByTurn.get(turnId) ?? { firstIndex: index, assistants: [] };
     if (message.role === "user" && pair.user === undefined) pair.user = message;
-    if (message.role === "assistant") pair.assistant = message;
+    if (message.role === "assistant") pair.assistants.push(message);
     messagesByTurn.set(turnId, pair);
   }
   const replayable: Array<{
@@ -527,12 +527,15 @@ async function replayEligibleTurns(
     readonly output: string;
   }> = [];
   for (const pair of messagesByTurn.values()) {
-    if (!pair?.user || !pair.assistant) continue;
+    if (!pair?.user || pair.assistants.length === 0) continue;
     replayable.push(
       Object.freeze({
         firstIndex: pair.firstIndex,
         input: pair.user.content,
-        output: pair.assistant.content,
+        output: pair.assistants
+          .map((message) => message.content)
+          .filter((content) => content.length > 0)
+          .join("\n\n"),
       }),
     );
   }
@@ -1071,11 +1074,22 @@ export async function createApplicationRuntimeComposition(
     },
   });
   const activeCodeRuntimes = new Set<CodeModeRuntime>();
+  const nestedActionBindings = new Map<
+    string,
+    {
+      readonly parentToolCallId: string;
+      readonly timelineSequence: number;
+      readonly parentReady: Promise<void>;
+    }
+  >();
   const recordToolInvocation = async (record: ToolInvocationRecord): Promise<void> => {
+    const binding = nestedActionBindings.get(record.callId);
+    await binding?.parentReady;
     await workspace.operational.toolCalls.put({
       toolCallId: record.callId,
       sessionId: record.sessionId,
       ...(record.turnId ? { turnId: record.turnId } : {}),
+      ...(binding ? { parentToolCallId: binding.parentToolCallId } : {}),
       executionId: record.executionId,
       toolName: record.toolName,
       request: Object.freeze({
@@ -1098,7 +1112,16 @@ export async function createApplicationRuntimeComposition(
       sensitivity: "normal",
       createdAt: record.occurredAt,
       ...(record.completedAt ? { completedAt: record.completedAt } : {}),
+      ...(binding ? { timelineSequence: binding.timelineSequence } : {}),
     });
+    if (
+      binding &&
+      (record.status === "completed" ||
+        record.status === "failed" ||
+        record.status === "denied" ||
+        record.status === "ambiguous")
+    )
+      nestedActionBindings.delete(record.callId);
   };
   const recordedToolInvocationStatus = async (
     callId: string,
@@ -1164,7 +1187,7 @@ export async function createApplicationRuntimeComposition(
   const durableActionEvent = (turnId: string, event: AgentActionEvent): AgentActionEvent =>
     Object.freeze({
       ...event,
-      actionId: `${turnId}:${event.actionId}`,
+      actionId: event.parentActionId ? event.actionId : `${turnId}:${event.actionId}`,
       ...(event.parentActionId ? { parentActionId: `${turnId}:${event.parentActionId}` } : {}),
     });
   const prepareCodeExecution: PiCodeExecutionAdapter["prepare"] = async (plan, signal, resources) => {
@@ -2116,6 +2139,7 @@ export async function createApplicationRuntimeComposition(
             else if (event.type === "tool-start")
               emit({
                 type: "tool-start",
+                callId: event.callId,
                 name: event.name,
                 callIndex: event.callIndex,
                 input: event.input,
@@ -2123,6 +2147,7 @@ export async function createApplicationRuntimeComposition(
             else if (event.type === "tool-end")
               emit({
                 type: "tool-end",
+                callId: event.callId,
                 name: event.name,
                 callIndex: event.callIndex,
                 ok: event.ok,
@@ -2506,8 +2531,17 @@ export async function createApplicationRuntimeComposition(
 
   const sessionTimes = new Map<string, { readonly createdAt: string; readonly updatedAt: string }>();
   const trailStates = new Map<string, TrailState>();
+  const messageCounts = new Map<string, number>();
+  const refreshMessageCount = async (sessionId: string): Promise<number> => {
+    const count = (await workspace.operational.messages.listForSession(sessionId)).length;
+    messageCounts.set(sessionId, count);
+    return count;
+  };
   for (const session of await workspace.operational.sessions.list()) {
-    const turns = await replayEligibleTurns(workspace, session.sessionId);
+    const [turns] = await Promise.all([
+      replayEligibleTurns(workspace, session.sessionId),
+      refreshMessageCount(session.sessionId),
+    ]);
     trailStates.set(
       session.sessionId,
       Object.freeze({
@@ -2546,6 +2580,7 @@ export async function createApplicationRuntimeComposition(
       }),
     );
     sessionTimes.set(trail.trailId, { createdAt: times.createdAt, updatedAt: timestamp });
+    if (!messageCounts.has(trail.trailId)) messageCounts.set(trail.trailId, 0);
     const frozen = Object.freeze(trail);
     trailStates.set(trail.trailId, frozen);
     return frozen;
@@ -2577,7 +2612,7 @@ export async function createApplicationRuntimeComposition(
             createdAt: times?.createdAt ?? "",
             updatedAt: times?.updatedAt ?? "",
             turnCount: trail.turns.length,
-            messageCount: trail.turns.length * 2,
+            messageCount: messageCounts.get(trail.trailId) ?? 0,
             preview: latest?.output ?? latest?.input ?? "",
           });
         })
@@ -2654,6 +2689,7 @@ export async function createApplicationRuntimeComposition(
       }
       await workspace.operational.messages.put(inherited);
     }
+    await refreshMessageCount(fork.trailId);
     fork = await persistTrail(
       Object.freeze({
         ...fork,
@@ -2765,6 +2801,18 @@ export async function createApplicationRuntimeComposition(
               }
               if (event.type === "tool-start" || event.type === "tool-update" || event.type === "tool-end") {
                 const durableEvent = durableActionEvent(turnId, event);
+                if (durableEvent.type === "tool-start" && durableEvent.parentActionId) {
+                  if (durableEvent.timelineSequence === undefined)
+                    throw new Error(`Nested action ${durableEvent.actionId} has no turn timeline position`);
+                  nestedActionBindings.set(
+                    durableEvent.actionId,
+                    Object.freeze({
+                      parentToolCallId: durableEvent.parentActionId,
+                      timelineSequence: durableEvent.timelineSequence,
+                      parentReady: actionPersistence,
+                    }),
+                  );
+                }
                 runOptions?.onEvent?.(durableEvent);
                 if (durableEvent.type === "tool-start") {
                   const currentPersistence = persistTopLevelAction(trailId, turnId, durableEvent);
@@ -2776,24 +2824,30 @@ export async function createApplicationRuntimeComposition(
                     await persistTopLevelAction(trailId, turnId, durableEvent);
                   });
                 }
+                if (durableEvent.type === "tool-end" && durableEvent.parentActionId)
+                  nestedActionBindings.delete(durableEvent.actionId);
                 return;
               }
               if (event.type === "assistant-message") {
                 const boundary = event;
                 const messageId = `${turnId}:assistant:${String(boundary.timelineSequence)}`;
-                const currentPersistence = workspace.operational.messages.put({
-                  messageId,
-                  sessionId: trailId,
-                  role: "assistant",
-                  content: boundary.text,
-                  sensitivity: "normal",
-                  createdAt: boundary.createdAt,
-                  metadata: Object.freeze({
-                    turnId,
-                    frozenTurnPlanId: plan.planId,
-                  }),
-                  timelineSequence: boundary.timelineSequence,
-                });
+                const currentPersistence = workspace.operational.messages
+                  .put({
+                    messageId,
+                    sessionId: trailId,
+                    role: "assistant",
+                    content: boundary.text,
+                    sensitivity: "normal",
+                    createdAt: boundary.createdAt,
+                    metadata: Object.freeze({
+                      turnId,
+                      frozenTurnPlanId: plan.planId,
+                    }),
+                    timelineSequence: boundary.timelineSequence,
+                  })
+                  .then(async () => {
+                    await refreshMessageCount(trailId);
+                  });
                 assistantPersistence = Promise.all([assistantPersistence, currentPersistence]).then(
                   () => undefined,
                 );
@@ -2866,6 +2920,8 @@ export async function createApplicationRuntimeComposition(
     } catch (error) {
       await persistTrail(Object.freeze({ ...running, status: "failed" as const }));
       throw error;
+    } finally {
+      await refreshMessageCount(trailId);
     }
   };
   const debugRunTurn = async (
@@ -2915,6 +2971,7 @@ export async function createApplicationRuntimeComposition(
       });
       if (delivered?.status !== "delivered")
         throw new Error(`Steer intent ${intentId} could not be committed as delivered`);
+      await refreshMessageCount(sessionId);
     },
     interrupt: async (sessionId) => {
       await agent.abort(sessionId);

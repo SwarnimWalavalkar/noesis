@@ -376,13 +376,13 @@ describe("runtime transcript projection", () => {
         messageId: "turn-timeline:steer:intent",
         role: "user" as const,
         content: "steer",
-        timelineSequence: 3,
+        timelineSequence: 4,
       },
       {
         messageId: "turn-timeline:assistant:4",
         role: "assistant" as const,
         content: "Second boundary",
-        timelineSequence: 4,
+        timelineSequence: 5,
       },
     ]) {
       await workspace.operational.messages.put({
@@ -392,18 +392,32 @@ describe("runtime transcript projection", () => {
         createdAt,
         metadata: Object.freeze({
           turnId: "turn-timeline",
-          ...(message.timelineSequence === 3 ? { deliveryMode: "steer" } : {}),
+          ...(message.timelineSequence === 4 ? { deliveryMode: "steer" } : {}),
         }),
       });
     }
     await workspace.operational.toolCalls.put({
-      toolCallId: "turn-timeline:tool",
+      toolCallId: "turn-timeline:execute",
       sessionId: "session-turn-timeline",
       turnId: "turn-timeline",
-      toolName: "inspect_self",
+      toolName: "execute",
       request: {},
       response: {},
       timelineSequence: 2,
+      status: "completed",
+      sensitivity: "normal",
+      createdAt,
+      completedAt: createdAt,
+    });
+    await workspace.operational.toolCalls.put({
+      toolCallId: "tool_call_nested-timeline",
+      sessionId: "session-turn-timeline",
+      turnId: "turn-timeline",
+      parentToolCallId: "turn-timeline:execute",
+      toolName: "shell.run",
+      request: { command: "pwd" },
+      response: { stdout: "/workspace" },
+      timelineSequence: 3,
       status: "completed",
       sensitivity: "normal",
       createdAt,
@@ -418,7 +432,8 @@ describe("runtime transcript projection", () => {
     expect(afterRestart.map((entry) => (entry.kind === "message" ? entry.text : entry.name))).toEqual([
       "start",
       "First boundary",
-      "inspect_self",
+      "execute",
+      "shell.run",
       "steer",
       "Second boundary",
     ]);

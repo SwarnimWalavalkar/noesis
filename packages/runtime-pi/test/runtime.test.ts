@@ -16,9 +16,9 @@ import {
   createPiSelfTools,
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
-  type PreparedPiCodeExecution,
   type PiCodeExecutionAdapter,
   type PiSkillLibrary,
+  type PreparedPiCodeExecution,
   resolveFrozenSessionToolDefinitions,
   toAgentActionPayload,
 } from "../src/index.ts";
@@ -477,12 +477,14 @@ describe("agent runtime factories", () => {
           emit({ type: "progress", value: { message: "Starting shell" } });
           emit({
             type: "tool-start",
+            callId: "tool_call_nested-visible",
             name: "shell.run",
             callIndex: 0,
             input: { command: "pwd" },
           });
           emit({
             type: "tool-end",
+            callId: "tool_call_nested-visible",
             name: "shell.run",
             callIndex: 0,
             ok: true,
@@ -536,7 +538,7 @@ describe("agent runtime factories", () => {
       expect.arrayContaining([
         expect.objectContaining({
           type: "tool-start",
-          actionId: "call-execute-visible:call:0",
+          actionId: "tool_call_nested-visible",
           parentActionId: "call-execute-visible",
           name: "shell.run",
           input: { command: "pwd" },
@@ -545,7 +547,7 @@ describe("agent runtime factories", () => {
     );
     expect(events).toContainEqual({
       type: "tool-end",
-      actionId: "call-execute-visible:call:0",
+      actionId: "tool_call_nested-visible",
       parentActionId: "call-execute-visible",
       name: "shell.run",
       isError: false,

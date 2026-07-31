@@ -72,13 +72,13 @@ describe("production codemode journey", () => {
 
     expect(result.output).toBe("Repository inspected through codemode.");
     expect(observedToolNames).toEqual(["adapt", "execute", "inspect_self", "remember"]);
-    expect(
-      (await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId)).find(
-        (call) => call.toolName === "files.read",
-      ),
-    ).toMatchObject({
+    const storedCalls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    const nestedCall = storedCalls.find((call) => call.toolName === "files.read");
+    expect(nestedCall).toMatchObject({
       toolName: "files.read",
       status: "completed",
+      parentToolCallId: expect.stringContaining(":"),
+      timelineSequence: 3,
     });
     const executions = await runtime.debug.workspace.operational.codeExecutions.listForSession(trail.trailId);
     const execution = executions[0];
@@ -87,6 +87,9 @@ describe("production codemode journey", () => {
       (entry) => entry.kind === "action",
     );
     expect(transcriptActions.map((action) => action.name)).toEqual(["execute", "files.read"]);
+    expect(storedCalls).toHaveLength(2);
+    expect(transcriptActions[1]?.actionId).toBe(nestedCall?.toolCallId);
+    expect(storedCalls.some((call) => call.toolCallId.includes(":call:"))).toBe(false);
     expect(transcriptActions[1]).toMatchObject({
       parentActionId: transcriptActions[0]?.actionId,
     });
@@ -111,7 +114,28 @@ describe("production codemode journey", () => {
         truncated: false,
       },
     });
+    const beforeRestart = await runtime.getTranscript(trail.trailId);
+    expect(beforeRestart.map((entry) => (entry.kind === "message" ? entry.text : entry.name))).toEqual([
+      "Inspect the repository package.",
+      "",
+      "execute",
+      "files.read",
+      "Repository inspected through codemode.",
+    ]);
     await runtime.shutdown();
+
+    const reopened = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({ text: '{"decision":"no_change","reason":"disabled in acceptance"}' }),
+        }),
+    });
+    expect(await reopened.getTranscript(trail.trailId)).toEqual(beforeRestart);
+    await reopened.shutdown();
   });
 
   test("the production permission snapshot admits shell execution from an arbitrary host directory", async () => {

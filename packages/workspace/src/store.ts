@@ -1761,15 +1761,6 @@ function createOperationalRepositories(
         .get(intentId, sessionId),
       decodeUserIntent,
     );
-  const assertRunningTargetTurn = (turnId: string, sessionId: string): void => {
-    const turn = db.prepare("SELECT session_id, status FROM foreground_turns WHERE turn_id = ?").get(turnId);
-    if (
-      turn === undefined ||
-      requiredString(turn, "session_id") !== sessionId ||
-      requiredString(turn, "status") !== "running"
-    )
-      throw new Error(`Foreground turn ${turnId} is not running in session ${sessionId}`);
-  };
   const targetTurnStatus = (
     turnId: string | undefined,
     sessionId: string,
@@ -1972,7 +1963,7 @@ function createOperationalRepositories(
     });
   const holdExplicitUserIntentSteer = async (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["holdExplicitSteer"]>[0],
-  ): Promise<UserIntentRecord> =>
+  ): Promise<UserIntentRecord | undefined> =>
     database.transaction(() => {
       const intentId = z.string().min(1).parse(request.intentId);
       const sessionId = z.string().min(1).parse(request.sessionId);
@@ -1994,7 +1985,15 @@ function createOperationalRepositories(
           throw new Error(`User intent ${intentId} already exists with a different identity`);
         return existing;
       }
-      assertRunningTargetTurn(targetTurnId, sessionId);
+      const target = db
+        .prepare("SELECT session_id, status FROM foreground_turns WHERE turn_id = ?")
+        .get(targetTurnId);
+      if (
+        target === undefined ||
+        requiredString(target, "session_id") !== sessionId ||
+        requiredString(target, "status") !== "running"
+      )
+        return undefined;
       const queueSequence = requiredNumber(
         db
           .prepare(

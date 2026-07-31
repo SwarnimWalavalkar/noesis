@@ -37,6 +37,7 @@ import {
   resumableTrail,
   type TuiStartOptions,
 } from "./session-picker.ts";
+import { executionForInteractionPhase } from "./state.ts";
 import { initialTuiState, interactionViewFromSnapshot, timelineActions } from "./state.ts";
 import { ANSI, safeTerminalText, shouldUseColor, styled } from "./theme.ts";
 
@@ -342,12 +343,8 @@ export async function startNoesisTui(
       type: "interaction-changed",
       interaction: interactionViewFromSnapshot(snapshot),
     });
-    if (snapshot.phase === "interrupting")
-      view.dispatch({ type: "execution-changed", execution: "aborting" });
-    else if (snapshot.phase === "idle" && view.state.execution !== "error")
-      view.dispatch({ type: "execution-changed", execution: "idle" });
-    else if (view.state.execution === "idle")
-      view.dispatch({ type: "execution-changed", execution: "thinking" });
+    const execution = executionForInteractionPhase(view.state.execution, snapshot.phase);
+    if (execution) view.dispatch({ type: "execution-changed", execution });
     tui.requestRender(snapshot.phase === "interrupting");
   };
 

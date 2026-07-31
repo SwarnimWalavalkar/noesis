@@ -2,8 +2,8 @@ import { AgentHarness, formatSkillsForSystemPrompt, type Skill } from "@earendil
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { MutableModels } from "@earendil-works/pi-ai";
 import type {
-  AgentContextUsage,
   AgentAssistantMessageBoundary,
+  AgentContextUsage,
   AgentRuntimeEvent,
   AgentRuntimeRequest,
   AgentRuntimeResult,
@@ -12,12 +12,12 @@ import type {
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
 import { validateFrozenTurnPlan } from "@noesis/agent-types";
+import { toAgentActionPayload } from "./action-payload.ts";
 import {
   createPiExecuteTool,
   type PiCodeExecutionAdapter,
   type PreparedPiCodeExecution,
 } from "./execute-tool.ts";
-import { toAgentActionPayload } from "./action-payload.ts";
 import { frozenPlanMaterialUses } from "./frozen-session-tools.ts";
 import { createPiSelfTools, type PiSelfToolAdapter } from "./self-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
@@ -123,10 +123,6 @@ export function createAssistantDeltaAggregator(): AssistantDeltaAggregator {
     },
     text: () => aggregate,
   };
-}
-
-export function nestedCodeActionId(parentActionId: string, callIndex: number): string {
-  return `${parentActionId}:call:${String(callIndex)}`;
 }
 
 function piToolUpdatePayload(value: unknown): unknown {
@@ -300,7 +296,7 @@ export function createPiAgentRuntime(
               if (event.type === "tool-start")
                 emit({
                   type: "tool-start",
-                  actionId: nestedCodeActionId(parentActionId, event.callIndex),
+                  actionId: event.callId,
                   parentActionId,
                   name: event.name,
                   input: toAgentActionPayload(event.input ?? {}),
@@ -309,7 +305,7 @@ export function createPiAgentRuntime(
               else if (event.type === "tool-end")
                 emit({
                   type: "tool-end",
-                  actionId: nestedCodeActionId(parentActionId, event.callIndex),
+                  actionId: event.callId,
                   parentActionId,
                   name: event.name,
                   isError: !event.ok,

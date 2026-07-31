@@ -66,6 +66,7 @@ export type CodeExecutionEvent =
   | {
       readonly type: "tool-start";
       readonly executionId: string;
+      readonly callId: string;
       readonly name: string;
       readonly callIndex: number;
       readonly input: JsonValue;
@@ -73,6 +74,7 @@ export type CodeExecutionEvent =
   | {
       readonly type: "tool-end";
       readonly executionId: string;
+      readonly callId: string;
       readonly name: string;
       readonly callIndex: number;
       readonly ok: boolean;
@@ -352,7 +354,14 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               : message.kind === "describe"
                 ? "noesis.describe"
                 : message.name;
-          notify({ type: "tool-start", executionId, name, callIndex, input: sdkActionInput(message) });
+          notify({
+            type: "tool-start",
+            executionId,
+            callId,
+            name,
+            callIndex,
+            input: sdkActionInput(message),
+          });
           try {
             const value = toJsonValue(
               message.kind === "search"
@@ -376,7 +385,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               ok: true,
               value,
             });
-            notify({ type: "tool-end", executionId, name, callIndex, ok: true, result: value });
+            notify({ type: "tool-end", executionId, callId, name, callIndex, ok: true, result: value });
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);
             respond({
@@ -385,7 +394,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               ok: false,
               error: reason,
             });
-            notify({ type: "tool-end", executionId, name, callIndex, ok: false, error: reason });
+            notify({ type: "tool-end", executionId, callId, name, callIndex, ok: false, error: reason });
           }
         };
         child.on("message", (raw: unknown) => {
