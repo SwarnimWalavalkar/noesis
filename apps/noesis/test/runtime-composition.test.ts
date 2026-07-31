@@ -468,6 +468,12 @@ describe("apps/noesis production control-plane composition", () => {
             result: { status: "completed", fixture: name },
           });
         }
+        emit({
+          type: "tool-start",
+          actionId: "action-unmatched",
+          name: "remember",
+          input: { fixture: "unmatched" },
+        });
         return Object.freeze({
           outcome: "completed" as const,
           stopReason: "stop" as const,
@@ -494,13 +500,20 @@ describe("apps/noesis production control-plane composition", () => {
       "remember",
       "adapt",
       "execute",
+      "remember",
     ]);
     expect(beforeRestart.flatMap((entry) => (entry.kind === "action" ? [entry.actionId] : []))).toEqual([
       expect.stringMatching(/:action-1$/u),
       expect.stringMatching(/:action-2$/u),
       expect.stringMatching(/:action-3$/u),
       expect.stringMatching(/:action-4$/u),
+      expect.stringMatching(/:action-unmatched$/u),
     ]);
+    expect(beforeRestart.at(-2)).toMatchObject({
+      kind: "action",
+      name: "remember",
+      status: "interrupted",
+    });
     await first.shutdown();
 
     const reopened = await createApplicationRuntimeComposition({
@@ -511,6 +524,61 @@ describe("apps/noesis production control-plane composition", () => {
     });
     expect(await reopened.getTranscript(trail.trailId)).toEqual(beforeRestart);
     await reopened.shutdown();
+  });
+
+  test("continues persisting later action events after an earlier write fails", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-action-persistence-drain-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    const noOp = async (): Promise<void> => undefined;
+    const actionAgent: NoesisAgentRuntime = Object.freeze({
+      name: runtimeIdentity,
+      run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+        emit({ type: "tool-start", actionId: "duplicate", name: "remember", input: { value: 1 } });
+        emit({ type: "tool-start", actionId: "duplicate", name: "remember", input: { value: 2 } });
+        emit({ type: "tool-start", actionId: "later", name: "adapt", input: { value: 3 } });
+        emit({
+          type: "tool-end",
+          actionId: "later",
+          name: "adapt",
+          isError: false,
+          result: { status: "completed" },
+        });
+        return Object.freeze({
+          outcome: "completed" as const,
+          stopReason: "stop" as const,
+          text: "The durable queue should report its failure.",
+          provider: request.provider,
+          model: request.model,
+        });
+      },
+      steer: noOp,
+      followUp: noOp,
+      abort: noOp,
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      agent: actionAgent,
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Action persistence drain" });
+
+    await expect(runtime.runTurn(trail.trailId, "Exercise the persistence queue")).rejects.toThrow(
+      "changed its immutable identity",
+    );
+    expect(await runtime.getTranscript(trail.trailId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "action", name: "adapt", status: "completed" }),
+      ]),
+    );
+    await runtime.shutdown();
   });
 
   test("a real app turn pins admission and records exact durable operational work", async () => {

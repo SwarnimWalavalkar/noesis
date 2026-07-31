@@ -186,6 +186,30 @@ describe("Noesis safe editor key path", () => {
 
     expect(editor.getText()).toBe("ab");
   });
+
+  test("normalizes one CRLF when a large paste flush splits the pair", async () => {
+    vi.useFakeTimers();
+    const editor = createSafeEditor(new TUI(inertTerminal));
+    const prefix = "x".repeat(1024 * 1024 - 5);
+
+    editor.handleInput?.(`\u001b[200~${prefix}\r\nabcx\u001b[201~`);
+    await settleSafeEditorAmbiguity();
+
+    expect(editor.getText()).toBe(`${prefix}\nabcx`);
+  });
+
+  test("programmatic edits discard partial terminal input and its timers", async () => {
+    vi.useFakeTimers();
+    const editor = createSafeEditor(new TUI(inertTerminal));
+    editor.handleInput?.("\u001b[200~discarded paste");
+
+    editor.setText("replacement");
+    editor.handleInput?.("\u001b");
+    editor.insertText(" + inserted");
+    await settleSafeEditorAmbiguity();
+
+    expect(editor.getText()).toBe("replacement + inserted");
+  });
 });
 
 describe("Noesis transcript rendering", () => {

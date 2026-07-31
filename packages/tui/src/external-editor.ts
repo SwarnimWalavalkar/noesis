@@ -61,6 +61,7 @@ const describeError = (error: unknown): string => (error instanceof Error ? erro
 
 function parseEditorCommand(
   command: string,
+  platform: NodeJS.Platform,
 ):
   | { readonly status: "complete"; readonly executable: string; readonly args: readonly string[] }
   | { readonly status: "failed"; readonly error: string } {
@@ -76,7 +77,7 @@ function parseEditorCommand(
       escaped = false;
       continue;
     }
-    if (character === "\\" && quote !== "'") {
+    if (character === "\\" && platform !== "win32" && quote !== "'") {
       escaped = true;
       wordStarted = true;
       continue;
@@ -145,7 +146,7 @@ async function runEditor(
       settled = true;
       resolve(result);
     };
-    const parsed = parseEditorCommand(command);
+    const parsed = parseEditorCommand(command, platform);
     if (parsed.status === "failed") {
       settle({
         status: "failed",
@@ -157,7 +158,7 @@ async function runEditor(
     const childEnvironment = { ...process.env, ...environment };
     const child = spawn(parsed.executable, [...parsed.args, filePath], {
       env: childEnvironment,
-      shell: platform === "win32",
+      shell: false,
       stdio: "inherit",
     });
     child.once("error", (error) =>

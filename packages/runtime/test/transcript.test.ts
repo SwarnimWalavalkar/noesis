@@ -288,4 +288,38 @@ describe("runtime transcript projection", () => {
     ]);
     workspace.close();
   });
+
+  test("omits turn identity for legacy actions that predate foreground turns", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-legacy-action-"));
+    roots.push(root);
+    const workspace = await createWorkspaceStore(root);
+    await workspace.operational.sessions.put({
+      sessionId: "session-legacy",
+      title: "Legacy action",
+      status: "idle",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    await workspace.operational.toolCalls.put({
+      toolCallId: "legacy-action",
+      sessionId: "session-legacy",
+      toolName: "legacy.tool",
+      request: { value: 1 },
+      response: { value: 2 },
+      status: "completed",
+      sensitivity: "normal",
+      createdAt: "2026-07-30T00:00:01.000Z",
+      completedAt: "2026-07-30T00:00:02.000Z",
+    });
+
+    const [action] = await loadRuntimeTranscript(workspace, "session-legacy");
+
+    expect(action).toMatchObject({ kind: "action", actionId: "legacy-action" });
+    expect(action).not.toHaveProperty("turnId");
+    workspace.close();
+  });
 });

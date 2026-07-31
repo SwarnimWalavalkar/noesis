@@ -2592,43 +2592,56 @@ export async function createApplicationRuntimeComposition(
           plan,
           execute: async () => {
             let actionPersistence = Promise.resolve();
+            let actionPersistenceFailure: unknown;
             const emit = (event: AgentRuntimeEvent): void => {
               if (event.type === "tool-start" || event.type === "tool-update" || event.type === "tool-end") {
                 const durableEvent = durableActionEvent(turnId, event);
                 runOptions?.onEvent?.(durableEvent);
                 actionPersistence = actionPersistence.then(async () => {
-                  await persistTopLevelAction(trailId, turnId, durableEvent);
+                  try {
+                    await persistTopLevelAction(trailId, turnId, durableEvent);
+                  } catch (error) {
+                    actionPersistenceFailure ??= error;
+                  }
                 });
                 return;
               }
               runOptions?.onEvent?.(event);
             };
-            let agentResult: Awaited<ReturnType<NoesisAgentRuntime["run"]>>;
+            let agentOutcome:
+              | {
+                  readonly status: "completed";
+                  readonly result: Awaited<ReturnType<NoesisAgentRuntime["run"]>>;
+                }
+              | { readonly status: "failed"; readonly error: unknown };
             try {
-              agentResult = await agent.run(
-                {
-                  trailId,
-                  provider: plan.provider,
-                  model: plan.model,
-                  thinkingLevel: plan.thinkingLevel,
-                  systemPrompt: plan.renderedSystemPrompt,
-                  prompt: input,
-                  activeCapabilities: plan.selectedCapabilities.map((selection) => ({
-                    name: selection.name,
-                    version: plan.activationRevision,
-                  })),
-                  frozenTurnPlan: plan,
-                },
-                emit,
-              );
-              await actionPersistence;
+              agentOutcome = {
+                status: "completed",
+                result: await agent.run(
+                  {
+                    trailId,
+                    provider: plan.provider,
+                    model: plan.model,
+                    thinkingLevel: plan.thinkingLevel,
+                    systemPrompt: plan.renderedSystemPrompt,
+                    prompt: input,
+                    activeCapabilities: plan.selectedCapabilities.map((selection) => ({
+                      name: selection.name,
+                      version: plan.activationRevision,
+                    })),
+                    frozenTurnPlan: plan,
+                  },
+                  emit,
+                ),
+              };
             } catch (error) {
-              await actionPersistence.catch(() => undefined);
-              await workspace.operational.toolCalls.interruptRunningForTurn(turnId, new Date().toISOString());
-              throw error;
+              agentOutcome = { status: "failed", error };
             }
-            if (agentResult.stopReason === "aborted" || agentResult.stopReason === "error")
-              await workspace.operational.toolCalls.interruptRunningForTurn(turnId, new Date().toISOString());
+            await actionPersistence;
+            await workspace.operational.toolCalls.interruptRunningForTurn(turnId, new Date().toISOString());
+            if (agentOutcome.status === "failed") throw agentOutcome.error;
+            if (actionPersistenceFailure !== undefined) throw actionPersistenceFailure;
+            const agentResult = agentOutcome.result;
             if (agentResult.stopReason === "error") throw new Error(agentResult.error);
             return Object.freeze({
               outcome: agentResult.stopReason === "aborted" ? ("aborted" as const) : ("completed" as const),

@@ -76,7 +76,7 @@ export function tuiTimelineFromRuntime(
     return {
       kind: "action",
       actionId: entry.actionId,
-      turnId: entry.turnId,
+      ...(entry.turnId ? { turnId: entry.turnId } : {}),
       ...(entry.parentActionId ? { parentActionId: entry.parentActionId } : {}),
       ...(entry.executionId ? { executionId: entry.executionId } : {}),
       name: entry.name,

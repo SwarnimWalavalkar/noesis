@@ -369,40 +369,77 @@ interface WrappedViewport {
   readonly scroll: number;
 }
 
-/**
- * Count the whole document, but retain only one visible viewport (plus a tail viewport used when
- * a stale scroll offset must be clamped). This keeps an exact multi-megabyte result inspectable
- * without constructing an equally large terminal-frame array on every repaint.
- */
-function wrappedViewport(
-  lines: readonly string[],
+interface PreparedInspectorDocument {
+  readonly action: TuiAgentAction | undefined;
+  readonly children: readonly TuiAgentAction[];
+  readonly detail: TuiExecutionDetail | undefined;
+  readonly inspectorStatus: TuiInspectorState["status"];
+  readonly width: number;
+  readonly colorEnabled: boolean;
+  readonly rows: readonly string[];
+}
+
+let preparedInspectorDocument: PreparedInspectorDocument | undefined;
+
+const sameActionReferences = (left: readonly TuiAgentAction[], right: readonly TuiAgentAction[]): boolean =>
+  left.length === right.length && left.every((action, index) => action === right[index]);
+
+function prepareInspectorDocument(
+  action: TuiAgentAction | undefined,
+  children: readonly TuiAgentAction[],
+  inspector: TuiInspectorState,
   width: number,
+  colorEnabled: boolean,
+): readonly string[] {
+  const cached = preparedInspectorDocument;
+  if (
+    cached &&
+    cached.action === action &&
+    cached.detail === inspector.detail &&
+    cached.inspectorStatus === inspector.status &&
+    cached.width === width &&
+    cached.colorEnabled === colorEnabled &&
+    sameActionReferences(cached.children, children)
+  )
+    return cached.rows;
+
+  const body = action
+    ? [
+        ...identityLines(action, children, inspector, colorEnabled),
+        ...buildSections(action, children, inspector.detail, width, colorEnabled).flatMap((section) => [
+          "",
+          sectionRule(section, width, colorEnabled),
+          ...section.lines,
+        ]),
+      ]
+    : ["This run is no longer available."];
+  const rows = body.flatMap((line) => {
+    const parts = wrapTextWithAnsi(line, width);
+    return parts.length > 0 ? parts : [""];
+  });
+  preparedInspectorDocument = {
+    action,
+    children: [...children],
+    detail: inspector.detail,
+    inspectorStatus: inspector.status,
+    width,
+    colorEnabled,
+    rows,
+  };
+  return rows;
+}
+
+/** Slice a prepared document without re-encoding, highlighting, or wrapping its payload. */
+function wrappedViewport(
+  rows: readonly string[],
   requestedScroll: number,
   visibleRows: number,
 ): WrappedViewport {
-  const requestedRows: string[] = [];
-  const tailRows: string[] = [];
-  let totalRows = 0;
-
-  for (const line of lines) {
-    const parts = wrapTextWithAnsi(line, width);
-    // Preserve blank logical rows even if an upstream wrapper represents them as no parts.
-    const wrappedParts = parts.length > 0 ? parts : [""];
-    for (const part of wrappedParts) {
-      if (totalRows >= requestedScroll && requestedRows.length < visibleRows) {
-        requestedRows.push(part);
-      }
-      tailRows.push(part);
-      if (tailRows.length > visibleRows) tailRows.shift();
-      totalRows += 1;
-    }
-  }
-
-  const maxScroll = Math.max(0, totalRows - visibleRows);
+  const maxScroll = Math.max(0, rows.length - visibleRows);
   const scroll = Math.min(requestedScroll, maxScroll);
   return {
-    rows: scroll === requestedScroll ? requestedRows : tailRows,
-    totalRows,
+    rows: rows.slice(scroll, scroll + visibleRows),
+    totalRows: rows.length,
     scroll,
   };
 }
@@ -418,21 +455,11 @@ export function renderRunInspectorFrame(
   const actions = timelineActions(state.timeline);
   const action = actions.find((candidate) => candidate.actionId === inspector.actionId);
   const inner = width - 4;
-  const body = action
-    ? [
-        ...identityLines(action, childActions(actions, action.actionId), inspector, colorEnabled),
-        ...buildSections(
-          action,
-          childActions(actions, action.actionId),
-          inspector.detail,
-          inner,
-          colorEnabled,
-        ).flatMap((section) => ["", sectionRule(section, inner, colorEnabled), ...section.lines]),
-      ]
-    : ["This run is no longer available."];
+  const children = action ? childActions(actions, action.actionId) : [];
+  const documentRows = prepareInspectorDocument(action, children, inspector, inner, colorEnabled);
   // Two rows of chrome: the top and bottom frame edges.
   const visibleRows = Math.max(1, height - 2);
-  const viewport = wrappedViewport(body, inner, inspector.scroll, visibleRows);
+  const viewport = wrappedViewport(documentRows, inspector.scroll, visibleRows);
   const maxScroll = Math.max(0, viewport.totalRows - visibleRows);
   const { rows, scroll } = viewport;
   const status = safeInspectorScalar(inspector.detail?.status ?? action?.status ?? "unknown");

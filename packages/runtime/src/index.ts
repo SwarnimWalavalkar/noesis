@@ -35,7 +35,7 @@ export interface RuntimeTranscriptAction {
   readonly actionId: string;
   /** Monotonic session-local order assigned when the action is first persisted. */
   readonly sequence?: number;
-  readonly turnId: string;
+  readonly turnId?: string;
   readonly parentActionId?: string;
   readonly executionId?: string;
   readonly name: string;

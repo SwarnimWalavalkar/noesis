@@ -20,6 +20,13 @@ CREATE INDEX tool_calls_turn_created
 CREATE INDEX tool_calls_execution
   ON tool_calls(execution_id, created_at, tool_call_id);
 
+CREATE TRIGGER tool_call_action_sequence_required
+BEFORE INSERT ON tool_calls
+WHEN NEW.action_sequence IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'Tool call action sequence is required');
+END;
+
 CREATE TRIGGER tool_call_lineage_insert
 BEFORE INSERT ON tool_calls
 WHEN (

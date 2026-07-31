@@ -156,7 +156,7 @@ export async function loadRuntimeTranscript(
       kind: "action" as const,
       actionId: call.toolCallId,
       sequence: call.sequence ?? Number.MAX_SAFE_INTEGER,
-      ...(call.turnId ? { turnId: call.turnId } : { turnId: "" }),
+      ...(call.turnId ? { turnId: call.turnId } : {}),
       ...(derivedParent ? { parentActionId: derivedParent } : {}),
       ...(!nested && executionId && knownExecutionIds.has(executionId) ? { executionId } : {}),
       name: call.toolName,
