@@ -1,8 +1,8 @@
 import {
   Container,
   matchesKey,
-  ProcessTerminal,
   type OverlayHandle,
+  ProcessTerminal,
   type Terminal,
   TUI,
 } from "@earendil-works/pi-tui";
@@ -23,8 +23,8 @@ import {
   createStatusView,
 } from "./rendering.ts";
 import {
-  stopVisibleInteraction,
   type NoesisTuiRuntime,
+  stopVisibleInteraction,
   type TuiInteractionCommand,
   type TuiInteractionEvent,
   type TuiInteractionResult,
@@ -37,8 +37,8 @@ import {
   resumableTrail,
   type TuiStartOptions,
 } from "./session-picker.ts";
-import { executionForInteractionPhase } from "./state.ts";
-import { initialTuiState, interactionViewFromSnapshot, timelineActions } from "./state.ts";
+import { executionForInteractionPhase, initialTuiState } from "./state.ts";
+import { interactionViewFromSnapshot, timelineActions } from "./state.ts";
 import { ANSI, safeTerminalText, shouldUseColor, styled } from "./theme.ts";
 
 export * from "./action-summary.ts";
@@ -91,6 +91,7 @@ export async function startNoesisTui(
   const colorEnabled =
     terminal instanceof ProcessTerminal && shouldUseColor(process.env) && process.stdout.hasColors();
   const selectTheme = createSelectTheme(colorEnabled);
+  const skillCommands = runtime.listSkills ? await runtime.listSkills() : Object.freeze([]);
   const view = createNoesisView(
     initialTuiState(runtime.agentName ?? "runtime", {
       provider: requestedProvider,
@@ -100,7 +101,7 @@ export async function startNoesisTui(
     }),
     () => terminal.rows,
   );
-  const editor = createSafeEditor(tui, colorEnabled, selectTheme, () => terminal.rows);
+  const editor = createSafeEditor(tui, colorEnabled, selectTheme, () => terminal.rows, skillCommands);
   const reportFailure = (error: unknown): void => {
     view.dispatch({
       type: "failed",
@@ -312,6 +313,7 @@ export async function startNoesisTui(
           delta: INSPECTOR_PAGE_ROWS,
           maxScroll: inspectorMaxScroll,
         });
+      else if (matchesKey(data, "space")) view.dispatch({ type: "inspector-view-toggled" });
       else return false;
       tui.requestRender();
       return true;

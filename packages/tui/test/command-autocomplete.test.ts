@@ -1,4 +1,4 @@
-import { TUI, type Terminal } from "@earendil-works/pi-tui";
+import { type Terminal, TUI } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import {
   createNoesisCommandAutocompleteProvider,
@@ -75,6 +75,64 @@ describe("Noesis slash command autocomplete", () => {
       expect.objectContaining({
         value: "steer",
         description: expect.stringContaining("[message]"),
+      }),
+    );
+  });
+
+  test("offers quiet ambient learning inspection", async () => {
+    const learning = await suggestionsFor("/lear");
+
+    expect(learning?.items).toContainEqual(
+      expect.objectContaining({
+        value: "learning",
+        description: expect.stringContaining("ambient reflection"),
+      }),
+    );
+  });
+
+  test("offers installed skills as direct slash commands without shadowing built-ins", async () => {
+    const provider = createNoesisCommandAutocompleteProvider([
+      {
+        name: "five-whys",
+        description: "Find the cause beneath a recurring problem",
+      },
+      {
+        name: "private-review",
+        description: "Run a manually selected review",
+        disableModelInvocation: true,
+      },
+      {
+        name: "help",
+        description: "Must not replace Noesis help",
+      },
+    ]);
+    const suggestions = await provider.getSuggestions(["/five"], 0, 5, {
+      signal: new AbortController().signal,
+    });
+    const privateSuggestions = await provider.getSuggestions(["/private"], 0, 8, {
+      signal: new AbortController().signal,
+    });
+    const allSuggestions = await provider.getSuggestions(["/"], 0, 1, {
+      signal: new AbortController().signal,
+    });
+
+    expect(suggestions?.items).toContainEqual(
+      expect.objectContaining({
+        value: "five-whys",
+        description: expect.stringContaining("[instructions]"),
+      }),
+    );
+    expect(privateSuggestions?.items).toContainEqual(
+      expect.objectContaining({
+        value: "private-review",
+        description: expect.stringContaining("explicit only"),
+      }),
+    );
+    expect(allSuggestions?.items.filter((item) => item.value === "help")).toHaveLength(1);
+    expect(allSuggestions?.items).toContainEqual(
+      expect.objectContaining({
+        value: "skill:help",
+        description: expect.stringContaining("Must not replace Noesis help"),
       }),
     );
   });

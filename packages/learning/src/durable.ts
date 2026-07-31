@@ -1,24 +1,24 @@
 import {
   ArtifactFileRefSchema,
-  canonicalJson,
-  capabilityRevisionRef,
+  type CapabilityRevision,
+  type CapabilityRevisionRef,
   CapabilityRevisionRefSchema,
   CapabilityRevisionSchema,
   CapabilitySchema,
+  canonicalJson,
+  capabilityRevisionRef,
   EvidenceRefSchema,
-  FileRevisionRefSchema,
-  sameCapabilityRevisionRef,
-  type CapabilityRevision,
-  type CapabilityRevisionRef,
   type Experiment,
   type FileRevisionRef,
+  FileRevisionRefSchema,
+  sameCapabilityRevisionRef,
   type WorkspaceStore,
 } from "@noesis/domain";
 import { z } from "zod";
 import {
-  createAutomaticLearningOrgan,
   type AutomaticLearningOrgan,
   type AutomaticLearningOrganOptions,
+  createAutomaticLearningOrgan,
   type ExperimentBrief,
   type ExperimentBriefStore,
   type LearningCandidateManifestStore,
@@ -117,6 +117,7 @@ const RawExperimentBriefSchema = z.strictObject({
   evidenceRefs: z.array(EvidenceRefSchema),
   feedbackSignalIds: z.array(z.string().min(1)),
   citations: z.array(CitationSchema),
+  recurrenceCitations: z.array(CitationSchema).default([]),
   sourceCases: z.array(
     z.strictObject({
       caseId: z.string().min(1),
@@ -128,7 +129,7 @@ const RawExperimentBriefSchema = z.strictObject({
       citations: z.array(CitationSchema),
     }),
   ),
-  recurrenceCount: z.number().int().positive(),
+  recurrenceCount: z.number().int().nonnegative(),
   reflectionRun: RoleRunSchema.optional(),
 });
 
@@ -203,6 +204,11 @@ async function readBrief(workspace: DurableWorkspace, reference: FileRevisionRef
 }
 
 export function createWorkspaceExperimentBriefStore(workspace: DurableWorkspace): ExperimentBriefStore {
+  const requireSamePublication = (existing: ExperimentBrief, requested: ExperimentBrief) => {
+    if (canonicalJson(existing) !== canonicalJson(requested))
+      throw new Error(`Experiment brief publication collision for ${requested.hypothesisDedupeKey}`);
+    return existing;
+  };
   return Object.freeze({
     findByDedupeKey: async (key: string) => {
       const current = await workspace.definitionMetadata.getCurrent(namespace, key);
@@ -213,9 +219,7 @@ export function createWorkspaceExperimentBriefStore(workspace: DurableWorkspace)
       const current = await workspace.definitionMetadata.getCurrent(namespace, value.hypothesisDedupeKey);
       if (current) {
         const existing = await readBrief(workspace, current.definitionRevision);
-        if (existing.hypothesisDedupeKey !== value.hypothesisDedupeKey)
-          throw new Error(`Experiment brief dedupe collision for ${value.hypothesisDedupeKey}`);
-        return;
+        return requireSamePublication(existing, value);
       }
       const result = await workspace.definitionPublications.publish({
         namespace,
@@ -234,8 +238,35 @@ export function createWorkspaceExperimentBriefStore(workspace: DurableWorkspace)
       if (!result.ok) {
         const winner = await workspace.definitionMetadata.getCurrent(namespace, value.hypothesisDedupeKey);
         if (!winner) throw new Error(result.error.message);
-        await readBrief(workspace, winner.definitionRevision);
+        return requireSamePublication(await readBrief(workspace, winner.definitionRevision), value);
       }
+      return value;
+    },
+    replace: async (input: { readonly expectedExperimentId: string; readonly brief: ExperimentBrief }) => {
+      const { expectedExperimentId, brief } = input;
+      const value = ExperimentBriefSchema.parse(brief);
+      const current = await workspace.definitionMetadata.getCurrent(namespace, value.hypothesisDedupeKey);
+      if (!current) throw new Error(`Experiment brief replacement has no current publication`);
+      const existing = await readBrief(workspace, current.definitionRevision);
+      if (existing.experimentId !== expectedExperimentId)
+        throw new Error(`Experiment brief replacement lost its expected identity`);
+      const result = await workspace.definitionPublications.publish({
+        namespace,
+        definitionId: value.hypothesisDedupeKey,
+        revision: current.revision + 1,
+        workingPath: briefPath(value.hypothesisDedupeKey),
+        bytes: encoder.encode(canonicalJson(value)),
+        expectedCurrentRevisionId: current.definitionRevision.revisionId,
+        sensitivity: "private",
+        provenanceRefs: value.evidenceRefs,
+        activity: {
+          kind: "learning.brief_replace",
+          actor,
+          reason: `Revise durable experiment brief ${value.experimentId}`,
+        },
+      });
+      if (!result.ok) throw new Error(result.error.message);
+      return value;
     },
   });
 }
@@ -281,6 +312,12 @@ export function createWorkspaceLearningCandidateManifestStore(
       (reference): reference is FileRevisionRef =>
         reference.kind === "file_revision" && reference.workingPath.endsWith("/manifest.json"),
     );
+    if (
+      experiment.status === "hypothesis" &&
+      experiment.candidateRevisions.length === 0 &&
+      manifestRefs.length === 0
+    )
+      return undefined;
     if (manifestRefs.length !== 1)
       throw new Error(`Experiment ${experimentId} must reference exactly one candidate manifest`);
     const manifestRevision = manifestRefs[0];

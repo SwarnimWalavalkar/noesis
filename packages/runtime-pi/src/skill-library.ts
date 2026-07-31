@@ -4,7 +4,7 @@ import {
   DefaultResourceLoader,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { sha256 } from "@noesis/domain";
+import { type EvidenceRevisionRef, sha256 } from "@noesis/domain";
 
 export interface PiSkillResource {
   readonly name: string;
@@ -12,6 +12,7 @@ export interface PiSkillResource {
   readonly content: string;
   readonly filePath: string;
   readonly contentDigest: string;
+  readonly admittedRevision?: EvidenceRevisionRef<"input">;
   readonly disableModelInvocation: boolean;
 }
 
@@ -28,7 +29,11 @@ export interface PiSkillSnapshot {
 
 export interface PiSkillLibrary {
   readonly snapshot: (signal?: AbortSignal) => Promise<PiSkillSnapshot>;
-  readonly pinSnapshot: (key: string, signal?: AbortSignal) => Promise<PiSkillSnapshot>;
+  readonly pinSnapshot: (
+    key: string,
+    signal?: AbortSignal,
+    admit?: (snapshot: PiSkillSnapshot) => Promise<PiSkillSnapshot>,
+  ) => Promise<PiSkillSnapshot>;
   readonly claimPinnedSnapshot: (key: string) => PiSkillSnapshot | undefined;
   readonly discardPinnedSnapshot: (key: string) => void;
   readonly install: (source: string, scope: "personal" | "workspace") => Promise<void>;
@@ -130,14 +135,17 @@ export function createPiSkillLibrary(input: {
     }
     return awaitWithSignal(loading, signal);
   };
-  const pinSnapshot: PiSkillLibrary["pinSnapshot"] = async (key, signal) => {
+  const pinSnapshot: PiSkillLibrary["pinSnapshot"] = async (key, signal, admit) => {
     const existing = pinned.get(key);
     if (existing) return existing;
     const captured = await snapshot(signal);
-    const admitted = pinned.get(key);
-    if (admitted) return admitted;
-    pinned.set(key, captured);
-    return captured;
+    const existingAfterLoad = pinned.get(key);
+    if (existingAfterLoad) return existingAfterLoad;
+    const admitted = admit ? await admit(captured) : captured;
+    const existingAfterAdmission = pinned.get(key);
+    if (existingAfterAdmission) return existingAfterAdmission;
+    pinned.set(key, admitted);
+    return admitted;
   };
   const workspaceOption = (scope: "personal" | "workspace") =>
     scope === "workspace" ? Object.freeze({ local: true }) : undefined;

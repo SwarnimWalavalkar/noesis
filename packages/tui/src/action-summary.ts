@@ -1,3 +1,4 @@
+import { presentActionPayload } from "./action-presentation.ts";
 import type { TuiAgentAction } from "./state.ts";
 import { safeTerminalText } from "./theme.ts";
 
@@ -178,7 +179,7 @@ const NESTED_SUMMARIZERS: Readonly<Record<string, NestedSummarizer>> = {
   },
   "noesis.search": (input, output) => {
     const query = stringField(input, "query");
-    const tools = arrayField(output, "tools") ?? arrayField(output, "results");
+    const tools = presentActionPayload("noesis.search", output).tools;
     return {
       ...(query ? { subject: `"${query}"` } : {}),
       ...(tools === undefined ? {} : { outcome: formatCount(tools.length, "tool") }),
@@ -187,6 +188,17 @@ const NESTED_SUMMARIZERS: Readonly<Record<string, NestedSummarizer>> = {
   "noesis.describe": (input) => {
     const name = stringField(input, "name");
     return name ? { subject: name } : {};
+  },
+  inspect_self: (input, output) => {
+    const section = stringField(input, "section") ?? "overview";
+    const presentation = presentActionPayload("inspect_self", output);
+    const count =
+      presentation.tools?.length ??
+      (Array.isArray(presentation.value) ? presentation.value.length : undefined);
+    return {
+      subject: section,
+      ...(count === undefined ? {} : { outcome: formatCount(count, presentation.tools ? "tool" : "item") }),
+    };
   },
 };
 

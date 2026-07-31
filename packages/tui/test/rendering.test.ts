@@ -422,6 +422,48 @@ describe("Noesis transcript rendering", () => {
     expect(renderAgentActionBlock(running, [running], 100).join("\n")).toContain("pnpm build");
   });
 
+  test("summarizes direct noesis.search arrays and inspect_self tool envelopes semantically", () => {
+    const search = summarizeAction(
+      {
+        actionId: "search-tools",
+        name: "noesis.search",
+        status: "completed",
+        input: { query: "files" },
+        output: [
+          { name: "files.read", description: "Read files", score: 0.9 },
+          { name: "files.search", description: "Search files", score: 0.8 },
+        ],
+      },
+      [],
+    );
+    const inspect = summarizeAction(
+      {
+        actionId: "inspect-tools",
+        name: "inspect_self",
+        status: "completed",
+        input: { section: "tools" },
+        output: {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                tools: [
+                  { name: "files.read", description: "Read files" },
+                  { name: "files.search", description: "Search files" },
+                ],
+              }),
+            },
+          ],
+          details: { semantic: true },
+        },
+      },
+      [],
+    );
+
+    expect(search).toMatchObject({ subject: '"files"', outcome: "2 tools" });
+    expect(inspect).toMatchObject({ subject: "tools", outcome: "2 tools" });
+  });
+
   test("indents nested codemode SDK calls under execute", () => {
     const parent = {
       actionId: "execute-1",

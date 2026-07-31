@@ -124,6 +124,11 @@ describe("turn settlement", () => {
       stop: async () => undefined,
     });
     const observedBaselines: CapabilityRevisionRef[] = [];
+    const observedLearningTurns: {
+      readonly outcome: string;
+      readonly toolFailureCount: number;
+      readonly evidenceTables: readonly string[];
+    }[] = [];
     const capabilities = new Map<string, Capability>([
       [
         "general",
@@ -151,6 +156,13 @@ describe("turn settlement", () => {
       controlPlane: Object.freeze({
         observeCompletedTurn: async (input) => {
           observedBaselines.push(input.baselineRevision);
+          observedLearningTurns.push({
+            outcome: input.turn.outcome,
+            toolFailureCount: input.turn.telemetry.toolFailureCount,
+            evidenceTables: input.turn.evidenceRefs.map((reference) =>
+              reference.kind === "database_row" ? reference.table : reference.kind,
+            ),
+          });
           return await Promise.reject(new Error("fixture stops after observing attribution"));
         },
       }),
@@ -174,19 +186,44 @@ describe("turn settlement", () => {
         sourceIntentId: "intent-accepted",
         occurredAt: "2026-07-25T00:00:00.000Z",
         plan,
-        execute: async () => ({
-          outcome: "completed",
-          output: "done",
-          context,
-          usedCapabilities: Object.freeze({}),
-          frozenTurnPlan: plan,
-        }),
+        execute: async () => {
+          await workspace.operational.toolCalls.put({
+            toolCallId: "turn-accepted:tool-failure",
+            sessionId: "session-1",
+            turnId: "turn-accepted",
+            toolName: "files.read",
+            request: Object.freeze({ path: "missing.md" }),
+            response: Object.freeze({ error: "not found" }),
+            status: "failed",
+            sensitivity: "normal",
+            createdAt: "2026-07-25T00:00:01.000Z",
+            completedAt: "2026-07-25T00:00:02.000Z",
+          });
+          return {
+            outcome: "completed",
+            output: "done",
+            context,
+            usedCapabilities: Object.freeze({}),
+            frozenTurnPlan: plan,
+          };
+        },
       }),
     ).rejects.toThrow("fixture stops after observing attribution");
     expect(feedbackInputs).toHaveLength(1);
     expect(feedbackInputs[0]?.outcomeId).toBe("turn-accepted:outcome");
+    expect(feedbackInputs[0]?.status).toBe("unknown");
     expect(observedBaselines).toEqual([revisionRef("noesis-research")]);
+    expect(observedLearningTurns).toEqual([
+      {
+        outcome: "unknown",
+        toolFailureCount: 1,
+        evidenceTables: ["messages", "messages", "tool_calls"],
+      },
+    ]);
     expect(await workspace.operational.outcomes.listForSession("session-1")).toHaveLength(1);
+    expect(await workspace.operational.outcomes.get("turn-accepted:outcome")).toMatchObject({
+      status: "unknown",
+    });
     expect((await workspace.operational.messages.get("turn-accepted:user"))?.metadata).toMatchObject({
       turnId: "turn-accepted",
       sourceIntentId: "intent-accepted",

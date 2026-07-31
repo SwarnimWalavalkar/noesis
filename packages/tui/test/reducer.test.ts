@@ -1,5 +1,5 @@
-import { describe, expect, test } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { describe, expect, test } from "vitest";
 import {
   createSessionPickerItems,
   createStatusFields,
@@ -9,8 +9,8 @@ import {
   formatContextUsage,
   helpHint,
   initialTuiState,
-  renderBottomChrome,
   reduceTui,
+  renderBottomChrome,
   renderHeader,
   renderNoesisState,
   renderQueuedInputs,
@@ -809,6 +809,7 @@ describe("Noesis TUI reducer", () => {
     expect(state.inspector).toMatchObject({
       actionId: "execute-1",
       status: "loading",
+      view: "semantic",
       scroll: 0,
     });
 
@@ -847,6 +848,11 @@ describe("Noesis TUI reducer", () => {
       maxScroll: 3,
     });
     expect(state.inspector?.scroll).toBe(3);
+
+    state = reduceTui(state, { type: "inspector-view-toggled" });
+    expect(state.inspector).toMatchObject({ view: "raw", scroll: 0 });
+    state = reduceTui(state, { type: "inspector-view-toggled" });
+    expect(state.inspector).toMatchObject({ view: "semantic", scroll: 0 });
 
     state = reduceTui(state, { type: "inspector-closed" });
     expect(state.inspector).toBeUndefined();

@@ -722,6 +722,72 @@ describe("Noesis TUI lifecycle", () => {
     expect(runtime.resumedTrailIds.at(-1)).toBe(selected.trailId);
   });
 
+  test("keeps ambient learning inspection available in both live and resumed sessions", async () => {
+    const makeRuntime = async (jobId: string) => {
+      const base = await createRuntime({
+        name: `learning-${jobId}`,
+        async run(request) {
+          return {
+            text: request.prompt,
+            provider: request.provider,
+            model: request.model,
+            outcome: "completed",
+            stopReason: "stop",
+          };
+        },
+        steer: consumeSteer,
+        async abort() {},
+      });
+      const requestedSessions: string[] = [];
+      return Object.freeze({
+        runtime: Object.freeze({
+          ...base,
+          listLearningActivity: async (sessionId: string) => {
+            requestedSessions.push(sessionId);
+            return Object.freeze([
+              Object.freeze({
+                jobId,
+                stage: "reflection" as const,
+                status: "no_change" as const,
+                summary: "The completed turn already worked well",
+                updatedAt: "2026-08-01T00:00:00.000Z",
+                turnId: `${sessionId}:turn-1`,
+              }),
+            ]);
+          },
+        }),
+        requestedSessions,
+      });
+    };
+
+    const live = await makeRuntime("job-live-learning");
+    const liveTerminal = createTestTerminal();
+    const liveSession = startNoesisTui(live.runtime, {}, liveTerminal);
+    await vi.waitFor(() => expect(liveTerminal.output).toContain("● IDLE"));
+    liveTerminal.type("/learning\r");
+    await vi.waitFor(() => expect(liveTerminal.output).toContain("job-live-learning"));
+    expect(liveTerminal.output).toContain("— no change · reflection");
+    liveTerminal.type("/quit\n");
+    await liveSession;
+    expect(live.requestedSessions).toHaveLength(1);
+
+    const resumed = await makeRuntime("job-resumed-learning");
+    const selected = await resumed.runtime.startTrail({ title: "learning history" });
+    const resumedTerminal = createTestTerminal();
+    const resumedSession = startNoesisTui(
+      resumed.runtime,
+      { session: { mode: "resume", trailId: selected.trailId } },
+      resumedTerminal,
+    );
+    await vi.waitFor(() => expect(resumedTerminal.output).toContain("● IDLE"));
+    resumedTerminal.type("/learning\r");
+    await vi.waitFor(() => expect(resumedTerminal.output).toContain("job-resumed-learning"));
+    expect(resumedTerminal.output).toContain("The completed turn already worked well");
+    resumedTerminal.type("/quit\n");
+    await resumedSession;
+    expect(resumed.requestedSessions).toEqual([selected.trailId]);
+  });
+
   test("restores durable tool calls as expandable transcript rows", async () => {
     const base = await createRuntime({
       name: "resume-actions-scripted",

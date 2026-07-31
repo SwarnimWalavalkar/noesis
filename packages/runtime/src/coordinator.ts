@@ -1,6 +1,7 @@
 import {
   canonicalJson,
   type DurableJobFailure,
+  type DurableJobListCursor,
   type DurableJobRecord,
   type Experiment,
   sameCapabilityRevisionRef,
@@ -49,6 +50,7 @@ export interface RuntimeCoordinator {
   readonly listJobs: (request?: {
     readonly kind?: CoordinatorJobKind;
     readonly limit?: number;
+    readonly after?: DurableJobListCursor;
   }) => Promise<readonly CoordinatorJobView[]>;
   readonly getPreflightActivationHandoff: (
     experimentId: string,
@@ -242,6 +244,23 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         routingStrategyId: payload.routingStrategyId,
         telemetry: reflected.telemetry,
       });
+    if (reflected.status === "deduped") {
+      const existing = await options.workspace.research.experiments.getExperiment(
+        reflected.experiment.experimentId,
+      );
+      if (existing && existing.status !== "hypothesis")
+        return Object.freeze({
+          status: reflected.status,
+          experimentId: existing.experimentId,
+          hypothesisDedupeKey: reflected.hypothesisDedupeKey,
+          retrievalStrategyId: payload.retrievalStrategyId,
+          routingStrategyId: payload.routingStrategyId,
+          telemetry: Object.freeze({
+            ...reflected.telemetry,
+            existingExperimentStatus: existing.status,
+          }),
+        });
+    }
     await enqueueAuthor({
       experimentId: reflected.experiment.experimentId,
       hypothesisDedupeKey: reflected.hypothesisDedupeKey,
@@ -489,7 +508,11 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
   };
 
   const listJobs = async (
-    request: { readonly kind?: CoordinatorJobKind; readonly limit?: number } = {},
+    request: {
+      readonly kind?: CoordinatorJobKind;
+      readonly limit?: number;
+      readonly after?: DurableJobListCursor;
+    } = {},
   ): Promise<readonly CoordinatorJobView[]> =>
     (await options.workspace.jobs.list(request)).flatMap((job) => {
       try {

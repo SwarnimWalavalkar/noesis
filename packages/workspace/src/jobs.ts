@@ -5,6 +5,7 @@ import {
   type ActorRef,
   type DurableJobEnqueueRequest,
   type DurableJobFailure,
+  type DurableJobListCursor,
   type DurableJobRecord,
   type DurableJobStatus,
   type EvidenceRef,
@@ -117,7 +118,12 @@ export function createDurableJobStore(
   };
 
   const list = async (
-    request: { readonly status?: DurableJobStatus; readonly kind?: string; readonly limit?: number } = {},
+    request: {
+      readonly status?: DurableJobStatus;
+      readonly kind?: string;
+      readonly limit?: number;
+      readonly after?: DurableJobListCursor;
+    } = {},
   ): Promise<readonly DurableJobRecord[]> => {
     const limit = request.limit ?? 100;
     if (!Number.isInteger(limit) || limit < 1 || limit > 1_000)
@@ -132,6 +138,12 @@ export function createDurableJobStore(
     if (request.kind) {
       clauses.push("kind = ?");
       values.push(request.kind);
+    }
+    if (request.after) {
+      z.string().datetime().parse(request.after.createdAt);
+      z.string().min(1).parse(request.after.jobId);
+      clauses.push("(created_at > ? OR (created_at = ? AND job_id > ?))");
+      values.push(request.after.createdAt, request.after.createdAt, request.after.jobId);
     }
     const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
     return db

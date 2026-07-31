@@ -1,8 +1,8 @@
-import { visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { type Component, visibleWidth } from "@earendil-works/pi-tui";
 import { renderRunInspectorFrame } from "./run-inspector.ts";
-import { createTranscriptRenderer, type TranscriptRenderer } from "./transcript.ts";
+import { type NoesisTuiAction, type NoesisTuiState, reduceTui, type TuiContextUsage } from "./state.ts";
 import { ANSI, elideText, NOESIS_WORDMARK, safeTerminalText, styled } from "./theme.ts";
-import { reduceTui, type NoesisTuiAction, type NoesisTuiState, type TuiContextUsage } from "./state.ts";
+import { createTranscriptRenderer, type TranscriptRenderer } from "./transcript.ts";
 
 export * from "./action-summary.ts";
 export * from "./rich-text.ts";
@@ -131,7 +131,8 @@ export function renderStatusLine(state: NoesisTuiState, width: number, height = 
 
 /** Keys change meaning while the transcript is navigable, so the hint follows the mode. */
 export function helpHint(state: NoesisTuiState): string {
-  if (state.inspector) return "↑/↓ scroll · esc close";
+  if (state.inspector)
+    return `↑/↓ scroll · space ${state.inspector.view === "raw" ? "semantic" : "exact"} · esc close`;
   if (state.actionCursor) return "↑/↓ select · space expand · enter inspect · esc leave · ctrl+c quit";
   if (state.interaction.phase !== "idle")
     return "enter queue · /steer redirect · alt+↑ edit newest · esc interrupt";

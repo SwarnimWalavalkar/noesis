@@ -34,14 +34,27 @@ export type PiCodeExecutionEvent =
       readonly error?: string;
     };
 
-export interface PreparedPiCodeExecution {
+export interface PiFrozenToolCatalog {
   readonly catalogId: string;
   readonly catalogDigest: string;
+  readonly tools: readonly {
+    readonly name: string;
+    readonly label: string;
+    readonly description: string;
+    readonly revisionId: string;
+    readonly inputSchema: JsonValue;
+    readonly outputSchema: JsonValue;
+  }[];
+}
+
+export interface PreparedPiCodeExecution {
+  readonly catalog: PiFrozenToolCatalog;
   readonly execute: (
     source: string,
     timeoutMs: number | undefined,
     signal: AbortSignal,
     emit: (event: PiCodeExecutionEvent) => void,
+    identity?: { readonly logicalExecutionId: string },
   ) => Promise<{
     readonly executionId: string;
     readonly value: JsonValue;
@@ -82,9 +95,11 @@ export function createPiExecuteTool(input: {
     label: "Execute JavaScript",
     description: [
       "Execute JavaScript on the user's machine and compose work tools through the injected SDK.",
-      "Use tools.<family>.<operation>(input), noesis.search(query), noesis.describe(name), or noesis.invoke(name, input).",
-      "Use emit(value) or notify(value) for progress, and store(key, value)/load(key) for execution-local state.",
-      "Return only the final value that should enter the conversation context.",
+      "Discover before guessing: return await noesis.search(query), then return await noesis.describe(exactName) to inspect its input schema.",
+      "Invoke with return await tools.<family>.<operation>(input), or return await noesis.invoke(exactName, input).",
+      "emit(value) and notify(value) show progress to the user but do not return that value to you; use return for the final result that should enter conversation context.",
+      "When the user asks to preserve successful reusable work, prefer scripts.save over a loose helper file, verify it immediately with scripts.run in the same execution, and return the save receipt, verification, and reuse instructions.",
+      "Use store(key, value)/load(key) for codemode-session scratch state.",
     ].join(" "),
     parameters: executeParametersJsonSchema,
     executionMode: "sequential",
@@ -118,6 +133,7 @@ export function createPiExecuteTool(input: {
               }),
             });
           },
+          { logicalExecutionId: toolCallId },
         );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result.value) }],

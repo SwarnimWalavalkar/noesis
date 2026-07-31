@@ -314,6 +314,12 @@ export interface DurableJobFailure {
   readonly ambiguous: boolean;
 }
 
+/** Stable keyset cursor for the authoritative `(created_at, job_id)` job order. */
+export interface DurableJobListCursor {
+  readonly createdAt: string;
+  readonly jobId: string;
+}
+
 /** Atomic SQLite-backed scheduling primitives. Runtime owns job meanings and retry decisions. */
 export interface DurableJobStorePort {
   readonly enqueue: (request: DurableJobEnqueueRequest) => Promise<DurableJobRecord>;
@@ -322,6 +328,7 @@ export interface DurableJobStorePort {
     readonly status?: DurableJobStatus;
     readonly kind?: string;
     readonly limit?: number;
+    readonly after?: DurableJobListCursor;
   }) => Promise<readonly DurableJobRecord[]>;
   readonly claim: (request: {
     readonly workerId: string;

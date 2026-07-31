@@ -1,4 +1,4 @@
-import type { NoesisTuiRuntime, TuiInteractionResult } from "./runtime-port.ts";
+import type { NoesisTuiRuntime, TuiInteractionResult, TuiLearningActivitySummary } from "./runtime-port.ts";
 import type { NoesisTuiAction } from "./state.ts";
 
 export interface SlashCommandContext {
@@ -12,7 +12,7 @@ export interface SlashCommandContext {
 
 export const HELP_LINES = [
   "/model provider/model · /context · /capabilities",
-  "/skills · /scripts · /workflows · /runs",
+  "/skills · /scripts · /workflows · /runs · /learning",
   "/skill NAME · /script NAME · /workflow NAME · /run ID",
   "/fork · /compact · /steer [MESSAGE] · /queue resume",
   "enter queues during work · alt+↑ edits newest queued · esc interrupts",
@@ -20,6 +20,34 @@ export const HELP_LINES = [
   "ctrl+o inspect runs · space expand · enter open the run inspector",
   "/quit · learning, experiments, activation, and revert run ambiently",
 ] as const;
+
+function learningActivityLine(activity: TuiLearningActivitySummary): string {
+  const glyph =
+    activity.status === "running"
+      ? "●"
+      : activity.status === "queued"
+        ? "○"
+        : activity.status === "failed"
+          ? "×"
+          : activity.status === "no_change"
+            ? "—"
+            : "✓";
+  const references = [
+    activity.turnId ? `turn ${activity.turnId}` : undefined,
+    activity.experimentId ? `experiment ${activity.experimentId}` : undefined,
+    activity.capabilityRevisionId
+      ? `capability ${activity.capabilityId ?? "unknown"}@${activity.capabilityRevisionId}`
+      : activity.capabilityId
+        ? `capability ${activity.capabilityId}`
+        : undefined,
+  ].filter((value): value is string => value !== undefined);
+  return [
+    `${glyph} ${activity.status.replaceAll("_", " ")} · ${activity.stage}`,
+    `  ${activity.summary}`,
+    ...(references.length > 0 ? [`  ${references.join(" · ")}`] : []),
+    `  ${activity.updatedAt} · ${activity.jobId}`,
+  ].join("\n");
+}
 
 /** Commands that change the active trail or its context must not overlap another submission. */
 export function isExclusiveSlashCommand(text: string): boolean {
@@ -74,7 +102,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
             ),
             "",
             "Install with: noesis skills install SOURCE [--workspace]",
-            "Invoke with: /skill:<name> [instructions]",
+            "Invoke with: /<name> [instructions]",
           ].join("\n"),
     );
     return true;
@@ -262,6 +290,25 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
             ...(run.error ? ["", `Error\n${run.error}`] : []),
           ].join("\n")
         : `Unknown run in this session: ${executionId}`,
+    );
+    return true;
+  }
+
+  if (command === "/learning") {
+    if (!runtime.listLearningActivity) {
+      publishInspector("Learning activity inspection is unavailable in this runtime.");
+      return true;
+    }
+    const activity = await runtime.listLearningActivity(trailId);
+    publishInspector(
+      activity.length === 0
+        ? "No ambient learning activity has been recorded for this session yet."
+        : [
+            `Learning activity · ${String(activity.length)}`,
+            ...activity.map(learningActivityLine),
+            "",
+            "Noesis reflects after useful work. No change is a normal outcome.",
+          ].join("\n\n"),
     );
     return true;
   }

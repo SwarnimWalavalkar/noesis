@@ -82,6 +82,32 @@ describe("tool broker", () => {
     await expect(broker.invoke("test.echo", { value: 1 }, invocationContext())).resolves.toMatchObject({
       ok: false,
       code: "invalid_input",
+      message: expect.stringContaining('noesis.describe("test.echo")'),
+    });
+  });
+
+  it("recovers unknown tool names with frozen-catalog suggestions and discovery guidance", async () => {
+    const shellRun = defineTool({
+      name: "shell.run",
+      label: "Run shell command",
+      description: "Run a shell command",
+      visibility: "codemode_only",
+      inputSchema: z.strictObject({ command: z.string() }),
+      outputSchema: z.null(),
+      effect: () => Object.freeze({ effect: "read", resource: "test:shell", estimatedCost: 0 }),
+      execute: async () => null,
+    });
+    const broker = createToolBroker({
+      definitions: [echo(), shellRun],
+      authority: foregroundAuthority(),
+      permission,
+    });
+
+    await expect(broker.invoke("shell.exec", { command: "pwd" }, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message:
+        "Unknown tool: shell.exec. Did you mean shell.run? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
     });
   });
 

@@ -59,8 +59,8 @@ import {
   type WorkspaceDatabase,
 } from "./database.ts";
 import {
-  decodeExperiment,
   decodeCodeExecution,
+  decodeExperiment,
   decodeFeedbackSignal,
   decodeFileRevisionRef,
   decodeMessage,
@@ -72,9 +72,9 @@ import {
   decodeStored,
   decodeToolCall,
   decodeUserIntent,
+  decodeVector,
   decodeWorkflowPhaseRun,
   decodeWorkflowRun,
-  decodeVector,
   JsonRecordSchema,
   SearchConfigurationSchema,
   SensitivitySchema,
@@ -185,6 +185,29 @@ const databaseRef = <Table extends DatabaseTable>(table: Table, rowId: string): 
   table,
   rowId,
 });
+
+function evidenceReferenceIdentity(reference: EvidenceRef): string {
+  switch (reference.kind) {
+    case "database_row":
+      return `${reference.kind}:${reference.table}:${reference.rowId}`;
+    case "file_revision":
+    case "evidence_revision":
+      return `${reference.kind}:${reference.revisionId}`;
+    case "artifact_file":
+      return `${reference.kind}:${reference.artifactId}`;
+  }
+}
+
+function mergeEvidenceReferences(
+  existing: readonly EvidenceRef[],
+  incoming: readonly EvidenceRef[],
+): readonly EvidenceRef[] {
+  const merged = new Map<string, EvidenceRef>();
+  for (const reference of [...existing, ...incoming]) {
+    merged.set(evidenceReferenceIdentity(reference), reference);
+  }
+  return [...merged.values()];
+}
 
 const PRIMARY_KEY_BY_TABLE: Readonly<Record<DatabaseTable, string>> = {
   sessions: "session_id",
@@ -3004,6 +3027,15 @@ function createOperationalRepositories(
   };
   const putOutcome = async (record: OutcomeRecord): Promise<void> => {
     database.transaction(() => {
+      const existingRow = db.prepare("SELECT * FROM outcomes WHERE outcome_id = ?").get(record.outcomeId);
+      if (existingRow !== undefined) {
+        const existing = decodeOutcome(existingRow);
+        const { createdAt: _existingCreatedAt, ...existingIdentity } = existing;
+        const { createdAt: _recordCreatedAt, ...recordIdentity } = record;
+        if (!isDeepStrictEqual(existingIdentity, recordIdentity))
+          throw new Error(`Outcome ${record.outcomeId} already exists with different durable meaning`);
+        return;
+      }
       db.prepare(
         `INSERT INTO outcomes(
           outcome_id, session_id, turn_id, status, summary, sensitivity, created_at, metadata_json
@@ -3492,14 +3524,25 @@ function createResearchRepositories(
         });
       },
       putExperiment: async (experiment: Experiment) => {
-        const value = ExperimentSchema.parse(experiment);
-        const encoded = JSON.stringify(value);
+        const requested = ExperimentSchema.parse(experiment);
         database.transaction(() => {
-          for (const ref of value.evidenceRefs) assertStoredReference(db, ref);
-          if (value.preflightRef) assertStoredReference(db, value.preflightRef);
           const current = db
             .prepare("SELECT status, data_json FROM experiments WHERE experiment_id = ?")
-            .get(value.experimentId);
+            .get(requested.experimentId);
+          const stored = decodeExperiment(current);
+          const value =
+            stored?.status === "completed"
+              ? requested
+              : ExperimentSchema.parse({
+                  ...requested,
+                  evidenceRefs: mergeEvidenceReferences(stored?.evidenceRefs ?? [], requested.evidenceRefs),
+                  feedbackSignalIds: [
+                    ...new Set([...(stored?.feedbackSignalIds ?? []), ...requested.feedbackSignalIds]),
+                  ],
+                });
+          const encoded = JSON.stringify(value);
+          for (const ref of value.evidenceRefs) assertStoredReference(db, ref);
+          if (value.preflightRef) assertStoredReference(db, value.preflightRef);
           if (current === undefined) {
             db.prepare("INSERT INTO experiments VALUES (?, ?, ?, ?, ?)").run(
               value.experimentId,
@@ -3520,7 +3563,7 @@ function createResearchRepositories(
           }
           recordActivity(actor, "experiment.put", "experiment", value.experimentId);
         });
-        return databaseRef("experiments", value.experimentId);
+        return databaseRef("experiments", requested.experimentId);
       },
     }),
     trials: Object.freeze({

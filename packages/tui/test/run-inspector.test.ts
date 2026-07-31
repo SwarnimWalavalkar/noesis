@@ -2,11 +2,11 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import {
   initialTuiState,
+  type NoesisTuiAction,
+  type NoesisTuiState,
   reduceTui,
   renderRunInspector,
   renderRunInspectorFrame,
-  type NoesisTuiAction,
-  type NoesisTuiState,
   type TuiExecutionDetail,
 } from "../src/index.ts";
 
@@ -116,6 +116,22 @@ function stateWithRun(
 const render = (state: NoesisTuiState, width = 88, height = 24): string[] =>
   renderRunInspector(state, width, height);
 
+function stateWithAction(name: string, input: unknown, output: unknown): NoesisTuiState {
+  const events: NoesisTuiAction[] = [
+    { type: "action-started", actionId: "semantic-action", name, input, at: 0 },
+    {
+      type: "action-ended",
+      actionId: "semantic-action",
+      output,
+      isError: false,
+      at: 10,
+    },
+    { type: "inspector-opened", actionId: "semantic-action" },
+    { type: "inspector-loaded", actionId: "semantic-action" },
+  ];
+  return events.reduce(reduceTui, initialTuiState("fake"));
+}
+
 describe("run inspector panel", () => {
   test("frames every row to exactly the requested width", () => {
     const rows = render(stateWithRun({ detail: DETAIL }));
@@ -142,6 +158,88 @@ describe("run inspector panel", () => {
     expect(rows[1]).toContain("codemode · 2 calls · 1.2s · exec_7d31c0a4");
     expect(order.every((position) => position >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((left, right) => left - right));
+  });
+
+  test("unwraps Pi text envelopes while keeping the exact response one keypress away", () => {
+    const envelope = {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify("first semantic line\nsecond semantic line"),
+        },
+      ],
+      details: { semantic: true },
+    };
+    const semantic = stateWithAction("inspect_self", { section: "system-prompt" }, envelope);
+    const semanticBody = render(semantic, 88, 60).join("\n");
+
+    expect(semanticBody).toContain("first semantic line");
+    expect(semanticBody).toContain("second semantic line");
+    expect(semanticBody).not.toContain('"content"');
+    expect(semanticBody).not.toContain("\\\\n");
+    expect(semanticBody).toContain("semantic · space for exact");
+
+    const rawBody = render(reduceTui(semantic, { type: "inspector-view-toggled" }), 88, 60).join("\n");
+    expect(rawBody).toContain("RAW RESULT");
+    expect(rawBody).toContain('"content"');
+    expect(rawBody).toContain('"details"');
+    expect(rawBody).toContain("space semantic");
+  });
+
+  test("presents tool catalogs as readable discovery lists instead of schema dumps", () => {
+    const catalog = {
+      catalogId: "catalog-local",
+      catalogDigest: "sha256:1234567890abcdefghijklmnopqrstuvwxyz",
+      permissions: {
+        effects: ["filesystem.read", "process.execute"],
+        resourcePatterns: ["/**"],
+        credentialRefs: [],
+      },
+      tools: Array.from({ length: 18 }, (_, index) => ({
+        name: `tool.${String(index + 1)}`,
+        description: `Useful tool ${String(index + 1)}`,
+        revisionId: `revision-${String(index + 1)}`,
+        inputSchema: {
+          type: "object",
+          properties: { path: { type: "string", description: "A deliberately verbose schema field" } },
+        },
+        outputSchema: { type: "object", properties: { ok: { type: "boolean" } } },
+      })),
+    };
+    const envelope = {
+      content: [{ type: "text", text: JSON.stringify(catalog) }],
+      details: { semantic: true },
+    };
+    const semantic = stateWithAction("inspect_self", { section: "tools" }, envelope);
+    const semanticFrame = renderRunInspectorFrame(semantic, 100, 100);
+    const semanticBody = semanticFrame.rows.join("\n");
+
+    expect(semanticBody).toContain("18 tools");
+    expect(semanticBody).toContain("tool.1");
+    expect(semanticBody).toContain("Useful tool 18");
+    expect(semanticBody).toContain("catalog-local");
+    expect(semanticBody).toContain("effects      2");
+    expect(semanticBody).not.toContain("inputSchema");
+    expect(semanticFrame.maxScroll).toBe(0);
+
+    const rawBody = render(reduceTui(semantic, { type: "inspector-view-toggled" }), 100, 500).join("\n");
+    expect(rawBody).toContain("inputSchema");
+    expect(rawBody).toContain("outputSchema");
+    expect(rawBody).toContain("revision-18");
+  });
+
+  test("renders noesis.search results as ranked tools with their useful provenance", () => {
+    const state = stateWithAction("noesis.search", { query: "read files" }, [
+      { name: "files.read", description: "Read a file", revisionId: "rev-read", score: 0.98 },
+      { name: "files.search", description: "Search files", revisionId: "rev-search", score: 0.82 },
+    ]);
+    const body = render(state, 100, 60).join("\n");
+
+    expect(body).toContain("2 tools");
+    expect(body).toContain("files.read");
+    expect(body).toContain("Read a file");
+    expect(body).toContain("score 0.98");
+    expect(body).toContain("rev rev-read");
   });
 
   test("summarizes each nested call with its subject, outcome, and duration", () => {

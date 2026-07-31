@@ -53,7 +53,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
     const serving = request.plan.selectedCapabilities.map((selection) => selection.revision);
 
     const record = async (
-      status: "accepted" | "corrected" | "failed",
+      status: "accepted" | "corrected" | "failed" | "unknown",
       summary: string,
       assistantMessage?: string,
       aborted = false,
@@ -131,7 +131,26 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
           }),
         ),
       );
-      const evidenceRefs: readonly EvidenceRef[] = Object.freeze([userRef, ...assistantRefs]);
+      const toolCalls = (await options.workspace.operational.toolCalls.listForSession(request.sessionId))
+        .filter((toolCall) => toolCall.turnId === request.turnId)
+        .sort(
+          (left, right) =>
+            (left.timelineSequence ?? Number.MAX_SAFE_INTEGER) -
+              (right.timelineSequence ?? Number.MAX_SAFE_INTEGER) ||
+            left.createdAt.localeCompare(right.createdAt) ||
+            left.toolCallId.localeCompare(right.toolCallId),
+        );
+      const toolRefs: readonly EvidenceRef[] = Object.freeze(
+        toolCalls.map((toolCall) =>
+          Object.freeze({
+            kind: "database_row" as const,
+            table: "tool_calls" as const,
+            rowId: toolCall.toolCallId,
+          }),
+        ),
+      );
+      const toolFailureCount = toolCalls.filter((toolCall) => toolCall.status === "failed").length;
+      const evidenceRefs: readonly EvidenceRef[] = Object.freeze([userRef, ...assistantRefs, ...toolRefs]);
       await options.workspace.operational.outcomes.put(
         Object.freeze({
           outcomeId: `${request.turnId}:outcome`,
@@ -197,13 +216,13 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
           userMessage: request.input,
           ...(assistantMessage ? { assistantMessage } : {}),
           ...(correction.corrected ? { correction: request.input } : {}),
-          outcome: status,
+          outcome: status === "failed" ? "failed" : correction.corrected ? "corrected" : "unknown",
           occurredAt: request.occurredAt,
           evidenceRefs: [...evidenceRefs],
           sensitivity: "normal" as const,
           telemetry: Object.freeze({
             retryCount: 0,
-            toolFailureCount: status === "failed" ? 1 : 0,
+            toolFailureCount,
             aborted: false,
           }),
         }),
@@ -228,13 +247,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
       await record("failed", "Turn aborted", result.output, true, result.assistantMessages);
       return result;
     }
-    await record(
-      correction.corrected ? "corrected" : "accepted",
-      result.output,
-      result.output,
-      false,
-      result.assistantMessages,
-    );
+    await record("unknown", result.output, result.output, false, result.assistantMessages);
     return result;
   };
 

@@ -145,19 +145,32 @@ export function createRuntimeCoordinatorComposition(
             recurrenceCount: observed.harvest.recurrenceCount,
           }),
         });
-      const experiment = Object.freeze({
-        experimentId: observed.brief.experimentId,
-        hypothesis: observed.brief.hypothesis,
-        scope: observed.brief.scope,
-        evidenceRefs: observed.brief.evidenceRefs,
-        baselineRevision: observed.brief.baselineRevision,
-        candidateRevisions: Object.freeze([]),
-        feedbackSignalIds: observed.brief.feedbackSignalIds,
+      const experiment = await options.workspace.research.experiments.getExperiment(
+        observed.brief.experimentId,
+      );
+      if (
+        !experiment ||
+        (observed.status === "experiment" && experiment.status !== "hypothesis") ||
+        experiment.hypothesis !== observed.brief.hypothesis ||
+        experiment.scope !== observed.brief.scope ||
+        !sameCapabilityRevisionRef(experiment.baselineRevision, observed.brief.baselineRevision)
+      )
+        throw coordinatorOperationError(
+          `Reflection ${observed.brief.experimentId} did not persist its authoritative hypothesis`,
+          { code: "experiment_hypothesis_missing", retryable: false },
+        );
+      const hypothesisExperiment = Object.freeze({
+        experimentId: experiment.experimentId,
+        hypothesis: experiment.hypothesis,
+        scope: experiment.scope,
+        evidenceRefs: experiment.evidenceRefs,
+        baselineRevision: experiment.baselineRevision,
+        feedbackSignalIds: experiment.feedbackSignalIds,
         status: "hypothesis" as const,
       });
       return Object.freeze({
         status: observed.status,
-        experiment,
+        experiment: hypothesisExperiment,
         hypothesisDedupeKey: observed.brief.hypothesisDedupeKey,
         telemetry: telemetry({
           reflectionRun: observed.reflectionRun,

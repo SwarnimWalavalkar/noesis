@@ -1,13 +1,12 @@
 import {
   Editor,
   matchesKey,
-  type AutocompleteProvider,
   type Component,
   type Focusable,
   type SelectListTheme,
   type TUI,
 } from "@earendil-works/pi-tui";
-import { createNoesisCommandAutocompleteProvider } from "./command-autocomplete.ts";
+import { createNoesisCommandAutocompleteProvider, type SkillSlashCommand } from "./command-autocomplete.ts";
 import { ANSI, elideText, styled } from "./theme.ts";
 
 export {
@@ -80,7 +79,7 @@ export function createSafeEditor(
   colorEnabled = false,
   selectTheme: SelectListTheme = createSelectTheme(colorEnabled),
   height: () => number = () => Number.POSITIVE_INFINITY,
-  autocompleteProvider: AutocompleteProvider = createNoesisCommandAutocompleteProvider(),
+  skills: readonly SkillSlashCommand[] = [],
 ): SafeEditor {
   const editor = new Editor(
     tui,
@@ -90,7 +89,7 @@ export function createSafeEditor(
     },
     { paddingX: 1 },
   );
-  editor.setAutocompleteProvider(autocompleteProvider);
+  editor.setAutocompleteProvider(createNoesisCommandAutocompleteProvider(skills));
   let inputState: SafeEditorInputState = { kind: "keyboard", pending: "" };
   let ambiguityTimer: NodeJS.Timeout | undefined;
   let submit: ((text: string) => void) | undefined;

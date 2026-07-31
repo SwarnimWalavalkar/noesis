@@ -98,6 +98,19 @@ export interface TuiExecutionDetail extends TuiExecutionSummary {
   }[];
 }
 
+export interface TuiLearningActivitySummary {
+  readonly jobId: string;
+  readonly stage: "reflection" | "authoring" | "preflight";
+  readonly status: "queued" | "running" | "completed" | "no_change" | "failed";
+  readonly summary: string;
+  readonly updatedAt: string;
+  readonly turnId?: string;
+  readonly experimentId?: string;
+  readonly capabilityId?: string;
+  readonly capabilityRevisionId?: string;
+  readonly failure?: string;
+}
+
 export type NoesisTuiRuntime = Pick<
   NoesisRuntime,
   | "agentDefaults"
@@ -124,4 +137,5 @@ export type NoesisTuiRuntime = Pick<
     sessionId: string,
     executionId: string,
   ) => Promise<TuiExecutionDetail | undefined>;
+  readonly listLearningActivity?: (sessionId: string) => Promise<readonly TuiLearningActivitySummary[]>;
 };

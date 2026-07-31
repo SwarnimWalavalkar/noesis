@@ -2,9 +2,9 @@ import type { NoesisAgentRuntime } from "@noesis/agent-types";
 import { describe, expect, test } from "vitest";
 import {
   isExclusiveSlashCommand,
+  type NoesisTuiAction,
   runSlashCommand,
   steerFeedback,
-  type NoesisTuiAction,
 } from "../src/index.ts";
 import { createInMemoryTestRuntime } from "./support/in-memory-runtime.ts";
 
@@ -69,6 +69,77 @@ describe("Noesis slash commands", () => {
     expect(handled).toBe(true);
     expect(inspectedName).toBe("reusable-research");
     expect(published).toEqual(["Unknown script: reusable-research"]);
+  });
+
+  test("renders quiet, inspectable ambient learning outcomes from the session read model", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const requestedSessions: string[] = [];
+    const runtime = Object.freeze({
+      ...base,
+      listLearningActivity: async (sessionId: string) => {
+        requestedSessions.push(sessionId);
+        return Object.freeze([
+          Object.freeze({
+            jobId: "job-reflection-running",
+            stage: "reflection" as const,
+            status: "running" as const,
+            summary: "Running reflection on the completed turn",
+            updatedAt: "2026-08-01T00:00:01.000Z",
+            turnId: "turn-1",
+            capabilityId: "general-collaboration",
+          }),
+          Object.freeze({
+            jobId: "job-reflection-no-change",
+            stage: "reflection" as const,
+            status: "no_change" as const,
+            summary: "The turn already worked well",
+            updatedAt: "2026-08-01T00:00:02.000Z",
+            turnId: "turn-2",
+          }),
+          Object.freeze({
+            jobId: "job-author-failed",
+            stage: "authoring" as const,
+            status: "failed" as const,
+            summary: "Candidate source could not be validated",
+            failure: "Candidate source could not be validated",
+            updatedAt: "2026-08-01T00:00:03.000Z",
+            experimentId: "experiment-1",
+          }),
+          Object.freeze({
+            jobId: "job-preflight-complete",
+            stage: "preflight" as const,
+            status: "completed" as const,
+            summary: "Preflight decision: pass",
+            updatedAt: "2026-08-01T00:00:04.000Z",
+            experimentId: "experiment-1",
+            capabilityId: "research-brief",
+            capabilityRevisionId: "research-brief-v2",
+          }),
+        ]);
+      },
+    });
+    const published: string[] = [];
+
+    const handled = await runSlashCommand("/learning", {
+      runtime,
+      trailId: "trail-learning",
+      publishInspector: (message) => published.push(message),
+      dispatch: () => undefined,
+      requestRender: () => undefined,
+    });
+
+    expect(handled).toBe(true);
+    expect(requestedSessions).toEqual(["trail-learning"]);
+    expect(published).toHaveLength(1);
+    expect(published[0]).toContain("Learning activity · 4");
+    expect(published[0]).toContain("● running · reflection");
+    expect(published[0]).toContain("— no change · reflection");
+    expect(published[0]).toContain("× failed · authoring");
+    expect(published[0]).toContain("✓ completed · preflight");
+    expect(published[0]).toContain("experiment experiment-1");
+    expect(published[0]).toContain("capability research-brief@research-brief-v2");
+    expect(published[0]).toContain("No change is a normal outcome");
+    expect(published[0]).not.toContain("approve");
   });
 
   test("hydrates inherited history when a fork becomes the active trail", async () => {

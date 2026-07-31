@@ -1,8 +1,8 @@
 import type { ContextSnapshot } from "@noesis/context";
 import type {
   RuntimeAgentDefaults,
-  RuntimeTranscriptEntry,
   RuntimeTranscriptAction,
+  RuntimeTranscriptEntry,
   TrailState,
 } from "@noesis/runtime";
 import type { TuiExecutionDetail, TuiInteractionSnapshot } from "./runtime-port.ts";
@@ -154,6 +154,7 @@ export interface TuiInspectorState {
   /** `fallback` means no durable execution record resolved and the in-memory action is shown. */
   readonly status: "loading" | "ready" | "fallback";
   readonly detail?: TuiExecutionDetail;
+  readonly view: "semantic" | "raw";
   readonly scroll: number;
 }
 
@@ -230,6 +231,7 @@ export type NoesisTuiAction =
       readonly delta: number;
       readonly maxScroll: number;
     }
+  | { readonly type: "inspector-view-toggled" }
   | { readonly type: "inspector-closed" }
   | { readonly type: "execution-changed"; readonly execution: ExecutionState }
   | {
@@ -469,6 +471,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         inspector: {
           actionId: action.actionId,
           status: "loading",
+          view: "semantic",
           scroll: 0,
         },
       };
@@ -481,6 +484,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
           actionId: action.actionId,
           status: action.detail ? "ready" : "fallback",
           ...(action.detail ? { detail: action.detail } : {}),
+          view: state.inspector.view,
           scroll: 0,
         },
       };
@@ -492,6 +496,17 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         inspector: {
           ...state.inspector,
           scroll: Math.min(Math.max(0, action.maxScroll), Math.max(0, state.inspector.scroll + action.delta)),
+        },
+      };
+    }
+    case "inspector-view-toggled": {
+      if (!state.inspector) return state;
+      return {
+        ...state,
+        inspector: {
+          ...state.inspector,
+          view: state.inspector.view === "semantic" ? "raw" : "semantic",
+          scroll: 0,
         },
       };
     }

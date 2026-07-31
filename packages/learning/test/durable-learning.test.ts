@@ -2,13 +2,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  capabilityRevisionRef,
-  sameCapabilityRevisionRef,
-  sha256,
   type CapabilityRevision,
+  capabilityRevisionRef,
   type EvidenceRef,
   type Experiment,
   type FileRevisionRef,
+  sameCapabilityRevisionRef,
+  sha256,
 } from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
@@ -71,6 +71,7 @@ describe("durable automatic-learning handoff", () => {
       evidenceRefs: Object.freeze([evidence]),
       feedbackSignalIds: Object.freeze([]),
       citations: Object.freeze([]),
+      recurrenceCitations: Object.freeze([]),
       sourceCases: Object.freeze([
         Object.freeze({
           caseId: "source-1",
@@ -110,7 +111,9 @@ describe("durable automatic-learning handoff", () => {
     workspace = await createWorkspaceStore(root);
     const restartedBriefs = createWorkspaceExperimentBriefStore(workspace);
     expect(await restartedBriefs.findByDedupeKey(brief.hypothesisDedupeKey)).toEqual(brief);
-    await restartedBriefs.put(Object.freeze({ ...brief, experimentId: "duplicate-after-restart" }));
+    await expect(
+      restartedBriefs.put(Object.freeze({ ...brief, experimentId: "duplicate-after-restart" })),
+    ).rejects.toThrow("publication collision");
     expect((await restartedBriefs.findByDedupeKey(brief.hypothesisDedupeKey))?.experimentId).toBe(
       brief.experimentId,
     );

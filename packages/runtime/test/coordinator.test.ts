@@ -362,6 +362,38 @@ describe("automatic runtime coordinator", () => {
     f.workspace.close();
   });
 
+  test("paginates jobs with a stable authoritative cursor", async () => {
+    const f = await fixture();
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      research: f.research,
+      config: config(),
+    });
+    await coordinator.observeCompletedTurn(f.turn("turn-page-a", "ordinary weather question"));
+    await coordinator.observeCompletedTurn(f.turn("turn-page-b", "ordinary weather question"));
+
+    const firstPage = await coordinator.listJobs({ kind: "runtime.reflect_turn", limit: 1 });
+    const first = firstPage[0]?.job;
+    if (!first) throw new Error("Expected the first coordinator job page");
+    const secondPage = await coordinator.listJobs({
+      kind: "runtime.reflect_turn",
+      limit: 1,
+      after: Object.freeze({ createdAt: first.createdAt, jobId: first.jobId }),
+    });
+
+    expect(firstPage).toHaveLength(1);
+    expect(secondPage).toHaveLength(1);
+    expect(secondPage[0]?.job.jobId).not.toBe(first.jobId);
+    expect(
+      secondPage[0]?.job.createdAt === first.createdAt
+        ? (secondPage[0]?.job.jobId ?? "") > first.jobId
+        : (secondPage[0]?.job.createdAt ?? "") > first.createdAt,
+    ).toBe(true);
+    await coordinator.stop();
+    f.workspace.close();
+  });
+
   test("retries transient role failure but keeps terminal failure inspectable and manually retryable", async () => {
     const f = await fixture();
     f.setTransientPreflightFailures(1);
