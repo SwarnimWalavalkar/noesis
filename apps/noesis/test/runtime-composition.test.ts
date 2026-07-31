@@ -752,6 +752,170 @@ describe("apps/noesis production control-plane composition", () => {
     await runtime.shutdown();
   });
 
+  test("forks authoritative replay history with steer provenance across immediate use and restart", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-fork-history-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    let releaseActive: (() => void) | undefined;
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    let markActiveStarted: (() => void) | undefined;
+    const activeStarted = new Promise<void>((resolve) => {
+      markActiveStarted = resolve;
+    });
+    const firstRequests: AgentRuntimeRequest[] = [];
+    const first = await createApplicationRuntimeComposition({
+      config,
+      agent: Object.freeze({
+        name: runtimeIdentity,
+        run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+          firstRequests.push(request);
+          emit({ type: "status", status: "started" });
+          if (request.prompt === "failed source input") throw new Error("source turn failed");
+          if (request.prompt === "aborted source input")
+            return Object.freeze({
+              outcome: "aborted" as const,
+              stopReason: "aborted" as const,
+              text: "aborted source output",
+              provider: request.provider,
+              model: request.model,
+            });
+          if (request.prompt === "active source input") {
+            markActiveStarted?.();
+            await activeGate;
+          }
+          return Object.freeze({
+            outcome: "completed" as const,
+            stopReason: "stop" as const,
+            text: `reply:${request.prompt}`,
+            provider: request.provider,
+            model: request.model,
+          });
+        },
+        steer: async () => Object.freeze({ status: "consumed" as const }),
+        abort: async () => undefined,
+      }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const source = await first.startTrail({ title: "Fork source" });
+    await first.debug.runTurn(source.trailId, "accepted source input");
+    await expect(first.debug.runTurn(source.trailId, "failed source input")).rejects.toThrow(
+      "source turn failed",
+    );
+    await first.debug.runTurn(source.trailId, "aborted source input");
+    await first.interact(source.trailId, { type: "submit", text: "active source input" });
+    await activeStarted;
+    await first.interact(source.trailId, { type: "steer", text: "delivered source steer" });
+    releaseActive?.();
+    await waitUntil(() => first.getTrail(source.trailId).turns.length === 2);
+
+    const fork = await first.forkTrail(source.trailId, "Authoritative fork");
+    const expectedInheritedText = [
+      "accepted source input",
+      "reply:accepted source input",
+      "active source input",
+      "delivered source steer",
+      "reply:active source input",
+    ];
+    const inheritedMessages = await first.debug.workspace.operational.messages.listForSession(fork.trailId);
+    expect(inheritedMessages.map((message) => message.content)).toEqual(expectedInheritedText);
+    expect(inheritedMessages.map((message) => message.metadata["historyKind"])).toEqual([
+      "turn",
+      "turn",
+      "turn",
+      "steer",
+      "turn",
+    ]);
+    expect(inheritedMessages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          messageId: expect.stringMatching(new RegExp(`^${fork.trailId}:inherited:`)),
+          metadata: expect.objectContaining({
+            replayEligible: true,
+            inheritedFromSessionId: source.trailId,
+            inheritedFromMessageId: expect.any(String),
+          }),
+        }),
+      ]),
+    );
+    expect(inheritedMessages.map((message) => message.metadata["historySequence"])).toEqual([0, 1, 2, 3, 4]);
+    expect(
+      (await first.getTranscript(fork.trailId)).flatMap((entry) =>
+        entry.kind === "message" ? [entry.text] : [],
+      ),
+    ).toEqual(expectedInheritedText);
+    expect(first.getTrail(fork.trailId).turns).toEqual([
+      { input: "accepted source input", output: "reply:accepted source input" },
+      { input: "active source input", output: "reply:active source input" },
+    ]);
+
+    await first.debug.runTurn(source.trailId, "source-only future input");
+    await first.debug.runTurn(fork.trailId, "immediate fork input");
+    const immediatePrompt = firstRequests.find(
+      (request) => request.prompt === "immediate fork input",
+    )?.systemPrompt;
+    expect(immediatePrompt).toContain("User: accepted source input");
+    expect(immediatePrompt).toContain("Assistant: reply:accepted source input");
+    expect(immediatePrompt).toContain("User: active source input");
+    expect(immediatePrompt).toContain("User: delivered source steer");
+    expect(immediatePrompt).toContain("Assistant: reply:active source input");
+    expect(immediatePrompt).not.toContain("failed source input");
+    expect(immediatePrompt).not.toContain("aborted source input");
+    expect(immediatePrompt).not.toContain("source-only future input");
+    const inheritedMessageIds = inheritedMessages.map((message) => message.messageId);
+    await first.shutdown();
+
+    const reopenedRequests: AgentRuntimeRequest[] = [];
+    const reopened = await createApplicationRuntimeComposition({
+      config,
+      agent: Object.freeze({
+        name: runtimeIdentity,
+        run: async (request: AgentRuntimeRequest) => {
+          reopenedRequests.push(request);
+          return Object.freeze({
+            outcome: "completed" as const,
+            stopReason: "stop" as const,
+            text: `reopened:${request.prompt}`,
+            provider: request.provider,
+            model: request.model,
+          });
+        },
+        steer: async () => Object.freeze({ status: "consumed" as const }),
+        abort: async () => undefined,
+      }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    expect(reopened.getTrail(fork.trailId).turns).toEqual([
+      { input: "accepted source input", output: "reply:accepted source input" },
+      { input: "active source input", output: "reply:active source input" },
+      { input: "immediate fork input", output: "reply:immediate fork input" },
+    ]);
+    expect(
+      (await reopened.debug.workspace.operational.messages.listForSession(fork.trailId))
+        .filter((message) => message.metadata["replayEligible"] === true)
+        .map((message) => message.messageId),
+    ).toEqual(inheritedMessageIds);
+    await reopened.resumeTrail(fork.trailId);
+    await reopened.debug.runTurn(fork.trailId, "restarted fork input");
+    const restartedPrompt = reopenedRequests.at(-1)?.systemPrompt;
+    expect(restartedPrompt).toContain("User: delivered source steer");
+    expect(restartedPrompt).toContain("User: immediate fork input");
+    expect(restartedPrompt).toContain("Assistant: reply:immediate fork input");
+    expect(restartedPrompt).not.toContain("failed source input");
+    expect(restartedPrompt).not.toContain("aborted source input");
+    expect(restartedPrompt).not.toContain("source-only future input");
+    await reopened.shutdown();
+  });
+
   test("a real app turn pins admission and records exact durable operational work", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-control-plane-"));
     roots.push(home);

@@ -5,6 +5,9 @@ import type { RuntimeTranscriptAction, RuntimeTranscriptEntry, RuntimeTranscript
 type TranscriptPoint = Readonly<{
   occurredAt: string;
   entry: RuntimeTranscriptEntry;
+  inheritedHistorySequence?: number;
+  interactionSequence?: number;
+  steer?: boolean;
 }>;
 
 const optionalTurnId = (metadata: Readonly<Record<string, unknown>>): string | undefined => {
@@ -12,6 +15,31 @@ const optionalTurnId = (metadata: Readonly<Record<string, unknown>>): string | u
   if (typeof turnId === "string" && turnId) return turnId;
   const legacyEventId = metadata["legacyEventId"];
   return typeof legacyEventId === "string" && legacyEventId ? legacyEventId : undefined;
+};
+
+const inheritedHistorySequence = (metadata: Readonly<Record<string, unknown>>): number | undefined => {
+  if (
+    metadata["replayEligible"] !== true ||
+    typeof metadata["inheritedFromSessionId"] !== "string" ||
+    metadata["inheritedFromSessionId"].length === 0 ||
+    typeof metadata["inheritedFromMessageId"] !== "string" ||
+    metadata["inheritedFromMessageId"].length === 0
+  )
+    return undefined;
+  const sequence = metadata["historySequence"];
+  return typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence >= 0
+    ? sequence
+    : undefined;
+};
+
+const nonnegativeSequence = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+
+const messageTieRank = (point: TranscriptPoint): number => {
+  if (point.entry.kind !== "message") return Number.MAX_SAFE_INTEGER;
+  if (point.entry.role === "system") return 0;
+  if (point.entry.role === "user") return point.steer === true ? 2 : 1;
+  return 3;
 };
 
 const jsonValue = (value: unknown): JsonValue | undefined => {
@@ -104,6 +132,23 @@ const compareTranscriptPoints = (
       compareActionIdentity(left.entry, right.entry)
     );
   }
+  if (left.entry.kind === "message" && right.entry.kind === "message") {
+    if (left.inheritedHistorySequence !== undefined && right.inheritedHistorySequence !== undefined) {
+      const inheritedOrder = left.inheritedHistorySequence - right.inheritedHistorySequence;
+      if (inheritedOrder !== 0) return inheritedOrder;
+    }
+    const messageRank = messageTieRank(left) - messageTieRank(right);
+    if (messageRank !== 0) return messageRank;
+    if (
+      left.steer === true &&
+      right.steer === true &&
+      left.interactionSequence !== undefined &&
+      right.interactionSequence !== undefined
+    ) {
+      const interactionOrder = left.interactionSequence - right.interactionSequence;
+      if (interactionOrder !== 0) return interactionOrder;
+    }
+  }
   const ranked = entryRank(left.entry) - entryRank(right.entry);
   if (ranked !== 0) return ranked;
   const leftId = left.entry.kind === "action" ? left.entry.actionId : left.entry.messageId;
@@ -182,7 +227,20 @@ export async function loadRuntimeTranscript(
       text: message.content,
       createdAt: message.createdAt,
     }) satisfies RuntimeTranscriptMessage;
-    points.push(Object.freeze({ occurredAt: entry.createdAt, entry }));
+    const sequence = inheritedHistorySequence(message.metadata);
+    const steer = message.role === "user" && message.metadata["deliveryMode"] === "steer";
+    const interactionSequence = steer
+      ? nonnegativeSequence(message.metadata["interactionSequence"])
+      : undefined;
+    points.push(
+      Object.freeze({
+        occurredAt: entry.createdAt,
+        entry,
+        ...(sequence === undefined ? {} : { inheritedHistorySequence: sequence }),
+        ...(interactionSequence === undefined ? {} : { interactionSequence }),
+        ...(steer ? { steer: true } : {}),
+      }),
+    );
   }
   const tiedActionOrder = actionOrderAtTimestampTies(actions);
   return Object.freeze(

@@ -95,6 +95,7 @@ import {
 import type { NoesisTuiRuntime } from "@noesis/tui";
 import {
   createWorkspaceStore,
+  type MessageRecord,
   type NoesisWorkspaceStore,
   type OutcomeRecord,
   type WorkflowRunRecord,
@@ -502,42 +503,34 @@ async function replayEligibleTurns(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
 ): Promise<readonly { readonly input: string; readonly output: string }[]> {
-  const [messages, outcomes] = await Promise.all([
-    workspace.operational.messages.listForSession(sessionId),
-    workspace.operational.outcomes.listForSession(sessionId),
-  ]);
-  const eligibleTurnIds = await replayEligibleTurnIds(workspace, sessionId, outcomes);
+  const messages = await replayEligibleHistoryMessages(workspace, sessionId);
   const messagesByTurn = new Map<
     string,
-    { user?: (typeof messages)[number]; assistant?: (typeof messages)[number] }
+    {
+      readonly firstIndex: number;
+      user?: (typeof messages)[number];
+      assistant?: (typeof messages)[number];
+    }
   >();
-  for (const message of messages) {
-    const turnId =
-      typeof message.metadata["turnId"] === "string"
-        ? message.metadata["turnId"]
-        : typeof message.metadata["legacyEventId"] === "string"
-          ? message.metadata["legacyEventId"]
-          : undefined;
+  for (const [index, message] of messages.entries()) {
+    if (replayHistoryKind(message) === "steer") continue;
+    const turnId = replayHistoryTurnKey(message);
     if (!turnId) continue;
-    const pair = messagesByTurn.get(turnId) ?? {};
+    const pair = messagesByTurn.get(turnId) ?? { firstIndex: index };
     if (message.role === "user" && pair.user === undefined) pair.user = message;
     if (message.role === "assistant" && pair.assistant === undefined) pair.assistant = message;
     messagesByTurn.set(turnId, pair);
   }
   const replayable: Array<{
-    readonly occurredAt: string;
-    readonly turnId: string;
+    readonly firstIndex: number;
     readonly input: string;
     readonly output: string;
   }> = [];
-  for (const outcome of outcomes) {
-    if (!outcome.turnId || !eligibleTurnIds.has(outcome.turnId)) continue;
-    const pair = messagesByTurn.get(outcome.turnId);
+  for (const pair of messagesByTurn.values()) {
     if (!pair?.user || !pair.assistant) continue;
     replayable.push(
       Object.freeze({
-        occurredAt: pair.user.createdAt,
-        turnId: outcome.turnId,
+        firstIndex: pair.firstIndex,
         input: pair.user.content,
         output: pair.assistant.content,
       }),
@@ -545,12 +538,54 @@ async function replayEligibleTurns(
   }
   return Object.freeze(
     replayable
-      .sort(
-        (left, right) =>
-          left.occurredAt.localeCompare(right.occurredAt) || left.turnId.localeCompare(right.turnId),
-      )
+      .sort((left, right) => left.firstIndex - right.firstIndex)
       .map(({ input, output }) => Object.freeze({ input, output })),
   );
+}
+
+function metadataString(message: MessageRecord, key: string): string | undefined {
+  const value = message.metadata[key];
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function inheritedReplayKind(message: MessageRecord): "turn" | "steer" | undefined {
+  if (
+    message.metadata["replayEligible"] !== true ||
+    metadataString(message, "inheritedFromSessionId") === undefined ||
+    metadataString(message, "inheritedFromMessageId") === undefined
+  )
+    return undefined;
+  const kind = message.metadata["historyKind"];
+  return kind === "turn" || kind === "steer" ? kind : undefined;
+}
+
+function replayHistoryKind(message: MessageRecord): "turn" | "steer" {
+  const inherited = inheritedReplayKind(message);
+  if (inherited !== undefined) return inherited;
+  return message.role === "user" && message.metadata["deliveryMode"] === "steer" ? "steer" : "turn";
+}
+
+function replayHistoryTurnKey(message: MessageRecord): string | undefined {
+  const inherited = inheritedReplayKind(message);
+  if (inherited === "steer") return undefined;
+  if (inherited === "turn") return metadataString(message, "historyTurnKey");
+  const turnId = metadataString(message, "turnId") ?? metadataString(message, "legacyEventId");
+  return turnId === undefined ? undefined : `${message.sessionId}:${turnId}`;
+}
+
+function historySequence(message: MessageRecord): number | undefined {
+  const value = message.metadata["historySequence"];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function interactionSequence(message: MessageRecord): number | undefined {
+  const value = message.metadata["interactionSequence"];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function replayMessageTieRank(message: MessageRecord): number {
+  if (message.role === "assistant") return 2;
+  return replayHistoryKind(message) === "steer" ? 1 : 0;
 }
 
 async function replayEligibleHistoryMessages(workspace: NoesisWorkspaceStore, sessionId: string) {
@@ -559,27 +594,41 @@ async function replayEligibleHistoryMessages(workspace: NoesisWorkspaceStore, se
     workspace.operational.outcomes.listForSession(sessionId),
   ]);
   const eligibleTurnIds = await replayEligibleTurnIds(workspace, sessionId, outcomes);
+  const sourceOrder = new Map(messages.map((message, index) => [message.messageId, index]));
   return Object.freeze(
     messages
       .filter((message) => {
         if (message.role !== "user" && message.role !== "assistant") return false;
-        if (message.role === "user" && message.metadata["deliveryMode"] === "steer") return true;
+        const inheritedKind = inheritedReplayKind(message);
+        if (inheritedKind === "steer") return message.role === "user";
+        if (inheritedKind === "turn") return replayHistoryTurnKey(message) !== undefined;
         const turnId =
           typeof message.metadata["turnId"] === "string"
             ? message.metadata["turnId"]
             : typeof message.metadata["legacyEventId"] === "string"
               ? message.metadata["legacyEventId"]
               : undefined;
+        if (message.role === "user" && message.metadata["deliveryMode"] === "steer")
+          return turnId !== undefined && eligibleTurnIds.has(turnId);
         return turnId !== undefined && eligibleTurnIds.has(turnId);
       })
       .sort((left, right) => {
-        const historyRank = (message: (typeof messages)[number]): number => {
-          if (message.role === "assistant") return 2;
-          return message.metadata["deliveryMode"] === "steer" ? 1 : 0;
-        };
+        const leftSequence = historySequence(left);
+        const rightSequence = historySequence(right);
+        const leftInteractionSequence = interactionSequence(left);
+        const rightInteractionSequence = interactionSequence(right);
         return (
           left.createdAt.localeCompare(right.createdAt) ||
-          historyRank(left) - historyRank(right) ||
+          (leftSequence !== undefined && rightSequence !== undefined ? leftSequence - rightSequence : 0) ||
+          replayMessageTieRank(left) - replayMessageTieRank(right) ||
+          (replayHistoryKind(left) === "steer" &&
+          replayHistoryKind(right) === "steer" &&
+          leftInteractionSequence !== undefined &&
+          rightInteractionSequence !== undefined
+            ? leftInteractionSequence - rightInteractionSequence
+            : 0) ||
+          (sourceOrder.get(left.messageId) ?? Number.MAX_SAFE_INTEGER) -
+            (sourceOrder.get(right.messageId) ?? Number.MAX_SAFE_INTEGER) ||
           left.messageId.localeCompare(right.messageId)
         );
       }),
@@ -2536,41 +2585,55 @@ export async function createApplicationRuntimeComposition(
   };
   const forkTrail: NoesisRuntime["forkTrail"] = async (trailId, title) => {
     const source = getTrail(trailId);
-    const fork = await persistTrail(
+    const inheritedHistory = await replayEligibleHistoryMessages(workspace, trailId);
+    let fork = await persistTrail(
       Object.freeze({
         ...source,
         trailId: createId("trail"),
         parentTrailId: trailId,
         title: title ?? `${source.title} (fork)`,
         status: "idle" as const,
-        turns: Object.freeze([...source.turns]),
+        turns: Object.freeze([]),
       }),
     );
-    for (const [index, turn] of source.turns.entries()) {
-      const createdAt = new Date().toISOString();
-      await workspace.operational.messages.put(
-        Object.freeze({
-          messageId: `${fork.trailId}:inherited:${index}:user`,
-          sessionId: fork.trailId,
-          role: "user" as const,
-          content: turn.input,
-          sensitivity: "normal" as const,
-          createdAt,
-          metadata: Object.freeze({ inheritedFrom: trailId }),
+    for (const [index, message] of inheritedHistory.entries()) {
+      const historyKind = replayHistoryKind(message);
+      const historyTurnKey = replayHistoryTurnKey(message);
+      if (historyKind === "turn" && historyTurnKey === undefined)
+        throw new Error(`Replay-eligible message ${message.messageId} has no conversation turn identity`);
+      const messageId = `${fork.trailId}:inherited:${sha256(
+        canonicalJson({ sourceSessionId: trailId, sourceMessageId: message.messageId }),
+      ).slice(0, 32)}`;
+      const inherited = Object.freeze({
+        messageId,
+        sessionId: fork.trailId,
+        role: message.role,
+        content: message.content,
+        sensitivity: message.sensitivity,
+        createdAt: message.createdAt,
+        metadata: Object.freeze({
+          replayEligible: true,
+          historyKind,
+          historySequence: index,
+          ...(historyTurnKey ? { historyTurnKey } : {}),
+          inheritedFromSessionId: trailId,
+          inheritedFromMessageId: message.messageId,
         }),
-      );
-      await workspace.operational.messages.put(
-        Object.freeze({
-          messageId: `${fork.trailId}:inherited:${index}:assistant`,
-          sessionId: fork.trailId,
-          role: "assistant" as const,
-          content: turn.output,
-          sensitivity: "normal" as const,
-          createdAt,
-          metadata: Object.freeze({ inheritedFrom: trailId }),
-        }),
-      );
+      }) satisfies MessageRecord;
+      const existing = await workspace.operational.messages.get(messageId);
+      if (existing !== undefined) {
+        if (canonicalJson(existing) !== canonicalJson(inherited))
+          throw new Error(`Inherited message identity collision: ${messageId}`);
+        continue;
+      }
+      await workspace.operational.messages.put(inherited);
     }
+    fork = await persistTrail(
+      Object.freeze({
+        ...fork,
+        turns: await replayEligibleTurns(workspace, fork.trailId),
+      }),
+    );
     return fork;
   };
 

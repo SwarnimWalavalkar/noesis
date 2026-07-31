@@ -234,6 +234,104 @@ describe("runtime transcript projection", () => {
     reopened.close();
   });
 
+  test("uses durable message sequences for same-timestamp source and inherited history", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-message-order-"));
+    roots.push(root);
+    const workspace = await createWorkspaceStore(root);
+    for (const sessionId of ["session-source-order", "session-inherited-order"]) {
+      await workspace.operational.sessions.put({
+        sessionId,
+        title: "Ordered transcript",
+        status: "idle",
+        provider: "controlled",
+        model: "controlled",
+        runtime: "pi",
+        createdAt: "2026-07-30T00:00:00.000Z",
+        updatedAt: "2026-07-30T00:00:00.000Z",
+        metadata: Object.freeze({}),
+      });
+    }
+    const createdAt = "2026-07-30T00:00:01.000Z";
+    await workspace.operational.messages.put({
+      messageId: "source-z-assistant",
+      sessionId: "session-source-order",
+      role: "assistant",
+      content: "assistant",
+      sensitivity: "normal",
+      createdAt,
+      metadata: Object.freeze({ turnId: "turn-source" }),
+    });
+    await workspace.operational.messages.put({
+      messageId: "source-a-steer-later",
+      sessionId: "session-source-order",
+      role: "user",
+      content: "steer later",
+      sensitivity: "normal",
+      createdAt,
+      metadata: Object.freeze({
+        turnId: "turn-source",
+        deliveryMode: "steer",
+        interactionSequence: 8,
+      }),
+    });
+    await workspace.operational.messages.put({
+      messageId: "source-z-user",
+      sessionId: "session-source-order",
+      role: "user",
+      content: "ordinary user",
+      sensitivity: "normal",
+      createdAt,
+      metadata: Object.freeze({ turnId: "turn-source" }),
+    });
+    await workspace.operational.messages.put({
+      messageId: "source-z-steer-earlier",
+      sessionId: "session-source-order",
+      role: "user",
+      content: "steer earlier",
+      sensitivity: "normal",
+      createdAt,
+      metadata: Object.freeze({
+        turnId: "turn-source",
+        deliveryMode: "steer",
+        interactionSequence: 7,
+      }),
+    });
+
+    for (const [messageId, role, content, historySequence] of [
+      ["inherited-a-assistant", "assistant", "assistant", 3],
+      ["inherited-a-steer", "user", "steer", 2],
+      ["inherited-z-user", "user", "ordinary user", 1],
+    ] as const) {
+      await workspace.operational.messages.put({
+        messageId,
+        sessionId: "session-inherited-order",
+        role,
+        content,
+        sensitivity: "normal",
+        createdAt,
+        metadata: Object.freeze({
+          replayEligible: true,
+          historySequence,
+          historyKind: content === "steer" ? "steer" : "turn",
+          inheritedFromSessionId: "session-source-order",
+          inheritedFromMessageId: `source:${messageId}`,
+        }),
+      });
+    }
+
+    expect(
+      (await loadRuntimeTranscript(workspace, "session-source-order")).map((entry) =>
+        entry.kind === "message" ? entry.text : entry.name,
+      ),
+    ).toEqual(["ordinary user", "steer earlier", "steer later", "assistant"]);
+    expect(
+      (await loadRuntimeTranscript(workspace, "session-inherited-order")).map((entry) =>
+        entry.kind === "message" ? entry.text : entry.name,
+      ),
+    ).toEqual(["ordinary user", "steer", "assistant"]);
+    workspace.close();
+  });
+
   test("marks running actions interrupted without losing their request", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-interrupt-"));
     roots.push(root);

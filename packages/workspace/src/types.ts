@@ -485,6 +485,19 @@ export interface OperationalRepositories {
       readonly queuedBehindTurnId?: string;
       readonly createdAt: string;
     }) => Promise<UserIntentRecord>;
+    /**
+     * Atomically creates a turn intent and promotes it into a steer bound to a
+     * running foreground turn. Returns undefined without inserting when the
+     * target turn cannot be bound.
+     */
+    readonly enqueueAndPromoteToSteer: (request: {
+      readonly intentId: string;
+      readonly sessionId: string;
+      readonly text: string;
+      readonly targetTurnId: string;
+      readonly createdAt: string;
+      readonly promotedAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
     readonly listPending: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
     readonly listUnresolved: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
     readonly claimOldestPending: (request: {
@@ -492,24 +505,24 @@ export interface OperationalRepositories {
       readonly targetTurnId: string;
       readonly claimedAt: string;
     }) => Promise<UserIntentRecord | undefined>;
-    readonly promotePendingToSteer: (request: {
-      readonly sessionId: string;
-      readonly intentId: string;
-      readonly targetTurnId: string;
-      readonly promotedAt: string;
-    }) => Promise<UserIntentRecord | undefined>;
     readonly promoteNewestPendingToSteer: (request: {
       readonly sessionId: string;
       readonly targetTurnId: string;
       readonly promotedAt: string;
     }) => Promise<UserIntentRecord | undefined>;
-    readonly withdrawNewestPending: (request: {
-      readonly sessionId: string;
-      readonly withdrawnAt: string;
-    }) => Promise<UserIntentRecord | undefined>;
     readonly withdraw: (request: {
       readonly sessionId: string;
       readonly intentId: string;
+      readonly withdrawnAt: string;
+    }) => Promise<UserIntentRecord | undefined>;
+    /**
+     * Withdraws an explicit steer only when the caller has positive evidence
+     * that it was not consumed. The steer never passes through pending state.
+     */
+    readonly withdrawUnconsumedSteerDispatch: (request: {
+      readonly sessionId: string;
+      readonly intentId: string;
+      readonly targetTurnId: string;
       readonly withdrawnAt: string;
     }) => Promise<UserIntentRecord | undefined>;
     readonly markDelivered: (request: {

@@ -1823,6 +1823,85 @@ function createOperationalRepositories(
       if (inserted === undefined) throw new Error(`User intent ${intentId} disappeared after enqueue`);
       return inserted;
     });
+  const enqueueAndPromoteUserIntentToSteer = async (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["enqueueAndPromoteToSteer"]>[0],
+  ): Promise<UserIntentRecord | undefined> =>
+    database.transaction(() => {
+      const intentId = z.string().min(1).parse(request.intentId);
+      const sessionId = z.string().min(1).parse(request.sessionId);
+      z.string().trim().min(1).parse(request.text);
+      const text = request.text;
+      const targetTurnId = z.string().min(1).parse(request.targetTurnId);
+      const createdAt = z.string().min(1).parse(request.createdAt);
+      const promotedAt = z.string().min(1).parse(request.promotedAt);
+      const contentDigest = sha256(text);
+
+      const existing = getUserIntent(intentId, sessionId);
+      if (existing !== undefined) {
+        if (
+          existing.contentDigest !== contentDigest ||
+          existing.queuedBehindTurnId !== targetTurnId ||
+          existing.createdAt !== createdAt ||
+          existing.deliveryMode !== "steer" ||
+          existing.targetTurnId !== targetTurnId ||
+          existing.promotedAt !== promotedAt
+        )
+          throw new Error(`User intent ${intentId} already exists with a different identity`);
+        return existing;
+      }
+      const colliding = db.prepare("SELECT session_id FROM user_intents WHERE intent_id = ?").get(intentId);
+      if (colliding !== undefined)
+        throw new Error(`User intent ${intentId} already belongs to another session`);
+
+      const target = db
+        .prepare("SELECT session_id, status FROM foreground_turns WHERE turn_id = ?")
+        .get(targetTurnId);
+      if (
+        target === undefined ||
+        requiredString(target, "session_id") !== sessionId ||
+        requiredString(target, "status") !== "running"
+      )
+        return undefined;
+
+      const queueSequence = requiredNumber(
+        db
+          .prepare(
+            `SELECT COALESCE(MAX(queue_sequence), 0) + 1 AS next_sequence
+             FROM user_intents
+             WHERE session_id = ?`,
+          )
+          .get(sessionId),
+        "next_sequence",
+      );
+      db.prepare(
+        `INSERT INTO user_intents(
+          intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
+          queued_behind_turn_id, target_turn_id, created_at, updated_at,
+          promoted_at, delivered_at, unresolved_at, withdrawn_at, attempt_count
+        ) VALUES (?, ?, ?, ?, 'steer', 'dispatching', ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 1)`,
+      ).run(
+        intentId,
+        sessionId,
+        text,
+        contentDigest,
+        queueSequence,
+        targetTurnId,
+        targetTurnId,
+        createdAt,
+        promotedAt,
+        promotedAt,
+      );
+      recordActivity(systemActor, "user_intent.enqueued", "user_intent", intentId, [
+        { sessionId, mode: "turn", queuedBehindTurnId: targetTurnId },
+      ]);
+      recordActivity(systemActor, "user_intent.promoted_to_steer", "user_intent", intentId, [
+        { targetTurnId },
+      ]);
+      const inserted = getUserIntent(intentId, sessionId);
+      if (inserted === undefined)
+        throw new Error(`User intent ${intentId} disappeared after atomic steer promotion`);
+      return inserted;
+    });
   const claimOldestPendingUserIntent = async (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["claimOldestPending"]>[0],
   ): Promise<UserIntentRecord | undefined> =>
@@ -1861,30 +1940,6 @@ function createOperationalRepositories(
       ]);
       return getUserIntent(intentId, request.sessionId);
     });
-  const promotePendingUserIntentInTransaction = (
-    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["promotePendingToSteer"]>[0],
-  ): UserIntentRecord | undefined => {
-    assertRunningTargetTurn(request.targetTurnId, request.sessionId);
-    const promoted = db
-      .prepare(
-        `UPDATE user_intents
-           SET status = 'dispatching', delivery_mode = 'steer', target_turn_id = ?,
-               promoted_at = ?, updated_at = ?,
-               attempt_count = attempt_count + 1
-           WHERE intent_id = ? AND session_id = ?
-             AND status = 'pending' AND delivery_mode = 'turn'`,
-      )
-      .run(request.targetTurnId, request.promotedAt, request.promotedAt, request.intentId, request.sessionId);
-    if (Number(promoted.changes) !== 1) return undefined;
-    recordActivity(systemActor, "user_intent.promoted_to_steer", "user_intent", request.intentId, [
-      { targetTurnId: request.targetTurnId },
-    ]);
-    return getUserIntent(request.intentId, request.sessionId);
-  };
-  const promotePendingUserIntent = async (
-    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["promotePendingToSteer"]>[0],
-  ): Promise<UserIntentRecord | undefined> =>
-    database.transaction(() => promotePendingUserIntentInTransaction(request));
   const promoteNewestPendingUserIntent = async (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["promoteNewestPendingToSteer"]>[0],
   ): Promise<UserIntentRecord | undefined> =>
@@ -1901,7 +1956,21 @@ function createOperationalRepositories(
         .get(request.sessionId);
       if (candidate === undefined) return undefined;
       const intentId = requiredString(candidate, "intent_id");
-      return promotePendingUserIntentInTransaction({ ...request, intentId });
+      const promoted = db
+        .prepare(
+          `UPDATE user_intents
+           SET status = 'dispatching', delivery_mode = 'steer', target_turn_id = ?,
+               promoted_at = ?, updated_at = ?,
+               attempt_count = attempt_count + 1
+           WHERE intent_id = ? AND session_id = ?
+             AND status = 'pending' AND delivery_mode = 'turn'`,
+        )
+        .run(request.targetTurnId, request.promotedAt, request.promotedAt, intentId, request.sessionId);
+      if (Number(promoted.changes) !== 1) return undefined;
+      recordActivity(systemActor, "user_intent.promoted_to_steer", "user_intent", intentId, [
+        { targetTurnId: request.targetTurnId },
+      ]);
+      return getUserIntent(intentId, request.sessionId);
     });
   const withdrawUserIntentInTransaction = (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["withdraw"]>[0],
@@ -1922,22 +1991,46 @@ function createOperationalRepositories(
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["withdraw"]>[0],
   ): Promise<UserIntentRecord | undefined> =>
     database.transaction(() => withdrawUserIntentInTransaction(request));
-  const withdrawNewestPendingUserIntent = async (
-    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["withdrawNewestPending"]>[0],
+  const withdrawUnconsumedSteerDispatch = async (
+    request: Parameters<
+      NoesisWorkspaceStore["operational"]["userIntents"]["withdrawUnconsumedSteerDispatch"]
+    >[0],
   ): Promise<UserIntentRecord | undefined> =>
     database.transaction(() => {
-      const candidate = db
+      z.string().min(1).parse(request.sessionId);
+      z.string().min(1).parse(request.intentId);
+      z.string().min(1).parse(request.targetTurnId);
+      z.string().min(1).parse(request.withdrawnAt);
+      const current = getUserIntent(request.intentId, request.sessionId);
+      if (current === undefined) return undefined;
+      if (current.status === "withdrawn")
+        return current.queuedBehindTurnId === request.targetTurnId ? current : undefined;
+      if (
+        current.status !== "dispatching" ||
+        current.deliveryMode !== "steer" ||
+        current.targetTurnId !== request.targetTurnId
+      )
+        return undefined;
+      const withdrawn = db
         .prepare(
-          `SELECT intent_id
-           FROM user_intents
-           WHERE session_id = ? AND status = 'pending'
-           ORDER BY queue_sequence DESC
-           LIMIT 1`,
+          `UPDATE user_intents
+           SET status = 'withdrawn', delivery_mode = 'turn', target_turn_id = NULL,
+               promoted_at = NULL, unresolved_at = NULL, withdrawn_at = ?, updated_at = ?
+           WHERE intent_id = ? AND session_id = ?
+             AND status = 'dispatching' AND delivery_mode = 'steer' AND target_turn_id = ?`,
         )
-        .get(request.sessionId);
-      if (candidate === undefined) return undefined;
-      const intentId = requiredString(candidate, "intent_id");
-      return withdrawUserIntentInTransaction({ ...request, intentId });
+        .run(
+          request.withdrawnAt,
+          request.withdrawnAt,
+          request.intentId,
+          request.sessionId,
+          request.targetTurnId,
+        );
+      if (Number(withdrawn.changes) !== 1) return undefined;
+      recordActivity(systemActor, "user_intent.withdrawn_unconsumed_steer", "user_intent", request.intentId, [
+        { targetTurnId: request.targetTurnId },
+      ]);
+      return getUserIntent(request.intentId, request.sessionId);
     });
   const markUserIntentDelivered = async (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["markDelivered"]>[0],
@@ -1991,6 +2084,7 @@ function createOperationalRepositories(
         turnId: request.targetTurnId,
         sourceIntentId: request.intentId,
         deliveryMode: "steer",
+        interactionSequence: current.queueSequence,
       });
       const existingMessage = decodeOptional(
         db.prepare("SELECT * FROM messages WHERE message_id = ?").get(messageId),
@@ -2678,6 +2772,7 @@ function createOperationalRepositories(
     }),
     userIntents: Object.freeze({
       enqueue: enqueueUserIntent,
+      enqueueAndPromoteToSteer: enqueueAndPromoteUserIntentToSteer,
       listPending: async (sessionId: string) =>
         db
           .prepare(
@@ -2699,10 +2794,9 @@ function createOperationalRepositories(
           .all(sessionId)
           .map(decodeUserIntent),
       claimOldestPending: claimOldestPendingUserIntent,
-      promotePendingToSteer: promotePendingUserIntent,
       promoteNewestPendingToSteer: promoteNewestPendingUserIntent,
-      withdrawNewestPending: withdrawNewestPendingUserIntent,
       withdraw: withdrawUserIntent,
+      withdrawUnconsumedSteerDispatch,
       markDelivered: markUserIntentDelivered,
       recordSteerDelivery,
       markUnresolved: markUserIntentUnresolved,

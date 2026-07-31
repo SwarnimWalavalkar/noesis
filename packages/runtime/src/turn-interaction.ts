@@ -99,10 +99,12 @@ export interface TurnInteractionIntentStore {
     readonly targetTurnId: string;
     readonly promotedAt: string;
   }) => Promise<UserIntentRecord | undefined>;
-  readonly promotePendingToSteer: (request: {
-    readonly sessionId: string;
+  readonly enqueueAndPromoteToSteer: (request: {
     readonly intentId: string;
+    readonly sessionId: string;
+    readonly text: string;
     readonly targetTurnId: string;
+    readonly createdAt: string;
     readonly promotedAt: string;
   }) => Promise<UserIntentRecord | undefined>;
   readonly withdraw: (request: {
@@ -120,6 +122,12 @@ export interface TurnInteractionIntentStore {
     readonly sessionId: string;
     readonly intentId: string;
     readonly releasedAt: string;
+  }) => Promise<UserIntentRecord | undefined>;
+  readonly withdrawUnconsumedSteerDispatch: (request: {
+    readonly sessionId: string;
+    readonly intentId: string;
+    readonly targetTurnId: string;
+    readonly withdrawnAt: string;
   }) => Promise<UserIntentRecord | undefined>;
   readonly markUnresolved: (request: {
     readonly sessionId: string;
@@ -186,6 +194,7 @@ interface SessionInteractionState {
   cancelScheduled?: () => void;
   wakeRequested: boolean;
   resumeGeneration: number;
+  cancellationGeneration: number;
   interruptRequested: boolean;
   steerableIntentId?: string;
 }
@@ -230,6 +239,7 @@ export function createTurnInteractionController(
       steerDeliveries: new Set(),
       wakeRequested: false,
       resumeGeneration: 0,
+      cancellationGeneration: 0,
       interruptRequested: false,
     };
     sessions.set(sessionId, created);
@@ -276,6 +286,24 @@ export function createTurnInteractionController(
     notify(state, { type: "state", snapshot: await snapshot(sessionId, state) });
   };
 
+  const settleSteerDeliveries = async (state: SessionInteractionState): Promise<string | undefined> => {
+    // Stop admitting new steers, then let any serialized command which already observed this turn
+    // install its delivery settlement before taking the barrier snapshot.
+    delete state.steerableIntentId;
+    await state.commandTail;
+    const deliveries = [...state.steerDeliveries];
+    const settlements = await Promise.allSettled(deliveries);
+    for (const delivery of deliveries) state.steerDeliveries.delete(delivery);
+    const rejected = settlements.find(
+      (settlement): settlement is PromiseRejectedResult => settlement.status === "rejected",
+    );
+    return rejected
+      ? rejected.reason instanceof Error
+        ? rejected.reason.message
+        : String(rejected.reason)
+      : undefined;
+  };
+
   const settleFailedDispatch = async (
     sessionId: string,
     state: SessionInteractionState,
@@ -284,12 +312,17 @@ export function createTurnInteractionController(
     outcome: "aborted" | "failed",
     error?: string,
   ): Promise<void> => {
-    await options.intents.releaseUnconsumedDispatch({
+    const steerFailure = await settleSteerDeliveries(state);
+    const released = await options.intents.releaseUnconsumedDispatch({
       sessionId,
       intentId: active.intentId,
       releasedAt: now(),
     });
-    if (state.resumeGeneration === resumeGenerationAtStart) state.queuePaused = true;
+    if (!released) {
+      state.queuePaused = true;
+      throw new Error(`Failed turn ${active.turnId} could not release its claimed intent`);
+    }
+    if (state.resumeGeneration === resumeGenerationAtStart || steerFailure) state.queuePaused = true;
     delete state.active;
     delete state.steerableIntentId;
     state.interruptRequested = false;
@@ -300,7 +333,7 @@ export function createTurnInteractionController(
       intentId: active.intentId,
       turnId: active.turnId,
       outcome,
-      ...(error ? { error } : {}),
+      ...(error || steerFailure ? { error: [error, steerFailure].filter(Boolean).join("; ") } : {}),
     });
     await notifyState(sessionId, state);
   };
@@ -313,12 +346,23 @@ export function createTurnInteractionController(
     while (!closed && !state.queuePaused) {
       state.wakeRequested = false;
       const turnId = options.createTurnId();
+      const cancellationGenerationAtClaim = state.cancellationGeneration;
       const claimed = await options.intents.claimOldestPending({
         sessionId,
         targetTurnId: turnId,
         claimedAt: now(),
       });
       if (!claimed) return;
+      if (closed || state.queuePaused || state.cancellationGeneration !== cancellationGenerationAtClaim) {
+        const released = await options.intents.releaseUnconsumedDispatch({
+          sessionId,
+          intentId: claimed.intentId,
+          releasedAt: now(),
+        });
+        if (!released) throw new Error(`Cancelled claim ${claimed.intentId} could not be released`);
+        if (!closed) await notifyState(sessionId, state);
+        return;
+      }
       const active = Object.freeze({
         intentId: claimed.intentId,
         turnId,
@@ -357,6 +401,7 @@ export function createTurnInteractionController(
           await settleFailedDispatch(sessionId, state, active, resumeGenerationAtStart, "aborted");
           return;
         }
+        const steerFailure = await settleSteerDeliveries(state);
         const delivered = await options.intents.markDelivered({
           sessionId,
           intentId: active.intentId,
@@ -365,20 +410,18 @@ export function createTurnInteractionController(
         });
         if (!delivered) throw new Error(`Completed turn ${turnId} did not settle its claimed intent`);
         delete state.active;
-        delete state.steerableIntentId;
         state.interruptRequested = false;
         state.phase = "idle";
+        if (steerFailure) state.queuePaused = true;
         notify(state, {
           type: "turn-settled",
           sessionId,
           intentId: active.intentId,
           turnId,
-          outcome: "completed",
+          outcome: steerFailure ? "failed" : "completed",
+          ...(steerFailure ? { error: steerFailure } : {}),
         });
         await notifyState(sessionId, state);
-        // A steer can be consumed just before the model turn settles. Commit its durable outcome
-        // before the next queued turn builds model history from authoritative messages.
-        await Promise.allSettled([...state.steerDeliveries]);
       } catch (error) {
         await settleFailedDispatch(
           sessionId,
@@ -498,6 +541,8 @@ export function createTurnInteractionController(
       }
       if (command.type === "interrupt") {
         state.queuePaused = true;
+        state.cancellationGeneration += 1;
+        state.interruptRequested = true;
         state.cancelScheduled?.();
         delete state.cancelScheduled;
         const active = state.active;
@@ -507,16 +552,18 @@ export function createTurnInteractionController(
           return Object.freeze({ result: Object.freeze({ effect: "idle" as const, snapshot: current }) });
         }
         state.phase = "interrupting";
-        state.interruptRequested = true;
         await notifyState(sessionId, state);
         await options.interrupt(sessionId);
-        if (state.drain) await state.drain;
-        return Object.freeze({
-          result: Object.freeze({
+        const settlement = (async (): Promise<InteractionDispatchResult> => {
+          if (state.drain) await state.drain;
+          return Object.freeze({
             effect: "interrupted" as const,
             intentId: active.intentId,
             snapshot: await snapshot(sessionId, state),
-          }),
+          });
+        })();
+        return Object.freeze({
+          settlement,
         });
       }
 
@@ -542,28 +589,20 @@ export function createTurnInteractionController(
       const explicit = command.text !== undefined;
       if (command.text !== undefined) {
         if (!command.text) throw new Error("Cannot steer with an empty message");
-        const enqueued = await options.intents.enqueue({
+        const createdAt = now();
+        steeringIntent = await options.intents.enqueueAndPromoteToSteer({
           intentId: options.createIntentId(),
           sessionId,
           text: command.text,
-          createdAt: now(),
-        });
-        steeringIntent = await options.intents.promotePendingToSteer({
-          sessionId,
-          intentId: enqueued.intentId,
           targetTurnId: active.turnId,
+          createdAt,
           promotedAt: now(),
         });
-        if (!steeringIntent || steeringIntent.intentId !== enqueued.intentId) {
-          const restored = await options.intents.withdraw({
-            sessionId,
-            intentId: enqueued.intentId,
-            withdrawnAt: now(),
-          });
+        if (!steeringIntent) {
           return Object.freeze({
             result: Object.freeze({
               effect: "idle" as const,
-              ...(restored ? { restoredText: intentText(restored), intentId: restored.intentId } : {}),
+              restoredText: command.text,
               snapshot: await snapshot(sessionId, state),
             }),
           });
@@ -586,37 +625,42 @@ export function createTurnInteractionController(
         try {
           receipt = await options.steer(sessionId, text);
         } catch {
-          await options.intents.markUnresolved({
+          const unresolved = await options.intents.markUnresolved({
             sessionId,
             intentId: intent.intentId,
             targetTurnId: active.turnId,
             unresolvedAt: now(),
           });
+          if (!unresolved) throw new Error(`Steer ${intent.intentId} could not be durably marked unresolved`);
           const current = await snapshot(sessionId, state);
           notify(state, { type: "state", snapshot: current });
           return Object.freeze({ effect: "unresolved", intentId: intent.intentId, snapshot: current });
         }
         if (receipt.status === "not-consumed") {
-          await options.intents.releaseUnconsumedDispatch({
+          if (explicit) {
+            const restored = await options.intents.withdrawUnconsumedSteerDispatch({
+              sessionId,
+              intentId: intent.intentId,
+              targetTurnId: active.turnId,
+              withdrawnAt: now(),
+            });
+            if (!restored)
+              throw new Error(`Unconsumed explicit steer ${intent.intentId} could not be withdrawn`);
+            const current = await snapshot(sessionId, state);
+            notify(state, { type: "state", snapshot: current });
+            return Object.freeze({
+              effect: "restored" as const,
+              intentId: intent.intentId,
+              restoredText: intentText(restored),
+              snapshot: current,
+            });
+          }
+          const released = await options.intents.releaseUnconsumedDispatch({
             sessionId,
             intentId: intent.intentId,
             releasedAt: now(),
           });
-          if (explicit) {
-            const restored = await options.intents.withdraw({
-              sessionId,
-              intentId: intent.intentId,
-              withdrawnAt: now(),
-            });
-            const current = await snapshot(sessionId, state);
-            notify(state, { type: "state", snapshot: current });
-            return Object.freeze({
-              effect: restored ? ("restored" as const) : ("idle" as const),
-              intentId: intent.intentId,
-              ...(restored ? { restoredText: intentText(restored) } : {}),
-              snapshot: current,
-            });
-          }
+          if (!released) throw new Error(`Unconsumed steer ${intent.intentId} could not be released`);
           const current = await snapshot(sessionId, state);
           notify(state, { type: "state", snapshot: current });
           return Object.freeze({ effect: "queued", intentId: intent.intentId, snapshot: current });
@@ -631,12 +675,13 @@ export function createTurnInteractionController(
             deliveredAt,
           });
         } catch {
-          await options.intents.markUnresolved({
+          const unresolved = await options.intents.markUnresolved({
             sessionId,
             intentId: intent.intentId,
             targetTurnId: active.turnId,
             unresolvedAt: now(),
           });
+          if (!unresolved) throw new Error(`Steer ${intent.intentId} could not be durably marked unresolved`);
           const current = await snapshot(sessionId, state);
           notify(state, { type: "state", snapshot: current });
           return Object.freeze({ effect: "unresolved", intentId: intent.intentId, snapshot: current });
@@ -654,10 +699,6 @@ export function createTurnInteractionController(
         return Object.freeze({ effect: "steered", intentId: intent.intentId, snapshot: current });
       })();
       state.steerDeliveries.add(settlement);
-      void settlement.then(
-        () => state.steerDeliveries.delete(settlement),
-        () => state.steerDeliveries.delete(settlement),
-      );
       return Object.freeze({ settlement });
     });
     return "settlement" in serialized ? await serialized.settlement : serialized.result;
@@ -670,6 +711,7 @@ export function createTurnInteractionController(
       const interrupts: Promise<void>[] = [];
       for (const [sessionId, state] of sessions) {
         state.queuePaused = true;
+        state.cancellationGeneration += 1;
         state.cancelScheduled?.();
         delete state.cancelScheduled;
         if (state.active) state.phase = "interrupting";

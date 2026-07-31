@@ -1197,8 +1197,9 @@ describe("WorkspaceStore", () => {
       (await store.operational.userIntents.listPending("session-intents")).map((intent) => intent.intentId),
     ).toEqual(["intent-z-first", "intent-a-second"]);
     await expect(
-      store.operational.userIntents.withdrawNewestPending({
+      store.operational.userIntents.withdraw({
         sessionId: "session-intents",
+        intentId: "intent-a-second",
         withdrawnAt: "2026-01-01T00:03:00.000Z",
       }),
     ).resolves.toMatchObject({
@@ -1225,18 +1226,13 @@ describe("WorkspaceStore", () => {
       }),
     ).resolves.toBeUndefined();
 
-    await store.operational.userIntents.enqueue({
-      intentId: "intent-steer",
-      sessionId: "session-intents",
-      text: "change direction",
-      queuedBehindTurnId: "turn-active",
-      createdAt: "2026-01-01T00:05:00.000Z",
-    });
     await expect(
-      store.operational.userIntents.promotePendingToSteer({
+      store.operational.userIntents.enqueueAndPromoteToSteer({
         sessionId: "session-intents",
         intentId: "intent-steer",
+        text: "change direction",
         targetTurnId: "turn-active",
+        createdAt: "2026-01-01T00:05:00.000Z",
         promotedAt: "2026-01-01T00:06:00.000Z",
       }),
     ).resolves.toMatchObject({
@@ -1265,7 +1261,12 @@ describe("WorkspaceStore", () => {
     ).resolves.toMatchObject({ status: "delivered", contentDigest: sha256("change direction") });
     await expect(store.operational.messages.get("turn-active:steer:intent-steer")).resolves.toMatchObject({
       content: "change direction",
-      metadata: { turnId: "turn-active", sourceIntentId: "intent-steer", deliveryMode: "steer" },
+      metadata: {
+        turnId: "turn-active",
+        sourceIntentId: "intent-steer",
+        deliveryMode: "steer",
+        interactionSequence: 3,
+      },
     });
 
     await store.operational.userIntents.enqueue({
@@ -1313,6 +1314,336 @@ describe("WorkspaceStore", () => {
     store.close();
   });
 
+  test("atomically enqueues and promotes an explicit steer with idempotent identity", async () => {
+    const root = await temporary("atomic-explicit-steer");
+    const store = await createWorkspaceStore(root);
+    await store.operational.sessions.put(session("session-atomic-steer"));
+    seedForegroundTurn(store, {
+      turnId: "turn-atomic-steer",
+      sessionId: "session-atomic-steer",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const request = {
+      intentId: "intent-atomic-steer",
+      sessionId: "session-atomic-steer",
+      text: "change direction immediately",
+      targetTurnId: "turn-atomic-steer",
+      createdAt: "2026-01-01T00:01:00.000Z",
+      promotedAt: "2026-01-01T00:01:00.001Z",
+    } as const;
+
+    await expect(store.operational.userIntents.enqueueAndPromoteToSteer(request)).resolves.toMatchObject({
+      intentId: "intent-atomic-steer",
+      deliveryMode: "steer",
+      status: "dispatching",
+      queueSequence: 1,
+      queuedBehindTurnId: "turn-atomic-steer",
+      targetTurnId: "turn-atomic-steer",
+      attemptCount: 1,
+    });
+    await expect(store.operational.userIntents.enqueueAndPromoteToSteer(request)).resolves.toMatchObject({
+      intentId: "intent-atomic-steer",
+      queueSequence: 1,
+      attemptCount: 1,
+    });
+    expect(await store.operational.userIntents.listPending("session-atomic-steer")).toEqual([]);
+
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    expect(
+      database
+        .prepare("SELECT count(*) AS count FROM user_intents WHERE intent_id = ?")
+        .get("intent-atomic-steer"),
+    ).toMatchObject({ count: 1 });
+    expect(
+      database
+        .prepare(
+          `SELECT activity_kind
+           FROM activity_log
+           WHERE subject_kind = 'user_intent' AND subject_id = ?
+           ORDER BY rowid`,
+        )
+        .all("intent-atomic-steer"),
+    ).toEqual([
+      { activity_kind: "user_intent.enqueued" },
+      { activity_kind: "user_intent.promoted_to_steer" },
+    ]);
+    database.close();
+    store.close();
+  });
+
+  test("does not enqueue an explicit steer when its target cannot be bound", async () => {
+    const root = await temporary("atomic-explicit-steer-target");
+    const store = await createWorkspaceStore(root);
+    await store.operational.sessions.put(session("session-steer-target"));
+    await store.operational.sessions.put(session("session-steer-target-other"));
+    seedForegroundTurn(store, {
+      turnId: "turn-steer-completed",
+      sessionId: "session-steer-target",
+      status: "completed",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+      settledAt: "2026-01-01T00:00:30.000Z",
+    });
+    seedForegroundTurn(store, {
+      turnId: "turn-steer-other-session",
+      sessionId: "session-steer-target-other",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    for (const [intentId, targetTurnId] of [
+      ["intent-target-missing", "turn-steer-missing"],
+      ["intent-target-settled", "turn-steer-completed"],
+      ["intent-target-foreign", "turn-steer-other-session"],
+    ] as const) {
+      await expect(
+        store.operational.userIntents.enqueueAndPromoteToSteer({
+          intentId,
+          sessionId: "session-steer-target",
+          text: intentId,
+          targetTurnId,
+          createdAt: "2026-01-01T00:01:00.000Z",
+          promotedAt: "2026-01-01T00:01:00.001Z",
+        }),
+      ).resolves.toBeUndefined();
+    }
+
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    expect(database.prepare("SELECT count(*) AS count FROM user_intents").get()).toMatchObject({ count: 0 });
+    expect(
+      database.prepare("SELECT count(*) AS count FROM activity_log WHERE subject_kind = 'user_intent'").get(),
+    ).toMatchObject({ count: 0 });
+    database.close();
+    store.close();
+  });
+
+  test("rolls back an explicit steer when promotion provenance cannot be recorded", async () => {
+    const root = await temporary("atomic-explicit-steer-rollback");
+    const store = await createWorkspaceStore(root);
+    await store.operational.sessions.put(session("session-steer-rollback"));
+    seedForegroundTurn(store, {
+      turnId: "turn-steer-rollback",
+      sessionId: "session-steer-rollback",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"));
+    database.exec(`
+      CREATE TRIGGER reject_atomic_steer_activity
+      BEFORE INSERT ON activity_log
+      WHEN NEW.subject_kind = 'user_intent' AND NEW.subject_id = 'intent-steer-rollback'
+      BEGIN
+        SELECT RAISE(ABORT, 'reject atomic steer activity');
+      END;
+    `);
+
+    await expect(
+      store.operational.userIntents.enqueueAndPromoteToSteer({
+        intentId: "intent-steer-rollback",
+        sessionId: "session-steer-rollback",
+        text: "must remain atomic",
+        targetTurnId: "turn-steer-rollback",
+        createdAt: "2026-01-01T00:01:00.000Z",
+        promotedAt: "2026-01-01T00:01:00.001Z",
+      }),
+    ).rejects.toThrow(/reject atomic steer activity/u);
+    expect(
+      database
+        .prepare("SELECT count(*) AS count FROM user_intents WHERE intent_id = ?")
+        .get("intent-steer-rollback"),
+    ).toMatchObject({ count: 0 });
+    expect(
+      database
+        .prepare("SELECT count(*) AS count FROM activity_log WHERE subject_id = ?")
+        .get("intent-steer-rollback"),
+    ).toMatchObject({ count: 0 });
+    database.close();
+    store.close();
+  });
+
+  test("atomically withdraws a proven-unconsumed explicit steer without exposing pending work", async () => {
+    const root = await temporary("atomic-explicit-steer-withdraw");
+    const store = await createWorkspaceStore(root);
+    await store.operational.sessions.put(session("session-steer-withdraw"));
+    seedForegroundTurn(store, {
+      turnId: "turn-steer-withdraw",
+      sessionId: "session-steer-withdraw",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await store.operational.userIntents.enqueueAndPromoteToSteer({
+      intentId: "intent-steer-withdraw",
+      sessionId: "session-steer-withdraw",
+      text: "restore this exact text",
+      targetTurnId: "turn-steer-withdraw",
+      createdAt: "2026-01-01T00:01:00.000Z",
+      promotedAt: "2026-01-01T00:01:00.001Z",
+    });
+    const request = {
+      sessionId: "session-steer-withdraw",
+      intentId: "intent-steer-withdraw",
+      targetTurnId: "turn-steer-withdraw",
+      withdrawnAt: "2026-01-01T00:02:00.000Z",
+    } as const;
+
+    await expect(
+      store.operational.userIntents.withdrawUnconsumedSteerDispatch(request),
+    ).resolves.toMatchObject({
+      status: "withdrawn",
+      deliveryMode: "turn",
+      text: "restore this exact text",
+      queuedBehindTurnId: "turn-steer-withdraw",
+      withdrawnAt: "2026-01-01T00:02:00.000Z",
+    });
+    await expect(
+      store.operational.userIntents.withdrawUnconsumedSteerDispatch(request),
+    ).resolves.toMatchObject({
+      status: "withdrawn",
+      text: "restore this exact text",
+    });
+    expect(await store.operational.userIntents.listPending("session-steer-withdraw")).toEqual([]);
+
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    expect(
+      database
+        .prepare("SELECT status, delivery_mode, target_turn_id FROM user_intents WHERE intent_id = ?")
+        .get("intent-steer-withdraw"),
+    ).toEqual({ status: "withdrawn", delivery_mode: "turn", target_turn_id: null });
+    database.close();
+    store.close();
+  });
+
+  test("rolls back unconsumed steer withdrawal without exposing pending work", async () => {
+    const root = await temporary("atomic-explicit-steer-withdraw-rollback");
+    const store = await createWorkspaceStore(root);
+    await store.operational.sessions.put(session("session-steer-withdraw-rollback"));
+    seedForegroundTurn(store, {
+      turnId: "turn-steer-withdraw-rollback",
+      sessionId: "session-steer-withdraw-rollback",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+    await store.operational.userIntents.enqueueAndPromoteToSteer({
+      intentId: "intent-steer-withdraw-rollback",
+      sessionId: "session-steer-withdraw-rollback",
+      text: "never become pending",
+      targetTurnId: "turn-steer-withdraw-rollback",
+      createdAt: "2026-01-01T00:01:00.000Z",
+      promotedAt: "2026-01-01T00:01:00.001Z",
+    });
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"));
+    database.exec(`
+      CREATE TRIGGER reject_atomic_steer_withdrawal
+      BEFORE INSERT ON activity_log
+      WHEN NEW.activity_kind = 'user_intent.withdrawn_unconsumed_steer'
+      BEGIN
+        SELECT RAISE(ABORT, 'reject atomic steer withdrawal');
+      END;
+    `);
+
+    await expect(
+      store.operational.userIntents.withdrawUnconsumedSteerDispatch({
+        sessionId: "session-steer-withdraw-rollback",
+        intentId: "intent-steer-withdraw-rollback",
+        targetTurnId: "turn-steer-withdraw-rollback",
+        withdrawnAt: "2026-01-01T00:02:00.000Z",
+      }),
+    ).rejects.toThrow(/reject atomic steer withdrawal/u);
+    expect(
+      database
+        .prepare("SELECT status, delivery_mode, target_turn_id FROM user_intents WHERE intent_id = ?")
+        .get("intent-steer-withdraw-rollback"),
+    ).toEqual({
+      status: "dispatching",
+      delivery_mode: "steer",
+      target_turn_id: "turn-steer-withdraw-rollback",
+    });
+    expect(await store.operational.userIntents.listPending("session-steer-withdraw-rollback")).toEqual([]);
+    database.close();
+    store.close();
+  });
+
+  test("allocates unique explicit-steer sequence numbers across store instances", async () => {
+    const root = await temporary("atomic-explicit-steer-contention");
+    const first = await createWorkspaceStore(root);
+    await first.operational.sessions.put(session("session-steer-contention"));
+    seedForegroundTurn(first, {
+      turnId: "turn-steer-contention",
+      sessionId: "session-steer-contention",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const second = await createWorkspaceStore(root);
+    const request = (intentId: string) => ({
+      intentId,
+      sessionId: "session-steer-contention",
+      text: intentId,
+      targetTurnId: "turn-steer-contention",
+      createdAt: "2026-01-01T00:01:00.000Z",
+      promotedAt: "2026-01-01T00:01:00.001Z",
+    });
+
+    const [one, two] = await Promise.all([
+      first.operational.userIntents.enqueueAndPromoteToSteer(request("intent-steer-one")),
+      second.operational.userIntents.enqueueAndPromoteToSteer(request("intent-steer-two")),
+    ]);
+    expect([one?.queueSequence, two?.queueSequence].sort()).toEqual([1, 2]);
+    const repeated = await Promise.all([
+      first.operational.userIntents.enqueueAndPromoteToSteer(request("intent-steer-one")),
+      second.operational.userIntents.enqueueAndPromoteToSteer(request("intent-steer-one")),
+    ]);
+    expect(repeated.map((intent) => intent?.queueSequence)).toEqual([one?.queueSequence, one?.queueSequence]);
+
+    second.close();
+    first.close();
+  });
+
+  test("records immutable interaction sequence for same-millisecond steer delivery", async () => {
+    const store = await createWorkspaceStore(await temporary("steer-interaction-sequence"));
+    await store.operational.sessions.put(session("session-steer-sequence"));
+    seedForegroundTurn(store, {
+      turnId: "turn-steer-sequence",
+      sessionId: "session-steer-sequence",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+    for (const [index, intentId] of ["intent-steer-first", "intent-steer-second"].entries()) {
+      await store.operational.userIntents.enqueueAndPromoteToSteer({
+        intentId,
+        sessionId: "session-steer-sequence",
+        text: intentId,
+        targetTurnId: "turn-steer-sequence",
+        createdAt: "2026-01-01T00:01:00.000Z",
+        promotedAt: `2026-01-01T00:01:00.00${String(index)}Z`,
+      });
+    }
+    const deliveredAt = "2026-01-01T00:02:00.000Z";
+    for (const intentId of ["intent-steer-second", "intent-steer-first"]) {
+      await store.operational.userIntents.recordSteerDelivery({
+        sessionId: "session-steer-sequence",
+        intentId,
+        targetTurnId: "turn-steer-sequence",
+        text: intentId,
+        sensitivity: "normal",
+        deliveredAt,
+      });
+    }
+
+    const steers = (await store.operational.messages.listForSession("session-steer-sequence")).filter(
+      (message) => message.metadata["deliveryMode"] === "steer",
+    );
+    expect(steers.map((message) => message.metadata["interactionSequence"])).toEqual([2, 1]);
+    expect(
+      steers
+        .toSorted(
+          (left, right) =>
+            Number(left.metadata["interactionSequence"]) - Number(right.metadata["interactionSequence"]),
+        )
+        .map((message) => message.metadata["sourceIntentId"]),
+    ).toEqual(["intent-steer-first", "intent-steer-second"]);
+    store.close();
+  });
+
   test("commits steer text to its canonical message atomically and protects intent identity", async () => {
     const root = await temporary("user-intent-canonical-text");
     const store = await createWorkspaceStore(root);
@@ -1323,16 +1654,12 @@ describe("WorkspaceStore", () => {
       status: "running",
       admittedAt: "2026-01-01T00:00:00.000Z",
     });
-    await store.operational.userIntents.enqueue({
+    await store.operational.userIntents.enqueueAndPromoteToSteer({
       intentId: "intent-canonical-text",
       sessionId: "session-canonical-text",
       text: "canonical steer",
-      createdAt: "2026-01-01T00:01:00.000Z",
-    });
-    await store.operational.userIntents.promotePendingToSteer({
-      sessionId: "session-canonical-text",
-      intentId: "intent-canonical-text",
       targetTurnId: "turn-canonical-text",
+      createdAt: "2026-01-01T00:01:00.000Z",
       promotedAt: "2026-01-01T00:02:00.000Z",
     });
 
@@ -1472,16 +1799,12 @@ describe("WorkspaceStore", () => {
       admittedAt: "2026-01-01T00:00:00.000Z",
       settledAt: "2026-01-01T00:00:30.000Z",
     });
-    await store.operational.userIntents.enqueue({
+    await store.operational.userIntents.enqueueAndPromoteToSteer({
       intentId: "intent-steer-uncertain",
       sessionId: "session-recovery",
       text: "possibly consumed",
-      createdAt: "2026-01-01T00:08:00.000Z",
-    });
-    await store.operational.userIntents.promotePendingToSteer({
-      sessionId: "session-recovery",
-      intentId: "intent-steer-uncertain",
       targetTurnId: "turn-running",
+      createdAt: "2026-01-01T00:08:00.000Z",
       promotedAt: "2026-01-01T00:08:30.000Z",
     });
     seedForegroundTurn(store, {
