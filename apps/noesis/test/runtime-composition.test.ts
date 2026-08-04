@@ -1477,29 +1477,37 @@ describe("apps/noesis production control-plane composition", () => {
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
-    const trail = await runtime.startTrail({ title: "Stalled skill discovery" });
+    let backgroundListing: ReturnType<NonNullable<typeof runtime.listSkills>> | undefined;
+    try {
+      const trail = await runtime.startTrail({ title: "Stalled skill discovery" });
 
-    if (!runtime.listSkills) throw new Error("Expected production skill listing support");
-    const backgroundListing = runtime.listSkills();
-    await readStarted;
-    await expect(runtime.debug.runTurn(trail.trailId, "Answer this normal prompt.")).resolves.toMatchObject({
-      outcome: "completed",
-    });
-    expect(admittedSnapshot?.skills).toEqual([]);
-    expect(admittedSnapshot?.diagnostics).toEqual([
-      expect.objectContaining({
-        type: "warning",
-        message: expect.stringContaining("omits skills that have not finished loading"),
-      }),
-    ]);
+      if (!runtime.listSkills) throw new Error("Expected production skill listing support");
+      backgroundListing = runtime.listSkills();
+      await readStarted;
+      await expect(runtime.debug.runTurn(trail.trailId, "Answer this normal prompt.")).resolves.toMatchObject(
+        {
+          outcome: "completed",
+        },
+      );
+      expect(admittedSnapshot?.skills).toEqual([]);
+      expect(admittedSnapshot?.diagnostics).toEqual([
+        expect.objectContaining({
+          type: "warning",
+          message: expect.stringContaining("omits skills that have not finished loading"),
+        }),
+      ]);
 
-    releaseRead?.();
-    await expect(backgroundListing).resolves.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ name: "stalled-work", contentDigest: expect.any(String) }),
-      ]),
-    );
-    await runtime.shutdown();
+      releaseRead?.();
+      await expect(backgroundListing).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "stalled-work", contentDigest: expect.any(String) }),
+        ]),
+      );
+    } finally {
+      releaseRead?.();
+      await backgroundListing?.catch(() => undefined);
+      await runtime.shutdown();
+    }
   });
 
   test("an explicitly invoked skill remains inspectable from admitted bytes after its source is removed", async () => {

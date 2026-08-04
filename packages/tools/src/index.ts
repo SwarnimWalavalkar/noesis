@@ -282,9 +282,10 @@ function nearestToolNames(
   requestedName: string,
   descriptors: readonly FrozenToolDescriptor[],
 ): readonly string[] {
-  if (!isValidToolName(requestedName)) return Object.freeze([]);
+  if (requestedName.length > MAX_TOOL_NAME_CHARACTERS) return Object.freeze([]);
   const normalized = requestedName.toLocaleLowerCase();
   const separator = normalized.indexOf(".");
+  const requestedHasSeparator = separator !== -1;
   const requestedFamily = separator === -1 ? normalized : normalized.slice(0, separator);
   const requestedOperation = separator === -1 ? normalized : normalized.slice(separator + 1);
   return Object.freeze(
@@ -292,9 +293,14 @@ function nearestToolNames(
       .map((descriptor) => {
         const name = descriptor.name.toLocaleLowerCase();
         const candidateSeparator = name.indexOf(".");
+        const candidateHasSeparator = candidateSeparator !== -1;
         const candidateFamily = candidateSeparator === -1 ? name : name.slice(0, candidateSeparator);
         const candidateOperation = candidateSeparator === -1 ? name : name.slice(candidateSeparator + 1);
-        const sameFamily = requestedFamily.length > 0 && requestedFamily === candidateFamily;
+        const sameFamily =
+          requestedHasSeparator &&
+          candidateHasSeparator &&
+          requestedFamily.length > 0 &&
+          requestedFamily === candidateFamily;
         const distance = sameFamily
           ? editDistance(requestedOperation, candidateOperation)
           : editDistance(normalized, name);

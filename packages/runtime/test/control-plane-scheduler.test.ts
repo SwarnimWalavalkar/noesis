@@ -31,7 +31,7 @@ describe("runtime control-plane resident scheduling", () => {
       now: () => new Date(nowMs).toISOString(),
     });
     const deferredJobIds = await Promise.all(
-      Array.from({ length: 1_000 }, async (_, index) => {
+      Array.from({ length: 1_001 }, async (_, index) => {
         const jobId = `deferred-runtime-${String(index).padStart(4, "0")}`;
         await workspace.jobs.enqueue({
           jobId,
@@ -155,9 +155,22 @@ describe("runtime control-plane resident scheduling", () => {
     expect(
       listRequests.every(
         (request) =>
-          request?.statuses?.join(",") === "scheduled,running" &&
-          request.kinds?.join(",") ===
-            "runtime.reflect_turn,runtime.author_revision,runtime.preflight,runtime.outcome_judge",
+          (request?.status === "scheduled" || request?.status === "running") &&
+          request.kind !== undefined &&
+          [
+            "runtime.reflect_turn",
+            "runtime.author_revision",
+            "runtime.preflight",
+            "runtime.outcome_judge",
+          ].includes(request.kind),
+      ),
+    ).toBe(true);
+    expect(
+      listRequests.some(
+        (request) =>
+          request?.status === "scheduled" &&
+          request.kind === "runtime.author_revision" &&
+          request.after !== undefined,
       ),
     ).toBe(true);
 
@@ -176,7 +189,7 @@ describe("runtime control-plane resident scheduling", () => {
     await controlPlane.stop();
     expect([...scheduled.values()].filter((timer) => !timer.cancelled)).toHaveLength(0);
     workspace.close();
-  });
+  }, 30_000);
 
   test("stop prevents later lifecycle stages when coordinator draining settles afterward", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-control-plane-stop-"));

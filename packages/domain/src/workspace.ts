@@ -305,7 +305,7 @@ export interface DurableJobEnqueueRequest {
   readonly maxAttempts: number;
   readonly estimatedCost: number;
   readonly budget: number;
-  readonly observation?: DurableJobObservationRequest;
+  readonly observations?: readonly DurableJobObservationRequest[];
 }
 
 export interface DurableJobObservationRequest {
@@ -328,7 +328,8 @@ export interface DurableJobFailureOptions {
   readonly cause?: unknown;
 }
 
-const DURABLE_JOB_FAILURE = Symbol.for("@noesis/domain/durable-job-failure");
+type DurableJobFailureMetadata = Readonly<Omit<DurableJobFailure, "message">>;
+const durableJobFailures = new WeakMap<Error, DurableJobFailureMetadata>();
 
 /**
  * Attach durable scheduling semantics to an ordinary Error without coupling the
@@ -336,9 +337,8 @@ const DURABLE_JOB_FAILURE = Symbol.for("@noesis/domain/durable-job-failure");
  */
 export function durableJobFailureError(message: string, options: DurableJobFailureOptions): Error {
   const error = new Error(message, options.cause === undefined ? undefined : { cause: options.cause });
-  Reflect.set(
+  durableJobFailures.set(
     error,
-    DURABLE_JOB_FAILURE,
     Object.freeze({
       code: options.code,
       retryable: options.retryable,
@@ -351,14 +351,8 @@ export function durableJobFailureError(message: string, options: DurableJobFailu
 /** Read scheduling semantics only from errors created through the durable failure contract. */
 export function durableJobFailureFromError(error: unknown): DurableJobFailure | undefined {
   if (!(error instanceof Error)) return undefined;
-  const failure = Reflect.get(error, DURABLE_JOB_FAILURE);
-  if (typeof failure !== "object" || failure === null) return undefined;
-  const code = Reflect.get(failure, "code");
-  const retryable = Reflect.get(failure, "retryable");
-  const ambiguous = Reflect.get(failure, "ambiguous");
-  if (typeof code !== "string" || typeof retryable !== "boolean" || typeof ambiguous !== "boolean")
-    return undefined;
-  return Object.freeze({ code, message: error.message, retryable, ambiguous });
+  const failure = durableJobFailures.get(error);
+  return failure ? Object.freeze({ ...failure, message: error.message }) : undefined;
 }
 
 /** Stable keyset cursor for the authoritative `(created_at, job_id)` job order. */
@@ -369,9 +363,7 @@ export interface DurableJobListCursor {
 
 export interface DurableJobListRequest {
   readonly status?: DurableJobStatus;
-  readonly statuses?: readonly DurableJobStatus[];
   readonly kind?: string;
-  readonly kinds?: readonly string[];
   readonly limit?: number;
   readonly after?: DurableJobListCursor;
   /** Exact reflection-session selector over the authoritative JSON payload. */
@@ -392,6 +384,7 @@ export interface DurableJobPage {
 export interface DurableJobStorePort {
   readonly enqueue: (request: DurableJobEnqueueRequest) => Promise<DurableJobRecord>;
   readonly recordObservation: (jobId: string, observation: DurableJobObservationRequest) => Promise<void>;
+  readonly listObservedSessionIds: (jobId: string) => Promise<readonly string[]>;
   readonly get: (jobId: string) => Promise<DurableJobRecord | undefined>;
   readonly list: (request?: DurableJobListRequest) => Promise<readonly DurableJobRecord[]>;
   readonly listPage: (request?: DurableJobListRequest) => Promise<DurableJobPage>;

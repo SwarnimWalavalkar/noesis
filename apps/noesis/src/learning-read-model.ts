@@ -131,7 +131,7 @@ export function learningActivityForSession(
         if (isReflection(job)) return job.payload.turn.sessionId === sessionId;
         if (observedChildJobIds.has(job.job.jobId)) return true;
         const sourceSessionId = stringField(job.payload, "sourceSessionId");
-        if (sourceSessionId !== undefined) return sourceSessionId === sessionId;
+        if (sourceSessionId !== undefined) return false;
         return experimentIds.has(stringField(job.payload, "experimentId") ?? "");
       })
       .map(activity)

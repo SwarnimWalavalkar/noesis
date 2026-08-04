@@ -15,6 +15,7 @@ import { describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
 import {
   type CompletedNormalTurn,
+  authorizeScheduledJob,
   coordinatorOperationError,
   createRuntimeCoordinator,
   type RuntimeCoordinatorConfig,
@@ -467,6 +468,12 @@ describe("automatic runtime coordinator", () => {
     f.setSharedExperimentId(experimentId);
     const operationId = `coordinator:author:${experimentId}`;
     const legacyAuthorJobId = `job_${sha256(operationId).slice(0, 32)}`;
+    let nowMs = Date.parse("2026-07-22T00:00:00.000Z");
+    await authorizeScheduledJob(f.authority, {
+      jobId: legacyAuthorJobId,
+      budget: 3,
+      expiresAt: "2027-07-23T00:00:00.000Z",
+    });
     await f.workspace.jobs.enqueue({
       jobId: legacyAuthorJobId,
       kind: "runtime.author_revision",
@@ -490,6 +497,7 @@ describe("automatic runtime coordinator", () => {
       authority: f.authority,
       research: f.research,
       config: config(),
+      now: () => new Date(nowMs),
     });
 
     const reflection = await coordinator.observeCompletedTurn(f.turn("turn-legacy-replay"));
@@ -497,6 +505,19 @@ describe("automatic runtime coordinator", () => {
 
     expect(await coordinator.listJobs({ kind: "runtime.author_revision" })).toHaveLength(1);
     expect(await coordinator.listJobs({ kind: "runtime.preflight" })).toHaveLength(0);
+    nowMs += 1_000;
+    await coordinator.idle();
+    expect(await coordinator.getJob(legacyAuthorJobId)).toMatchObject({
+      job: { status: "completed" },
+    });
+    const preflightJobs = await coordinator.listJobs({ kind: "runtime.preflight" });
+    expect(preflightJobs).toHaveLength(1);
+    const preflightJob = preflightJobs[0];
+    if (!preflightJob) throw new Error("Expected recovered preflight job");
+    expect(preflightJob.payload).toMatchObject({ sourceSessionId: "session-1" });
+    expect(
+      (await coordinator.listJobPage({ kind: "runtime.preflight", sessionId: "session-1" })).jobs,
+    ).toHaveLength(1);
     const database = new DatabaseSync(f.workspace.unsafeDatabasePathForTesting, { readOnly: true });
     expect(
       database
@@ -506,6 +527,14 @@ describe("automatic runtime coordinator", () => {
         )
         .get(legacyAuthorJobId),
     ).toEqual({ parent_job_id: reflection.job.jobId, source_session_id: "session-1" });
+    expect(
+      database
+        .prepare(
+          `SELECT parent_job_id, source_session_id
+           FROM job_observations WHERE child_job_id = ?`,
+        )
+        .get(preflightJob.job.jobId),
+    ).toEqual({ parent_job_id: legacyAuthorJobId, source_session_id: "session-1" });
     database.close();
     f.workspace.close();
   });

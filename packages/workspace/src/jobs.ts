@@ -6,6 +6,7 @@ import {
   type DurableJobEnqueueRequest,
   type DurableJobFailure,
   type DurableJobListRequest,
+  type DurableJobObservationRequest,
   type DurableJobPage,
   type DurableJobRecord,
   type DurableJobStatus,
@@ -50,7 +51,7 @@ const EnqueueSchema = z.strictObject({
   maxAttempts: z.number().int().positive(),
   estimatedCost: z.number().nonnegative(),
   budget: z.number().nonnegative(),
-  observation: JobObservationSchema.optional(),
+  observations: z.array(JobObservationSchema).max(256).optional(),
 });
 
 type RecordActivity = (
@@ -74,10 +75,7 @@ export function createDurableJobStore(
     return row === undefined ? undefined : decodeDurableJob(row);
   };
 
-  const recordObservation = (
-    jobId: string,
-    observation: NonNullable<DurableJobEnqueueRequest["observation"]>,
-  ): void => {
+  const recordObservation = (jobId: string, observation: DurableJobObservationRequest): void => {
     db.prepare(
       `INSERT OR IGNORE INTO job_observations(
          child_job_id, parent_job_id, source_session_id, observed_at
@@ -105,7 +103,7 @@ export function createDurableJobStore(
           existing.estimatedCost === value.estimatedCost;
         if (!sameRequest)
           throw new Error(`Durable job operation identity collision for ${value.operationId}`);
-        if (value.observation) recordObservation(existing.jobId, value.observation);
+        for (const observation of value.observations ?? []) recordObservation(existing.jobId, observation);
         return existing;
       }
       db.prepare(
@@ -130,7 +128,7 @@ export function createDurableJobStore(
         value.estimatedCost,
       );
       recordActivity(actor, "coordinator.job_enqueued", "job", value.jobId, value.payloadRefs);
-      if (value.observation) recordObservation(value.jobId, value.observation);
+      for (const observation of value.observations ?? []) recordObservation(value.jobId, observation);
       const created = read(value.jobId);
       if (!created) throw new Error(`Durable job ${value.jobId} disappeared after enqueue`);
       return created;
@@ -145,10 +143,6 @@ export function createDurableJobStore(
   };
 
   const query = (request: DurableJobListRequest, limit: number): readonly DurableJobRecord[] => {
-    if (request.status !== undefined && request.statuses !== undefined)
-      throw new Error("Durable job list accepts either status or statuses, not both");
-    if (request.kind !== undefined && request.kinds !== undefined)
-      throw new Error("Durable job list accepts either kind or kinds, not both");
     if (request.status) JobStatusSchema.parse(request.status);
     const clauses: string[] = [];
     const values: Array<string | number> = [];
@@ -156,25 +150,9 @@ export function createDurableJobStore(
       clauses.push("status = ?");
       values.push(request.status);
     }
-    if (request.statuses !== undefined) {
-      const statuses = z.array(JobStatusSchema).max(6).parse(request.statuses);
-      if (statuses.length === 0) clauses.push("0");
-      else {
-        clauses.push(`status IN (${statuses.map(() => "?").join(", ")})`);
-        values.push(...statuses);
-      }
-    }
     if (request.kind) {
       clauses.push("kind = ?");
       values.push(request.kind);
-    }
-    if (request.kinds !== undefined) {
-      const kinds = z.array(z.string().min(1)).max(32).parse(request.kinds);
-      if (kinds.length === 0) clauses.push("0");
-      else {
-        clauses.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
-        values.push(...kinds);
-      }
     }
     if (request.payloadSessionId !== undefined) {
       z.string().min(1).parse(request.payloadSessionId);
@@ -442,13 +420,25 @@ export function createDurableJobStore(
 
   return Object.freeze({
     enqueue,
-    recordObservation: async (
-      jobId: string,
-      observation: NonNullable<DurableJobEnqueueRequest["observation"]>,
-    ) => {
+    recordObservation: async (jobId: string, observation: DurableJobObservationRequest) => {
       z.string().min(1).parse(jobId);
       const value = JobObservationSchema.parse(observation);
       database.transaction(() => recordObservation(jobId, value));
+    },
+    listObservedSessionIds: async (jobId: string) => {
+      z.string().min(1).parse(jobId);
+      return Object.freeze(
+        db
+          .prepare(
+            `SELECT source_session_id
+             FROM job_observations
+             WHERE child_job_id = ?
+             GROUP BY source_session_id
+             ORDER BY min(observed_at), source_session_id`,
+          )
+          .all(jobId)
+          .map((row) => z.string().min(1).parse(Reflect.get(row, "source_session_id"))),
+      );
     },
     get: async (jobId: string) => read(jobId),
     list,

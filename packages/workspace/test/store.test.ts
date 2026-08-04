@@ -1162,17 +1162,10 @@ describe("WorkspaceStore", () => {
       .prepare(
         `EXPLAIN QUERY PLAN
          SELECT * FROM jobs
-         WHERE status IN (?, ?) AND kind IN (?, ?, ?, ?)
+         WHERE status = ? AND kind = ?
          ORDER BY created_at, job_id LIMIT 100`,
       )
-      .all(
-        "scheduled",
-        "running",
-        "runtime.reflect_turn",
-        "runtime.author_revision",
-        "runtime.preflight",
-        "runtime.outcome_judge",
-      )
+      .all("scheduled", "runtime.reflect_turn")
       .map((row) => String(Reflect.get(row, "detail")));
     database.close();
 
@@ -1192,6 +1185,7 @@ describe("WorkspaceStore", () => {
     expect(sourceSessionPlan.some((detail) => detail.includes("job_observations_session_child"))).toBe(true);
     expect(sourceSessionPlan.some((detail) => detail.includes("job_observations_parent_child"))).toBe(true);
     expect(runtimeScanPlan.some((detail) => detail.includes("jobs_status_kind_created"))).toBe(true);
+    expect(runtimeScanPlan.some((detail) => detail.includes("USE TEMP B-TREE"))).toBe(false);
   });
 
   test("reports exact-limit terminal job pages as exhausted without exceeding the page limit", async () => {
@@ -1229,16 +1223,6 @@ describe("WorkspaceStore", () => {
     });
     expect(final.records.map(({ jobId }) => jobId)).toEqual(["job-c"]);
     expect(final.exhausted).toBe(true);
-    await expect(store.jobs.list({ statuses: ["scheduled"], kinds: ["fixture.job"] })).resolves.toMatchObject(
-      [{ jobId: "job-a" }, { jobId: "job-b" }, { jobId: "job-c" }],
-    );
-    await expect(store.jobs.list({ statuses: [], kinds: ["fixture.job"] })).resolves.toEqual([]);
-    await expect(store.jobs.list({ status: "scheduled", statuses: ["scheduled"] })).rejects.toThrow(
-      /either status or statuses/u,
-    );
-    await expect(store.jobs.list({ kind: "fixture.job", kinds: ["fixture.job"] })).rejects.toThrow(
-      /either kind or kinds/u,
-    );
     store.close();
   });
 
@@ -1267,7 +1251,7 @@ describe("WorkspaceStore", () => {
         maxAttempts: 1,
         estimatedCost: 0,
         budget: 0,
-        ...(observation ? { observation } : {}),
+        ...(observation ? { observations: [observation] } : {}),
       });
     };
     await enqueue("root-observation-a", "fixture.root", "2026-07-26T00:00:00.000Z");
@@ -1282,6 +1266,10 @@ describe("WorkspaceStore", () => {
       parentJobId: "root-observation-b",
       observedAt: "2026-07-26T00:00:03.000Z",
     });
+    await expect(store.jobs.listObservedSessionIds("shared-observation-parent")).resolves.toEqual([
+      "session-observation-a",
+      "session-observation-b",
+    ]);
     await enqueue("observation-child-a", "fixture.observed", "2026-07-26T00:00:04.000Z", {
       sourceSessionId: "session-observation-a",
       parentJobId: "shared-observation-parent",

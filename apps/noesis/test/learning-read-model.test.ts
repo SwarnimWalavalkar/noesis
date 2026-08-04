@@ -237,6 +237,14 @@ describe("ambient learning read model", () => {
           updatedAt: "2026-08-01T00:00:07.000Z",
         }),
         author({
+          jobId: "modern-local-payload-only-author",
+          experimentId,
+          status: "completed",
+          updatedAt: "2026-08-01T00:00:07.500Z",
+          sourceSessionId: "session-a",
+          parentJobId: "reflection-experiment",
+        }),
+        author({
           jobId: "modern-foreign-author",
           experimentId,
           status: "completed",
@@ -284,6 +292,7 @@ describe("ambient learning read model", () => {
       ]),
     );
     expect(activity.some(({ jobId }) => jobId === "modern-foreign-author")).toBe(false);
+    expect(activity.some(({ jobId }) => jobId === "modern-local-payload-only-author")).toBe(false);
   });
 
   test("loads a session and its experiment chain beyond one thousand older unrelated jobs", async () => {

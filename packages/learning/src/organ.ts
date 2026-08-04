@@ -878,51 +878,47 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       });
 
     const reconcileObservation = async (
-      initial: ExperimentBrief,
+      current: ExperimentBrief,
+      attemptsRemaining = MAX_BRIEF_RECONCILIATION_ATTEMPTS,
     ): Promise<Readonly<{ status: "experiment" | "deduped"; brief: ExperimentBrief }>> => {
-      let current = initial;
-      for (let attempt = 1; attempt <= MAX_BRIEF_RECONCILIATION_ATTEMPTS; attempt += 1) {
-        const experiment = await options.experiments.getExperiment(current.experimentId);
-        let status: "experiment" | "deduped";
-        let proposed: ExperimentBrief;
-        if (experiment?.status === "completed") {
-          const experimentId = followUpExperimentId({
-            dedupeKey,
-            predecessorExperimentId: experiment.experimentId,
-          });
-          const predecessorRef: EvidenceRef = Object.freeze({
-            kind: "database_row",
-            table: "experiments",
-            rowId: experiment.experimentId,
-          });
-          proposed = makeBrief(experimentId, uniqueEvidenceRefs([predecessorRef, ...harvest.evidenceRefs]));
-          await persistHypothesisExperiment(proposed);
-          status = "experiment";
-        } else {
-          await attachHarvestToExperiment(current, harvest);
-          proposed = mergeBriefObservation(current, harvest, selectedRecurrence);
-          status = "deduped";
-        }
-        if (canonicalJson(current) === canonicalJson(proposed)) {
-          return Object.freeze({ status, brief: current });
-        }
-        try {
-          return Object.freeze({
-            status,
-            brief: await options.briefs.replace({
-              expectedExperimentId: current.experimentId,
-              brief: proposed,
-            }),
-          });
-        } catch (error) {
-          if (!isExperimentBriefPublicationCollision(error) || attempt === MAX_BRIEF_RECONCILIATION_ATTEMPTS)
-            throw error;
-          const winner = await options.briefs.findByDedupeKey(dedupeKey);
-          if (!winner) throw error;
-          current = winner;
-        }
+      const experiment = await options.experiments.getExperiment(current.experimentId);
+      let status: "experiment" | "deduped";
+      let proposed: ExperimentBrief;
+      if (experiment?.status === "completed") {
+        const experimentId = followUpExperimentId({
+          dedupeKey,
+          predecessorExperimentId: experiment.experimentId,
+        });
+        const predecessorRef: EvidenceRef = Object.freeze({
+          kind: "database_row",
+          table: "experiments",
+          rowId: experiment.experimentId,
+        });
+        proposed = makeBrief(experimentId, uniqueEvidenceRefs([predecessorRef, ...harvest.evidenceRefs]));
+        await persistHypothesisExperiment(proposed);
+        status = "experiment";
+      } else {
+        await attachHarvestToExperiment(current, harvest);
+        proposed = mergeBriefObservation(current, harvest, selectedRecurrence);
+        status = "deduped";
       }
-      throw new Error(`Experiment brief reconciliation exhausted for ${dedupeKey}`);
+      if (canonicalJson(current) === canonicalJson(proposed)) {
+        return Object.freeze({ status, brief: current });
+      }
+      try {
+        return Object.freeze({
+          status,
+          brief: await options.briefs.replace({
+            expectedExperimentId: current.experimentId,
+            brief: proposed,
+          }),
+        });
+      } catch (error) {
+        if (!isExperimentBriefPublicationCollision(error) || attemptsRemaining <= 1) throw error;
+        const winner = await options.briefs.findByDedupeKey(dedupeKey);
+        if (!winner) throw error;
+        return await reconcileObservation(winner, attemptsRemaining - 1);
+      }
     };
 
     const observed = await serializeHypothesis(dedupeKey, async () => {

@@ -137,10 +137,10 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     readonly operationId: string;
     readonly estimatedCost: number;
     readonly budget: number;
-    readonly observation?: {
+    readonly observations?: readonly {
       readonly sourceSessionId: string;
       readonly parentJobId: string;
-    };
+    }[];
     readonly matchesExisting?: (view: CoordinatorJobView) => boolean;
   }): Promise<CoordinatorJobView> => {
     const jobId = stableJobId(input.operationId);
@@ -149,9 +149,9 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       budget: input.budget,
       expiresAt: iso(new Date(Math.max(now().getTime(), Date.now()) + 24 * 60 * 60 * 1_000)),
     });
-    const observation = input.observation
-      ? Object.freeze({ ...input.observation, observedAt: iso(now()) })
-      : undefined;
+    const observations = input.observations?.map((observation) =>
+      Object.freeze({ ...observation, observedAt: iso(now()) }),
+    );
     try {
       const job = await options.workspace.jobs.enqueue({
         jobId,
@@ -164,11 +164,11 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         maxAttempts: config.retry.maxAttempts,
         estimatedCost: input.estimatedCost,
         budget: input.budget,
-        ...(observation ? { observation } : {}),
+        ...(observations ? { observations } : {}),
       });
       return coordinatorJobPayload(job);
     } catch (error) {
-      if (!input.matchesExisting || !observation) throw error;
+      if (!input.matchesExisting || !observations) throw error;
       const existing = await options.workspace.jobs.get(jobId);
       if (!existing) throw error;
       let view: CoordinatorJobView;
@@ -178,7 +178,8 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         throw error;
       }
       if (!input.matchesExisting(view)) throw error;
-      await options.workspace.jobs.recordObservation(jobId, observation);
+      for (const observation of observations)
+        await options.workspace.jobs.recordObservation(jobId, observation);
       return view;
     }
   };
@@ -206,10 +207,12 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       payload,
       payloadRefs: input.payloadRefs,
       operationId: `coordinator:author:${input.experimentId}`,
-      observation: Object.freeze({
-        sourceSessionId: input.sourceSessionId,
-        parentJobId: input.parentJobId,
-      }),
+      observations: Object.freeze([
+        Object.freeze({
+          sourceSessionId: input.sourceSessionId,
+          parentJobId: input.parentJobId,
+        }),
+      ]),
       matchesExisting: (view) => {
         if (view.kind !== "runtime.author_revision") return false;
         const existing = AuthorRevisionJobPayloadSchema.safeParse(view.payload);
@@ -225,7 +228,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
 
   const enqueuePreflight = async (input: {
     readonly experimentId: string;
-    readonly sourceSessionId?: string;
+    readonly sourceSessionIds: readonly string[];
     readonly parentJobId: string;
     readonly candidate: CoordinatorCandidateResult;
     readonly retrievalStrategyId: import("@noesis/intelligence").RetrievalStrategyId;
@@ -235,7 +238,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     const payload = PreflightJobPayloadSchema.parse({
       schemaVersion: 1,
       experimentId: input.experimentId,
-      ...(input.sourceSessionId ? { sourceSessionId: input.sourceSessionId } : {}),
+      ...(input.sourceSessionIds[0] ? { sourceSessionId: input.sourceSessionIds[0] } : {}),
       parentJobId: input.parentJobId,
       preflightId,
       planId: stablePlanId(preflightId),
@@ -250,12 +253,13 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         input.candidate.manifestRevision,
       ]),
       operationId: `coordinator:preflight:${input.experimentId}:${input.candidate.candidateRevision.bundleDigest}`,
-      ...(input.sourceSessionId
+      ...(input.sourceSessionIds.length > 0
         ? {
-            observation: Object.freeze({
-              sourceSessionId: input.sourceSessionId,
-              parentJobId: input.parentJobId,
-            }),
+            observations: Object.freeze(
+              input.sourceSessionIds.map((sourceSessionId) =>
+                Object.freeze({ sourceSessionId, parentJobId: input.parentJobId }),
+              ),
+            ),
           }
         : {}),
       matchesExisting: (view) => {
@@ -371,7 +375,12 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       );
     await enqueuePreflight({
       experimentId: payload.experimentId,
-      ...(payload.sourceSessionId ? { sourceSessionId: payload.sourceSessionId } : {}),
+      sourceSessionIds: Object.freeze([
+        ...new Set([
+          ...(payload.sourceSessionId ? [payload.sourceSessionId] : []),
+          ...(await options.workspace.jobs.listObservedSessionIds(parentJobId)),
+        ]),
+      ]),
       parentJobId,
       candidate,
       retrievalStrategyId: payload.retrievalStrategyId,

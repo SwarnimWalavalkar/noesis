@@ -97,8 +97,18 @@ describe("tool broker", () => {
       effect: () => Object.freeze({ effect: "read", resource: "test:shell", estimatedCost: 0 }),
       execute: async () => null,
     });
+    const bareFoo = defineTool({
+      name: "foo",
+      label: "Foo",
+      description: "Exercise nearest-name recovery across dot structure",
+      visibility: "codemode_only",
+      inputSchema: z.strictObject({}),
+      outputSchema: z.null(),
+      effect: () => Object.freeze({ effect: "read", resource: "test:foo", estimatedCost: 0 }),
+      execute: async () => null,
+    });
     const broker = createToolBroker({
-      definitions: [echo(), shellRun],
+      definitions: [echo(), shellRun, bareFoo],
       authority: foregroundAuthority(),
       permission,
     });
@@ -108,6 +118,27 @@ describe("tool broker", () => {
       code: "not_found",
       message:
         "Unknown tool: shell.rum. Did you mean shell.run? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+    });
+
+    await expect(broker.invoke("shell/run", { command: "pwd" }, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message:
+        "Unknown tool: shell/run. Did you mean shell.run? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+    });
+
+    await expect(broker.invoke("Shell.run", { command: "pwd" }, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message:
+        "Unknown tool: Shell.run. Did you mean shell.run? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+    });
+
+    await expect(broker.invoke("foo.", {}, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message:
+        "Unknown tool: foo.. Did you mean foo? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
     });
 
     await expect(

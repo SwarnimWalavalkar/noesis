@@ -86,20 +86,25 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
 
   const listAllActiveRuntimeJobs = async () => {
     const jobs: Awaited<ReturnType<typeof options.workspace.jobs.list>>[number][] = [];
-    let after: DurableJobListCursor | undefined;
-    for (;;) {
-      const page = await options.workspace.jobs.listPage({
-        kinds: runtimeJobKinds,
-        statuses: activeJobStatuses,
-        limit: 1_000,
-        ...(after ? { after } : {}),
-      });
-      jobs.push(...page.records);
-      if (page.exhausted) return Object.freeze(jobs);
-      if (!page.nextCursor)
-        throw new Error("Non-exhausted durable job page did not provide an authoritative cursor");
-      after = page.nextCursor;
+    for (const status of activeJobStatuses) {
+      for (const kind of runtimeJobKinds) {
+        let after: DurableJobListCursor | undefined;
+        for (;;) {
+          const page = await options.workspace.jobs.listPage({
+            status,
+            kind,
+            limit: 1_000,
+            ...(after ? { after } : {}),
+          });
+          jobs.push(...page.records);
+          if (page.exhausted) break;
+          if (!page.nextCursor)
+            throw new Error("Non-exhausted durable job page did not provide an authoritative cursor");
+          after = page.nextCursor;
+        }
+      }
     }
+    return Object.freeze(jobs);
   };
 
   const nextDurableWake = async (): Promise<number | undefined> => {

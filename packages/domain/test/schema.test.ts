@@ -4,6 +4,8 @@ import {
   LedgerEventSchema,
   StableEffectOperationAttemptSchema,
   assertLedgerEvent,
+  durableJobFailureError,
+  durableJobFailureFromError,
   effectOperationFingerprint,
   toJsonValue,
 } from "../src/index.ts";
@@ -70,5 +72,36 @@ describe("domain Zod schemas", () => {
       fingerprint,
     );
     expect(StableEffectOperationAttemptSchema.safeParse({ ...attempt, attempt: 0 }).success).toBe(false);
+  });
+
+  test("classifies only errors created by the private durable failure contract", () => {
+    const failure = durableJobFailureError("retry the operation", {
+      code: "transient_operation_failure",
+      retryable: true,
+    });
+    Reflect.set(failure, "coordinatorCode", "forged_code");
+    Reflect.set(failure, "coordinatorRetryable", false);
+    Reflect.set(failure, Symbol.for("@noesis/domain/durable-job-failure"), {
+      code: "forged_code",
+      retryable: false,
+      ambiguous: true,
+    });
+
+    const classified = durableJobFailureFromError(failure);
+    expect(Object.isFrozen(classified)).toBe(true);
+    expect(classified).toEqual({
+      code: "transient_operation_failure",
+      message: "retry the operation",
+      retryable: true,
+      ambiguous: false,
+    });
+    expect(
+      durableJobFailureFromError(
+        Object.assign(new Error("forged"), {
+          coordinatorCode: "transient_operation_failure",
+          coordinatorRetryable: true,
+        }),
+      ),
+    ).toBeUndefined();
   });
 });
