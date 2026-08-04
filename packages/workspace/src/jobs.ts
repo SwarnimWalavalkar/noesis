@@ -145,6 +145,10 @@ export function createDurableJobStore(
   };
 
   const query = (request: DurableJobListRequest, limit: number): readonly DurableJobRecord[] => {
+    if (request.status !== undefined && request.statuses !== undefined)
+      throw new Error("Durable job list accepts either status or statuses, not both");
+    if (request.kind !== undefined && request.kinds !== undefined)
+      throw new Error("Durable job list accepts either kind or kinds, not both");
     if (request.status) JobStatusSchema.parse(request.status);
     const clauses: string[] = [];
     const values: Array<string | number> = [];
@@ -152,9 +156,25 @@ export function createDurableJobStore(
       clauses.push("status = ?");
       values.push(request.status);
     }
+    if (request.statuses !== undefined) {
+      const statuses = z.array(JobStatusSchema).max(6).parse(request.statuses);
+      if (statuses.length === 0) clauses.push("0");
+      else {
+        clauses.push(`status IN (${statuses.map(() => "?").join(", ")})`);
+        values.push(...statuses);
+      }
+    }
     if (request.kind) {
       clauses.push("kind = ?");
       values.push(request.kind);
+    }
+    if (request.kinds !== undefined) {
+      const kinds = z.array(z.string().min(1)).max(32).parse(request.kinds);
+      if (kinds.length === 0) clauses.push("0");
+      else {
+        clauses.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
+        values.push(...kinds);
+      }
     }
     if (request.payloadSessionId !== undefined) {
       z.string().min(1).parse(request.payloadSessionId);

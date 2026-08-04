@@ -1,7 +1,13 @@
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
 import type { RuntimeTranscriptEntry } from "@noesis/runtime";
 import { describe, expect, test, vi } from "vitest";
-import { actionIdentityForView, boundedInspectorText, startNoesisTui } from "../src/index.ts";
+import {
+  actionIdentityForView,
+  boundedInspectorText,
+  INSPECTOR_PREVIEW_CHARACTERS,
+  paginateInspectorText,
+  startNoesisTui,
+} from "../src/index.ts";
 import { createInMemoryTestRuntime, type TestNoesisRuntime } from "./support/in-memory-runtime.ts";
 import { createTestTerminal } from "./support/test-terminal.ts";
 
@@ -16,6 +22,18 @@ const containsC1 = (text: string): boolean =>
     const code = character.codePointAt(0) ?? 0;
     return code >= 128 && code <= 159;
   });
+
+const containsUnpairedSurrogate = (text: string): boolean => {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) return true;
+  }
+  return false;
+};
 
 const consumeSteer: NoesisAgentRuntime["steer"] = async () =>
   Object.freeze({
@@ -35,6 +53,24 @@ describe("Noesis TUI lifecycle", () => {
     expect(inspected).not.toContain("\u001b[2J");
     expect(inspected).toContain("inspector preview truncated");
     expect(inspected.length).toBeLessThan(25_000);
+  });
+
+  test("does not split a surrogate pair at the inspector preview boundary", () => {
+    const inspected = boundedInspectorText(
+      `${"x".repeat(INSPECTOR_PREVIEW_CHARACTERS - 1)}😀outside-preview`,
+    );
+
+    expect(containsUnpairedSurrogate(inspected)).toBe(false);
+    expect(inspected).not.toContain("😀");
+    expect(inspected).toContain("inspector preview truncated");
+  });
+
+  test("does not split a surrogate pair at the inspector heading boundary", () => {
+    const [page] = paginateInspectorText(`${"h".repeat(119)}😀outside-heading`, "body");
+
+    expect(page).toBeDefined();
+    expect(containsUnpairedSurrogate(page ?? "")).toBe(false);
+    expect(page).toBe(`${"h".repeat(119)}\n\nbody`);
   });
 
   test("keeps runtime action identities byte-identical to hydrated transcript identities", () => {

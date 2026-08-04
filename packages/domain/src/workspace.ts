@@ -369,7 +369,9 @@ export interface DurableJobListCursor {
 
 export interface DurableJobListRequest {
   readonly status?: DurableJobStatus;
+  readonly statuses?: readonly DurableJobStatus[];
   readonly kind?: string;
+  readonly kinds?: readonly string[];
   readonly limit?: number;
   readonly after?: DurableJobListCursor;
   /** Exact reflection-session selector over the authoritative JSON payload. */

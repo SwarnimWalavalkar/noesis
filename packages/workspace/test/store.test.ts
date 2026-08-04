@@ -953,7 +953,8 @@ describe("WorkspaceStore", () => {
          WHERE type = 'index' AND name IN (
            'jobs_created',
            'jobs_reflection_session_created',
-           'jobs_experiment_created'
+           'jobs_experiment_created',
+           'jobs_status_kind_created'
          )
          ORDER BY name`,
       )
@@ -1044,7 +1045,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(27);
+    expect(versions.at(-1)).toBe(28);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
@@ -1056,6 +1057,7 @@ describe("WorkspaceStore", () => {
       { name: "jobs_created" },
       { name: "jobs_experiment_created" },
       { name: "jobs_reflection_session_created" },
+      { name: "jobs_status_kind_created" },
     ]);
     expect(jobListPlan.some((detail) => detail.includes("jobs_created"))).toBe(true);
     expect(experimentJobPlan.some((detail) => detail.includes("jobs_experiment_created"))).toBe(true);
@@ -1106,12 +1108,16 @@ describe("WorkspaceStore", () => {
     const observationMigration = database
       .prepare("SELECT version, name FROM schema_migrations WHERE version = 27")
       .get();
+    const runtimeScanMigration = database
+      .prepare("SELECT version, name FROM schema_migrations WHERE version = 28")
+      .get();
     const indexes = database
       .prepare(
         `SELECT name, sql FROM sqlite_master
          WHERE type = 'index' AND name IN (
            'jobs_created',
            'jobs_experiment_created',
+           'jobs_status_kind_created',
            'job_observations_session_child',
            'job_observations_parent_child'
          ) ORDER BY name`,
@@ -1152,21 +1158,40 @@ describe("WorkspaceStore", () => {
       )
       .all("runtime.author_revision", "session-1")
       .map((row) => String(Reflect.get(row, "detail")));
+    const runtimeScanPlan = database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM jobs
+         WHERE status IN (?, ?) AND kind IN (?, ?, ?, ?)
+         ORDER BY created_at, job_id LIMIT 100`,
+      )
+      .all(
+        "scheduled",
+        "running",
+        "runtime.reflect_turn",
+        "runtime.author_revision",
+        "runtime.preflight",
+        "runtime.outcome_judge",
+      )
+      .map((row) => String(Reflect.get(row, "detail")));
     database.close();
 
     expect(keysetMigration).toEqual({ version: 25, name: "025_jobs_keyset_index.sql" });
     expect(scopeMigration).toEqual({ version: 26, name: "026_job_lineage_indexes.sql" });
     expect(observationMigration).toEqual({ version: 27, name: "027_job_observations.sql" });
+    expect(runtimeScanMigration).toEqual({ version: 28, name: "028_job_runtime_scan_index.sql" });
     expect(indexes).toEqual([
       { name: "job_observations_parent_child", sql: expect.any(String) },
       { name: "job_observations_session_child", sql: expect.any(String) },
       { name: "jobs_created", sql: expect.any(String) },
       { name: "jobs_experiment_created", sql: expect.not.stringContaining("WHERE kind IN") },
+      { name: "jobs_status_kind_created", sql: expect.any(String) },
     ]);
     expect(keysetPlan.some((detail) => detail.includes("jobs_created"))).toBe(true);
     expect(experimentPlan.some((detail) => detail.includes("jobs_experiment_created"))).toBe(true);
     expect(sourceSessionPlan.some((detail) => detail.includes("job_observations_session_child"))).toBe(true);
     expect(sourceSessionPlan.some((detail) => detail.includes("job_observations_parent_child"))).toBe(true);
+    expect(runtimeScanPlan.some((detail) => detail.includes("jobs_status_kind_created"))).toBe(true);
   });
 
   test("reports exact-limit terminal job pages as exhausted without exceeding the page limit", async () => {
@@ -1204,6 +1229,16 @@ describe("WorkspaceStore", () => {
     });
     expect(final.records.map(({ jobId }) => jobId)).toEqual(["job-c"]);
     expect(final.exhausted).toBe(true);
+    await expect(store.jobs.list({ statuses: ["scheduled"], kinds: ["fixture.job"] })).resolves.toMatchObject(
+      [{ jobId: "job-a" }, { jobId: "job-b" }, { jobId: "job-c" }],
+    );
+    await expect(store.jobs.list({ statuses: [], kinds: ["fixture.job"] })).resolves.toEqual([]);
+    await expect(store.jobs.list({ status: "scheduled", statuses: ["scheduled"] })).rejects.toThrow(
+      /either status or statuses/u,
+    );
+    await expect(store.jobs.list({ kind: "fixture.job", kinds: ["fixture.job"] })).rejects.toThrow(
+      /either kind or kinds/u,
+    );
     store.close();
   });
 

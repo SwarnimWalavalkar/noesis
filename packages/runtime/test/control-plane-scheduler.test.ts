@@ -30,21 +30,22 @@ describe("runtime control-plane resident scheduling", () => {
     const workspace = await createWorkspaceStore(root, {
       now: () => new Date(nowMs).toISOString(),
     });
-    await Promise.all(
+    const deferredJobIds = await Promise.all(
       Array.from({ length: 1_000 }, async (_, index) => {
-        const jobId = `unrelated-${String(index).padStart(4, "0")}`;
+        const jobId = `deferred-runtime-${String(index).padStart(4, "0")}`;
         await workspace.jobs.enqueue({
           jobId,
-          kind: "unrelated.job",
+          kind: "runtime.author_revision",
           payload: Object.freeze({}),
           payloadRefs: Object.freeze([]),
           operationId: `operation:${jobId}`,
           idempotencyKey: `operation:${jobId}`,
-          notBefore: new Date(nowMs).toISOString(),
+          notBefore: new Date(nowMs + 2_000).toISOString(),
           maxAttempts: 1,
           estimatedCost: 0,
           budget: 0,
         });
+        return jobId;
       }),
     );
     const job = await workspace.jobs.enqueue({
@@ -125,8 +126,18 @@ describe("runtime control-plane resident scheduling", () => {
       cancel: async () => undefined,
       stop: async () => undefined,
     });
+    const listRequests: Array<Parameters<typeof workspace.jobs.listPage>[0]> = [];
     const controlPlane = createRuntimeControlPlane({
-      workspace,
+      workspace: Object.freeze({
+        research: workspace.research,
+        jobs: Object.freeze({
+          ...workspace.jobs,
+          listPage: async (request = {}) => {
+            listRequests.push(request);
+            return await workspace.jobs.listPage(request);
+          },
+        }),
+      }),
       coordinator,
       activation,
       feedback,
@@ -140,6 +151,19 @@ describe("runtime control-plane resident scheduling", () => {
     expect(armed).toHaveLength(1);
     expect(armed[0]).toMatchObject({ at: nowMs + 1_000, unrefed: true });
     expect(drains).toBe(1);
+    expect(listRequests.length).toBeGreaterThan(2);
+    expect(
+      listRequests.every(
+        (request) =>
+          request?.statuses?.join(",") === "scheduled,running" &&
+          request.kinds?.join(",") ===
+            "runtime.reflect_turn,runtime.author_revision,runtime.preflight,runtime.outcome_judge",
+      ),
+    ).toBe(true);
+
+    await Promise.all(
+      deferredJobIds.map(async (jobId) => await workspace.jobs.cancel(jobId, new Date(nowMs).toISOString())),
+    );
 
     nowMs += 1_000;
     if (armed[0]) armed[0].cancelled = true;

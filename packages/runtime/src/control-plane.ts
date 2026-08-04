@@ -1,4 +1,4 @@
-import type { Experiment, WorkspaceStore } from "@noesis/domain";
+import type { DurableJobListCursor, DurableJobStatus, Experiment, WorkspaceStore } from "@noesis/domain";
 import type { ActivationAttemptResult, AtomicActivationController } from "./atomic-activation.ts";
 import type { CompletedNormalTurn, CoordinatorJobView } from "./coordinator-contracts.ts";
 import type { RuntimeCoordinator } from "./coordinator.ts";
@@ -76,11 +76,21 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     wakeTimer = undefined;
   };
 
-  const listAllDurableJobs = async () => {
+  const runtimeJobKinds = Object.freeze([
+    "runtime.reflect_turn",
+    "runtime.author_revision",
+    "runtime.preflight",
+    "runtime.outcome_judge",
+  ]);
+  const activeJobStatuses: readonly DurableJobStatus[] = Object.freeze(["scheduled", "running"]);
+
+  const listAllActiveRuntimeJobs = async () => {
     const jobs: Awaited<ReturnType<typeof options.workspace.jobs.list>>[number][] = [];
-    let after: import("@noesis/domain").DurableJobListCursor | undefined;
+    let after: DurableJobListCursor | undefined;
     for (;;) {
       const page = await options.workspace.jobs.listPage({
+        kinds: runtimeJobKinds,
+        statuses: activeJobStatuses,
         limit: 1_000,
         ...(after ? { after } : {}),
       });
@@ -93,15 +103,8 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
   };
 
   const nextDurableWake = async (): Promise<number | undefined> => {
-    const jobs = await listAllDurableJobs();
-    const supported = jobs.filter(
-      (job) =>
-        job.kind === "runtime.reflect_turn" ||
-        job.kind === "runtime.author_revision" ||
-        job.kind === "runtime.preflight" ||
-        job.kind === "runtime.outcome_judge",
-    );
-    const times = supported.flatMap((job) => {
+    const jobs = await listAllActiveRuntimeJobs();
+    const times = jobs.flatMap((job) => {
       if (job.status === "scheduled") return [new Date(job.notBefore).getTime()];
       if (job.status === "running" && job.leaseUntil) return [new Date(job.leaseUntil).getTime()];
       return [];
@@ -163,15 +166,11 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     for (;;) {
       reconciled.push(...(await runAvailable()));
       const timestamp = now().getTime();
-      const runnable = (await listAllDurableJobs()).some(
+      const runnable = (await listAllActiveRuntimeJobs()).some(
         (job) =>
-          (job.kind === "runtime.reflect_turn" ||
-            job.kind === "runtime.author_revision" ||
-            job.kind === "runtime.preflight" ||
-            job.kind === "runtime.outcome_judge") &&
-          ((job.status === "scheduled" && new Date(job.notBefore).getTime() <= timestamp) ||
-            (job.status === "running" &&
-              (job.leaseUntil === undefined || new Date(job.leaseUntil).getTime() <= timestamp))),
+          (job.status === "scheduled" && new Date(job.notBefore).getTime() <= timestamp) ||
+          (job.status === "running" &&
+            (job.leaseUntil === undefined || new Date(job.leaseUntil).getTime() <= timestamp)),
       );
       if (!runnable) return Object.freeze(reconciled);
     }
