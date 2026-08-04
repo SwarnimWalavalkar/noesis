@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DurableJobRecord } from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import {
@@ -176,6 +177,103 @@ describe("runtime control-plane resident scheduling", () => {
 
     await controlPlane.stop();
     expect([...scheduled.values()].filter((timer) => !timer.cancelled)).toHaveLength(0);
+    workspace.close();
+  }, 30_000);
+
+  test("reduces a large active backlog without variadic argument limits", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-control-plane-large-backlog-"));
+    roots.push(root);
+    const workspace = await createWorkspaceStore(root);
+    const nowMs = Date.parse("2026-07-23T00:00:00.000Z");
+    const total = 150_000;
+    const jobs = Object.freeze({
+      ...workspace.jobs,
+      listPage: async (request: Parameters<typeof workspace.jobs.listPage>[0] = {}) => {
+        const limit = request.limit ?? 100;
+        const start = request.after ? Number(request.after.jobId.slice("synthetic-".length)) + 1 : 0;
+        const end = Math.min(total, start + limit);
+        const records: DurableJobRecord[] = [];
+        for (let index = start; index < end; index += 1) {
+          const timestamp = new Date(nowMs + 1_000 + index).toISOString();
+          records.push(
+            Object.freeze({
+              jobId: `synthetic-${String(index)}`,
+              kind: "runtime.reflect_turn",
+              payload: Object.freeze({}),
+              payloadRefs: Object.freeze([]),
+              operationId: `operation:${String(index)}`,
+              idempotencyKey: `idempotency:${String(index)}`,
+              status: "scheduled" as const,
+              notBefore: timestamp,
+              attempt: 0,
+              maxAttempts: 1,
+              estimatedCost: 0,
+              budgetRemaining: 0,
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            }),
+          );
+        }
+        const last = records.at(-1);
+        return Object.freeze({
+          records: Object.freeze(records),
+          exhausted: end >= total,
+          ...(last ? { nextCursor: { createdAt: last.createdAt, jobId: last.jobId } } : {}),
+        });
+      },
+    });
+    const coordinator: RuntimeCoordinator = Object.freeze({
+      observeCompletedTurn: async () => unsupported(),
+      runAvailable: async () => undefined,
+      idle: async () => undefined,
+      cancel: async () => undefined,
+      retry: async () => unsupported(),
+      getJob: async () => undefined,
+      listJobs: async () => Object.freeze([]),
+      listJobPage: async () => Object.freeze({ jobs: Object.freeze([]), exhausted: true }),
+      getPreflightActivationHandoff: async () => undefined,
+      stop: async () => undefined,
+    });
+    const activation: AtomicActivationController = Object.freeze({
+      activateFromPreflight: async () => unsupported(),
+      approve: async () => unsupported(),
+      reject: async () => unsupported(),
+      getOperation: async () => undefined,
+      pinTurnActivation: async () => unsupported(),
+    });
+    const feedback: ContinuousFeedbackController = Object.freeze({
+      observeTurnOutcome: async () => unsupported(),
+      evaluateExperiment: async () => undefined,
+      experimentComparison: async () => unsupported(),
+      capabilityHealth: async () => unsupported(),
+      runAvailable: async () => undefined,
+      cancel: async () => undefined,
+      stop: async () => undefined,
+    });
+    let armTimer: ((delayMs: number) => void) | undefined;
+    const armed = new Promise<number>((resolve) => {
+      armTimer = resolve;
+    });
+    const timers: RuntimeControlPlaneTimers = Object.freeze({
+      setTimeout: (_callback: () => void, delayMs: number): RuntimeControlPlaneTimerHandle => {
+        armTimer?.(delayMs);
+        return Object.freeze({ cancel: () => undefined, unref: () => undefined });
+      },
+      clearTimeout: (handle: RuntimeControlPlaneTimerHandle): void => handle.cancel(),
+    });
+    const controlPlane = createRuntimeControlPlane({
+      workspace: Object.freeze({ research: workspace.research, jobs }),
+      coordinator,
+      activation,
+      feedback,
+      now: () => new Date(nowMs),
+      timers,
+      autoStart: false,
+    });
+
+    await controlPlane.runAvailable();
+    await expect(armed).resolves.toBe(1_000);
+    await controlPlane.stop();
     workspace.close();
   }, 30_000);
 

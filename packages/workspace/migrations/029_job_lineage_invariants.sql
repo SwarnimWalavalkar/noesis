@@ -42,8 +42,9 @@ WITH RECURSIVE inherited(child_job_id, parent_job_id, source_session_id, observe
 INSERT OR IGNORE INTO job_observations(
   child_job_id, parent_job_id, source_session_id, observed_at
 )
-SELECT child_job_id, parent_job_id, source_session_id, observed_at
-FROM inherited;
+SELECT child_job_id, parent_job_id, source_session_id, min(observed_at)
+FROM inherited
+GROUP BY child_job_id, parent_job_id, source_session_id;
 
 CREATE INDEX job_lineage_parent_child
 ON job_lineage(parent_job_id, child_job_id);

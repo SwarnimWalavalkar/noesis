@@ -1202,6 +1202,94 @@ describe("WorkspaceStore", () => {
     expect(runtimeScanPlan.some((detail) => detail.includes("USE TEMP B-TREE"))).toBe(false);
   });
 
+  test("migration 29 deterministically keeps the earliest inherited observation", async () => {
+    const root = await temporary("job-lineage-observation-deduplication");
+    await mkdir(join(root, "database"), { recursive: true });
+    const seed = new DatabaseSync(join(root, "database", "noesis.sqlite"));
+    const migrationNames = (await readdir(new URL("../migrations/", import.meta.url)))
+      .filter((name) => /^\d{3}_.+\.sql$/u.test(name))
+      .sort()
+      .filter((name) => Number(name.slice(0, 3)) <= 28);
+    for (const name of migrationNames) {
+      const version = Number(name.slice(0, 3));
+      seed.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
+      seed
+        .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+        .run(version, name, "2026-07-26T00:00:00.000Z");
+    }
+    seed
+      .prepare(
+        `INSERT INTO sessions(
+           session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
+         ) VALUES (?, ?, 'idle', '', '', '', ?, ?, '{}')`,
+      )
+      .run(
+        "session-duplicate-inheritance",
+        "Duplicate inheritance",
+        "2026-07-26T00:00:00.000Z",
+        "2026-07-26T00:00:00.000Z",
+      );
+    const insertJob = seed.prepare(
+      `INSERT INTO jobs(
+         job_id, kind, payload_json, status, attempt, budget_remaining, created_at, updated_at,
+         operation_id, idempotency_key, not_before
+       ) VALUES (?, ?, ?, 'completed', 1, 0, ?, ?, ?, ?, ?)`,
+    );
+    const insert = (jobId: string, payload: object, createdAt: string): void => {
+      insertJob.run(
+        jobId,
+        "fixture.job",
+        JSON.stringify(payload),
+        createdAt,
+        createdAt,
+        `operation:${jobId}`,
+        `idempotency:${jobId}`,
+        createdAt,
+      );
+    };
+    insert("lineage-root-early", {}, "2026-07-26T00:00:00.000Z");
+    insert("lineage-root-late", {}, "2026-07-26T00:00:00.001Z");
+    insert("lineage-parent", {}, "2026-07-26T00:00:00.002Z");
+    insert("lineage-child", { parentJobId: "lineage-parent" }, "2026-07-26T00:00:00.003Z");
+    const insertObservation = seed.prepare(
+      `INSERT INTO job_observations(
+         child_job_id, parent_job_id, source_session_id, observed_at
+       ) VALUES (?, ?, ?, ?)`,
+    );
+    insertObservation.run(
+      "lineage-parent",
+      "lineage-root-late",
+      "session-duplicate-inheritance",
+      "2026-07-26T00:00:02.000Z",
+    );
+    insertObservation.run(
+      "lineage-parent",
+      "lineage-root-early",
+      "session-duplicate-inheritance",
+      "2026-07-26T00:00:01.000Z",
+    );
+    seed.close();
+
+    const upgraded = await createWorkspaceStore(root);
+    upgraded.close();
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    expect(
+      database
+        .prepare(
+          `SELECT parent_job_id, source_session_id, observed_at
+           FROM job_observations WHERE child_job_id = ?`,
+        )
+        .all("lineage-child"),
+    ).toEqual([
+      {
+        parent_job_id: "lineage-parent",
+        source_session_id: "session-duplicate-inheritance",
+        observed_at: "2026-07-26T00:00:01.000Z",
+      },
+    ]);
+    database.close();
+  });
+
   test("reports exact-limit terminal job pages as exhausted without exceeding the page limit", async () => {
     const store = await createWorkspaceStore(await temporary("job-page-lookahead"));
     const enqueue = async (jobId: string, createdAt: string): Promise<void> => {

@@ -1,4 +1,10 @@
-import type { DurableJobListCursor, DurableJobStatus, Experiment, WorkspaceStore } from "@noesis/domain";
+import type {
+  DurableJobListCursor,
+  DurableJobRecord,
+  DurableJobStatus,
+  Experiment,
+  WorkspaceStore,
+} from "@noesis/domain";
 import type { ActivationAttemptResult, AtomicActivationController } from "./atomic-activation.ts";
 import type { CompletedNormalTurn, CoordinatorJobView } from "./coordinator-contracts.ts";
 import type { RuntimeCoordinator } from "./coordinator.ts";
@@ -84,8 +90,11 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
   ]);
   const activeJobStatuses: readonly DurableJobStatus[] = Object.freeze(["scheduled", "running"]);
 
-  const listAllActiveRuntimeJobs = async () => {
-    const jobs: Awaited<ReturnType<typeof options.workspace.jobs.list>>[number][] = [];
+  const reduceActiveRuntimeJobs = async <Value>(
+    initial: Value,
+    reduce: (value: Value, job: DurableJobRecord) => Value,
+  ): Promise<Value> => {
+    let value = initial;
     let after: DurableJobListCursor | undefined;
     for (;;) {
       const page = await options.workspace.jobs.listPage({
@@ -94,23 +103,25 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
         limit: 1_000,
         ...(after ? { after } : {}),
       });
-      jobs.push(...page.records);
-      if (page.exhausted) return Object.freeze(jobs);
+      for (const job of page.records) value = reduce(value, job);
+      if (page.exhausted) return value;
       if (!page.nextCursor)
         throw new Error("Non-exhausted durable job page did not provide an authoritative cursor");
       after = page.nextCursor;
     }
   };
 
-  const nextDurableWake = async (): Promise<number | undefined> => {
-    const jobs = await listAllActiveRuntimeJobs();
-    const times = jobs.flatMap((job) => {
-      if (job.status === "scheduled") return [new Date(job.notBefore).getTime()];
-      if (job.status === "running" && job.leaseUntil) return [new Date(job.leaseUntil).getTime()];
-      return [];
+  const nextDurableWake = async (): Promise<number | undefined> =>
+    await reduceActiveRuntimeJobs<number | undefined>(undefined, (earliest, job) => {
+      const candidate =
+        job.status === "scheduled"
+          ? new Date(job.notBefore).getTime()
+          : job.status === "running" && job.leaseUntil
+            ? new Date(job.leaseUntil).getTime()
+            : undefined;
+      if (candidate === undefined) return earliest;
+      return earliest === undefined || candidate < earliest ? candidate : earliest;
     });
-    return times.length === 0 ? undefined : Math.min(...times);
-  };
 
   const armNextWake = async (): Promise<void> => {
     clearWake();
@@ -166,8 +177,10 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     for (;;) {
       reconciled.push(...(await runAvailable()));
       const timestamp = now().getTime();
-      const runnable = (await listAllActiveRuntimeJobs()).some(
-        (job) =>
+      const runnable = await reduceActiveRuntimeJobs(
+        false,
+        (found, job) =>
+          found ||
           (job.status === "scheduled" && new Date(job.notBefore).getTime() <= timestamp) ||
           (job.status === "running" &&
             (job.leaseUntil === undefined || new Date(job.leaseUntil).getTime() <= timestamp)),
