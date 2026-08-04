@@ -58,6 +58,11 @@ interface InFlightSkillLoad {
   readonly promise: Promise<PiSkillSnapshot>;
 }
 
+interface InFlightSkillPin {
+  readonly token: object;
+  readonly promise: Promise<PiSkillSnapshot>;
+}
+
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -93,7 +98,7 @@ export function createPiSkillLibrary(input: {
   let loading: InFlightSkillLoad | undefined;
   let lastSettledSnapshot: PiSkillSnapshot | undefined;
   const pinned = new Map<string, PiSkillSnapshot>();
-  const pinning = new Map<string, Promise<PiSkillSnapshot>>();
+  const pinning = new Map<string, InFlightSkillPin>();
   const readSkillFile = input.readSkillFile ?? (async (path: string) => await readFile(path, "utf8"));
   const awaitWithSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Promise<Value> => {
     if (!signal) return promise;
@@ -199,22 +204,25 @@ export function createPiSkillLibrary(input: {
     if (signal?.aborted) throw new Error("Skill loading was cancelled");
     let inFlight = pinning.get(key);
     if (!inFlight) {
+      const token = Object.freeze({});
       const admission = (async (): Promise<PiSkillSnapshot> => {
         const captured = await admissionSnapshot();
         const existingAfterLoad = pinned.get(key);
-        if (existingAfterLoad) return existingAfterLoad;
+        if (pinning.get(key)?.token === token && existingAfterLoad) return existingAfterLoad;
         const admitted = admit ? await admit(captured) : captured;
         const existingAfterAdmission = pinned.get(key);
+        if (pinning.get(key)?.token !== token) return admitted;
         if (existingAfterAdmission) return existingAfterAdmission;
         pinned.set(key, admitted);
         return admitted;
       })();
-      inFlight = admission.finally(() => {
-        if (pinning.get(key) === inFlight) pinning.delete(key);
+      const promise = admission.finally(() => {
+        if (pinning.get(key)?.token === token) pinning.delete(key);
       });
+      inFlight = Object.freeze({ token, promise });
       pinning.set(key, inFlight);
     }
-    return await awaitWithSignal(inFlight, signal);
+    return await awaitWithSignal(inFlight.promise, signal);
   };
   const workspaceOption = (scope: "personal" | "workspace") =>
     scope === "workspace" ? Object.freeze({ local: true }) : undefined;
@@ -258,6 +266,7 @@ export function createPiSkillLibrary(input: {
     },
     discardPinnedSnapshot: (key: string) => {
       pinned.delete(key);
+      pinning.delete(key);
     },
     install,
     remove,

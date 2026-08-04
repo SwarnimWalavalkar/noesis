@@ -930,7 +930,14 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       if (!existing) {
         const brief = makeBrief(experimentIdForHypothesis(dedupeKey));
         await persistHypothesisExperiment(brief);
-        return Object.freeze({ status: "experiment" as const, brief: await options.briefs.put(brief) });
+        try {
+          return Object.freeze({ status: "experiment" as const, brief: await options.briefs.put(brief) });
+        } catch (error) {
+          if (!isExperimentBriefPublicationCollision(error)) throw error;
+          const winner = await options.briefs.findByDedupeKey(dedupeKey);
+          if (!winner) throw error;
+          return await reconcileObservation(winner);
+        }
       }
 
       return await reconcileObservation(existing);

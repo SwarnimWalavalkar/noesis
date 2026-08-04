@@ -976,12 +976,16 @@ describe("WorkspaceStore", () => {
         `EXPLAIN QUERY PLAN
          SELECT * FROM jobs
          WHERE kind = ? AND job_id IN (
-           WITH RECURSIVE scoped_jobs(job_id) AS (
-             SELECT child_job_id FROM job_observations WHERE source_session_id = ?
+           WITH RECURSIVE scoped_jobs(job_id, source_session_id) AS (
+             SELECT child_job_id, source_session_id
+             FROM job_observations
+             WHERE source_session_id = ?
              UNION
-             SELECT observations.child_job_id
+             SELECT observations.child_job_id, observations.source_session_id
              FROM job_observations AS observations
-             JOIN scoped_jobs ON observations.parent_job_id = scoped_jobs.job_id
+             JOIN scoped_jobs
+               ON observations.parent_job_id = scoped_jobs.job_id
+              AND observations.source_session_id = scoped_jobs.source_session_id
            )
            SELECT job_id FROM scoped_jobs
          )
@@ -1131,12 +1135,16 @@ describe("WorkspaceStore", () => {
         `EXPLAIN QUERY PLAN
          SELECT * FROM jobs
          WHERE kind = ? AND job_id IN (
-           WITH RECURSIVE scoped_jobs(job_id) AS (
-             SELECT child_job_id FROM job_observations WHERE source_session_id = ?
+           WITH RECURSIVE scoped_jobs(job_id, source_session_id) AS (
+             SELECT child_job_id, source_session_id
+             FROM job_observations
+             WHERE source_session_id = ?
              UNION
-             SELECT observations.child_job_id
+             SELECT observations.child_job_id, observations.source_session_id
              FROM job_observations AS observations
-             JOIN scoped_jobs ON observations.parent_job_id = scoped_jobs.job_id
+             JOIN scoped_jobs
+               ON observations.parent_job_id = scoped_jobs.job_id
+              AND observations.source_session_id = scoped_jobs.source_session_id
            )
            SELECT job_id FROM scoped_jobs
          )
@@ -1196,6 +1204,77 @@ describe("WorkspaceStore", () => {
     });
     expect(final.records.map(({ jobId }) => jobId)).toEqual(["job-c"]);
     expect(final.exhausted).toBe(true);
+    store.close();
+  });
+
+  test("keeps recursive job observations isolated to their source session", async () => {
+    const store = await createWorkspaceStore(await temporary("job-observation-session-isolation"));
+    await store.operational.sessions.put(session("session-observation-a"));
+    await store.operational.sessions.put(session("session-observation-b"));
+    const enqueue = async (
+      jobId: string,
+      kind: string,
+      createdAt: string,
+      observation?: {
+        readonly sourceSessionId: string;
+        readonly parentJobId: string;
+        readonly observedAt: string;
+      },
+    ): Promise<void> => {
+      await store.jobs.enqueue({
+        jobId,
+        kind,
+        payload: Object.freeze({}),
+        payloadRefs: Object.freeze([]),
+        operationId: `operation:${jobId}`,
+        idempotencyKey: `idempotency:${jobId}`,
+        notBefore: createdAt,
+        maxAttempts: 1,
+        estimatedCost: 0,
+        budget: 0,
+        ...(observation ? { observation } : {}),
+      });
+    };
+    await enqueue("root-observation-a", "fixture.root", "2026-07-26T00:00:00.000Z");
+    await enqueue("root-observation-b", "fixture.root", "2026-07-26T00:00:01.000Z");
+    await enqueue("shared-observation-parent", "fixture.observed", "2026-07-26T00:00:02.000Z", {
+      sourceSessionId: "session-observation-a",
+      parentJobId: "root-observation-a",
+      observedAt: "2026-07-26T00:00:02.000Z",
+    });
+    await store.jobs.recordObservation("shared-observation-parent", {
+      sourceSessionId: "session-observation-b",
+      parentJobId: "root-observation-b",
+      observedAt: "2026-07-26T00:00:03.000Z",
+    });
+    await enqueue("observation-child-a", "fixture.observed", "2026-07-26T00:00:04.000Z", {
+      sourceSessionId: "session-observation-a",
+      parentJobId: "shared-observation-parent",
+      observedAt: "2026-07-26T00:00:04.000Z",
+    });
+    await enqueue("observation-child-b", "fixture.observed", "2026-07-26T00:00:05.000Z", {
+      sourceSessionId: "session-observation-b",
+      parentJobId: "shared-observation-parent",
+      observedAt: "2026-07-26T00:00:05.000Z",
+    });
+
+    const observedByA = await store.jobs.list({
+      kind: "fixture.observed",
+      observedSessionId: "session-observation-a",
+    });
+    const observedByB = await store.jobs.list({
+      kind: "fixture.observed",
+      observedSessionId: "session-observation-b",
+    });
+
+    expect(observedByA.map(({ jobId }) => jobId)).toEqual([
+      "shared-observation-parent",
+      "observation-child-a",
+    ]);
+    expect(observedByB.map(({ jobId }) => jobId)).toEqual([
+      "shared-observation-parent",
+      "observation-child-b",
+    ]);
     store.close();
   });
 

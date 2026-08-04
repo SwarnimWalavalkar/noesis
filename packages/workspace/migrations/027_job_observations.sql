@@ -20,4 +20,4 @@ CREATE INDEX job_observations_session_child
 ON job_observations(source_session_id, child_job_id, parent_job_id);
 
 CREATE INDEX job_observations_parent_child
-ON job_observations(parent_job_id, child_job_id);
+ON job_observations(parent_job_id, source_session_id, child_job_id);

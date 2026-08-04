@@ -331,6 +331,93 @@ describe("Pi skill library adapter", () => {
     expect(secondSnapshot.skills[0]?.admittedRevision).toBe(firstSnapshot.skills[0]?.admittedRevision);
   });
 
+  test("discarding an in-flight pin prevents its admission from resurrecting the key", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-skill-pin-discard-race-"));
+    roots.push(root);
+    const project = join(root, "project");
+    await mkdir(project, { recursive: true });
+    const library = createPiSkillLibrary({
+      cwd: project,
+      agentDirectory: join(root, "agent"),
+      workspaceTrusted: true,
+    });
+    let discardedAdmissionStarted: (() => void) | undefined;
+    const discardedStarted = new Promise<void>((resolve) => {
+      discardedAdmissionStarted = resolve;
+    });
+    let releaseDiscardedAdmission: (() => void) | undefined;
+    const discardedBarrier = new Promise<void>((resolve) => {
+      releaseDiscardedAdmission = resolve;
+    });
+    let admissions = 0;
+    const first = library.pinSnapshot("discarded-plan", undefined, async (snapshot) => {
+      admissions += 1;
+      discardedAdmissionStarted?.();
+      await discardedBarrier;
+      return Object.freeze({
+        ...snapshot,
+        diagnostics: Object.freeze([
+          ...snapshot.diagnostics,
+          Object.freeze({ type: "warning" as const, message: "discarded admission" }),
+        ]),
+      });
+    });
+    await discardedStarted;
+    const shared = library.pinSnapshot("discarded-plan", undefined, async () => {
+      admissions += 1;
+      throw new Error("Concurrent admission must remain coalesced");
+    });
+
+    library.discardPinnedSnapshot("discarded-plan");
+    releaseDiscardedAdmission?.();
+    const [firstSnapshot, sharedSnapshot] = await Promise.all([first, shared]);
+
+    expect(sharedSnapshot).toBe(firstSnapshot);
+    expect(library.claimPinnedSnapshot("discarded-plan")).toBeUndefined();
+
+    let replacementAdmissionStarted: (() => void) | undefined;
+    const replacementStarted = new Promise<void>((resolve) => {
+      replacementAdmissionStarted = resolve;
+    });
+    let releaseReplacementAdmission: (() => void) | undefined;
+    const replacementBarrier = new Promise<void>((resolve) => {
+      releaseReplacementAdmission = resolve;
+    });
+    const replacement = library.pinSnapshot("discarded-plan", undefined, async (snapshot) => {
+      admissions += 1;
+      replacementAdmissionStarted?.();
+      await replacementBarrier;
+      return Object.freeze({
+        ...snapshot,
+        diagnostics: Object.freeze([
+          ...snapshot.diagnostics,
+          Object.freeze({ type: "warning" as const, message: "replacement admission" }),
+        ]),
+      });
+    });
+    await replacementStarted;
+    const replacementShared = library.pinSnapshot("discarded-plan", undefined, async () => {
+      admissions += 1;
+      throw new Error("Replacement admission must also be coalesced");
+    });
+
+    releaseReplacementAdmission?.();
+    const [replacementSnapshot, replacementSharedSnapshot] = await Promise.all([
+      replacement,
+      replacementShared,
+    ]);
+
+    expect(admissions).toBe(2);
+    expect(replacementSharedSnapshot).toBe(replacementSnapshot);
+    expect(library.claimPinnedSnapshot("discarded-plan")).toBe(replacementSnapshot);
+    expect(replacementSnapshot.diagnostics).toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: "replacement admission" })]),
+    );
+    expect(replacementSnapshot.diagnostics).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: "discarded admission" })]),
+    );
+  });
+
   test("does not trust repository-selected skill packages by default", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-untrusted-skill-"));
     roots.push(root);

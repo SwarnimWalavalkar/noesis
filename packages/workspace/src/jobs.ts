@@ -165,12 +165,16 @@ export function createDurableJobStore(
       z.string().min(1).parse(request.observedSessionId);
       clauses.push(
         `job_id IN (
-           WITH RECURSIVE scoped_jobs(job_id) AS (
-             SELECT child_job_id FROM job_observations WHERE source_session_id = ?
+           WITH RECURSIVE scoped_jobs(job_id, source_session_id) AS (
+             SELECT child_job_id, source_session_id
+             FROM job_observations
+             WHERE source_session_id = ?
              UNION
-             SELECT observations.child_job_id
+             SELECT observations.child_job_id, observations.source_session_id
              FROM job_observations AS observations
-             JOIN scoped_jobs ON observations.parent_job_id = scoped_jobs.job_id
+             JOIN scoped_jobs
+               ON observations.parent_job_id = scoped_jobs.job_id
+              AND observations.source_session_id = scoped_jobs.source_session_id
            )
            SELECT job_id FROM scoped_jobs
          )`,

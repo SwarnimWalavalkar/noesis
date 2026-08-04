@@ -513,6 +513,47 @@ function createContendedBriefStore(initial: ExperimentBrief) {
   return Object.freeze({ port, current: () => current, collisions: () => collisions });
 }
 
+function createContendedInitialBriefStore() {
+  let current: ExperimentBrief | undefined;
+  let dedupeKey: string | undefined;
+  let initialReads = 0;
+  let collisions = 0;
+  let release: () => void = () => undefined;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const port: ExperimentBriefStore = Object.freeze({
+    findByDedupeKey: async (key: string) => {
+      dedupeKey ??= key;
+      if (key !== dedupeKey) return undefined;
+      if (initialReads >= 2) return current;
+      const observed = current;
+      initialReads += 1;
+      if (initialReads === 2) release();
+      await barrier;
+      return observed;
+    },
+    put: async (brief: ExperimentBrief) => {
+      if (current) {
+        if (JSON.stringify(current) === JSON.stringify(brief)) return current;
+        collisions += 1;
+        throw experimentBriefPublicationCollisionError(brief.hypothesisDedupeKey);
+      }
+      current = brief;
+      return brief;
+    },
+    replace: async ({ expectedExperimentId, brief }: Parameters<ExperimentBriefStore["replace"]>[0]) => {
+      if (!current || current.experimentId !== expectedExperimentId) {
+        collisions += 1;
+        throw experimentBriefPublicationCollisionError(brief.hypothesisDedupeKey);
+      }
+      current = brief;
+      return brief;
+    },
+  });
+  return Object.freeze({ port, current: () => current, collisions: () => collisions });
+}
+
 function createBarrierInference(
   steps: readonly ScriptedLearningInferenceStep[],
 ): ScriptedLearningInferencePort {
@@ -795,6 +836,73 @@ describe("automatic learning organ", () => {
     );
     expect(harness.experiments()).toHaveLength(1);
     expect(harness.experiments()[0]?.feedbackSignalIds).toHaveLength(2);
+  });
+
+  test("reconciles a concurrent initial publication with the winning brief", async () => {
+    const experimentState = createExperimentState();
+    const briefs = createContendedInitialBriefStore();
+    const left = createHarness({
+      steps: [reflectionStep],
+      citations: [citation(1)],
+      briefs: briefs.port,
+      experimentState,
+    });
+    const right = createHarness({
+      steps: [reflectionStep],
+      citations: [citation(1)],
+      briefs: briefs.port,
+      experimentState,
+    });
+
+    const [leftResult, rightResult] = await Promise.all([
+      left.organ.observeTurn({
+        turn: turn({
+          turnId: "turn-initial-left",
+          correction: "Use primary sources.",
+          evidenceRef: databaseRef("current-message-initial-left"),
+        }),
+        baselineRevision: left.baseline,
+        capability,
+      }),
+      right.organ.observeTurn({
+        turn: turn({
+          turnId: "turn-initial-right",
+          correction: "Use primary sources.",
+          evidenceRef: databaseRef("current-message-initial-right"),
+        }),
+        baselineRevision: right.baseline,
+        capability,
+      }),
+    ]);
+
+    expect([leftResult.status, rightResult.status].sort()).toEqual(["deduped", "experiment"]);
+    if (leftResult.status === "no_change" || rightResult.status === "no_change")
+      throw new Error("Expected concurrent initial publication results");
+    expect(leftResult.brief.experimentId).toBe(rightResult.brief.experimentId);
+    expect(briefs.collisions()).toBe(1);
+    expect(briefs.current()).toMatchObject({
+      experimentId: leftResult.brief.experimentId,
+      evidenceRefs: expect.arrayContaining([
+        databaseRef("current-message-initial-left"),
+        databaseRef("current-message-initial-right"),
+      ]),
+      feedbackSignalIds: expect.arrayContaining([
+        leftResult.harvest.signals[0]?.signal.signalId,
+        rightResult.harvest.signals[0]?.signal.signalId,
+      ]),
+    });
+    expect(experimentState.values()).toHaveLength(1);
+    expect(experimentState.values()[0]).toMatchObject({
+      experimentId: leftResult.brief.experimentId,
+      evidenceRefs: expect.arrayContaining([
+        databaseRef("current-message-initial-left"),
+        databaseRef("current-message-initial-right"),
+      ]),
+      feedbackSignalIds: expect.arrayContaining([
+        leftResult.harvest.signals[0]?.signal.signalId,
+        rightResult.harvest.signals[0]?.signal.signalId,
+      ]),
+    });
   });
 
   test("retains outcome and file-revision citations independently of evidence conversion", async () => {
