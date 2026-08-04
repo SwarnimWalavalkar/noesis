@@ -237,7 +237,7 @@ function createFakeWorkspaceStore(): WorkspaceStore {
         throw new Error("unused fake job store");
       },
       recordObservation: async () => undefined,
-      listObservedSessionIds: async () => Object.freeze([]),
+      inheritObservations: async () => undefined,
       get: async () => undefined,
       list: async () => [],
       listPage: async () => Object.freeze({ records: Object.freeze([]), exhausted: true }),

@@ -141,6 +141,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       readonly sourceSessionId: string;
       readonly parentJobId: string;
     }[];
+    readonly inheritObservationsFromParentJobId?: string;
     readonly matchesExisting?: (view: CoordinatorJobView) => boolean;
   }): Promise<CoordinatorJobView> => {
     const jobId = stableJobId(input.operationId);
@@ -165,10 +166,13 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         estimatedCost: input.estimatedCost,
         budget: input.budget,
         ...(observations ? { observations } : {}),
+        ...(input.inheritObservationsFromParentJobId
+          ? { inheritObservationsFromParentJobId: input.inheritObservationsFromParentJobId }
+          : {}),
       });
       return coordinatorJobPayload(job);
     } catch (error) {
-      if (!input.matchesExisting || !observations) throw error;
+      if (!input.matchesExisting || (!observations && !input.inheritObservationsFromParentJobId)) throw error;
       const existing = await options.workspace.jobs.get(jobId);
       if (!existing) throw error;
       let view: CoordinatorJobView;
@@ -178,8 +182,14 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         throw error;
       }
       if (!input.matchesExisting(view)) throw error;
-      for (const observation of observations)
+      for (const observation of observations ?? [])
         await options.workspace.jobs.recordObservation(jobId, observation);
+      if (input.inheritObservationsFromParentJobId)
+        await options.workspace.jobs.inheritObservations(
+          jobId,
+          input.inheritObservationsFromParentJobId,
+          iso(now()),
+        );
       return view;
     }
   };
@@ -253,15 +263,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         input.candidate.manifestRevision,
       ]),
       operationId: `coordinator:preflight:${input.experimentId}:${input.candidate.candidateRevision.bundleDigest}`,
-      ...(input.sourceSessionIds.length > 0
-        ? {
-            observations: Object.freeze(
-              input.sourceSessionIds.map((sourceSessionId) =>
-                Object.freeze({ sourceSessionId, parentJobId: input.parentJobId }),
-              ),
-            ),
-          }
-        : {}),
+      inheritObservationsFromParentJobId: input.parentJobId,
       matchesExisting: (view) => {
         if (view.kind !== "runtime.preflight") return false;
         const existing = PreflightJobPayloadSchema.safeParse(view.payload);
@@ -376,10 +378,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     await enqueuePreflight({
       experimentId: payload.experimentId,
       sourceSessionIds: Object.freeze([
-        ...new Set([
-          ...(payload.sourceSessionId ? [payload.sourceSessionId] : []),
-          ...(await options.workspace.jobs.listObservedSessionIds(parentJobId)),
-        ]),
+        ...new Set([...(payload.sourceSessionId ? [payload.sourceSessionId] : [])]),
       ]),
       parentJobId,
       candidate,

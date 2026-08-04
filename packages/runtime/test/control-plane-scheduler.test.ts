@@ -155,24 +155,12 @@ describe("runtime control-plane resident scheduling", () => {
     expect(
       listRequests.every(
         (request) =>
-          (request?.status === "scheduled" || request?.status === "running") &&
-          request.kind !== undefined &&
-          [
-            "runtime.reflect_turn",
-            "runtime.author_revision",
-            "runtime.preflight",
-            "runtime.outcome_judge",
-          ].includes(request.kind),
+          request?.statuses?.join(",") === "scheduled,running" &&
+          request.kinds?.join(",") ===
+            "runtime.reflect_turn,runtime.author_revision,runtime.preflight,runtime.outcome_judge",
       ),
     ).toBe(true);
-    expect(
-      listRequests.some(
-        (request) =>
-          request?.status === "scheduled" &&
-          request.kind === "runtime.author_revision" &&
-          request.after !== undefined,
-      ),
-    ).toBe(true);
+    expect(listRequests.some((request) => request?.after !== undefined)).toBe(true);
 
     await Promise.all(
       deferredJobIds.map(async (jobId) => await workspace.jobs.cancel(jobId, new Date(nowMs).toISOString())),

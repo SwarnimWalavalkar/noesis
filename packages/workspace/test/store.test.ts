@@ -951,10 +951,10 @@ describe("WorkspaceStore", () => {
       .prepare(
         `SELECT name FROM sqlite_master
          WHERE type = 'index' AND name IN (
-           'jobs_created',
+           'jobs_created_status_kind',
            'jobs_reflection_session_created',
            'jobs_experiment_created',
-           'jobs_status_kind_created'
+           'job_lineage_parent_child'
          )
          ORDER BY name`,
       )
@@ -1045,7 +1045,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(28);
+    expect(versions.at(-1)).toBe(29);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
@@ -1054,10 +1054,10 @@ describe("WorkspaceStore", () => {
     expect(phaseLineageTrigger).toBeDefined();
     expect(sequenceTrigger).toBeDefined();
     expect(jobListIndexes).toEqual([
-      { name: "jobs_created" },
+      { name: "job_lineage_parent_child" },
+      { name: "jobs_created_status_kind" },
       { name: "jobs_experiment_created" },
       { name: "jobs_reflection_session_created" },
-      { name: "jobs_status_kind_created" },
     ]);
     expect(jobListPlan.some((detail) => detail.includes("jobs_created"))).toBe(true);
     expect(experimentJobPlan.some((detail) => detail.includes("jobs_experiment_created"))).toBe(true);
@@ -1111,13 +1111,16 @@ describe("WorkspaceStore", () => {
     const runtimeScanMigration = database
       .prepare("SELECT version, name FROM schema_migrations WHERE version = 28")
       .get();
+    const lineageInvariantMigration = database
+      .prepare("SELECT version, name FROM schema_migrations WHERE version = 29")
+      .get();
     const indexes = database
       .prepare(
         `SELECT name, sql FROM sqlite_master
          WHERE type = 'index' AND name IN (
-           'jobs_created',
+           'jobs_created_status_kind',
            'jobs_experiment_created',
-           'jobs_status_kind_created',
+           'job_lineage_parent_child',
            'job_observations_session_child',
            'job_observations_parent_child'
          ) ORDER BY name`,
@@ -1161,11 +1164,18 @@ describe("WorkspaceStore", () => {
     const runtimeScanPlan = database
       .prepare(
         `EXPLAIN QUERY PLAN
-         SELECT * FROM jobs
-         WHERE status = ? AND kind = ?
+         SELECT * FROM jobs INDEXED BY jobs_created_status_kind
+         WHERE status IN (?, ?) AND kind IN (?, ?, ?, ?)
          ORDER BY created_at, job_id LIMIT 100`,
       )
-      .all("scheduled", "runtime.reflect_turn")
+      .all(
+        "scheduled",
+        "running",
+        "runtime.reflect_turn",
+        "runtime.author_revision",
+        "runtime.preflight",
+        "runtime.outcome_judge",
+      )
       .map((row) => String(Reflect.get(row, "detail")));
     database.close();
 
@@ -1173,18 +1183,22 @@ describe("WorkspaceStore", () => {
     expect(scopeMigration).toEqual({ version: 26, name: "026_job_lineage_indexes.sql" });
     expect(observationMigration).toEqual({ version: 27, name: "027_job_observations.sql" });
     expect(runtimeScanMigration).toEqual({ version: 28, name: "028_job_runtime_scan_index.sql" });
+    expect(lineageInvariantMigration).toEqual({
+      version: 29,
+      name: "029_job_lineage_invariants.sql",
+    });
     expect(indexes).toEqual([
+      { name: "job_lineage_parent_child", sql: expect.any(String) },
       { name: "job_observations_parent_child", sql: expect.any(String) },
       { name: "job_observations_session_child", sql: expect.any(String) },
-      { name: "jobs_created", sql: expect.any(String) },
+      { name: "jobs_created_status_kind", sql: expect.any(String) },
       { name: "jobs_experiment_created", sql: expect.not.stringContaining("WHERE kind IN") },
-      { name: "jobs_status_kind_created", sql: expect.any(String) },
     ]);
     expect(keysetPlan.some((detail) => detail.includes("jobs_created"))).toBe(true);
     expect(experimentPlan.some((detail) => detail.includes("jobs_experiment_created"))).toBe(true);
     expect(sourceSessionPlan.some((detail) => detail.includes("job_observations_session_child"))).toBe(true);
     expect(sourceSessionPlan.some((detail) => detail.includes("job_observations_parent_child"))).toBe(true);
-    expect(runtimeScanPlan.some((detail) => detail.includes("jobs_status_kind_created"))).toBe(true);
+    expect(runtimeScanPlan.some((detail) => detail.includes("jobs_created_status_kind"))).toBe(true);
     expect(runtimeScanPlan.some((detail) => detail.includes("USE TEMP B-TREE"))).toBe(false);
   });
 
@@ -1266,10 +1280,6 @@ describe("WorkspaceStore", () => {
       parentJobId: "root-observation-b",
       observedAt: "2026-07-26T00:00:03.000Z",
     });
-    await expect(store.jobs.listObservedSessionIds("shared-observation-parent")).resolves.toEqual([
-      "session-observation-a",
-      "session-observation-b",
-    ]);
     await enqueue("observation-child-a", "fixture.observed", "2026-07-26T00:00:04.000Z", {
       sourceSessionId: "session-observation-a",
       parentJobId: "shared-observation-parent",
@@ -1300,6 +1310,142 @@ describe("WorkspaceStore", () => {
     ]);
     store.close();
   });
+
+  test("inherits unbounded parent observations and propagates observations recorded after child enqueue", async () => {
+    const store = await createWorkspaceStore(await temporary("job-observation-inheritance"));
+    const sessionIds = Array.from(
+      { length: 300 },
+      (_, index) => `session-inherited-${String(index).padStart(3, "0")}`,
+    );
+    for (const sessionId of sessionIds) await store.operational.sessions.put(session(sessionId));
+    await store.operational.sessions.put(session("session-inherited-late"));
+    const enqueue = async (input: {
+      readonly jobId: string;
+      readonly kind: string;
+      readonly observations?: readonly {
+        readonly sourceSessionId: string;
+        readonly parentJobId: string;
+        readonly observedAt: string;
+      }[];
+      readonly inheritObservationsFromParentJobId?: string;
+    }): Promise<void> => {
+      await store.jobs.enqueue({
+        ...input,
+        payload: Object.freeze({}),
+        payloadRefs: Object.freeze([]),
+        operationId: `operation:${input.jobId}`,
+        idempotencyKey: `idempotency:${input.jobId}`,
+        notBefore: "2026-07-26T00:00:00.000Z",
+        maxAttempts: 1,
+        estimatedCost: 0,
+        budget: 0,
+      });
+    };
+    await enqueue({ jobId: "observation-root", kind: "fixture.root" });
+    await enqueue({
+      jobId: "observation-author",
+      kind: "fixture.author",
+      observations: sessionIds.map((sourceSessionId) => ({
+        sourceSessionId,
+        parentJobId: "observation-root",
+        observedAt: "2026-07-26T00:00:01.000Z",
+      })),
+    });
+    await enqueue({
+      jobId: "observation-preflight",
+      kind: "fixture.preflight",
+      inheritObservationsFromParentJobId: "observation-author",
+    });
+
+    const database = new DatabaseSync(store.unsafeDatabasePathForTesting, { readOnly: true });
+    const observationCount = (jobId: string): number => {
+      const row = database
+        .prepare("SELECT count(*) AS count FROM job_observations WHERE child_job_id = ?")
+        .get(jobId);
+      if (!row) throw new Error(`Missing observation count for ${jobId}`);
+      return Number(Reflect.get(row, "count"));
+    };
+    expect(observationCount("observation-author")).toBe(300);
+    expect(observationCount("observation-preflight")).toBe(300);
+
+    await store.jobs.recordObservation("observation-author", {
+      sourceSessionId: "session-inherited-late",
+      parentJobId: "observation-root",
+      observedAt: "2026-07-26T00:00:02.000Z",
+    });
+    expect(observationCount("observation-author")).toBe(301);
+    expect(observationCount("observation-preflight")).toBe(301);
+    expect(
+      database
+        .prepare(
+          `SELECT parent_job_id FROM job_observations
+           WHERE child_job_id = ? AND source_session_id = ?`,
+        )
+        .get("observation-preflight", "session-inherited-late"),
+    ).toEqual({ parent_job_id: "observation-author" });
+    database.close();
+    store.close();
+  });
+
+  test("keeps a running job visible when it becomes scheduled between active-stream pages", async () => {
+    const store = await createWorkspaceStore(await temporary("job-active-status-transition"));
+    const start = Date.parse("2026-07-26T00:00:00.000Z");
+    for (let index = 0; index < 1_000; index += 1) {
+      const jobId = `active-filler-${String(index).padStart(4, "0")}`;
+      await store.jobs.enqueue({
+        jobId,
+        kind: "runtime.author_revision",
+        payload: Object.freeze({}),
+        payloadRefs: Object.freeze([]),
+        operationId: `operation:${jobId}`,
+        idempotencyKey: `idempotency:${jobId}`,
+        notBefore: new Date(start + index).toISOString(),
+        maxAttempts: 1,
+        estimatedCost: 0,
+        budget: 0,
+      });
+    }
+    await store.jobs.enqueue({
+      jobId: "active-transition-target",
+      kind: "runtime.preflight",
+      payload: Object.freeze({}),
+      payloadRefs: Object.freeze([]),
+      operationId: "operation:active-transition-target",
+      idempotencyKey: "idempotency:active-transition-target",
+      notBefore: new Date(start + 2_000).toISOString(),
+      maxAttempts: 2,
+      estimatedCost: 1,
+      budget: 2,
+    });
+    const claimed = await store.jobs.claim({
+      workerId: "status-transition-worker",
+      now: new Date(start + 3_000).toISOString(),
+      leaseUntil: new Date(start + 4_000).toISOString(),
+      maximumCost: 1,
+      kinds: ["runtime.preflight"],
+    });
+    if (!claimed?.leaseToken) throw new Error("Expected transition target lease");
+    const filter = {
+      statuses: ["scheduled", "running"] as const,
+      kinds: ["runtime.author_revision", "runtime.preflight"] as const,
+      limit: 1_000,
+    };
+    const first = await store.jobs.listPage(filter);
+    expect(first.exhausted).toBe(false);
+    expect(first.records).toHaveLength(1_000);
+    await store.jobs.fail({
+      jobId: claimed.jobId,
+      leaseToken: claimed.leaseToken,
+      now: new Date(start + 3_500).toISOString(),
+      retryAt: new Date(start + 5_000).toISOString(),
+      failure: { code: "retry", message: "retry", retryable: true, ambiguous: false },
+    });
+    if (!first.nextCursor) throw new Error("Expected active stream cursor");
+    const second = await store.jobs.listPage({ ...filter, after: first.nextCursor });
+    expect(second.records.map(({ jobId }) => jobId)).toEqual(["active-transition-target"]);
+    expect(second.exhausted).toBe(true);
+    store.close();
+  }, 30_000);
 
   test("keeps authority grants, reservations, completions, and replay in SQLite", async () => {
     const root = await temporary("durable-authority");

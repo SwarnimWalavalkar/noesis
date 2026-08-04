@@ -514,7 +514,6 @@ describe("automatic runtime coordinator", () => {
     expect(preflightJobs).toHaveLength(1);
     const preflightJob = preflightJobs[0];
     if (!preflightJob) throw new Error("Expected recovered preflight job");
-    expect(preflightJob.payload).toMatchObject({ sourceSessionId: "session-1" });
     expect(
       (await coordinator.listJobPage({ kind: "runtime.preflight", sessionId: "session-1" })).jobs,
     ).toHaveLength(1);

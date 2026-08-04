@@ -306,6 +306,7 @@ export interface DurableJobEnqueueRequest {
   readonly estimatedCost: number;
   readonly budget: number;
   readonly observations?: readonly DurableJobObservationRequest[];
+  readonly inheritObservationsFromParentJobId?: string;
 }
 
 export interface DurableJobObservationRequest {
@@ -363,7 +364,9 @@ export interface DurableJobListCursor {
 
 export interface DurableJobListRequest {
   readonly status?: DurableJobStatus;
+  readonly statuses?: readonly DurableJobStatus[];
   readonly kind?: string;
+  readonly kinds?: readonly string[];
   readonly limit?: number;
   readonly after?: DurableJobListCursor;
   /** Exact reflection-session selector over the authoritative JSON payload. */
@@ -384,7 +387,7 @@ export interface DurableJobPage {
 export interface DurableJobStorePort {
   readonly enqueue: (request: DurableJobEnqueueRequest) => Promise<DurableJobRecord>;
   readonly recordObservation: (jobId: string, observation: DurableJobObservationRequest) => Promise<void>;
-  readonly listObservedSessionIds: (jobId: string) => Promise<readonly string[]>;
+  readonly inheritObservations: (jobId: string, parentJobId: string, observedAt: string) => Promise<void>;
   readonly get: (jobId: string) => Promise<DurableJobRecord | undefined>;
   readonly list: (request?: DurableJobListRequest) => Promise<readonly DurableJobRecord[]>;
   readonly listPage: (request?: DurableJobListRequest) => Promise<DurableJobPage>;
