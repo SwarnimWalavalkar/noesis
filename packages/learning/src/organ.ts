@@ -278,20 +278,21 @@ function uniqueEvidenceRefs(refs: readonly EvidenceRef[]): readonly EvidenceRef[
 }
 
 function toEvidenceRef(citation: ExactCitation): EvidenceRef | undefined {
-  if (
-    citation.source.kind === "database_row" &&
-    ["sessions", "messages", "tool_calls", "outcomes"].includes(citation.source.table)
-  ) {
-    const table = citation.source.table;
-    if (table !== "sessions" && table !== "messages" && table !== "tool_calls" && table !== "outcomes")
+  const source = citation.source;
+  if (source.kind !== "database_row") return undefined;
+  switch (source.table) {
+    case "sessions":
+    case "messages":
+    case "tool_calls":
+    case "outcomes":
+      return Object.freeze({
+        kind: "database_row",
+        table: source.table,
+        rowId: source.rowId,
+      });
+    default:
       return undefined;
-    return Object.freeze({
-      kind: "database_row",
-      table,
-      rowId: citation.source.rowId,
-    });
   }
-  return undefined;
 }
 
 function cloneCitation(citation: ExactCitation): LearningCitation {

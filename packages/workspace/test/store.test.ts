@@ -906,13 +906,30 @@ describe("WorkspaceStore", () => {
          WHERE type = 'trigger' AND name = 'tool_call_action_sequence_required'`,
       )
       .get();
-    const learningJobIndexes = database
+    const jobListIndexes = database
       .prepare(
         `SELECT name FROM sqlite_master
-         WHERE type = 'index' AND name IN ('jobs_reflection_session_created', 'jobs_experiment_created')
+         WHERE type = 'index' AND name IN (
+           'jobs_created',
+           'jobs_reflection_session_created',
+           'jobs_experiment_created'
+         )
          ORDER BY name`,
       )
       .all();
+    const jobListPlan = database
+      .prepare("EXPLAIN QUERY PLAN SELECT * FROM jobs ORDER BY created_at, job_id LIMIT 100")
+      .all()
+      .map((row) => String(Reflect.get(row, "detail")));
+    const toolCallTurnPlan = database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM tool_calls
+         WHERE session_id = ? AND turn_id = ?
+         ORDER BY action_sequence, tool_call_id`,
+      )
+      .all("session-null-sequence", "turn-null-sequence")
+      .map((row) => String(Reflect.get(row, "detail")));
     database
       .prepare(
         `INSERT INTO sessions(
@@ -949,7 +966,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(24);
+    expect(versions.at(-1)).toBe(25);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
@@ -957,10 +974,54 @@ describe("WorkspaceStore", () => {
     });
     expect(phaseLineageTrigger).toBeDefined();
     expect(sequenceTrigger).toBeDefined();
-    expect(learningJobIndexes).toEqual([
+    expect(jobListIndexes).toEqual([
+      { name: "jobs_created" },
       { name: "jobs_experiment_created" },
       { name: "jobs_reflection_session_created" },
     ]);
+    expect(jobListPlan.some((detail) => detail.includes("jobs_created"))).toBe(true);
+    expect(toolCallTurnPlan.some((detail) => detail.includes("tool_calls_turn_created"))).toBe(true);
+  });
+
+  test("upgrades a version-24 workspace with the jobs keyset index", async () => {
+    const root = await temporary("jobs-keyset-migration");
+    await mkdir(join(root, "database"), { recursive: true });
+    const seed = new DatabaseSync(join(root, "database", "noesis.sqlite"));
+    const migrationNames = (await readdir(new URL("../migrations/", import.meta.url)))
+      .filter((name) => /^\d{3}_.+\.sql$/u.test(name))
+      .sort()
+      .filter((name) => Number(name.slice(0, 3)) <= 24);
+    for (const name of migrationNames) {
+      const version = Number(name.slice(0, 3));
+      seed.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
+      seed
+        .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+        .run(version, name, "2026-07-26T00:00:00.000Z");
+    }
+    expect(
+      seed.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'jobs_created'").get(),
+    ).toBeUndefined();
+    seed.close();
+
+    const upgraded = await createWorkspaceStore(root);
+    upgraded.close();
+
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    const migration = database
+      .prepare("SELECT version, name FROM schema_migrations WHERE version = 25")
+      .get();
+    const index = database
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'jobs_created'")
+      .get();
+    const queryPlan = database
+      .prepare("EXPLAIN QUERY PLAN SELECT * FROM jobs ORDER BY created_at, job_id LIMIT 100")
+      .all()
+      .map((row) => String(Reflect.get(row, "detail")));
+    database.close();
+
+    expect(migration).toEqual({ version: 25, name: "025_jobs_keyset_index.sql" });
+    expect(index).toEqual({ name: "jobs_created" });
+    expect(queryPlan.some((detail) => detail.includes("jobs_created"))).toBe(true);
   });
 
   test("keeps authority grants, reservations, completions, and replay in SQLite", async () => {

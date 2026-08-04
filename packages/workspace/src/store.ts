@@ -3241,6 +3241,18 @@ function createOperationalRepositories(
           )
           .all(sessionId)
           .map(decodeToolCall),
+      listForTurn: async (sessionId: string, turnId: string) =>
+        db
+          .prepare(
+            `SELECT calls.*, timeline.timeline_sequence
+             FROM tool_calls AS calls
+             LEFT JOIN turn_timeline_entries AS timeline
+               ON timeline.entry_kind = 'tool_call' AND timeline.entry_id = calls.tool_call_id
+             WHERE calls.session_id = ? AND calls.turn_id = ?
+             ORDER BY calls.action_sequence, calls.tool_call_id`,
+          )
+          .all(sessionId, turnId)
+          .map(decodeToolCall),
       listForExecution: async (executionId: string) =>
         db
           .prepare(

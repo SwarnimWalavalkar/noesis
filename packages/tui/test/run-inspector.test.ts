@@ -399,6 +399,33 @@ describe("run inspector panel", () => {
     expect(body).not.toContain("RESULT");
   });
 
+  test("keeps a failed action's exact structured output in raw mode", () => {
+    const failed = stateWithRun({ failed: true });
+    const timeline = failed.timeline.map((entry) =>
+      entry.kind === "action" && entry.actionId === "x1"
+        ? {
+            ...entry,
+            output: {
+              error: "ToolError: files.write denied by permission policy",
+              diagnostics: { operationId: "write-17", attempts: 2 },
+            },
+          }
+        : entry,
+    );
+    const semantic = render({ ...failed, timeline }, 88, 60).join("\n");
+    const raw = render(reduceTui({ ...failed, timeline }, { type: "inspector-view-toggled" }), 88, 60).join(
+      "\n",
+    );
+
+    expect(semantic).toContain("ToolError: files.write denied");
+    expect(semantic).not.toContain("RESULT");
+    expect(semantic).not.toContain("diagnostics");
+    expect(raw).toContain("RAW RESULT");
+    expect(raw).toContain('"diagnostics"');
+    expect(raw).toContain('"operationId": "write-17"');
+    expect(raw).toContain('"attempts": 2');
+  });
+
   test("says when no durable record backs the panel", () => {
     const body = render(stateWithRun()).join("\n");
 

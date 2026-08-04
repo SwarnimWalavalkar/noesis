@@ -152,6 +152,34 @@ describe("Noesis slash command autocomplete", () => {
     );
   });
 
+  test("deduplicates discovered skill names before applying built-in collision prefixes", async () => {
+    const provider = createNoesisCommandAutocompleteProvider([
+      { name: "five-whys", description: "First discovered package" },
+      { name: "five-whys", description: "Duplicate package" },
+      { name: "help", description: "First help skill" },
+      { name: "help", description: "Duplicate help skill" },
+    ]);
+    const suggestions = await provider.getSuggestions(["/"], 0, 1, {
+      signal: new AbortController().signal,
+    });
+
+    expect(suggestions?.items.filter((item) => item.value === "five-whys")).toHaveLength(1);
+    expect(suggestions?.items.filter((item) => item.value === "help")).toHaveLength(1);
+    expect(suggestions?.items.filter((item) => item.value === "skill:help")).toHaveLength(1);
+    expect(suggestions?.items).toContainEqual(
+      expect.objectContaining({
+        value: "five-whys",
+        description: expect.stringContaining("First discovered package"),
+      }),
+    );
+    expect(suggestions?.items).toContainEqual(
+      expect.objectContaining({
+        value: "skill:help",
+        description: expect.stringContaining("First help skill"),
+      }),
+    );
+  });
+
   test("does not turn Tab outside slash commands into file completion", () => {
     const provider = createNoesisCommandAutocompleteProvider();
 

@@ -347,7 +347,11 @@ function buildSections(
   const source = exactSource ?? detail?.sourceArtifact?.preview;
   // A failure reported through the action output is already the error section; showing the same
   // payload again as a result would just push the useful sections further down.
-  const result = action.output === undefined || (error && !detail?.error) ? detail?.result : action.output;
+  const semanticResult =
+    action.output === undefined || (error && !detail?.error) ? detail?.result : action.output;
+  // Raw mode is the exact escape hatch. Even when semantic mode suppresses a failed output that
+  // duplicates the error section, the untouched structured payload must remain inspectable.
+  const rawResult = action.output === undefined ? detail?.result : action.output;
   const common = [
     // The reason a failed run gets opened is the error, so it never sits below the program.
     ...(error
@@ -368,7 +372,7 @@ function buildSections(
       ...common,
       ...rawPayloadSection("raw input", action.input, colorEnabled),
       ...rawPayloadSection("raw update", action.update, colorEnabled),
-      ...rawPayloadSection("raw result", result, colorEnabled),
+      ...rawPayloadSection("raw result", rawResult, colorEnabled),
       ...artifactSection("stdout", detail?.stdoutArtifact, colorEnabled),
       ...artifactSection("stderr", detail?.stderrArtifact, colorEnabled),
       ...provenanceSection(detail, colorEnabled),
@@ -394,7 +398,7 @@ function buildSections(
     ...(children.length > 0
       ? []
       : semanticPayloadSection("update", action.name, action.update, colorEnabled)),
-    ...semanticPayloadSection("result", action.name, result, colorEnabled),
+    ...semanticPayloadSection("result", action.name, semanticResult, colorEnabled),
     ...artifactSection("stdout", detail?.stdoutArtifact, colorEnabled),
     ...artifactSection("stderr", detail?.stderrArtifact, colorEnabled),
     ...provenanceSection(detail, colorEnabled),

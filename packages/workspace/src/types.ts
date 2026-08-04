@@ -605,6 +605,7 @@ export interface OperationalRepositories {
     readonly get: (toolCallId: string) => Promise<ToolCallRecord | undefined>;
     readonly put: (record: ToolCallRecord) => Promise<DatabaseRowRef>;
     readonly listForSession: (sessionId: string) => Promise<readonly ToolCallRecord[]>;
+    readonly listForTurn: (sessionId: string, turnId: string) => Promise<readonly ToolCallRecord[]>;
     readonly listForExecution: (executionId: string) => Promise<readonly ToolCallRecord[]>;
     readonly interruptRunningForTurn: (turnId: string, interruptedAt: string) => Promise<number>;
   };

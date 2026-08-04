@@ -131,15 +131,15 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
           }),
         ),
       );
-      const toolCalls = (await options.workspace.operational.toolCalls.listForSession(request.sessionId))
-        .filter((toolCall) => toolCall.turnId === request.turnId)
-        .sort(
-          (left, right) =>
-            (left.timelineSequence ?? Number.MAX_SAFE_INTEGER) -
-              (right.timelineSequence ?? Number.MAX_SAFE_INTEGER) ||
-            left.createdAt.localeCompare(right.createdAt) ||
-            left.toolCallId.localeCompare(right.toolCallId),
-        );
+      const toolCalls = [
+        ...(await options.workspace.operational.toolCalls.listForTurn(request.sessionId, request.turnId)),
+      ].sort(
+        (left, right) =>
+          (left.timelineSequence ?? Number.MAX_SAFE_INTEGER) -
+            (right.timelineSequence ?? Number.MAX_SAFE_INTEGER) ||
+          left.createdAt.localeCompare(right.createdAt) ||
+          left.toolCallId.localeCompare(right.toolCallId),
+      );
       const toolRefs: readonly EvidenceRef[] = Object.freeze(
         toolCalls.map((toolCall) =>
           Object.freeze({

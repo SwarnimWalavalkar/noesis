@@ -184,6 +184,19 @@ describe("turn settlement", () => {
       },
     ]);
     seedForegroundTurn(workspace, "session-1", "turn-accepted", plan.planId);
+    seedForegroundTurn(workspace, "session-1", "turn-unrelated", "plan-turn-unrelated");
+    await workspace.operational.toolCalls.put({
+      toolCallId: "turn-unrelated:tool-failure",
+      sessionId: "session-1",
+      turnId: "turn-unrelated",
+      toolName: "files.read",
+      request: Object.freeze({ path: "also-missing.md" }),
+      response: Object.freeze({ error: "not found" }),
+      status: "failed",
+      sensitivity: "normal",
+      createdAt: "2026-07-25T00:00:00.500Z",
+      completedAt: "2026-07-25T00:00:00.750Z",
+    });
 
     await expect(
       settlement.run({
@@ -206,6 +219,18 @@ describe("turn settlement", () => {
             createdAt: "2026-07-25T00:00:01.000Z",
             completedAt: "2026-07-25T00:00:02.000Z",
           });
+          await workspace.operational.toolCalls.put({
+            toolCallId: "turn-accepted:tool-success",
+            sessionId: "session-1",
+            turnId: "turn-accepted",
+            toolName: "files.read",
+            request: Object.freeze({ path: "found.md" }),
+            response: Object.freeze({ content: "found" }),
+            status: "completed",
+            sensitivity: "normal",
+            createdAt: "2026-07-25T00:00:03.000Z",
+            completedAt: "2026-07-25T00:00:04.000Z",
+          });
           return {
             outcome: "completed",
             output: "done",
@@ -224,9 +249,14 @@ describe("turn settlement", () => {
       {
         outcome: "unknown",
         toolFailureCount: 1,
-        evidenceTables: ["messages", "messages", "tool_calls"],
+        evidenceTables: ["messages", "messages", "tool_calls", "tool_calls"],
       },
     ]);
+    expect(
+      (await workspace.operational.toolCalls.listForTurn("session-1", "turn-accepted")).map(
+        (toolCall) => toolCall.toolCallId,
+      ),
+    ).toEqual(["turn-accepted:tool-failure", "turn-accepted:tool-success"]);
     expect(await workspace.operational.outcomes.listForSession("session-1")).toHaveLength(1);
     expect(await workspace.operational.outcomes.get("turn-accepted:outcome")).toMatchObject({
       status: "unknown",
