@@ -1,17 +1,29 @@
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import {
+  type ActionPayloadPresentation,
+  type PresentedTool,
+  presentActionPayload,
+} from "./action-presentation.ts";
 import { formatCount, formatDuration, sourceOf, summarizeNestedAction } from "./action-summary.ts";
 import type { TuiExecutionArtifact, TuiExecutionDetail } from "./runtime-port.ts";
 import {
   childActions,
-  timelineActions,
   type NoesisTuiState,
   type TuiAgentAction,
   type TuiInspectorState,
+  timelineActions,
 } from "./state.ts";
 import { highlightCode } from "./syntax.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 
-export const INSPECTOR_HINT = "↑/↓ · pgup/pgdn scroll · esc close";
+const SEMANTIC_INSPECTOR_HINT = "↑/↓ scroll · pgup/pgdn scroll · space exact · esc close";
+const RAW_INSPECTOR_HINT = "↑/↓ scroll · pgup/pgdn scroll · space semantic · esc close";
+/** Compatibility export for the inspector's default semantic view. */
+export const INSPECTOR_HINT = SEMANTIC_INSPECTOR_HINT;
+
+function inspectorHint(view: TuiInspectorState["view"]): string {
+  return view === "raw" ? RAW_INSPECTOR_HINT : SEMANTIC_INSPECTOR_HINT;
+}
 
 export interface RenderedRunInspector {
   readonly rows: readonly string[];
@@ -22,6 +34,8 @@ export interface RenderedRunInspector {
 const ARTIFACT_PREVIEW_MAX_CHARACTERS = 20_000;
 const DIGEST_DISPLAY_CHARACTERS = 24;
 const CALL_SUMMARY_MAX_CHARACTERS = 256;
+const TOOL_DESCRIPTION_MAX_CHARACTERS = 180;
+const TOOL_NAME_MAX_CHARACTERS = 128;
 
 interface Section {
   readonly label: string;
@@ -55,6 +69,20 @@ function encodeJson(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function jsonLines(value: unknown, colorEnabled: boolean): readonly string[] {
+  return highlightCode(exactText(encodeJson(value)), "json", colorEnabled);
+}
+
+function rawPayloadSection(label: string, value: unknown, colorEnabled: boolean): readonly Section[] {
+  if (value === undefined) return [];
+  return [
+    {
+      label,
+      lines: typeof value === "string" ? exactText(value).split("\n") : jsonLines(value, colorEnabled),
+    },
+  ];
 }
 
 const shortDigest = (digest: string): string => {
@@ -174,6 +202,83 @@ function callsSection(children: readonly TuiAgentAction[], colorEnabled: boolean
   ];
 }
 
+function toolListLines(tools: readonly PresentedTool[], colorEnabled: boolean): readonly string[] {
+  const ordinalWidth = String(tools.length).length;
+  const presented = tools.map((tool) =>
+    Object.freeze({
+      tool,
+      name: boundedInspectorScalar(tool.name, TOOL_NAME_MAX_CHARACTERS),
+    }),
+  );
+  const nameWidth = Math.max(0, ...presented.map(({ name }) => visibleWidth(name)));
+  return [
+    styled(colorEnabled, ANSI.dim, formatCount(tools.length, "tool")),
+    ...presented.map(({ tool, name }, index) => {
+      const metadata = [
+        tool.score === undefined ? undefined : `score ${String(tool.score)}`,
+        tool.revisionId ? `rev ${shortDigest(tool.revisionId)}` : undefined,
+      ].filter((item): item is string => item !== undefined);
+      const description = tool.description
+        ? boundedInspectorScalar(tool.description, TOOL_DESCRIPTION_MAX_CHARACTERS)
+        : undefined;
+      return [
+        styled(colorEnabled, ANSI.dim, String(index + 1).padStart(ordinalWidth)),
+        `${name}${" ".repeat(Math.max(0, nameWidth - visibleWidth(name)))}`,
+        description ? styled(colorEnabled, ANSI.dim, `— ${description}`) : "",
+        metadata.length > 0 ? styled(colorEnabled, ANSI.dim, `· ${metadata.join(" · ")}`) : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+    }),
+  ];
+}
+
+function semanticPayloadLines(
+  presentation: ActionPayloadPresentation,
+  colorEnabled: boolean,
+): readonly string[] {
+  if (presentation.tools) {
+    const catalog = presentation.catalog;
+    const metadata: (readonly [string, string])[] = catalog
+      ? [
+          ...(catalog.catalogId ? ([["catalog", safeInspectorScalar(catalog.catalogId)]] as const) : []),
+          ...(catalog.catalogDigest ? ([["digest", shortDigest(catalog.catalogDigest)]] as const) : []),
+          ...(catalog.effectCount === undefined ? [] : ([["effects", String(catalog.effectCount)]] as const)),
+          ...(catalog.resourceCount === undefined
+            ? []
+            : ([["resources", String(catalog.resourceCount)]] as const)),
+          ...(catalog.credentialCount === undefined
+            ? []
+            : ([["credentials", String(catalog.credentialCount)]] as const)),
+        ]
+      : [];
+    return [
+      ...(metadata.length > 0 ? [...keyValueLines(metadata, colorEnabled), ""] : []),
+      ...toolListLines(presentation.tools, colorEnabled),
+    ];
+  }
+  if (typeof presentation.value === "string") return exactText(presentation.value).split("\n");
+  if (presentation.value === null) return [styled(colorEnabled, ANSI.dim, "(null)")];
+  return jsonLines(presentation.value, colorEnabled);
+}
+
+function semanticPayloadSection(
+  label: string,
+  actionName: string,
+  value: unknown,
+  colorEnabled: boolean,
+): readonly Section[] {
+  if (value === undefined) return [];
+  const presentation = presentActionPayload(actionName, value);
+  return [
+    {
+      label,
+      ...(presentation.unwrapped || presentation.tools ? { note: "semantic · space for exact" } : {}),
+      lines: semanticPayloadLines(presentation, colorEnabled),
+    },
+  ];
+}
+
 function phasesSection(detail: TuiExecutionDetail | undefined, colorEnabled: boolean): readonly Section[] {
   const phases = detail?.phases ?? [];
   if (phases.length === 0) return [];
@@ -239,6 +344,7 @@ function buildSections(
   detail: TuiExecutionDetail | undefined,
   width: number,
   colorEnabled: boolean,
+  view: TuiInspectorState["view"],
 ): readonly Section[] {
   const error = errorText(action, detail);
   // The transcript action is authoritative. Execution artifacts are intentionally bounded
@@ -247,9 +353,12 @@ function buildSections(
   const source = exactSource ?? detail?.sourceArtifact?.preview;
   // A failure reported through the action output is already the error section; showing the same
   // payload again as a result would just push the useful sections further down.
-  const result =
-    action.output === undefined || (error && !detail?.error) ? detail?.result : encodeJson(action.output);
-  return [
+  const semanticResult =
+    action.output === undefined || (error && !detail?.error) ? detail?.result : action.output;
+  // Raw mode is the exact escape hatch. Even when semantic mode suppresses a failed output that
+  // duplicates the error section, the untouched structured payload must remain inspectable.
+  const rawResult = action.output === undefined ? detail?.result : action.output;
+  const common = [
     // The reason a failed run gets opened is the error, so it never sits below the program.
     ...(error
       ? [
@@ -263,6 +372,20 @@ function buildSections(
       : []),
     ...phasesSection(detail, colorEnabled),
     ...callsSection(children, colorEnabled),
+  ];
+  if (view === "raw")
+    return [
+      ...common,
+      ...(!exactSource ? artifactSection("source", detail?.sourceArtifact, colorEnabled) : []),
+      ...rawPayloadSection("raw input", action.input, colorEnabled),
+      ...rawPayloadSection("raw update", action.update, colorEnabled),
+      ...rawPayloadSection("raw result", rawResult, colorEnabled),
+      ...artifactSection("stdout", detail?.stdoutArtifact, colorEnabled),
+      ...artifactSection("stderr", detail?.stderrArtifact, colorEnabled),
+      ...provenanceSection(detail, colorEnabled),
+    ];
+  return [
+    ...common,
     ...(source
       ? [
           {
@@ -276,25 +399,11 @@ function buildSections(
         : [
             {
               label: "input",
-              lines: highlightCode(exactText(encodeJson(action.input)), "json", colorEnabled),
+              lines: jsonLines(action.input, colorEnabled),
             },
           ]),
-    ...(action.update === undefined
-      ? []
-      : [
-          {
-            label: "update",
-            lines: highlightCode(exactText(encodeJson(action.update)), "json", colorEnabled),
-          },
-        ]),
-    ...(result
-      ? [
-          {
-            label: "result",
-            lines: highlightCode(exactText(result), "json", colorEnabled),
-          },
-        ]
-      : []),
+    ...semanticPayloadSection("update", action.name, action.update, colorEnabled),
+    ...semanticPayloadSection("result", action.name, semanticResult, colorEnabled),
     ...artifactSection("stdout", detail?.stdoutArtifact, colorEnabled),
     ...artifactSection("stderr", detail?.stderrArtifact, colorEnabled),
     ...provenanceSection(detail, colorEnabled),
@@ -374,6 +483,7 @@ interface PreparedInspectorDocument {
   readonly children: readonly TuiAgentAction[];
   readonly detail: TuiExecutionDetail | undefined;
   readonly inspectorStatus: TuiInspectorState["status"];
+  readonly inspectorView: TuiInspectorState["view"];
   readonly width: number;
   readonly colorEnabled: boolean;
   readonly rows: readonly string[];
@@ -397,6 +507,7 @@ function prepareInspectorDocument(
     cached.action === action &&
     cached.detail === inspector.detail &&
     cached.inspectorStatus === inspector.status &&
+    cached.inspectorView === inspector.view &&
     cached.width === width &&
     cached.colorEnabled === colorEnabled &&
     sameActionReferences(cached.children, children)
@@ -406,11 +517,9 @@ function prepareInspectorDocument(
   const body = action
     ? [
         ...identityLines(action, children, inspector, colorEnabled),
-        ...buildSections(action, children, inspector.detail, width, colorEnabled).flatMap((section) => [
-          "",
-          sectionRule(section, width, colorEnabled),
-          ...section.lines,
-        ]),
+        ...buildSections(action, children, inspector.detail, width, colorEnabled, inspector.view).flatMap(
+          (section) => ["", sectionRule(section, width, colorEnabled), ...section.lines],
+        ),
       ]
     : ["This run is no longer available."];
   const rows = body.flatMap((line) => {
@@ -422,6 +531,7 @@ function prepareInspectorDocument(
     children: [...children],
     detail: inspector.detail,
     inspectorStatus: inspector.status,
+    inspectorView: inspector.view,
     width,
     colorEnabled,
     rows,
@@ -499,7 +609,13 @@ export function renderRunInspectorFrame(
             : dim("│");
         return `${dim("│")} ${padTo(elideText(line, inner), inner)} ${scrollbar}`;
       }),
-      frameEdge({ left: "╰", right: "╯" }, dim(INSPECTOR_HINT), dim(position), width, colorEnabled),
+      frameEdge(
+        { left: "╰", right: "╯" },
+        dim(inspectorHint(inspector.view)),
+        dim(position),
+        width,
+        colorEnabled,
+      ),
     ],
   };
 }

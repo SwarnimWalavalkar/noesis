@@ -1,8 +1,8 @@
 import {
   Container,
   matchesKey,
-  ProcessTerminal,
   type OverlayHandle,
+  ProcessTerminal,
   type Terminal,
   TUI,
 } from "@earendil-works/pi-tui";
@@ -23,22 +23,26 @@ import {
   createStatusView,
 } from "./rendering.ts";
 import {
-  stopVisibleInteraction,
   type NoesisTuiRuntime,
+  stopVisibleInteraction,
   type TuiInteractionCommand,
   type TuiInteractionEvent,
   type TuiInteractionResult,
   type TuiInteractionSnapshot,
 } from "./runtime-port.ts";
-import { createSafeEditor, createSelectTheme } from "./safe-editor.ts";
+import { createSafeEditor, createSelectTheme, enrichEditorSkills } from "./safe-editor.ts";
 import {
   createResponsiveSessionPicker,
   createSessionPickerItems,
   resumableTrail,
   type TuiStartOptions,
 } from "./session-picker.ts";
-import { executionForInteractionPhase } from "./state.ts";
-import { initialTuiState, interactionViewFromSnapshot, timelineActions } from "./state.ts";
+import {
+  executionForInteractionPhase,
+  initialTuiState,
+  interactionViewFromSnapshot,
+  timelineActions,
+} from "./state.ts";
 import { ANSI, safeTerminalText, shouldUseColor, styled } from "./theme.ts";
 
 export * from "./action-summary.ts";
@@ -123,6 +127,7 @@ export async function startNoesisTui(
   const inputLabelView = createInputLabelView(colorEnabled, () => terminal.rows);
   const helpView = createHelpView(view, () => terminal.rows);
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
+  enrichEditorSkills(editor, runtime.listSkills, () => phase !== "stopped");
   let activeExclusiveCommand: Promise<boolean> | undefined;
   let externalEditorActive = false;
   let turnGeneration = 0;
@@ -312,6 +317,7 @@ export async function startNoesisTui(
           delta: INSPECTOR_PAGE_ROWS,
           maxScroll: inspectorMaxScroll,
         });
+      else if (matchesKey(data, "space")) view.dispatch({ type: "inspector-view-toggled" });
       else return false;
       tui.requestRender();
       return true;
@@ -687,8 +693,7 @@ export async function startNoesisTui(
     });
   };
   tui.addChild(root);
-  const loadTranscript = async (trail: TrailState): Promise<readonly RuntimeTranscriptEntry[]> =>
-    runtime.getTranscript(trail.trailId);
+  const loadTranscript = (trail: TrailState) => runtime.getTranscript(trail.trailId);
   const mountMain = (
     trail: TrailState,
     transcript: readonly RuntimeTranscriptEntry[],

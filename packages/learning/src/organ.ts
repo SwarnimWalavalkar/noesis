@@ -8,32 +8,36 @@ import type {
 import type { AtomicCapabilityRegistry, CapabilityRevisionConstruction } from "@noesis/capabilities";
 import type { UserCriterionReadModel, UserCriterionRepository } from "@noesis/config";
 import {
-  canonicalJson,
-  createId,
-  sha256,
   type Capability,
   type CapabilityRevision,
   type CapabilityRevisionRef,
+  canonicalJson,
+  createId,
   type DefinitionFilePort,
+  durableJobFailureFromError,
+  durableJobFailureError,
   type EvidenceRef,
   type Experiment,
   type ExperimentStorePort,
   type FeedbackSignal,
   type FeedbackSignalStorePort,
   type FileRevisionRef,
+  sameCapabilityRevisionRef,
+  sha256,
 } from "@noesis/domain";
 import type { ExactCitation, HistoryPort } from "@noesis/intelligence";
 import {
-  AutomaticLearningConfigSchema,
-  LearningTurnInputSchema,
-  ReflectorOutputSchema,
-  RevisionAuthorOutputSchema,
   type AutomaticLearningConfig,
+  AutomaticLearningConfigSchema,
   type LearningCitation,
   type LearningRoleConfiguration,
   type LearningSourceCase,
   type LearningTurnInput,
+  LearningTurnInputSchema,
+  normalizeRevisionAuthorOutput,
   type ReflectorOutput,
+  ReflectorOutputSchema,
+  RevisionAuthorInferenceOutputSchema,
   type RevisionAuthorOutput,
   type RoleResearchMetadata,
 } from "./schemas.ts";
@@ -84,6 +88,7 @@ export interface ExperimentBrief {
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly feedbackSignalIds: readonly string[];
   readonly citations: readonly LearningCitation[];
+  readonly recurrenceCitations: readonly LearningCitation[];
   readonly sourceCases: readonly LearningSourceCase[];
   readonly recurrenceCount: number;
   readonly reflectionRun?: LearningRoleResearchRun;
@@ -91,12 +96,33 @@ export interface ExperimentBrief {
 
 export interface ExperimentBriefStore {
   readonly findByDedupeKey: (key: string) => Promise<ExperimentBrief | undefined>;
-  readonly put: (brief: ExperimentBrief) => Promise<void>;
+  /** Create-only. A publication collision must be byte-identical. */
+  readonly put: (brief: ExperimentBrief) => Promise<ExperimentBrief>;
+  /** Deliberate revision of the current brief under an exact experiment identity CAS. */
+  readonly replace: (input: {
+    readonly expectedExperimentId: string;
+    readonly brief: ExperimentBrief;
+  }) => Promise<ExperimentBrief>;
+}
+
+export const EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE = "experiment_brief_publication_collision" as const;
+const MAX_BRIEF_RECONCILIATION_ATTEMPTS = 3;
+
+export function experimentBriefPublicationCollisionError(key: string, cause?: unknown): Error {
+  return durableJobFailureError(`Experiment brief publication collision for ${key}`, {
+    code: EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE,
+    retryable: true,
+    ...(cause === undefined ? {} : { cause }),
+  });
+}
+
+function isExperimentBriefPublicationCollision(error: unknown): boolean {
+  return durableJobFailureFromError(error)?.code === EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE;
 }
 
 /**
- * Pending-brief dedupe only. It is ephemeral or a rebuildable projection; the canonical operational
- * Experiment is written through ExperimentStorePort after AC-03 produces a candidate revision.
+ * Durable semantic-hypothesis material used by the revision author. SQLite owns the matching
+ * operational Experiment from hypothesis onward; the brief remains inspectable authored evidence.
  */
 export function createInMemoryExperimentBriefStore(): ExperimentBriefStore {
   const briefs = new Map<string, ExperimentBrief>();
@@ -104,10 +130,21 @@ export function createInMemoryExperimentBriefStore(): ExperimentBriefStore {
     findByDedupeKey: async (key: string) => briefs.get(key),
     put: async (brief: ExperimentBrief) => {
       const existing = briefs.get(brief.hypothesisDedupeKey);
-      if (existing && existing.experimentId !== brief.experimentId) {
-        throw new Error(`Experiment brief dedupe collision for ${brief.hypothesisDedupeKey}`);
+      if (existing) {
+        if (canonicalJson(existing) !== canonicalJson(brief))
+          throw experimentBriefPublicationCollisionError(brief.hypothesisDedupeKey);
+        return existing;
       }
       briefs.set(brief.hypothesisDedupeKey, brief);
+      return brief;
+    },
+    replace: async (input: { readonly expectedExperimentId: string; readonly brief: ExperimentBrief }) => {
+      const { expectedExperimentId, brief } = input;
+      const existing = briefs.get(brief.hypothesisDedupeKey);
+      if (!existing || existing.experimentId !== expectedExperimentId)
+        throw experimentBriefPublicationCollisionError(brief.hypothesisDedupeKey);
+      briefs.set(brief.hypothesisDedupeKey, brief);
+      return brief;
     },
   });
 }
@@ -161,7 +198,7 @@ export interface AutomaticLearningOrganOptions {
   readonly briefs: ExperimentBriefStore;
   readonly capabilities: AtomicCapabilityRegistry;
   readonly candidateDefinitions: Pick<DefinitionFilePort, "recordCandidateDefinition">;
-  readonly experiments?: ExperimentStorePort;
+  readonly experiments: ExperimentStorePort;
   readonly candidateManifests?: LearningCandidateManifestStore;
   readonly nextId?: (prefix: string) => string;
 }
@@ -258,19 +295,21 @@ function uniqueEvidenceRefs(refs: readonly EvidenceRef[]): readonly EvidenceRef[
 }
 
 function toEvidenceRef(citation: ExactCitation): EvidenceRef | undefined {
-  if (
-    citation.source.kind === "database_row" &&
-    ["sessions", "messages", "tool_calls"].includes(citation.source.table)
-  ) {
-    const table = citation.source.table;
-    if (table !== "sessions" && table !== "messages" && table !== "tool_calls") return undefined;
-    return Object.freeze({
-      kind: "database_row",
-      table,
-      rowId: citation.source.rowId,
-    });
+  const source = citation.source;
+  if (source.kind !== "database_row") return undefined;
+  switch (source.table) {
+    case "sessions":
+    case "messages":
+    case "tool_calls":
+    case "outcomes":
+      return Object.freeze({
+        kind: "database_row",
+        table: source.table,
+        rowId: source.rowId,
+      });
+    default:
+      return undefined;
   }
-  return undefined;
 }
 
 function cloneCitation(citation: ExactCitation): LearningCitation {
@@ -325,6 +364,81 @@ function signalStrength(kind: NonNullable<ReturnType<typeof signalKind>>): numbe
     case "user_request":
       return 1;
   }
+}
+
+function stableSignalId(turn: LearningTurnInput, kind: NonNullable<ReturnType<typeof signalKind>>): string {
+  return `signal_${sha256(
+    canonicalJson({
+      sessionId: turn.sessionId,
+      turnId: turn.turnId,
+      kind,
+      scope: turn.scope,
+      statement: (turn.correction ?? turn.userMessage).trim(),
+    }),
+  ).slice(0, 32)}`;
+}
+
+function citationSourceKey(citation: ExactCitation): string {
+  switch (citation.source.kind) {
+    case "database_row":
+      return `database_row:${citation.source.table}:${citation.source.rowId}`;
+    case "file_revision":
+      return `revision:${citation.source.revisionId}`;
+  }
+}
+
+function evidenceCitationSourceKey(reference: EvidenceRef): string {
+  switch (reference.kind) {
+    case "database_row":
+      return `database_row:${reference.table}:${reference.rowId}`;
+    case "file_revision":
+    case "evidence_revision":
+      return `revision:${reference.revisionId}`;
+    case "artifact_file":
+      return `artifact:${reference.artifactId}`;
+  }
+}
+
+function currentCitationSourceKeys(turn: LearningTurnInput): ReadonlySet<string> {
+  return new Set(turn.evidenceRefs.map(evidenceCitationSourceKey));
+}
+
+function distinctHistoricalCitations(
+  turn: LearningTurnInput,
+  citations: readonly ExactCitation[],
+): readonly LearningCitation[] {
+  const current = currentCitationSourceKeys(turn);
+  const distinct = new Map<string, LearningCitation>();
+  for (const citation of citations) {
+    if (current.has(citationSourceKey(citation))) continue;
+    const key = canonicalJson({ source: citation.source, contentDigest: citation.contentDigest });
+    // Distinct authoritative sources remain distinct even when they contain the same text.
+    if (!distinct.has(key)) distinct.set(key, cloneCitation(citation));
+  }
+  return Object.freeze([...distinct.values()]);
+}
+
+function recurrenceCitations(
+  reflected: Extract<ReflectorOutput, { readonly decision: "experiment" }>,
+  citations: readonly LearningCitation[],
+): readonly LearningCitation[] {
+  const selected = new Map<string, LearningCitation>();
+  for (const index of reflected.recurrenceEvidenceCitationIndexes) {
+    const citation = citations[index];
+    if (!citation) throw new Error(`Reflector cited missing recurrence evidence index ${String(index)}`);
+    selected.set(canonicalJson({ source: citation.source, contentDigest: citation.contentDigest }), citation);
+  }
+  return Object.freeze([...selected.values()]);
+}
+
+function citationKey(citation: LearningCitation): string {
+  return canonicalJson({ source: citation.source, contentDigest: citation.contentDigest });
+}
+
+function uniqueCitations(citations: readonly LearningCitation[]): readonly LearningCitation[] {
+  const unique = new Map<string, LearningCitation>();
+  for (const citation of citations) unique.set(citationKey(citation), cloneCitation(citation));
+  return Object.freeze([...unique.values()]);
 }
 
 function criterionIdFor(capture: CapturedConversationalFeedback): string {
@@ -393,6 +507,23 @@ function normalizedHypothesisKey(scope: string, hypothesis: string): string {
   );
 }
 
+function experimentIdForHypothesis(dedupeKey: string): string {
+  return `experiment_${sha256(`learning-hypothesis:${dedupeKey}`).slice(0, 32)}`;
+}
+
+function followUpExperimentId(input: {
+  readonly dedupeKey: string;
+  readonly predecessorExperimentId: string;
+}): string {
+  return `experiment_${sha256(
+    canonicalJson({
+      kind: "learning-follow-up",
+      dedupeKey: input.dedupeKey,
+      predecessorExperimentId: input.predecessorExperimentId,
+    }),
+  ).slice(0, 32)}`;
+}
+
 function normalizedCapabilityScope(scope: string): string {
   return scope.trim().toLocaleLowerCase().replaceAll(/\s+/gu, " ");
 }
@@ -455,6 +586,7 @@ function freezeBrief(brief: ExperimentBrief): ExperimentBrief {
     evidenceRefs: cloneEvidenceRefs(brief.evidenceRefs),
     feedbackSignalIds: Object.freeze([...brief.feedbackSignalIds]),
     citations: Object.freeze(brief.citations.map((citation) => cloneCitation(citation))),
+    recurrenceCitations: Object.freeze(brief.recurrenceCitations.map((citation) => cloneCitation(citation))),
     sourceCases: Object.freeze(
       brief.sourceCases.map((sourceCase) =>
         Object.freeze({
@@ -493,12 +625,57 @@ function sourceCasesFrom(input: {
   );
 }
 
+function mergeBriefObservation(
+  existing: ExperimentBrief,
+  harvest: SignalHarvestResult,
+  selectedRecurrence: readonly LearningCitation[],
+): ExperimentBrief {
+  const citations = uniqueCitations([...existing.citations, ...harvest.citations]);
+  const recurrence = uniqueCitations([...existing.recurrenceCitations, ...selectedRecurrence]);
+  const evidenceRefs = uniqueEvidenceRefs([...existing.evidenceRefs, ...harvest.evidenceRefs]);
+  return freezeBrief({
+    ...existing,
+    evidenceRefs,
+    feedbackSignalIds: Object.freeze([
+      ...new Set([...existing.feedbackSignalIds, ...harvest.signals.map(({ signal }) => signal.signalId)]),
+    ]),
+    citations,
+    recurrenceCitations: recurrence,
+    sourceCases: Object.freeze(
+      existing.sourceCases.map((sourceCase) =>
+        Object.freeze({
+          ...sourceCase,
+          evidenceRefs,
+          citations,
+        }),
+      ),
+    ),
+    recurrenceCount: recurrence.length,
+  });
+}
+
 export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOptions): AutomaticLearningOrgan {
   const config = AutomaticLearningConfigSchema.parse(options.config);
   validateRoleConfiguration("reflector", config.roles.reflector);
   validateRoleConfiguration("revisionAuthor", config.roles.revisionAuthor);
   validateRoleConfiguration("revisionAgent", config.roles.revisionAgent);
   const nextId = options.nextId ?? createId;
+  const hypothesisOperations = new Map<string, Promise<void>>();
+
+  const serializeHypothesis = async <Value>(key: string, operation: () => Promise<Value>): Promise<Value> => {
+    const predecessor = hypothesisOperations.get(key) ?? Promise.resolve();
+    const running = predecessor.catch(() => undefined).then(operation);
+    const marker = running.then(
+      () => undefined,
+      () => undefined,
+    );
+    hypothesisOperations.set(key, marker);
+    try {
+      return await running;
+    } finally {
+      if (hypothesisOperations.get(key) === marker) hypothesisOperations.delete(key);
+    }
+  };
 
   const recordCriterion = async (
     turn: LearningTurnInput,
@@ -550,19 +727,23 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     const resolved = await options.history.resolve(
       searched.hits.slice(0, config.retrieval.maxResults).map((hit) => hit.citation),
     );
-    const citations = Object.freeze(resolved.map(cloneCitation));
-    const historicalEvidence = resolved.flatMap((citation) => {
+    const citations = distinctHistoricalCitations(turn, resolved);
+    const historicalEvidence = citations.flatMap((citation) => {
       const reference = toEvidenceRef(citation);
       return reference ? [reference] : [];
     });
     const evidenceRefs = uniqueEvidenceRefs([...turn.evidenceRefs, ...historicalEvidence]);
     const signal: FeedbackSignal = Object.freeze({
-      signalId: nextId("signal"),
+      signalId: stableSignalId(turn, kind),
       kind,
       scope: turn.scope,
-      evidenceRefs,
+      // The feedback signal cites the observation that created it. Retrieved history belongs to
+      // the reflection brief and must not make a retry mutate the signal's immutable identity.
+      evidenceRefs: cloneEvidenceRefs(turn.evidenceRefs),
       strength: signalStrength(kind),
-      novelty: resolved.length >= config.retrieval.recurrenceThreshold ? 0.35 : 0.9,
+      // Novelty is deliberately left neutral here. Semantic recurrence is selected by the LLM
+      // reflector from exact citations instead of inferred from raw search hit count.
+      novelty: 0.5,
       sensitivity: turn.sensitivity,
     });
     const rowRef = await options.feedbackSignals.recordFeedbackSignal(signal);
@@ -572,7 +753,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       signals: Object.freeze([Object.freeze({ signal, rowRef })]),
       evidenceRefs,
       citations,
-      recurrenceCount: resolved.length,
+      recurrenceCount: 0,
       ...(criterionCapture ? { criterionCapture } : {}),
     });
   };
@@ -665,46 +846,113 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       });
     }
 
-    const experimentId = nextId("experiment");
-    const dedupeKey = normalizedHypothesisKey(reflected.value.scope, reflected.value.hypothesis);
-    const capability = capabilityFromReflection(request.capability, reflected.value);
-    const brief = freezeBrief({
-      experimentId,
-      title: reflected.value.title,
-      hypothesis: reflected.value.hypothesis,
-      hypothesisDedupeKey: dedupeKey,
-      scope: reflected.value.scope,
-      capability,
-      baselineRevision: request.baselineRevision,
-      evidenceRefs: harvest.evidenceRefs,
-      feedbackSignalIds: harvest.signals.map(({ signal }) => signal.signalId),
-      citations: harvest.citations,
-      sourceCases: sourceCasesFrom({
+    const reflection = reflected.value;
+    const selectedRecurrence = recurrenceCitations(reflection, harvest.citations);
+    const dedupeKey = normalizedHypothesisKey(reflection.scope, reflection.hypothesis);
+    const capability = capabilityFromReflection(request.capability, reflection);
+    const makeBrief = (
+      experimentId: string,
+      evidenceRefs: readonly EvidenceRef[] = harvest.evidenceRefs,
+    ): ExperimentBrief =>
+      freezeBrief({
         experimentId,
-        scope: reflected.value.scope,
-        cases: reflected.value.sourceCases,
-        evidenceRefs: harvest.evidenceRefs,
+        title: reflection.title,
+        hypothesis: reflection.hypothesis,
+        hypothesisDedupeKey: dedupeKey,
+        scope: reflection.scope,
+        capability,
+        baselineRevision: request.baselineRevision,
+        evidenceRefs,
+        feedbackSignalIds: harvest.signals.map(({ signal }) => signal.signalId),
         citations: harvest.citations,
-      }),
-      recurrenceCount: harvest.recurrenceCount,
-      reflectionRun,
+        recurrenceCitations: selectedRecurrence,
+        sourceCases: sourceCasesFrom({
+          experimentId,
+          scope: reflection.scope,
+          cases: reflection.sourceCases,
+          evidenceRefs,
+          citations: harvest.citations,
+        }),
+        recurrenceCount: selectedRecurrence.length,
+        reflectionRun,
+      });
+
+    const reconcileObservation = async (
+      current: ExperimentBrief,
+      attemptsRemaining = MAX_BRIEF_RECONCILIATION_ATTEMPTS,
+    ): Promise<Readonly<{ status: "experiment" | "deduped"; brief: ExperimentBrief }>> => {
+      const experiment = await options.experiments.getExperiment(current.experimentId);
+      let status: "experiment" | "deduped";
+      let proposed: ExperimentBrief;
+      if (experiment?.status === "completed") {
+        const experimentId = followUpExperimentId({
+          dedupeKey,
+          predecessorExperimentId: experiment.experimentId,
+        });
+        const predecessorRef: EvidenceRef = Object.freeze({
+          kind: "database_row",
+          table: "experiments",
+          rowId: experiment.experimentId,
+        });
+        proposed = makeBrief(experimentId, uniqueEvidenceRefs([predecessorRef, ...harvest.evidenceRefs]));
+        await persistHypothesisExperiment(proposed);
+        status = "experiment";
+      } else {
+        await attachHarvestToExperiment(current, harvest);
+        proposed = mergeBriefObservation(current, harvest, selectedRecurrence);
+        status = "deduped";
+      }
+      if (canonicalJson(current) === canonicalJson(proposed)) {
+        return Object.freeze({ status, brief: current });
+      }
+      try {
+        return Object.freeze({
+          status,
+          brief: await options.briefs.replace({
+            expectedExperimentId: current.experimentId,
+            brief: proposed,
+          }),
+        });
+      } catch (error) {
+        if (!isExperimentBriefPublicationCollision(error) || attemptsRemaining <= 1) throw error;
+        const winner = await options.briefs.findByDedupeKey(dedupeKey);
+        if (!winner) throw error;
+        return await reconcileObservation(winner, attemptsRemaining - 1);
+      }
+    };
+
+    const observed = await serializeHypothesis(dedupeKey, async () => {
+      const existing = await options.briefs.findByDedupeKey(dedupeKey);
+      if (!existing) {
+        const brief = makeBrief(experimentIdForHypothesis(dedupeKey));
+        await persistHypothesisExperiment(brief);
+        try {
+          return Object.freeze({ status: "experiment" as const, brief: await options.briefs.put(brief) });
+        } catch (error) {
+          if (!isExperimentBriefPublicationCollision(error)) throw error;
+          const winner = await options.briefs.findByDedupeKey(dedupeKey);
+          if (!winner) throw error;
+          return await reconcileObservation(winner);
+        }
+      }
+
+      return await reconcileObservation(existing);
     });
-    const existing = await options.briefs.findByDedupeKey(dedupeKey);
-    if (existing) {
+
+    if (observed.status === "deduped") {
       return Object.freeze({
         status: "deduped",
-        harvest,
-        brief: existing,
+        harvest: Object.freeze({ ...harvest, recurrenceCount: selectedRecurrence.length }),
+        brief: observed.brief,
         reflectionRun,
         notification: criterionNotification(),
         interruption: null,
       });
     }
-    await options.briefs.put(brief);
     return Object.freeze({
       status: "experiment",
-      harvest,
-      brief,
+      harvest: Object.freeze({ ...harvest, recurrenceCount: selectedRecurrence.length }),
+      brief: observed.brief,
       reflectionRun,
       notification:
         criterionNotification() ??
@@ -713,11 +961,65 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
           : Object.freeze({
               mode: config.notifications,
               kind: "experiment",
-              message: `Learning experiment ready: ${brief.title}`,
+              message: `Learning experiment ready: ${observed.brief.title}`,
             })),
       interruption: null,
     });
   };
+
+  async function persistHypothesisExperiment(brief: ExperimentBrief): Promise<Experiment> {
+    const experiment: Experiment = Object.freeze({
+      experimentId: brief.experimentId,
+      hypothesis: brief.hypothesis,
+      scope: brief.scope,
+      evidenceRefs: cloneEvidenceRefs(brief.evidenceRefs),
+      baselineRevision: Object.freeze({ ...brief.baselineRevision }),
+      candidateRevisions: Object.freeze([]),
+      feedbackSignalIds: Object.freeze([...brief.feedbackSignalIds]),
+      status: "hypothesis",
+    });
+    const existing = await options.experiments.getExperiment(brief.experimentId);
+    if (existing) {
+      if (
+        existing.hypothesis !== experiment.hypothesis ||
+        existing.scope !== experiment.scope ||
+        !sameCapabilityRevisionRef(existing.baselineRevision, experiment.baselineRevision)
+      )
+        throw new Error(`Hypothesis experiment ${brief.experimentId} conflicts with its durable identity`);
+      if (existing.status !== "hypothesis") return existing;
+      const merged = Object.freeze({
+        ...existing,
+        evidenceRefs: uniqueEvidenceRefs([...existing.evidenceRefs, ...experiment.evidenceRefs]),
+        feedbackSignalIds: Object.freeze([
+          ...new Set([...existing.feedbackSignalIds, ...experiment.feedbackSignalIds]),
+        ]),
+      });
+      await options.experiments.putExperiment(merged);
+      return merged;
+    }
+    await options.experiments.putExperiment(experiment);
+    return experiment;
+  }
+
+  async function attachHarvestToExperiment(
+    brief: ExperimentBrief,
+    harvest: SignalHarvestResult,
+  ): Promise<Experiment> {
+    const existing = await persistHypothesisExperiment(brief);
+    if (existing.status === "completed") return existing;
+    const feedbackSignalIds = Object.freeze([
+      ...new Set([...existing.feedbackSignalIds, ...harvest.signals.map(({ signal }) => signal.signalId)]),
+    ]);
+    const evidenceRefs = uniqueEvidenceRefs([...existing.evidenceRefs, ...harvest.evidenceRefs]);
+    if (
+      canonicalJson(feedbackSignalIds) === canonicalJson(existing.feedbackSignalIds) &&
+      canonicalJson(evidenceRefs) === canonicalJson(existing.evidenceRefs)
+    )
+      return existing;
+    const updated = Object.freeze({ ...existing, feedbackSignalIds, evidenceRefs });
+    await options.experiments.putExperiment(updated);
+    return updated;
+  }
 
   const recordCandidateFile = async (input: {
     readonly capabilityId: string;
@@ -768,20 +1070,24 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     revisionRef: CapabilityRevisionRef,
   ): Promise<Experiment> => {
     const manifestRevision = await options.candidateManifests?.persist({ brief, revision, revisionRef });
+    const current = await options.experiments.getExperiment(brief.experimentId);
     const experiment: Experiment = Object.freeze({
       experimentId: brief.experimentId,
       hypothesis: brief.hypothesis,
       scope: brief.scope,
       evidenceRefs: uniqueEvidenceRefs([
+        ...(current?.evidenceRefs ?? []),
         ...brief.evidenceRefs,
         ...(manifestRevision ? [manifestRevision] : []),
       ]),
       baselineRevision: Object.freeze({ ...brief.baselineRevision }),
       candidateRevisions: Object.freeze([Object.freeze({ ...revisionRef })]),
-      feedbackSignalIds: Object.freeze([...brief.feedbackSignalIds]),
+      feedbackSignalIds: Object.freeze([
+        ...new Set([...(current?.feedbackSignalIds ?? []), ...brief.feedbackSignalIds]),
+      ]),
       status: "authoring",
     });
-    await options.experiments?.putExperiment(experiment);
+    await options.experiments.putExperiment(experiment);
     return experiment;
   };
 
@@ -799,7 +1105,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       input.predecessorRevision.capabilityId === input.brief.capability.capabilityId;
     options.capabilities.registerCapability(input.brief.capability);
     const runId = nextId(input.role === "revision_author" ? "author" : "revise");
-    const authored = await options.inference.run(
+    const inferred = await options.inference.run(
       roleRequest({
         runId,
         role: input.role,
@@ -808,8 +1114,12 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         evidenceRefs: input.brief.evidenceRefs,
         ...(input.signal ? { signal: input.signal } : {}),
       }),
-      RevisionAuthorOutputSchema,
+      RevisionAuthorInferenceOutputSchema,
     );
+    const authored = Object.freeze({
+      ...inferred,
+      value: normalizeRevisionAuthorOutput(inferred.value),
+    });
     const authorRun = researchRun(runId, input.role, input.configuration, authored.trace);
     const capabilityRevisionId = nextId("capability_revision");
     const promptModules = await materializeList({
@@ -970,6 +1280,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       evidenceRefs,
       feedbackSignalIds: request.parentExperiment.feedbackSignalIds,
       citations,
+      recurrenceCitations: citations,
       sourceCases,
       recurrenceCount: citations.length,
     });

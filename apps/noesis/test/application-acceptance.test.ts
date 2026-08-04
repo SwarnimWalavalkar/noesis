@@ -97,13 +97,21 @@ describe("credential-free Pi application acceptance", () => {
       await runtime.controlPlane.idle();
 
       const outcome = await runtime.debug.adaptations.feedback.getOutcome(experiment.experimentId);
+      const origin = activated
+        ? await runtime.debug.adaptations.feedback.operationForActivation(activated.activationId)
+        : undefined;
+      expect(origin?.binding.experimentId).toBe(experiment.experimentId);
       expect(outcome).toMatchObject({
         decision: "revert",
+        restoreSourceActivationId: origin?.previousActivationId,
         restoredActivationId: expect.any(String),
       });
-      const restored = await runtime.debug.adaptations.activations.current();
-      expect(restored?.activeCapabilityRevisions).toEqual(genesis.activeCapabilityRevisions);
-      expect(restored?.activeCapabilityRevisions[candidateRevision.capabilityId]).toBeUndefined();
+      expect(
+        await runtime.debug.workspace.research.experiments.getExperiment(experiment.experimentId),
+      ).toMatchObject({
+        status: "completed",
+        outcome: "revert",
+      });
 
       const storedOutcomes = await runtime.debug.workspace.operational.outcomes.listForSession(
         relatedSession.trailId,

@@ -1,22 +1,34 @@
 import {
+  canonicalJson,
+  createId,
   type EffectClass,
   type JsonValue,
   JsonValueSchema,
   type PermissionManifest,
-  canonicalJson,
-  createId,
   sha256,
   toJsonValue,
 } from "@noesis/domain";
 import {
-  createEffectExecutionFailure,
-  inspectEffectExecutionFailure,
   type AuthorityBoundary,
+  createEffectExecutionFailure,
   type EffectDecision,
   type EffectRequest,
+  inspectEffectExecutionFailure,
 } from "@noesis/policy";
 import { z } from "zod";
 import { MAX_TOOL_RESULT_BYTES } from "./limits.ts";
+
+const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_.-]{0,127}$/u;
+const MAX_TOOL_NAME_CHARACTERS = 128;
+
+function isValidToolName(name: string): boolean {
+  return name.length <= MAX_TOOL_NAME_CHARACTERS && TOOL_NAME_PATTERN.test(name);
+}
+
+function displayToolName(name: string): string {
+  if (name.length <= MAX_TOOL_NAME_CHARACTERS) return name;
+  return `${name.slice(0, MAX_TOOL_NAME_CHARACTERS)}… [truncated]`;
+}
 
 export * from "./builtins.ts";
 export * from "./limits.ts";
@@ -248,6 +260,71 @@ function scoreDescriptor(descriptor: FrozenToolDescriptor, terms: readonly strin
   }, 0);
 }
 
+function editDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 0; leftIndex < left.length; leftIndex += 1) {
+    const current = [leftIndex + 1];
+    for (let rightIndex = 0; rightIndex < right.length; rightIndex += 1) {
+      current.push(
+        Math.min(
+          (current[rightIndex] ?? 0) + 1,
+          (previous[rightIndex + 1] ?? 0) + 1,
+          (previous[rightIndex] ?? 0) + (left[leftIndex] === right[rightIndex] ? 0 : 1),
+        ),
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous.at(-1) ?? 0;
+}
+
+function nearestToolNames(
+  requestedName: string,
+  descriptors: readonly FrozenToolDescriptor[],
+): readonly string[] {
+  if (requestedName.length > MAX_TOOL_NAME_CHARACTERS) return Object.freeze([]);
+  const normalized = requestedName.toLocaleLowerCase();
+  const separator = normalized.indexOf(".");
+  const requestedHasSeparator = separator !== -1;
+  const requestedFamily = separator === -1 ? normalized : normalized.slice(0, separator);
+  const requestedOperation = separator === -1 ? normalized : normalized.slice(separator + 1);
+  return Object.freeze(
+    descriptors
+      .map((descriptor) => {
+        const name = descriptor.name.toLocaleLowerCase();
+        const candidateSeparator = name.indexOf(".");
+        const candidateHasSeparator = candidateSeparator !== -1;
+        const candidateFamily = candidateSeparator === -1 ? name : name.slice(0, candidateSeparator);
+        const candidateOperation = candidateSeparator === -1 ? name : name.slice(candidateSeparator + 1);
+        const sameFamily =
+          requestedHasSeparator &&
+          candidateHasSeparator &&
+          requestedFamily.length > 0 &&
+          requestedFamily === candidateFamily;
+        const distance = sameFamily
+          ? editDistance(requestedOperation, candidateOperation)
+          : editDistance(normalized, name);
+        const comparedLength = Math.max(
+          sameFamily ? requestedOperation.length : normalized.length,
+          sameFamily ? candidateOperation.length : name.length,
+        );
+        return Object.freeze({ name: descriptor.name, sameFamily, distance, comparedLength });
+      })
+      .filter(
+        ({ distance, comparedLength }) =>
+          comparedLength > 0 && distance <= Math.max(1, Math.floor(comparedLength / 3)),
+      )
+      .sort(
+        (left, right) =>
+          Number(right.sameFamily) - Number(left.sameFamily) ||
+          left.distance - right.distance ||
+          left.name.localeCompare(right.name),
+      )
+      .slice(0, 3)
+      .map(({ name }) => name),
+  );
+}
+
 function failure(code: ToolInvocationFailureCode, message: string): ToolInvocationFailure {
   return Object.freeze({ ok: false, code, message });
 }
@@ -275,7 +352,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
   });
   const names = new Set<string>();
   for (const entry of frozen) {
-    if (!/^[a-z][a-z0-9_.-]{0,127}$/u.test(entry.descriptor.name))
+    if (!isValidToolName(entry.descriptor.name))
       throw new Error(`Invalid tool name ${entry.descriptor.name}`);
     if (names.has(entry.descriptor.name)) throw new Error(`Duplicate tool name ${entry.descriptor.name}`);
     names.add(entry.descriptor.name);
@@ -316,10 +393,21 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
 
   const invoke: ToolBroker["invoke"] = async (name, rawInput, invocationContext) => {
     const entry = byName.get(name);
-    if (!entry) return failure("not_found", `Unknown tool: ${name}`);
+    if (!entry) {
+      const suggestions = nearestToolNames(name, descriptors);
+      const recovery = suggestions.length > 0 ? ` Did you mean ${suggestions.join(", ")}?` : "";
+      return failure(
+        "not_found",
+        `Unknown tool: ${displayToolName(name)}.${recovery} Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).`,
+      );
+    }
     if (invocationContext.signal.aborted) return failure("cancelled", "Execution was cancelled");
     const parsedInput = entry.definition.inputSchema.safeParse(rawInput);
-    if (!parsedInput.success) return failure("invalid_input", z.prettifyError(parsedInput.error));
+    if (!parsedInput.success)
+      return failure(
+        "invalid_input",
+        `Invalid input for ${name}: ${z.prettifyError(parsedInput.error)} Inspect the exact input schema with noesis.describe("${name}").`,
+      );
     const input = toJsonValue(parsedInput.data);
     const callId = invocationContext.callId ?? createId("tool_call");
     const logicalExecutionId = invocationContext.logicalExecutionId ?? invocationContext.executionId;

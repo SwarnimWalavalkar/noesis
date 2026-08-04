@@ -2,6 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { AgentRuntimeRequest, FrozenTurnPlan } from "@noesis/agent-types";
 import { type JsonValue, JsonValueSchema } from "@noesis/domain";
 import { z } from "zod";
+import type { PiFrozenToolCatalog } from "./execute-tool.ts";
 
 const MAX_DIRECT_TOOL_RESULT_BYTES = 64 * 1024;
 const inspectInput = z.strictObject({
@@ -24,7 +25,7 @@ export interface PiSelfToolAdapter {
     readonly section: z.infer<typeof inspectInput>["section"];
     readonly plan: FrozenTurnPlan;
     readonly request: AgentRuntimeRequest;
-    readonly catalog?: { readonly catalogId: string; readonly catalogDigest: string };
+    readonly catalog?: PiFrozenToolCatalog;
     readonly signal: AbortSignal;
   }) => Promise<JsonValue>;
   readonly remember: (
@@ -93,14 +94,14 @@ export function createPiSelfTools(input: {
   readonly plan: FrozenTurnPlan;
   readonly request: AgentRuntimeRequest;
   readonly signal: AbortSignal;
-  readonly catalog?: { readonly catalogId: string; readonly catalogDigest: string };
+  readonly catalog?: PiFrozenToolCatalog;
 }): readonly AgentTool[] {
   return Object.freeze([
     directTool({
       name: "inspect_self",
       label: "Inspect self",
       description:
-        "Inspect Noesis's active context, capabilities, memory, experiments, or executable tool surface.",
+        "Inspect Noesis's active context, capabilities, memory, experiments, or executable tool surface. Use section 'tools' to see the exact frozen tool names, descriptions, revisions, and input/output schemas available to execute in this turn.",
       schema: inspectInput,
       signal: input.signal,
       execute: async ({ section = "overview" }, signal) =>

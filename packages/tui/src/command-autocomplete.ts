@@ -1,7 +1,7 @@
 import {
-  CombinedAutocompleteProvider,
   type AutocompleteItem,
   type AutocompleteProvider,
+  CombinedAutocompleteProvider,
   type SlashCommand,
 } from "@earendil-works/pi-tui";
 
@@ -33,6 +33,24 @@ const completeQueueCommand = (argumentPrefix: string): AutocompleteItem[] => {
   };
   return !normalizedPrefix || item.value.startsWith(normalizedPrefix) ? [item] : [];
 };
+
+export interface SkillSlashCommand {
+  readonly name: string;
+  readonly description: string;
+  readonly disableModelInvocation?: boolean;
+}
+
+/** Skill discovery enriches autocomplete but must never gate TUI startup. */
+export async function loadSkillSlashCommands(
+  discover?: () => Promise<readonly SkillSlashCommand[]>,
+): Promise<readonly SkillSlashCommand[]> {
+  if (!discover) return Object.freeze([]);
+  try {
+    return await discover();
+  } catch {
+    return Object.freeze([]);
+  }
+}
 
 export const NOESIS_SLASH_COMMANDS = [
   {
@@ -90,6 +108,10 @@ export const NOESIS_SLASH_COMMANDS = [
     argumentHint: "<execution-id>",
   },
   {
+    name: "learning",
+    description: "Inspect ambient reflection and learning activity",
+  },
+  {
     name: "fork",
     description: "Fork the current session",
   },
@@ -118,8 +140,26 @@ export const NOESIS_SLASH_COMMANDS = [
   },
 ] as const satisfies readonly SlashCommand[];
 
-export function createNoesisCommandAutocompleteProvider(): AutocompleteProvider {
-  const provider = new CombinedAutocompleteProvider([...NOESIS_SLASH_COMMANDS], process.cwd());
+export function createNoesisCommandAutocompleteProvider(
+  skills: readonly SkillSlashCommand[] = [],
+): AutocompleteProvider {
+  const builtInNames = new Set<string>(NOESIS_SLASH_COMMANDS.map((command) => command.name));
+  const seenSkillNames = new Set<string>();
+  const skillCommands: SlashCommand[] = skills.flatMap((skill) => {
+    if (seenSkillNames.has(skill.name)) return [];
+    seenSkillNames.add(skill.name);
+    return [
+      {
+        name: builtInNames.has(skill.name) ? `skill:${skill.name}` : skill.name,
+        description: `Skill · ${skill.description}${skill.disableModelInvocation ? " · explicit only" : ""}`,
+        argumentHint: "[instructions]",
+      },
+    ];
+  });
+  const provider = new CombinedAutocompleteProvider(
+    [...NOESIS_SLASH_COMMANDS, ...skillCommands],
+    process.cwd(),
+  );
 
   return {
     getSuggestions: (lines, cursorLine, cursorCol, options) => {

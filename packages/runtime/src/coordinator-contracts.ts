@@ -1,9 +1,10 @@
 import {
+  type CapabilityRevisionRef,
   CapabilityRevisionRefSchema,
   CapabilitySchema,
-  type CapabilityRevisionRef,
   type DatabaseRowRef,
   type DurableJobRecord,
+  durableJobFailureError,
   type EvidenceRef,
   type Experiment,
   type FileRevisionRef,
@@ -11,7 +12,7 @@ import {
   type PreflightDecision,
   type PreflightReport,
 } from "@noesis/domain";
-import { RetrievalStrategyIdSchema, type RetrievalStrategyId } from "@noesis/intelligence";
+import { type RetrievalStrategyId, RetrievalStrategyIdSchema } from "@noesis/intelligence";
 import { LearningTurnInputSchema } from "@noesis/learning";
 import { z } from "zod";
 
@@ -56,6 +57,9 @@ export type ReflectTurnJobPayload = Readonly<z.infer<typeof ReflectTurnJobPayloa
 export const AuthorRevisionJobPayloadSchema = z.strictObject({
   schemaVersion: z.literal(1),
   experimentId: z.string().min(1),
+  // Immutable origin provenance only; job_observations owns shared session membership.
+  sourceSessionId: z.string().min(1).optional(),
+  parentJobId: z.string().min(1).optional(),
   hypothesisDedupeKey: z.string().min(1),
   retrievalStrategyId: RetrievalStrategyIdSchema,
   routingStrategyId: z.string().min(1),
@@ -65,6 +69,9 @@ export type AuthorRevisionJobPayload = Readonly<z.infer<typeof AuthorRevisionJob
 export const PreflightJobPayloadSchema = z.strictObject({
   schemaVersion: z.literal(1),
   experimentId: z.string().min(1),
+  // Immutable origin provenance only; job_observations owns shared session membership.
+  sourceSessionId: z.string().min(1).optional(),
+  parentJobId: z.string().min(1).optional(),
   preflightId: z.string().min(1),
   planId: z.string().min(1),
   retrievalStrategyId: RetrievalStrategyIdSchema,
@@ -128,7 +135,7 @@ export type CoordinatorReflectionResult =
       readonly telemetry: CoordinatorResearchTelemetry;
     }
   | {
-      readonly status: "experiment" | "deduped";
+      readonly status: "experiment";
       readonly experiment: {
         readonly experimentId: string;
         readonly hypothesis: string;
@@ -138,6 +145,12 @@ export type CoordinatorReflectionResult =
         readonly feedbackSignalIds: readonly string[];
         readonly status: "hypothesis";
       };
+      readonly hypothesisDedupeKey: string;
+      readonly telemetry: CoordinatorResearchTelemetry;
+    }
+  | {
+      readonly status: "deduped";
+      readonly experiment: Experiment;
       readonly hypothesisDedupeKey: string;
       readonly telemetry: CoordinatorResearchTelemetry;
     };
@@ -181,11 +194,7 @@ export interface CoordinatorFailureOptions {
 }
 
 export function coordinatorOperationError(message: string, options: CoordinatorFailureOptions): Error {
-  const error = new Error(message, options.cause === undefined ? undefined : { cause: options.cause });
-  Reflect.set(error, "coordinatorCode", options.code);
-  Reflect.set(error, "coordinatorRetryable", options.retryable);
-  Reflect.set(error, "coordinatorAmbiguous", options.ambiguous ?? false);
-  return error;
+  return durableJobFailureError(message, options);
 }
 
 export interface CoordinatorJobView {

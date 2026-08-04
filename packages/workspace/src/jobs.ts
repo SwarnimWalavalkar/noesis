@@ -5,6 +5,9 @@ import {
   type ActorRef,
   type DurableJobEnqueueRequest,
   type DurableJobFailure,
+  type DurableJobListRequest,
+  type DurableJobObservationRequest,
+  type DurableJobPage,
   type DurableJobRecord,
   type DurableJobStatus,
   type EvidenceRef,
@@ -32,6 +35,11 @@ const JobFailureSchema = z.strictObject({
   retryable: z.boolean(),
   ambiguous: z.boolean(),
 });
+const JobObservationSchema = z.strictObject({
+  sourceSessionId: z.string().min(1),
+  parentJobId: z.string().min(1),
+  observedAt: z.string().datetime(),
+});
 const EnqueueSchema = z.strictObject({
   jobId: z.string().min(1),
   kind: z.string().min(1),
@@ -43,6 +51,8 @@ const EnqueueSchema = z.strictObject({
   maxAttempts: z.number().int().positive(),
   estimatedCost: z.number().nonnegative(),
   budget: z.number().nonnegative(),
+  observations: z.array(JobObservationSchema).optional(),
+  inheritObservationsFromParentJobId: z.string().min(1).optional(),
 });
 
 type RecordActivity = (
@@ -66,6 +76,50 @@ export function createDurableJobStore(
     return row === undefined ? undefined : decodeDurableJob(row);
   };
 
+  const recordObservation = (jobId: string, observation: DurableJobObservationRequest): void => {
+    db.prepare(
+      `INSERT OR IGNORE INTO job_lineage(child_job_id, parent_job_id, linked_at)
+       VALUES (?, ?, ?)`,
+    ).run(jobId, observation.parentJobId, observation.observedAt);
+    db.prepare(
+      `INSERT OR IGNORE INTO job_observations(
+         child_job_id, parent_job_id, source_session_id, observed_at
+       ) VALUES (?, ?, ?, ?)`,
+    ).run(jobId, observation.parentJobId, observation.sourceSessionId, observation.observedAt);
+    db.prepare(
+      `WITH RECURSIVE descendants(child_job_id, parent_job_id) AS (
+         SELECT child_job_id, parent_job_id FROM job_lineage WHERE parent_job_id = ?
+         UNION
+         SELECT lineage.child_job_id, lineage.parent_job_id
+         FROM job_lineage AS lineage
+         JOIN descendants ON lineage.parent_job_id = descendants.child_job_id
+       )
+       INSERT OR IGNORE INTO job_observations(
+         child_job_id, parent_job_id, source_session_id, observed_at
+       )
+       SELECT child_job_id, parent_job_id, ?, ? FROM descendants`,
+    ).run(jobId, observation.sourceSessionId, observation.observedAt);
+  };
+
+  const inheritObservations = (jobId: string, parentJobId: string, observedAt: string): void => {
+    db.prepare(
+      `INSERT OR IGNORE INTO job_lineage(child_job_id, parent_job_id, linked_at)
+       VALUES (?, ?, ?)`,
+    ).run(jobId, parentJobId, observedAt);
+    const sessions = db
+      .prepare(
+        `SELECT source_session_id
+         FROM job_observations
+         WHERE child_job_id = ?
+         GROUP BY source_session_id
+         ORDER BY min(observed_at), source_session_id`,
+      )
+      .all(parentJobId)
+      .map((row) => z.string().min(1).parse(Reflect.get(row, "source_session_id")));
+    for (const sourceSessionId of sessions)
+      recordObservation(jobId, { sourceSessionId, parentJobId, observedAt });
+  };
+
   const enqueue = async (request: DurableJobEnqueueRequest): Promise<DurableJobRecord> => {
     const value = EnqueueSchema.parse(request);
     for (const reference of value.payloadRefs) assertReference(reference);
@@ -86,6 +140,9 @@ export function createDurableJobStore(
           existing.estimatedCost === value.estimatedCost;
         if (!sameRequest)
           throw new Error(`Durable job operation identity collision for ${value.operationId}`);
+        for (const observation of value.observations ?? []) recordObservation(existing.jobId, observation);
+        if (value.inheritObservationsFromParentJobId)
+          inheritObservations(existing.jobId, value.inheritObservationsFromParentJobId, value.notBefore);
         return existing;
       }
       db.prepare(
@@ -110,18 +167,27 @@ export function createDurableJobStore(
         value.estimatedCost,
       );
       recordActivity(actor, "coordinator.job_enqueued", "job", value.jobId, value.payloadRefs);
+      for (const observation of value.observations ?? []) recordObservation(value.jobId, observation);
+      if (value.inheritObservationsFromParentJobId)
+        inheritObservations(value.jobId, value.inheritObservationsFromParentJobId, value.notBefore);
       const created = read(value.jobId);
       if (!created) throw new Error(`Durable job ${value.jobId} disappeared after enqueue`);
       return created;
     });
   };
 
-  const list = async (
-    request: { readonly status?: DurableJobStatus; readonly kind?: string; readonly limit?: number } = {},
-  ): Promise<readonly DurableJobRecord[]> => {
+  const validatedLimit = (request: DurableJobListRequest): number => {
     const limit = request.limit ?? 100;
     if (!Number.isInteger(limit) || limit < 1 || limit > 1_000)
       throw new Error("Durable job list limit must be between 1 and 1000");
+    return limit;
+  };
+
+  const query = (request: DurableJobListRequest, limit: number): readonly DurableJobRecord[] => {
+    if (request.status !== undefined && request.statuses !== undefined)
+      throw new Error("Durable job list accepts either status or statuses, not both");
+    if (request.kind !== undefined && request.kinds !== undefined)
+      throw new Error("Durable job list accepts either kind or kinds, not both");
     if (request.status) JobStatusSchema.parse(request.status);
     const clauses: string[] = [];
     const values: Array<string | number> = [];
@@ -129,15 +195,95 @@ export function createDurableJobStore(
       clauses.push("status = ?");
       values.push(request.status);
     }
+    if (request.statuses !== undefined) {
+      const statuses = z.array(JobStatusSchema).max(6).parse(request.statuses);
+      if (statuses.length === 0) clauses.push("0");
+      else {
+        clauses.push(`status IN (${statuses.map(() => "?").join(", ")})`);
+        values.push(...statuses);
+      }
+    }
     if (request.kind) {
       clauses.push("kind = ?");
       values.push(request.kind);
     }
+    if (request.kinds !== undefined) {
+      const kinds = z.array(z.string().min(1)).max(32).parse(request.kinds);
+      if (kinds.length === 0) clauses.push("0");
+      else {
+        clauses.push(`kind IN (${kinds.map(() => "?").join(", ")})`);
+        values.push(...kinds);
+      }
+    }
+    if (request.payloadSessionId !== undefined) {
+      z.string().min(1).parse(request.payloadSessionId);
+      clauses.push("json_extract(payload_json, '$.turn.sessionId') = ?");
+      values.push(request.payloadSessionId);
+    }
+    if (request.observedSessionId !== undefined) {
+      z.string().min(1).parse(request.observedSessionId);
+      clauses.push(
+        `job_id IN (
+           WITH RECURSIVE scoped_jobs(job_id, source_session_id) AS (
+             SELECT child_job_id, source_session_id
+             FROM job_observations
+             WHERE source_session_id = ?
+             UNION
+             SELECT observations.child_job_id, observations.source_session_id
+             FROM job_observations AS observations
+             JOIN scoped_jobs
+               ON observations.parent_job_id = scoped_jobs.job_id
+              AND observations.source_session_id = scoped_jobs.source_session_id
+           )
+           SELECT job_id FROM scoped_jobs
+         )`,
+      );
+      values.push(request.observedSessionId);
+    }
+    if (request.payloadExperimentIds !== undefined) {
+      const experimentIds = z.array(z.string().min(1)).max(250).parse(request.payloadExperimentIds);
+      if (experimentIds.length === 0) clauses.push("0");
+      else {
+        clauses.push(
+          `json_extract(payload_json, '$.experimentId') IN (${experimentIds.map(() => "?").join(", ")})`,
+        );
+        values.push(...experimentIds);
+      }
+    }
+    if (request.after) {
+      z.string().datetime().parse(request.after.createdAt);
+      z.string().min(1).parse(request.after.jobId);
+      clauses.push("(created_at > ? OR (created_at = ? AND job_id > ?))");
+      values.push(request.after.createdAt, request.after.createdAt, request.after.jobId);
+    }
     const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
+    const orderedScanIndex =
+      request.statuses !== undefined || request.kinds !== undefined
+        ? " INDEXED BY jobs_created_status_kind"
+        : "";
     return db
-      .prepare(`SELECT * FROM jobs${where} ORDER BY created_at, job_id LIMIT ?`)
+      .prepare(`SELECT * FROM jobs${orderedScanIndex}${where} ORDER BY created_at, job_id LIMIT ?`)
       .all(...values, limit)
       .map(decodeDurableJob);
+  };
+
+  const list = async (request: DurableJobListRequest = {}): Promise<readonly DurableJobRecord[]> =>
+    query(request, validatedLimit(request));
+
+  const listPage = async (request: DurableJobListRequest = {}): Promise<DurableJobPage> => {
+    const limit = validatedLimit(request);
+    const lookahead = query(request, limit + 1);
+    const records = Object.freeze(lookahead.slice(0, limit));
+    const last = records.at(-1);
+    return Object.freeze({
+      records,
+      exhausted: lookahead.length <= limit,
+      ...(last
+        ? {
+            nextCursor: Object.freeze({ createdAt: last.createdAt, jobId: last.jobId }),
+          }
+        : {}),
+    });
   };
 
   const claim = async (request: {
@@ -339,8 +485,20 @@ export function createDurableJobStore(
 
   return Object.freeze({
     enqueue,
+    recordObservation: async (jobId: string, observation: DurableJobObservationRequest) => {
+      z.string().min(1).parse(jobId);
+      const value = JobObservationSchema.parse(observation);
+      database.transaction(() => recordObservation(jobId, value));
+    },
+    inheritObservations: async (jobId: string, parentJobId: string, observedAt: string) => {
+      z.string().min(1).parse(jobId);
+      z.string().min(1).parse(parentJobId);
+      z.string().datetime().parse(observedAt);
+      database.transaction(() => inheritObservations(jobId, parentJobId, observedAt));
+    },
     get: async (jobId: string) => read(jobId),
     list,
+    listPage,
     claim,
     renew,
     complete,

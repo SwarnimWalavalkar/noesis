@@ -305,6 +305,14 @@ export interface DurableJobEnqueueRequest {
   readonly maxAttempts: number;
   readonly estimatedCost: number;
   readonly budget: number;
+  readonly observations?: readonly DurableJobObservationRequest[];
+  readonly inheritObservationsFromParentJobId?: string;
+}
+
+export interface DurableJobObservationRequest {
+  readonly sourceSessionId: string;
+  readonly parentJobId: string;
+  readonly observedAt: string;
 }
 
 export interface DurableJobFailure {
@@ -314,15 +322,75 @@ export interface DurableJobFailure {
   readonly ambiguous: boolean;
 }
 
+export interface DurableJobFailureOptions {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly ambiguous?: boolean;
+  readonly cause?: unknown;
+}
+
+type DurableJobFailureMetadata = Readonly<Omit<DurableJobFailure, "message">>;
+const durableJobFailures = new WeakMap<Error, DurableJobFailureMetadata>();
+
+/**
+ * Attach durable scheduling semantics to an ordinary Error without coupling the
+ * producer to a particular coordinator implementation.
+ */
+export function durableJobFailureError(message: string, options: DurableJobFailureOptions): Error {
+  const error = new Error(message, options.cause === undefined ? undefined : { cause: options.cause });
+  durableJobFailures.set(
+    error,
+    Object.freeze({
+      code: options.code,
+      retryable: options.retryable,
+      ambiguous: options.ambiguous ?? false,
+    }),
+  );
+  return error;
+}
+
+/** Read scheduling semantics only from errors created through the durable failure contract. */
+export function durableJobFailureFromError(error: unknown): DurableJobFailure | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const failure = durableJobFailures.get(error);
+  return failure ? Object.freeze({ ...failure, message: error.message }) : undefined;
+}
+
+/** Stable keyset cursor for the authoritative `(created_at, job_id)` job order. */
+export interface DurableJobListCursor {
+  readonly createdAt: string;
+  readonly jobId: string;
+}
+
+export interface DurableJobListRequest {
+  readonly status?: DurableJobStatus;
+  readonly statuses?: readonly DurableJobStatus[];
+  readonly kind?: string;
+  readonly kinds?: readonly string[];
+  readonly limit?: number;
+  readonly after?: DurableJobListCursor;
+  /** Exact reflection-session selector over the authoritative JSON payload. */
+  readonly payloadSessionId?: string;
+  /** Exact session selector over authoritative many-to-one job observations. */
+  readonly observedSessionId?: string;
+  /** Exact experiment selector for authoring and preflight payloads. */
+  readonly payloadExperimentIds?: readonly string[];
+}
+
+export interface DurableJobPage {
+  readonly records: readonly DurableJobRecord[];
+  readonly exhausted: boolean;
+  readonly nextCursor?: DurableJobListCursor;
+}
+
 /** Atomic SQLite-backed scheduling primitives. Runtime owns job meanings and retry decisions. */
 export interface DurableJobStorePort {
   readonly enqueue: (request: DurableJobEnqueueRequest) => Promise<DurableJobRecord>;
+  readonly recordObservation: (jobId: string, observation: DurableJobObservationRequest) => Promise<void>;
+  readonly inheritObservations: (jobId: string, parentJobId: string, observedAt: string) => Promise<void>;
   readonly get: (jobId: string) => Promise<DurableJobRecord | undefined>;
-  readonly list: (request?: {
-    readonly status?: DurableJobStatus;
-    readonly kind?: string;
-    readonly limit?: number;
-  }) => Promise<readonly DurableJobRecord[]>;
+  readonly list: (request?: DurableJobListRequest) => Promise<readonly DurableJobRecord[]>;
+  readonly listPage: (request?: DurableJobListRequest) => Promise<DurableJobPage>;
   readonly claim: (request: {
     readonly workerId: string;
     readonly now: string;

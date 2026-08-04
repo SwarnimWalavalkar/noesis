@@ -5,11 +5,18 @@ import { DatabaseSync } from "node:sqlite";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import { compileContext } from "@noesis/context";
 import type { Capability, CapabilityRevisionRef } from "@noesis/domain";
+import {
+  createDeterministicEmbeddingPort,
+  createDeterministicRerankPort,
+  createHistoryPort,
+  createSessionSearchTools,
+  SESSION_RETRIEVAL_STRATEGIES,
+} from "@noesis/intelligence";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import {
-  createTurnSettlement,
   type ContinuousFeedbackController,
+  createTurnSettlement,
   type TurnOutcomeObservationInput,
 } from "../src/index.ts";
 
@@ -124,6 +131,11 @@ describe("turn settlement", () => {
       stop: async () => undefined,
     });
     const observedBaselines: CapabilityRevisionRef[] = [];
+    const observedLearningTurns: {
+      readonly outcome: string;
+      readonly toolFailureCount: number;
+      readonly evidenceTables: readonly string[];
+    }[] = [];
     const capabilities = new Map<string, Capability>([
       [
         "general",
@@ -151,6 +163,13 @@ describe("turn settlement", () => {
       controlPlane: Object.freeze({
         observeCompletedTurn: async (input) => {
           observedBaselines.push(input.baselineRevision);
+          observedLearningTurns.push({
+            outcome: input.turn.outcome,
+            toolFailureCount: input.turn.telemetry.toolFailureCount,
+            evidenceTables: input.turn.evidenceRefs.map((reference) =>
+              reference.kind === "database_row" ? reference.table : reference.kind,
+            ),
+          });
           return await Promise.reject(new Error("fixture stops after observing attribution"));
         },
       }),
@@ -165,6 +184,19 @@ describe("turn settlement", () => {
       },
     ]);
     seedForegroundTurn(workspace, "session-1", "turn-accepted", plan.planId);
+    seedForegroundTurn(workspace, "session-1", "turn-unrelated", "plan-turn-unrelated");
+    await workspace.operational.toolCalls.put({
+      toolCallId: "turn-unrelated:tool-failure",
+      sessionId: "session-1",
+      turnId: "turn-unrelated",
+      toolName: "files.read",
+      request: Object.freeze({ path: "also-missing.md" }),
+      response: Object.freeze({ error: "not found" }),
+      status: "failed",
+      sensitivity: "normal",
+      createdAt: "2026-07-25T00:00:00.500Z",
+      completedAt: "2026-07-25T00:00:00.750Z",
+    });
 
     await expect(
       settlement.run({
@@ -174,19 +206,61 @@ describe("turn settlement", () => {
         sourceIntentId: "intent-accepted",
         occurredAt: "2026-07-25T00:00:00.000Z",
         plan,
-        execute: async () => ({
-          outcome: "completed",
-          output: "done",
-          context,
-          usedCapabilities: Object.freeze({}),
-          frozenTurnPlan: plan,
-        }),
+        execute: async () => {
+          await workspace.operational.toolCalls.put({
+            toolCallId: "turn-accepted:tool-failure",
+            sessionId: "session-1",
+            turnId: "turn-accepted",
+            toolName: "files.read",
+            request: Object.freeze({ path: "missing.md" }),
+            response: Object.freeze({ error: "not found" }),
+            status: "failed",
+            sensitivity: "normal",
+            createdAt: "2026-07-25T00:00:01.000Z",
+            completedAt: "2026-07-25T00:00:02.000Z",
+          });
+          await workspace.operational.toolCalls.put({
+            toolCallId: "turn-accepted:tool-success",
+            sessionId: "session-1",
+            turnId: "turn-accepted",
+            toolName: "files.read",
+            request: Object.freeze({ path: "found.md" }),
+            response: Object.freeze({ content: "found" }),
+            status: "completed",
+            sensitivity: "normal",
+            createdAt: "2026-07-25T00:00:03.000Z",
+            completedAt: "2026-07-25T00:00:04.000Z",
+          });
+          return {
+            outcome: "completed",
+            output: "done",
+            context,
+            usedCapabilities: Object.freeze({}),
+            frozenTurnPlan: plan,
+          };
+        },
       }),
     ).rejects.toThrow("fixture stops after observing attribution");
     expect(feedbackInputs).toHaveLength(1);
     expect(feedbackInputs[0]?.outcomeId).toBe("turn-accepted:outcome");
+    expect(feedbackInputs[0]?.status).toBe("unknown");
     expect(observedBaselines).toEqual([revisionRef("noesis-research")]);
+    expect(observedLearningTurns).toEqual([
+      {
+        outcome: "unknown",
+        toolFailureCount: 1,
+        evidenceTables: ["messages", "messages", "tool_calls", "tool_calls"],
+      },
+    ]);
+    expect(
+      (await workspace.operational.toolCalls.listForTurn("session-1", "turn-accepted")).map(
+        (toolCall) => toolCall.toolCallId,
+      ),
+    ).toEqual(["turn-accepted:tool-failure", "turn-accepted:tool-success"]);
     expect(await workspace.operational.outcomes.listForSession("session-1")).toHaveLength(1);
+    expect(await workspace.operational.outcomes.get("turn-accepted:outcome")).toMatchObject({
+      status: "unknown",
+    });
     expect((await workspace.operational.messages.get("turn-accepted:user"))?.metadata).toMatchObject({
       turnId: "turn-accepted",
       sourceIntentId: "intent-accepted",
@@ -219,6 +293,54 @@ describe("turn settlement", () => {
       status: "failed",
       metadata: { aborted: true, replayEligible: false },
     });
+
+    const correctedPlan = turnPlan("session-1", "turn-corrected", [
+      { capabilityId: "general", name: "General", scope: "general" },
+    ]);
+    seedForegroundTurn(workspace, "session-1", "turn-corrected", correctedPlan.planId);
+    await expect(
+      settlement.run({
+        sessionId: "session-1",
+        turnId: "turn-corrected",
+        input: "Actually, cite the exact primary source.",
+        occurredAt: "2026-07-25T00:02:00.000Z",
+        plan: correctedPlan,
+        execute: async () => ({
+          outcome: "completed",
+          output: "Corrected response with an exact primary source.",
+          context,
+          usedCapabilities: Object.freeze({}),
+          frozenTurnPlan: correctedPlan,
+        }),
+      }),
+    ).rejects.toThrow("fixture stops after observing attribution");
+    expect(feedbackInputs.at(-1)?.status).toBe("corrected");
+    expect(observedLearningTurns.at(-1)?.outcome).toBe("corrected");
+    expect(await workspace.operational.outcomes.get("turn-corrected:outcome")).toMatchObject({
+      status: "corrected",
+    });
+
+    const history = createHistoryPort({
+      workspace,
+      embeddings: createDeterministicEmbeddingPort(),
+      reranker: createDeterministicRerankPort(),
+    });
+    const sessionTools = createSessionSearchTools({
+      workspace,
+      history,
+      authorization: { currentSessionId: "consumer-session" },
+    });
+    const corrections = await sessionTools.findCorrections({
+      topic: "exact primary source corrected response",
+      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
+    });
+    expect(corrections.ok).toBe(true);
+    if (corrections.ok)
+      expect(corrections.value.fragments[0]?.citation.identity).toEqual({
+        kind: "outcome",
+        sessionId: "session-1",
+        outcomeId: "turn-corrected:outcome",
+      });
   });
 });
 

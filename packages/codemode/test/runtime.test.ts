@@ -119,6 +119,17 @@ describe("codemode runtime", () => {
     expect(firstEnd?.callId).toBe(firstStart?.callId);
   });
 
+  it("returns actionable frozen-catalog recovery for an unknown tool name", async () => {
+    await expect(
+      runtime().execute({
+        source: "return await tools.math.multiply({ value: 4 });",
+        sessionId: "session-unknown-tool",
+      }),
+    ).rejects.toThrow(
+      "Unknown tool: math.multiply. Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+    );
+  });
+
   it("supports Node imports and progress", async () => {
     const events: JsonValue[] = [];
     const result = await runtime().execute(

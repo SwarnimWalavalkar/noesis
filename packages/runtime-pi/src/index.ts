@@ -21,6 +21,7 @@ import {
 import { frozenPlanMaterialUses } from "./frozen-session-tools.ts";
 import { createPiSelfTools, type PiSelfToolAdapter } from "./self-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
+import { resolvePiSkillInvocation } from "./skill-invocation.ts";
 import type { PiSkillLibrary } from "./skill-library.ts";
 
 export type {
@@ -52,6 +53,7 @@ export * from "./role-context.ts";
 export * from "./role-runner.ts";
 export * from "./role-types.ts";
 export * from "./self-tools.ts";
+export * from "./skill-invocation.ts";
 export * from "./skill-library.ts";
 
 function assistantText(message: { readonly content: readonly unknown[] }): string {
@@ -277,10 +279,7 @@ export function createPiAgentRuntime(
               signal: execution.controller.signal,
               ...(preparedCode
                 ? {
-                    catalog: {
-                      catalogId: preparedCode.catalogId,
-                      catalogDigest: preparedCode.catalogDigest,
-                    },
+                    catalog: preparedCode.catalog,
                   }
                 : {}),
             })
@@ -288,34 +287,36 @@ export function createPiAgentRuntime(
       const { session, sessionId } = await createEphemeralPiSession();
       execution.sessionId = sessionId;
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
-      const executeTool = preparedCode
-        ? createPiExecuteTool({
-            prepared: preparedCode,
-            signal: execution.controller.signal,
-            emit: (event, parentActionId) => {
-              if (event.type === "tool-start")
-                emit({
-                  type: "tool-start",
-                  actionId: event.callId,
-                  parentActionId,
-                  name: event.name,
-                  input: toAgentActionPayload(event.input ?? {}),
-                  timelineSequence: claimTimelineSequence(),
-                });
-              else if (event.type === "tool-end")
-                emit({
-                  type: "tool-end",
-                  actionId: event.callId,
-                  parentActionId,
-                  name: event.name,
-                  isError: !event.ok,
-                  result: toAgentActionPayload(
-                    event.result ?? (event.error ? { error: event.error } : { ok: event.ok }),
-                  ),
-                });
-            },
-          })
-        : undefined;
+      const executeTool =
+        plan && preparedCode
+          ? createPiExecuteTool({
+              prepared: preparedCode,
+              turnId: plan.turnId,
+              signal: execution.controller.signal,
+              emit: (event, parentActionId) => {
+                if (event.type === "tool-start")
+                  emit({
+                    type: "tool-start",
+                    actionId: event.callId,
+                    parentActionId,
+                    name: event.name,
+                    input: toAgentActionPayload(event.input ?? {}),
+                    timelineSequence: claimTimelineSequence(),
+                  });
+                else if (event.type === "tool-end")
+                  emit({
+                    type: "tool-end",
+                    actionId: event.callId,
+                    parentActionId,
+                    name: event.name,
+                    isError: !event.ok,
+                    result: toAgentActionPayload(
+                      event.result ?? (event.error ? { error: event.error } : { ok: event.ok }),
+                    ),
+                  });
+              },
+            })
+          : undefined;
       const piSkills = skillSnapshot.skills.map(
         (skill): Skill => ({
           name: skill.name,
@@ -325,6 +326,24 @@ export function createPiAgentRuntime(
           disableModelInvocation: skill.disableModelInvocation,
         }),
       );
+      const explicitSkill = resolvePiSkillInvocation(request.prompt, skillSnapshot.skills);
+      if (explicitSkill) {
+        const actionId = `skill-load:${plan?.turnId ?? request.trailId}:${explicitSkill.name}`;
+        emit({
+          type: "tool-start",
+          actionId,
+          name: "skills.load",
+          input: Object.freeze({ name: explicitSkill.name }),
+          timelineSequence: claimTimelineSequence(),
+        });
+        emit({
+          type: "tool-end",
+          actionId,
+          name: "skills.load",
+          isError: false,
+          result: explicitSkill.actionEvidence,
+        });
+      }
       const harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),
         session,
@@ -415,7 +434,7 @@ export function createPiAgentRuntime(
       execution.acceptsSteering = true;
       emit({ type: "status", status: "started" });
       try {
-        const message = await harness.prompt(request.prompt);
+        const message = await harness.prompt(explicitSkill?.prompt ?? request.prompt);
         const finalText = assistantText(message);
         if (assistantMessages.length === 0) {
           const boundary = Object.freeze({

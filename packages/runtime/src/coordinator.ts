@@ -1,6 +1,8 @@
 import {
   canonicalJson,
+  durableJobFailureFromError,
   type DurableJobFailure,
+  type DurableJobListCursor,
   type DurableJobRecord,
   type Experiment,
   sameCapabilityRevisionRef,
@@ -15,11 +17,11 @@ import {
   type CompletedNormalTurn,
   CompletedNormalTurnSchema,
   type CoordinatorCandidateResult,
-  coordinatorOperationError,
   type CoordinatorJobKind,
   type CoordinatorJobView,
   type CoordinatorPreflightResult,
   coordinatorJobPayload,
+  coordinatorOperationError,
   DEFAULT_RUNTIME_COORDINATOR_CONFIG,
   type PreflightActivationHandoff,
   PreflightJobPayloadSchema,
@@ -49,7 +51,19 @@ export interface RuntimeCoordinator {
   readonly listJobs: (request?: {
     readonly kind?: CoordinatorJobKind;
     readonly limit?: number;
+    readonly after?: DurableJobListCursor;
   }) => Promise<readonly CoordinatorJobView[]>;
+  readonly listJobPage: (request?: {
+    readonly kind?: CoordinatorJobKind;
+    readonly limit?: number;
+    readonly after?: DurableJobListCursor;
+    readonly sessionId?: string;
+    readonly experimentIds?: readonly string[];
+  }) => Promise<{
+    readonly jobs: readonly CoordinatorJobView[];
+    readonly exhausted: boolean;
+    readonly nextCursor?: DurableJobListCursor;
+  }>;
   readonly getPreflightActivationHandoff: (
     experimentId: string,
   ) => Promise<PreflightActivationHandoff | undefined>;
@@ -83,19 +97,15 @@ function errorMessage(error: unknown): string {
 }
 
 function failureFrom(error: unknown): DurableJobFailure {
-  const code =
-    error instanceof Error && typeof Reflect.get(error, "coordinatorCode") === "string"
-      ? String(Reflect.get(error, "coordinatorCode"))
-      : "coordinator_operation_failed";
-  const retryable =
-    error instanceof Error && typeof Reflect.get(error, "coordinatorRetryable") === "boolean"
-      ? Reflect.get(error, "coordinatorRetryable") === true
-      : false;
-  const ambiguous =
-    error instanceof Error && typeof Reflect.get(error, "coordinatorAmbiguous") === "boolean"
-      ? Reflect.get(error, "coordinatorAmbiguous") === true
-      : false;
-  return Object.freeze({ code, message: errorMessage(error), retryable, ambiguous });
+  return (
+    durableJobFailureFromError(error) ??
+    Object.freeze({
+      code: "coordinator_operation_failed",
+      message: errorMessage(error),
+      retryable: false,
+      ambiguous: false,
+    })
+  );
 }
 
 function retryDelay(config: RuntimeCoordinatorConfig, attempt: number): number {
@@ -127,6 +137,12 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     readonly operationId: string;
     readonly estimatedCost: number;
     readonly budget: number;
+    readonly observations?: readonly {
+      readonly sourceSessionId: string;
+      readonly parentJobId: string;
+    }[];
+    readonly inheritObservationsFromParentJobId?: string;
+    readonly matchesExisting?: (view: CoordinatorJobView) => boolean;
   }): Promise<CoordinatorJobView> => {
     const jobId = stableJobId(input.operationId);
     await authorizeScheduledJob(options.authority, {
@@ -134,23 +150,54 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       budget: input.budget,
       expiresAt: iso(new Date(Math.max(now().getTime(), Date.now()) + 24 * 60 * 60 * 1_000)),
     });
-    const job = await options.workspace.jobs.enqueue({
-      jobId,
-      kind: input.kind,
-      payload: input.payload,
-      payloadRefs: input.payloadRefs,
-      operationId: input.operationId,
-      idempotencyKey: input.operationId,
-      notBefore: iso(now()),
-      maxAttempts: config.retry.maxAttempts,
-      estimatedCost: input.estimatedCost,
-      budget: input.budget,
-    });
-    return coordinatorJobPayload(job);
+    const observations = input.observations?.map((observation) =>
+      Object.freeze({ ...observation, observedAt: iso(now()) }),
+    );
+    try {
+      const job = await options.workspace.jobs.enqueue({
+        jobId,
+        kind: input.kind,
+        payload: input.payload,
+        payloadRefs: input.payloadRefs,
+        operationId: input.operationId,
+        idempotencyKey: input.operationId,
+        notBefore: iso(now()),
+        maxAttempts: config.retry.maxAttempts,
+        estimatedCost: input.estimatedCost,
+        budget: input.budget,
+        ...(observations ? { observations } : {}),
+        ...(input.inheritObservationsFromParentJobId
+          ? { inheritObservationsFromParentJobId: input.inheritObservationsFromParentJobId }
+          : {}),
+      });
+      return coordinatorJobPayload(job);
+    } catch (error) {
+      if (!input.matchesExisting || (!observations && !input.inheritObservationsFromParentJobId)) throw error;
+      const existing = await options.workspace.jobs.get(jobId);
+      if (!existing) throw error;
+      let view: CoordinatorJobView;
+      try {
+        view = coordinatorJobPayload(existing);
+      } catch {
+        throw error;
+      }
+      if (!input.matchesExisting(view)) throw error;
+      for (const observation of observations ?? [])
+        await options.workspace.jobs.recordObservation(jobId, observation);
+      if (input.inheritObservationsFromParentJobId)
+        await options.workspace.jobs.inheritObservations(
+          jobId,
+          input.inheritObservationsFromParentJobId,
+          iso(now()),
+        );
+      return view;
+    }
   };
 
   const enqueueAuthor = async (input: {
     readonly experimentId: string;
+    readonly sourceSessionId: string;
+    readonly parentJobId: string;
     readonly hypothesisDedupeKey: string;
     readonly retrievalStrategyId: import("@noesis/intelligence").RetrievalStrategyId;
     readonly routingStrategyId: string;
@@ -159,6 +206,8 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     const payload = AuthorRevisionJobPayloadSchema.parse({
       schemaVersion: 1,
       experimentId: input.experimentId,
+      sourceSessionId: input.sourceSessionId,
+      parentJobId: input.parentJobId,
       hypothesisDedupeKey: input.hypothesisDedupeKey,
       retrievalStrategyId: input.retrievalStrategyId,
       routingStrategyId: input.routingStrategyId,
@@ -168,12 +217,29 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       payload,
       payloadRefs: input.payloadRefs,
       operationId: `coordinator:author:${input.experimentId}`,
+      observations: Object.freeze([
+        Object.freeze({
+          sourceSessionId: input.sourceSessionId,
+          parentJobId: input.parentJobId,
+        }),
+      ]),
+      matchesExisting: (view) => {
+        if (view.kind !== "runtime.author_revision") return false;
+        const existing = AuthorRevisionJobPayloadSchema.safeParse(view.payload);
+        return (
+          existing.success &&
+          existing.data.experimentId === input.experimentId &&
+          existing.data.hypothesisDedupeKey === input.hypothesisDedupeKey
+        );
+      },
       ...config.jobs.author,
     });
   };
 
   const enqueuePreflight = async (input: {
     readonly experimentId: string;
+    readonly sourceSessionIds: readonly string[];
+    readonly parentJobId: string;
     readonly candidate: CoordinatorCandidateResult;
     readonly retrievalStrategyId: import("@noesis/intelligence").RetrievalStrategyId;
     readonly routingStrategyId: string;
@@ -182,6 +248,8 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     const payload = PreflightJobPayloadSchema.parse({
       schemaVersion: 1,
       experimentId: input.experimentId,
+      ...(input.sourceSessionIds[0] ? { sourceSessionId: input.sourceSessionIds[0] } : {}),
+      parentJobId: input.parentJobId,
       preflightId,
       planId: stablePlanId(preflightId),
       retrievalStrategyId: input.retrievalStrategyId,
@@ -195,6 +263,17 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         input.candidate.manifestRevision,
       ]),
       operationId: `coordinator:preflight:${input.experimentId}:${input.candidate.candidateRevision.bundleDigest}`,
+      inheritObservationsFromParentJobId: input.parentJobId,
+      matchesExisting: (view) => {
+        if (view.kind !== "runtime.preflight") return false;
+        const existing = PreflightJobPayloadSchema.safeParse(view.payload);
+        return (
+          existing.success &&
+          existing.data.experimentId === input.experimentId &&
+          existing.data.preflightId === preflightId &&
+          existing.data.planId === stablePlanId(preflightId)
+        );
+      },
       ...config.jobs.preflight,
     });
   };
@@ -232,6 +311,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
   const runReflect = async (
     payload: ReturnType<typeof ReflectTurnJobPayloadSchema.parse>,
     signal: AbortSignal,
+    parentJobId: string,
   ) => {
     const reflected = await options.research.reflect(payload, signal);
     if (reflected.status === "no_change")
@@ -242,8 +322,27 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         routingStrategyId: payload.routingStrategyId,
         telemetry: reflected.telemetry,
       });
+    if (reflected.status === "deduped") {
+      const existing = await options.workspace.research.experiments.getExperiment(
+        reflected.experiment.experimentId,
+      );
+      if (existing && existing.status !== "hypothesis")
+        return Object.freeze({
+          status: reflected.status,
+          experimentId: existing.experimentId,
+          hypothesisDedupeKey: reflected.hypothesisDedupeKey,
+          retrievalStrategyId: payload.retrievalStrategyId,
+          routingStrategyId: payload.routingStrategyId,
+          telemetry: Object.freeze({
+            ...reflected.telemetry,
+            existingExperimentStatus: existing.status,
+          }),
+        });
+    }
     await enqueueAuthor({
       experimentId: reflected.experiment.experimentId,
+      sourceSessionId: payload.turn.sessionId,
+      parentJobId,
       hypothesisDedupeKey: reflected.hypothesisDedupeKey,
       retrievalStrategyId: payload.retrievalStrategyId,
       routingStrategyId: payload.routingStrategyId,
@@ -262,6 +361,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
   const runAuthor = async (
     payload: ReturnType<typeof AuthorRevisionJobPayloadSchema.parse>,
     signal: AbortSignal,
+    parentJobId: string,
   ) => {
     let candidate = await options.research.rehydrateCandidate(payload.experimentId);
     if (!candidate) candidate = await options.research.author(payload, signal);
@@ -277,6 +377,10 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       );
     await enqueuePreflight({
       experimentId: payload.experimentId,
+      sourceSessionIds: Object.freeze([
+        ...new Set([...(payload.sourceSessionId ? [payload.sourceSessionId] : [])]),
+      ]),
+      parentJobId,
       candidate,
       retrievalStrategyId: payload.retrievalStrategyId,
       routingStrategyId: payload.routingStrategyId,
@@ -375,9 +479,17 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         async () =>
           toJsonValue(
             view.kind === "runtime.reflect_turn"
-              ? await runReflect(ReflectTurnJobPayloadSchema.parse(view.payload), controller.signal)
+              ? await runReflect(
+                  ReflectTurnJobPayloadSchema.parse(view.payload),
+                  controller.signal,
+                  job.jobId,
+                )
               : view.kind === "runtime.author_revision"
-                ? await runAuthor(AuthorRevisionJobPayloadSchema.parse(view.payload), controller.signal)
+                ? await runAuthor(
+                    AuthorRevisionJobPayloadSchema.parse(view.payload),
+                    controller.signal,
+                    job.jobId,
+                  )
                 : await runPreflight(PreflightJobPayloadSchema.parse(view.payload), controller.signal),
           ),
       );
@@ -489,7 +601,11 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
   };
 
   const listJobs = async (
-    request: { readonly kind?: CoordinatorJobKind; readonly limit?: number } = {},
+    request: {
+      readonly kind?: CoordinatorJobKind;
+      readonly limit?: number;
+      readonly after?: DurableJobListCursor;
+    } = {},
   ): Promise<readonly CoordinatorJobView[]> =>
     (await options.workspace.jobs.list(request)).flatMap((job) => {
       try {
@@ -498,6 +614,37 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         return [];
       }
     });
+
+  const listJobPage: RuntimeCoordinator["listJobPage"] = async (request = {}) => {
+    if (request.sessionId !== undefined && request.kind === undefined)
+      throw new Error("Session-scoped coordinator job pages require an exact coordinator job kind");
+    if (request.experimentIds && request.kind === "runtime.reflect_turn")
+      throw new Error("Experiment-scoped coordinator job pages are not valid for reflection jobs");
+    const page = await options.workspace.jobs.listPage({
+      ...(request.kind ? { kind: request.kind } : {}),
+      ...(request.limit === undefined ? {} : { limit: request.limit }),
+      ...(request.after ? { after: request.after } : {}),
+      ...(request.sessionId === undefined
+        ? {}
+        : request.kind === "runtime.reflect_turn"
+          ? { payloadSessionId: request.sessionId }
+          : { observedSessionId: request.sessionId }),
+      ...(request.experimentIds ? { payloadExperimentIds: request.experimentIds } : {}),
+    });
+    return Object.freeze({
+      jobs: Object.freeze(
+        page.records.flatMap((job) => {
+          try {
+            return [coordinatorJobPayload(job)];
+          } catch {
+            return [];
+          }
+        }),
+      ),
+      exhausted: page.exhausted,
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+    });
+  };
 
   const getPreflightActivationHandoff = async (
     experimentId: string,
@@ -536,6 +683,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     retry,
     getJob,
     listJobs,
+    listJobPage,
     getPreflightActivationHandoff,
     stop,
   });

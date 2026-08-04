@@ -1,17 +1,21 @@
 import {
-  Editor,
-  matchesKey,
-  type AutocompleteProvider,
   type Component,
+  Editor,
   type Focusable,
+  matchesKey,
   type SelectListTheme,
   type TUI,
 } from "@earendil-works/pi-tui";
-import { createNoesisCommandAutocompleteProvider } from "./command-autocomplete.ts";
+import {
+  createNoesisCommandAutocompleteProvider,
+  loadSkillSlashCommands,
+  type SkillSlashCommand,
+} from "./command-autocomplete.ts";
 import { ANSI, elideText, styled } from "./theme.ts";
 
 export {
   createNoesisCommandAutocompleteProvider,
+  loadSkillSlashCommands,
   NOESIS_SLASH_COMMANDS,
 } from "./command-autocomplete.ts";
 
@@ -69,10 +73,25 @@ export interface SafeEditor extends Component, Focusable {
   readonly getText: () => string;
   readonly setText: (text: string) => void;
   readonly insertText: (text: string) => void;
+  /** Enriches the live editor after optional skill discovery settles. */
+  readonly setSkillCommands: (skills: readonly SkillSlashCommand[]) => void;
   /** Consumes raw input when the editor must resolve paste-marker ambiguity itself. */
   readonly capturePotentialPasteInput: (data: string) => boolean;
   /** True only when raw input cannot be part of a bracketed-paste marker or payload. */
   readonly acceptsUnbracketedCommandInput: () => boolean;
+}
+
+/** Optional discovery enriches an already-usable editor without delaying terminal startup. */
+export function enrichEditorSkills(
+  editor: Pick<SafeEditor, "setSkillCommands">,
+  discover: (() => Promise<readonly SkillSlashCommand[]>) | undefined,
+  isActive: () => boolean = () => true,
+): void {
+  void loadSkillSlashCommands(discover)
+    .then((skills) => {
+      if (isActive()) editor.setSkillCommands(skills);
+    })
+    .catch(() => undefined);
 }
 
 export function createSafeEditor(
@@ -80,7 +99,7 @@ export function createSafeEditor(
   colorEnabled = false,
   selectTheme: SelectListTheme = createSelectTheme(colorEnabled),
   height: () => number = () => Number.POSITIVE_INFINITY,
-  autocompleteProvider: AutocompleteProvider = createNoesisCommandAutocompleteProvider(),
+  skills: readonly SkillSlashCommand[] = [],
 ): SafeEditor {
   const editor = new Editor(
     tui,
@@ -90,7 +109,7 @@ export function createSafeEditor(
     },
     { paddingX: 1 },
   );
-  editor.setAutocompleteProvider(autocompleteProvider);
+  editor.setAutocompleteProvider(createNoesisCommandAutocompleteProvider(skills));
   let inputState: SafeEditorInputState = { kind: "keyboard", pending: "" };
   let ambiguityTimer: NodeJS.Timeout | undefined;
   let submit: ((text: string) => void) | undefined;
@@ -284,6 +303,10 @@ export function createSafeEditor(
     insertText: (text) => {
       resetBufferedInput();
       editor.insertTextAtCursor(sanitizeEditorText(text));
+      tui.requestRender();
+    },
+    setSkillCommands: (nextSkills) => {
+      editor.setAutocompleteProvider(createNoesisCommandAutocompleteProvider(nextSkills));
       tui.requestRender();
     },
     capturePotentialPasteInput: (data) => {

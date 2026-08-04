@@ -1,3 +1,5 @@
+import { presentActionPayload } from "./action-presentation.ts";
+import { isRecord, numberField, stringField } from "./record-fields.ts";
 import type { TuiAgentAction } from "./state.ts";
 import { safeTerminalText } from "./theme.ts";
 
@@ -9,22 +11,6 @@ import { safeTerminalText } from "./theme.ts";
  */
 
 export const EXECUTE_ACTION_NAME = "execute";
-
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function stringField(value: unknown, key: string): string | undefined {
-  if (!isRecord(value)) return undefined;
-  const field = value[key];
-  return typeof field === "string" ? field : undefined;
-}
-
-function numberField(value: unknown, key: string): number | undefined {
-  if (!isRecord(value)) return undefined;
-  const field = value[key];
-  return typeof field === "number" && Number.isFinite(field) ? field : undefined;
-}
 
 function arrayField(value: unknown, key: string): readonly unknown[] | undefined {
   if (!isRecord(value)) return undefined;
@@ -178,7 +164,7 @@ const NESTED_SUMMARIZERS: Readonly<Record<string, NestedSummarizer>> = {
   },
   "noesis.search": (input, output) => {
     const query = stringField(input, "query");
-    const tools = arrayField(output, "tools") ?? arrayField(output, "results");
+    const tools = presentActionPayload("noesis.search", output).tools;
     return {
       ...(query ? { subject: `"${query}"` } : {}),
       ...(tools === undefined ? {} : { outcome: formatCount(tools.length, "tool") }),
@@ -187,6 +173,17 @@ const NESTED_SUMMARIZERS: Readonly<Record<string, NestedSummarizer>> = {
   "noesis.describe": (input) => {
     const name = stringField(input, "name");
     return name ? { subject: name } : {};
+  },
+  inspect_self: (input, output) => {
+    const section = stringField(input, "section") ?? "overview";
+    const presentation = presentActionPayload("inspect_self", output);
+    const count =
+      presentation.tools?.length ??
+      (Array.isArray(presentation.value) ? presentation.value.length : undefined);
+    return {
+      subject: section,
+      ...(count === undefined ? {} : { outcome: formatCount(count, presentation.tools ? "tool" : "item") }),
+    };
   },
 };
 
@@ -208,6 +205,8 @@ function genericOutcome(output: unknown): string | undefined {
   if (isRecord(output)) {
     const error = stringField(output, "error");
     if (error) return firstLine(error);
+    const results = arrayField(output, "results");
+    if (results) return formatCount(results.length, "item");
     return undefined;
   }
   return undefined;

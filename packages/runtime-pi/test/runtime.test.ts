@@ -5,7 +5,7 @@ import {
   type FrozenTurnPlan,
   frozenTurnPlanDigest,
 } from "@noesis/agent-types";
-import { type FileRevisionRef, sha256 } from "@noesis/domain";
+import { type FileRevisionRef, sha256, toJsonValue } from "@noesis/domain";
 import type { SessionToolDefinition, SessionToolName } from "@noesis/intelligence";
 import { describe, expect, test, vi } from "vitest";
 import { z } from "zod";
@@ -17,9 +17,11 @@ import {
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
   type PiCodeExecutionAdapter,
+  type PiFrozenToolCatalog,
   type PiSkillLibrary,
   type PreparedPiCodeExecution,
   resolveFrozenSessionToolDefinitions,
+  resolvePiSkillInvocation,
   toAgentActionPayload,
 } from "../src/index.ts";
 import {
@@ -121,6 +123,14 @@ function definitions(marker: string): readonly SessionToolDefinition[] {
   );
 }
 
+function emptyCatalog(catalogId: string) {
+  return Object.freeze({
+    catalogId,
+    catalogDigest: sha256(catalogId),
+    tools: Object.freeze([]),
+  });
+}
+
 function controlledCodeExecution(
   resolver: FrozenSessionToolResolver,
   marker: string,
@@ -128,8 +138,7 @@ function controlledCodeExecution(
   const prepare: PiCodeExecutionAdapter["prepare"] = async (plan, signal) => {
     await resolveFrozenSessionToolDefinitions(plan, resolver, signal);
     return Object.freeze({
-      catalogId: "catalog-controlled",
-      catalogDigest: sha256("catalog-controlled"),
+      catalog: emptyCatalog("catalog-controlled"),
       execute: async () =>
         Object.freeze({
           executionId: "execution-controlled",
@@ -158,14 +167,196 @@ describe("agent runtime factories", () => {
     expect(deltas.text()).toBe("I will inspect the snapshot.\n\nGrounded answer.");
   });
 
+  test("loads an explicitly invoked skill from the pinned snapshot before model inference", async () => {
+    const plan = frozenPlan();
+    const skillContent = "Ask why repeatedly, then identify the smallest actionable root cause.";
+    const skill = Object.freeze({
+      name: "five-whys",
+      description: "Find the cause beneath a recurring problem",
+      content: skillContent,
+      filePath: "/skills/five-whys/SKILL.md",
+      contentDigest: sha256(skillContent),
+      disableModelInvocation: false,
+    });
+    const pinnedSnapshot = Object.freeze({
+      skills: Object.freeze([skill]),
+      diagnostics: Object.freeze([]),
+    });
+    let snapshotReads = 0;
+    const skills: PiSkillLibrary = {
+      snapshot: async () => {
+        snapshotReads += 1;
+        return pinnedSnapshot;
+      },
+      pinSnapshot: async () => pinnedSnapshot,
+      claimPinnedSnapshot: (key) => (key === plan.planId ? pinnedSnapshot : undefined),
+      discardPinnedSnapshot: () => undefined,
+      install: async () => undefined,
+      remove: async () => false,
+      update: async () => undefined,
+      configured: () => Object.freeze([]),
+    };
+    const events: AgentRuntimeEvent[] = [];
+    const controlled = createControlledPiModels({
+      respond: ({ lastUserText }) => {
+        expect(events).toEqual([
+          expect.objectContaining({
+            type: "model",
+          }),
+          {
+            type: "tool-start",
+            actionId: `skill-load:${plan.turnId}:five-whys`,
+            name: "skills.load",
+            input: { name: "five-whys" },
+            timelineSequence: 1,
+          },
+          {
+            type: "tool-end",
+            actionId: `skill-load:${plan.turnId}:five-whys`,
+            name: "skills.load",
+            isError: false,
+            result: {
+              name: "five-whys",
+              description: skill.description,
+              filePath: skill.filePath,
+              content: skill.content,
+              contentDigest: skill.contentDigest,
+              revision: null,
+              invocation: "explicit",
+            },
+          },
+          {
+            type: "status",
+            status: "started",
+          },
+        ]);
+        expect(lastUserText).toContain('<skill name="five-whys" location="/skills/five-whys/SKILL.md">');
+        expect(lastUserText).toContain(skillContent);
+        expect(lastUserText).toContain("Investigate why the deploy keeps failing.");
+        return "The skill instructions were applied.";
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      skills,
+      requirePinnedSkillSnapshot: true,
+      codeExecution: controlledCodeExecution(
+        {
+          resolve: async (received) =>
+            Object.freeze({
+              planId: received.planId,
+              canonicalDigest: received.canonicalDigest,
+              consumedMaterials: frozenPlanMaterialUses(received),
+              definitions: definitions("unused"),
+            }),
+        },
+        "unused",
+      ),
+    });
+
+    const result = await runtime.run(
+      {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "/five-whys Investigate why the deploy keeps failing.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      (event) => events.push(event),
+    );
+
+    expect(result).toMatchObject({ outcome: "completed", text: "The skill instructions were applied." });
+    expect(snapshotReads).toBe(0);
+  });
+
+  test("leaves unknown slash prompts untouched", async () => {
+    const prompt = "/not-installed preserve this exact text";
+    const controlled = createControlledPiModels({
+      respond: ({ lastUserText }) => {
+        expect(lastUserText).toBe(prompt);
+        return "ordinary prompt";
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      skills: {
+        snapshot: async () => Object.freeze({ skills: Object.freeze([]), diagnostics: Object.freeze([]) }),
+        pinSnapshot: async () => Object.freeze({ skills: Object.freeze([]), diagnostics: Object.freeze([]) }),
+        claimPinnedSnapshot: () => undefined,
+        discardPinnedSnapshot: () => undefined,
+        install: async () => undefined,
+        remove: async () => false,
+        update: async () => undefined,
+        configured: () => Object.freeze([]),
+      },
+    });
+    const events: AgentRuntimeEvent[] = [];
+
+    await runtime.run(
+      {
+        trailId: "trail-unknown-skill",
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        thinkingLevel: "off",
+        systemPrompt: "Noesis",
+        prompt,
+        activeCapabilities: [],
+      },
+      (event) => events.push(event),
+    );
+
+    expect(events.some((event) => event.type === "tool-start" && event.name === "skills.load")).toBe(false);
+  });
+
+  test("bounds explicit skill action evidence while preserving its immutable revision", () => {
+    const content = "x".repeat(300 * 1024);
+    const contentDigest = sha256(content);
+    const revision = Object.freeze({
+      kind: "evidence_revision" as const,
+      revisionId: "evidence-large-skill",
+      workingPath: "skills/large/SKILL.md",
+      snapshotPath: "evidence/revisions/evidence-large-skill",
+      contentDigest,
+      evidenceKind: "input" as const,
+    });
+    const resolved = resolvePiSkillInvocation(
+      "/large apply this skill",
+      Object.freeze([
+        Object.freeze({
+          name: "large",
+          description: "A deliberately large skill",
+          content,
+          filePath: "/skills/large/SKILL.md",
+          contentDigest,
+          admittedRevision: revision,
+          disableModelInvocation: false,
+        }),
+      ]),
+    );
+
+    expect(resolved?.actionEvidence).toMatchObject({
+      authority: {
+        name: "large",
+        contentDigest,
+        revision,
+        invocation: "explicit",
+      },
+      evidence: { truncated: true },
+    });
+    expect(new TextEncoder().encode(JSON.stringify(resolved?.actionEvidence)).byteLength).toBeLessThanOrEqual(
+      256 * 1024,
+    );
+    expect(resolved?.evidence).toMatchObject({ content, revision });
+  });
+
   test("rejects already-cancelled and oversized execute requests before preparation", async () => {
     let executions = 0;
     const turn = new AbortController();
     turn.abort("cancelled");
     const execute = createPiExecuteTool({
       prepared: {
-        catalogId: "catalog",
-        catalogDigest: sha256("catalog"),
+        catalog: emptyCatalog("catalog"),
         execute: async () => {
           executions += 1;
           return {
@@ -177,6 +368,7 @@ describe("agent runtime factories", () => {
         },
         close: async () => undefined,
       },
+      turnId: "turn-cancelled",
       signal: turn.signal,
       emit: () => undefined,
     });
@@ -189,8 +381,7 @@ describe("agent runtime factories", () => {
     const active = new AbortController();
     const byteBounded = createPiExecuteTool({
       prepared: {
-        catalogId: "catalog",
-        catalogDigest: sha256("catalog"),
+        catalog: emptyCatalog("catalog"),
         execute: async () => {
           executions += 1;
           return {
@@ -202,16 +393,80 @@ describe("agent runtime factories", () => {
         },
         close: async () => undefined,
       },
+      turnId: "turn-byte-bounded",
       signal: active.signal,
       emit: () => undefined,
     });
     await expect(byteBounded.execute("oversized", { source: "😀".repeat(40_000) })).rejects.toThrow(
       "UTF-8 bytes",
     );
-    expect(byteBounded.description).toContain("noesis.invoke");
-    expect(byteBounded.description).toContain("emit(value)");
+    expect(byteBounded.description).toContain("return await noesis.search(query)");
+    expect(byteBounded.description).toContain("return await noesis.describe(exactName)");
+    expect(byteBounded.description).toContain("do not return that value to you");
+    expect(byteBounded.description).toContain("prefer scripts.save over a loose helper file");
+    expect(byteBounded.description).toContain("verify it immediately with scripts.run");
     expect(byteBounded.description).toContain("store(key, value)");
     expect(executions).toBe(0);
+  });
+
+  test("scopes codemode logical execution identity by turn when Pi reuses a tool call ID", async () => {
+    const logicalExecutionIds: string[] = [];
+    const prepared: PreparedPiCodeExecution = {
+      catalog: emptyCatalog("catalog-logical-identity"),
+      execute: async (_source, _timeoutMs, _signal, _emit, identity) => {
+        if (identity) logicalExecutionIds.push(identity.logicalExecutionId);
+        return {
+          executionId: "physical-execution",
+          value: null,
+          calls: 0,
+          durationMs: 0,
+        };
+      },
+      close: async () => undefined,
+    };
+    const firstTurn = createPiExecuteTool({
+      prepared,
+      turnId: "turn-one",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+    });
+    const secondTurn = createPiExecuteTool({
+      prepared,
+      turnId: "turn-two",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+    });
+
+    await firstTurn.execute("stable-parent-call", { source: "return null;" });
+    await secondTurn.execute("stable-parent-call", { source: "return null;" });
+
+    expect(logicalExecutionIds).toEqual(["turn-one:stable-parent-call", "turn-two:stable-parent-call"]);
+  });
+
+  test("keeps a stable logical execution identity for retries within one turn", async () => {
+    let logicalExecutionId: string | undefined;
+    const execute = createPiExecuteTool({
+      prepared: {
+        catalog: emptyCatalog("catalog-logical-identity"),
+        execute: async (_source, _timeoutMs, _signal, _emit, identity) => {
+          logicalExecutionId = identity?.logicalExecutionId;
+          return {
+            executionId: "physical-execution",
+            value: null,
+            calls: 0,
+            durationMs: 0,
+          };
+        },
+        close: async () => undefined,
+      },
+      turnId: "turn-stable",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+    });
+
+    await execute.execute("stable-parent-call", { source: "return null;" });
+
+    expect(logicalExecutionId).toBe("turn-stable:stable-parent-call");
   });
 
   test("bounds arbitrary action payloads without leaking runtime-specific values", () => {
@@ -279,6 +534,56 @@ describe("agent runtime factories", () => {
     await expect(
       remember.execute("remember", { memory: "m", scope: "turn", anticipatedUse: "later" }, toolCall.signal),
     ).rejects.toThrow("cancelled before execution");
+  });
+
+  test("passes the exact frozen tool catalog through inspect_self", async () => {
+    const plan = frozenPlan();
+    const catalog = Object.freeze({
+      catalogId: "catalog-inspection",
+      catalogDigest: sha256("catalog-inspection"),
+      tools: Object.freeze([
+        Object.freeze({
+          name: "files.read",
+          label: "Read file",
+          description: "Read a text file",
+          revisionId: "tool-files-read-v1",
+          inputSchema: Object.freeze({ type: "object" as const }),
+          outputSchema: Object.freeze({ type: "object" as const }),
+        }),
+      ]),
+    });
+    let inspectedCatalog: PiFrozenToolCatalog | undefined;
+    const tools = createPiSelfTools({
+      plan,
+      request: {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "Inspect tools.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      signal: new AbortController().signal,
+      catalog,
+      adapter: {
+        inspect: async ({ catalog: received }) => {
+          inspectedCatalog = received;
+          return toJsonValue(received ?? null);
+        },
+        remember: async () => null,
+        adapt: async () => null,
+      },
+    });
+    const inspect = tools.find((tool) => tool.name === "inspect_self");
+    if (!inspect) throw new Error("Expected inspect_self tool");
+
+    const result = await inspect.execute("inspect-tools", { section: "tools" });
+
+    expect(inspectedCatalog).toBe(catalog);
+    expect(result.content).toEqual([{ type: "text", text: JSON.stringify(catalog) }]);
+    expect(inspect.description).toContain("exact frozen tool names");
   });
 
   test("checks authentication before loading skills or preparing codemode", async () => {
@@ -418,8 +723,7 @@ describe("agent runtime factories", () => {
       codeExecution: {
         prepare: async () =>
           Object.freeze({
-            catalogId: "catalog-close-failure",
-            catalogDigest: sha256("catalog-close-failure"),
+            catalog: emptyCatalog("catalog-close-failure"),
             execute: async () =>
               Object.freeze({
                 executionId: "unused-execution",
@@ -498,8 +802,7 @@ describe("agent runtime factories", () => {
           });
         };
         return Object.freeze({
-          catalogId: "catalog-actions",
-          catalogDigest: sha256("catalog-actions"),
+          catalog: emptyCatalog("catalog-actions"),
           execute,
           close: async () => undefined,
         });

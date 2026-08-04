@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,10 +9,11 @@ import {
   type NoesisAgentRuntime,
 } from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
-import { eventChecksum, type LedgerEvent } from "@noesis/domain";
+import { EvidenceRevisionRefSchema, eventChecksum, type LedgerEvent } from "@noesis/domain";
 import { createPiAgentRoleRunner, createPiAgentRuntime, createPiSkillLibrary } from "@noesis/runtime-pi";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
+import { z } from "zod";
 import {
   CONTROLLED_PI_MODEL,
   CONTROLLED_PI_PROVIDER,
@@ -106,6 +107,119 @@ async function writeLegacyCompletedTurn(
 }
 
 describe("apps/noesis production control-plane composition", () => {
+  test("rehydrates an exactly replayed script save before same-scope resume runs it", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-script-save-replay-"));
+    roots.push(home);
+    const markerPath = join(home, "script-save-crashed-once");
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    let replayValue: unknown;
+    const noOp = async (): Promise<void> => undefined;
+    const runtime = await createApplicationRuntimeComposition({
+      config: Object.freeze({
+        ...config,
+        learning: Object.freeze({ ...config.learning, enabled: false }),
+      }),
+      createAgent: (_sessionTools, codeExecution) =>
+        Object.freeze({
+          name: "script-save-replay-agent",
+          run: async (request: AgentRuntimeRequest) => {
+            const plan = request.frozenTurnPlan;
+            if (!plan) throw new Error("Expected a frozen turn plan");
+            const signal = new AbortController().signal;
+            // Prepare both physical attempts before the first save. The resumed attempt therefore
+            // has the original frozen script view and must learn the saved revision from replay.
+            const [firstAttempt, resumedAttempt] = await Promise.all([
+              codeExecution.prepare(plan, signal, { skills: Object.freeze([]) }),
+              codeExecution.prepare(plan, signal, { skills: Object.freeze([]) }),
+            ]);
+            const source = [
+              'const fs = await import("node:fs");',
+              "const saved = await tools.scripts.save({",
+              '  name: "replayed-double",',
+              '  description: "Double one numeric input after a resumed save.",',
+              '  source: "return { doubled: input.value * 2 };",',
+              '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+              '  outputSchema: { type: "object", properties: { doubled: { type: "number" } }, required: ["doubled"], additionalProperties: false },',
+              "  requiredTools: []",
+              "});",
+              `if (!fs.existsSync(${JSON.stringify(markerPath)})) {`,
+              `  fs.writeFileSync(${JSON.stringify(markerPath)}, "saved-before-crash");`,
+              "  process.exit(17);",
+              "}",
+              "const verification = await tools.scripts.run({ name: saved.name, input: { value: 21 } });",
+              "return { savedRevision: saved.revision, verification };",
+            ].join("\n");
+            const identity = Object.freeze({ logicalExecutionId: "script-save-resume-stable" });
+            let crashed = false;
+            try {
+              await firstAttempt.execute(source, undefined, signal, () => undefined, identity);
+            } catch {
+              crashed = true;
+            } finally {
+              await firstAttempt.close();
+            }
+            if (!crashed) throw new Error("Expected the first physical execution to crash after save");
+            try {
+              replayValue = (
+                await resumedAttempt.execute(source, undefined, signal, () => undefined, identity)
+              ).value;
+            } finally {
+              await resumedAttempt.close();
+            }
+            const text = "Replayed script revision 1 and verified 42.";
+            return Object.freeze({
+              outcome: "completed" as const,
+              stopReason: "stop" as const,
+              text,
+              assistantMessages: Object.freeze([
+                Object.freeze({ text, timelineSequence: 1, createdAt: new Date().toISOString() }),
+              ]),
+              provider: request.provider,
+              model: request.model,
+            });
+          },
+          steer: async () =>
+            Object.freeze({
+              status: "consumed" as const,
+              timelineSequence: 1,
+              consumedAt: new Date().toISOString(),
+            }),
+          abort: noOp,
+        }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({ text: '{"decision":"no_change","reason":"disabled in replay test"}' }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Script save replay" });
+
+    const result = await runtime.debug.runTurn(trail.trailId, "Save and verify a reusable script.");
+
+    expect(result.output).toBe("Replayed script revision 1 and verified 42.");
+    expect(replayValue).toMatchObject({
+      savedRevision: 1,
+      verification: { scriptRevision: 1, value: { doubled: 42 } },
+    });
+    expect(await runtime.listScripts?.()).toMatchObject([{ name: "replayed-double", revision: 1 }]);
+    const executions = await runtime.debug.workspace.operational.codeExecutions.listForSession(trail.trailId);
+    const physicalAttempts = executions.filter(
+      (execution) => execution.logicalExecutionId === "script-save-resume-stable",
+    );
+    expect(physicalAttempts).toHaveLength(2);
+    expect(physicalAttempts.map((execution) => execution.status).sort()).toEqual(["completed", "failed"]);
+    expect(
+      (await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId)).filter(
+        (call) => call.toolName === "scripts.save",
+      ),
+    ).toHaveLength(1);
+    await runtime.shutdown();
+  });
+
   test("starts from marked SQLite authority without parsing corrupted abandoned JSONL", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-marked-corrupt-legacy-"));
     roots.push(home);
@@ -1190,7 +1304,7 @@ describe("apps/noesis production control-plane composition", () => {
     const messages = await runtime.debug.workspace.operational.messages.listForSession(trail.trailId);
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     const outcomes = await runtime.debug.workspace.operational.outcomes.listForSession(trail.trailId);
-    expect(outcomes).toMatchObject([{ status: "accepted", summary: result.output }]);
+    expect(outcomes).toMatchObject([{ status: "unknown", summary: result.output }]);
     const turnId = String(messages[0]?.metadata["turnId"]);
     expect(await runtime.debug.workspace.operational.foregroundTurns.get(turnId)).toMatchObject({
       sessionId: trail.trailId,
@@ -1240,6 +1354,261 @@ describe("apps/noesis production control-plane composition", () => {
     expect(await reopenedProtected.activations.getTurnPin(trail.trailId, turnId)).toBeDefined();
     expect(await reopenedProtected.activations.getTurnPlan(trail.trailId, turnId)).toEqual(storedPlan);
     reopened.close();
+  });
+
+  test("an ordinary production turn degrades around one persistently unreadable skill", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-partial-skill-load-"));
+    roots.push(home);
+    const skillPackage = join(home, "skill-package");
+    const validPath = join(skillPackage, "skills", "valid-work", "SKILL.md");
+    const brokenPath = join(skillPackage, "skills", "broken-work", "SKILL.md");
+    const validContent =
+      "---\nname: valid-work\ndescription: Valid work.\n---\n\nUse the valid workflow instructions.";
+    const brokenContent =
+      "---\nname: broken-work\ndescription: Broken work.\n---\n\nThese bytes cannot be loaded.";
+    await mkdir(join(skillPackage, "skills", "valid-work"), { recursive: true });
+    await mkdir(join(skillPackage, "skills", "broken-work"), { recursive: true });
+    await writeFile(validPath, validContent, "utf8");
+    await writeFile(brokenPath, brokenContent, "utf8");
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const skills = createPiSkillLibrary({
+      cwd: home,
+      agentDirectory: join(home, "agent"),
+      workspaceTrusted: true,
+      readSkillFile: async (path) => {
+        if (path === brokenPath) throw new Error("persistent skill read failure");
+        return await readFile(path, "utf8");
+      },
+    });
+    await skills.install(skillPackage, "workspace");
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      skills,
+      createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, {
+          codeExecution,
+          selfTools,
+          ...(skillLibrary ? { skills: skillLibrary } : {}),
+          requirePinnedSkillSnapshot: true,
+        }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Partial skill degradation" });
+
+    await expect(runtime.debug.runTurn(trail.trailId, "Answer this ordinary prompt.")).resolves.toMatchObject(
+      { outcome: "completed" },
+    );
+    const snapshot = await skills.snapshot();
+    expect(snapshot.skills.find((skill) => skill.name === "valid-work")).toMatchObject({
+      name: "valid-work",
+      content: validContent,
+    });
+    expect(snapshot.skills.some((skill) => skill.name === "broken-work")).toBe(false);
+    expect(snapshot.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "error",
+          path: brokenPath,
+          message: expect.stringContaining("persistent skill read failure"),
+        }),
+      ]),
+    );
+    await runtime.shutdown();
+  });
+
+  test("a stalled background skill listing cannot poison the first ordinary turn", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-background-skill-stall-"));
+    roots.push(home);
+    const skillPackage = join(home, "skill-package");
+    const skillPath = join(skillPackage, "skills", "stalled-work", "SKILL.md");
+    const skillContent =
+      "---\nname: stalled-work\ndescription: Stalled background skill.\n---\n\nEventually available.";
+    await mkdir(join(skillPackage, "skills", "stalled-work"), { recursive: true });
+    await writeFile(skillPath, skillContent, "utf8");
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    let signalReadStarted: (() => void) | undefined;
+    const readStarted = new Promise<void>((resolve) => {
+      signalReadStarted = resolve;
+    });
+    let releaseRead: (() => void) | undefined;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const skills = createPiSkillLibrary({
+      cwd: home,
+      agentDirectory: join(home, "agent"),
+      workspaceTrusted: true,
+      readSkillFile: async (path) => {
+        signalReadStarted?.();
+        await readGate;
+        return path === skillPath ? skillContent : "";
+      },
+    });
+    await skills.install(skillPackage, "workspace");
+    let admittedSnapshot: Awaited<ReturnType<typeof skills.pinSnapshot>> | undefined;
+    const observedSkills = Object.freeze({
+      ...skills,
+      pinSnapshot: async (...args: Parameters<typeof skills.pinSnapshot>) => {
+        admittedSnapshot = await skills.pinSnapshot(...args);
+        return admittedSnapshot;
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      skills: observedSkills,
+      createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, {
+          codeExecution,
+          selfTools,
+          ...(skillLibrary ? { skills: skillLibrary } : {}),
+          requirePinnedSkillSnapshot: true,
+        }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    let backgroundListing: ReturnType<NonNullable<typeof runtime.listSkills>> | undefined;
+    try {
+      const trail = await runtime.startTrail({ title: "Stalled skill discovery" });
+
+      if (!runtime.listSkills) throw new Error("Expected production skill listing support");
+      backgroundListing = runtime.listSkills();
+      await readStarted;
+      await expect(runtime.debug.runTurn(trail.trailId, "Answer this normal prompt.")).resolves.toMatchObject(
+        {
+          outcome: "completed",
+        },
+      );
+      expect(admittedSnapshot?.skills).toEqual([]);
+      expect(admittedSnapshot?.diagnostics).toEqual([
+        expect.objectContaining({
+          type: "warning",
+          message: expect.stringContaining("omits skills that have not finished loading"),
+        }),
+      ]);
+
+      releaseRead?.();
+      await expect(backgroundListing).resolves.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "stalled-work", contentDigest: expect.any(String) }),
+        ]),
+      );
+    } finally {
+      releaseRead?.();
+      await backgroundListing?.catch(() => undefined);
+      await runtime.shutdown();
+    }
+  });
+
+  test("an explicitly invoked skill remains inspectable from admitted bytes after its source is removed", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-skill-evidence-"));
+    roots.push(home);
+    const skillPackage = join(home, "skill-package");
+    const skillPath = join(skillPackage, "skills", "trace-work", "SKILL.md");
+    const skillContent = [
+      "---",
+      "name: trace-work",
+      "description: Preserve the exact instructions used for traced work.",
+      "---",
+      "",
+      "Inspect the evidence, cite the durable trace, and report the result.",
+    ].join("\n");
+    await mkdir(join(skillPackage, "skills", "trace-work"), { recursive: true });
+    await writeFile(skillPath, skillContent, "utf8");
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const skills = createPiSkillLibrary({
+      cwd: home,
+      agentDirectory: join(home, "agent"),
+      workspaceTrusted: true,
+    });
+    await skills.install(skillPackage, "workspace");
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      skills,
+      createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, {
+          codeExecution,
+          selfTools,
+          ...(skillLibrary ? { skills: skillLibrary } : {}),
+          requirePinnedSkillSnapshot: true,
+        }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Durable skill evidence" });
+
+    await runtime.debug.runTurn(trail.trailId, "/trace-work inspect this session");
+    const initialTranscript = await runtime.getTranscript(trail.trailId);
+    const initialLoad = initialTranscript.find(
+      (entry) => entry.kind === "action" && entry.name === "skills.load",
+    );
+    expect(initialLoad).toMatchObject({
+      kind: "action",
+      status: "completed",
+      output: {
+        name: "trace-work",
+        content: skillContent,
+        invocation: "explicit",
+      },
+    });
+    if (!initialLoad || initialLoad.kind !== "action" || !initialLoad.output)
+      throw new Error("Expected a durable skills.load action");
+    const revision = z.object({ revision: EvidenceRevisionRefSchema }).parse(initialLoad.output).revision;
+    expect(new TextDecoder().decode(await runtime.debug.workspace.reads.readEvidence(revision))).toBe(
+      skillContent,
+    );
+    await runtime.shutdown();
+
+    await rm(skillPath);
+    const reopenedSkills = createPiSkillLibrary({
+      cwd: home,
+      agentDirectory: join(home, "agent"),
+      workspaceTrusted: true,
+    });
+    const reopened = await createApplicationRuntimeComposition({
+      config,
+      skills: reopenedSkills,
+      createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, {
+          codeExecution,
+          selfTools,
+          ...(skillLibrary ? { skills: skillLibrary } : {}),
+          requirePinnedSkillSnapshot: true,
+        }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const resumedLoad = (await reopened.getTranscript(trail.trailId)).find(
+      (entry) => entry.kind === "action" && entry.name === "skills.load",
+    );
+    expect(resumedLoad).toMatchObject({
+      kind: "action",
+      status: "completed",
+      output: {
+        name: "trace-work",
+        content: skillContent,
+        revision,
+      },
+    });
+    expect(new TextDecoder().decode(await reopened.debug.workspace.reads.readEvidence(revision))).toBe(
+      skillContent,
+    );
+    await reopened.shutdown();
   });
 
   test("a first-turn correction on a fresh home reflects against the immutable genesis baseline", async () => {

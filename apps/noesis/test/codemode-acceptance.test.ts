@@ -199,7 +199,7 @@ describe("production codemode journey", () => {
     await runtime.shutdown();
   });
 
-  test("a controlled Pi turn saves and reruns an exact reusable script revision", async () => {
+  test("a controlled Pi journey saves, verifies, inspects, and reuses an exact script revision", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-script-acceptance-"));
     roots.push(home);
     const resolved = await resolveNoesisConfig({
@@ -216,16 +216,18 @@ describe("production codemode journey", () => {
         const lastMessage = context.messages.at(-1);
         if (lastMessage?.role === "toolResult")
           return lastUserText.includes("Save")
-            ? "Script saved."
-            : lastUserText.includes("direct edit")
-              ? "Script returned 63."
-              : "Script returned 42.";
+            ? "Script saved, verified with 42, and ready to reuse as double-value."
+            : lastUserText.includes("List")
+              ? "double-value is saved, typed, inspectable, and ready to reuse."
+              : lastUserText.includes("direct edit")
+                ? "Script returned 63."
+                : "Script returned 44.";
         if (lastUserText.includes("Save"))
           return controlledToolCallResponse(
             "execute",
             {
               source: [
-                "return await tools.scripts.save({",
+                "const saved = await tools.scripts.save({",
                 '  name: "double-value",',
                 '  description: "Double one numeric input.",',
                 '  source: "return { doubled: input.value * 2 };",',
@@ -233,16 +235,30 @@ describe("production codemode journey", () => {
                 '  outputSchema: { type: "object", properties: { doubled: { type: "number" } }, required: ["doubled"], additionalProperties: false },',
                 "  requiredTools: []",
                 "});",
+                "const verification = await tools.scripts.run({ name: saved.name, input: { value: 21 } });",
+                "return { saved, verification };",
               ].join("\n"),
             },
-            "call-save-script",
+            "call-save-and-verify-script",
+          );
+        if (lastUserText.includes("List"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: [
+                "const scripts = await tools.scripts.list({});",
+                'const inspected = await tools.scripts.describe({ name: "double-value" });',
+                "return { scripts, inspected };",
+              ].join("\n"),
+            },
+            "call-list-and-inspect-script",
           );
         return controlledToolCallResponse(
           "execute",
           {
-            source: 'return await tools.scripts.run({ name: "double-value", input: { value: 21 } });',
+            source: `return await tools.scripts.run({ name: "double-value", input: { value: ${lastUserText.includes("direct edit") ? "21" : "22"} } });`,
           },
-          "call-run-script",
+          lastUserText.includes("direct edit") ? "call-run-edited-script" : "call-reuse-script",
         );
       },
     });
@@ -260,7 +276,8 @@ describe("production codemode journey", () => {
 
     const saved = await runtime.debug.runTurn(trail.trailId, "Save a reusable doubling script.");
     const scripts = await runtime.listScripts?.();
-    const run = await runtime.debug.runTurn(trail.trailId, "Run the double-value script for 21.");
+    const inspected = await runtime.debug.runTurn(trail.trailId, "List and inspect the saved script.");
+    const run = await runtime.debug.runTurn(trail.trailId, "Reuse the double-value script for 22.");
     const executionsBeforeEdit = await runtime.debug.workspace.operational.codeExecutions.listForSession(
       trail.trailId,
     );
@@ -286,7 +303,7 @@ describe("production codemode journey", () => {
       trail.trailId,
     );
 
-    expect(saved.output).toBe("Script saved.");
+    expect(saved.output).toBe("Script saved, verified with 42, and ready to reuse as double-value.");
     expect(scripts).toMatchObject([
       {
         name: "double-value",
@@ -294,7 +311,8 @@ describe("production codemode journey", () => {
         requiredTools: [],
       },
     ]);
-    expect(run.output).toBe("Script returned 42.");
+    expect(inspected.output).toBe("double-value is saved, typed, inspectable, and ready to reuse.");
+    expect(run.output).toBe("Script returned 44.");
     expect(editedScripts).toMatchObject([{ name: "double-value", revision: 2 }]);
     expect(rerun.output).toBe("Script returned 63.");
     expect(
@@ -312,8 +330,25 @@ describe("production codemode journey", () => {
     expect(calls.filter((call) => call.toolName !== "execute").map((call) => call.toolName)).toEqual([
       "scripts.save",
       "scripts.run",
+      "scripts.list",
+      "scripts.describe",
+      "scripts.run",
       "scripts.run",
     ]);
+    expect(calls.find((call) => call.toolName === "scripts.save")?.response).toMatchObject({
+      output: {
+        name: "double-value",
+        revision: 1,
+        requiredTools: [],
+        reuse: {
+          naturalLanguage: "Run the double-value script with the desired input.",
+          run: { tool: "scripts.run", name: "double-value" },
+          inspect: { tool: "scripts.describe", name: "double-value" },
+          list: { tool: "scripts.list" },
+          workingPath: "definitions/scripts/double-value/index.mjs",
+        },
+      },
+    });
     await runtime.shutdown();
   });
 

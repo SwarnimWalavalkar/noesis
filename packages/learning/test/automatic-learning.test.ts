@@ -1,5 +1,5 @@
-import type { AgentRunRequest } from "@noesis/agent-types";
-import { createAtomicCapabilityRegistry, type CapabilityRevisionConstruction } from "@noesis/capabilities";
+import type { AgentRunRequest, StructuredInferencePort } from "@noesis/agent-types";
+import { type CapabilityRevisionConstruction, createAtomicCapabilityRegistry } from "@noesis/capabilities";
 import type {
   CreateUserCriterionInput,
   UserCriterionError,
@@ -7,32 +7,35 @@ import type {
   UserCriterionRepository,
 } from "@noesis/config";
 import {
-  capabilityRevisionRef,
-  err,
-  ok,
-  sha256,
   type Capability,
+  capabilityRevisionRef,
   type DatabaseRowRef,
   type DefinitionWriteRequest,
   type EvidenceRef,
   type Experiment,
   type ExperimentStorePort,
+  err,
   type FeedbackSignal,
   type FileRevisionRef,
+  ok,
   type Result,
+  sha256,
 } from "@noesis/domain";
 import type { ExactCitation, HistoryPort, HistorySearchRequest } from "@noesis/intelligence";
 import { describe, expect, test } from "vitest";
 import {
+  type AutomaticLearningConfig,
+  AutomaticLearningConfigSchema,
   createAutomaticLearningOrgan,
   createInMemoryExperimentBriefStore,
-  AutomaticLearningConfigSchema,
-  RevisionAuthorOutputSchema,
-  type AutomaticLearningConfig,
+  experimentBriefPublicationCollisionError,
+  type ExperimentBrief,
   type ExperimentBriefStore,
+  RevisionAuthorOutputSchema,
 } from "../src/index.ts";
 import {
   createScriptedLearningInferencePort,
+  type ScriptedLearningInferencePort,
   type ScriptedLearningInferenceStep,
 } from "./support/scripted-learning-inference.ts";
 
@@ -118,6 +121,28 @@ function citation(index: number, excerpt = `prior correction ${index}`): ExactCi
   });
 }
 
+function outcomeCitation(rowId: string, excerpt: string): ExactCitation {
+  return Object.freeze({
+    source: Object.freeze({ kind: "database_row", table: "outcomes", rowId, field: "summary" }),
+    occurredAt: "2026-01-08T00:00:00.000Z",
+    excerpt,
+    startOffset: 0,
+    endOffset: excerpt.length,
+    contentDigest: sha256(excerpt),
+  });
+}
+
+function fileRevisionCitation(revisionId: string, excerpt: string): ExactCitation {
+  return Object.freeze({
+    source: Object.freeze({ kind: "file_revision", revisionId, field: "bytes" }),
+    occurredAt: "2026-01-09T00:00:00.000Z",
+    excerpt,
+    startOffset: 0,
+    endOffset: excerpt.length,
+    contentDigest: sha256(excerpt),
+  });
+}
+
 function databaseRef(rowId: string): DatabaseRowRef<"messages"> {
   return Object.freeze({ kind: "database_row", table: "messages", rowId });
 }
@@ -154,7 +179,11 @@ function createFeedbackHarness() {
     port: Object.freeze({
       getFeedbackSignal: async (signalId: string) => signals.find((signal) => signal.signalId === signalId),
       recordFeedbackSignal: async (signal: FeedbackSignal) => {
-        signals.push(signal);
+        const existing = signals.find((candidate) => candidate.signalId === signal.signalId);
+        if (existing && JSON.stringify(existing) !== JSON.stringify(signal)) {
+          throw new Error(`Feedback signal ${signal.signalId} changed`);
+        }
+        if (!existing) signals.push(signal);
         return Object.freeze({
           kind: "database_row" as const,
           table: "feedback_signals" as const,
@@ -286,6 +315,7 @@ const reflectionStep = Object.freeze({
     scope: "writing",
     capabilityName: "Writing assistance",
     capabilityIntent: "Apply evidence-grounded writing corrections",
+    recurrenceEvidenceCitationIndexes: Object.freeze([0]),
     sourceCases: Object.freeze([
       Object.freeze({
         title: "Apply the observed correction",
@@ -369,16 +399,18 @@ function createHarness(input: {
   readonly steps: readonly ScriptedLearningInferenceStep[];
   readonly citations?: readonly ExactCitation[];
   readonly briefs?: ExperimentBriefStore;
+  readonly inference?: ScriptedLearningInferencePort;
+  readonly experimentState?: ReturnType<typeof createExperimentState>;
 }) {
   const history = createHistoryHarness(input.citations ?? []);
   const feedback = createFeedbackHarness();
   const criteria = createCriteriaHarness();
-  const inference = createScriptedLearningInferencePort({ steps: input.steps });
+  const inference = input.inference ?? createScriptedLearningInferencePort({ steps: input.steps });
   const registry = createAtomicCapabilityRegistry();
   registry.registerCapability(capability);
   const baseline = registry.constructRevision(baselineConstruction());
   const candidates = createCandidateDefinitionHarness();
-  const experiments: Experiment[] = [];
+  const experimentState = input.experimentState ?? createExperimentState();
   const organ = createAutomaticLearningOrgan({
     config,
     history: history.history,
@@ -388,24 +420,7 @@ function createHarness(input: {
     briefs: input.briefs ?? createInMemoryExperimentBriefStore(),
     capabilities: registry,
     candidateDefinitions: candidates.port,
-    experiments: Object.freeze({
-      getExperiment: async (experimentId: string) =>
-        experiments.find((experiment) => experiment.experimentId === experimentId),
-      listExperiments: async (request: Parameters<ExperimentStorePort["listExperiments"]>[0]) =>
-        Object.freeze(
-          experiments
-            .filter((experiment) => request.status === undefined || experiment.status === request.status)
-            .slice(0, request.limit),
-        ),
-      putExperiment: async (experiment: Experiment) => {
-        experiments.push(experiment);
-        return Object.freeze({
-          kind: "database_row" as const,
-          table: "experiments" as const,
-          rowId: experiment.experimentId,
-        });
-      },
-    }),
+    experiments: experimentState.port,
     nextId: sequentialIds(),
   });
   return Object.freeze({
@@ -417,8 +432,144 @@ function createHarness(input: {
     criteria,
     inference,
     candidates,
-    experiments: () => Object.freeze([...experiments]),
+    experiments: experimentState.values,
+    putExperiment: experimentState.port.putExperiment,
   });
+}
+
+function createExperimentState() {
+  const experiments: Experiment[] = [];
+  const port: ExperimentStorePort = Object.freeze({
+    getExperiment: async (experimentId: string) =>
+      experiments.find((experiment) => experiment.experimentId === experimentId),
+    listExperiments: async (request: Parameters<ExperimentStorePort["listExperiments"]>[0]) =>
+      Object.freeze(
+        experiments
+          .filter((experiment) => request.status === undefined || experiment.status === request.status)
+          .slice(0, request.limit),
+      ),
+    putExperiment: async (experiment: Experiment) => {
+      const index = experiments.findIndex((candidate) => candidate.experimentId === experiment.experimentId);
+      const existing = index === -1 ? undefined : experiments[index];
+      const value = existing
+        ? Object.freeze({
+            ...experiment,
+            evidenceRefs: Object.freeze([
+              ...new Map(
+                [...existing.evidenceRefs, ...experiment.evidenceRefs].map((reference) => [
+                  JSON.stringify(reference),
+                  reference,
+                ]),
+              ).values(),
+            ]),
+            feedbackSignalIds: Object.freeze([
+              ...new Set([...existing.feedbackSignalIds, ...experiment.feedbackSignalIds]),
+            ]),
+          })
+        : experiment;
+      if (index === -1) experiments.push(value);
+      else experiments[index] = value;
+      return Object.freeze({
+        kind: "database_row" as const,
+        table: "experiments" as const,
+        rowId: experiment.experimentId,
+      });
+    },
+  });
+  return Object.freeze({ port, values: () => Object.freeze([...experiments]) });
+}
+
+function createContendedBriefStore(initial: ExperimentBrief) {
+  let current = initial;
+  let initialReads = 0;
+  let collisions = 0;
+  let release: () => void = () => undefined;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const port: ExperimentBriefStore = Object.freeze({
+    findByDedupeKey: async (key: string) => {
+      if (key !== current.hypothesisDedupeKey) return undefined;
+      if (initialReads >= 2) return current;
+      const observed = current;
+      initialReads += 1;
+      if (initialReads === 2) release();
+      await barrier;
+      return observed;
+    },
+    put: async (brief: ExperimentBrief) => {
+      current = brief;
+      return brief;
+    },
+    replace: async ({ expectedExperimentId, brief }: Parameters<ExperimentBriefStore["replace"]>[0]) => {
+      if (current.experimentId !== expectedExperimentId) {
+        collisions += 1;
+        throw experimentBriefPublicationCollisionError(brief.hypothesisDedupeKey);
+      }
+      current = brief;
+      return brief;
+    },
+  });
+  return Object.freeze({ port, current: () => current, collisions: () => collisions });
+}
+
+function createContendedInitialBriefStore() {
+  let current: ExperimentBrief | undefined;
+  let dedupeKey: string | undefined;
+  let initialReads = 0;
+  let collisions = 0;
+  let release: () => void = () => undefined;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const port: ExperimentBriefStore = Object.freeze({
+    findByDedupeKey: async (key: string) => {
+      dedupeKey ??= key;
+      if (key !== dedupeKey) return undefined;
+      if (initialReads >= 2) return current;
+      const observed = current;
+      initialReads += 1;
+      if (initialReads === 2) release();
+      await barrier;
+      return observed;
+    },
+    put: async (brief: ExperimentBrief) => {
+      if (current) {
+        if (JSON.stringify(current) === JSON.stringify(brief)) return current;
+        collisions += 1;
+        throw experimentBriefPublicationCollisionError(brief.hypothesisDedupeKey);
+      }
+      current = brief;
+      return brief;
+    },
+    replace: async ({ expectedExperimentId, brief }: Parameters<ExperimentBriefStore["replace"]>[0]) => {
+      if (!current || current.experimentId !== expectedExperimentId) {
+        collisions += 1;
+        throw experimentBriefPublicationCollisionError(brief.hypothesisDedupeKey);
+      }
+      current = brief;
+      return brief;
+    },
+  });
+  return Object.freeze({ port, current: () => current, collisions: () => collisions });
+}
+
+function createBarrierInference(
+  steps: readonly ScriptedLearningInferenceStep[],
+): ScriptedLearningInferencePort {
+  const base = createScriptedLearningInferencePort({ steps });
+  let entrants = 0;
+  let release: () => void = () => undefined;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const run: StructuredInferencePort["run"] = async (request, schema) => {
+    entrants += 1;
+    if (entrants === 2) release();
+    await barrier;
+    return await base.run(request, schema);
+  };
+  return Object.freeze({ run, requests: base.requests, remaining: base.remaining });
 }
 
 describe("automatic learning organ", () => {
@@ -449,7 +600,10 @@ describe("automatic learning organ", () => {
       databaseRef("prior-message-2"),
     ]);
     expect(result.brief.citations).toHaveLength(2);
-    expect(result.brief.recurrenceCount).toBe(2);
+    expect(result.brief.recurrenceCount).toBe(1);
+    expect(harness.experiments()).toEqual([
+      expect.objectContaining({ experimentId: result.brief.experimentId, status: "hypothesis" }),
+    ]);
     expect(result.notification).toEqual({
       mode: "quiet",
       kind: "experiment",
@@ -604,7 +758,7 @@ describe("automatic learning organ", () => {
     expect(result.harvest.signals[0]?.signal).toMatchObject({
       kind: "repeated_failure",
       scope: "writing",
-      evidenceRefs: [databaseRef("current-message"), databaseRef("prior-message-1")],
+      evidenceRefs: [databaseRef("current-message")],
     });
     expect(harness.criteria.creates()).toHaveLength(0);
   });
@@ -647,6 +801,406 @@ describe("automatic learning organ", () => {
     expect(authored.experiment.candidateRevisions).toEqual([authored.revisionRef]);
   });
 
+  test("serializes two reflected observations without losing either provenance set", async () => {
+    const inference = createBarrierInference([reflectionStep, reflectionStep]);
+    const harness = createHarness({
+      steps: [],
+      inference,
+      citations: [citation(1)],
+    });
+
+    const [first, second] = await Promise.all([
+      harness.organ.observeTurn({
+        turn: turn({ turnId: "turn-concurrent-1", correction: "Use primary sources." }),
+        baselineRevision: harness.baseline,
+        capability,
+      }),
+      harness.organ.observeTurn({
+        turn: turn({
+          turnId: "turn-concurrent-2",
+          correction: "Use primary sources.",
+          evidenceRef: databaseRef("current-message-2"),
+        }),
+        baselineRevision: harness.baseline,
+        capability,
+      }),
+    ]);
+
+    expect([first.status, second.status].sort()).toEqual(["deduped", "experiment"]);
+    if (first.status === "no_change" || second.status === "no_change")
+      throw new Error("Expected concurrent experiment results");
+    const brief = first.status === "deduped" ? first.brief : second.brief;
+    expect(brief.feedbackSignalIds).toHaveLength(2);
+    expect(brief.evidenceRefs).toEqual(
+      expect.arrayContaining([databaseRef("current-message"), databaseRef("current-message-2")]),
+    );
+    expect(harness.experiments()).toHaveLength(1);
+    expect(harness.experiments()[0]?.feedbackSignalIds).toHaveLength(2);
+  });
+
+  test("reconciles a concurrent initial publication with the winning brief", async () => {
+    const experimentState = createExperimentState();
+    const briefs = createContendedInitialBriefStore();
+    const left = createHarness({
+      steps: [reflectionStep],
+      citations: [citation(1)],
+      briefs: briefs.port,
+      experimentState,
+    });
+    const right = createHarness({
+      steps: [reflectionStep],
+      citations: [citation(1)],
+      briefs: briefs.port,
+      experimentState,
+    });
+
+    const [leftResult, rightResult] = await Promise.all([
+      left.organ.observeTurn({
+        turn: turn({
+          turnId: "turn-initial-left",
+          correction: "Use primary sources.",
+          evidenceRef: databaseRef("current-message-initial-left"),
+        }),
+        baselineRevision: left.baseline,
+        capability,
+      }),
+      right.organ.observeTurn({
+        turn: turn({
+          turnId: "turn-initial-right",
+          correction: "Use primary sources.",
+          evidenceRef: databaseRef("current-message-initial-right"),
+        }),
+        baselineRevision: right.baseline,
+        capability,
+      }),
+    ]);
+
+    expect([leftResult.status, rightResult.status].sort()).toEqual(["deduped", "experiment"]);
+    if (leftResult.status === "no_change" || rightResult.status === "no_change")
+      throw new Error("Expected concurrent initial publication results");
+    expect(leftResult.brief.experimentId).toBe(rightResult.brief.experimentId);
+    expect(briefs.collisions()).toBe(1);
+    expect(briefs.current()).toMatchObject({
+      experimentId: leftResult.brief.experimentId,
+      evidenceRefs: expect.arrayContaining([
+        databaseRef("current-message-initial-left"),
+        databaseRef("current-message-initial-right"),
+      ]),
+      feedbackSignalIds: expect.arrayContaining([
+        leftResult.harvest.signals[0]?.signal.signalId,
+        rightResult.harvest.signals[0]?.signal.signalId,
+      ]),
+    });
+    expect(experimentState.values()).toHaveLength(1);
+    expect(experimentState.values()[0]).toMatchObject({
+      experimentId: leftResult.brief.experimentId,
+      evidenceRefs: expect.arrayContaining([
+        databaseRef("current-message-initial-left"),
+        databaseRef("current-message-initial-right"),
+      ]),
+      feedbackSignalIds: expect.arrayContaining([
+        leftResult.harvest.signals[0]?.signal.signalId,
+        rightResult.harvest.signals[0]?.signal.signalId,
+      ]),
+    });
+  });
+
+  test("retains outcome and file-revision citations independently of evidence conversion", async () => {
+    const outcome = outcomeCitation("outcome-prior", "The report failed source review");
+    const file = fileRevisionCitation("revision-prior-report", "A prior report omitted citations");
+    const reflection = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        recurrenceEvidenceCitationIndexes: Object.freeze([0, 1]),
+      }),
+    }) satisfies ScriptedLearningInferenceStep;
+    const harness = createHarness({ steps: [reflection], citations: [outcome, file] });
+
+    const result = await harness.organ.observeTurn({
+      turn: turn({ correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    if (result.status !== "experiment") throw new Error("Expected an experiment");
+    expect(result.brief.citations).toEqual([outcome, file]);
+    expect(result.brief.recurrenceCitations).toEqual([outcome, file]);
+    expect(result.brief.evidenceRefs).toContainEqual({
+      kind: "database_row",
+      table: "outcomes",
+      rowId: "outcome-prior",
+    });
+    expect(result.brief.evidenceRefs).not.toContainEqual(
+      expect.objectContaining({
+        kind: "file_revision",
+        revisionId: "revision-prior-report",
+      }),
+    );
+  });
+
+  test("does not count a current-turn file revision returned by history as recurrence", async () => {
+    const currentRevision = fileRef("current-turn-source.md");
+    const currentCitation = fileRevisionCitation(currentRevision.revisionId, "The current correction");
+    const priorOutcome = outcomeCitation("outcome-earlier-correction", "An earlier correction recurred");
+    const selectsFilteredIndex = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        recurrenceEvidenceCitationIndexes: Object.freeze([0]),
+      }),
+    }) satisfies ScriptedLearningInferenceStep;
+    const harness = createHarness({
+      steps: [selectsFilteredIndex],
+      citations: [currentCitation, priorOutcome],
+    });
+
+    const result = await harness.organ.observeTurn({
+      turn: turn({
+        correction: "Use primary sources.",
+        evidenceRef: currentRevision,
+      }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    if (result.status !== "experiment") throw new Error("Expected an experiment");
+    expect(result.brief.evidenceRefs).toEqual([
+      currentRevision,
+      { kind: "database_row", table: "outcomes", rowId: "outcome-earlier-correction" },
+    ]);
+    expect(result.brief.citations).toEqual([priorOutcome]);
+    expect(result.brief.citations).not.toContainEqual(currentCitation);
+    expect(result.brief.recurrenceCitations).toEqual([priorOutcome]);
+    expect(result.brief.recurrenceCount).toBe(1);
+  });
+
+  test("retries one reflected turn without duplicating its feedback signal or hypothesis", async () => {
+    const harness = createHarness({
+      steps: [reflectionStep, reflectionStep],
+      citations: [citation(1), citation(2)],
+    });
+    const request = {
+      turn: turn({ turnId: "turn-retried", correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    } as const;
+
+    const first = await harness.organ.observeTurn(request);
+    const retried = await harness.organ.observeTurn(request);
+
+    expect(first.status).toBe("experiment");
+    expect(retried.status).toBe("deduped");
+    expect(harness.feedback.signals()).toHaveLength(1);
+    expect(harness.experiments()).toHaveLength(1);
+    expect(harness.feedback.signals()[0]?.signalId).toMatch(/^signal_[a-f0-9]{32}$/u);
+  });
+
+  test("counts only distinct recurrence citations selected by the reflector", async () => {
+    const selectiveReflection = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        recurrenceEvidenceCitationIndexes: Object.freeze([0]),
+      }),
+    }) satisfies ScriptedLearningInferenceStep;
+    const harness = createHarness({
+      steps: [selectiveReflection],
+      citations: [citation(1, "same correction"), citation(2, "same correction")],
+    });
+
+    const result = await harness.organ.observeTurn({
+      turn: turn({ correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    if (result.status !== "experiment") throw new Error("Expected an experiment");
+    expect(result.brief.citations).toHaveLength(2);
+    expect(result.brief.recurrenceCount).toBe(1);
+  });
+
+  test("reports fresh recurrence without overwriting exact cumulative recurrence evidence", async () => {
+    const noFreshRecurrence = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        recurrenceEvidenceCitationIndexes: Object.freeze([]),
+      }),
+    }) satisfies ScriptedLearningInferenceStep;
+    const harness = createHarness({
+      steps: [reflectionStep, noFreshRecurrence],
+      citations: [citation(1)],
+    });
+    await harness.organ.observeTurn({
+      turn: turn({ turnId: "turn-recurrence-1", correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+    const second = await harness.organ.observeTurn({
+      turn: turn({
+        turnId: "turn-recurrence-2",
+        correction: "Use primary sources.",
+        evidenceRef: databaseRef("current-message-2"),
+      }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    if (second.status !== "deduped") throw new Error("Expected a deduped experiment");
+    expect(second.harvest.recurrenceCount).toBe(0);
+    expect(second.brief.recurrenceCount).toBe(1);
+    expect(second.brief.recurrenceCitations).toEqual([citation(1)]);
+  });
+
+  test("creates a fresh generation when new evidence recurs after a completed experiment", async () => {
+    const harness = createHarness({
+      steps: [reflectionStep, reflectionStep],
+      citations: [citation(1)],
+    });
+    const first = await harness.organ.observeTurn({
+      turn: turn({ turnId: "turn-generation-1", correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+    if (first.status !== "experiment") throw new Error("Expected an experiment");
+    const openExperiment = harness.experiments()[0];
+    if (!openExperiment) throw new Error("Expected the first experiment to be stored");
+    const completedExperiment: Experiment = Object.freeze({
+      experimentId: openExperiment.experimentId,
+      hypothesis: openExperiment.hypothesis,
+      scope: openExperiment.scope,
+      evidenceRefs: openExperiment.evidenceRefs,
+      baselineRevision: openExperiment.baselineRevision,
+      candidateRevisions: openExperiment.candidateRevisions,
+      feedbackSignalIds: openExperiment.feedbackSignalIds,
+      ...(openExperiment.preflightRef ? { preflightRef: openExperiment.preflightRef } : {}),
+      ...(openExperiment.activatedRevision ? { activatedRevision: openExperiment.activatedRevision } : {}),
+      ...(openExperiment.followUpExperimentId
+        ? { followUpExperimentId: openExperiment.followUpExperimentId }
+        : {}),
+      status: "completed",
+      outcome: "keep",
+    });
+    await harness.putExperiment(completedExperiment);
+
+    const second = await harness.organ.observeTurn({
+      turn: turn({
+        turnId: "turn-generation-2",
+        correction: "Use primary sources.",
+        evidenceRef: databaseRef("current-message-2"),
+      }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    if (second.status !== "experiment") throw new Error("Expected a follow-up experiment");
+    expect(second.brief.experimentId).not.toBe(first.brief.experimentId);
+    expect(harness.experiments()).toHaveLength(2);
+    expect(
+      harness.experiments().find(({ experimentId }) => experimentId === first.brief.experimentId),
+    ).toMatchObject({
+      status: "completed",
+      outcome: "keep",
+    });
+    expect(
+      harness.experiments().find(({ experimentId }) => experimentId === second.brief.experimentId),
+    ).toMatchObject({
+      status: "hypothesis",
+      evidenceRefs: expect.arrayContaining([
+        { kind: "database_row", table: "experiments", rowId: first.brief.experimentId },
+        databaseRef("current-message-2"),
+      ]),
+    });
+  });
+
+  test("reconciles concurrent follow-up observations into one reachable successor", async () => {
+    const experimentState = createExperimentState();
+    const genesis = createHarness({
+      steps: [reflectionStep],
+      citations: [citation(1)],
+      experimentState,
+    });
+    const first = await genesis.organ.observeTurn({
+      turn: turn({ turnId: "turn-follow-up-parent", correction: "Use primary sources." }),
+      baselineRevision: genesis.baseline,
+      capability,
+    });
+    if (first.status !== "experiment") throw new Error("Expected a parent experiment");
+    const parent = experimentState.values()[0];
+    if (!parent) throw new Error("Expected the parent experiment to be stored");
+    await experimentState.port.putExperiment(
+      Object.freeze({
+        ...parent,
+        status: "completed" as const,
+        outcome: "keep" as const,
+      }),
+    );
+
+    const briefs = createContendedBriefStore(first.brief);
+    const left = createHarness({
+      steps: [reflectionStep],
+      citations: [citation(1)],
+      briefs: briefs.port,
+      experimentState,
+    });
+    const right = createHarness({
+      steps: [reflectionStep],
+      citations: [citation(1)],
+      briefs: briefs.port,
+      experimentState,
+    });
+    const [leftResult, rightResult] = await Promise.all([
+      left.organ.observeTurn({
+        turn: turn({
+          turnId: "turn-follow-up-left",
+          correction: "Use primary sources.",
+          evidenceRef: databaseRef("current-message-left"),
+        }),
+        baselineRevision: left.baseline,
+        capability,
+      }),
+      right.organ.observeTurn({
+        turn: turn({
+          turnId: "turn-follow-up-right",
+          correction: "Use primary sources.",
+          evidenceRef: databaseRef("current-message-right"),
+        }),
+        baselineRevision: right.baseline,
+        capability,
+      }),
+    ]);
+
+    expect([leftResult.status, rightResult.status].sort()).toEqual(["deduped", "experiment"]);
+    if (leftResult.status === "no_change" || rightResult.status === "no_change")
+      throw new Error("Expected concurrent follow-up results");
+    const successorId = leftResult.brief.experimentId;
+    expect(rightResult.brief.experimentId).toBe(successorId);
+    expect(briefs.collisions()).toBe(1);
+    expect(briefs.current()).toMatchObject({
+      experimentId: successorId,
+      evidenceRefs: expect.arrayContaining([
+        databaseRef("current-message-left"),
+        databaseRef("current-message-right"),
+      ]),
+    });
+    const experiments = experimentState.values();
+    expect(experiments).toHaveLength(2);
+    expect(experiments.filter(({ status }) => status === "hypothesis")).toHaveLength(1);
+    expect(experiments.find(({ experimentId }) => experimentId === successorId)).toMatchObject({
+      status: "hypothesis",
+      evidenceRefs: expect.arrayContaining([
+        { kind: "database_row", table: "experiments", rowId: parent.experimentId },
+        databaseRef("current-message-left"),
+        databaseRef("current-message-right"),
+      ]),
+      feedbackSignalIds: expect.arrayContaining([
+        leftResult.harvest.signals[0]?.signal.signalId,
+        rightResult.harvest.signals[0]?.signal.signalId,
+      ]),
+    });
+  });
+
   test("authors a complete immutable AC-03 revision and a canonical authoring experiment", async () => {
     const harness = createHarness({ steps: [reflectionStep, authorStep], citations: [citation(1)] });
     const observed = await harness.organ.observeTurn({
@@ -687,6 +1241,25 @@ describe("automatic learning organ", () => {
     });
     expect(harness.experiments()).toEqual([authored.experiment]);
     expect("activate" in harness.registry).toBe(false);
+  });
+
+  test("repairs a singleton-array revision-author handoff without choosing among candidates", async () => {
+    const wrappedAuthor = Object.freeze({
+      role: "revision_author" as const,
+      value: Object.freeze([authorStep.value]),
+    }) satisfies ScriptedLearningInferenceStep;
+    const harness = createHarness({ steps: [reflectionStep, wrappedAuthor], citations: [citation(1)] });
+    const observed = await harness.organ.observeTurn({
+      turn: turn({ correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+    if (observed.status !== "experiment") throw new Error("Expected an experiment brief");
+
+    const authored = await harness.organ.authorExperimentRevision({ brief: observed.brief });
+
+    expect(authored.revision.promptModules).toHaveLength(1);
+    expect(authored.experiment.status).toBe("authoring");
   });
 
   test("keeps coordinator cancellation transient while forwarding it to reflector and author roles", async () => {

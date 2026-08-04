@@ -1,5 +1,5 @@
 import type { EffectClass, JsonValue } from "@noesis/domain";
-import { inspectEffectExecutionFailure, type AuthorityBoundary, type EffectDecision } from "@noesis/policy";
+import { type AuthorityBoundary, type EffectDecision, inspectEffectExecutionFailure } from "@noesis/policy";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -82,6 +82,80 @@ describe("tool broker", () => {
     await expect(broker.invoke("test.echo", { value: 1 }, invocationContext())).resolves.toMatchObject({
       ok: false,
       code: "invalid_input",
+      message: expect.stringContaining('noesis.describe("test.echo")'),
+    });
+  });
+
+  it("recovers unknown tool names with frozen-catalog suggestions and discovery guidance", async () => {
+    const shellRun = defineTool({
+      name: "shell.run",
+      label: "Run shell command",
+      description: "Run a shell command",
+      visibility: "codemode_only",
+      inputSchema: z.strictObject({ command: z.string() }),
+      outputSchema: z.null(),
+      effect: () => Object.freeze({ effect: "read", resource: "test:shell", estimatedCost: 0 }),
+      execute: async () => null,
+    });
+    const bareFoo = defineTool({
+      name: "foo",
+      label: "Foo",
+      description: "Exercise nearest-name recovery across dot structure",
+      visibility: "codemode_only",
+      inputSchema: z.strictObject({}),
+      outputSchema: z.null(),
+      effect: () => Object.freeze({ effect: "read", resource: "test:foo", estimatedCost: 0 }),
+      execute: async () => null,
+    });
+    const broker = createToolBroker({
+      definitions: [echo(), shellRun, bareFoo],
+      authority: foregroundAuthority(),
+      permission,
+    });
+
+    await expect(broker.invoke("shell.rum", { command: "pwd" }, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message:
+        "Unknown tool: shell.rum. Did you mean shell.run? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+    });
+
+    await expect(broker.invoke("shell/run", { command: "pwd" }, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message:
+        "Unknown tool: shell/run. Did you mean shell.run? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+    });
+
+    await expect(broker.invoke("Shell.run", { command: "pwd" }, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message:
+        "Unknown tool: Shell.run. Did you mean shell.run? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+    });
+
+    await expect(broker.invoke("foo.", {}, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message:
+        "Unknown tool: foo.. Did you mean foo? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+    });
+
+    await expect(
+      broker.invoke("shell.completely-unrelated", { command: "pwd" }, invocationContext()),
+    ).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message:
+        "Unknown tool: shell.completely-unrelated. Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+    });
+
+    const oversizedName = `shell.${"x".repeat(10_000)}`;
+    const displayedName = `${oversizedName.slice(0, 128)}… [truncated]`;
+    await expect(broker.invoke(oversizedName, {}, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message: `Unknown tool: ${displayedName}. Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).`,
     });
   });
 

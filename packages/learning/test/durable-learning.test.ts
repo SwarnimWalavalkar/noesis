@@ -2,19 +2,21 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  capabilityRevisionRef,
-  sameCapabilityRevisionRef,
-  sha256,
   type CapabilityRevision,
+  capabilityRevisionRef,
+  durableJobFailureFromError,
   type EvidenceRef,
   type Experiment,
   type FileRevisionRef,
+  sameCapabilityRevisionRef,
+  sha256,
 } from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   createWorkspaceExperimentBriefStore,
   createWorkspaceLearningCandidateManifestStore,
+  EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE,
   type ExperimentBrief,
 } from "../src/index.ts";
 
@@ -71,6 +73,7 @@ describe("durable automatic-learning handoff", () => {
       evidenceRefs: Object.freeze([evidence]),
       feedbackSignalIds: Object.freeze([]),
       citations: Object.freeze([]),
+      recurrenceCitations: Object.freeze([]),
       sourceCases: Object.freeze([
         Object.freeze({
           caseId: "source-1",
@@ -110,7 +113,9 @@ describe("durable automatic-learning handoff", () => {
     workspace = await createWorkspaceStore(root);
     const restartedBriefs = createWorkspaceExperimentBriefStore(workspace);
     expect(await restartedBriefs.findByDedupeKey(brief.hypothesisDedupeKey)).toEqual(brief);
-    await restartedBriefs.put(Object.freeze({ ...brief, experimentId: "duplicate-after-restart" }));
+    await expect(
+      restartedBriefs.put(Object.freeze({ ...brief, experimentId: "duplicate-after-restart" })),
+    ).rejects.toThrow("publication collision");
     expect((await restartedBriefs.findByDedupeKey(brief.hypothesisDedupeKey))?.experimentId).toBe(
       brief.experimentId,
     );
@@ -125,6 +130,102 @@ describe("durable automatic-learning handoff", () => {
       revisionRef: candidateRef,
     });
     expect(repeatedManifest).toEqual(manifestRevision);
+    workspace.close();
+  });
+
+  test("re-reads the winner after a replacement CAS loss and reports a retryable collision", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-durable-learning-collision-"));
+    roots.push(root);
+    const workspace = await createWorkspaceStore(root);
+    await workspace.operational.sessions.put({
+      sessionId: "session-learning-collision",
+      title: "Concurrent learning source",
+      status: "completed",
+      provider: "fake",
+      model: "fake",
+      runtime: "fake",
+      createdAt: "2026-07-22T10:00:00.000Z",
+      updatedAt: "2026-07-22T10:00:00.000Z",
+      metadata: {},
+    });
+    await workspace.operational.messages.put({
+      messageId: "message-learning-collision",
+      sessionId: "session-learning-collision",
+      role: "user",
+      content: "Always cite the source.",
+      sensitivity: "private",
+      createdAt: "2026-07-22T10:00:00.000Z",
+      metadata: {},
+    });
+    const evidence: EvidenceRef = {
+      kind: "database_row",
+      table: "messages",
+      rowId: "message-learning-collision",
+    };
+    const baseline = capabilityRevisionRef(
+      revision("capability-collision-r1", fileRef("collision"), [evidence]),
+    );
+    const initial: ExperimentBrief = Object.freeze({
+      experimentId: "experiment-learning-collision",
+      title: "Cite sources",
+      hypothesis: "Citations reduce corrections",
+      hypothesisDedupeKey: "dedupe-learning-collision",
+      scope: "research",
+      capability: Object.freeze({
+        capabilityId: "capability-research",
+        name: "Research",
+        scope: "research",
+        intent: "Produce grounded research",
+      }),
+      baselineRevision: baseline,
+      evidenceRefs: Object.freeze([evidence]),
+      feedbackSignalIds: Object.freeze([]),
+      citations: Object.freeze([]),
+      recurrenceCitations: Object.freeze([]),
+      sourceCases: Object.freeze([]),
+      recurrenceCount: 0,
+    });
+    const authoritative = createWorkspaceExperimentBriefStore(workspace);
+    await authoritative.put(initial);
+    const winner: ExperimentBrief = Object.freeze({
+      ...initial,
+      title: "Winning concurrent observation",
+      recurrenceCount: 1,
+    });
+    const contender: ExperimentBrief = Object.freeze({
+      ...initial,
+      title: "Contending concurrent observation",
+      recurrenceCount: 1,
+    });
+    let injectWinner = true;
+    const contested = createWorkspaceExperimentBriefStore({
+      ...workspace,
+      definitionPublications: Object.freeze({
+        ...workspace.definitionPublications,
+        publish: async (request: Parameters<typeof workspace.definitionPublications.publish>[0]) => {
+          if (injectWinner && request.activity.kind === "learning.brief_replace") {
+            injectWinner = false;
+            await authoritative.replace({ expectedExperimentId: initial.experimentId, brief: winner });
+          }
+          return await workspace.definitionPublications.publish(request);
+        },
+      }),
+    });
+
+    let collision: unknown;
+    try {
+      await contested.replace({ expectedExperimentId: initial.experimentId, brief: contender });
+    } catch (error) {
+      collision = error;
+    }
+
+    expect(durableJobFailureFromError(collision)).toEqual({
+      code: EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE,
+      message: `Experiment brief publication collision for ${initial.hypothesisDedupeKey}`,
+      retryable: true,
+      ambiguous: false,
+    });
+    expect(await authoritative.findByDedupeKey(initial.hypothesisDedupeKey)).toEqual(winner);
     workspace.close();
   });
 });

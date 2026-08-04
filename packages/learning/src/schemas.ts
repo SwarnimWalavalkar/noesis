@@ -77,6 +77,18 @@ export const ReflectorOutputSchema = z.discriminatedUnion("decision", [
     scope: z.string().min(1),
     capabilityName: z.string().min(1),
     capabilityIntent: z.string().min(1),
+    /**
+     * Zero-based indexes into the supplied evidence message. The reflector, rather than a lexical
+     * hit count, decides which prior citations are genuinely recurring evidence. Protected code
+     * only validates that the cited indexes exist and counts distinct source content.
+     */
+    recurrenceEvidenceCitationIndexes: z
+      .array(z.number().int().nonnegative())
+      .max(20)
+      .default([])
+      .describe(
+        "Zero-based indexes of supplied evidence citations that genuinely show the same behavior recurring",
+      ),
     sourceCases: z
       .array(
         z.strictObject({
@@ -123,6 +135,21 @@ export const RevisionAuthorOutputSchema = z.strictObject({
   }),
 });
 export type RevisionAuthorOutput = Readonly<z.infer<typeof RevisionAuthorOutputSchema>>;
+
+/**
+ * Some providers occasionally wrap an otherwise valid structured object in a singleton array.
+ * Accept that one lossless shape at the inference boundary; multiple candidates remain ambiguous
+ * and fail validation instead of being guessed at.
+ */
+export const RevisionAuthorInferenceOutputSchema = z.union([
+  RevisionAuthorOutputSchema,
+  z.tuple([RevisionAuthorOutputSchema]),
+]);
+export type RevisionAuthorInferenceOutput = Readonly<z.infer<typeof RevisionAuthorInferenceOutputSchema>>;
+
+export function normalizeRevisionAuthorOutput(value: RevisionAuthorInferenceOutput): RevisionAuthorOutput {
+  return RevisionAuthorOutputSchema.parse(Array.isArray(value) ? value[0] : value);
+}
 
 export interface LearningCitation {
   readonly source:

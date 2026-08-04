@@ -1,7 +1,13 @@
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
 import type { RuntimeTranscriptEntry } from "@noesis/runtime";
 import { describe, expect, test, vi } from "vitest";
-import { actionIdentityForView, boundedInspectorText, startNoesisTui } from "../src/index.ts";
+import {
+  actionIdentityForView,
+  boundedInspectorText,
+  INSPECTOR_PREVIEW_CHARACTERS,
+  paginateInspectorText,
+  startNoesisTui,
+} from "../src/index.ts";
 import { createInMemoryTestRuntime, type TestNoesisRuntime } from "./support/in-memory-runtime.ts";
 import { createTestTerminal } from "./support/test-terminal.ts";
 
@@ -16,6 +22,18 @@ const containsC1 = (text: string): boolean =>
     const code = character.codePointAt(0) ?? 0;
     return code >= 128 && code <= 159;
   });
+
+const containsUnpairedSurrogate = (text: string): boolean => {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) return true;
+  }
+  return false;
+};
 
 const consumeSteer: NoesisAgentRuntime["steer"] = async () =>
   Object.freeze({
@@ -35,6 +53,24 @@ describe("Noesis TUI lifecycle", () => {
     expect(inspected).not.toContain("\u001b[2J");
     expect(inspected).toContain("inspector preview truncated");
     expect(inspected.length).toBeLessThan(25_000);
+  });
+
+  test("does not split a surrogate pair at the inspector preview boundary", () => {
+    const inspected = boundedInspectorText(
+      `${"x".repeat(INSPECTOR_PREVIEW_CHARACTERS - 1)}😀outside-preview`,
+    );
+
+    expect(containsUnpairedSurrogate(inspected)).toBe(false);
+    expect(inspected).not.toContain("😀");
+    expect(inspected).toContain("inspector preview truncated");
+  });
+
+  test("does not split a surrogate pair at the inspector heading boundary", () => {
+    const [page] = paginateInspectorText(`${"h".repeat(119)}😀outside-heading`, "body");
+
+    expect(page).toBeDefined();
+    expect(containsUnpairedSurrogate(page ?? "")).toBe(false);
+    expect(page).toBe(`${"h".repeat(119)}\n\nbody`);
   });
 
   test("keeps runtime action identities byte-identical to hydrated transcript identities", () => {
@@ -279,6 +315,75 @@ describe("Noesis TUI lifecycle", () => {
     expect(emptyTerminal.output).not.toContain("unavailable in this runtime");
     emptyTerminal.type("/quit\n");
     await emptyRun;
+  });
+
+  test("starts with built-in autocomplete when skill discovery fails", async () => {
+    const base = await createRuntime({
+      name: "skill-discovery-failure-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    let discoveryAttempts = 0;
+    const runtime = Object.freeze({
+      ...base,
+      listSkills: async () => {
+        discoveryAttempts += 1;
+        throw new Error("broken skill package");
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    expect(discoveryAttempts).toBe(1);
+    expect(terminal.output).not.toContain("broken skill package");
+    terminal.type("/help\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("/model provider/model"));
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("starts without waiting for non-settling optional skill discovery", async () => {
+    const base = await createRuntime({
+      name: "skill-discovery-pending-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    let discoveryAttempts = 0;
+    const runtime = Object.freeze({
+      ...base,
+      listSkills: () => {
+        discoveryAttempts += 1;
+        return new Promise<never>(() => undefined);
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    expect(discoveryAttempts).toBe(1);
+    terminal.type("/help\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("/model provider/model"));
+    terminal.type("/quit\n");
+    await running;
   });
 
   test("serializes slash commands with prompts and other commands", async () => {
@@ -720,6 +825,72 @@ describe("Noesis TUI lifecycle", () => {
     await running;
 
     expect(runtime.resumedTrailIds.at(-1)).toBe(selected.trailId);
+  });
+
+  test("keeps ambient learning inspection available in both live and resumed sessions", async () => {
+    const makeRuntime = async (jobId: string) => {
+      const base = await createRuntime({
+        name: `learning-${jobId}`,
+        async run(request) {
+          return {
+            text: request.prompt,
+            provider: request.provider,
+            model: request.model,
+            outcome: "completed",
+            stopReason: "stop",
+          };
+        },
+        steer: consumeSteer,
+        async abort() {},
+      });
+      const requestedSessions: string[] = [];
+      return Object.freeze({
+        runtime: Object.freeze({
+          ...base,
+          listLearningActivity: async (sessionId: string) => {
+            requestedSessions.push(sessionId);
+            return Object.freeze([
+              Object.freeze({
+                jobId,
+                stage: "reflection" as const,
+                status: "no_change" as const,
+                summary: "The completed turn already worked well",
+                updatedAt: "2026-08-01T00:00:00.000Z",
+                turnId: `${sessionId}:turn-1`,
+              }),
+            ]);
+          },
+        }),
+        requestedSessions,
+      });
+    };
+
+    const live = await makeRuntime("job-live-learning");
+    const liveTerminal = createTestTerminal();
+    const liveSession = startNoesisTui(live.runtime, {}, liveTerminal);
+    await vi.waitFor(() => expect(liveTerminal.output).toContain("● IDLE"));
+    liveTerminal.type("/learning\r");
+    await vi.waitFor(() => expect(liveTerminal.output).toContain("job-live-learning"));
+    expect(liveTerminal.output).toContain("— no change · reflection");
+    liveTerminal.type("/quit\n");
+    await liveSession;
+    expect(live.requestedSessions).toHaveLength(1);
+
+    const resumed = await makeRuntime("job-resumed-learning");
+    const selected = await resumed.runtime.startTrail({ title: "learning history" });
+    const resumedTerminal = createTestTerminal();
+    const resumedSession = startNoesisTui(
+      resumed.runtime,
+      { session: { mode: "resume", trailId: selected.trailId } },
+      resumedTerminal,
+    );
+    await vi.waitFor(() => expect(resumedTerminal.output).toContain("● IDLE"));
+    resumedTerminal.type("/learning\r");
+    await vi.waitFor(() => expect(resumedTerminal.output).toContain("job-resumed-learning"));
+    expect(resumedTerminal.output).toContain("The completed turn already worked well");
+    resumedTerminal.type("/quit\n");
+    await resumedSession;
+    expect(resumed.requestedSessions).toEqual([selected.trailId]);
   });
 
   test("restores durable tool calls as expandable transcript rows", async () => {

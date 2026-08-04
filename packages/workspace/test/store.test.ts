@@ -872,6 +872,47 @@ describe("WorkspaceStore", () => {
         .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
         .run(version, name, "2026-07-26T00:00:00.000Z");
     }
+    seed
+      .prepare(
+        `INSERT INTO sessions(
+           session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
+         ) VALUES (?, ?, 'idle', '', '', '', ?, ?, '{}')`,
+      )
+      .run(
+        "session-observed-before-lineage",
+        "Observed before lineage",
+        "2026-07-26T00:00:00.000Z",
+        "2026-07-26T00:00:00.000Z",
+      );
+    const insertJob = seed.prepare(
+      `INSERT INTO jobs(
+         job_id, kind, payload_json, status, attempt, budget_remaining, created_at, updated_at,
+         operation_id, idempotency_key, not_before
+       ) VALUES (?, ?, ?, 'completed', 1, 0, ?, ?, ?, ?, ?)`,
+    );
+    insertJob.run(
+      "reflection-before-lineage",
+      "runtime.reflect_turn",
+      "{}",
+      "2026-07-26T00:00:00.000Z",
+      "2026-07-26T00:00:00.000Z",
+      "operation:reflection-before-lineage",
+      "idempotency:reflection-before-lineage",
+      "2026-07-26T00:00:00.000Z",
+    );
+    insertJob.run(
+      "author-before-lineage",
+      "runtime.author_revision",
+      JSON.stringify({
+        sourceSessionId: "session-observed-before-lineage",
+        parentJobId: "reflection-before-lineage",
+      }),
+      "2026-07-26T00:00:01.000Z",
+      "2026-07-26T00:00:01.000Z",
+      "operation:author-before-lineage",
+      "idempotency:author-before-lineage",
+      "2026-07-26T00:00:01.000Z",
+    );
     seed.close();
 
     const upgraded = await createWorkspaceStore(root);
@@ -906,6 +947,68 @@ describe("WorkspaceStore", () => {
          WHERE type = 'trigger' AND name = 'tool_call_action_sequence_required'`,
       )
       .get();
+    const jobListIndexes = database
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'index' AND name IN (
+           'jobs_created_status_kind',
+           'jobs_reflection_session_created',
+           'jobs_experiment_created',
+           'job_lineage_parent_child'
+         )
+         ORDER BY name`,
+      )
+      .all();
+    const jobListPlan = database
+      .prepare("EXPLAIN QUERY PLAN SELECT * FROM jobs ORDER BY created_at, job_id LIMIT 100")
+      .all()
+      .map((row) => String(Reflect.get(row, "detail")));
+    const experimentJobPlan = database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM jobs
+         WHERE kind = ? AND json_extract(payload_json, '$.experimentId') IN (?)
+         ORDER BY created_at, job_id LIMIT 100`,
+      )
+      .all("runtime.author_revision", "experiment-1")
+      .map((row) => String(Reflect.get(row, "detail")));
+    const sourceSessionJobPlan = database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM jobs
+         WHERE kind = ? AND job_id IN (
+           WITH RECURSIVE scoped_jobs(job_id, source_session_id) AS (
+             SELECT child_job_id, source_session_id
+             FROM job_observations
+             WHERE source_session_id = ?
+             UNION
+             SELECT observations.child_job_id, observations.source_session_id
+             FROM job_observations AS observations
+             JOIN scoped_jobs
+               ON observations.parent_job_id = scoped_jobs.job_id
+              AND observations.source_session_id = scoped_jobs.source_session_id
+           )
+           SELECT job_id FROM scoped_jobs
+         )
+         ORDER BY created_at, job_id LIMIT 100`,
+      )
+      .all("runtime.author_revision", "session-1")
+      .map((row) => String(Reflect.get(row, "detail")));
+    const backfilledObservation = database
+      .prepare(
+        `SELECT child_job_id, parent_job_id, source_session_id
+         FROM job_observations WHERE child_job_id = 'author-before-lineage'`,
+      )
+      .get();
+    const toolCallTurnPlan = database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM tool_calls
+         WHERE session_id = ? AND turn_id = ?
+         ORDER BY action_sequence, tool_call_id`,
+      )
+      .all("session-null-sequence", "turn-null-sequence")
+      .map((row) => String(Reflect.get(row, "detail")));
     database
       .prepare(
         `INSERT INTO sessions(
@@ -942,7 +1045,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(23);
+    expect(versions.at(-1)).toBe(29);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
@@ -950,7 +1053,487 @@ describe("WorkspaceStore", () => {
     });
     expect(phaseLineageTrigger).toBeDefined();
     expect(sequenceTrigger).toBeDefined();
+    expect(jobListIndexes).toEqual([
+      { name: "job_lineage_parent_child" },
+      { name: "jobs_created_status_kind" },
+      { name: "jobs_experiment_created" },
+      { name: "jobs_reflection_session_created" },
+    ]);
+    expect(jobListPlan.some((detail) => detail.includes("jobs_created"))).toBe(true);
+    expect(experimentJobPlan.some((detail) => detail.includes("jobs_experiment_created"))).toBe(true);
+    expect(sourceSessionJobPlan.some((detail) => detail.includes("job_observations_session_child"))).toBe(
+      true,
+    );
+    expect(sourceSessionJobPlan.some((detail) => detail.includes("job_observations_parent_child"))).toBe(
+      true,
+    );
+    expect(backfilledObservation).toEqual({
+      child_job_id: "author-before-lineage",
+      parent_job_id: "reflection-before-lineage",
+      source_session_id: "session-observed-before-lineage",
+    });
+    expect(toolCallTurnPlan.some((detail) => detail.includes("tool_calls_turn_created"))).toBe(true);
   });
+
+  test("upgrades a version-24 workspace with planner-usable job scope indexes", async () => {
+    const root = await temporary("jobs-keyset-migration");
+    await mkdir(join(root, "database"), { recursive: true });
+    const seed = new DatabaseSync(join(root, "database", "noesis.sqlite"));
+    const migrationNames = (await readdir(new URL("../migrations/", import.meta.url)))
+      .filter((name) => /^\d{3}_.+\.sql$/u.test(name))
+      .sort()
+      .filter((name) => Number(name.slice(0, 3)) <= 24);
+    for (const name of migrationNames) {
+      const version = Number(name.slice(0, 3));
+      seed.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
+      seed
+        .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+        .run(version, name, "2026-07-26T00:00:00.000Z");
+    }
+    expect(
+      seed.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'jobs_created'").get(),
+    ).toBeUndefined();
+    seed.close();
+
+    const upgraded = await createWorkspaceStore(root);
+    upgraded.close();
+
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    const keysetMigration = database
+      .prepare("SELECT version, name FROM schema_migrations WHERE version = 25")
+      .get();
+    const scopeMigration = database
+      .prepare("SELECT version, name FROM schema_migrations WHERE version = 26")
+      .get();
+    const observationMigration = database
+      .prepare("SELECT version, name FROM schema_migrations WHERE version = 27")
+      .get();
+    const runtimeScanMigration = database
+      .prepare("SELECT version, name FROM schema_migrations WHERE version = 28")
+      .get();
+    const lineageInvariantMigration = database
+      .prepare("SELECT version, name FROM schema_migrations WHERE version = 29")
+      .get();
+    const indexes = database
+      .prepare(
+        `SELECT name, sql FROM sqlite_master
+         WHERE type = 'index' AND name IN (
+           'jobs_created_status_kind',
+           'jobs_experiment_created',
+           'job_lineage_parent_child',
+           'job_observations_session_child',
+           'job_observations_parent_child'
+         ) ORDER BY name`,
+      )
+      .all();
+    const keysetPlan = database
+      .prepare("EXPLAIN QUERY PLAN SELECT * FROM jobs ORDER BY created_at, job_id LIMIT 100")
+      .all()
+      .map((row) => String(Reflect.get(row, "detail")));
+    const experimentPlan = database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM jobs
+         WHERE kind = ? AND json_extract(payload_json, '$.experimentId') IN (?)
+         ORDER BY created_at, job_id LIMIT 100`,
+      )
+      .all("runtime.preflight", "experiment-1")
+      .map((row) => String(Reflect.get(row, "detail")));
+    const sourceSessionPlan = database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM jobs
+         WHERE kind = ? AND job_id IN (
+           WITH RECURSIVE scoped_jobs(job_id, source_session_id) AS (
+             SELECT child_job_id, source_session_id
+             FROM job_observations
+             WHERE source_session_id = ?
+             UNION
+             SELECT observations.child_job_id, observations.source_session_id
+             FROM job_observations AS observations
+             JOIN scoped_jobs
+               ON observations.parent_job_id = scoped_jobs.job_id
+              AND observations.source_session_id = scoped_jobs.source_session_id
+           )
+           SELECT job_id FROM scoped_jobs
+         )
+         ORDER BY created_at, job_id LIMIT 100`,
+      )
+      .all("runtime.author_revision", "session-1")
+      .map((row) => String(Reflect.get(row, "detail")));
+    const runtimeScanPlan = database
+      .prepare(
+        `EXPLAIN QUERY PLAN
+         SELECT * FROM jobs INDEXED BY jobs_created_status_kind
+         WHERE status IN (?, ?) AND kind IN (?, ?, ?, ?)
+         ORDER BY created_at, job_id LIMIT 100`,
+      )
+      .all(
+        "scheduled",
+        "running",
+        "runtime.reflect_turn",
+        "runtime.author_revision",
+        "runtime.preflight",
+        "runtime.outcome_judge",
+      )
+      .map((row) => String(Reflect.get(row, "detail")));
+    database.close();
+
+    expect(keysetMigration).toEqual({ version: 25, name: "025_jobs_keyset_index.sql" });
+    expect(scopeMigration).toEqual({ version: 26, name: "026_job_lineage_indexes.sql" });
+    expect(observationMigration).toEqual({ version: 27, name: "027_job_observations.sql" });
+    expect(runtimeScanMigration).toEqual({ version: 28, name: "028_job_runtime_scan_index.sql" });
+    expect(lineageInvariantMigration).toEqual({
+      version: 29,
+      name: "029_job_lineage_invariants.sql",
+    });
+    expect(indexes).toEqual([
+      { name: "job_lineage_parent_child", sql: expect.any(String) },
+      { name: "job_observations_parent_child", sql: expect.any(String) },
+      { name: "job_observations_session_child", sql: expect.any(String) },
+      { name: "jobs_created_status_kind", sql: expect.any(String) },
+      { name: "jobs_experiment_created", sql: expect.not.stringContaining("WHERE kind IN") },
+    ]);
+    expect(keysetPlan.some((detail) => detail.includes("jobs_created"))).toBe(true);
+    expect(experimentPlan.some((detail) => detail.includes("jobs_experiment_created"))).toBe(true);
+    expect(sourceSessionPlan.some((detail) => detail.includes("job_observations_session_child"))).toBe(true);
+    expect(sourceSessionPlan.some((detail) => detail.includes("job_observations_parent_child"))).toBe(true);
+    expect(runtimeScanPlan.some((detail) => detail.includes("jobs_created_status_kind"))).toBe(true);
+    expect(runtimeScanPlan.some((detail) => detail.includes("USE TEMP B-TREE"))).toBe(false);
+  });
+
+  test("migration 29 deterministically keeps the earliest inherited observation", async () => {
+    const root = await temporary("job-lineage-observation-deduplication");
+    await mkdir(join(root, "database"), { recursive: true });
+    const seed = new DatabaseSync(join(root, "database", "noesis.sqlite"));
+    const migrationNames = (await readdir(new URL("../migrations/", import.meta.url)))
+      .filter((name) => /^\d{3}_.+\.sql$/u.test(name))
+      .sort()
+      .filter((name) => Number(name.slice(0, 3)) <= 28);
+    for (const name of migrationNames) {
+      const version = Number(name.slice(0, 3));
+      seed.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
+      seed
+        .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+        .run(version, name, "2026-07-26T00:00:00.000Z");
+    }
+    seed
+      .prepare(
+        `INSERT INTO sessions(
+           session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
+         ) VALUES (?, ?, 'idle', '', '', '', ?, ?, '{}')`,
+      )
+      .run(
+        "session-duplicate-inheritance",
+        "Duplicate inheritance",
+        "2026-07-26T00:00:00.000Z",
+        "2026-07-26T00:00:00.000Z",
+      );
+    const insertJob = seed.prepare(
+      `INSERT INTO jobs(
+         job_id, kind, payload_json, status, attempt, budget_remaining, created_at, updated_at,
+         operation_id, idempotency_key, not_before
+       ) VALUES (?, ?, ?, 'completed', 1, 0, ?, ?, ?, ?, ?)`,
+    );
+    const insert = (jobId: string, payload: object, createdAt: string): void => {
+      insertJob.run(
+        jobId,
+        "fixture.job",
+        JSON.stringify(payload),
+        createdAt,
+        createdAt,
+        `operation:${jobId}`,
+        `idempotency:${jobId}`,
+        createdAt,
+      );
+    };
+    insert("lineage-root-early", {}, "2026-07-26T00:00:00.000Z");
+    insert("lineage-root-late", {}, "2026-07-26T00:00:00.001Z");
+    insert("lineage-parent", {}, "2026-07-26T00:00:00.002Z");
+    insert("lineage-child", { parentJobId: "lineage-parent" }, "2026-07-26T00:00:00.003Z");
+    const insertObservation = seed.prepare(
+      `INSERT INTO job_observations(
+         child_job_id, parent_job_id, source_session_id, observed_at
+       ) VALUES (?, ?, ?, ?)`,
+    );
+    insertObservation.run(
+      "lineage-parent",
+      "lineage-root-late",
+      "session-duplicate-inheritance",
+      "2026-07-26T00:00:02.000Z",
+    );
+    insertObservation.run(
+      "lineage-parent",
+      "lineage-root-early",
+      "session-duplicate-inheritance",
+      "2026-07-26T00:00:01.000Z",
+    );
+    seed.close();
+
+    const upgraded = await createWorkspaceStore(root);
+    upgraded.close();
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    expect(
+      database
+        .prepare(
+          `SELECT parent_job_id, source_session_id, observed_at
+           FROM job_observations WHERE child_job_id = ?`,
+        )
+        .all("lineage-child"),
+    ).toEqual([
+      {
+        parent_job_id: "lineage-parent",
+        source_session_id: "session-duplicate-inheritance",
+        observed_at: "2026-07-26T00:00:01.000Z",
+      },
+    ]);
+    database.close();
+  });
+
+  test("reports exact-limit terminal job pages as exhausted without exceeding the page limit", async () => {
+    const store = await createWorkspaceStore(await temporary("job-page-lookahead"));
+    const enqueue = async (jobId: string, createdAt: string): Promise<void> => {
+      await store.jobs.enqueue({
+        jobId,
+        kind: "fixture.job",
+        payload: Object.freeze({}),
+        payloadRefs: Object.freeze([]),
+        operationId: `operation:${jobId}`,
+        idempotencyKey: `idempotency:${jobId}`,
+        notBefore: createdAt,
+        maxAttempts: 1,
+        estimatedCost: 0,
+        budget: 0,
+      });
+    };
+    await enqueue("job-a", "2026-07-26T00:00:00.000Z");
+    await enqueue("job-b", "2026-07-26T00:00:01.000Z");
+
+    const exactTerminal = await store.jobs.listPage({ kind: "fixture.job", limit: 2 });
+    expect(exactTerminal.records.map(({ jobId }) => jobId)).toEqual(["job-a", "job-b"]);
+    expect(exactTerminal.exhausted).toBe(true);
+
+    await enqueue("job-c", "2026-07-26T00:00:02.000Z");
+    const first = await store.jobs.listPage({ kind: "fixture.job", limit: 2 });
+    expect(first.records.map(({ jobId }) => jobId)).toEqual(["job-a", "job-b"]);
+    expect(first.exhausted).toBe(false);
+    expect(first.nextCursor).toBeDefined();
+    const final = await store.jobs.listPage({
+      kind: "fixture.job",
+      limit: 2,
+      ...(first.nextCursor ? { after: first.nextCursor } : {}),
+    });
+    expect(final.records.map(({ jobId }) => jobId)).toEqual(["job-c"]);
+    expect(final.exhausted).toBe(true);
+    store.close();
+  });
+
+  test("keeps recursive job observations isolated to their source session", async () => {
+    const store = await createWorkspaceStore(await temporary("job-observation-session-isolation"));
+    await store.operational.sessions.put(session("session-observation-a"));
+    await store.operational.sessions.put(session("session-observation-b"));
+    const enqueue = async (
+      jobId: string,
+      kind: string,
+      createdAt: string,
+      observation?: {
+        readonly sourceSessionId: string;
+        readonly parentJobId: string;
+        readonly observedAt: string;
+      },
+    ): Promise<void> => {
+      await store.jobs.enqueue({
+        jobId,
+        kind,
+        payload: Object.freeze({}),
+        payloadRefs: Object.freeze([]),
+        operationId: `operation:${jobId}`,
+        idempotencyKey: `idempotency:${jobId}`,
+        notBefore: createdAt,
+        maxAttempts: 1,
+        estimatedCost: 0,
+        budget: 0,
+        ...(observation ? { observations: [observation] } : {}),
+      });
+    };
+    await enqueue("root-observation-a", "fixture.root", "2026-07-26T00:00:00.000Z");
+    await enqueue("root-observation-b", "fixture.root", "2026-07-26T00:00:01.000Z");
+    await enqueue("shared-observation-parent", "fixture.observed", "2026-07-26T00:00:02.000Z", {
+      sourceSessionId: "session-observation-a",
+      parentJobId: "root-observation-a",
+      observedAt: "2026-07-26T00:00:02.000Z",
+    });
+    await store.jobs.recordObservation("shared-observation-parent", {
+      sourceSessionId: "session-observation-b",
+      parentJobId: "root-observation-b",
+      observedAt: "2026-07-26T00:00:03.000Z",
+    });
+    await enqueue("observation-child-a", "fixture.observed", "2026-07-26T00:00:04.000Z", {
+      sourceSessionId: "session-observation-a",
+      parentJobId: "shared-observation-parent",
+      observedAt: "2026-07-26T00:00:04.000Z",
+    });
+    await enqueue("observation-child-b", "fixture.observed", "2026-07-26T00:00:05.000Z", {
+      sourceSessionId: "session-observation-b",
+      parentJobId: "shared-observation-parent",
+      observedAt: "2026-07-26T00:00:05.000Z",
+    });
+
+    const observedByA = await store.jobs.list({
+      kind: "fixture.observed",
+      observedSessionId: "session-observation-a",
+    });
+    const observedByB = await store.jobs.list({
+      kind: "fixture.observed",
+      observedSessionId: "session-observation-b",
+    });
+
+    expect(observedByA.map(({ jobId }) => jobId)).toEqual([
+      "shared-observation-parent",
+      "observation-child-a",
+    ]);
+    expect(observedByB.map(({ jobId }) => jobId)).toEqual([
+      "shared-observation-parent",
+      "observation-child-b",
+    ]);
+    store.close();
+  });
+
+  test("inherits unbounded parent observations and propagates observations recorded after child enqueue", async () => {
+    const store = await createWorkspaceStore(await temporary("job-observation-inheritance"));
+    const sessionIds = Array.from(
+      { length: 300 },
+      (_, index) => `session-inherited-${String(index).padStart(3, "0")}`,
+    );
+    for (const sessionId of sessionIds) await store.operational.sessions.put(session(sessionId));
+    await store.operational.sessions.put(session("session-inherited-late"));
+    const enqueue = async (input: {
+      readonly jobId: string;
+      readonly kind: string;
+      readonly observations?: readonly {
+        readonly sourceSessionId: string;
+        readonly parentJobId: string;
+        readonly observedAt: string;
+      }[];
+      readonly inheritObservationsFromParentJobId?: string;
+    }): Promise<void> => {
+      await store.jobs.enqueue({
+        ...input,
+        payload: Object.freeze({}),
+        payloadRefs: Object.freeze([]),
+        operationId: `operation:${input.jobId}`,
+        idempotencyKey: `idempotency:${input.jobId}`,
+        notBefore: "2026-07-26T00:00:00.000Z",
+        maxAttempts: 1,
+        estimatedCost: 0,
+        budget: 0,
+      });
+    };
+    await enqueue({ jobId: "observation-root", kind: "fixture.root" });
+    await enqueue({
+      jobId: "observation-author",
+      kind: "fixture.author",
+      observations: sessionIds.map((sourceSessionId) => ({
+        sourceSessionId,
+        parentJobId: "observation-root",
+        observedAt: "2026-07-26T00:00:01.000Z",
+      })),
+    });
+    await enqueue({
+      jobId: "observation-preflight",
+      kind: "fixture.preflight",
+      inheritObservationsFromParentJobId: "observation-author",
+    });
+
+    const database = new DatabaseSync(store.unsafeDatabasePathForTesting, { readOnly: true });
+    const observationCount = (jobId: string): number => {
+      const row = database
+        .prepare("SELECT count(*) AS count FROM job_observations WHERE child_job_id = ?")
+        .get(jobId);
+      if (!row) throw new Error(`Missing observation count for ${jobId}`);
+      return Number(Reflect.get(row, "count"));
+    };
+    expect(observationCount("observation-author")).toBe(300);
+    expect(observationCount("observation-preflight")).toBe(300);
+
+    await store.jobs.recordObservation("observation-author", {
+      sourceSessionId: "session-inherited-late",
+      parentJobId: "observation-root",
+      observedAt: "2026-07-26T00:00:02.000Z",
+    });
+    expect(observationCount("observation-author")).toBe(301);
+    expect(observationCount("observation-preflight")).toBe(301);
+    expect(
+      database
+        .prepare(
+          `SELECT parent_job_id FROM job_observations
+           WHERE child_job_id = ? AND source_session_id = ?`,
+        )
+        .get("observation-preflight", "session-inherited-late"),
+    ).toEqual({ parent_job_id: "observation-author" });
+    database.close();
+    store.close();
+  });
+
+  test("keeps a running job visible when it becomes scheduled between active-stream pages", async () => {
+    const store = await createWorkspaceStore(await temporary("job-active-status-transition"));
+    const start = Date.parse("2026-07-26T00:00:00.000Z");
+    for (let index = 0; index < 1_000; index += 1) {
+      const jobId = `active-filler-${String(index).padStart(4, "0")}`;
+      await store.jobs.enqueue({
+        jobId,
+        kind: "runtime.author_revision",
+        payload: Object.freeze({}),
+        payloadRefs: Object.freeze([]),
+        operationId: `operation:${jobId}`,
+        idempotencyKey: `idempotency:${jobId}`,
+        notBefore: new Date(start + index).toISOString(),
+        maxAttempts: 1,
+        estimatedCost: 0,
+        budget: 0,
+      });
+    }
+    await store.jobs.enqueue({
+      jobId: "active-transition-target",
+      kind: "runtime.preflight",
+      payload: Object.freeze({}),
+      payloadRefs: Object.freeze([]),
+      operationId: "operation:active-transition-target",
+      idempotencyKey: "idempotency:active-transition-target",
+      notBefore: new Date(start + 2_000).toISOString(),
+      maxAttempts: 2,
+      estimatedCost: 1,
+      budget: 2,
+    });
+    const claimed = await store.jobs.claim({
+      workerId: "status-transition-worker",
+      now: new Date(start + 3_000).toISOString(),
+      leaseUntil: new Date(start + 4_000).toISOString(),
+      maximumCost: 1,
+      kinds: ["runtime.preflight"],
+    });
+    if (!claimed?.leaseToken) throw new Error("Expected transition target lease");
+    const filter = {
+      statuses: ["scheduled", "running"] as const,
+      kinds: ["runtime.author_revision", "runtime.preflight"] as const,
+      limit: 1_000,
+    };
+    const first = await store.jobs.listPage(filter);
+    expect(first.exhausted).toBe(false);
+    expect(first.records).toHaveLength(1_000);
+    await store.jobs.fail({
+      jobId: claimed.jobId,
+      leaseToken: claimed.leaseToken,
+      now: new Date(start + 3_500).toISOString(),
+      retryAt: new Date(start + 5_000).toISOString(),
+      failure: { code: "retry", message: "retry", retryable: true, ambiguous: false },
+    });
+    if (!first.nextCursor) throw new Error("Expected active stream cursor");
+    const second = await store.jobs.listPage({ ...filter, after: first.nextCursor });
+    expect(second.records.map(({ jobId }) => jobId)).toEqual(["active-transition-target"]);
+    expect(second.exhausted).toBe(true);
+    store.close();
+  }, 30_000);
 
   test("keeps authority grants, reservations, completions, and replay in SQLite", async () => {
     const root = await temporary("durable-authority");
@@ -2295,6 +2878,91 @@ describe("WorkspaceStore", () => {
     expect(await store.research.feedbackSignals.getFeedbackSignal("feedback-1")).toMatchObject({
       experimentId: experiment.experimentId,
     });
+    store.close();
+  });
+
+  test("retries the exact completing experiment write against its merged stored provenance", async () => {
+    const store = await createWorkspaceStore(await temporary("experiment-completion-retry"));
+    const [initialEvidence, authoringEvidence, completingEvidence] = await Promise.all([
+      store.evidence.appendEvidence({
+        workingPath: "experiments/retry/initial",
+        bytes: text("initial"),
+        actor,
+        evidenceKind: "input",
+      }),
+      store.evidence.appendEvidence({
+        workingPath: "experiments/retry/authoring",
+        bytes: text("authoring"),
+        actor,
+        evidenceKind: "input",
+      }),
+      store.evidence.appendEvidence({
+        workingPath: "experiments/retry/completing",
+        bytes: text("completing"),
+        actor,
+        evidenceKind: "input",
+      }),
+    ]);
+    const baseline = revision("retry-baseline", "c");
+    const candidate = revision("retry-candidate", "d");
+    const initial: Experiment = {
+      experimentId: "experiment-completion-retry",
+      hypothesis: "completion retries preserve cumulative provenance",
+      scope: "research",
+      evidenceRefs: [initialEvidence],
+      baselineRevision: baseline,
+      candidateRevisions: [candidate],
+      feedbackSignalIds: ["feedback-initial"],
+      status: "hypothesis",
+    };
+    await store.research.experiments.putExperiment(initial);
+    await store.research.experiments.putExperiment({
+      ...initial,
+      evidenceRefs: [authoringEvidence],
+      feedbackSignalIds: ["feedback-authoring"],
+      status: "authoring",
+    });
+    await store.research.experiments.putExperiment({
+      ...initial,
+      evidenceRefs: [authoringEvidence],
+      feedbackSignalIds: ["feedback-authoring"],
+      status: "preflight",
+    });
+    const completing: Experiment = {
+      ...initial,
+      evidenceRefs: [completingEvidence],
+      feedbackSignalIds: ["feedback-completing"],
+      status: "completed",
+      outcome: "keep",
+    };
+
+    await store.research.experiments.putExperiment(completing);
+    const completed = await store.research.experiments.getExperiment(initial.experimentId);
+    await expect(store.research.experiments.putExperiment(completing)).resolves.toEqual({
+      kind: "database_row",
+      table: "experiments",
+      rowId: initial.experimentId,
+    });
+    await expect(
+      store.research.experiments.putExperiment({
+        ...completing,
+        evidenceRefs: [completingEvidence, completingEvidence],
+        feedbackSignalIds: ["feedback-completing", "feedback-completing"],
+      }),
+    ).resolves.toEqual({
+      kind: "database_row",
+      table: "experiments",
+      rowId: initial.experimentId,
+    });
+
+    expect(await store.research.experiments.getExperiment(initial.experimentId)).toEqual(completed);
+    expect(completed).toMatchObject({
+      evidenceRefs: [initialEvidence, authoringEvidence, completingEvidence],
+      feedbackSignalIds: ["feedback-initial", "feedback-authoring", "feedback-completing"],
+    });
+    await expect(
+      store.research.experiments.putExperiment({ ...completing, outcome: "revise" }),
+    ).rejects.toThrow(`Completed experiment ${initial.experimentId} is immutable`);
     store.close();
   });
 

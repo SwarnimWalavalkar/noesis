@@ -25,6 +25,7 @@ import {
   canonicalJson,
   capabilityRevisionRef,
   createId,
+  EvidenceRevisionRefSchema,
   type FileRevisionRef,
   FileRevisionRefSchema,
   type JsonValue,
@@ -80,8 +81,10 @@ import {
   type PiCodeExecutionAdapter,
   type PiSelfToolAdapter,
   type PiSkillLibrary,
+  type PiSkillSnapshot,
   type RoleVariantConfiguration,
   type RuntimePiAgentRoleRunner,
+  resolvePiSkillInvocation,
   resolveFrozenSessionToolDefinitions,
 } from "@noesis/runtime-pi";
 import {
@@ -105,6 +108,7 @@ import {
   createWorkspaceRuntimeInternals,
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
+import { loadLearningActivityForSession } from "./learning-read-model.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
@@ -145,6 +149,23 @@ const ScriptManifestSchema = z.strictObject({
   }),
 });
 type ScriptManifest = Readonly<z.infer<typeof ScriptManifestSchema>>;
+const ScriptSaveResultSchema = ScriptManifestSchema.extend({
+  reuse: z.strictObject({
+    naturalLanguage: z.string().min(1),
+    run: z.strictObject({
+      tool: z.literal("scripts.run"),
+      name: z.string().min(1),
+    }),
+    inspect: z.strictObject({
+      tool: z.literal("scripts.describe"),
+      name: z.string().min(1),
+    }),
+    list: z.strictObject({
+      tool: z.literal("scripts.list"),
+    }),
+    workingPath: z.string().min(1),
+  }),
+});
 
 const WorkflowPhaseSchema = z.strictObject({
   name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
@@ -482,7 +503,7 @@ async function replayEligibleTurnIds(
     const modernReplayEligible =
       outcome.metadata["replayEligible"] === true &&
       outcome.metadata["aborted"] !== true &&
-      (outcome.status === "accepted" || outcome.status === "corrected");
+      (outcome.status === "unknown" || outcome.status === "accepted" || outcome.status === "corrected");
     if (!legacyCompleted && !modernReplayEligible) continue;
     if (modernReplayEligible) {
       const turn = await workspace.operational.foregroundTurns.get(outcome.turnId);
@@ -1197,6 +1218,14 @@ export async function createApplicationRuntimeComposition(
       listStoredWorkflows(workspace),
     ]);
     const frozenScriptsByName = new Map(frozenScripts.map((script) => [script.name, script]));
+    const savedThisTurnByName = new Map<string, ScriptManifest>();
+    const visibleScripts = (): readonly ScriptManifest[] => {
+      const scripts = new Map(frozenScriptsByName);
+      for (const [name, script] of savedThisTurnByName) scripts.set(name, script);
+      return Object.freeze([...scripts.values()].sort((left, right) => left.name.localeCompare(right.name)));
+    };
+    const visibleScript = (name: string): ScriptManifest | undefined =>
+      savedThisTurnByName.get(name) ?? frozenScriptsByName.get(name);
     const frozenWorkflowsByName = new Map(
       frozenWorkflows.map((workflow) => [workflow.manifest.name, workflow]),
     );
@@ -1250,7 +1279,7 @@ export async function createApplicationRuntimeComposition(
         ),
         effect: () => ({ effect: "read", resource: "scripts:index", estimatedCost: 0 }),
         execute: async () =>
-          frozenScripts.map((script) => ({
+          visibleScripts().map((script) => ({
             name: script.name,
             description: script.description,
             revision: script.revision,
@@ -1279,7 +1308,7 @@ export async function createApplicationRuntimeComposition(
         ]),
         effect: ({ name }) => ({ effect: "read", resource: `script:${name}`, estimatedCost: 0 }),
         execute: async ({ name }) => {
-          const manifest = frozenScriptsByName.get(name);
+          const manifest = visibleScript(name);
           if (!manifest) return null;
           const source = decoder.decode(await workspace.reads.readRevision(manifest.sourceRevision));
           return { manifest, source };
@@ -1289,7 +1318,7 @@ export async function createApplicationRuntimeComposition(
         name: "scripts.save",
         label: "Save script",
         description:
-          "Save a reusable JavaScript program as editable source plus immutable revision. Use only for an explicitly requested or clearly reusable program.",
+          "Save a reusable JavaScript program as editable source plus an immutable, typed revision. When the user asks to preserve successful work for later, prefer this over a loose helper file, run the saved script immediately with scripts.run, and return the save receipt plus verification.",
         visibility: "codemode_only",
         inputSchema: z.strictObject({
           name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
@@ -1302,7 +1331,7 @@ export async function createApplicationRuntimeComposition(
           outputSchema: z.record(z.string(), JsonValueSchema),
           requiredTools: z.array(z.string().min(1)).max(128),
         }),
-        outputSchema: ScriptManifestSchema,
+        outputSchema: ScriptSaveResultSchema,
         effect: ({ name }) => ({
           effect: "write",
           resource: `script:${name}`,
@@ -1360,7 +1389,16 @@ export async function createApplicationRuntimeComposition(
             }),
           });
           if (!publication.ok) throw new Error(publication.error.message);
-          return manifest;
+          return {
+            ...manifest,
+            reuse: {
+              naturalLanguage: `Run the ${name} script with the desired input.`,
+              run: { tool: "scripts.run", name },
+              inspect: { tool: "scripts.describe", name },
+              list: { tool: "scripts.list" },
+              workingPath: sourceRevision.workingPath,
+            },
+          };
         },
       }),
       defineTool({
@@ -1391,7 +1429,7 @@ export async function createApplicationRuntimeComposition(
           estimatedCost: 1,
         }),
         execute: async ({ name, input }, context) => {
-          const manifest = frozenScriptsByName.get(name);
+          const manifest = visibleScript(name);
           if (!manifest) throw new Error(`Unknown script ${name}`);
           for (const requiredTool of manifest.requiredTools)
             if (!activeBroker?.describe(requiredTool))
@@ -1672,6 +1710,7 @@ export async function createApplicationRuntimeComposition(
       identityMaterial: (resources?.skills ?? []).map((skill) => ({
         name: skill.name,
         contentDigest: skill.contentDigest,
+        ...(skill.admittedRevision ? { revisionId: skill.admittedRevision.revisionId } : {}),
       })),
       inputSchema: z.strictObject({ name: z.string().trim().min(1).max(256) }),
       outputSchema: z.union([
@@ -1682,6 +1721,7 @@ export async function createApplicationRuntimeComposition(
           content: z.string(),
           filePath: z.string(),
           contentDigest: z.string(),
+          revision: EvidenceRevisionRefSchema.nullable(),
         }),
       ]),
       effect: ({ name }) => ({
@@ -1692,13 +1732,14 @@ export async function createApplicationRuntimeComposition(
       execute: async ({ name }) => {
         const skill = resources?.skills.find((candidate) => candidate.name === name);
         return skill
-          ? {
+          ? toJsonValue({
               name: skill.name,
               description: skill.description,
               content: skill.content,
               filePath: skill.filePath,
               contentDigest: skill.contentDigest,
-            }
+              revision: skill.admittedRevision ?? null,
+            })
           : null;
       },
     });
@@ -1737,8 +1778,42 @@ export async function createApplicationRuntimeComposition(
       }),
       permission: plan.permissionSnapshot,
     });
-    activeBroker = broker;
-    const codeRuntime = createCodeModeRuntime({ cwd: process.cwd(), broker });
+    const scriptAwareBroker: ToolBroker = Object.freeze({
+      catalogId: broker.catalogId,
+      catalogDigest: broker.catalogDigest,
+      list: broker.list,
+      search: broker.search,
+      describe: broker.describe,
+      invoke: async (...arguments_: Parameters<ToolBroker["invoke"]>) => {
+        const result = await broker.invoke(...arguments_);
+        if (arguments_[0] === "scripts.save" && result.ok) {
+          const saved = ScriptSaveResultSchema.parse(result.value);
+          if (
+            saved.createdFrom.sessionId !== plan.sessionId ||
+            saved.createdFrom.turnId !== plan.turnId ||
+            saved.createdFrom.planId !== plan.planId
+          )
+            throw new Error("scripts.save replay resolved a revision from outside the frozen turn plan");
+          savedThisTurnByName.set(
+            saved.name,
+            ScriptManifestSchema.parse({
+              kind: saved.kind,
+              name: saved.name,
+              description: saved.description,
+              revision: saved.revision,
+              sourceRevision: saved.sourceRevision,
+              inputSchema: saved.inputSchema,
+              outputSchema: saved.outputSchema,
+              requiredTools: saved.requiredTools,
+              createdFrom: saved.createdFrom,
+            }),
+          );
+        }
+        return result;
+      },
+    });
+    activeBroker = scriptAwareBroker;
+    const codeRuntime = createCodeModeRuntime({ cwd: process.cwd(), broker: scriptAwareBroker });
     runRecordedCode = async (
       request,
       parentExecutionId,
@@ -2114,13 +2189,28 @@ export async function createApplicationRuntimeComposition(
       return closePromise;
     };
     return Object.freeze({
-      catalogId: broker.catalogId,
-      catalogDigest: broker.catalogDigest,
+      catalog: Object.freeze({
+        catalogId: broker.catalogId,
+        catalogDigest: broker.catalogDigest,
+        tools: Object.freeze(
+          broker.list().map((tool) =>
+            Object.freeze({
+              name: tool.name,
+              label: tool.label,
+              description: tool.description,
+              revisionId: tool.revisionId,
+              inputSchema: tool.inputSchema,
+              outputSchema: tool.outputSchema,
+            }),
+          ),
+        ),
+      }),
       execute: async (
         source: string,
         timeoutMs: number | undefined,
         executeSignal: AbortSignal,
         emit: Parameters<Awaited<ReturnType<PiCodeExecutionAdapter["prepare"]>>["execute"]>[3],
+        identity?: { readonly logicalExecutionId: string },
       ) => {
         if (!runRecordedCode) throw new Error("Codemode runtime is not initialized");
         const result = await runRecordedCode(
@@ -2129,6 +2219,7 @@ export async function createApplicationRuntimeComposition(
             sessionId: plan.sessionId,
             turnId: plan.turnId,
             signal: executeSignal,
+            ...(identity ? { logicalExecutionId: identity.logicalExecutionId } : {}),
             ...(timeoutMs === undefined ? {} : { timeoutMs }),
           },
           undefined,
@@ -2222,7 +2313,15 @@ export async function createApplicationRuntimeComposition(
       })),
       memory: memory?.ok ? memory.value : [],
       experiments: experiments ?? [],
-      ...(catalog ?? {}),
+      ...(catalog
+        ? {
+            catalog: {
+              catalogId: catalog.catalogId,
+              catalogDigest: catalog.catalogDigest,
+              toolCount: catalog.tools.length,
+            },
+          }
+        : {}),
     });
   };
   const remember: PiSelfToolAdapter["remember"] = async ({ memory, scope, anticipatedUse, plan }) => {
@@ -2770,7 +2869,6 @@ export async function createApplicationRuntimeComposition(
         maxTokens: 8_000,
         maxFragmentTokens: 2_000,
       });
-      await options.skills?.pinSnapshot(plan.planId);
       try {
         const result = await settlement.run({
           sessionId: trailId,
@@ -2780,6 +2878,38 @@ export async function createApplicationRuntimeComposition(
           occurredAt,
           plan,
           execute: async () => {
+            await options.skills?.pinSnapshot(
+              plan.planId,
+              undefined,
+              async (snapshot): Promise<PiSkillSnapshot> => {
+                const invocation = resolvePiSkillInvocation(input, snapshot.skills);
+                if (!invocation) return snapshot;
+                const invokedSkill = snapshot.skills.find((skill) => skill.name === invocation.name);
+                if (!invokedSkill)
+                  throw new Error(`Invoked skill ${invocation.name} is missing from its admitted snapshot`);
+                const revision = await workspace.evidence.appendEvidence({
+                  workingPath: `skill-invocations/${plan.planId}/${invokedSkill.contentDigest}.md`,
+                  bytes: encoder.encode(invokedSkill.content),
+                  evidenceKind: "input",
+                  actor: Object.freeze({ actorId: "runtime-turn-planner", kind: "system" as const }),
+                  reason: `Admit explicit skill ${invokedSkill.name} for frozen turn plan ${plan.planId}`,
+                  sensitivity: "normal",
+                  provenanceRefs: Object.freeze([foregroundEvidence(plan)]),
+                });
+                if (revision.contentDigest !== invokedSkill.contentDigest)
+                  throw new Error(`Admitted skill ${invokedSkill.name} changed while being recorded`);
+                return Object.freeze({
+                  skills: Object.freeze(
+                    snapshot.skills.map((skill) =>
+                      skill.name === invokedSkill.name
+                        ? Object.freeze({ ...skill, admittedRevision: revision })
+                        : skill,
+                    ),
+                  ),
+                  diagnostics: snapshot.diagnostics,
+                });
+              },
+            );
             if (interactionControl?.isInterruptRequested())
               return Object.freeze({
                 outcome: "aborted" as const,
@@ -3164,6 +3294,8 @@ export async function createApplicationRuntimeComposition(
         .sort((left, right) => right.startedAt.localeCompare(left.startedAt)),
     );
   };
+  const listLearningActivity: NonNullable<NoesisTuiRuntime["listLearningActivity"]> = async (sessionId) =>
+    await loadLearningActivityForSession(coordinator, sessionId);
   const inspectExecution: NonNullable<NoesisTuiRuntime["inspectExecution"]> = async (
     sessionId,
     executionId,
@@ -3315,6 +3447,7 @@ export async function createApplicationRuntimeComposition(
     inspectWorkflow,
     listExecutions,
     inspectExecution,
+    listLearningActivity,
     shutdown,
   });
 }

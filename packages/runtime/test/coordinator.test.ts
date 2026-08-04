@@ -2,12 +2,20 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { CapabilityRevisionRef, FileRevisionRef, PreflightDecision } from "@noesis/domain";
+import {
+  type CapabilityRevisionRef,
+  type Experiment,
+  type FileRevisionRef,
+  type PreflightDecision,
+  sha256,
+} from "@noesis/domain";
+import { experimentBriefPublicationCollisionError } from "@noesis/learning";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
 import {
   type CompletedNormalTurn,
+  authorizeScheduledJob,
   coordinatorOperationError,
   createRuntimeCoordinator,
   type RuntimeCoordinatorConfig,
@@ -72,6 +80,9 @@ async function fixture(decision: PreflightDecision = "pass") {
   let preflightCalls = 0;
   let transientPreflightFailures = 0;
   let terminalAuthorFailure = false;
+  let briefPublicationCollisions = 0;
+  let dedupedStatus: "authoring" | "completed" | undefined;
+  let sharedExperimentId: string | undefined;
   let blockingReflect: Promise<void> | undefined;
   let activeReflects = 0;
   let peakReflects = 0;
@@ -90,6 +101,10 @@ async function fixture(decision: PreflightDecision = "pass") {
   const research: RuntimeCoordinatorResearchPort = {
     reflect: async (payload, signal) => {
       reflectCalls += 1;
+      if (briefPublicationCollisions > 0) {
+        briefPublicationCollisions -= 1;
+        throw experimentBriefPublicationCollisionError(`dedupe:${payload.turn.turnId}`);
+      }
       activeReflects += 1;
       peakReflects = Math.max(peakReflects, activeReflects);
       try {
@@ -98,8 +113,41 @@ async function fixture(decision: PreflightDecision = "pass") {
           throw coordinatorOperationError("cancelled", { code: "cancelled", retryable: false });
         if (!payload.turn.userMessage.includes("preserve"))
           return { status: "no_change", reason: "irrelevant", telemetry: { role: "fake-reflector" } };
+        if (dedupedStatus) {
+          const experiment: Experiment =
+            dedupedStatus === "completed"
+              ? {
+                  experimentId: `experiment:${payload.turn.turnId}`,
+                  hypothesis: "preserve voice",
+                  scope: payload.turn.scope,
+                  evidenceRefs: payload.turn.evidenceRefs,
+                  baselineRevision: payload.baselineRevision,
+                  candidateRevisions: [],
+                  feedbackSignalIds: [],
+                  status: "completed",
+                  outcome: "keep",
+                }
+              : {
+                  experimentId: `experiment:${payload.turn.turnId}`,
+                  hypothesis: "preserve voice",
+                  scope: payload.turn.scope,
+                  evidenceRefs: payload.turn.evidenceRefs,
+                  baselineRevision: payload.baselineRevision,
+                  candidateRevisions: [],
+                  feedbackSignalIds: [],
+                  status: "authoring",
+                };
+          await workspace.research.experiments.putExperiment(experiment);
+          return {
+            status: "deduped",
+            experiment,
+            hypothesisDedupeKey: `dedupe:${payload.turn.turnId}`,
+            telemetry: { role: "fake-reflector" },
+          };
+        }
+        const experimentId = sharedExperimentId ?? `experiment:${payload.turn.turnId}`;
         const experiment = {
-          experimentId: `experiment:${payload.turn.turnId}`,
+          experimentId,
           hypothesis: "preserve voice",
           scope: payload.turn.scope,
           evidenceRefs: payload.turn.evidenceRefs,
@@ -111,7 +159,7 @@ async function fixture(decision: PreflightDecision = "pass") {
         return {
           status: "experiment",
           experiment,
-          hypothesisDedupeKey: `dedupe:${payload.turn.turnId}`,
+          hypothesisDedupeKey: `dedupe:${experimentId}`,
           telemetry: { role: "fake-reflector", authorityHandleSeen: "authority" in payload },
         };
       } finally {
@@ -296,6 +344,15 @@ async function fixture(decision: PreflightDecision = "pass") {
     setTerminalAuthorFailure: (value: boolean) => {
       terminalAuthorFailure = value;
     },
+    setBriefPublicationCollisions: (count: number) => {
+      briefPublicationCollisions = count;
+    },
+    setDedupedStatus: (status: "authoring" | "completed") => {
+      dedupedStatus = status;
+    },
+    setSharedExperimentId: (experimentId: string) => {
+      sharedExperimentId = experimentId;
+    },
     setBlockingReflect: (value: Promise<void> | undefined) => {
       blockingReflect = value;
     },
@@ -318,11 +375,28 @@ describe("automatic runtime coordinator", () => {
       retrievalStrategyId: "session-search.fts-only.v1",
       routingStrategyId: "router.alternative.v2",
     });
-    expect((await coordinator.listJobs()).map(({ job }) => job.status)).toEqual([
-      "completed",
-      "completed",
-      "completed",
-    ]);
+    const jobs = await coordinator.listJobs();
+    expect(jobs.map(({ job }) => job.status)).toEqual(["completed", "completed", "completed"]);
+    const authorJob = jobs.find(({ kind }) => kind === "runtime.author_revision");
+    const preflightJob = jobs.find(({ kind }) => kind === "runtime.preflight");
+    expect(authorJob?.payload).toMatchObject({
+      sourceSessionId: "session-1",
+      parentJobId: observed.job.jobId,
+    });
+    expect(preflightJob?.payload).toMatchObject({
+      sourceSessionId: "session-1",
+      parentJobId: authorJob?.job.jobId,
+    });
+    expect(
+      (await coordinator.listJobPage({ kind: "runtime.author_revision", sessionId: "session-1" })).jobs.map(
+        ({ job }) => job.jobId,
+      ),
+    ).toEqual([authorJob?.job.jobId]);
+    expect(
+      (await coordinator.listJobPage({ kind: "runtime.preflight", sessionId: "session-1" })).jobs.map(
+        ({ job }) => job.jobId,
+      ),
+    ).toEqual([preflightJob?.job.jobId]);
     const experiment = await f.workspace.research.experiments.getExperiment("experiment:turn-approval");
     expect(experiment).toMatchObject({ status: "preflight", candidateRevisions: [candidate] });
     const handoff = await coordinator.getPreflightActivationHandoff("experiment:turn-approval");
@@ -345,6 +419,125 @@ describe("automatic runtime coordinator", () => {
     f.workspace.close();
   });
 
+  test("shares one author chain across repeated experiment observations without payload collisions", async () => {
+    const f = await fixture();
+    f.setSharedExperimentId("experiment:shared-hypothesis");
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      research: f.research,
+      config: config(),
+    });
+
+    const first = await coordinator.observeCompletedTurn(f.turn("turn-shared-first"));
+    const second = await coordinator.observeCompletedTurn(f.turn("turn-shared-second"));
+    await coordinator.idle();
+
+    const authorJobs = await coordinator.listJobs({ kind: "runtime.author_revision" });
+    const preflightJobs = await coordinator.listJobs({ kind: "runtime.preflight" });
+    expect(authorJobs).toHaveLength(1);
+    expect(preflightJobs).toHaveLength(1);
+    const authorJob = authorJobs[0];
+    if (!authorJob) throw new Error("Expected the shared author job");
+    expect(f.counts()).toMatchObject({ reflectCalls: 2, authorCalls: 1, preflightCalls: 1 });
+    const database = new DatabaseSync(f.workspace.unsafeDatabasePathForTesting, { readOnly: true });
+    const observations = database
+      .prepare(
+        `SELECT parent_job_id, source_session_id
+         FROM job_observations
+         WHERE child_job_id = ?`,
+      )
+      .all(authorJob.job.jobId);
+    expect(observations).toHaveLength(2);
+    expect(observations).toEqual(
+      expect.arrayContaining([
+        { parent_job_id: first.job.jobId, source_session_id: "session-1" },
+        { parent_job_id: second.job.jobId, source_session_id: "session-1" },
+      ]),
+    );
+    database.close();
+    expect(
+      (await coordinator.listJobPage({ kind: "runtime.preflight", sessionId: "session-1" })).jobs,
+    ).toHaveLength(1);
+    f.workspace.close();
+  });
+
+  test("attaches a replayed reflection to a legacy shared author job", async () => {
+    const f = await fixture();
+    const experimentId = "experiment:legacy-shared";
+    f.setSharedExperimentId(experimentId);
+    const operationId = `coordinator:author:${experimentId}`;
+    const legacyAuthorJobId = `job_${sha256(operationId).slice(0, 32)}`;
+    let nowMs = Date.parse("2026-07-22T00:00:00.000Z");
+    await authorizeScheduledJob(f.authority, {
+      jobId: legacyAuthorJobId,
+      budget: 3,
+      expiresAt: "2027-07-23T00:00:00.000Z",
+    });
+    await f.workspace.jobs.enqueue({
+      jobId: legacyAuthorJobId,
+      kind: "runtime.author_revision",
+      payload: Object.freeze({
+        schemaVersion: 1,
+        experimentId,
+        hypothesisDedupeKey: `dedupe:${experimentId}`,
+        retrievalStrategyId: "session-search.fts-only.v1",
+        routingStrategyId: "router.alternative.v2",
+      }),
+      payloadRefs: Object.freeze([]),
+      operationId,
+      idempotencyKey: operationId,
+      notBefore: "2026-07-22T00:00:01.000Z",
+      maxAttempts: 3,
+      estimatedCost: 1,
+      budget: 3,
+    });
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      research: f.research,
+      config: config(),
+      now: () => new Date(nowMs),
+    });
+
+    const reflection = await coordinator.observeCompletedTurn(f.turn("turn-legacy-replay"));
+    await coordinator.idle();
+
+    expect(await coordinator.listJobs({ kind: "runtime.author_revision" })).toHaveLength(1);
+    expect(await coordinator.listJobs({ kind: "runtime.preflight" })).toHaveLength(0);
+    nowMs += 1_000;
+    await coordinator.idle();
+    expect(await coordinator.getJob(legacyAuthorJobId)).toMatchObject({
+      job: { status: "completed" },
+    });
+    const preflightJobs = await coordinator.listJobs({ kind: "runtime.preflight" });
+    expect(preflightJobs).toHaveLength(1);
+    const preflightJob = preflightJobs[0];
+    if (!preflightJob) throw new Error("Expected recovered preflight job");
+    expect(
+      (await coordinator.listJobPage({ kind: "runtime.preflight", sessionId: "session-1" })).jobs,
+    ).toHaveLength(1);
+    const database = new DatabaseSync(f.workspace.unsafeDatabasePathForTesting, { readOnly: true });
+    expect(
+      database
+        .prepare(
+          `SELECT parent_job_id, source_session_id
+           FROM job_observations WHERE child_job_id = ?`,
+        )
+        .get(legacyAuthorJobId),
+    ).toEqual({ parent_job_id: reflection.job.jobId, source_session_id: "session-1" });
+    expect(
+      database
+        .prepare(
+          `SELECT parent_job_id, source_session_id
+           FROM job_observations WHERE child_job_id = ?`,
+        )
+        .get(preflightJob.job.jobId),
+    ).toEqual({ parent_job_id: legacyAuthorJobId, source_session_id: "session-1" });
+    database.close();
+    f.workspace.close();
+  });
+
   test("records irrelevant turns as a no-op without child jobs", async () => {
     const f = await fixture();
     const coordinator = createRuntimeCoordinator({
@@ -359,6 +552,70 @@ describe("automatic runtime coordinator", () => {
     expect(jobs).toHaveLength(1);
     expect(jobs[0]?.job.result).toMatchObject({ status: "no_change", reason: "irrelevant" });
     expect(f.counts()).toMatchObject({ authorCalls: 0, preflightCalls: 0 });
+    f.workspace.close();
+  });
+
+  test("advances an authoritative page cursor past an undecodable legacy coordinator row", async () => {
+    const f = await fixture();
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      research: f.research,
+      config: config(),
+    });
+    await coordinator.stop();
+    await f.workspace.jobs.enqueue({
+      jobId: "000-legacy-reflection",
+      kind: "runtime.reflect_turn",
+      payload: Object.freeze({ turn: Object.freeze({ sessionId: "session-1" }), legacy: true }),
+      payloadRefs: Object.freeze([]),
+      operationId: "legacy-reflection-operation",
+      idempotencyKey: "legacy-reflection-idempotency",
+      notBefore: "2026-07-22T00:00:00.000Z",
+      maxAttempts: 1,
+      estimatedCost: 0,
+      budget: 0,
+    });
+    await coordinator.observeCompletedTurn(f.turn("turn-page-valid", "ordinary weather question"));
+
+    const firstPage = await coordinator.listJobPage({
+      kind: "runtime.reflect_turn",
+      limit: 1,
+      sessionId: "session-1",
+    });
+    expect(firstPage).toEqual({
+      jobs: [],
+      exhausted: false,
+      nextCursor: {
+        createdAt: "2026-07-22T00:00:00.000Z",
+        jobId: "000-legacy-reflection",
+      },
+    });
+    if (!firstPage.nextCursor) throw new Error("Expected an authoritative cursor");
+    const secondPage = await coordinator.listJobPage({
+      kind: "runtime.reflect_turn",
+      limit: 1,
+      after: firstPage.nextCursor,
+      sessionId: "session-1",
+    });
+
+    expect(secondPage.jobs).toHaveLength(1);
+    expect(secondPage.jobs[0]?.payload).toMatchObject({ turn: { turnId: "turn-page-valid" } });
+    f.workspace.close();
+  });
+
+  test("rejects an explicitly empty reflection session selector", async () => {
+    const f = await fixture();
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      research: f.research,
+      config: config(),
+    });
+
+    await expect(coordinator.listJobPage({ kind: "runtime.reflect_turn", sessionId: "" })).rejects.toThrow();
+
+    await coordinator.stop();
     f.workspace.close();
   });
 
@@ -395,6 +652,80 @@ describe("automatic runtime coordinator", () => {
     expect((await terminal.getJob(failed.job.jobId))?.job.status).toBe("completed");
     f.workspace.close();
     second.workspace.close();
+  });
+
+  test("retries a cross-process experiment brief publication collision", async () => {
+    const f = await fixture();
+    f.setBriefPublicationCollisions(1);
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      research: f.research,
+      config: config(),
+    });
+
+    const observed = await coordinator.observeCompletedTurn(f.turn("turn-brief-collision"));
+    await coordinator.idle();
+
+    expect((await coordinator.getJob(observed.job.jobId))?.job).toMatchObject({
+      status: "completed",
+      attempt: 2,
+    });
+    expect(f.counts().reflectCalls).toBe(2);
+    f.workspace.close();
+  });
+
+  test("does not infer retry policy from error message text", async () => {
+    const f = await fixture();
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      research: Object.freeze({
+        ...f.research,
+        reflect: async () => {
+          throw new Error("Experiment brief publication collision for unstructured-error");
+        },
+      }),
+      config: config(),
+    });
+
+    const observed = await coordinator.observeCompletedTurn(f.turn("turn-unstructured-error"));
+    await coordinator.idle();
+
+    expect((await coordinator.getJob(observed.job.jobId))?.job).toMatchObject({
+      status: "failed",
+      attempt: 1,
+      lastError: {
+        code: "coordinator_operation_failed",
+        retryable: false,
+      },
+    });
+    f.workspace.close();
+  });
+
+  test.each([
+    "authoring",
+    "completed",
+  ] as const)("does not enqueue duplicate author work for an authoritative deduped %s experiment", async (status) => {
+    const f = await fixture();
+    f.setDedupedStatus(status);
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      research: f.research,
+      config: config(),
+    });
+
+    const observed = await coordinator.observeCompletedTurn(f.turn(`turn-deduped-${status}`));
+    await coordinator.idle();
+
+    expect((await coordinator.getJob(observed.job.jobId))?.job.result).toMatchObject({
+      status: "deduped",
+      telemetry: { existingExperimentStatus: status },
+    });
+    expect(await coordinator.listJobs({ kind: "runtime.author_revision" })).toEqual([]);
+    expect(f.counts()).toMatchObject({ reflectCalls: 1, authorCalls: 0, preflightCalls: 0 });
+    f.workspace.close();
   });
 
   test("bounds concurrency and budget and propagates cancellation", async () => {
