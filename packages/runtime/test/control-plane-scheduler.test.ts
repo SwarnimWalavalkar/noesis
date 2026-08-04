@@ -186,9 +186,11 @@ describe("runtime control-plane resident scheduling", () => {
     const workspace = await createWorkspaceStore(root);
     const nowMs = Date.parse("2026-07-23T00:00:00.000Z");
     const total = 150_000;
+    let pagesRead = 0;
     const jobs = Object.freeze({
       ...workspace.jobs,
       listPage: async (request: Parameters<typeof workspace.jobs.listPage>[0] = {}) => {
+        pagesRead += 1;
         const limit = request.limit ?? 100;
         const start = request.after ? Number(request.after.jobId.slice("synthetic-".length)) + 1 : 0;
         const end = Math.min(total, start + limit);
@@ -273,6 +275,7 @@ describe("runtime control-plane resident scheduling", () => {
 
     await controlPlane.runAvailable();
     await expect(armed).resolves.toBe(1_000);
+    expect(pagesRead).toBe(150);
     await controlPlane.stop();
     workspace.close();
   }, 30_000);
