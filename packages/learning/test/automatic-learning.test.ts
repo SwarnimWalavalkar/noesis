@@ -774,16 +774,18 @@ describe("automatic learning organ", () => {
 
   test("does not count a current-turn file revision returned by history as recurrence", async () => {
     const currentRevision = fileRef("current-turn-source.md");
-    const noRecurrence = Object.freeze({
+    const currentCitation = fileRevisionCitation(currentRevision.revisionId, "The current correction");
+    const priorOutcome = outcomeCitation("outcome-earlier-correction", "An earlier correction recurred");
+    const selectsFilteredIndex = Object.freeze({
       ...reflectionStep,
       value: Object.freeze({
         ...reflectionStep.value,
-        recurrenceEvidenceCitationIndexes: Object.freeze([]),
+        recurrenceEvidenceCitationIndexes: Object.freeze([0]),
       }),
     }) satisfies ScriptedLearningInferenceStep;
     const harness = createHarness({
-      steps: [noRecurrence],
-      citations: [fileRevisionCitation(currentRevision.revisionId, "The current correction")],
+      steps: [selectsFilteredIndex],
+      citations: [currentCitation, priorOutcome],
     });
 
     const result = await harness.organ.observeTurn({
@@ -796,10 +798,14 @@ describe("automatic learning organ", () => {
     });
 
     if (result.status !== "experiment") throw new Error("Expected an experiment");
-    expect(result.brief.evidenceRefs).toEqual([currentRevision]);
-    expect(result.brief.citations).toEqual([]);
-    expect(result.brief.recurrenceCitations).toEqual([]);
-    expect(result.brief.recurrenceCount).toBe(0);
+    expect(result.brief.evidenceRefs).toEqual([
+      currentRevision,
+      { kind: "database_row", table: "outcomes", rowId: "outcome-earlier-correction" },
+    ]);
+    expect(result.brief.citations).toEqual([priorOutcome]);
+    expect(result.brief.citations).not.toContainEqual(currentCitation);
+    expect(result.brief.recurrenceCitations).toEqual([priorOutcome]);
+    expect(result.brief.recurrenceCount).toBe(1);
   });
 
   test("retries one reflected turn without duplicating its feedback signal or hypothesis", async () => {

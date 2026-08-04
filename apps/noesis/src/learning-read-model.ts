@@ -184,8 +184,9 @@ export async function loadLearningActivityForSession(
   const experimentIds = Object.freeze(
     [...new Set(reflections.flatMap((job) => resultExperimentId(job) ?? []))].sort(),
   );
-  const linked = await Promise.all(
-    chunks(experimentIds, EXPERIMENT_QUERY_CHUNK_SIZE).flatMap((experimentChunk) =>
+  const linked: CoordinatorJobView[] = [];
+  for (const experimentChunk of chunks(experimentIds, EXPERIMENT_QUERY_CHUNK_SIZE)) {
+    const chunkJobs = await Promise.all(
       (["runtime.author_revision", "runtime.preflight"] as const).map(
         async (kind) =>
           await listAllScopedJobs(coordinator, {
@@ -193,7 +194,8 @@ export async function loadLearningActivityForSession(
             experimentIds: experimentChunk,
           }),
       ),
-    ),
-  );
-  return learningActivityForSession([...reflections, ...linked.flat()], sessionId);
+    );
+    linked.push(...chunkJobs.flat());
+  }
+  return learningActivityForSession([...reflections, ...linked], sessionId);
 }

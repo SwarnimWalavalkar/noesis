@@ -46,6 +46,14 @@ export interface PiSkillLibrary {
   }[];
 }
 
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function compareSkillResources(left: PiSkillResource, right: PiSkillResource): number {
+  return compareText(left.name, right.name) || compareText(left.filePath, right.filePath);
+}
+
 export function createPiSkillLibrary(input: {
   readonly cwd: string;
   readonly agentDirectory: string;
@@ -132,7 +140,7 @@ export function createPiSkillLibrary(input: {
           skills: Object.freeze(
             resources
               .flatMap((resource) => (resource.kind === "skill" ? [resource.value] : []))
-              .sort((left, right) => left.name.localeCompare(right.name)),
+              .sort(compareSkillResources),
           ),
           diagnostics: Object.freeze([
             ...loaded.diagnostics.map((diagnostic) =>

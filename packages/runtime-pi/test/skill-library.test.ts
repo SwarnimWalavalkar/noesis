@@ -53,6 +53,42 @@ describe("Pi skill library adapter", () => {
     expect(library.configured()[0]?.source).toContain("portable-skill-package");
   });
 
+  test("orders snapshot resources independently of the host locale", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-skill-order-"));
+    roots.push(root);
+    const project = join(root, "project");
+    const skillPackage = join(root, "package");
+    const definitions = [
+      { directory: "lower", name: "zeta" },
+      { directory: "accented", name: "äther" },
+      { directory: "upper", name: "Alpha" },
+      { directory: "punctuation", name: "a-z" },
+      { directory: "numeric", name: "a0" },
+    ] as const;
+    await mkdir(project, { recursive: true });
+    for (const definition of definitions) {
+      const directory = join(skillPackage, "skills", definition.directory);
+      await mkdir(directory, { recursive: true });
+      await writeFile(
+        join(directory, "SKILL.md"),
+        `---\nname: ${definition.name}\ndescription: Ordering fixture.\n---\n\n${definition.name}`,
+        "utf8",
+      );
+    }
+    const library = createPiSkillLibrary({
+      cwd: project,
+      agentDirectory: join(root, "agent"),
+      workspaceTrusted: true,
+    });
+    await library.install(skillPackage, "workspace");
+
+    const names = (await library.snapshot()).skills
+      .filter((skill) => skill.filePath.startsWith(skillPackage))
+      .map((skill) => skill.name);
+
+    expect(names).toEqual(["Alpha", "a-z", "a0", "zeta", "äther"]);
+  });
+
   test("one cancelled snapshot caller does not poison a shared load", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-skill-cancellation-"));
     roots.push(root);

@@ -399,4 +399,57 @@ describe("ambient learning read model", () => {
       }),
     ]);
   });
+
+  test("processes experiment chunks sequentially without truncating the session chain", async () => {
+    const experimentIds = Array.from(
+      { length: 251 },
+      (_, index) => `experiment-${String(index).padStart(3, "0")}`,
+    );
+    const reflections = experimentIds.map((experimentId, index) =>
+      reflection({
+        jobId: `reflection-${String(index).padStart(3, "0")}`,
+        sessionId: "target-session",
+        status: "completed",
+        updatedAt: "2026-08-01T00:00:01.000Z",
+        result: { status: "experiment", experimentId },
+      }),
+    );
+    const authors = experimentIds.map((experimentId, index) =>
+      author({
+        jobId: `author-${String(index).padStart(3, "0")}`,
+        experimentId,
+        status: "completed",
+        updatedAt: "2026-08-01T00:00:02.000Z",
+      }),
+    );
+    const requestedChunkSizes: number[] = [];
+    let concurrentExperimentQueries = 0;
+    let maximumConcurrentExperimentQueries = 0;
+    const listJobPage: RuntimeCoordinator["listJobPage"] = async (request = {}) => {
+      if (request.kind === "runtime.reflect_turn")
+        return Object.freeze({ jobs: Object.freeze(reflections), exhausted: true });
+      requestedChunkSizes.push(request.experimentIds?.length ?? 0);
+      concurrentExperimentQueries += 1;
+      maximumConcurrentExperimentQueries = Math.max(
+        maximumConcurrentExperimentQueries,
+        concurrentExperimentQueries,
+      );
+      await Promise.resolve();
+      const jobs =
+        request.kind === "runtime.author_revision"
+          ? authors.filter(
+              (job) => isExperimentJob(job) && request.experimentIds?.includes(job.payload.experimentId),
+            )
+          : [];
+      concurrentExperimentQueries -= 1;
+      return Object.freeze({ jobs: Object.freeze(jobs), exhausted: true });
+    };
+
+    const activity = await loadLearningActivityForSession({ listJobPage }, "target-session");
+
+    expect(maximumConcurrentExperimentQueries).toBe(2);
+    expect(requestedChunkSizes).toEqual([250, 250, 1, 1]);
+    expect(activity.filter(({ stage }) => stage === "reflection")).toHaveLength(251);
+    expect(activity.filter(({ stage }) => stage === "authoring")).toHaveLength(251);
+  });
 });
