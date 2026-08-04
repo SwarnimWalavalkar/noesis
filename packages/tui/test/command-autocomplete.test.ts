@@ -197,6 +197,22 @@ describe("Noesis slash command autocomplete", () => {
     expect(editor.getText()).toBe("/context ");
   });
 
+  test("enriches an already-live editor when skill discovery settles later", async () => {
+    const editor = createSafeEditor(new TUI(inertTerminal));
+
+    editor.setSkillCommands([
+      {
+        name: "late-skill",
+        description: "Loaded after the editor became interactive",
+      },
+    ]);
+    editor.handleInput?.("/late");
+
+    await vi.waitFor(() =>
+      expect(editor.render(100).join("\n")).toContain("Loaded after the editor became interactive"),
+    );
+  });
+
   test("preserves native Backspace while suggestions are open", async () => {
     const editor = createSafeEditor(new TUI(inertTerminal));
     editor.handleInput?.("/help");

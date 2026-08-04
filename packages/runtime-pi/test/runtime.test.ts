@@ -21,6 +21,7 @@ import {
   type PiSkillLibrary,
   type PreparedPiCodeExecution,
   resolveFrozenSessionToolDefinitions,
+  resolvePiSkillInvocation,
   toAgentActionPayload,
 } from "../src/index.ts";
 import {
@@ -308,6 +309,47 @@ describe("agent runtime factories", () => {
     expect(events.some((event) => event.type === "tool-start" && event.name === "skills.load")).toBe(false);
   });
 
+  test("bounds explicit skill action evidence while preserving its immutable revision", () => {
+    const content = "x".repeat(300 * 1024);
+    const contentDigest = sha256(content);
+    const revision = Object.freeze({
+      kind: "evidence_revision" as const,
+      revisionId: "evidence-large-skill",
+      workingPath: "skills/large/SKILL.md",
+      snapshotPath: "evidence/revisions/evidence-large-skill",
+      contentDigest,
+      evidenceKind: "input" as const,
+    });
+    const resolved = resolvePiSkillInvocation(
+      "/large apply this skill",
+      Object.freeze([
+        Object.freeze({
+          name: "large",
+          description: "A deliberately large skill",
+          content,
+          filePath: "/skills/large/SKILL.md",
+          contentDigest,
+          admittedRevision: revision,
+          disableModelInvocation: false,
+        }),
+      ]),
+    );
+
+    expect(resolved?.actionEvidence).toMatchObject({
+      authority: {
+        name: "large",
+        contentDigest,
+        revision,
+        invocation: "explicit",
+      },
+      evidence: { truncated: true },
+    });
+    expect(new TextEncoder().encode(JSON.stringify(resolved?.actionEvidence)).byteLength).toBeLessThanOrEqual(
+      256 * 1024,
+    );
+    expect(resolved?.evidence).toMatchObject({ content, revision });
+  });
+
   test("rejects already-cancelled and oversized execute requests before preparation", async () => {
     let executions = 0;
     const turn = new AbortController();
@@ -326,6 +368,7 @@ describe("agent runtime factories", () => {
         },
         close: async () => undefined,
       },
+      turnId: "turn-cancelled",
       signal: turn.signal,
       emit: () => undefined,
     });
@@ -350,6 +393,7 @@ describe("agent runtime factories", () => {
         },
         close: async () => undefined,
       },
+      turnId: "turn-byte-bounded",
       signal: active.signal,
       emit: () => undefined,
     });
@@ -365,7 +409,41 @@ describe("agent runtime factories", () => {
     expect(executions).toBe(0);
   });
 
-  test("binds codemode logical execution identity to the stable Pi tool call", async () => {
+  test("scopes codemode logical execution identity by turn when Pi reuses a tool call ID", async () => {
+    const logicalExecutionIds: string[] = [];
+    const prepared: PreparedPiCodeExecution = {
+      catalog: emptyCatalog("catalog-logical-identity"),
+      execute: async (_source, _timeoutMs, _signal, _emit, identity) => {
+        if (identity) logicalExecutionIds.push(identity.logicalExecutionId);
+        return {
+          executionId: "physical-execution",
+          value: null,
+          calls: 0,
+          durationMs: 0,
+        };
+      },
+      close: async () => undefined,
+    };
+    const firstTurn = createPiExecuteTool({
+      prepared,
+      turnId: "turn-one",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+    });
+    const secondTurn = createPiExecuteTool({
+      prepared,
+      turnId: "turn-two",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+    });
+
+    await firstTurn.execute("stable-parent-call", { source: "return null;" });
+    await secondTurn.execute("stable-parent-call", { source: "return null;" });
+
+    expect(logicalExecutionIds).toEqual(["turn-one:stable-parent-call", "turn-two:stable-parent-call"]);
+  });
+
+  test("keeps a stable logical execution identity for retries within one turn", async () => {
     let logicalExecutionId: string | undefined;
     const execute = createPiExecuteTool({
       prepared: {
@@ -381,13 +459,14 @@ describe("agent runtime factories", () => {
         },
         close: async () => undefined,
       },
+      turnId: "turn-stable",
       signal: new AbortController().signal,
       emit: () => undefined,
     });
 
     await execute.execute("stable-parent-call", { source: "return null;" });
 
-    expect(logicalExecutionId).toBe("stable-parent-call");
+    expect(logicalExecutionId).toBe("turn-stable:stable-parent-call");
   });
 
   test("bounds arbitrary action payloads without leaking runtime-specific values", () => {

@@ -28,7 +28,12 @@ export interface PiSkillSnapshot {
 }
 
 export interface PiSkillLibrary {
+  /** Live inspection load; callers may wait for newly discovered resources. */
   readonly snapshot: (signal?: AbortSignal) => Promise<PiSkillSnapshot>;
+  /**
+   * Turn admission never waits behind an opportunistic inspection load. It pins the last settled
+   * snapshot, or an explicitly diagnosed empty snapshot, until that inspection settles.
+   */
   readonly pinSnapshot: (
     key: string,
     signal?: AbortSignal,
@@ -44,6 +49,13 @@ export interface PiSkillLibrary {
     readonly scope: "personal" | "workspace";
     readonly installedPath?: string;
   }[];
+}
+
+type SkillLoadOwner = "snapshot" | "admission";
+
+interface InFlightSkillLoad {
+  readonly owner: SkillLoadOwner;
+  readonly promise: Promise<PiSkillSnapshot>;
 }
 
 function compareText(left: string, right: string): number {
@@ -78,7 +90,8 @@ export function createPiSkillLibrary(input: {
     noThemes: true,
     noContextFiles: true,
   });
-  let loading: Promise<PiSkillSnapshot> | undefined;
+  let loading: InFlightSkillLoad | undefined;
+  let lastSettledSnapshot: PiSkillSnapshot | undefined;
   const pinned = new Map<string, PiSkillSnapshot>();
   const pinning = new Map<string, Promise<PiSkillSnapshot>>();
   const readSkillFile = input.readSkillFile ?? (async (path: string) => await readFile(path, "utf8"));
@@ -104,7 +117,7 @@ export function createPiSkillLibrary(input: {
       );
     });
   };
-  const snapshot = (signal?: AbortSignal): Promise<PiSkillSnapshot> => {
+  const loadSnapshot = (owner: SkillLoadOwner): Promise<PiSkillSnapshot> => {
     if (!loading) {
       const current = (async () => {
         await loader.reload();
@@ -136,7 +149,7 @@ export function createPiSkillLibrary(input: {
             }
           }),
         );
-        return Object.freeze({
+        const captured = Object.freeze({
           skills: Object.freeze(
             resources
               .flatMap((resource) => (resource.kind === "skill" ? [resource.value] : []))
@@ -153,12 +166,32 @@ export function createPiSkillLibrary(input: {
             ...resources.flatMap((resource) => (resource.kind === "diagnostic" ? [resource.value] : [])),
           ]),
         });
+        lastSettledSnapshot = captured;
+        return captured;
       })().finally(() => {
-        if (loading === current) loading = undefined;
+        if (loading?.promise === current) loading = undefined;
       });
-      loading = current;
+      loading = Object.freeze({ owner, promise: current });
     }
-    return awaitWithSignal(loading, signal);
+    return loading.promise;
+  };
+  const snapshot = (signal?: AbortSignal): Promise<PiSkillSnapshot> =>
+    awaitWithSignal(loadSnapshot("snapshot"), signal);
+  const admissionSnapshot = (): Promise<PiSkillSnapshot> => {
+    if (loading?.owner !== "snapshot") return loadSnapshot("admission");
+    const settled = lastSettledSnapshot;
+    const diagnostic = Object.freeze({
+      type: "warning" as const,
+      message: settled
+        ? "Skill discovery is still in progress; this turn uses the last settled skill snapshot and omits skills that have not finished loading."
+        : "Skill discovery is still in progress; this turn uses no skills and omits skills that have not finished loading.",
+    });
+    return Promise.resolve(
+      Object.freeze({
+        skills: settled?.skills ?? Object.freeze([]),
+        diagnostics: Object.freeze([...(settled?.diagnostics ?? []), diagnostic]),
+      }),
+    );
   };
   const pinSnapshot: PiSkillLibrary["pinSnapshot"] = async (key, signal, admit) => {
     const existing = pinned.get(key);
@@ -167,7 +200,7 @@ export function createPiSkillLibrary(input: {
     let inFlight = pinning.get(key);
     if (!inFlight) {
       const admission = (async (): Promise<PiSkillSnapshot> => {
-        const captured = await snapshot();
+        const captured = await admissionSnapshot();
         const existingAfterLoad = pinned.get(key);
         if (existingAfterLoad) return existingAfterLoad;
         const admitted = admit ? await admit(captured) : captured;

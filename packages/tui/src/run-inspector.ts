@@ -76,7 +76,13 @@ function jsonLines(value: unknown, colorEnabled: boolean): readonly string[] {
 }
 
 function rawPayloadSection(label: string, value: unknown, colorEnabled: boolean): readonly Section[] {
-  return value === undefined ? [] : [{ label, lines: jsonLines(value, colorEnabled) }];
+  if (value === undefined) return [];
+  return [
+    {
+      label,
+      lines: typeof value === "string" ? exactText(value).split("\n") : jsonLines(value, colorEnabled),
+    },
+  ];
 }
 
 const shortDigest = (digest: string): string => {
@@ -370,6 +376,7 @@ function buildSections(
   if (view === "raw")
     return [
       ...common,
+      ...(!exactSource ? artifactSection("source", detail?.sourceArtifact, colorEnabled) : []),
       ...rawPayloadSection("raw input", action.input, colorEnabled),
       ...rawPayloadSection("raw update", action.update, colorEnabled),
       ...rawPayloadSection("raw result", rawResult, colorEnabled),
@@ -395,9 +402,7 @@ function buildSections(
               lines: jsonLines(action.input, colorEnabled),
             },
           ]),
-    ...(children.length > 0
-      ? []
-      : semanticPayloadSection("update", action.name, action.update, colorEnabled)),
+    ...semanticPayloadSection("update", action.name, action.update, colorEnabled),
     ...semanticPayloadSection("result", action.name, semanticResult, colorEnabled),
     ...artifactSection("stdout", detail?.stdoutArtifact, colorEnabled),
     ...artifactSection("stderr", detail?.stderrArtifact, colorEnabled),

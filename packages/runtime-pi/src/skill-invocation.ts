@@ -1,11 +1,25 @@
 import { formatSkillInvocation, type Skill } from "@earendil-works/pi-agent-core";
 import { type JsonValue, toJsonValue } from "@noesis/domain";
+import { toAgentActionPayload } from "./action-payload.ts";
 import type { PiSkillResource } from "./skill-library.ts";
 
 export interface ResolvedPiSkillInvocation {
   readonly name: string;
   readonly prompt: string;
   readonly evidence: JsonValue;
+  readonly actionEvidence: JsonValue;
+}
+
+function actionEvidence(evidence: JsonValue, authority: JsonValue): JsonValue {
+  const normalized = toAgentActionPayload(evidence);
+  if (
+    typeof normalized !== "object" ||
+    normalized === null ||
+    Array.isArray(normalized) ||
+    Reflect.get(normalized, "truncated") !== true
+  )
+    return normalized;
+  return toAgentActionPayload({ authority, evidence: normalized });
 }
 
 /**
@@ -31,17 +45,26 @@ export function resolvePiSkillInvocation(
     filePath: skill.filePath,
     disableModelInvocation: skill.disableModelInvocation,
   };
+  const evidence = toJsonValue({
+    name: skill.name,
+    description: skill.description,
+    filePath: skill.filePath,
+    content: skill.content,
+    contentDigest: skill.contentDigest,
+    revision: skill.admittedRevision ?? null,
+    invocation: "explicit",
+  });
+  const authority = toJsonValue({
+    name: skill.name,
+    filePath: skill.filePath,
+    contentDigest: skill.contentDigest,
+    revision: skill.admittedRevision ?? null,
+    invocation: "explicit",
+  });
   return Object.freeze({
     name: skill.name,
     prompt: formatSkillInvocation(piSkill, additionalInstructions || undefined),
-    evidence: toJsonValue({
-      name: skill.name,
-      description: skill.description,
-      filePath: skill.filePath,
-      content: skill.content,
-      contentDigest: skill.contentDigest,
-      revision: skill.admittedRevision ?? null,
-      invocation: "explicit",
-    }),
+    evidence,
+    actionEvidence: actionEvidence(evidence, authority),
   });
 }

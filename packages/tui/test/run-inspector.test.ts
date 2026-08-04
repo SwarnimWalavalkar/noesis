@@ -186,6 +186,23 @@ describe("run inspector panel", () => {
     expect(rawBody).toContain("space semantic");
   });
 
+  test("preserves null progress values as semantic nulls", () => {
+    const state = stateWithAction(
+      "execute",
+      { source: "return null;" },
+      {
+        activity: { type: "progress", value: null },
+      },
+    );
+    const semantic = render(state, 88, 60).join("\n");
+    const raw = render(reduceTui(state, { type: "inspector-view-toggled" }), 88, 60).join("\n");
+
+    expect(semantic).toContain("RESULT semantic · space for exact");
+    expect(semantic).toContain("(null)");
+    expect(semantic).not.toContain('"activity"');
+    expect(raw).toContain('"value": null');
+  });
+
   test("presents tool catalogs as readable discovery lists instead of schema dumps", () => {
     const catalog = {
       catalogId: "catalog-local",
@@ -319,6 +336,59 @@ describe("run inspector panel", () => {
 
     expect(body).toContain("SOURCE preview truncated");
     expect(body).toContain("1  const partial = true;");
+  });
+
+  test("keeps durable source and string result readable in raw mode", () => {
+    const detail: TuiExecutionDetail = {
+      ...DETAIL,
+      sourceArtifact: {
+        artifactId: "artifact-source-raw",
+        path: ".noesis/artifacts/codemode/raw/source.js",
+        mediaType: "text/javascript",
+        preview: "const durable = true;",
+        truncated: false,
+      },
+      result: '{\n  "durable": true\n}',
+    };
+    const state = stateWithRun({ detail });
+    const timeline = state.timeline.map((entry) =>
+      entry.kind === "action" && entry.actionId === "x1"
+        ? { ...entry, input: undefined, output: undefined }
+        : entry,
+    );
+    const raw = render(reduceTui({ ...state, timeline }, { type: "inspector-view-toggled" }), 88, 80).join(
+      "\n",
+    );
+
+    expect(raw).toContain("SOURCE .noesis/artifacts/codemode/raw/source.js");
+    expect(raw).toContain("const durable = true;");
+    expect(raw).toContain("RAW RESULT");
+    expect(raw).toContain('  "durable": true');
+    expect(raw).not.toContain('\\"durable\\"');
+    expect(raw).not.toContain('\\n  \\"durable');
+  });
+
+  test("keeps semantic parent updates visible beside nested calls", () => {
+    const state = stateWithRun({ detail: DETAIL });
+    const timeline = state.timeline.map((entry) =>
+      entry.kind === "action" && entry.actionId === "x1"
+        ? {
+            ...entry,
+            update: {
+              activity: {
+                type: "progress",
+                value: { checkpoint: "read complete", next: "summarize" },
+              },
+            },
+          }
+        : entry,
+    );
+    const body = render({ ...state, timeline }, 88, 80).join("\n");
+
+    expect(body).toContain("CALLS");
+    expect(body).toContain("UPDATE semantic · space for exact");
+    expect(body).toContain('"checkpoint": "read complete"');
+    expect(body).toContain('"next": "summarize"');
   });
 
   test("scrolls to the exact tail of a large resumed action result", () => {

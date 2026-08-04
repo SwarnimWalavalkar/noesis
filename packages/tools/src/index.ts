@@ -1,22 +1,34 @@
 import {
+  canonicalJson,
+  createId,
   type EffectClass,
   type JsonValue,
   JsonValueSchema,
   type PermissionManifest,
-  canonicalJson,
-  createId,
   sha256,
   toJsonValue,
 } from "@noesis/domain";
 import {
-  createEffectExecutionFailure,
-  inspectEffectExecutionFailure,
   type AuthorityBoundary,
+  createEffectExecutionFailure,
   type EffectDecision,
   type EffectRequest,
+  inspectEffectExecutionFailure,
 } from "@noesis/policy";
 import { z } from "zod";
 import { MAX_TOOL_RESULT_BYTES } from "./limits.ts";
+
+const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_.-]{0,127}$/u;
+const MAX_TOOL_NAME_CHARACTERS = 128;
+
+function isValidToolName(name: string): boolean {
+  return name.length <= MAX_TOOL_NAME_CHARACTERS && TOOL_NAME_PATTERN.test(name);
+}
+
+function displayToolName(name: string): string {
+  if (name.length <= MAX_TOOL_NAME_CHARACTERS) return name;
+  return `${name.slice(0, MAX_TOOL_NAME_CHARACTERS)}… [truncated]`;
+}
 
 export * from "./builtins.ts";
 export * from "./limits.ts";
@@ -270,6 +282,7 @@ function nearestToolNames(
   requestedName: string,
   descriptors: readonly FrozenToolDescriptor[],
 ): readonly string[] {
+  if (!isValidToolName(requestedName)) return Object.freeze([]);
   const normalized = requestedName.toLocaleLowerCase();
   const separator = normalized.indexOf(".");
   const requestedFamily = separator === -1 ? normalized : normalized.slice(0, separator);
@@ -285,9 +298,16 @@ function nearestToolNames(
         const distance = sameFamily
           ? editDistance(requestedOperation, candidateOperation)
           : editDistance(normalized, name);
-        return Object.freeze({ name: descriptor.name, sameFamily, distance });
+        const comparedLength = Math.max(
+          sameFamily ? requestedOperation.length : normalized.length,
+          sameFamily ? candidateOperation.length : name.length,
+        );
+        return Object.freeze({ name: descriptor.name, sameFamily, distance, comparedLength });
       })
-      .filter(({ sameFamily, distance }) => sameFamily || distance <= Math.max(2, normalized.length / 3))
+      .filter(
+        ({ distance, comparedLength }) =>
+          comparedLength > 0 && distance <= Math.max(1, Math.floor(comparedLength / 3)),
+      )
       .sort(
         (left, right) =>
           Number(right.sameFamily) - Number(left.sameFamily) ||
@@ -326,7 +346,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
   });
   const names = new Set<string>();
   for (const entry of frozen) {
-    if (!/^[a-z][a-z0-9_.-]{0,127}$/u.test(entry.descriptor.name))
+    if (!isValidToolName(entry.descriptor.name))
       throw new Error(`Invalid tool name ${entry.descriptor.name}`);
     if (names.has(entry.descriptor.name)) throw new Error(`Duplicate tool name ${entry.descriptor.name}`);
     names.add(entry.descriptor.name);
@@ -372,7 +392,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
       const recovery = suggestions.length > 0 ? ` Did you mean ${suggestions.join(", ")}?` : "";
       return failure(
         "not_found",
-        `Unknown tool: ${name}.${recovery} Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).`,
+        `Unknown tool: ${displayToolName(name)}.${recovery} Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).`,
       );
     }
     if (invocationContext.signal.aborted) return failure("cancelled", "Execution was cancelled");

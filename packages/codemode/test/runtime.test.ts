@@ -126,7 +126,7 @@ describe("codemode runtime", () => {
         sessionId: "session-unknown-tool",
       }),
     ).rejects.toThrow(
-      "Unknown tool: math.multiply. Did you mean math.double? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+      "Unknown tool: math.multiply. Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
     );
   });
 

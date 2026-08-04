@@ -1,5 +1,5 @@
 import type { EffectClass, JsonValue } from "@noesis/domain";
-import { inspectEffectExecutionFailure, type AuthorityBoundary, type EffectDecision } from "@noesis/policy";
+import { type AuthorityBoundary, type EffectDecision, inspectEffectExecutionFailure } from "@noesis/policy";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
@@ -103,11 +103,28 @@ describe("tool broker", () => {
       permission,
     });
 
-    await expect(broker.invoke("shell.exec", { command: "pwd" }, invocationContext())).resolves.toEqual({
+    await expect(broker.invoke("shell.rum", { command: "pwd" }, invocationContext())).resolves.toEqual({
       ok: false,
       code: "not_found",
       message:
-        "Unknown tool: shell.exec. Did you mean shell.run? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+        "Unknown tool: shell.rum. Did you mean shell.run? Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+    });
+
+    await expect(
+      broker.invoke("shell.completely-unrelated", { command: "pwd" }, invocationContext()),
+    ).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message:
+        "Unknown tool: shell.completely-unrelated. Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
+    });
+
+    const oversizedName = `shell.${"x".repeat(10_000)}`;
+    const displayedName = `${oversizedName.slice(0, 128)}… [truncated]`;
+    await expect(broker.invoke(oversizedName, {}, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "not_found",
+      message: `Unknown tool: ${displayedName}. Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).`,
     });
   });
 

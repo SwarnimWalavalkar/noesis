@@ -28,6 +28,8 @@ import {
   AutomaticLearningConfigSchema,
   createAutomaticLearningOrgan,
   createInMemoryExperimentBriefStore,
+  experimentBriefPublicationCollisionError,
+  type ExperimentBrief,
   type ExperimentBriefStore,
   RevisionAuthorOutputSchema,
 } from "../src/index.ts";
@@ -398,6 +400,7 @@ function createHarness(input: {
   readonly citations?: readonly ExactCitation[];
   readonly briefs?: ExperimentBriefStore;
   readonly inference?: ScriptedLearningInferencePort;
+  readonly experimentState?: ReturnType<typeof createExperimentState>;
 }) {
   const history = createHistoryHarness(input.citations ?? []);
   const feedback = createFeedbackHarness();
@@ -407,27 +410,7 @@ function createHarness(input: {
   registry.registerCapability(capability);
   const baseline = registry.constructRevision(baselineConstruction());
   const candidates = createCandidateDefinitionHarness();
-  const experiments: Experiment[] = [];
-  const experimentStore: ExperimentStorePort = Object.freeze({
-    getExperiment: async (experimentId: string) =>
-      experiments.find((experiment) => experiment.experimentId === experimentId),
-    listExperiments: async (request: Parameters<ExperimentStorePort["listExperiments"]>[0]) =>
-      Object.freeze(
-        experiments
-          .filter((experiment) => request.status === undefined || experiment.status === request.status)
-          .slice(0, request.limit),
-      ),
-    putExperiment: async (experiment: Experiment) => {
-      const index = experiments.findIndex((candidate) => candidate.experimentId === experiment.experimentId);
-      if (index === -1) experiments.push(experiment);
-      else experiments[index] = experiment;
-      return Object.freeze({
-        kind: "database_row" as const,
-        table: "experiments" as const,
-        rowId: experiment.experimentId,
-      });
-    },
-  });
+  const experimentState = input.experimentState ?? createExperimentState();
   const organ = createAutomaticLearningOrgan({
     config,
     history: history.history,
@@ -437,7 +420,7 @@ function createHarness(input: {
     briefs: input.briefs ?? createInMemoryExperimentBriefStore(),
     capabilities: registry,
     candidateDefinitions: candidates.port,
-    experiments: experimentStore,
+    experiments: experimentState.port,
     nextId: sequentialIds(),
   });
   return Object.freeze({
@@ -449,9 +432,85 @@ function createHarness(input: {
     criteria,
     inference,
     candidates,
-    experiments: () => Object.freeze([...experiments]),
-    putExperiment: experimentStore.putExperiment,
+    experiments: experimentState.values,
+    putExperiment: experimentState.port.putExperiment,
   });
+}
+
+function createExperimentState() {
+  const experiments: Experiment[] = [];
+  const port: ExperimentStorePort = Object.freeze({
+    getExperiment: async (experimentId: string) =>
+      experiments.find((experiment) => experiment.experimentId === experimentId),
+    listExperiments: async (request: Parameters<ExperimentStorePort["listExperiments"]>[0]) =>
+      Object.freeze(
+        experiments
+          .filter((experiment) => request.status === undefined || experiment.status === request.status)
+          .slice(0, request.limit),
+      ),
+    putExperiment: async (experiment: Experiment) => {
+      const index = experiments.findIndex((candidate) => candidate.experimentId === experiment.experimentId);
+      const existing = index === -1 ? undefined : experiments[index];
+      const value = existing
+        ? Object.freeze({
+            ...experiment,
+            evidenceRefs: Object.freeze([
+              ...new Map(
+                [...existing.evidenceRefs, ...experiment.evidenceRefs].map((reference) => [
+                  JSON.stringify(reference),
+                  reference,
+                ]),
+              ).values(),
+            ]),
+            feedbackSignalIds: Object.freeze([
+              ...new Set([...existing.feedbackSignalIds, ...experiment.feedbackSignalIds]),
+            ]),
+          })
+        : experiment;
+      if (index === -1) experiments.push(value);
+      else experiments[index] = value;
+      return Object.freeze({
+        kind: "database_row" as const,
+        table: "experiments" as const,
+        rowId: experiment.experimentId,
+      });
+    },
+  });
+  return Object.freeze({ port, values: () => Object.freeze([...experiments]) });
+}
+
+function createContendedBriefStore(initial: ExperimentBrief) {
+  let current = initial;
+  let initialReads = 0;
+  let collisions = 0;
+  let release: () => void = () => undefined;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const port: ExperimentBriefStore = Object.freeze({
+    findByDedupeKey: async (key: string) => {
+      if (key !== current.hypothesisDedupeKey) return undefined;
+      if (initialReads >= 2) return current;
+      const observed = current;
+      initialReads += 1;
+      if (initialReads === 2) release();
+      await barrier;
+      return observed;
+    },
+    put: async (brief: ExperimentBrief) => {
+      current = brief;
+      return brief;
+    },
+    replace: async ({ expectedExperimentId, brief }: Parameters<ExperimentBriefStore["replace"]>[0]) => {
+      if (current.experimentId !== expectedExperimentId) {
+        collisions += 1;
+        throw experimentBriefPublicationCollisionError(brief.hypothesisDedupeKey);
+      }
+      current = brief;
+      return brief;
+    },
+  });
+  return Object.freeze({ port, current: () => current, collisions: () => collisions });
 }
 
 function createBarrierInference(
@@ -943,6 +1002,93 @@ describe("automatic learning organ", () => {
       evidenceRefs: expect.arrayContaining([
         { kind: "database_row", table: "experiments", rowId: first.brief.experimentId },
         databaseRef("current-message-2"),
+      ]),
+    });
+  });
+
+  test("reconciles concurrent follow-up observations into one reachable successor", async () => {
+    const experimentState = createExperimentState();
+    const genesis = createHarness({
+      steps: [reflectionStep],
+      citations: [citation(1)],
+      experimentState,
+    });
+    const first = await genesis.organ.observeTurn({
+      turn: turn({ turnId: "turn-follow-up-parent", correction: "Use primary sources." }),
+      baselineRevision: genesis.baseline,
+      capability,
+    });
+    if (first.status !== "experiment") throw new Error("Expected a parent experiment");
+    const parent = experimentState.values()[0];
+    if (!parent) throw new Error("Expected the parent experiment to be stored");
+    await experimentState.port.putExperiment(
+      Object.freeze({
+        ...parent,
+        status: "completed" as const,
+        outcome: "keep" as const,
+      }),
+    );
+
+    const briefs = createContendedBriefStore(first.brief);
+    const left = createHarness({
+      steps: [reflectionStep],
+      citations: [citation(1)],
+      briefs: briefs.port,
+      experimentState,
+    });
+    const right = createHarness({
+      steps: [reflectionStep],
+      citations: [citation(1)],
+      briefs: briefs.port,
+      experimentState,
+    });
+    const [leftResult, rightResult] = await Promise.all([
+      left.organ.observeTurn({
+        turn: turn({
+          turnId: "turn-follow-up-left",
+          correction: "Use primary sources.",
+          evidenceRef: databaseRef("current-message-left"),
+        }),
+        baselineRevision: left.baseline,
+        capability,
+      }),
+      right.organ.observeTurn({
+        turn: turn({
+          turnId: "turn-follow-up-right",
+          correction: "Use primary sources.",
+          evidenceRef: databaseRef("current-message-right"),
+        }),
+        baselineRevision: right.baseline,
+        capability,
+      }),
+    ]);
+
+    expect([leftResult.status, rightResult.status].sort()).toEqual(["deduped", "experiment"]);
+    if (leftResult.status === "no_change" || rightResult.status === "no_change")
+      throw new Error("Expected concurrent follow-up results");
+    const successorId = leftResult.brief.experimentId;
+    expect(rightResult.brief.experimentId).toBe(successorId);
+    expect(briefs.collisions()).toBe(1);
+    expect(briefs.current()).toMatchObject({
+      experimentId: successorId,
+      evidenceRefs: expect.arrayContaining([
+        databaseRef("current-message-left"),
+        databaseRef("current-message-right"),
+      ]),
+    });
+    const experiments = experimentState.values();
+    expect(experiments).toHaveLength(2);
+    expect(experiments.filter(({ status }) => status === "hypothesis")).toHaveLength(1);
+    expect(experiments.find(({ experimentId }) => experimentId === successorId)).toMatchObject({
+      status: "hypothesis",
+      evidenceRefs: expect.arrayContaining([
+        { kind: "database_row", table: "experiments", rowId: parent.experimentId },
+        databaseRef("current-message-left"),
+        databaseRef("current-message-right"),
+      ]),
+      feedbackSignalIds: expect.arrayContaining([
+        leftResult.harvest.signals[0]?.signal.signalId,
+        rightResult.harvest.signals[0]?.signal.signalId,
       ]),
     });
   });

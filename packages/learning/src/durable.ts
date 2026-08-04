@@ -19,6 +19,7 @@ import {
   type AutomaticLearningOrgan,
   type AutomaticLearningOrganOptions,
   createAutomaticLearningOrgan,
+  experimentBriefPublicationCollisionError,
   type ExperimentBrief,
   type ExperimentBriefStore,
   type LearningCandidateManifestStore,
@@ -206,7 +207,7 @@ async function readBrief(workspace: DurableWorkspace, reference: FileRevisionRef
 export function createWorkspaceExperimentBriefStore(workspace: DurableWorkspace): ExperimentBriefStore {
   const requireSamePublication = (existing: ExperimentBrief, requested: ExperimentBrief) => {
     if (canonicalJson(existing) !== canonicalJson(requested))
-      throw new Error(`Experiment brief publication collision for ${requested.hypothesisDedupeKey}`);
+      throw experimentBriefPublicationCollisionError(requested.hypothesisDedupeKey);
     return existing;
   };
   return Object.freeze({
@@ -249,7 +250,7 @@ export function createWorkspaceExperimentBriefStore(workspace: DurableWorkspace)
       if (!current) throw new Error(`Experiment brief replacement has no current publication`);
       const existing = await readBrief(workspace, current.definitionRevision);
       if (existing.experimentId !== expectedExperimentId)
-        throw new Error(`Experiment brief replacement lost its expected identity`);
+        throw experimentBriefPublicationCollisionError(value.hypothesisDedupeKey);
       const result = await workspace.definitionPublications.publish({
         namespace,
         definitionId: value.hypothesisDedupeKey,
@@ -265,7 +266,14 @@ export function createWorkspaceExperimentBriefStore(workspace: DurableWorkspace)
           reason: `Revise durable experiment brief ${value.experimentId}`,
         },
       });
-      if (!result.ok) throw new Error(result.error.message);
+      if (!result.ok) {
+        const winner = await workspace.definitionMetadata.getCurrent(namespace, value.hypothesisDedupeKey);
+        if (winner) {
+          const published = await readBrief(workspace, winner.definitionRevision);
+          if (canonicalJson(published) === canonicalJson(value)) return published;
+        }
+        throw experimentBriefPublicationCollisionError(value.hypothesisDedupeKey, result.error);
+      }
       return value;
     },
   });

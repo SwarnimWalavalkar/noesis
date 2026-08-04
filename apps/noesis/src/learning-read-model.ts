@@ -114,6 +114,7 @@ function activity(job: CoordinatorJobView): TuiLearningActivitySummary {
 export function learningActivityForSession(
   jobs: readonly CoordinatorJobView[],
   sessionId: string,
+  observedChildJobIds: ReadonlySet<string> = new Set(),
 ): readonly TuiLearningActivitySummary[] {
   const reflections = jobs.filter(
     (job): job is ReflectionJob => isReflection(job) && job.payload.turn.sessionId === sessionId,
@@ -126,11 +127,13 @@ export function learningActivityForSession(
   );
   return Object.freeze(
     jobs
-      .filter(
-        (job) =>
-          (isReflection(job) && job.payload.turn.sessionId === sessionId) ||
-          (!isReflection(job) && experimentIds.has(stringField(job.payload, "experimentId") ?? "")),
-      )
+      .filter((job) => {
+        if (isReflection(job)) return job.payload.turn.sessionId === sessionId;
+        if (observedChildJobIds.has(job.job.jobId)) return true;
+        const sourceSessionId = stringField(job.payload, "sourceSessionId");
+        if (sourceSessionId !== undefined) return sourceSessionId === sessionId;
+        return experimentIds.has(stringField(job.payload, "experimentId") ?? "");
+      })
       .map(activity)
       .sort(
         (left, right) =>
@@ -181,8 +184,18 @@ export async function loadLearningActivityForSession(
     kind: "runtime.reflect_turn",
     sessionId,
   });
+  const sessionChildren = await Promise.all(
+    (["runtime.author_revision", "runtime.preflight"] as const).map(
+      async (kind) => await listAllScopedJobs(coordinator, { kind, sessionId }),
+    ),
+  );
   const experimentIds = Object.freeze(
-    [...new Set(reflections.flatMap((job) => resultExperimentId(job) ?? []))].sort(),
+    [
+      ...new Set([
+        ...reflections.flatMap((job) => resultExperimentId(job) ?? []),
+        ...sessionChildren.flat().flatMap((job) => experimentId(job) ?? []),
+      ]),
+    ].sort(),
   );
   const linked: CoordinatorJobView[] = [];
   for (const experimentChunk of chunks(experimentIds, EXPERIMENT_QUERY_CHUNK_SIZE)) {
@@ -195,7 +208,16 @@ export async function loadLearningActivityForSession(
           }),
       ),
     );
-    linked.push(...chunkJobs.flat());
+    linked.push(
+      ...chunkJobs.flat().filter((job) => stringField(job.payload, "sourceSessionId") === undefined),
+    );
   }
-  return learningActivityForSession([...reflections, ...linked], sessionId);
+  const uniqueLinked = new Map(
+    [...sessionChildren.flat(), ...linked].map((job) => [job.job.jobId, job] as const),
+  );
+  return learningActivityForSession(
+    [...reflections, ...uniqueLinked.values()],
+    sessionId,
+    new Set(sessionChildren.flat().map((job) => job.job.jobId)),
+  );
 }

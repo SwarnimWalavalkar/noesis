@@ -76,8 +76,24 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     wakeTimer = undefined;
   };
 
+  const listAllDurableJobs = async () => {
+    const jobs: Awaited<ReturnType<typeof options.workspace.jobs.list>>[number][] = [];
+    let after: import("@noesis/domain").DurableJobListCursor | undefined;
+    for (;;) {
+      const page = await options.workspace.jobs.listPage({
+        limit: 1_000,
+        ...(after ? { after } : {}),
+      });
+      jobs.push(...page.records);
+      if (page.exhausted) return Object.freeze(jobs);
+      if (!page.nextCursor)
+        throw new Error("Non-exhausted durable job page did not provide an authoritative cursor");
+      after = page.nextCursor;
+    }
+  };
+
   const nextDurableWake = async (): Promise<number | undefined> => {
-    const jobs = await options.workspace.jobs.list({ limit: 1_000 });
+    const jobs = await listAllDurableJobs();
     const supported = jobs.filter(
       (job) =>
         job.kind === "runtime.reflect_turn" ||
@@ -147,7 +163,7 @@ export function createRuntimeControlPlane(options: RuntimeControlPlaneOptions): 
     for (;;) {
       reconciled.push(...(await runAvailable()));
       const timestamp = now().getTime();
-      const runnable = (await options.workspace.jobs.list({ limit: 1_000 })).some(
+      const runnable = (await listAllDurableJobs()).some(
         (job) =>
           (job.kind === "runtime.reflect_turn" ||
             job.kind === "runtime.author_revision" ||

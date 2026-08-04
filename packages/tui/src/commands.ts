@@ -1,3 +1,4 @@
+import { paginateInspectorText } from "./lifecycle-utils.ts";
 import type { NoesisTuiRuntime, TuiInteractionResult, TuiLearningActivitySummary } from "./runtime-port.ts";
 import type { NoesisTuiAction } from "./state.ts";
 
@@ -13,7 +14,8 @@ export interface SlashCommandContext {
 export const HELP_LINES = [
   "/model provider/model · /context · /capabilities",
   "/skills · /scripts · /workflows · /runs · /learning",
-  "/skill NAME · /script NAME · /workflow NAME · /run ID",
+  "/skill NAME inspects · /skill:NAME [instructions] invokes command-name collisions",
+  "/script NAME · /workflow NAME · /run ID",
   "/fork · /compact · /steer [MESSAGE] · /queue resume",
   "enter queues during work · alt+↑ edits newest queued · esc interrupts",
   "shift+enter newline · ctrl+g external editor",
@@ -300,16 +302,18 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
       return true;
     }
     const activity = await runtime.listLearningActivity(trailId);
-    publishInspector(
-      activity.length === 0
-        ? "No ambient learning activity has been recorded for this session yet."
-        : [
-            `Learning activity · ${String(activity.length)}`,
-            ...activity.map(learningActivityLine),
-            "",
-            "Noesis reflects after useful work. No change is a normal outcome.",
-          ].join("\n\n"),
+    if (activity.length === 0) {
+      publishInspector("No ambient learning activity has been recorded for this session yet.");
+      return true;
+    }
+    const pages = paginateInspectorText(
+      `Learning activity · ${String(activity.length)}`,
+      [
+        ...activity.map(learningActivityLine),
+        "Noesis reflects after useful work. No change is a normal outcome.",
+      ].join("\n\n"),
     );
+    for (const page of pages) publishInspector(page);
     return true;
   }
 

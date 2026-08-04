@@ -128,6 +128,64 @@ describe("Pi skill library adapter", () => {
     });
   });
 
+  test("degrades admission instead of awaiting a stalled background snapshot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-skill-background-stall-"));
+    roots.push(root);
+    const project = join(root, "project");
+    const skillPackage = join(root, "package");
+    const skillPath = join(skillPackage, "skills", "eventual", "SKILL.md");
+    const content =
+      "---\nname: eventual\ndescription: Eventual skill.\n---\n\nLoaded after discovery settles.";
+    await mkdir(project, { recursive: true });
+    await mkdir(join(skillPackage, "skills", "eventual"), { recursive: true });
+    await writeFile(skillPath, content, "utf8");
+    let signalReadStarted: (() => void) | undefined;
+    const readStarted = new Promise<void>((resolve) => {
+      signalReadStarted = resolve;
+    });
+    let releaseRead: (() => void) | undefined;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    let reads = 0;
+    const library = createPiSkillLibrary({
+      cwd: project,
+      agentDirectory: join(root, "agent"),
+      workspaceTrusted: true,
+      readSkillFile: async (path) => {
+        reads += 1;
+        signalReadStarted?.();
+        await readGate;
+        return path === skillPath ? content : "";
+      },
+    });
+    await library.install(skillPackage, "workspace");
+
+    const background = library.snapshot();
+    await readStarted;
+    const readsBeforeAdmission = reads;
+    const admitted = await library.pinSnapshot("ordinary-turn");
+
+    expect(admitted.skills).toEqual([]);
+    expect(admitted.diagnostics).toEqual([
+      expect.objectContaining({
+        type: "warning",
+        message: expect.stringContaining("uses no skills"),
+      }),
+    ]);
+    expect(reads).toBe(readsBeforeAdmission);
+
+    releaseRead?.();
+    const settled = await background;
+    expect(settled.skills).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "eventual", content })]),
+    );
+    const later = await library.pinSnapshot("later-turn");
+    expect(later.skills).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "eventual", content })]),
+    );
+  });
+
   test("keeps valid skills when one discovered resource persistently fails to load", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-skill-partial-load-"));
     roots.push(root);

@@ -205,6 +205,8 @@ function genericOutcome(output: unknown): string | undefined {
   if (isRecord(output)) {
     const error = stringField(output, "error");
     if (error) return firstLine(error);
+    const results = arrayField(output, "results");
+    if (results) return formatCount(results.length, "item");
     return undefined;
   }
   return undefined;

@@ -305,6 +305,13 @@ export interface DurableJobEnqueueRequest {
   readonly maxAttempts: number;
   readonly estimatedCost: number;
   readonly budget: number;
+  readonly observation?: DurableJobObservationRequest;
+}
+
+export interface DurableJobObservationRequest {
+  readonly sourceSessionId: string;
+  readonly parentJobId: string;
+  readonly observedAt: string;
 }
 
 export interface DurableJobFailure {
@@ -312,6 +319,46 @@ export interface DurableJobFailure {
   readonly message: string;
   readonly retryable: boolean;
   readonly ambiguous: boolean;
+}
+
+export interface DurableJobFailureOptions {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly ambiguous?: boolean;
+  readonly cause?: unknown;
+}
+
+const DURABLE_JOB_FAILURE = Symbol.for("@noesis/domain/durable-job-failure");
+
+/**
+ * Attach durable scheduling semantics to an ordinary Error without coupling the
+ * producer to a particular coordinator implementation.
+ */
+export function durableJobFailureError(message: string, options: DurableJobFailureOptions): Error {
+  const error = new Error(message, options.cause === undefined ? undefined : { cause: options.cause });
+  Reflect.set(
+    error,
+    DURABLE_JOB_FAILURE,
+    Object.freeze({
+      code: options.code,
+      retryable: options.retryable,
+      ambiguous: options.ambiguous ?? false,
+    }),
+  );
+  return error;
+}
+
+/** Read scheduling semantics only from errors created through the durable failure contract. */
+export function durableJobFailureFromError(error: unknown): DurableJobFailure | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const failure = Reflect.get(error, DURABLE_JOB_FAILURE);
+  if (typeof failure !== "object" || failure === null) return undefined;
+  const code = Reflect.get(failure, "code");
+  const retryable = Reflect.get(failure, "retryable");
+  const ambiguous = Reflect.get(failure, "ambiguous");
+  if (typeof code !== "string" || typeof retryable !== "boolean" || typeof ambiguous !== "boolean")
+    return undefined;
+  return Object.freeze({ code, message: error.message, retryable, ambiguous });
 }
 
 /** Stable keyset cursor for the authoritative `(created_at, job_id)` job order. */
@@ -327,6 +374,8 @@ export interface DurableJobListRequest {
   readonly after?: DurableJobListCursor;
   /** Exact reflection-session selector over the authoritative JSON payload. */
   readonly payloadSessionId?: string;
+  /** Exact session selector over authoritative many-to-one job observations. */
+  readonly observedSessionId?: string;
   /** Exact experiment selector for authoring and preflight payloads. */
   readonly payloadExperimentIds?: readonly string[];
 }
@@ -340,6 +389,7 @@ export interface DurableJobPage {
 /** Atomic SQLite-backed scheduling primitives. Runtime owns job meanings and retry decisions. */
 export interface DurableJobStorePort {
   readonly enqueue: (request: DurableJobEnqueueRequest) => Promise<DurableJobRecord>;
+  readonly recordObservation: (jobId: string, observation: DurableJobObservationRequest) => Promise<void>;
   readonly get: (jobId: string) => Promise<DurableJobRecord | undefined>;
   readonly list: (request?: DurableJobListRequest) => Promise<readonly DurableJobRecord[]>;
   readonly listPage: (request?: DurableJobListRequest) => Promise<DurableJobPage>;

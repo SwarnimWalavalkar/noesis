@@ -30,15 +30,19 @@ import {
   type TuiInteractionResult,
   type TuiInteractionSnapshot,
 } from "./runtime-port.ts";
-import { createSafeEditor, createSelectTheme, loadSkillSlashCommands } from "./safe-editor.ts";
+import { createSafeEditor, createSelectTheme, enrichEditorSkills } from "./safe-editor.ts";
 import {
   createResponsiveSessionPicker,
   createSessionPickerItems,
   resumableTrail,
   type TuiStartOptions,
 } from "./session-picker.ts";
-import { executionForInteractionPhase, initialTuiState } from "./state.ts";
-import { interactionViewFromSnapshot, timelineActions } from "./state.ts";
+import {
+  executionForInteractionPhase,
+  initialTuiState,
+  interactionViewFromSnapshot,
+  timelineActions,
+} from "./state.ts";
 import { ANSI, safeTerminalText, shouldUseColor, styled } from "./theme.ts";
 
 export * from "./action-summary.ts";
@@ -91,7 +95,6 @@ export async function startNoesisTui(
   const colorEnabled =
     terminal instanceof ProcessTerminal && shouldUseColor(process.env) && process.stdout.hasColors();
   const selectTheme = createSelectTheme(colorEnabled);
-  const skillCommands = await loadSkillSlashCommands(runtime.listSkills);
   const view = createNoesisView(
     initialTuiState(runtime.agentName ?? "runtime", {
       provider: requestedProvider,
@@ -101,7 +104,7 @@ export async function startNoesisTui(
     }),
     () => terminal.rows,
   );
-  const editor = createSafeEditor(tui, colorEnabled, selectTheme, () => terminal.rows, skillCommands);
+  const editor = createSafeEditor(tui, colorEnabled, selectTheme, () => terminal.rows);
   const reportFailure = (error: unknown): void => {
     view.dispatch({
       type: "failed",
@@ -124,6 +127,7 @@ export async function startNoesisTui(
   const inputLabelView = createInputLabelView(colorEnabled, () => terminal.rows);
   const helpView = createHelpView(view, () => terminal.rows);
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
+  enrichEditorSkills(editor, runtime.listSkills, () => phase !== "stopped");
   let activeExclusiveCommand: Promise<boolean> | undefined;
   let externalEditorActive = false;
   let turnGeneration = 0;
@@ -689,8 +693,7 @@ export async function startNoesisTui(
     });
   };
   tui.addChild(root);
-  const loadTranscript = async (trail: TrailState): Promise<readonly RuntimeTranscriptEntry[]> =>
-    runtime.getTranscript(trail.trailId);
+  const loadTranscript = (trail: TrailState) => runtime.getTranscript(trail.trailId);
   const mountMain = (
     trail: TrailState,
     transcript: readonly RuntimeTranscriptEntry[],

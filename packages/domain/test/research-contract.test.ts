@@ -236,6 +236,7 @@ function createFakeWorkspaceStore(): WorkspaceStore {
       enqueue: async () => {
         throw new Error("unused fake job store");
       },
+      recordObservation: async () => undefined,
       get: async () => undefined,
       list: async () => [],
       listPage: async () => Object.freeze({ records: Object.freeze([]), exhausted: true }),

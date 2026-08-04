@@ -111,16 +111,16 @@ function presentedCatalog(value: unknown): PresentedCatalog | undefined {
  */
 export function presentActionPayload(actionName: string, payload: unknown): ActionPayloadPresentation {
   const activity = isRecord(payload) && isRecord(payload["activity"]) ? payload["activity"] : undefined;
-  const progressValue =
-    activity?.["type"] === "progress" && "value" in activity ? activity["value"] : undefined;
-  const envelopeText = piTextEnvelope(progressValue ?? payload);
-  const decoded = parseJsonText(envelopeText ?? progressValue ?? payload);
+  const hasProgressValue = activity?.["type"] === "progress" && "value" in activity;
+  const semanticPayload = hasProgressValue ? activity["value"] : payload;
+  const envelopeText = piTextEnvelope(semanticPayload);
+  const decoded = parseJsonText(envelopeText ?? semanticPayload);
   const value = decoded.value;
   const tools = presentedTools(actionName, value);
   const catalog = presentedCatalog(value);
   return Object.freeze({
     value,
-    unwrapped: progressValue !== undefined || envelopeText !== undefined || decoded.changed,
+    unwrapped: hasProgressValue || envelopeText !== undefined || decoded.changed,
     ...(tools ? { tools } : {}),
     ...(catalog ? { catalog } : {}),
   });

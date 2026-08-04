@@ -87,6 +87,7 @@ export type PiExecuteToolDetails =
 
 export function createPiExecuteTool(input: {
   readonly prepared: PreparedPiCodeExecution;
+  readonly turnId: string;
   readonly signal: AbortSignal;
   readonly emit: (event: PiCodeExecutionEvent, parentToolCallId: string) => void;
 }): AgentTool<typeof executeParametersJsonSchema, PiExecuteToolDetails> {
@@ -133,7 +134,7 @@ export function createPiExecuteTool(input: {
               }),
             });
           },
-          { logicalExecutionId: toolCallId },
+          { logicalExecutionId: `${input.turnId}:${toolCallId}` },
         );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result.value) }],

@@ -316,6 +316,40 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
+  test("starts without waiting for non-settling optional skill discovery", async () => {
+    const base = await createRuntime({
+      name: "skill-discovery-pending-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    let discoveryAttempts = 0;
+    const runtime = Object.freeze({
+      ...base,
+      listSkills: () => {
+        discoveryAttempts += 1;
+        return new Promise<never>(() => undefined);
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    expect(discoveryAttempts).toBe(1);
+    terminal.type("/help\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("/model provider/model"));
+    terminal.type("/quit\n");
+    await running;
+  });
+
   test("serializes slash commands with prompts and other commands", async () => {
     let releaseCompact: (() => void) | undefined;
     const compactGate = new Promise<void>((resolve) => {

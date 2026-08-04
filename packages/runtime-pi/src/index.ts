@@ -287,34 +287,36 @@ export function createPiAgentRuntime(
       const { session, sessionId } = await createEphemeralPiSession();
       execution.sessionId = sessionId;
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
-      const executeTool = preparedCode
-        ? createPiExecuteTool({
-            prepared: preparedCode,
-            signal: execution.controller.signal,
-            emit: (event, parentActionId) => {
-              if (event.type === "tool-start")
-                emit({
-                  type: "tool-start",
-                  actionId: event.callId,
-                  parentActionId,
-                  name: event.name,
-                  input: toAgentActionPayload(event.input ?? {}),
-                  timelineSequence: claimTimelineSequence(),
-                });
-              else if (event.type === "tool-end")
-                emit({
-                  type: "tool-end",
-                  actionId: event.callId,
-                  parentActionId,
-                  name: event.name,
-                  isError: !event.ok,
-                  result: toAgentActionPayload(
-                    event.result ?? (event.error ? { error: event.error } : { ok: event.ok }),
-                  ),
-                });
-            },
-          })
-        : undefined;
+      const executeTool =
+        plan && preparedCode
+          ? createPiExecuteTool({
+              prepared: preparedCode,
+              turnId: plan.turnId,
+              signal: execution.controller.signal,
+              emit: (event, parentActionId) => {
+                if (event.type === "tool-start")
+                  emit({
+                    type: "tool-start",
+                    actionId: event.callId,
+                    parentActionId,
+                    name: event.name,
+                    input: toAgentActionPayload(event.input ?? {}),
+                    timelineSequence: claimTimelineSequence(),
+                  });
+                else if (event.type === "tool-end")
+                  emit({
+                    type: "tool-end",
+                    actionId: event.callId,
+                    parentActionId,
+                    name: event.name,
+                    isError: !event.ok,
+                    result: toAgentActionPayload(
+                      event.result ?? (event.error ? { error: event.error } : { ok: event.ok }),
+                    ),
+                  });
+              },
+            })
+          : undefined;
       const piSkills = skillSnapshot.skills.map(
         (skill): Skill => ({
           name: skill.name,
@@ -339,7 +341,7 @@ export function createPiAgentRuntime(
           actionId,
           name: "skills.load",
           isError: false,
-          result: explicitSkill.evidence,
+          result: explicitSkill.actionEvidence,
         });
       }
       const harness = new AgentHarness({

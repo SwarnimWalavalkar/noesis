@@ -464,6 +464,20 @@ describe("Noesis transcript rendering", () => {
     expect(inspect).toMatchObject({ subject: "tools", outcome: "2 tools" });
   });
 
+  test("summarizes generic result collection envelopes by item count", () => {
+    const summary = summarizeAction(
+      {
+        actionId: "wrapped-results",
+        name: "custom.search",
+        status: "completed",
+        output: { results: [{ id: "first" }, { id: "second" }] },
+      },
+      [],
+    );
+
+    expect(summary).toMatchObject({ outcome: "2 items" });
+  });
+
   test("indents nested codemode SDK calls under execute", () => {
     const parent = {
       actionId: "execute-1",

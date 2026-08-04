@@ -1422,6 +1422,86 @@ describe("apps/noesis production control-plane composition", () => {
     await runtime.shutdown();
   });
 
+  test("a stalled background skill listing cannot poison the first ordinary turn", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-background-skill-stall-"));
+    roots.push(home);
+    const skillPackage = join(home, "skill-package");
+    const skillPath = join(skillPackage, "skills", "stalled-work", "SKILL.md");
+    const skillContent =
+      "---\nname: stalled-work\ndescription: Stalled background skill.\n---\n\nEventually available.";
+    await mkdir(join(skillPackage, "skills", "stalled-work"), { recursive: true });
+    await writeFile(skillPath, skillContent, "utf8");
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    let signalReadStarted: (() => void) | undefined;
+    const readStarted = new Promise<void>((resolve) => {
+      signalReadStarted = resolve;
+    });
+    let releaseRead: (() => void) | undefined;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const skills = createPiSkillLibrary({
+      cwd: home,
+      agentDirectory: join(home, "agent"),
+      workspaceTrusted: true,
+      readSkillFile: async (path) => {
+        signalReadStarted?.();
+        await readGate;
+        return path === skillPath ? skillContent : "";
+      },
+    });
+    await skills.install(skillPackage, "workspace");
+    let admittedSnapshot: Awaited<ReturnType<typeof skills.pinSnapshot>> | undefined;
+    const observedSkills = Object.freeze({
+      ...skills,
+      pinSnapshot: async (...args: Parameters<typeof skills.pinSnapshot>) => {
+        admittedSnapshot = await skills.pinSnapshot(...args);
+        return admittedSnapshot;
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      skills: observedSkills,
+      createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, {
+          codeExecution,
+          selfTools,
+          ...(skillLibrary ? { skills: skillLibrary } : {}),
+          requirePinnedSkillSnapshot: true,
+        }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+    });
+    const trail = await runtime.startTrail({ title: "Stalled skill discovery" });
+
+    if (!runtime.listSkills) throw new Error("Expected production skill listing support");
+    const backgroundListing = runtime.listSkills();
+    await readStarted;
+    await expect(runtime.debug.runTurn(trail.trailId, "Answer this normal prompt.")).resolves.toMatchObject({
+      outcome: "completed",
+    });
+    expect(admittedSnapshot?.skills).toEqual([]);
+    expect(admittedSnapshot?.diagnostics).toEqual([
+      expect.objectContaining({
+        type: "warning",
+        message: expect.stringContaining("omits skills that have not finished loading"),
+      }),
+    ]);
+
+    releaseRead?.();
+    await expect(backgroundListing).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "stalled-work", contentDigest: expect.any(String) }),
+      ]),
+    );
+    await runtime.shutdown();
+  });
+
   test("an explicitly invoked skill remains inspectable from admitted bytes after its source is removed", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-skill-evidence-"));
     roots.push(home);

@@ -14,6 +14,8 @@ import {
   canonicalJson,
   createId,
   type DefinitionFilePort,
+  durableJobFailureFromError,
+  durableJobFailureError,
   type EvidenceRef,
   type Experiment,
   type ExperimentStorePort,
@@ -103,6 +105,21 @@ export interface ExperimentBriefStore {
   }) => Promise<ExperimentBrief>;
 }
 
+export const EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE = "experiment_brief_publication_collision" as const;
+const MAX_BRIEF_RECONCILIATION_ATTEMPTS = 3;
+
+export function experimentBriefPublicationCollisionError(key: string, cause?: unknown): Error {
+  return durableJobFailureError(`Experiment brief publication collision for ${key}`, {
+    code: EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE,
+    retryable: true,
+    ...(cause === undefined ? {} : { cause }),
+  });
+}
+
+function isExperimentBriefPublicationCollision(error: unknown): boolean {
+  return durableJobFailureFromError(error)?.code === EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE;
+}
+
 /**
  * Durable semantic-hypothesis material used by the revision author. SQLite owns the matching
  * operational Experiment from hypothesis onward; the brief remains inspectable authored evidence.
@@ -115,7 +132,7 @@ export function createInMemoryExperimentBriefStore(): ExperimentBriefStore {
       const existing = briefs.get(brief.hypothesisDedupeKey);
       if (existing) {
         if (canonicalJson(existing) !== canonicalJson(brief))
-          throw new Error(`Experiment brief publication collision for ${brief.hypothesisDedupeKey}`);
+          throw experimentBriefPublicationCollisionError(brief.hypothesisDedupeKey);
         return existing;
       }
       briefs.set(brief.hypothesisDedupeKey, brief);
@@ -125,7 +142,7 @@ export function createInMemoryExperimentBriefStore(): ExperimentBriefStore {
       const { expectedExperimentId, brief } = input;
       const existing = briefs.get(brief.hypothesisDedupeKey);
       if (!existing || existing.experimentId !== expectedExperimentId)
-        throw new Error(`Experiment brief replacement lost its expected identity`);
+        throw experimentBriefPublicationCollisionError(brief.hypothesisDedupeKey);
       briefs.set(brief.hypothesisDedupeKey, brief);
       return brief;
     },
@@ -497,14 +514,12 @@ function experimentIdForHypothesis(dedupeKey: string): string {
 function followUpExperimentId(input: {
   readonly dedupeKey: string;
   readonly predecessorExperimentId: string;
-  readonly feedbackSignalIds: readonly string[];
 }): string {
   return `experiment_${sha256(
     canonicalJson({
       kind: "learning-follow-up",
       dedupeKey: input.dedupeKey,
       predecessorExperimentId: input.predecessorExperimentId,
-      feedbackSignalIds: [...input.feedbackSignalIds].sort(),
     }),
   ).slice(0, 32)}`;
 }
@@ -862,6 +877,54 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         reflectionRun,
       });
 
+    const reconcileObservation = async (
+      initial: ExperimentBrief,
+    ): Promise<Readonly<{ status: "experiment" | "deduped"; brief: ExperimentBrief }>> => {
+      let current = initial;
+      for (let attempt = 1; attempt <= MAX_BRIEF_RECONCILIATION_ATTEMPTS; attempt += 1) {
+        const experiment = await options.experiments.getExperiment(current.experimentId);
+        let status: "experiment" | "deduped";
+        let proposed: ExperimentBrief;
+        if (experiment?.status === "completed") {
+          const experimentId = followUpExperimentId({
+            dedupeKey,
+            predecessorExperimentId: experiment.experimentId,
+          });
+          const predecessorRef: EvidenceRef = Object.freeze({
+            kind: "database_row",
+            table: "experiments",
+            rowId: experiment.experimentId,
+          });
+          proposed = makeBrief(experimentId, uniqueEvidenceRefs([predecessorRef, ...harvest.evidenceRefs]));
+          await persistHypothesisExperiment(proposed);
+          status = "experiment";
+        } else {
+          await attachHarvestToExperiment(current, harvest);
+          proposed = mergeBriefObservation(current, harvest, selectedRecurrence);
+          status = "deduped";
+        }
+        if (canonicalJson(current) === canonicalJson(proposed)) {
+          return Object.freeze({ status, brief: current });
+        }
+        try {
+          return Object.freeze({
+            status,
+            brief: await options.briefs.replace({
+              expectedExperimentId: current.experimentId,
+              brief: proposed,
+            }),
+          });
+        } catch (error) {
+          if (!isExperimentBriefPublicationCollision(error) || attempt === MAX_BRIEF_RECONCILIATION_ATTEMPTS)
+            throw error;
+          const winner = await options.briefs.findByDedupeKey(dedupeKey);
+          if (!winner) throw error;
+          current = winner;
+        }
+      }
+      throw new Error(`Experiment brief reconciliation exhausted for ${dedupeKey}`);
+    };
+
     const observed = await serializeHypothesis(dedupeKey, async () => {
       const existing = await options.briefs.findByDedupeKey(dedupeKey);
       if (!existing) {
@@ -870,39 +933,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         return Object.freeze({ status: "experiment" as const, brief: await options.briefs.put(brief) });
       }
 
-      const experiment = await options.experiments.getExperiment(existing.experimentId);
-      if (experiment?.status === "completed") {
-        const feedbackSignalIds = harvest.signals.map(({ signal }) => signal.signalId);
-        const experimentId = followUpExperimentId({
-          dedupeKey,
-          predecessorExperimentId: experiment.experimentId,
-          feedbackSignalIds,
-        });
-        const predecessorRef: EvidenceRef = Object.freeze({
-          kind: "database_row",
-          table: "experiments",
-          rowId: experiment.experimentId,
-        });
-        const brief = makeBrief(experimentId, uniqueEvidenceRefs([predecessorRef, ...harvest.evidenceRefs]));
-        await persistHypothesisExperiment(brief);
-        return Object.freeze({
-          status: "experiment" as const,
-          brief: await options.briefs.replace({
-            expectedExperimentId: existing.experimentId,
-            brief,
-          }),
-        });
-      }
-
-      await attachHarvestToExperiment(existing, harvest);
-      const merged = mergeBriefObservation(existing, harvest, selectedRecurrence);
-      return Object.freeze({
-        status: "deduped" as const,
-        brief:
-          canonicalJson(existing) === canonicalJson(merged)
-            ? existing
-            : await options.briefs.replace({ expectedExperimentId: existing.experimentId, brief: merged }),
-      });
+      return await reconcileObservation(existing);
     });
 
     if (observed.status === "deduped") {

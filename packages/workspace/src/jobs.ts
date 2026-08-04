@@ -34,6 +34,11 @@ const JobFailureSchema = z.strictObject({
   retryable: z.boolean(),
   ambiguous: z.boolean(),
 });
+const JobObservationSchema = z.strictObject({
+  sourceSessionId: z.string().min(1),
+  parentJobId: z.string().min(1),
+  observedAt: z.string().datetime(),
+});
 const EnqueueSchema = z.strictObject({
   jobId: z.string().min(1),
   kind: z.string().min(1),
@@ -45,6 +50,7 @@ const EnqueueSchema = z.strictObject({
   maxAttempts: z.number().int().positive(),
   estimatedCost: z.number().nonnegative(),
   budget: z.number().nonnegative(),
+  observation: JobObservationSchema.optional(),
 });
 
 type RecordActivity = (
@@ -68,6 +74,17 @@ export function createDurableJobStore(
     return row === undefined ? undefined : decodeDurableJob(row);
   };
 
+  const recordObservation = (
+    jobId: string,
+    observation: NonNullable<DurableJobEnqueueRequest["observation"]>,
+  ): void => {
+    db.prepare(
+      `INSERT OR IGNORE INTO job_observations(
+         child_job_id, parent_job_id, source_session_id, observed_at
+       ) VALUES (?, ?, ?, ?)`,
+    ).run(jobId, observation.parentJobId, observation.sourceSessionId, observation.observedAt);
+  };
+
   const enqueue = async (request: DurableJobEnqueueRequest): Promise<DurableJobRecord> => {
     const value = EnqueueSchema.parse(request);
     for (const reference of value.payloadRefs) assertReference(reference);
@@ -88,6 +105,7 @@ export function createDurableJobStore(
           existing.estimatedCost === value.estimatedCost;
         if (!sameRequest)
           throw new Error(`Durable job operation identity collision for ${value.operationId}`);
+        if (value.observation) recordObservation(existing.jobId, value.observation);
         return existing;
       }
       db.prepare(
@@ -112,16 +130,21 @@ export function createDurableJobStore(
         value.estimatedCost,
       );
       recordActivity(actor, "coordinator.job_enqueued", "job", value.jobId, value.payloadRefs);
+      if (value.observation) recordObservation(value.jobId, value.observation);
       const created = read(value.jobId);
       if (!created) throw new Error(`Durable job ${value.jobId} disappeared after enqueue`);
       return created;
     });
   };
 
-  const list = async (request: DurableJobListRequest = {}): Promise<readonly DurableJobRecord[]> => {
+  const validatedLimit = (request: DurableJobListRequest): number => {
     const limit = request.limit ?? 100;
     if (!Number.isInteger(limit) || limit < 1 || limit > 1_000)
       throw new Error("Durable job list limit must be between 1 and 1000");
+    return limit;
+  };
+
+  const query = (request: DurableJobListRequest, limit: number): readonly DurableJobRecord[] => {
     if (request.status) JobStatusSchema.parse(request.status);
     const clauses: string[] = [];
     const values: Array<string | number> = [];
@@ -137,6 +160,22 @@ export function createDurableJobStore(
       z.string().min(1).parse(request.payloadSessionId);
       clauses.push("json_extract(payload_json, '$.turn.sessionId') = ?");
       values.push(request.payloadSessionId);
+    }
+    if (request.observedSessionId !== undefined) {
+      z.string().min(1).parse(request.observedSessionId);
+      clauses.push(
+        `job_id IN (
+           WITH RECURSIVE scoped_jobs(job_id) AS (
+             SELECT child_job_id FROM job_observations WHERE source_session_id = ?
+             UNION
+             SELECT observations.child_job_id
+             FROM job_observations AS observations
+             JOIN scoped_jobs ON observations.parent_job_id = scoped_jobs.job_id
+           )
+           SELECT job_id FROM scoped_jobs
+         )`,
+      );
+      values.push(request.observedSessionId);
     }
     if (request.payloadExperimentIds !== undefined) {
       const experimentIds = z.array(z.string().min(1)).max(250).parse(request.payloadExperimentIds);
@@ -161,13 +200,17 @@ export function createDurableJobStore(
       .map(decodeDurableJob);
   };
 
+  const list = async (request: DurableJobListRequest = {}): Promise<readonly DurableJobRecord[]> =>
+    query(request, validatedLimit(request));
+
   const listPage = async (request: DurableJobListRequest = {}): Promise<DurableJobPage> => {
-    const limit = request.limit ?? 100;
-    const records = await list(request);
+    const limit = validatedLimit(request);
+    const lookahead = query(request, limit + 1);
+    const records = Object.freeze(lookahead.slice(0, limit));
     const last = records.at(-1);
     return Object.freeze({
       records,
-      exhausted: records.length < limit,
+      exhausted: lookahead.length <= limit,
       ...(last
         ? {
             nextCursor: Object.freeze({ createdAt: last.createdAt, jobId: last.jobId }),
@@ -375,6 +418,14 @@ export function createDurableJobStore(
 
   return Object.freeze({
     enqueue,
+    recordObservation: async (
+      jobId: string,
+      observation: NonNullable<DurableJobEnqueueRequest["observation"]>,
+    ) => {
+      z.string().min(1).parse(jobId);
+      const value = JobObservationSchema.parse(observation);
+      database.transaction(() => recordObservation(jobId, value));
+    },
     get: async (jobId: string) => read(jobId),
     list,
     listPage,

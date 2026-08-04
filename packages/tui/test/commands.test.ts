@@ -1,6 +1,7 @@
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
 import { describe, expect, test } from "vitest";
 import {
+  INSPECTOR_PREVIEW_CHARACTERS,
   isExclusiveSlashCommand,
   type NoesisTuiAction,
   runSlashCommand,
@@ -30,6 +31,26 @@ const agent: NoesisAgentRuntime = {
 };
 
 describe("Noesis slash commands", () => {
+  test("documents how to invoke skills whose names collide with built-in commands", async () => {
+    const dispatched: NoesisTuiAction[] = [];
+
+    const handled = await runSlashCommand("/help", {
+      runtime: createInMemoryTestRuntime(agent),
+      trailId: "trail-help",
+      publishInspector: () => undefined,
+      dispatch: (action) => dispatched.push(action),
+      requestRender: () => undefined,
+    });
+
+    expect(handled).toBe(true);
+    expect(dispatched).toContainEqual(
+      expect.objectContaining({
+        type: "system-message",
+        text: expect.stringContaining("/skill:NAME [instructions] invokes command-name collisions"),
+      }),
+    );
+  });
+
   test("explains idle and unresolved steering without masking successful delivery", () => {
     const snapshot = { sessionId: "session", phase: "idle" as const, queuePaused: true, pending: [] };
     expect(steerFeedback({ effect: "idle", snapshot }, true)).toContain("No active turn");
@@ -140,6 +161,48 @@ describe("Noesis slash commands", () => {
     expect(published[0]).toContain("capability research-brief@research-brief-v2");
     expect(published[0]).toContain("No change is a normal outcome");
     expect(published[0]).not.toContain("approve");
+  });
+
+  test("paginates complete learning history instead of truncating later entries", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const activity = Object.freeze(
+      Array.from({ length: 240 }, (_, index) =>
+        Object.freeze({
+          jobId: `job-${String(index).padStart(3, "0")}`,
+          stage: "reflection" as const,
+          status: "no_change" as const,
+          summary: `Reflection ${String(index)} ${"evidence ".repeat(20)}`,
+          updatedAt: `2026-08-01T00:${String(index % 60).padStart(2, "0")}:00.000Z`,
+          turnId: `turn-${String(index)}`,
+        }),
+      ),
+    );
+    const published: string[] = [];
+    const runtime = Object.freeze({
+      ...base,
+      listLearningActivity: async () => activity,
+    });
+
+    const handled = await runSlashCommand("/learning", {
+      runtime,
+      trailId: "trail-long-learning",
+      publishInspector: (message) => published.push(message),
+      dispatch: () => undefined,
+      requestRender: () => undefined,
+    });
+
+    expect(handled).toBe(true);
+    expect(published.length).toBeGreaterThan(1);
+    expect(published[0]).toContain("Learning activity · 240 · page 1/");
+    expect(published.at(-1)).toContain("job-239");
+    const completeOutput = published.join("\n");
+    expect(
+      activity.every((entry) => completeOutput.includes(entry.jobId)),
+      "every learning entry should remain inspectable across pages",
+    ).toBe(true);
+    expect(completeOutput).toContain("No change is a normal outcome");
+    expect(completeOutput).not.toContain("inspector preview truncated");
+    expect(published.every((page) => page.length <= INSPECTOR_PREVIEW_CHARACTERS)).toBe(true);
   });
 
   test("hydrates inherited history when a fork becomes the active trail", async () => {

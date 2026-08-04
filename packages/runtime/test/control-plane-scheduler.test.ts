@@ -30,6 +30,23 @@ describe("runtime control-plane resident scheduling", () => {
     const workspace = await createWorkspaceStore(root, {
       now: () => new Date(nowMs).toISOString(),
     });
+    await Promise.all(
+      Array.from({ length: 1_000 }, async (_, index) => {
+        const jobId = `unrelated-${String(index).padStart(4, "0")}`;
+        await workspace.jobs.enqueue({
+          jobId,
+          kind: "unrelated.job",
+          payload: Object.freeze({}),
+          payloadRefs: Object.freeze([]),
+          operationId: `operation:${jobId}`,
+          idempotencyKey: `operation:${jobId}`,
+          notBefore: new Date(nowMs).toISOString(),
+          maxAttempts: 1,
+          estimatedCost: 0,
+          budget: 0,
+        });
+      }),
+    );
     const job = await workspace.jobs.enqueue({
       jobId: "job-future",
       kind: "runtime.reflect_turn",

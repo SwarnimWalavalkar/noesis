@@ -126,10 +126,14 @@ function author(input: {
   readonly updatedAt: string;
   readonly result?: unknown;
   readonly error?: string;
+  readonly sourceSessionId?: string;
+  readonly parentJobId?: string;
 }): CoordinatorJobView {
   const payload: AuthorRevisionJobPayload = Object.freeze({
     schemaVersion: 1,
     experimentId: input.experimentId,
+    ...(input.sourceSessionId ? { sourceSessionId: input.sourceSessionId } : {}),
+    ...(input.parentJobId ? { parentJobId: input.parentJobId } : {}),
     hypothesisDedupeKey: `hypothesis:${input.experimentId}`,
     retrievalStrategyId: "session-search.hybrid.v1",
     routingStrategyId: "router.default.v1",
@@ -149,10 +153,15 @@ function author(input: {
   });
 }
 
-function preflight(experimentId: string): CoordinatorJobView {
+function preflight(
+  experimentId: string,
+  lineage: { readonly sourceSessionId?: string; readonly parentJobId?: string } = {},
+): CoordinatorJobView {
   const payload: PreflightJobPayload = Object.freeze({
     schemaVersion: 1,
     experimentId,
+    ...(lineage.sourceSessionId ? { sourceSessionId: lineage.sourceSessionId } : {}),
+    ...(lineage.parentJobId ? { parentJobId: lineage.parentJobId } : {}),
     preflightId: "preflight-1",
     planId: "plan-1",
     retrievalStrategyId: "session-search.hybrid.v1",
@@ -227,6 +236,14 @@ describe("ambient learning read model", () => {
           status: "scheduled",
           updatedAt: "2026-08-01T00:00:07.000Z",
         }),
+        author({
+          jobId: "modern-foreign-author",
+          experimentId,
+          status: "completed",
+          updatedAt: "2026-08-01T00:00:08.000Z",
+          sourceSessionId: "session-b",
+          parentJobId: "other-reflection",
+        }),
       ],
       "session-a",
     );
@@ -266,6 +283,7 @@ describe("ambient learning read model", () => {
         }),
       ]),
     );
+    expect(activity.some(({ jobId }) => jobId === "modern-foreign-author")).toBe(false);
   });
 
   test("loads a session and its experiment chain beyond one thousand older unrelated jobs", async () => {
@@ -284,9 +302,8 @@ describe("ambient learning read model", () => {
       reflection({
         jobId: "reflection-zz-target",
         sessionId: "target-session",
-        status: "completed",
+        status: "failed",
         updatedAt: "2026-08-01T00:00:02.000Z",
-        result: { status: "experiment", experimentId: targetExperiment },
       }),
       author({
         jobId: "author-target",
@@ -294,8 +311,21 @@ describe("ambient learning read model", () => {
         status: "failed",
         updatedAt: "2026-08-01T00:00:03.000Z",
         error: "Target author failure",
+        sourceSessionId: "target-session",
+        parentJobId: "reflection-zz-target",
       }),
-      preflight(targetExperiment),
+      preflight(targetExperiment, {
+        sourceSessionId: "target-session",
+        parentJobId: "author-target",
+      }),
+      author({
+        jobId: "modern-foreign-fallback",
+        experimentId: targetExperiment,
+        status: "completed",
+        updatedAt: "2026-08-01T00:00:04.000Z",
+        sourceSessionId: "other-session",
+        parentJobId: "other-reflection",
+      }),
     ]);
     const requests: Array<NonNullable<Parameters<RuntimeCoordinator["listJobPage"]>[0]>> = [];
     const listJobPage: RuntimeCoordinator["listJobPage"] = async (request = {}) => {
@@ -304,7 +334,9 @@ describe("ambient learning read model", () => {
         .filter(({ kind }) => !request.kind || kind === request.kind)
         .filter(
           (job) =>
-            !request.sessionId || (isReflectionJob(job) && job.payload.turn.sessionId === request.sessionId),
+            !request.sessionId ||
+            (isReflectionJob(job) && job.payload.turn.sessionId === request.sessionId) ||
+            (isExperimentJob(job) && job.payload.sourceSessionId === request.sessionId),
         )
         .filter(
           (job) =>
@@ -350,10 +382,13 @@ describe("ambient learning read model", () => {
       ]),
     );
     expect(activity.some(({ summary }) => summary === "Unrelated turn")).toBe(false);
-    expect(requests).toHaveLength(3);
+    expect(activity.some(({ jobId }) => jobId === "modern-foreign-fallback")).toBe(false);
+    expect(requests).toHaveLength(5);
     expect(requests).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ kind: "runtime.reflect_turn", sessionId: "target-session" }),
+        expect.objectContaining({ kind: "runtime.author_revision", sessionId: "target-session" }),
+        expect.objectContaining({ kind: "runtime.preflight", sessionId: "target-session" }),
         expect.objectContaining({
           kind: "runtime.author_revision",
           experimentIds: [targetExperiment],
@@ -428,7 +463,7 @@ describe("ambient learning read model", () => {
     const listJobPage: RuntimeCoordinator["listJobPage"] = async (request = {}) => {
       if (request.kind === "runtime.reflect_turn")
         return Object.freeze({ jobs: Object.freeze(reflections), exhausted: true });
-      requestedChunkSizes.push(request.experimentIds?.length ?? 0);
+      if (request.experimentIds) requestedChunkSizes.push(request.experimentIds.length);
       concurrentExperimentQueries += 1;
       maximumConcurrentExperimentQueries = Math.max(
         maximumConcurrentExperimentQueries,
