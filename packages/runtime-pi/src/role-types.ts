@@ -21,7 +21,6 @@ export interface RoleContextPolicy {
   readonly maxTools: number;
   readonly allowedMessageNames?: readonly string[];
   readonly includeCapabilityRevisions: boolean;
-  readonly forbiddenContent?: RegExp;
 }
 
 export interface RoleVariantConfiguration {

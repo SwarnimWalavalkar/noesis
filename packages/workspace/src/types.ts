@@ -1,20 +1,20 @@
+import type { FrozenTurnPlan } from "@noesis/agent-types";
 import type {
   ActorRef,
   ArtifactFileRef,
+  CapabilityRevisionRef,
   CompoundingReplayRecord,
   CompoundingReplayRole,
+  DatabaseRowRef,
+  DataSensitivity,
   EvidenceRef,
   EvidenceRevisionRef,
   Experiment,
-  DatabaseRowRef,
   FileRevisionRef,
-  WorkspaceStore,
-  CapabilityRevisionRef,
-  DataSensitivity,
   JsonValue,
   PermissionManifest,
+  WorkspaceStore,
 } from "@noesis/domain";
-import type { FrozenTurnPlan } from "@noesis/agent-types";
 
 export type Sensitivity = DataSensitivity;
 export type SessionStatus = "idle" | "running" | "completed" | "aborted" | "failed";
@@ -172,6 +172,14 @@ export interface OutcomeRecord {
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 
+export interface ClassifyOutcomeRequest {
+  readonly outcomeId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly classification: "correction" | "preference" | "other";
+  readonly reason: string;
+}
+
 export interface ActivationRecord {
   readonly activationId: string;
   readonly revision: number;
@@ -298,6 +306,18 @@ export interface ExperimentObservationRecord {
   readonly createdAt: string;
 }
 
+export interface ClassifyExperimentObservationsRequest {
+  readonly outcomeId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly classification: "correction" | "preference" | "other";
+}
+
+export interface ExperimentObservationClassificationResult {
+  readonly status: "updated" | "unchanged" | "already_bound";
+  readonly observations: readonly ExperimentObservationRecord[];
+}
+
 export interface ExperimentResearchRunRecord {
   readonly runId: string;
   readonly experimentId: string;
@@ -370,7 +390,14 @@ export interface ProtectedFeedbackStore {
     record: Omit<ExperimentObservationRecord, "createdAt">,
     maximumObservations: number,
   ) => Promise<ExperimentObservationRecord | undefined>;
+  readonly classifyObservations: (
+    request: ClassifyExperimentObservationsRequest,
+  ) => Promise<ExperimentObservationClassificationResult>;
+  readonly getObservationClassification: (
+    request: ClassifyExperimentObservationsRequest,
+  ) => Promise<ExperimentObservationClassificationResult | undefined>;
   readonly getObservation: (observationId: string) => Promise<ExperimentObservationRecord | undefined>;
+  readonly listObservationsForOutcome: (outcomeId: string) => Promise<readonly ExperimentObservationRecord[]>;
   readonly listObservations: (
     experimentId: string,
     limit: number,
@@ -634,6 +661,8 @@ export interface OperationalRepositories {
   readonly outcomes: {
     readonly get: (outcomeId: string) => Promise<OutcomeRecord | undefined>;
     readonly put: (record: OutcomeRecord) => Promise<void>;
+    /** Record the model's semantic observation once; only a correction advances unknown -> corrected. */
+    readonly classify: (request: ClassifyOutcomeRequest) => Promise<OutcomeRecord>;
     readonly listForSession: (sessionId: string) => Promise<readonly OutcomeRecord[]>;
   };
   readonly searchConfiguration: {

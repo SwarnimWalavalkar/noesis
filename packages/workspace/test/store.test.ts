@@ -1,24 +1,24 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, mkdtemp, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { frozenTurnPlanDigest, type FrozenTurnPlan } from "@noesis/agent-types";
+import { type FrozenTurnPlan, frozenTurnPlanDigest } from "@noesis/agent-types";
 import {
-  eventChecksum,
-  effectOperationFingerprint,
-  SCHEMA_VERSION,
-  sha256,
   type CapabilityRevisionRef,
   type Experiment,
   type ExperimentTrial,
+  effectOperationFingerprint,
+  eventChecksum,
   type LedgerEvent,
   type PreflightPlan,
   type PreflightReport,
+  SCHEMA_VERSION,
+  sha256,
 } from "@noesis/domain";
 import type { AuthorityReceipt } from "@noesis/policy";
-import { createWorkspaceStore, restoreWorkspaceBackup, type NoesisWorkspaceStore } from "../src/index.ts";
-import { createWorkspaceRuntimeInternals } from "../src/protected-runtime.ts";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { createWorkspaceStore, type NoesisWorkspaceStore, restoreWorkspaceBackup } from "../src/index.ts";
+import { createWorkspaceRuntimeInternals } from "../src/protected-runtime.ts";
 
 const actor = { actorId: "test-user", kind: "user" as const };
 const text = (value: string): Uint8Array => Buffer.from(value);
@@ -62,6 +62,54 @@ describe("WorkspaceStore", () => {
     roots.push(root);
     return root;
   };
+
+  test("classifies one canonical turn outcome with an idempotent semantic transition", async () => {
+    const store = await createWorkspaceStore(await temporary("semantic-outcome"));
+    await store.operational.sessions.put({
+      sessionId: "session-semantic",
+      title: "Semantic outcome",
+      status: "idle",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-08-05T00:00:00.000Z",
+      updatedAt: "2026-08-05T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    await store.operational.outcomes.put({
+      outcomeId: "outcome-semantic",
+      sessionId: "session-semantic",
+      turnId: "turn-semantic",
+      status: "unknown",
+      summary: "The assistant completed the turn.",
+      sensitivity: "normal",
+      createdAt: "2026-08-05T00:00:01.000Z",
+      metadata: Object.freeze({ source: "turn-settlement" }),
+    });
+    const request = Object.freeze({
+      outcomeId: "outcome-semantic",
+      sessionId: "session-semantic",
+      turnId: "turn-semantic",
+      classification: "correction" as const,
+      reason: "The model identified a correction to prior assistant behavior.",
+    });
+
+    await expect(store.operational.outcomes.classify(request)).resolves.toMatchObject({
+      status: "corrected",
+      metadata: { semanticObservation: { kind: "correction" } },
+    });
+    await expect(
+      store.operational.outcomes.classify({
+        ...request,
+        reason: "A retry may phrase the reason differently.",
+      }),
+    ).resolves.toMatchObject({ status: "corrected" });
+    await expect(
+      store.operational.outcomes.classify({ ...request, classification: "preference" }),
+    ).rejects.toThrow("conflicting semantic classification");
+    expect(await store.operational.outcomes.listForSession("session-semantic")).toHaveLength(1);
+    store.close();
+  });
 
   test("records direct edits as immutable predecessor-linked revisions", async () => {
     const store = await createWorkspaceStore(await temporary("revision"));

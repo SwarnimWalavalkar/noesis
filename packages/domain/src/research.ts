@@ -80,6 +80,7 @@ export interface EvidenceRevision extends FileRevision {
 }
 
 export type LearningSignalKind =
+  | "turn_observation"
   | "explicit_correction"
   | "preference_expression"
   | "recurring_workflow"

@@ -9,7 +9,7 @@ import {
   type NoesisAgentRuntime,
 } from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
-import { EvidenceRevisionRefSchema, eventChecksum, type LedgerEvent } from "@noesis/domain";
+import { EvidenceRevisionRefSchema, eventChecksum, type LedgerEvent, sha256 } from "@noesis/domain";
 import { createPiAgentRoleRunner, createPiAgentRuntime, createPiSkillLibrary } from "@noesis/runtime-pi";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
@@ -193,7 +193,9 @@ describe("apps/noesis production control-plane composition", () => {
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
-          respond: () => ({ text: '{"decision":"no_change","reason":"disabled in replay test"}' }),
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled replay fixture."},"decision":"no_change","reason":"disabled in replay test"}',
+          }),
         }),
     });
     const trail = await runtime.startTrail({ title: "Script save replay" });
@@ -940,21 +942,47 @@ describe("apps/noesis production control-plane composition", () => {
     await waitUntil(() => runtime.getTrail(trail.trailId).turns.length === 2);
     await runtime.debug.runTurn(trail.trailId, "inspect history");
 
-    const systemPrompt = requests.at(-1)?.systemPrompt ?? "";
-    const acceptedUser = systemPrompt.indexOf("User: accepted input");
-    const acceptedAssistant = systemPrompt.indexOf("Assistant: reply:accepted input");
-    const activeUser = systemPrompt.indexOf("User: active input");
-    const steer = systemPrompt.indexOf("User: delivered steering");
-    const activeAssistant = systemPrompt.indexOf("Assistant: reply:active input");
+    const inspectionRequest = requests.at(-1);
+    const history = inspectionRequest?.history ?? [];
+    expect(history.map(({ role, content }) => ({ role, content }))).toEqual([
+      { role: "user", content: "accepted input" },
+      { role: "assistant", content: "reply:accepted input" },
+      { role: "user", content: "active input" },
+      { role: "user", content: "delivered steering" },
+      { role: "assistant", content: "reply:active input" },
+    ]);
+    expect(history.map((message) => message.content)).not.toContain("aborted input");
+    expect(history.map((message) => message.content)).not.toContain("aborted partial output");
+    expect(inspectionRequest?.systemPrompt).not.toContain("accepted input");
+    expect(history).toEqual(
+      inspectionRequest?.frozenTurnPlan?.conversationHistory?.map(({ role, content, createdAt }) => ({
+        role,
+        content,
+        createdAt,
+      })),
+    );
+    for (const entry of inspectionRequest?.frozenTurnPlan?.conversationHistory ?? []) {
+      expect(entry.contentDigest).toBe(sha256(entry.content));
+      expect(entry.messageRef).toEqual({
+        kind: "database_row",
+        table: "messages",
+        rowId: entry.messageId,
+      });
+      expect(await runtime.debug.workspace.operational.messages.get(entry.messageId)).toMatchObject({
+        role: entry.role,
+        content: entry.content,
+        createdAt: entry.createdAt,
+      });
+    }
+
+    const oversized = "x".repeat(12_001);
+    await runtime.debug.runTurn(trail.trailId, oversized);
+    await runtime.debug.runTurn(trail.trailId, "inspect bounded history");
+    const boundedRequest = requests.at(-1);
+    expect(boundedRequest?.history?.some((message) => message.content.includes(oversized))).toBe(false);
     expect(
-      [acceptedUser, acceptedAssistant, activeUser, steer, activeAssistant].every((index) => index >= 0),
-    ).toBe(true);
-    expect(acceptedUser).toBeLessThan(acceptedAssistant);
-    expect(acceptedAssistant).toBeLessThan(activeUser);
-    expect(activeUser).toBeLessThan(steer);
-    expect(steer).toBeLessThan(activeAssistant);
-    expect(systemPrompt).not.toContain("aborted input");
-    expect(systemPrompt).not.toContain("aborted partial output");
+      boundedRequest?.frozenTurnPlan?.conversationHistory?.some((entry) => entry.content.includes(oversized)),
+    ).toBe(false);
     await runtime.shutdown();
   });
 
@@ -1104,18 +1132,13 @@ describe("apps/noesis production control-plane composition", () => {
 
     await first.debug.runTurn(source.trailId, "source-only future input");
     await first.debug.runTurn(fork.trailId, "immediate fork input");
-    const immediatePrompt = firstRequests.find(
-      (request) => request.prompt === "immediate fork input",
-    )?.systemPrompt;
-    expect(immediatePrompt).toContain("User: accepted source input");
-    expect(immediatePrompt).toContain("Assistant: A");
-    expect(immediatePrompt).toContain("Assistant: B");
-    expect(immediatePrompt).toContain("User: active source input");
-    expect(immediatePrompt).toContain("User: delivered source steer");
-    expect(immediatePrompt).toContain("Assistant: reply:active source input");
-    expect(immediatePrompt).not.toContain("failed source input");
-    expect(immediatePrompt).not.toContain("aborted source input");
-    expect(immediatePrompt).not.toContain("source-only future input");
+    const immediateRequest = firstRequests.find((request) => request.prompt === "immediate fork input");
+    const immediateHistory = immediateRequest?.history ?? [];
+    expect(immediateHistory.map((message) => message.content)).toEqual(expectedInheritedText);
+    expect(immediateRequest?.systemPrompt).not.toContain("accepted source input");
+    expect(immediateHistory.map((message) => message.content)).not.toContain("failed source input");
+    expect(immediateHistory.map((message) => message.content)).not.toContain("aborted source input");
+    expect(immediateHistory.map((message) => message.content)).not.toContain("source-only future input");
     const inheritedMessageIds = inheritedMessages.map((message) => message.messageId);
     await first.shutdown();
 
@@ -1165,13 +1188,13 @@ describe("apps/noesis production control-plane composition", () => {
     ).toEqual(inheritedMessageIds);
     await reopened.resumeTrail(fork.trailId);
     await reopened.debug.runTurn(fork.trailId, "restarted fork input");
-    const restartedPrompt = reopenedRequests.at(-1)?.systemPrompt;
-    expect(restartedPrompt).toContain("User: delivered source steer");
-    expect(restartedPrompt).toContain("User: immediate fork input");
-    expect(restartedPrompt).toContain("Assistant: reply:immediate fork input");
-    expect(restartedPrompt).not.toContain("failed source input");
-    expect(restartedPrompt).not.toContain("aborted source input");
-    expect(restartedPrompt).not.toContain("source-only future input");
+    const restartedHistory = reopenedRequests.at(-1)?.history ?? [];
+    expect(restartedHistory.map((message) => message.content)).toContain("delivered source steer");
+    expect(restartedHistory.map((message) => message.content)).toContain("immediate fork input");
+    expect(restartedHistory.map((message) => message.content)).toContain("reply:immediate fork input");
+    expect(restartedHistory.map((message) => message.content)).not.toContain("failed source input");
+    expect(restartedHistory.map((message) => message.content)).not.toContain("aborted source input");
+    expect(restartedHistory.map((message) => message.content)).not.toContain("source-only future input");
     await reopened.shutdown();
   });
 
@@ -1340,7 +1363,7 @@ describe("apps/noesis production control-plane composition", () => {
         },
       ],
     });
-    expect(await runtime.debug.workspace.definitionMetadata.listCurrent("runtime_role")).toHaveLength(7);
+    expect(await runtime.debug.workspace.definitionMetadata.listCurrent("runtime_role")).toHaveLength(8);
     expect(JSON.stringify(seenConfigurations)).not.toMatch(
       /protectedActivations|protectedFeedback|authorityBoundary|restorationHandle/iu,
     );
@@ -1625,6 +1648,10 @@ describe("apps/noesis production control-plane composition", () => {
         if (!systemPrompt.includes("role: reflector")) return `Controlled completion for: ${lastUserText}`;
         reflectorRuns += 1;
         return JSON.stringify({
+          observation: {
+            kind: "correction",
+            reason: "The user corrects how this research brief should be written.",
+          },
           decision: "no_change",
           reason: "The single correction is useful evidence but not yet a durable adaptation.",
         });
@@ -1685,6 +1712,10 @@ describe("apps/noesis production control-plane composition", () => {
             await blockedReflection;
             return Object.freeze({
               text: JSON.stringify({
+                observation: {
+                  kind: "other",
+                  reason: "The fixture is exercising bounded shutdown rather than user feedback.",
+                },
                 decision: "no_change",
                 reason: "The fixture releases only after bounded shutdown returns.",
               }),
@@ -1769,6 +1800,10 @@ describe("apps/noesis production control-plane composition", () => {
             ]);
             return Object.freeze({
               text: JSON.stringify({
+                observation: {
+                  kind: "other",
+                  reason: "The fixture is exercising shutdown cancellation rather than user feedback.",
+                },
                 decision: "no_change",
                 reason: "The role run settled after receiving shutdown cancellation.",
               }),

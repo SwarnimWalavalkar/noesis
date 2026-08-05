@@ -49,6 +49,16 @@ export interface PiFrozenToolCatalog {
 
 export interface PreparedPiCodeExecution {
   readonly catalog: PiFrozenToolCatalog;
+  readonly invoke?: (
+    name: string,
+    input: JsonValue,
+    signal: AbortSignal,
+    identity: {
+      readonly executionId: string;
+      readonly logicalExecutionId: string;
+      readonly callId: string;
+    },
+  ) => Promise<JsonValue>;
   readonly execute: (
     source: string,
     timeoutMs: number | undefined,

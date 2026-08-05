@@ -92,6 +92,7 @@ import {
 import { createProtectedWorkspaceRuntime, registerWorkspaceRuntimeInternals } from "./protected-runtime.ts";
 import type {
   CanonicalSearchSource,
+  ClassifyOutcomeRequest,
   CodeExecutionRecord,
   MessageRecord,
   NoesisWorkspaceStore,
@@ -130,6 +131,17 @@ const ActorSchema = z.strictObject({
   kind: z.enum(["user", "noesis", "external_system", "system"]),
 });
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+const ClassifyOutcomeRequestSchema: z.ZodType<ClassifyOutcomeRequest> = z.strictObject({
+  outcomeId: z.string().min(1),
+  sessionId: z.string().min(1),
+  turnId: z.string().min(1),
+  classification: z.enum(["correction", "preference", "other"]),
+  reason: z.string().min(1),
+});
+const OutcomeSemanticObservationSchema = z.strictObject({
+  kind: z.enum(["correction", "preference", "other"]),
+  reason: z.string().min(1),
+});
 
 const persistedJsonValue = (value: unknown): unknown => {
   const encoded = JSON.stringify(value);
@@ -3053,6 +3065,48 @@ function createOperationalRepositories(
       recordActivity(systemActor, "outcome.record", "outcome", record.outcomeId);
     });
   };
+  const classifyOutcome = async (value: ClassifyOutcomeRequest): Promise<OutcomeRecord> => {
+    const request = ClassifyOutcomeRequestSchema.parse(value);
+    return database.transaction(() => {
+      const row = db.prepare("SELECT * FROM outcomes WHERE outcome_id = ?").get(request.outcomeId);
+      if (row === undefined) throw new Error(`Outcome ${request.outcomeId} does not exist`);
+      const outcome = decodeOutcome(row);
+      if (outcome.sessionId !== request.sessionId || outcome.turnId !== request.turnId)
+        throw new Error(`Outcome ${request.outcomeId} does not belong to the classified turn`);
+
+      const recordedValue = outcome.metadata["semanticObservation"];
+      const recorded = OutcomeSemanticObservationSchema.safeParse(recordedValue);
+      if (Object.hasOwn(outcome.metadata, "semanticObservation") && !recorded.success)
+        throw new Error(`Outcome ${request.outcomeId} has malformed semantic classification metadata`);
+      if (recorded.success) {
+        if (recorded.data.kind !== request.classification)
+          throw new Error(`Outcome ${request.outcomeId} has a conflicting semantic classification`);
+        return outcome;
+      }
+      if (outcome.status !== "unknown")
+        throw new Error(`Outcome ${request.outcomeId} cannot be classified from ${outcome.status}`);
+
+      const status = request.classification === "correction" ? "corrected" : "unknown";
+      const metadata = Object.freeze({
+        ...outcome.metadata,
+        semanticObservation: Object.freeze({
+          kind: request.classification,
+          reason: request.reason,
+        }),
+      });
+      const changed = db
+        .prepare(
+          `UPDATE outcomes
+           SET status = ?, metadata_json = ?
+           WHERE outcome_id = ? AND session_id = ? AND turn_id = ? AND status = 'unknown'`,
+        )
+        .run(status, JSON.stringify(metadata), request.outcomeId, request.sessionId, request.turnId);
+      if (changed.changes !== 1)
+        throw new Error(`Outcome ${request.outcomeId} changed before semantic classification`);
+      recordActivity(systemActor, "outcome.classified", "outcome", request.outcomeId);
+      return decodeOutcome(db.prepare("SELECT * FROM outcomes WHERE outcome_id = ?").get(request.outcomeId));
+    });
+  };
   const putSearchConfiguration = async (configuration: SearchConfiguration): Promise<DatabaseRowRef> => {
     SearchConfigurationSchema.parse(configuration);
     database.transaction(() => {
@@ -3398,6 +3452,7 @@ function createOperationalRepositories(
           decodeOutcome,
         ),
       put: putOutcome,
+      classify: classifyOutcome,
       listForSession: async (sessionId: string) =>
         db
           .prepare("SELECT * FROM outcomes WHERE session_id = ? ORDER BY created_at, outcome_id")

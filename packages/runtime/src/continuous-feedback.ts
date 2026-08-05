@@ -15,8 +15,10 @@ import {
   type LearningSignalKind,
 } from "@noesis/domain";
 import type {
+  ClassifyExperimentObservationsRequest,
   CommitExperimentOutcomeRequest,
   ExperimentObservationRecord,
+  ExperimentObservationClassificationResult,
   ExperimentOutcomeOperationRecord,
   ExperimentResearchRunRecord,
   NoesisWorkspaceStore,
@@ -30,6 +32,7 @@ import { z } from "zod";
 
 const OutcomeStatusSchema = z.enum(["accepted", "corrected", "failed", "unknown"]);
 const SignalKindSchema = z.enum([
+  "turn_observation",
   "explicit_correction",
   "preference_expression",
   "recurring_workflow",
@@ -228,6 +231,9 @@ export interface ContinuousFeedbackController {
   readonly observeTurnOutcome: (
     input: TurnOutcomeObservationInput,
   ) => Promise<readonly ObservationResolution[]>;
+  readonly classifyTurnObservations: (
+    input: ClassifyExperimentObservationsRequest,
+  ) => Promise<ExperimentObservationClassificationResult>;
   readonly evaluateExperiment: (
     experimentId: string,
     strategyId?: string,
@@ -261,7 +267,7 @@ function signalKind(input: z.infer<typeof TurnOutcomeInputSchema>): LearningSign
   if (input.signal?.kind) return input.signal.kind;
   if (input.status === "corrected") return "explicit_correction";
   if (input.status === "failed") return "repeated_failure";
-  return "surprising_success";
+  return "turn_observation";
 }
 
 function numericAverage(values: readonly (number | null)[]): number | null {
@@ -837,6 +843,11 @@ export function createContinuousFeedbackController(
     });
   };
 
+  const classifyTurnObservations = async (
+    input: ClassifyExperimentObservationsRequest,
+  ): Promise<ExperimentObservationClassificationResult> =>
+    await options.protectedRuntime.feedback.classifyObservations(input);
+
   const observeTurnOutcome = async (
     rawInput: TurnOutcomeObservationInput,
   ): Promise<readonly ObservationResolution[]> => {
@@ -915,6 +926,7 @@ export function createContinuousFeedbackController(
             ? "preference"
             : "none";
       const observationId = `observation_${sha256(signalId).slice(0, 32)}`;
+      const isHardRegression = hardRegression(metrics, config);
       const observation = await options.protectedRuntime.feedback.recordObservation(
         Object.freeze({
           observationId,
@@ -933,7 +945,7 @@ export function createContinuousFeedbackController(
           evidenceRefs: signal.evidenceRefs,
           precedence,
           ...(input.signal?.userDecision ? { userDecision: input.signal.userDecision } : {}),
-          hardRegression: hardRegression(metrics, config),
+          hardRegression: isHardRegression,
         }),
         config.observationWindow,
       );
@@ -942,6 +954,16 @@ export function createContinuousFeedbackController(
           Object.freeze({
             status: "excluded",
             reason: `observation window is full for ${experiment.experimentId}`,
+          }),
+        );
+        continue;
+      }
+      if (input.status === "unknown" && precedence === "none" && !isHardRegression) {
+        resolutions.push(
+          Object.freeze({
+            status: "observing",
+            experimentId: experiment.experimentId,
+            observationId,
           }),
         );
         continue;
@@ -1025,6 +1047,7 @@ export function createContinuousFeedbackController(
 
   return Object.freeze({
     observeTurnOutcome,
+    classifyTurnObservations,
     evaluateExperiment,
     experimentComparison,
     capabilityHealth,

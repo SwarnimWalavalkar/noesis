@@ -28,9 +28,10 @@ import {
   AutomaticLearningConfigSchema,
   createAutomaticLearningOrgan,
   createInMemoryExperimentBriefStore,
-  experimentBriefPublicationCollisionError,
   type ExperimentBrief,
   type ExperimentBriefStore,
+  experimentBriefPublicationCollisionError,
+  ReflectorOutputSchema,
   RevisionAuthorOutputSchema,
 } from "../src/index.ts";
 import {
@@ -309,10 +310,17 @@ function createCandidateDefinitionHarness() {
 const reflectionStep = Object.freeze({
   role: "reflector" as const,
   value: Object.freeze({
+    observation: Object.freeze({ kind: "correction" as const, reason: "The user corrects prior behavior." }),
     decision: "experiment" as const,
     title: "Preserve writing intent",
     hypothesis: "A scoped writing capability can apply corrections consistently",
     scope: "writing",
+    anticipatedFutureUse: "When rewriting future prose in the user's writing workflow.",
+    scopeRelationship: "same" as const,
+    scopeRationale: "The evidence concerns the same writing capability and does not support a wider scope.",
+    staleOrContradictionConditions: Object.freeze([
+      "The user rejects this behavior in a later writing task.",
+    ]),
     capabilityName: "Writing assistance",
     capabilityIntent: "Apply evidence-grounded writing corrections",
     recurrenceEvidenceCitationIndexes: Object.freeze([0]),
@@ -325,6 +333,32 @@ const reflectionStep = Object.freeze({
     ]),
   }),
 }) satisfies ScriptedLearningInferenceStep;
+
+function scopeVerificationStep(relationship: "same" | "narrower" | "broader"): ScriptedLearningInferenceStep {
+  return Object.freeze({
+    role: "reflector" as const,
+    value: Object.freeze({
+      relationship,
+      reason: `Independent scope verification classified the proposal as ${relationship}.`,
+    }),
+  });
+}
+
+function withScopeVerification(
+  steps: readonly ScriptedLearningInferenceStep[],
+  relationships: readonly ("same" | "narrower" | "broader")[] = [],
+): readonly ScriptedLearningInferenceStep[] {
+  let experimentIndex = 0;
+  return Object.freeze(
+    steps.flatMap((step) => {
+      const reflected = ReflectorOutputSchema.safeParse(step.value);
+      if (!reflected.success || reflected.data.decision !== "experiment") return [step];
+      const relationship = relationships[experimentIndex] ?? reflected.data.scopeRelationship;
+      experimentIndex += 1;
+      return [step, scopeVerificationStep(relationship)];
+    }),
+  );
+}
 
 const authorStep = Object.freeze({
   role: "revision_author" as const,
@@ -401,11 +435,16 @@ function createHarness(input: {
   readonly briefs?: ExperimentBriefStore;
   readonly inference?: ScriptedLearningInferencePort;
   readonly experimentState?: ReturnType<typeof createExperimentState>;
+  readonly scopeVerificationRelationships?: readonly ("same" | "narrower" | "broader")[];
 }) {
   const history = createHistoryHarness(input.citations ?? []);
   const feedback = createFeedbackHarness();
   const criteria = createCriteriaHarness();
-  const inference = input.inference ?? createScriptedLearningInferencePort({ steps: input.steps });
+  const inference =
+    input.inference ??
+    createScriptedLearningInferencePort({
+      steps: withScopeVerification(input.steps, input.scopeVerificationRelationships),
+    });
   const registry = createAtomicCapabilityRegistry();
   registry.registerCapability(capability);
   const baseline = registry.constructRevision(baselineConstruction());
@@ -415,7 +454,6 @@ function createHarness(input: {
     config,
     history: history.history,
     feedbackSignals: feedback.port,
-    criteria: criteria.repository,
     inference,
     briefs: input.briefs ?? createInMemoryExperimentBriefStore(),
     capabilities: registry,
@@ -601,6 +639,12 @@ describe("automatic learning organ", () => {
     ]);
     expect(result.brief.citations).toHaveLength(2);
     expect(result.brief.recurrenceCount).toBe(1);
+    expect(result.brief).toMatchObject({
+      anticipatedFutureUse: "When rewriting future prose in the user's writing workflow.",
+      scopeRelationship: "same",
+      scopeRationale: "The evidence concerns the same writing capability and does not support a wider scope.",
+      staleOrContradictionConditions: ["The user rejects this behavior in a later writing task."],
+    });
     expect(harness.experiments()).toEqual([
       expect.objectContaining({ experimentId: result.brief.experimentId, status: "hypothesis" }),
     ]);
@@ -624,10 +668,20 @@ describe("automatic learning organ", () => {
     const narrowReflection = Object.freeze({
       role: "reflector" as const,
       value: Object.freeze({
+        observation: Object.freeze({
+          kind: "correction" as const,
+          reason: "The user corrects how research evidence should be presented.",
+        }),
         decision: "experiment" as const,
         title: "Research brief evidence",
         hypothesis: "Research briefs should separate evidence from inference",
         scope: "research brief",
+        anticipatedFutureUse: "When the user requests another evidence-grounded research brief.",
+        scopeRelationship: "narrower" as const,
+        scopeRationale: "The correction concerns research briefs, a narrower case than general writing.",
+        staleOrContradictionConditions: Object.freeze([
+          "The user requests a format where evidence and inference should intentionally be blended.",
+        ]),
         capabilityName: "Research brief evidence",
         capabilityIntent: "Make research briefs evidence-grounded and explicit about inference",
         sourceCases: Object.freeze([
@@ -657,6 +711,11 @@ describe("automatic learning organ", () => {
       intent: "Make research briefs evidence-grounded and explicit about inference",
     });
     expect(observed.brief.capability.capabilityId).not.toBe(capability.capabilityId);
+    expect(observed.brief).toMatchObject({
+      scopeRelationship: "narrower",
+      verifiedScopeRelationship: "narrower",
+      scopeVerificationReason: "Independent scope verification classified the proposal as narrower.",
+    });
 
     const authored = await harness.organ.authorExperimentRevision({ brief: observed.brief });
     expect(authored.revision.capabilityId).toBe(observed.brief.capability.capabilityId);
@@ -667,7 +726,88 @@ describe("automatic learning organ", () => {
     ).toBe(true);
   });
 
-  test("creates exactly one scoped criterion only for explicitly normative feedback", async () => {
+  test("rejects one-off broadening without the configured distinct recurrence evidence", async () => {
+    const broadReflection = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        scope: "all collaboration",
+        scopeRelationship: "broader" as const,
+        scopeRationale: "The proposal would apply this behavior beyond writing.",
+        anticipatedFutureUse: "Whenever the user asks for evidence-grounded work.",
+        recurrenceEvidenceCitationIndexes: Object.freeze([0, 0]),
+      }),
+    }) satisfies ScriptedLearningInferenceStep;
+    const harness = createHarness({ steps: [broadReflection], citations: [citation(1)] });
+
+    await expect(
+      harness.organ.observeTurn({
+        turn: turn({ correction: "Use primary sources." }),
+        baselineRevision: harness.baseline,
+        capability,
+      }),
+    ).rejects.toThrow("Broader learning scope requires at least 2 distinct recurrence citations");
+    expect(harness.experiments()).toHaveLength(0);
+  });
+
+  test("accepts broader scope when the reflector cites enough distinct recurrence evidence", async () => {
+    const broadReflection = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        scope: "all collaboration",
+        scopeRelationship: "broader" as const,
+        scopeRationale: "Two distinct prior contexts support applying the behavior beyond writing.",
+        anticipatedFutureUse: "Whenever the user asks for evidence-grounded work.",
+        recurrenceEvidenceCitationIndexes: Object.freeze([0, 1]),
+      }),
+    }) satisfies ScriptedLearningInferenceStep;
+    const harness = createHarness({
+      steps: [broadReflection],
+      citations: [citation(1), citation(2)],
+    });
+
+    const result = await harness.organ.observeTurn({
+      turn: turn({ correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    if (result.status !== "experiment") throw new Error("Expected a broader experiment");
+    expect(result.brief).toMatchObject({
+      scope: "all collaboration",
+      scopeRelationship: "broader",
+      recurrenceCount: 2,
+      anticipatedFutureUse: "Whenever the user asks for evidence-grounded work.",
+    });
+  });
+
+  test("rejects a broad proposal that self-labels as narrower", async () => {
+    const inconsistentReflection = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        scope: "all collaboration",
+        scopeRelationship: "narrower" as const,
+      }),
+    }) satisfies ScriptedLearningInferenceStep;
+    const harness = createHarness({
+      steps: [inconsistentReflection],
+      citations: [citation(1)],
+      scopeVerificationRelationships: ["broader"],
+    });
+
+    await expect(
+      harness.organ.observeTurn({
+        turn: turn({ correction: "Use primary sources." }),
+        baselineRevision: harness.baseline,
+        capability,
+      }),
+    ).rejects.toThrow("disagrees with independent verification broader");
+    expect(harness.experiments()).toHaveLength(0);
+  });
+
+  test("leaves normative interpretation to the reflector instead of creating a keyword criterion", async () => {
     const harness = createHarness({ steps: [reflectionStep], citations: [citation(1)] });
     const result = await harness.organ.observeTurn({
       turn: turn({ correction: "Always preserve my voice when editing." }),
@@ -676,37 +816,78 @@ describe("automatic learning organ", () => {
     });
 
     expect(result.status).toBe("experiment");
-    expect(harness.criteria.creates()).toHaveLength(1);
-    expect(harness.criteria.values()[0]?.definition).toMatchObject({
-      source: "correction",
-      scope: "writing",
-      evaluatorInstruction: "Always preserve my voice when editing.",
-      promptOwnership: { owner: "user", layer: "learned_profile" },
-    });
-    expect(result.harvest.criterionCapture).toMatchObject({
-      created: true,
-      capture: { explicitlyNormative: true, confidence: 0.99, scope: "writing" },
+    expect(harness.criteria.creates()).toHaveLength(0);
+    expect(harness.inference.requests()[0]?.messages[0]).toMatchObject({
+      role: "user",
+      name: "current_turn",
     });
     expect(result.notification).toEqual({
       mode: "quiet",
-      kind: "criterion",
-      message: "Learned criterion for writing: Always preserve my voice when editing.",
+      kind: "experiment",
+      message: "Learning experiment ready: Preserve writing intent",
     });
   });
 
-  test("returns no change for irrelevant chat without retrieval, roles, criteria, or a modal", async () => {
-    const harness = createHarness({ steps: [] });
+  test("lets the reflector return no change for ordinary chat", async () => {
+    const harness = createHarness({
+      steps: [
+        Object.freeze({
+          role: "reflector",
+          value: Object.freeze({
+            observation: Object.freeze({ kind: "other", reason: "This is ordinary conversation." }),
+            decision: "no_change",
+            reason: "No durable learning is useful.",
+          }),
+        }),
+      ],
+    });
     const result = await harness.organ.observeTurn({
       turn: turn({ userMessage: "Thanks, that looks good.", outcome: "accepted" }),
       baselineRevision: harness.baseline,
       capability,
     });
 
-    expect(result).toMatchObject({ status: "no_change", reason: "irrelevant", interruption: null });
-    expect(harness.history.requests()).toHaveLength(0);
+    expect(result).toMatchObject({ status: "no_change", reason: "reflector_no_change", interruption: null });
+    expect(harness.history.requests()).toHaveLength(1);
     expect(harness.feedback.signals()).toHaveLength(0);
     expect(harness.criteria.creates()).toHaveLength(0);
-    expect(harness.inference.requests()).toHaveLength(0);
+    expect(harness.inference.requests()).toHaveLength(1);
+  });
+
+  test("records a model-classified preference independently of experiment creation", async () => {
+    const harness = createHarness({
+      steps: [
+        Object.freeze({
+          role: "reflector",
+          value: Object.freeze({
+            observation: Object.freeze({
+              kind: "preference",
+              reason: "The user expresses a reusable presentation preference.",
+            }),
+            decision: "no_change",
+            reason: "One preference observation does not justify an experiment yet.",
+          }),
+        }),
+      ],
+    });
+
+    const result = await harness.organ.observeTurn({
+      turn: turn({ userMessage: "I prefer concise summaries with links to primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    expect(result).toMatchObject({
+      status: "no_change",
+      observation: { kind: "preference" },
+    });
+    expect(harness.feedback.signals()).toMatchObject([
+      {
+        kind: "preference_expression",
+        strength: 0.8,
+      },
+    ]);
+    expect(harness.experiments()).toHaveLength(0);
   });
 
   test("accepts an explicit reflector no-change result without authoring a candidate", async () => {
@@ -715,6 +896,10 @@ describe("automatic learning organ", () => {
         Object.freeze({
           role: "reflector",
           value: Object.freeze({
+            observation: Object.freeze({
+              kind: "correction",
+              reason: "The user corrects a detail for this artifact.",
+            }),
             decision: "no_change",
             reason: "The correction is specific to this one artifact.",
           }),
@@ -733,7 +918,9 @@ describe("automatic learning organ", () => {
       reason: "reflector_no_change",
       interruption: null,
       reflectionRun: { role: "reflector" },
+      observation: { kind: "correction" },
     });
+    expect(harness.feedback.signals().map((signal) => signal.kind)).toEqual(["explicit_correction"]);
     expect(harness.candidates.requests()).toHaveLength(0);
     expect(harness.experiments()).toHaveLength(0);
   });
@@ -743,7 +930,11 @@ describe("automatic learning organ", () => {
       steps: [
         Object.freeze({
           role: "reflector",
-          value: Object.freeze({ decision: "no_change", reason: "One failure is not recurrent yet." }),
+          value: Object.freeze({
+            observation: Object.freeze({ kind: "other", reason: "The turn reports a failure." }),
+            decision: "no_change",
+            reason: "One failure is not recurrent yet.",
+          }),
         }),
       ],
       citations: [citation(1)],
@@ -802,7 +993,12 @@ describe("automatic learning organ", () => {
   });
 
   test("serializes two reflected observations without losing either provenance set", async () => {
-    const inference = createBarrierInference([reflectionStep, reflectionStep]);
+    const inference = createBarrierInference([
+      reflectionStep,
+      reflectionStep,
+      scopeVerificationStep("same"),
+      scopeVerificationStep("same"),
+    ]);
     const harness = createHarness({
       steps: [],
       inference,
@@ -1279,7 +1475,11 @@ describe("automatic learning organ", () => {
     });
 
     const requests = harness.inference.requests();
-    expect(requests.map((request) => request.signal)).toEqual([controller.signal, controller.signal]);
+    expect(requests.map((request) => request.signal)).toEqual([
+      controller.signal,
+      controller.signal,
+      controller.signal,
+    ]);
     expect(JSON.stringify(observed.brief)).not.toContain('"signal":');
     expect(JSON.stringify(harness.experiments())).not.toContain('"signal":');
   });
@@ -1295,14 +1495,22 @@ describe("automatic learning organ", () => {
     await harness.organ.authorExperimentRevision({ brief: observed.brief });
 
     const requests = harness.inference.requests();
-    expect(requests.map((request) => request.role)).toEqual(["reflector", "revision_author"]);
+    expect(requests.map((request) => request.role)).toEqual(["reflector", "reflector", "revision_author"]);
     expect(requests[0]?.messages.map((message) => message.name)).toEqual([
+      "current_turn",
       "signals",
       "evidence",
       "active_capabilities",
       "user_preferences",
     ]);
-    expect(requests[1]?.messages.map((message) => message.name)).toEqual(["hypothesis", "source_cases"]);
+    expect(requests[1]?.messages.map((message) => message.name)).toEqual(["evidence"]);
+    expect(JSON.parse(requests[1]?.messages[0]?.content ?? "null")).toEqual({
+      currentScope: "writing",
+      proposedScope: "writing",
+      scopeRationale: "The evidence concerns the same writing capability and does not support a wider scope.",
+    });
+    expect(requests[1]?.evidenceRefs).toEqual([]);
+    expect(requests[2]?.messages.map((message) => message.name)).toEqual(["hypothesis", "source_cases"]);
     for (const request of requests) {
       expect(request.availableTools).toEqual([]);
       expect(request).not.toHaveProperty("authorityGrant");
@@ -1374,6 +1582,10 @@ describe("automatic learning organ", () => {
         traceId: "scripted-learning-trace-1",
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCost: 0 },
       },
+    });
+    expect(result.brief.scopeVerificationRun).toMatchObject({
+      role: "reflector",
+      trace: { traceId: "scripted-learning-trace-2" },
     });
     expect(harness.inference.remaining()).toBe(0);
   });

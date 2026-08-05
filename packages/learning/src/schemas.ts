@@ -1,9 +1,9 @@
 import {
-  EvidenceRefSchema,
-  FileRevisionRefSchema,
   type EvidenceRef,
+  EvidenceRefSchema,
   type ExperimentVariantRef,
   type FileRevisionRef,
+  FileRevisionRefSchema,
 } from "@noesis/domain";
 import { z } from "zod";
 
@@ -45,6 +45,7 @@ export type AutomaticLearningConfig = Readonly<z.infer<typeof AutomaticLearningC
 export const LearningTurnInputSchema = z.strictObject({
   sessionId: z.string().min(1),
   turnId: z.string().min(1),
+  outcomeId: z.string().min(1).optional(),
   scope: z.string().min(1),
   userMessage: z.string().min(1),
   assistantMessage: z.string().optional(),
@@ -65,16 +66,48 @@ export const LearningTurnInputSchema = z.strictObject({
 });
 export type LearningTurnInput = Readonly<z.infer<typeof LearningTurnInputSchema>>;
 
+export const SemanticTurnObservationSchema = z.strictObject({
+  kind: z
+    .enum(["correction", "preference", "other"])
+    .describe(
+      "Whether the current user turn semantically corrects prior behavior, expresses a reusable preference, or is neither",
+    ),
+  reason: z.string().min(1).describe("Brief evidence-grounded reason for the classification"),
+});
+export type SemanticTurnObservation = Readonly<z.infer<typeof SemanticTurnObservationSchema>>;
+
+const ReflectorObservationShape = {
+  observation: SemanticTurnObservationSchema,
+};
+
 export const ReflectorOutputSchema = z.discriminatedUnion("decision", [
   z.strictObject({
+    ...ReflectorObservationShape,
     decision: z.literal("no_change"),
     reason: z.string().min(1),
   }),
   z.strictObject({
+    ...ReflectorObservationShape,
     decision: z.literal("experiment"),
     title: z.string().min(1),
     hypothesis: z.string().min(1),
     scope: z.string().min(1),
+    anticipatedFutureUse: z
+      .string()
+      .min(1)
+      .describe("A concrete future situation in which this learning should improve the collaboration"),
+    scopeRelationship: z
+      .enum(["same", "narrower", "broader"])
+      .describe("How the proposed scope relates to the current capability scope"),
+    scopeRationale: z
+      .string()
+      .min(1)
+      .describe("Why this is the narrowest plausible scope supported by the cited evidence"),
+    staleOrContradictionConditions: z
+      .array(z.string().min(1))
+      .min(1)
+      .max(8)
+      .describe("Observable conditions that would make this learning stale, contradicted, or harmful"),
     capabilityName: z.string().min(1),
     capabilityIntent: z.string().min(1),
     /**
@@ -102,6 +135,12 @@ export const ReflectorOutputSchema = z.discriminatedUnion("decision", [
   }),
 ]);
 export type ReflectorOutput = Readonly<z.infer<typeof ReflectorOutputSchema>>;
+
+export const ScopeRelationshipVerificationSchema = z.strictObject({
+  relationship: z.enum(["same", "narrower", "broader"]),
+  reason: z.string().min(1),
+});
+export type ScopeRelationshipVerification = Readonly<z.infer<typeof ScopeRelationshipVerificationSchema>>;
 
 const CandidateFileSchema = z.strictObject({
   path: z.string().min(1),

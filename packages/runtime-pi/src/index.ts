@@ -1,6 +1,6 @@
 import { AgentHarness, formatSkillsForSystemPrompt, type Skill } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
-import type { MutableModels } from "@earendil-works/pi-ai";
+import type { AssistantMessage, MutableModels, UserMessage } from "@earendil-works/pi-ai";
 import type {
   AgentAssistantMessageBoundary,
   AgentContextUsage,
@@ -19,6 +19,12 @@ import {
   type PreparedPiCodeExecution,
 } from "./execute-tool.ts";
 import { frozenPlanMaterialUses } from "./frozen-session-tools.ts";
+import {
+  createHotbarToolAliases,
+  createPiHotbarTools,
+  reconcileHotbarTools,
+  resolveHotbarTools,
+} from "./hotbar-tools.ts";
 import { createPiSelfTools, type PiSelfToolAdapter } from "./self-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
 import { resolvePiSkillInvocation } from "./skill-invocation.ts";
@@ -48,6 +54,7 @@ export {
   frozenPlanMaterialUses,
   resolveFrozenSessionToolDefinitions,
 } from "./frozen-session-tools.ts";
+export * from "./hotbar-tools.ts";
 export * from "./pi-role-backend.ts";
 export * from "./role-context.ts";
 export * from "./role-runner.ts";
@@ -100,6 +107,30 @@ function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | und
   return plan;
 }
 
+function historyForRequest(
+  request: AgentRuntimeRequest,
+  plan: FrozenTurnPlan | undefined,
+): NonNullable<AgentRuntimeRequest["history"]> {
+  if (!plan) return Object.freeze([...(request.history ?? [])]);
+  const frozen = Object.freeze(
+    (plan.conversationHistory ?? []).map(({ role, content, createdAt }) =>
+      Object.freeze({ role, content, createdAt }),
+    ),
+  );
+  if (request.history !== undefined) {
+    const matches =
+      request.history.length === frozen.length &&
+      request.history.every(
+        (message, index) =>
+          message.role === frozen[index]?.role &&
+          message.content === frozen[index]?.content &&
+          message.createdAt === frozen[index]?.createdAt,
+      );
+    if (!matches) throw new Error(`Runtime history does not match frozen turn plan ${plan.planId}`);
+  }
+  return frozen;
+}
+
 export interface AssistantDeltaAggregator {
   /** Start the next Pi assistant message in the same tool-loop turn. */
   readonly beginMessage: () => void;
@@ -125,6 +156,48 @@ export function createAssistantDeltaAggregator(): AssistantDeltaAggregator {
     },
     text: () => aggregate,
   };
+}
+
+const emptyUsage = Object.freeze({
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }),
+});
+
+function historyTimestamp(createdAt: string | undefined, fallback: number): number {
+  if (!createdAt) return fallback;
+  const parsed = Date.parse(createdAt);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function priorUserMessage(content: string, timestamp: number): UserMessage {
+  const message: UserMessage = {
+    role: "user",
+    content: [{ type: "text", text: content }],
+    timestamp,
+  };
+  return Object.freeze(message);
+}
+
+function priorAssistantMessage(
+  content: string,
+  timestamp: number,
+  model: NonNullable<ReturnType<MutableModels["getModel"]>>,
+): AssistantMessage {
+  const message: AssistantMessage = {
+    role: "assistant",
+    content: [{ type: "text", text: content }],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: emptyUsage,
+    stopReason: "stop",
+    timestamp,
+  };
+  return Object.freeze(message);
 }
 
 function piToolUpdatePayload(value: unknown): unknown {
@@ -198,6 +271,7 @@ export function createPiAgentRuntime(
     emit: (event: AgentRuntimeEvent) => void,
   ): Promise<AgentRuntimeResult> => {
     const plan = verifyFrozenRequest(request);
+    const history = historyForRequest(request, plan);
     if (active.has(request.trailId)) throw new Error(`Trail ${request.trailId} is already active`);
     const execution: ActivePiExecution = {
       controller: new AbortController(),
@@ -270,6 +344,68 @@ export function createPiAgentRuntime(
         );
       if (preparedCode) execution.preparedCode = preparedCode;
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
+      const emitCodeEvent = (
+        event: Parameters<Parameters<typeof createPiExecuteTool>[0]["emit"]>[0],
+        parentActionId?: string,
+        recordedByBroker = false,
+      ): void => {
+        if (event.type === "tool-start")
+          emit({
+            type: "tool-start",
+            actionId: event.callId,
+            ...(parentActionId ? { parentActionId } : {}),
+            name: event.name,
+            input: toAgentActionPayload(event.input ?? {}),
+            timelineSequence: claimTimelineSequence(),
+            ...(recordedByBroker ? { recordedByBroker: true } : {}),
+          });
+        else if (event.type === "tool-end")
+          emit({
+            type: "tool-end",
+            actionId: event.callId,
+            ...(parentActionId ? { parentActionId } : {}),
+            name: event.name,
+            isError: !event.ok,
+            result: toAgentActionPayload(
+              event.result ?? (event.error ? { error: event.error } : { ok: event.ok }),
+            ),
+            ...(recordedByBroker ? { recordedByBroker: true } : {}),
+          });
+      };
+      let harness: AgentHarness | undefined;
+      const initialHotbar =
+        plan && preparedCode && options.selfTools
+          ? reconcileHotbarTools(
+              preparedCode.catalog,
+              await options.selfTools.hotbar({
+                plan,
+                catalog: preparedCode.catalog,
+                signal: execution.controller.signal,
+              }),
+            ).active
+          : Object.freeze([]);
+      const hotbarAliases = preparedCode
+        ? createHotbarToolAliases(preparedCode.catalog)
+        : new Map<string, string>();
+      const activeNames = (canonicalNames: readonly string[]): string[] => [
+        ...(plan && options.selfTools ? ["inspect_self", "remember", "adapt"] : []),
+        ...(preparedCode
+          ? [
+              "execute",
+              ...canonicalNames.map((name) => {
+                const alias = hotbarAliases.get(name);
+                if (!alias) throw new Error(`Frozen tool catalog has no direct alias for ${name}`);
+                return alias;
+              }),
+            ]
+          : []),
+      ];
+      const applyHotbar = async (canonicalNames: readonly string[]): Promise<void> => {
+        if (!preparedCode) throw new Error("This turn has no executable tool catalog");
+        const resolved = resolveHotbarTools(preparedCode.catalog, canonicalNames);
+        if (!harness) throw new Error("The direct-tool hotbar is not ready");
+        await harness.setActiveTools(activeNames(resolved));
+      };
       const selfTools =
         plan && options.selfTools
           ? createPiSelfTools({
@@ -277,6 +413,7 @@ export function createPiAgentRuntime(
               plan,
               request,
               signal: execution.controller.signal,
+              applyHotbar,
               ...(preparedCode
                 ? {
                     catalog: preparedCode.catalog,
@@ -293,30 +430,19 @@ export function createPiAgentRuntime(
               prepared: preparedCode,
               turnId: plan.turnId,
               signal: execution.controller.signal,
-              emit: (event, parentActionId) => {
-                if (event.type === "tool-start")
-                  emit({
-                    type: "tool-start",
-                    actionId: event.callId,
-                    parentActionId,
-                    name: event.name,
-                    input: toAgentActionPayload(event.input ?? {}),
-                    timelineSequence: claimTimelineSequence(),
-                  });
-                else if (event.type === "tool-end")
-                  emit({
-                    type: "tool-end",
-                    actionId: event.callId,
-                    parentActionId,
-                    name: event.name,
-                    isError: !event.ok,
-                    result: toAgentActionPayload(
-                      event.result ?? (event.error ? { error: event.error } : { ok: event.ok }),
-                    ),
-                  });
-              },
+              emit: emitCodeEvent,
             })
           : undefined;
+      const hotbarTools =
+        plan && preparedCode
+          ? createPiHotbarTools({
+              prepared: preparedCode,
+              turnId: plan.turnId,
+              signal: execution.controller.signal,
+              emit: emitCodeEvent,
+            })
+          : Object.freeze([]);
+      const directToolNames = new Set(hotbarTools.map((tool) => tool.name));
       const piSkills = skillSnapshot.skills.map(
         (skill): Skill => ({
           name: skill.name,
@@ -344,12 +470,13 @@ export function createPiAgentRuntime(
           result: explicitSkill.actionEvidence,
         });
       }
-      const harness = new AgentHarness({
+      harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),
         session,
         models,
         model,
-        tools: executeTool ? [...selfTools, executeTool] : [...selfTools],
+        tools: executeTool ? [...selfTools, executeTool, ...hotbarTools] : [...selfTools],
+        activeToolNames: activeNames(initialHotbar),
         thinkingLevel: request.thinkingLevel,
         resources: {
           skills: piSkills,
@@ -358,6 +485,16 @@ export function createPiAgentRuntime(
           .filter(Boolean)
           .join("\n\n"),
       });
+      const historyBaseTimestamp = Date.now() - history.length;
+      for (const [index, message] of history.entries()) {
+        if (message.role === "assistant" && message.content.length === 0) continue;
+        const timestamp = historyTimestamp(message.createdAt, historyBaseTimestamp + index);
+        await harness.appendMessage(
+          message.role === "user"
+            ? priorUserMessage(message.content, timestamp)
+            : priorAssistantMessage(message.content, timestamp, model),
+        );
+      }
       execution.harness = harness;
       let abortPromise: Promise<void> | undefined;
       const requestHarnessAbort = (): Promise<void> => {
@@ -396,8 +533,10 @@ export function createPiAgentRuntime(
             );
           }
         } else if (event.type === "message_end" && event.message.role === "assistant") {
+          const text = assistantText(event.message);
+          if (text.length === 0) return;
           const boundary = Object.freeze({
-            text: assistantText(event.message),
+            text,
             timelineSequence: claimTimelineSequence(),
             createdAt: now(),
           });
@@ -407,6 +546,7 @@ export function createPiAgentRuntime(
           const delta = assistantDeltas.push(event.assistantMessageEvent.delta);
           if (delta) emit({ type: "delta", text: delta });
         } else if (event.type === "tool_execution_start") {
+          if (directToolNames.has(event.toolName)) return;
           emit({
             type: "tool-start",
             actionId: event.toolCallId,
@@ -415,6 +555,7 @@ export function createPiAgentRuntime(
             timelineSequence: claimTimelineSequence(),
           });
         } else if (event.type === "tool_execution_update") {
+          if (directToolNames.has(event.toolName)) return;
           emit({
             type: "tool-update",
             actionId: event.toolCallId,
@@ -422,6 +563,7 @@ export function createPiAgentRuntime(
             update: toAgentActionPayload(piToolUpdatePayload(event.partialResult)),
           });
         } else if (event.type === "tool_execution_end") {
+          if (directToolNames.has(event.toolName)) return;
           emit({
             type: "tool-end",
             actionId: event.toolCallId,
@@ -436,7 +578,7 @@ export function createPiAgentRuntime(
       try {
         const message = await harness.prompt(explicitSkill?.prompt ?? request.prompt);
         const finalText = assistantText(message);
-        if (assistantMessages.length === 0) {
+        if (assistantMessages.length === 0 && finalText.length > 0) {
           const boundary = Object.freeze({
             text: finalText,
             timelineSequence: claimTimelineSequence(),

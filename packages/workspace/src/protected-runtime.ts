@@ -7,6 +7,7 @@ import {
   type EffectDecision,
 } from "@noesis/policy";
 import type {
+  ClassifyExperimentObservationsRequest,
   CommitExperimentOutcomeRequest,
   CompoundingMeasurementStore,
   ExperimentObservationRecord,
@@ -33,7 +34,7 @@ type ActivationInspection = Omit<ProtectedActivationStore, keyof ActivationMutat
 
 type FeedbackMutation = Pick<
   ProtectedFeedbackStore,
-  "recordObservation" | "putResearchRun" | "commitOutcome"
+  "recordObservation" | "classifyObservations" | "putResearchRun" | "commitOutcome"
 >;
 
 type FeedbackInspection = Omit<ProtectedFeedbackStore, keyof FeedbackMutation>;
@@ -157,6 +158,7 @@ export function createReceiptGuardedProtectedMutations(input: {
     }),
     feedback: Object.freeze({
       recordObservation: feedback("recordObservation"),
+      classifyObservations: feedback("classifyObservations"),
       putResearchRun: feedback("putResearchRun"),
       commitOutcome: feedback("commitOutcome"),
     }),
@@ -320,6 +322,8 @@ export function createProtectedWorkspaceRuntime(
     ...({
       operationForActivation: options.feedback.operationForActivation,
       getObservation: options.feedback.getObservation,
+      getObservationClassification: options.feedback.getObservationClassification,
+      listObservationsForOutcome: options.feedback.listObservationsForOutcome,
       listObservations: options.feedback.listObservations,
       getResearchRun: options.feedback.getResearchRun,
       listResearchRuns: options.feedback.listResearchRuns,
@@ -340,6 +344,17 @@ export function createProtectedWorkspaceRuntime(
           `protected:feedback:observation:${record.dedupeKey}`,
         ),
         async () => await options.feedback.getObservation(record.observationId),
+      ),
+    classifyObservations: async (request: ClassifyExperimentObservationsRequest) =>
+      await runAuthorized(
+        options.authority,
+        async (mutation, receipt) => await guarded.feedback.classifyObservations(mutation, receipt, request),
+        binding(
+          workspaceId,
+          `feedback:outcome:${request.outcomeId}:classification:${request.classification}`,
+          `protected:feedback:classification:${request.outcomeId}:${request.classification}`,
+        ),
+        async () => await options.feedback.getObservationClassification(request),
       ),
     putResearchRun: async (record: Omit<ExperimentResearchRunRecord, "createdAt" | "updatedAt">) =>
       await runAuthorized(

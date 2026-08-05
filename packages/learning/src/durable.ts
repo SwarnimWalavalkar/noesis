@@ -113,6 +113,15 @@ const RawExperimentBriefSchema = z.strictObject({
   hypothesis: z.string().min(1),
   hypothesisDedupeKey: z.string().min(1),
   scope: z.string().min(1),
+  anticipatedFutureUse: z.string().min(1).default("Unspecified in legacy experiment brief"),
+  scopeRelationship: z.enum(["same", "narrower", "broader"]).default("same"),
+  scopeRationale: z.string().min(1).default("Unspecified in legacy experiment brief"),
+  staleOrContradictionConditions: z
+    .array(z.string().min(1))
+    .default(["Unspecified in legacy experiment brief"]),
+  verifiedScopeRelationship: z.enum(["same", "narrower", "broader"]).optional(),
+  scopeVerificationReason: z.string().min(1).default("Unspecified in legacy experiment brief"),
+  scopeVerificationRun: RoleRunSchema.optional(),
   capability: CapabilitySchema,
   baselineRevision: CapabilityRevisionRefSchema,
   evidenceRefs: z.array(EvidenceRefSchema),
@@ -136,10 +145,19 @@ const RawExperimentBriefSchema = z.strictObject({
 
 const ExperimentBriefSchema: z.ZodType<ExperimentBrief> = RawExperimentBriefSchema.transform(
   (value): ExperimentBrief => {
-    const { reflectionRun, ...brief } = value;
+    const {
+      reflectionRun,
+      scopeVerificationRun,
+      staleOrContradictionConditions,
+      verifiedScopeRelationship,
+      ...brief
+    } = value;
     return Object.freeze({
       ...brief,
+      staleOrContradictionConditions: Object.freeze([...staleOrContradictionConditions]),
+      verifiedScopeRelationship: verifiedScopeRelationship ?? value.scopeRelationship,
       ...(reflectionRun === undefined ? {} : { reflectionRun }),
+      ...(scopeVerificationRun === undefined ? {} : { scopeVerificationRun }),
     });
   },
 );

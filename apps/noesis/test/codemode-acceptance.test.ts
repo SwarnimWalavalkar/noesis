@@ -20,7 +20,64 @@ afterEach(async () => {
 });
 
 describe("production codemode journey", () => {
-  test("Pi sees one execute tool and nested file calls use the recorded broker path", async () => {
+  test("a direct hotbar read records one Broker action without a codemode execution", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-hotbar-acceptance-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context }) =>
+        context.messages.at(-1)?.role === "toolResult"
+          ? "Read the package directly."
+          : controlledToolCallResponse(
+              "file_read",
+              { path: "package.json", startLine: 1, endLine: 4 },
+              "call-direct-read",
+            ),
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Direct hotbar acceptance" });
+
+    const result = await runtime.debug.runTurn(trail.trailId, "Read the package metadata.");
+
+    expect(result.output).toBe("Read the package directly.");
+    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      toolName: "files.read",
+      status: "completed",
+      timelineSequence: 1,
+    });
+    expect(
+      (await runtime.getTranscript(trail.trailId)).flatMap((entry) =>
+        entry.kind === "action" ? [entry.name] : [],
+      ),
+    ).toEqual(["files.read"]);
+    expect(await runtime.debug.workspace.operational.codeExecutions.listForSession(trail.trailId)).toEqual(
+      [],
+    );
+    await runtime.shutdown();
+  });
+
+  test("Pi sees the default hotbar and nested execute calls use the recorded broker path", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-codemode-acceptance-"));
     roots.push(home);
     const resolved = await resolveNoesisConfig({
@@ -63,7 +120,9 @@ describe("production codemode journey", () => {
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
-          respond: () => ({ text: '{"decision":"no_change","reason":"disabled in acceptance"}' }),
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
         }),
     });
     const trail = await runtime.startTrail({ title: "Codemode acceptance" });
@@ -71,14 +130,22 @@ describe("production codemode journey", () => {
     const result = await runtime.debug.runTurn(trail.trailId, "Inspect the repository package.");
 
     expect(result.output).toBe("Repository inspected through codemode.");
-    expect(observedToolNames).toEqual(["adapt", "execute", "inspect_self", "remember"]);
+    expect(observedToolNames).toEqual([
+      "adapt",
+      "execute",
+      "file_read",
+      "inspect_self",
+      "list_dir",
+      "remember",
+      "shell",
+    ]);
     const storedCalls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
     const nestedCall = storedCalls.find((call) => call.toolName === "files.read");
     expect(nestedCall).toMatchObject({
       toolName: "files.read",
       status: "completed",
       parentToolCallId: expect.stringContaining(":"),
-      timelineSequence: 3,
+      timelineSequence: 2,
     });
     const executions = await runtime.debug.workspace.operational.codeExecutions.listForSession(trail.trailId);
     const execution = executions[0];
@@ -117,7 +184,6 @@ describe("production codemode journey", () => {
     const beforeRestart = await runtime.getTranscript(trail.trailId);
     expect(beforeRestart.map((entry) => (entry.kind === "message" ? entry.text : entry.name))).toEqual([
       "Inspect the repository package.",
-      "",
       "execute",
       "files.read",
       "Repository inspected through codemode.",
@@ -131,7 +197,9 @@ describe("production codemode journey", () => {
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
-          respond: () => ({ text: '{"decision":"no_change","reason":"disabled in acceptance"}' }),
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
         }),
     });
     expect(await reopened.getTranscript(trail.trailId)).toEqual(beforeRestart);
@@ -174,7 +242,9 @@ describe("production codemode journey", () => {
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
-          respond: () => ({ text: '{"decision":"no_change","reason":"disabled in acceptance"}' }),
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
         }),
     });
     const trail = await runtime.startTrail({ title: "Shell permission acceptance" });
@@ -269,7 +339,9 @@ describe("production codemode journey", () => {
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
-          respond: () => ({ text: '{"decision":"no_change","reason":"disabled in acceptance"}' }),
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
         }),
     });
     const trail = await runtime.startTrail({ title: "Script acceptance" });
@@ -432,7 +504,9 @@ describe("production codemode journey", () => {
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
-          respond: () => ({ text: '{"decision":"no_change","reason":"disabled in acceptance"}' }),
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
         }),
     });
     const trail = await runtime.startTrail({ title: "Workflow acceptance" });

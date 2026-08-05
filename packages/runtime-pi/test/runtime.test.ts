@@ -5,12 +5,13 @@ import {
   type FrozenTurnPlan,
   frozenTurnPlanDigest,
 } from "@noesis/agent-types";
-import { type FileRevisionRef, sha256, toJsonValue } from "@noesis/domain";
+import { type FileRevisionRef, type JsonValue, sha256, toJsonValue } from "@noesis/domain";
 import type { SessionToolDefinition, SessionToolName } from "@noesis/intelligence";
 import { describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import {
   createAssistantDeltaAggregator,
+  createHotbarToolAliases,
   createPiAgentRuntime,
   createPiExecuteTool,
   createPiSelfTools,
@@ -18,8 +19,10 @@ import {
   frozenPlanMaterialUses,
   type PiCodeExecutionAdapter,
   type PiFrozenToolCatalog,
+  type PiSelfToolAdapter,
   type PiSkillLibrary,
   type PreparedPiCodeExecution,
+  reconcileHotbarTools,
   resolveFrozenSessionToolDefinitions,
   resolvePiSkillInvocation,
   toAgentActionPayload,
@@ -49,7 +52,9 @@ function material(revisionId: string, workingPath: string, content: string): Fro
   return Object.freeze({ revision, content });
 }
 
-function frozenPlan(): FrozenTurnPlan {
+function frozenPlan(
+  conversationHistory: NonNullable<FrozenTurnPlan["conversationHistory"]> = Object.freeze([]),
+): FrozenTurnPlan {
   const prompt = material("prompt-v1", "prompts/grounded.md", "Use exact session evidence.");
   const skill = material("skill-v1", "skills/grounded.md", "Search before answering.");
   const router = material(
@@ -88,6 +93,7 @@ function frozenPlan(): FrozenTurnPlan {
         }),
       }),
     ]),
+    conversationHistory,
     renderedSystemPrompt: `Noesis protected kernel.\n\n${prompt.content}`,
     provider: CONTROLLED_PI_PROVIDER,
     model: CONTROLLED_PI_MODEL,
@@ -156,6 +162,56 @@ function controlledCodeExecution(
 }
 
 describe("agent runtime factories", () => {
+  test("reconciles durable hotbar preferences with the current frozen catalog", () => {
+    const catalog: PiFrozenToolCatalog = Object.freeze({
+      catalogId: "catalog-reconciled-hotbar",
+      catalogDigest: sha256("catalog-reconciled-hotbar"),
+      tools: Object.freeze([
+        Object.freeze({
+          name: "files.read",
+          label: "Read file",
+          description: "Read a file",
+          revisionId: "files-read-v1",
+          inputSchema: Object.freeze({ type: "object" }),
+          outputSchema: Object.freeze({ type: "object" }),
+        }),
+      ]),
+    });
+
+    expect(reconcileHotbarTools(catalog, ["files.read", "removed.tool", "files.read"])).toEqual({
+      active: ["files.read"],
+      unavailable: ["removed.tool"],
+    });
+  });
+
+  test("assigns injective catalog aliases without shadowing core tools", () => {
+    const catalog: PiFrozenToolCatalog = Object.freeze({
+      catalogId: "catalog-aliases",
+      catalogDigest: sha256("catalog-aliases"),
+      tools: Object.freeze(
+        ["files.read", "file_read", "adapt", "execute"].map((name) =>
+          Object.freeze({
+            name,
+            label: name,
+            description: name,
+            revisionId: `${name}-v1`,
+            inputSchema: Object.freeze({ type: "object" }),
+            outputSchema: Object.freeze({ type: "object" }),
+          }),
+        ),
+      ),
+    });
+
+    const aliases = createHotbarToolAliases(catalog);
+    const values = [...aliases.values()];
+
+    expect(aliases.get("files.read")).toBe("file_read");
+    expect(new Set(values).size).toBe(values.length);
+    expect(values).not.toContain("adapt");
+    expect(values).not.toContain("execute");
+    expect([...createHotbarToolAliases(catalog)]).toEqual([...aliases]);
+  });
+
   test("aggregates authoritative Pi text deltas across tool-loop assistant messages", () => {
     const deltas = createAssistantDeltaAggregator();
     deltas.beginMessage();
@@ -165,6 +221,118 @@ describe("agent runtime factories", () => {
     deltas.beginMessage();
     expect(deltas.push("Grounded answer.")).toBe("\n\nGrounded answer.");
     expect(deltas.text()).toBe("I will inspect the snapshot.\n\nGrounded answer.");
+  });
+
+  test("preserves prior conversation roles instead of promoting history into the system prompt", async () => {
+    const controlled = createControlledPiModels({
+      respond: ({ systemPrompt, context }) => {
+        expect(systemPrompt).toBe("Stable system instruction.");
+        expect(context.messages.map((message) => message.role)).toEqual(["user", "assistant", "user"]);
+        return "History kept its roles.";
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+
+    const result = await runtime.run(
+      {
+        trailId: "history-roles",
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        thinkingLevel: "off",
+        systemPrompt: "Stable system instruction.",
+        history: Object.freeze([
+          Object.freeze({ role: "user" as const, content: "Earlier user message" }),
+          Object.freeze({ role: "assistant" as const, content: "Earlier assistant response" }),
+          Object.freeze({ role: "assistant" as const, content: "" }),
+        ]),
+        prompt: "Current request",
+        activeCapabilities: Object.freeze([]),
+      },
+      () => undefined,
+    );
+
+    expect(result.text).toBe("History kept its roles.");
+  });
+
+  test("serves only frozen conversation history and rejects a divergent runtime copy", async () => {
+    const createdAt = "2026-07-25T00:00:00.000Z";
+    const conversationHistory = Object.freeze([
+      Object.freeze({
+        messageId: "history-user",
+        messageRef: Object.freeze({
+          kind: "database_row" as const,
+          table: "messages" as const,
+          rowId: "history-user",
+        }),
+        role: "user" as const,
+        content: "Earlier frozen request",
+        createdAt,
+        contentDigest: sha256("Earlier frozen request"),
+      }),
+      Object.freeze({
+        messageId: "history-assistant",
+        messageRef: Object.freeze({
+          kind: "database_row" as const,
+          table: "messages" as const,
+          rowId: "history-assistant",
+        }),
+        role: "assistant" as const,
+        content: "Earlier frozen response",
+        createdAt,
+        contentDigest: sha256("Earlier frozen response"),
+      }),
+    ]);
+    const plan = frozenPlan(conversationHistory);
+    const controlled = createControlledPiModels({
+      respond: ({ context }) => {
+        expect(context.messages.map((message) => message.role)).toEqual(["user", "assistant", "user"]);
+        return "Frozen history served.";
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      codeExecution: controlledCodeExecution(
+        {
+          resolve: async (received) =>
+            Object.freeze({
+              planId: received.planId,
+              canonicalDigest: received.canonicalDigest,
+              consumedMaterials: frozenPlanMaterialUses(received),
+              definitions: definitions("unused"),
+            }),
+        },
+        "unused",
+      ),
+    });
+    const request = {
+      trailId: plan.sessionId,
+      provider: plan.provider,
+      model: plan.model,
+      thinkingLevel: plan.thinkingLevel,
+      systemPrompt: plan.renderedSystemPrompt,
+      prompt: "Current request",
+      history: Object.freeze(
+        conversationHistory.map(({ role, content, createdAt: timestamp }) =>
+          Object.freeze({ role, content, createdAt: timestamp }),
+        ),
+      ),
+      activeCapabilities: Object.freeze([]),
+      frozenTurnPlan: plan,
+    } as const;
+
+    await expect(runtime.run(request, () => undefined)).resolves.toMatchObject({
+      text: "Frozen history served.",
+    });
+    await expect(
+      runtime.run(
+        {
+          ...request,
+          history: Object.freeze([
+            Object.freeze({ role: "user" as const, content: "Unfrozen injected history", createdAt }),
+          ]),
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow(`Runtime history does not match frozen turn plan ${plan.planId}`);
   });
 
   test("loads an explicitly invoked skill from the pinned snapshot before model inference", async () => {
@@ -510,7 +678,9 @@ describe("agent runtime factories", () => {
         frozenTurnPlan: plan,
       },
       signal: turn.signal,
+      applyHotbar: async () => undefined,
       adapter: {
+        hotbar: async () => Object.freeze([]),
         inspect: async ({ signal }) => {
           observedSignal = signal;
           return "x".repeat(70_000);
@@ -567,7 +737,9 @@ describe("agent runtime factories", () => {
       },
       signal: new AbortController().signal,
       catalog,
+      applyHotbar: async () => undefined,
       adapter: {
+        hotbar: async () => Object.freeze([]),
         inspect: async ({ catalog: received }) => {
           inspectedCatalog = received;
           return toJsonValue(received ?? null);
@@ -584,6 +756,181 @@ describe("agent runtime factories", () => {
     expect(inspectedCatalog).toBe(catalog);
     expect(result.content).toEqual([{ type: "text", text: JSON.stringify(catalog) }]);
     expect(inspect.description).toContain("exact frozen tool names");
+  });
+
+  test("activates a catalog tool through adapt for the next model step in the same turn", async () => {
+    const plan = frozenPlan();
+    const catalog: PiFrozenToolCatalog = Object.freeze({
+      catalogId: "catalog-hotbar",
+      catalogDigest: sha256("catalog-hotbar"),
+      tools: Object.freeze([
+        Object.freeze({
+          name: "files.write",
+          label: "Write file",
+          description: "Write a UTF-8 file",
+          revisionId: "tool-files-write-v1",
+          inputSchema: Object.freeze({
+            type: "object",
+            properties: Object.freeze({
+              path: Object.freeze({ type: "string" }),
+              content: Object.freeze({ type: "string" }),
+            }),
+            required: Object.freeze(["path", "content"]),
+            additionalProperties: false,
+          }),
+          outputSchema: Object.freeze({ type: "object" }),
+        }),
+      ]),
+    });
+    const invocations: { readonly name: string; readonly input: JsonValue }[] = [];
+    const codeExecution: PiCodeExecutionAdapter = Object.freeze({
+      prepare: async () =>
+        Object.freeze({
+          catalog,
+          invoke: async (name: string, input: JsonValue) => {
+            invocations.push(Object.freeze({ name, input }));
+            return Object.freeze({ written: true });
+          },
+          execute: async () => {
+            return Object.freeze({
+              executionId: "unused-execution-hotbar",
+              value: null,
+              calls: 0,
+              durationMs: 1,
+            });
+          },
+          close: async () => undefined,
+        }),
+      shutdown: async () => undefined,
+    });
+    let step = 0;
+    const controlled = createControlledPiModels({
+      respond: ({ context }) => {
+        step += 1;
+        const visible = context.tools?.map((tool) => tool.name) ?? [];
+        if (step === 1) {
+          expect(visible).toEqual(["inspect_self", "remember", "adapt", "execute"]);
+          return fauxAssistantMessage(
+            fauxToolCall("adapt", { action: "add_tool", tool: "files.write" }, { id: "adapt-hotbar" }),
+            { stopReason: "toolUse" },
+          );
+        }
+        if (step === 2) {
+          expect(visible).toContain("file_write");
+          return fauxAssistantMessage(
+            fauxToolCall("file_write", { path: "notes.txt", content: "hello" }, { id: "write-hotbar" }),
+            { stopReason: "toolUse" },
+          );
+        }
+        return "Hotbar write completed.";
+      },
+    });
+    const selfTools: PiSelfToolAdapter = {
+      hotbar: async () => Object.freeze([]),
+      inspect: async () => null,
+      remember: async () => null,
+      adapt: async (input) => {
+        if (input.action !== "add_tool") throw new Error("Expected add_tool");
+        await input.applyHotbar([input.tool]);
+        return toJsonValue({ status: "hotbar_updated", hotbar: [input.tool] });
+      },
+    };
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
+    const events: AgentRuntimeEvent[] = [];
+
+    const result = await runtime.run(
+      {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "Write a note.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      (event) => events.push(event),
+    );
+
+    expect(result.text).toContain("Hotbar write completed.");
+    expect(result.assistantMessages?.map((message) => message.text)).toEqual(["Hotbar write completed."]);
+    expect(invocations).toEqual([{ name: "files.write", input: { path: "notes.txt", content: "hello" } }]);
+    expect(events.flatMap((event) => (event.type === "tool-start" ? [event.name] : []))).toEqual([
+      "adapt",
+      "files.write",
+    ]);
+    expect(events.flatMap((event) => (event.type === "assistant-message" ? [event.text] : []))).toEqual([
+      "Hotbar write completed.",
+    ]);
+  });
+
+  test("ignores unavailable persisted hotbar entries without blocking the turn", async () => {
+    const plan = frozenPlan();
+    const catalog: PiFrozenToolCatalog = Object.freeze({
+      catalogId: "catalog-stale-hotbar",
+      catalogDigest: sha256("catalog-stale-hotbar"),
+      tools: Object.freeze([
+        Object.freeze({
+          name: "files.read",
+          label: "Read file",
+          description: "Read a file",
+          revisionId: "files-read-v1",
+          inputSchema: Object.freeze({ type: "object" }),
+          outputSchema: Object.freeze({ type: "object" }),
+        }),
+      ]),
+    });
+    const codeExecution: PiCodeExecutionAdapter = Object.freeze({
+      prepare: async () =>
+        Object.freeze({
+          catalog,
+          invoke: async () => null,
+          execute: async () =>
+            Object.freeze({
+              executionId: "unused-stale-hotbar",
+              value: null,
+              calls: 0,
+              durationMs: 1,
+            }),
+          close: async () => undefined,
+        }),
+      shutdown: async () => undefined,
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context }) => {
+        expect(context.tools?.map((tool) => tool.name)).toEqual([
+          "inspect_self",
+          "remember",
+          "adapt",
+          "execute",
+          "file_read",
+        ]);
+        return "Stale preference reconciled.";
+      },
+    });
+    const selfTools: PiSelfToolAdapter = Object.freeze({
+      hotbar: async () => Object.freeze(["files.read", "removed.tool"]),
+      inspect: async () => null,
+      remember: async () => null,
+      adapt: async () => null,
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "Continue despite stale hotbar entries.",
+          activeCapabilities: [],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({ text: "Stale preference reconciled.", outcome: "completed" });
   });
 
   test("checks authentication before loading skills or preparing codemode", async () => {

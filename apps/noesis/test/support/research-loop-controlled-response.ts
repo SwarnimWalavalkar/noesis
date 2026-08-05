@@ -1,17 +1,25 @@
 import {
-  CapabilityRevisionRefSchema,
-  EvidenceRefSchema,
   type CapabilityRevisionRef,
+  CapabilityRevisionRefSchema,
   type EvidenceRef,
+  EvidenceRefSchema,
 } from "@noesis/domain";
 import { z } from "zod";
 import {
-  controlledToolCallResponse,
   type ControlledPiPrompt,
+  controlledToolCallResponse,
 } from "../../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 
 const RolePromptSchema = z.object({
-  role: z.enum(["reflector", "revision_author", "revision_agent", "case_generator", "trial", "judge_critic"]),
+  role: z.enum([
+    "capability_router",
+    "reflector",
+    "revision_author",
+    "revision_agent",
+    "case_generator",
+    "trial",
+    "judge_critic",
+  ]),
   messages: z.array(z.object({ name: z.string().optional(), content: z.string() })),
   capabilityRevisions: z.array(CapabilityRevisionRefSchema),
 });
@@ -30,6 +38,12 @@ function namedMessage(prompt: RolePrompt, name: string): string {
 
 function parsedMessage(prompt: RolePrompt, name: string): unknown {
   return JSON.parse(namedMessage(prompt, name));
+}
+
+function structuredPayload(content: string): unknown {
+  const payload = content.split("\n\nReturn JSON only.", 1)[0]?.split("\n\nRepair the following", 1)[0];
+  if (!payload) throw new Error("Controlled role received no structured payload");
+  return JSON.parse(payload);
 }
 
 function sourceEvidence(prompt: RolePrompt): EvidenceRef {
@@ -84,12 +98,97 @@ export function researchLoopControlledResponse(
       summary: "The controlled correction evidence requests a protected revert.",
     });
   }
-  if (prompt.role === "reflector")
+  if (prompt.role === "capability_router") {
+    const turn = z
+      .object({
+        userInput: z.string(),
+        candidates: z.array(
+          z.object({
+            capabilityId: z.string(),
+            name: z.string(),
+            scope: z.string(),
+            intent: z.string(),
+          }),
+        ),
+      })
+      .parse(structuredPayload(namedMessage(prompt, "turn")));
+    const priorConversation = prompt.messages
+      .filter((message) => message.name === "prior_conversation")
+      .map((message) =>
+        z
+          .object({
+            messageId: z.string(),
+            role: z.enum(["user", "assistant"]),
+            content: z.string(),
+            createdAt: z.string(),
+          })
+          .parse(structuredPayload(message.content)),
+      );
+    const semanticContext = [...priorConversation.map((message) => message.content), turn.userInput].join(
+      "\n",
+    );
+    const selected = semanticContext.includes("research brief") ? turn.candidates[0] : undefined;
     return JSON.stringify({
+      selections: selected
+        ? [
+            {
+              capabilityId: selected.capabilityId,
+              reason: "The current request is meaningfully within the research-brief scope.",
+            },
+          ]
+        : [],
+      reason: selected
+        ? "Selected the active research-brief capability for relevant work."
+        : "No narrow active capability is relevant to this request.",
+      learningAttribution: selected
+        ? {
+            capabilityId: selected.capabilityId,
+            reason: "The research-brief capability is the primary context for learning from this turn.",
+          }
+        : null,
+    });
+  }
+  if (prompt.role === "reflector") {
+    const scopeEvidence = namedMessage(prompt, "evidence").split("\n\nReturn JSON only.", 1)[0];
+    if (!scopeEvidence) throw new Error("Controlled scope verifier received no scope evidence");
+    const scopeVerification = z
+      .object({
+        currentScope: z.string(),
+        proposedScope: z.string(),
+        scopeRationale: z.string(),
+      })
+      .safeParse(JSON.parse(scopeEvidence));
+    if (scopeVerification.success) {
+      const { currentScope, proposedScope } = scopeVerification.data;
+      return JSON.stringify({
+        relationship: currentScope === proposedScope ? "same" : "narrower",
+        reason:
+          currentScope === proposedScope
+            ? "The proposed scope is the current research-brief scope."
+            : "A research brief is semantically narrower than the general collaboration scope.",
+      });
+    }
+    const active = z
+      .object({ capabilities: z.array(z.object({ scope: z.string() })) })
+      .parse(parsedMessage(prompt, "active_capabilities"));
+    const sameScope = active.capabilities.some((capability) => capability.scope === "research brief");
+    return JSON.stringify({
+      observation: {
+        kind: "correction",
+        reason: "The user corrects how research briefs should distinguish evidence from inference.",
+      },
       decision: "experiment",
       title: "Evidence-grounded research briefs",
       hypothesis: "Research briefs improve when cited evidence is separated from inference",
       scope: "research brief",
+      anticipatedFutureUse: "When the user requests another evidence-grounded research brief.",
+      scopeRelationship: sameScope ? "same" : "narrower",
+      scopeRationale: sameScope
+        ? "The correction remains within the already-active research-brief scope."
+        : "The observed correction is specific to research briefs rather than all collaboration.",
+      staleOrContradictionConditions: [
+        "The user requests a format where evidence and inference should intentionally be blended.",
+      ],
       capabilityName: "Research brief evidence",
       capabilityIntent: "Separate cited evidence from inference in research briefs",
       sourceCases: [
@@ -100,6 +199,7 @@ export function researchLoopControlledResponse(
         },
       ],
     });
+  }
   if (prompt.role === "revision_author" || prompt.role === "revision_agent")
     return JSON.stringify({
       promptModules: [

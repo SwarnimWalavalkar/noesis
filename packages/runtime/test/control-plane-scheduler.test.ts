@@ -119,6 +119,8 @@ describe("runtime control-plane resident scheduling", () => {
       pinTurnActivation: async () => unsupported(),
     });
     const feedback: ContinuousFeedbackController = Object.freeze({
+      classifyTurnObservations: async () =>
+        Object.freeze({ status: "unchanged" as const, observations: Object.freeze([]) }),
       observeTurnOutcome: async () => unsupported(),
       evaluateExperiment: async () => undefined,
       experimentComparison: async () => unsupported(),
@@ -244,6 +246,8 @@ describe("runtime control-plane resident scheduling", () => {
       pinTurnActivation: async () => unsupported(),
     });
     const feedback: ContinuousFeedbackController = Object.freeze({
+      classifyTurnObservations: async () =>
+        Object.freeze({ status: "unchanged" as const, observations: Object.freeze([]) }),
       observeTurnOutcome: async () => unsupported(),
       evaluateExperiment: async () => undefined,
       experimentComparison: async () => unsupported(),
@@ -324,6 +328,8 @@ describe("runtime control-plane resident scheduling", () => {
       pinTurnActivation: async () => unsupported(),
     });
     const feedback: ContinuousFeedbackController = Object.freeze({
+      classifyTurnObservations: async () =>
+        Object.freeze({ status: "unchanged" as const, observations: Object.freeze([]) }),
       observeTurnOutcome: async () => unsupported(),
       evaluateExperiment: async () => undefined,
       experimentComparison: async () => unsupported(),

@@ -545,6 +545,82 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "revise" } });
   });
 
+  test("ambient semantic correction upgrades the pending observation before evaluation", async () => {
+    const fixture = await createFixture();
+    await pinTurn(fixture, "turn-semantic-correction");
+    const feedback = controller(fixture, judge("keep"), config(1));
+    const { signal: _signal, ...unclassified } = observationInput(fixture, "turn-semantic-correction", {
+      outcomeId: "outcome-semantic-correction",
+      status: "unknown",
+      summary: "completed before semantic reflection",
+    });
+
+    const pending = await feedback.observeTurnOutcome(unclassified);
+    expect(pending[0]).toMatchObject({ status: "observing" });
+    expect(await fixture.protectedRuntime.feedback.getOutcome(fixture.experimentId)).toBeUndefined();
+
+    const classified = await feedback.classifyTurnObservations({
+      outcomeId: "outcome-semantic-correction",
+      sessionId: "session-feedback",
+      turnId: "turn-semantic-correction",
+      classification: "correction",
+    });
+    await fixture.workspace.operational.outcomes.classify({
+      outcomeId: "outcome-semantic-correction",
+      sessionId: "session-feedback",
+      turnId: "turn-semantic-correction",
+      classification: "correction",
+      reason: "The reflector identified a correction.",
+    });
+    expect(classified).toMatchObject({
+      status: "updated",
+      observations: [{ precedence: "correction" }],
+    });
+
+    await expect(feedback.evaluateExperiment(fixture.experimentId)).resolves.toMatchObject({
+      status: "resolved",
+      outcome: { decision: "revise" },
+    });
+  });
+
+  test("refuses to rewrite a neutral observation after evaluation has bound it", async () => {
+    const fixture = await createFixture();
+    await pinTurn(fixture, "turn-decision-bound");
+    const feedback = controller(fixture, judge("keep"), config(1));
+    const { signal: _signal, ...unclassified } = observationInput(fixture, "turn-decision-bound", {
+      outcomeId: "outcome-decision-bound",
+      status: "unknown",
+      summary: "completed before semantic reflection",
+    });
+
+    await feedback.observeTurnOutcome(unclassified);
+    await expect(feedback.evaluateExperiment(fixture.experimentId)).resolves.toMatchObject({
+      status: "resolved",
+      outcome: { decision: "keep" },
+    });
+    await fixture.workspace.operational.outcomes.classify({
+      outcomeId: "outcome-decision-bound",
+      sessionId: "session-feedback",
+      turnId: "turn-decision-bound",
+      classification: "correction",
+      reason: "The reflector identified a late correction.",
+    });
+    await expect(
+      feedback.classifyTurnObservations({
+        outcomeId: "outcome-decision-bound",
+        sessionId: "session-feedback",
+        turnId: "turn-decision-bound",
+        classification: "correction",
+      }),
+    ).resolves.toMatchObject({ status: "already_bound" });
+    expect(await fixture.workspace.operational.outcomes.get("outcome-decision-bound")).toMatchObject({
+      status: "corrected",
+    });
+    expect(
+      (await fixture.protectedRuntime.feedback.listObservations(fixture.experimentId, 8))[0]?.precedence,
+    ).toBe("none");
+  });
+
   test("a hard regression automatically reverts to the exact prior snapshot and restart is idempotent", async () => {
     const fixture = await createFixture();
     const priorOperation = (await fixture.protectedRuntime.activations.listOperations(100)).find(

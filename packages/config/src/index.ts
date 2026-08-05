@@ -48,12 +48,21 @@ export const ExperimentDefaultsSchema = z.strictObject({
 });
 export type ExperimentDefaults = Readonly<z.infer<typeof ExperimentDefaultsSchema>>;
 
+export const ToolConfigSchema = z.strictObject({
+  hotbar: z.array(z.string().trim().min(1).max(128)).max(16).optional(),
+});
+export type ToolConfig = Readonly<z.infer<typeof ToolConfigSchema>>;
+export interface ResolvedToolConfig {
+  readonly hotbar: readonly string[];
+}
+
 export const NoesisConfigSchema = z.strictObject({
   schemaVersion: z.literal(NOESIS_CONFIG_SCHEMA_VERSION),
   agent: AgentConfigSchema,
   learning: LearningConfigSchema.optional(),
   autonomy: AutonomyConfigSchema.optional(),
   experiments: ExperimentDefaultsSchema.optional(),
+  tools: ToolConfigSchema.optional(),
 });
 export type NoesisConfig = Readonly<z.infer<typeof NoesisConfigSchema>>;
 
@@ -73,6 +82,7 @@ export interface ResolvedNoesisConfig {
   readonly learning: Required<LearningConfig>;
   readonly autonomy: Required<AutonomyConfig>;
   readonly experiments: Required<ExperimentDefaults>;
+  readonly tools: ResolvedToolConfig;
   readonly sources: Readonly<Record<keyof ResolvedAgentConfig, ConfigSource>>;
 }
 
@@ -86,6 +96,7 @@ export interface UserControlConfigPatch {
   readonly learning?: LearningConfig;
   readonly autonomy?: AutonomyConfig;
   readonly experiments?: ExperimentDefaults;
+  readonly tools?: ToolConfig;
 }
 
 export interface ResolveConfigInput {
@@ -129,12 +140,17 @@ export const BUILT_IN_EXPERIMENT_DEFAULTS: Required<ExperimentDefaults> = {
   maxCost: 0,
 };
 
+export const BUILT_IN_TOOL_DEFAULTS: ResolvedToolConfig = {
+  hotbar: Object.freeze(["files.read", "files.list", "shell.run"]),
+};
+
 export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
   schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
   agent: { ...BUILT_IN_AGENT_DEFAULTS },
   learning: { ...BUILT_IN_LEARNING_DEFAULTS },
   autonomy: { ...BUILT_IN_AUTONOMY_DEFAULTS },
   experiments: { ...BUILT_IN_EXPERIMENT_DEFAULTS },
+  tools: { hotbar: [...BUILT_IN_TOOL_DEFAULTS.hotbar] },
 };
 
 export const noesisConfigPath = (home: string): string => join(home, "config.json");
@@ -256,6 +272,7 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
   const learning = loaded.value.config?.learning ?? {};
   const autonomy = loaded.value.config?.autonomy ?? {};
   const experiments = loaded.value.config?.experiments ?? {};
+  const tools = loaded.value.config?.tools ?? {};
   const [provider, providerSource] = pick(path, "provider", cli, env, file, "NOESIS_PROVIDER");
   const [model, modelSource] = pick(path, "model", cli, env, file, "NOESIS_MODEL");
   const [thinkingLevel, thinkingLevelSource] = pick(
@@ -286,6 +303,9 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
       maxCases: experiments.maxCases ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxCases,
       maxAttemptsPerArm: experiments.maxAttemptsPerArm ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxAttemptsPerArm,
       maxCost: experiments.maxCost ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxCost,
+    },
+    tools: {
+      hotbar: Object.freeze([...(tools.hotbar ?? BUILT_IN_TOOL_DEFAULTS.hotbar)]),
     },
     sources: {
       provider: providerSource,
@@ -429,10 +449,15 @@ export async function updateUserControlConfig(
   home: string,
   patch: UserControlConfigPatch,
 ): Promise<NoesisConfig> {
-  if (patch.learning === undefined && patch.autonomy === undefined && patch.experiments === undefined) {
+  if (
+    patch.learning === undefined &&
+    patch.autonomy === undefined &&
+    patch.experiments === undefined &&
+    patch.tools === undefined
+  ) {
     throw new NoesisConfigError(
       noesisConfigPath(home),
-      "user control update requires learning, autonomy, or experiment preferences",
+      "user control update requires learning, autonomy, experiment, or tool preferences",
     );
   }
   return await withConfigWriter(home, async () => {
@@ -445,6 +470,7 @@ export async function updateUserControlConfig(
       ...(patch.learning ? { learning: { ...current.learning, ...patch.learning } } : {}),
       ...(patch.autonomy ? { autonomy: { ...current.autonomy, ...patch.autonomy } } : {}),
       ...(patch.experiments ? { experiments: { ...current.experiments, ...patch.experiments } } : {}),
+      ...(patch.tools ? { tools: { ...current.tools, ...patch.tools } } : {}),
     };
     const decoded = decodeConfig(path, candidate);
     if (!decoded.ok) throw decoded.error;

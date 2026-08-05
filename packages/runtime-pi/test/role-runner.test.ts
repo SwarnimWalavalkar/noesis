@@ -1,7 +1,7 @@
 import type { AgentRole, AgentRunRequest, AgentUsage } from "@noesis/agent-types";
 import type { CapabilityRevisionRef, ExperimentVariantRef, FileRevisionRef } from "@noesis/domain";
-import { z } from "zod";
 import { describe, expect, test } from "vitest";
+import { z } from "zod";
 import {
   createAgentRoleRunner,
   createBlindedJudgeFixture,
@@ -341,11 +341,17 @@ describe("adapter-neutral role runner", () => {
 });
 
 describe("research role isolation", () => {
+  test("restricts capability routing to the current turn payload", () => {
+    const policy = createRestrictedRoleContextPolicy("capability_router");
+
+    expect(policy.allowedMessageNames).toEqual(["turn", "prior_conversation"]);
+    expect(policy.maxTools).toBe(0);
+  });
+
   test("derives custom isolated-role policies without weakening the default whitelist", () => {
     const policy = createRestrictedRoleContextPolicy("judge_critic", {
       policyId: "application-judge-v1",
       maxMessages: 12,
-      forbiddenContent: /authority[_-]?token/iu,
     });
 
     expect(policy.allowedMessageNames).toEqual(["rubric", "arm_A", "arm_B", "relevant_traces"]);
@@ -353,7 +359,7 @@ describe("research role isolation", () => {
     expect(policy.maxMessages).toBe(12);
     expect(() =>
       createRestrictedRoleContextPolicy("judge_critic", {
-        maxTotalCharacters: 64_000,
+        maxTotalCharacters: 65_000,
       }),
     ).toThrow("cannot widen maxTotalCharacters");
     expect(() =>
@@ -366,6 +372,59 @@ describe("research role isolation", () => {
         includeCapabilityRevisions: true,
       }),
     ).toThrow("cannot expose capability revisions");
+  });
+
+  test("preserves long structured router context as valid JSON and rejects overflow instead of slicing", async () => {
+    let capturedPrompt = "";
+    const backend = createScriptedRoleModelBackend({
+      respond(backendRequest) {
+        capturedPrompt = backendRequest.prompt;
+        return { text: "{}" };
+      },
+    });
+    const runner = createAgentRoleRunner({
+      backend,
+      variants: [configuration("capability_router", "router-context-v1")],
+    });
+    const longContent = "x".repeat(12_000);
+    const messages = [
+      Object.freeze({
+        role: "user" as const,
+        name: "turn",
+        content: JSON.stringify({ userInput: "Continue", candidates: [] }),
+      }),
+      Object.freeze({
+        role: "user" as const,
+        name: "prior_conversation",
+        content: JSON.stringify({
+          messageId: "history-long",
+          role: "user",
+          content: longContent,
+          createdAt: "2026-07-25T00:00:00.000Z",
+        }),
+      }),
+    ];
+
+    await runner.run(request("capability_router", "router-context-v1", messages));
+    const rendered = z
+      .object({ messages: z.array(z.object({ name: z.string(), content: z.string() })) })
+      .parse(JSON.parse(capturedPrompt));
+    expect(rendered.messages.map((message) => JSON.parse(message.content))).toMatchObject([
+      { userInput: "Continue", candidates: [] },
+      { messageId: "history-long", content: longContent },
+    ]);
+
+    await expect(
+      runner.run(
+        request("capability_router", "router-context-v1", [
+          Object.freeze({
+            role: "user" as const,
+            name: "prior_conversation",
+            content: "x".repeat(16_001),
+          }),
+        ]),
+      ),
+    ).rejects.toThrow("beyond its character bound");
   });
 
   test("passes only declared bounded reflector inputs and strips tools", async () => {

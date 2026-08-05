@@ -1,6 +1,5 @@
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import type { Capability, CapabilityRevisionRef, EvidenceRef } from "@noesis/domain";
-import { detectExplicitCorrection } from "@noesis/learning";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ContinuousFeedbackController } from "./continuous-feedback.ts";
 import type { RuntimeControlPlane } from "./control-plane.ts";
@@ -32,7 +31,6 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
   const now = options.now ?? (() => new Date().toISOString());
 
   const run = async (request: TurnSettlementRequest): Promise<TurnResult> => {
-    const correction = detectExplicitCorrection(request.input);
     const userRef = await options.workspace.operational.messages.put(
       Object.freeze({
         messageId: `${request.turnId}:user`,
@@ -185,25 +183,18 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         sensitivity: "normal",
         usedCapabilityIds: serving.map((reference) => reference.capabilityId),
         evidenceRefs,
-        ...(correction.corrected
-          ? {
-              signal: {
-                kind: "explicit_correction",
-                scope: "general",
-                strength: 1,
-                novelty: 0.8,
-              },
-            }
-          : {}),
         metrics: Object.freeze({ failed: status === "failed" }),
       });
-      const routedSelection = [...request.plan.selectedCapabilities]
-        .sort(
-          (left, right) =>
-            (left.scope === "general" ? 0 : left.scope.length) -
-            (right.scope === "general" ? 0 : right.scope.length),
-        )
-        .at(-1);
+      const learningAttribution = request.plan.routing.learningAttribution;
+      const routedSelection = learningAttribution
+        ? request.plan.selectedCapabilities.find(
+            (selection) => selection.capabilityId === learningAttribution.capabilityId,
+          )
+        : request.plan.selectedCapabilities.find((selection) => selection.baseline.kind === "genesis");
+      if (learningAttribution && !routedSelection)
+        throw new Error(
+          `Frozen turn plan ${request.plan.planId} attributes learning to unselected capability ${learningAttribution.capabilityId}`,
+        );
       if (!routedSelection) return;
       const baseline = routedSelection.revision;
       const capability = options.resolveCapability(routedSelection.capabilityId);
@@ -212,11 +203,11 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         turn: Object.freeze({
           sessionId: request.sessionId,
           turnId: request.turnId,
+          outcomeId,
           scope: capability.scope,
           userMessage: request.input,
           ...(assistantMessage ? { assistantMessage } : {}),
-          ...(correction.corrected ? { correction: request.input } : {}),
-          outcome: status === "failed" ? "failed" : correction.corrected ? "corrected" : "unknown",
+          outcome: status === "failed" ? "failed" : "unknown",
           occurredAt: request.occurredAt,
           evidenceRefs: [...evidenceRefs],
           sensitivity: "normal" as const,
@@ -247,13 +238,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
       await record("failed", "Turn aborted", result.output, true, result.assistantMessages);
       return result;
     }
-    await record(
-      correction.corrected ? "corrected" : "unknown",
-      result.output,
-      result.output,
-      false,
-      result.assistantMessages,
-    );
+    await record("unknown", result.output, result.output, false, result.assistantMessages);
     return result;
   };
 

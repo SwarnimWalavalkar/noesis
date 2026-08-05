@@ -80,6 +80,8 @@ Noesis currently runs locally and provides a terminal interface. It uses a langu
 
 Noesis is an early research preview. It is ready to run and tinker with, but its interfaces and internal design will continue to change.
 
+Product documentation lives under `docs/`.
+
 The repository includes a local terminal experience, persistent sessions, tools, skills, reusable scripts, durable workflows, and the first complete path from reflection to evaluated and reversible behavior change. Some parts of the intended experience are still easier to inspect in the underlying records than through the interface.
 
 The central research question remains open:

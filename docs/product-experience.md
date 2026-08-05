@@ -113,7 +113,7 @@ The absence of compounding machinery in the visible experience is a feature: not
 
 ### Useful execution becomes an inspectable program
 
-The user asks Noesis to investigate a repository, modify files, run commands, consult the web, or create an artifact. Noesis uses one model-visible `execute` call and composes progressively discovered host tools in JavaScript. The conversation receives the selected final value while nested operations, effects, and revisions remain inspectable.
+The user asks Noesis to investigate a repository, modify files, run commands, consult the web, or create an artifact. Noesis uses a small direct-tool hotbar for common work and `execute` to discover and compose host tools in JavaScript. The conversation receives the selected final value while operations, effects, and revisions remain inspectable.
 
 When the program has a credible future use, the user or ambient reflection may propose saving it. One reusable computation becomes a typed script. Work that needs named phases, durable progress, corrections between phases, or resume becomes a workflow. Skills remain portable instructional context that can teach when and how to use these primitives without silently installing executable authority.
 

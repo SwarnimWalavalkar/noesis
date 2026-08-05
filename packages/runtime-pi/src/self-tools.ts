@@ -13,14 +13,30 @@ const rememberInput = z.strictObject({
   scope: z.string().trim().min(1).max(512),
   anticipatedUse: z.string().trim().min(1).max(2_048),
 });
-const adaptInput = z.strictObject({
-  target: z.enum(["prompt", "skill", "tool", "script", "workflow", "toolset", "router", "tui"]),
-  change: z.string().trim().min(1).max(16_384),
-  scope: z.string().trim().min(1).max(512),
-  rationale: z.string().trim().min(1).max(4_096),
-});
+const adaptInput = z.discriminatedUnion("action", [
+  z.strictObject({
+    action: z.literal("propose"),
+    target: z.enum(["prompt", "skill", "tool", "script", "workflow", "toolset", "router", "tui"]),
+    change: z.string().trim().min(1).max(16_384),
+    scope: z.string().trim().min(1).max(512),
+    rationale: z.string().trim().min(1).max(4_096),
+  }),
+  z.strictObject({
+    action: z.literal("add_tool"),
+    tool: z.string().trim().min(1).max(128),
+  }),
+  z.strictObject({
+    action: z.literal("remove_tool"),
+    tool: z.string().trim().min(1).max(128),
+  }),
+]);
 
 export interface PiSelfToolAdapter {
+  readonly hotbar: (input: {
+    readonly plan: FrozenTurnPlan;
+    readonly catalog: PiFrozenToolCatalog;
+    readonly signal: AbortSignal;
+  }) => Promise<readonly string[]>;
   readonly inspect: (input: {
     readonly section: z.infer<typeof inspectInput>["section"];
     readonly plan: FrozenTurnPlan;
@@ -37,6 +53,8 @@ export interface PiSelfToolAdapter {
   readonly adapt: (
     input: z.infer<typeof adaptInput> & {
       readonly plan: FrozenTurnPlan;
+      readonly catalog?: PiFrozenToolCatalog;
+      readonly applyHotbar: (canonicalToolNames: readonly string[]) => Promise<void>;
       readonly signal: AbortSignal;
     },
   ) => Promise<JsonValue>;
@@ -95,6 +113,7 @@ export function createPiSelfTools(input: {
   readonly request: AgentRuntimeRequest;
   readonly signal: AbortSignal;
   readonly catalog?: PiFrozenToolCatalog;
+  readonly applyHotbar: (canonicalToolNames: readonly string[]) => Promise<void>;
 }): readonly AgentTool[] {
   return Object.freeze([
     directTool({
@@ -125,13 +144,19 @@ export function createPiSelfTools(input: {
     }),
     directTool({
       name: "adapt",
-      label: "Propose adaptation",
+      label: "Adapt",
       description:
-        "Propose a scoped change to Noesis behavior. This records evidence for reflection and evaluation; it never self-promotes.",
+        "Change the direct-tool hotbar immediately with add_tool or remove_tool, or propose a scoped behavior change for reflection and evaluation. Tool names are the canonical names shown by inspect_self(section: 'tools'). Hotbar changes never widen the frozen catalog or permissions; proposals never self-promote.",
       schema: adaptInput,
       signal: input.signal,
       execute: async (parameters, signal) =>
-        await input.adapter.adapt({ ...parameters, plan: input.plan, signal }),
+        await input.adapter.adapt({
+          ...parameters,
+          plan: input.plan,
+          signal,
+          applyHotbar: input.applyHotbar,
+          ...(input.catalog ? { catalog: input.catalog } : {}),
+        }),
     }),
   ]);
 }

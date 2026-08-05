@@ -115,7 +115,9 @@ function resourceResponse(): FauxResponseFactory {
   return async (_context, options) => {
     if (!options?.sessionId) throw new Error("AgentHarness did not provide a provider session ID");
     await openSessionNetworkResource(options.sessionId);
-    return fauxAssistantMessage('{"decision":"no_change","reason":"local provider completed"}');
+    return fauxAssistantMessage(
+      '{"observation":{"kind":"other","reason":"Controlled cleanup fixture."},"decision":"no_change","reason":"local provider completed"}',
+    );
   };
 }
 
@@ -212,7 +214,9 @@ describe("Pi session resource ownership", () => {
     provider.setResponses([
       () => {
         providerPrompts += 1;
-        return fauxAssistantMessage('{"decision":"no_change","reason":"should not run"}');
+        return fauxAssistantMessage(
+          '{"observation":{"kind":"other","reason":"Controlled cleanup fixture."},"decision":"no_change","reason":"should not run"}',
+        );
       },
     ]);
     const cleanedSessionIds: string[] = [];

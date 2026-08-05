@@ -150,6 +150,7 @@ describe("Noesis config", () => {
         vetoes: "respect",
       },
       experiments: { maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 },
+      tools: { hotbar: ["files.read", "files.list", "shell.run"] },
     });
   });
 
@@ -188,6 +189,7 @@ describe("Noesis config", () => {
       learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
       autonomy: { riskLevel: "low", approval: "all_changes" },
       experiments: { maxCases: 3, maxAttemptsPerArm: 1, maxCost: 0 },
+      tools: { hotbar: ["files.read", "shell.run", "files.write"] },
     });
 
     expect(await resolveNoesisConfig({ home, env: {} })).toMatchObject({
@@ -196,6 +198,7 @@ describe("Noesis config", () => {
       learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
       autonomy: { riskLevel: "low", approval: "all_changes" },
       experiments: { maxCases: 3, maxAttemptsPerArm: 1, maxCost: 0 },
+      tools: { hotbar: ["files.read", "shell.run", "files.write"] },
     });
   });
 

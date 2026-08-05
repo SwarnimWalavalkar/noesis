@@ -2,7 +2,8 @@
 
 ## Product contract
 
-- Read `docs/product-thesis.md`, `docs/product-experience.md`, and `plans/compounding-partnership-product-loop.html` before changing product behavior.
+- Read the relevant product doctrine under `docs/` before changing product behavior.
+- Use capable models for decisions that depend on meaning, including intent, correction, feedback, relevance, progress, scope, and learning value. Do not use regular expressions, keyword lists, or fixed heuristics as semantic classifiers. Keep regular expressions for syntax and validation.
 - Deliver immediate value first. Preserve a future advantage only when the evidence supports a credible future use.
 - Infer collaboration posture. Ambiguous intellectual work defaults toward `work_with_me`, while explicit execution defaults toward `do_for_me`. A conversational instruction overrides the inference.
 - Start new learning at the narrowest plausible scope. Every durable learning names its anticipated future use, and recurring evidence is required before its scope broadens.
@@ -13,8 +14,7 @@
 
 ## Architecture
 
-- Read `plans/noesis-first-complete-iteration.html` and `plans/noesis-autonomous-compounding-implementation-plan.html` before changing package ownership or protected boundaries. The autonomous-compounding plan supersedes the older plan's storage and ledger architecture.
-- Read `plans/noesis-tools-codemode-workflows-plan.html` before changing tools, codemode, skills, scripts, workflows, or their TUI surfaces.
+- Read the relevant implementation plans under `plans/` before changing package ownership, protected boundaries, tools, codemode, skills, scripts, workflows, or their TUI surfaces.
 - Pi executes turns only. Only `packages/runtime-pi` may import Pi agent/runtime types. Do not introduce `createAgentSession` or Pi `InteractiveMode` as a product root.
 - The TUI uses `@earendil-works/pi-tui` directly and renders read models. UI components never own durable state.
 - `WorkspaceStore` owns persistence boundaries. SQLite is authoritative for operational state; ordinary editable workspace files are authoritative for declarative definitions.
@@ -25,7 +25,7 @@
 - Legacy JSONL support is import-only inside the workspace cutover. Do not recreate a runtime ledger, ledger package, or second operational authority around it.
 - Large outputs remain ordinary artifact files with SQLite metadata. Evaluation evidence is revisioned and append-only once used by a decision; credentials remain only in the protected credential store or process environment.
 - Context fragments have provenance and hard per-fragment and total bounds. Capability versions are frozen at turn start.
-- Pi sees only the three semantic self tools plus `execute`. Broad work tools are codemode-only and use one frozen Tool Catalog and Broker.
+- Pi always sees the three semantic self tools plus `execute`. A small direct-tool hotbar may expose tools from the same frozen Tool Catalog and Broker; it never creates a second execution path or widens authority.
 - Codemode is trusted local Node.js execution. It owns process lifecycle and the SDK bridge, not real tools, policy, durable state, or a second registry.
 - Standard skills remain instructional resources with progressive disclosure. A skill package never registers executable extensions implicitly.
 - Editable script and workflow files are declarative authority; immutable revisions pin executions. SQLite owns code execution, workflow run, phase, and nested-call state.

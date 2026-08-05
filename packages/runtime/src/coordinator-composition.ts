@@ -19,6 +19,7 @@ import {
 } from "@noesis/learning";
 import type { AuthorityBoundary } from "@noesis/policy";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
+import type { ContinuousFeedbackController } from "./continuous-feedback.ts";
 import { createRuntimeCoordinator, type RuntimeCoordinator } from "./coordinator.ts";
 import {
   type AuthorRevisionJobPayload,
@@ -61,6 +62,10 @@ export interface RuntimeCoordinatorCompositionOptions {
   readonly evaluation: DynamicEvaluationLaboratory;
   readonly baselineRevisions: CapabilityRevisionResolverPort;
   readonly preflightPreparation: CoordinatorPreflightPreparation;
+  readonly continuousFeedback: Pick<
+    ContinuousFeedbackController,
+    "classifyTurnObservations" | "evaluateExperiment"
+  >;
   readonly config?: RuntimeCoordinatorConfig;
   readonly workerId?: string;
   readonly now?: () => Date;
@@ -134,6 +139,26 @@ export function createRuntimeCoordinatorComposition(
         signal,
       });
       cancelled(signal);
+      if (observed.observation && payload.turn.outcomeId) {
+        await options.workspace.operational.outcomes.classify({
+          outcomeId: payload.turn.outcomeId,
+          sessionId: payload.turn.sessionId,
+          turnId: payload.turn.turnId,
+          classification: observed.observation.kind,
+          reason: observed.observation.reason,
+        });
+        const classified = await options.continuousFeedback.classifyTurnObservations({
+          outcomeId: payload.turn.outcomeId,
+          sessionId: payload.turn.sessionId,
+          turnId: payload.turn.turnId,
+          classification: observed.observation.kind,
+        });
+        if (classified.status !== "already_bound")
+          for (const experimentId of [
+            ...new Set(classified.observations.map((observation) => observation.experimentId)),
+          ])
+            await options.continuousFeedback.evaluateExperiment(experimentId);
+      }
       if (observed.status === "no_change")
         return Object.freeze({
           status: "no_change" as const,

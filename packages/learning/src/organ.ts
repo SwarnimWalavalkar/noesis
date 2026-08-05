@@ -6,7 +6,6 @@ import type {
   StructuredInferencePort,
 } from "@noesis/agent-types";
 import type { AtomicCapabilityRegistry, CapabilityRevisionConstruction } from "@noesis/capabilities";
-import type { UserCriterionReadModel, UserCriterionRepository } from "@noesis/config";
 import {
   type Capability,
   type CapabilityRevision,
@@ -14,8 +13,8 @@ import {
   canonicalJson,
   createId,
   type DefinitionFilePort,
-  durableJobFailureFromError,
   durableJobFailureError,
+  durableJobFailureFromError,
   type EvidenceRef,
   type Experiment,
   type ExperimentStorePort,
@@ -40,21 +39,10 @@ import {
   RevisionAuthorInferenceOutputSchema,
   type RevisionAuthorOutput,
   type RoleResearchMetadata,
+  type ScopeRelationshipVerification,
+  ScopeRelationshipVerificationSchema,
+  type SemanticTurnObservation,
 } from "./schemas.ts";
-
-export interface CapturedConversationalFeedback {
-  readonly kind: "correction" | "criterion";
-  readonly statement: string;
-  readonly scope: string;
-  readonly confidence: number;
-  readonly explicitlyNormative: boolean;
-}
-
-export interface CriterionCaptureResult {
-  readonly capture: CapturedConversationalFeedback;
-  readonly created: boolean;
-  readonly criterion?: UserCriterionReadModel;
-}
 
 export interface HarvestedLearningSignal {
   readonly signal: FeedbackSignal;
@@ -67,7 +55,6 @@ export interface SignalHarvestResult {
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly citations: readonly LearningCitation[];
   readonly recurrenceCount: number;
-  readonly criterionCapture?: CriterionCaptureResult;
 }
 
 export interface LearningRoleResearchRun {
@@ -83,6 +70,13 @@ export interface ExperimentBrief {
   readonly hypothesis: string;
   readonly hypothesisDedupeKey: string;
   readonly scope: string;
+  readonly anticipatedFutureUse: string;
+  readonly scopeRelationship: "same" | "narrower" | "broader";
+  readonly scopeRationale: string;
+  readonly staleOrContradictionConditions: readonly string[];
+  readonly verifiedScopeRelationship: "same" | "narrower" | "broader";
+  readonly scopeVerificationReason: string;
+  readonly scopeVerificationRun?: LearningRoleResearchRun;
   readonly capability: Capability;
   readonly baselineRevision: CapabilityRevisionRef;
   readonly evidenceRefs: readonly EvidenceRef[];
@@ -158,9 +152,10 @@ export interface LearningNotification {
 export type ObserveLearningResult =
   | {
       readonly status: "no_change";
-      readonly reason: "disabled" | "irrelevant" | "sensitive" | "reflector_no_change";
+      readonly reason: "disabled" | "sensitive" | "reflector_no_change";
       readonly harvest: SignalHarvestResult;
       readonly reflectionRun?: LearningRoleResearchRun;
+      readonly observation: SemanticTurnObservation | null;
       readonly notification: LearningNotification | null;
       readonly interruption: null;
     }
@@ -169,6 +164,7 @@ export type ObserveLearningResult =
       readonly harvest: SignalHarvestResult;
       readonly brief: ExperimentBrief;
       readonly reflectionRun: LearningRoleResearchRun;
+      readonly observation: SemanticTurnObservation;
       readonly notification: LearningNotification | null;
       readonly interruption: null;
     }
@@ -177,6 +173,7 @@ export type ObserveLearningResult =
       readonly harvest: SignalHarvestResult;
       readonly brief: ExperimentBrief;
       readonly reflectionRun: LearningRoleResearchRun;
+      readonly observation: SemanticTurnObservation;
       readonly notification: LearningNotification | null;
       readonly interruption: null;
     };
@@ -193,7 +190,6 @@ export interface AutomaticLearningOrganOptions {
   readonly config: AutomaticLearningConfig;
   readonly history: Pick<HistoryPort, "search" | "resolve">;
   readonly feedbackSignals: FeedbackSignalStorePort;
-  readonly criteria: Pick<UserCriterionRepository, "create" | "inspect">;
   readonly inference: StructuredInferencePort;
   readonly briefs: ExperimentBriefStore;
   readonly capabilities: AtomicCapabilityRegistry;
@@ -247,11 +243,6 @@ export interface AutomaticLearningOrgan {
   ) => Promise<AuthorRevisionResult>;
   readonly authorFollowUpRevision: (request: AuthorFollowUpRevisionRequest) => Promise<AuthorRevisionResult>;
 }
-
-const NORMATIVE_PATTERN =
-  /(?:^|\b)(?:always|never|must|every time|do not|don't|should always|should never)(?:\b|$)/iu;
-const CORRECTION_PATTERN = /(?:^|\b)(?:no[,;:]?|instead|actually|correction|not that)(?:\b|$)/iu;
-const DIRECT_LEARNING_PATTERN = /(?:^|\b)(?:learn from|remember this|improve this)(?:\b|$)/iu;
 
 function sameFileRevision(left: FileRevisionRef, right: FileRevisionRef): boolean {
   return (
@@ -319,24 +310,7 @@ function cloneCitation(citation: ExactCitation): LearningCitation {
   });
 }
 
-function captureConversationalFeedback(turn: LearningTurnInput): CapturedConversationalFeedback | undefined {
-  const statement = (turn.correction ?? turn.userMessage).trim();
-  const explicitlyNormative = NORMATIVE_PATTERN.test(statement);
-  const correction =
-    turn.outcome === "corrected" || turn.correction !== undefined || CORRECTION_PATTERN.test(statement);
-  if (!explicitlyNormative && !correction) return undefined;
-  return Object.freeze({
-    kind: explicitlyNormative ? "criterion" : "correction",
-    statement,
-    scope: turn.scope,
-    confidence: explicitlyNormative ? 0.99 : 0.9,
-    explicitlyNormative,
-  });
-}
-
-function signalKind(turn: LearningTurnInput, capture?: CapturedConversationalFeedback) {
-  if (capture?.kind === "correction" || turn.outcome === "corrected") return "explicit_correction" as const;
-  if (capture?.kind === "criterion") return "preference_expression" as const;
+function signalKind(turn: LearningTurnInput) {
   if (turn.outcome === "failed" || turn.telemetry.toolFailureCount > 0) return "repeated_failure" as const;
   if (turn.telemetry.retryCount > 0 || turn.telemetry.aborted) return "friction" as const;
   if (
@@ -345,28 +319,21 @@ function signalKind(turn: LearningTurnInput, capture?: CapturedConversationalFee
     turn.telemetry.latencyMs > turn.telemetry.expectedLatencyMs
   )
     return "cost_or_latency" as const;
-  if (DIRECT_LEARNING_PATTERN.test(turn.userMessage)) return "user_request" as const;
   return undefined;
 }
 
 function signalStrength(kind: NonNullable<ReturnType<typeof signalKind>>): number {
   switch (kind) {
-    case "explicit_correction":
-      return 0.95;
-    case "preference_expression":
-      return 0.9;
     case "repeated_failure":
       return 0.8;
     case "friction":
       return 0.7;
     case "cost_or_latency":
       return 0.65;
-    case "user_request":
-      return 1;
   }
 }
 
-function stableSignalId(turn: LearningTurnInput, kind: NonNullable<ReturnType<typeof signalKind>>): string {
+function stableSignalId(turn: LearningTurnInput, kind: FeedbackSignal["kind"]): string {
   return `signal_${sha256(
     canonicalJson({
       sessionId: turn.sessionId,
@@ -431,6 +398,37 @@ function recurrenceCitations(
   return Object.freeze([...selected.values()]);
 }
 
+function validateScopeContract(input: {
+  readonly currentScope: string;
+  readonly reflection: Extract<ReflectorOutput, { readonly decision: "experiment" }>;
+  readonly verification: ScopeRelationshipVerification;
+}): void {
+  const sameScope =
+    normalizedCapabilityScope(input.currentScope) === normalizedCapabilityScope(input.reflection.scope);
+  if (sameScope !== (input.verification.relationship === "same"))
+    throw new Error("Scope verifier's same-scope classification disagrees with canonical scope identity");
+  if (input.reflection.scopeRelationship !== input.verification.relationship) {
+    throw new Error(
+      `Reflector scope relationship ${input.reflection.scopeRelationship} disagrees with independent verification ${input.verification.relationship}`,
+    );
+  }
+}
+
+function validateBroadeningEvidence(input: {
+  readonly verifiedRelationship: ScopeRelationshipVerification["relationship"];
+  readonly recurrenceCitations: readonly LearningCitation[];
+  readonly recurrenceThreshold: number;
+}): void {
+  if (
+    input.verifiedRelationship === "broader" &&
+    input.recurrenceCitations.length < input.recurrenceThreshold
+  ) {
+    throw new Error(
+      `Broader learning scope requires at least ${String(input.recurrenceThreshold)} distinct recurrence citations`,
+    );
+  }
+}
+
 function citationKey(citation: LearningCitation): string {
   return canonicalJson({ source: citation.source, contentDigest: citation.contentDigest });
 }
@@ -439,10 +437,6 @@ function uniqueCitations(citations: readonly LearningCitation[]): readonly Learn
   const unique = new Map<string, LearningCitation>();
   for (const citation of citations) unique.set(citationKey(citation), cloneCitation(citation));
   return Object.freeze([...unique.values()]);
-}
-
-function criterionIdFor(capture: CapturedConversationalFeedback): string {
-  return `criterion_${sha256(canonicalJson({ scope: capture.scope, statement: capture.statement })).slice(0, 24)}`;
 }
 
 function roleRequest(input: {
@@ -581,6 +575,7 @@ function safeComponentPath(path: string): string {
 function freezeBrief(brief: ExperimentBrief): ExperimentBrief {
   return Object.freeze({
     ...brief,
+    staleOrContradictionConditions: Object.freeze([...brief.staleOrContradictionConditions]),
     capability: Object.freeze({ ...brief.capability }),
     baselineRevision: Object.freeze({ ...brief.baselineRevision }),
     evidenceRefs: cloneEvidenceRefs(brief.evidenceRefs),
@@ -677,35 +672,10 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     }
   };
 
-  const recordCriterion = async (
-    turn: LearningTurnInput,
-    capture: CapturedConversationalFeedback | undefined,
-  ): Promise<CriterionCaptureResult | undefined> => {
-    if (!capture?.explicitlyNormative) return undefined;
-    const criterionId = criterionIdFor(capture);
-    const created = await options.criteria.create({
-      criterionId,
-      source: turn.outcome === "corrected" ? "correction" : "explicit_statement",
-      scope: capture.scope,
-      evaluatorInstruction: capture.statement,
-      evidenceRefs: turn.evidenceRefs,
-      actor: { actorId: `user:${turn.sessionId}`, kind: "user" },
-      reason: "Explicitly normative conversational feedback",
-    });
-    if (created.ok) return Object.freeze({ capture, created: true, criterion: created.value });
-    if (created.error.code !== "already_exists") {
-      throw new Error(`Could not capture explicit criterion: ${created.error.message}`);
-    }
-    const existing = await options.criteria.inspect(criterionId);
-    if (!existing.ok) throw new Error(`Could not inspect deduplicated criterion: ${existing.error.message}`);
-    return Object.freeze({ capture, created: false, criterion: existing.value });
-  };
-
   const harvestTurn = async (value: unknown): Promise<SignalHarvestResult> => {
     const turn = LearningTurnInputSchema.parse(value);
-    const capture = captureConversationalFeedback(turn);
-    const kind = signalKind(turn, capture);
-    if (!config.enabled || turn.sensitivity === "secret" || !kind) {
+    const kind = signalKind(turn);
+    if (!config.enabled || turn.sensitivity === "secret") {
       return Object.freeze({
         turn,
         signals: Object.freeze([]),
@@ -733,6 +703,14 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       return reference ? [reference] : [];
     });
     const evidenceRefs = uniqueEvidenceRefs([...turn.evidenceRefs, ...historicalEvidence]);
+    if (kind === undefined)
+      return Object.freeze({
+        turn,
+        signals: Object.freeze([]),
+        evidenceRefs,
+        citations,
+        recurrenceCount: 0,
+      });
     const signal: FeedbackSignal = Object.freeze({
       signalId: stableSignalId(turn, kind),
       kind,
@@ -747,33 +725,23 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       sensitivity: turn.sensitivity,
     });
     const rowRef = await options.feedbackSignals.recordFeedbackSignal(signal);
-    const criterionCapture = await recordCriterion(turn, capture);
     return Object.freeze({
       turn,
       signals: Object.freeze([Object.freeze({ signal, rowRef })]),
       evidenceRefs,
       citations,
       recurrenceCount: 0,
-      ...(criterionCapture ? { criterionCapture } : {}),
     });
   };
 
   const observeTurn = async (request: ObserveLearningTurnRequest): Promise<ObserveLearningResult> => {
     const harvest = await harvestTurn(request.turn);
-    const criterionNotification = (): LearningNotification | null => {
-      const capture = harvest.criterionCapture;
-      if (config.notifications === "off" || !capture?.created) return null;
-      return Object.freeze({
-        mode: config.notifications,
-        kind: "criterion",
-        message: `Learned criterion for ${capture.capture.scope}: ${capture.capture.statement}`,
-      });
-    };
     if (!config.enabled) {
       return Object.freeze({
         status: "no_change",
         reason: "disabled",
         harvest,
+        observation: null,
         notification: null,
         interruption: null,
       });
@@ -783,22 +751,18 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         status: "no_change",
         reason: "sensitive",
         harvest,
+        observation: null,
         notification: null,
         interruption: null,
       });
     }
-    if (harvest.signals.length === 0) {
-      return Object.freeze({
-        status: "no_change",
-        reason: "irrelevant",
-        harvest,
-        notification: null,
-        interruption: null,
-      });
-    }
-
     const runId = nextId("reflect");
     const messages: readonly AgentMessage[] = [
+      {
+        role: "user",
+        name: "current_turn",
+        content: JSON.stringify(harvest.turn),
+      },
       {
         role: "user",
         name: "signals",
@@ -835,24 +799,84 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       ReflectorOutputSchema,
     );
     const reflectionRun = researchRun(runId, "reflector", config.roles.reflector, reflected.trace);
+    const observation = Object.freeze({ ...reflected.value.observation });
+    const semanticKind =
+      observation.kind === "correction"
+        ? ("explicit_correction" as const)
+        : observation.kind === "preference"
+          ? ("preference_expression" as const)
+          : undefined;
+    const classifiedHarvest =
+      semanticKind === undefined
+        ? harvest
+        : await (async (): Promise<SignalHarvestResult> => {
+            const signal: FeedbackSignal = Object.freeze({
+              signalId: stableSignalId(harvest.turn, semanticKind),
+              kind: semanticKind,
+              scope: harvest.turn.scope,
+              evidenceRefs: cloneEvidenceRefs(harvest.turn.evidenceRefs),
+              strength: semanticKind === "explicit_correction" ? 0.95 : 0.8,
+              novelty: 0.5,
+              sensitivity: harvest.turn.sensitivity,
+            });
+            const rowRef = await options.feedbackSignals.recordFeedbackSignal(signal);
+            return Object.freeze({
+              ...harvest,
+              signals: Object.freeze([...harvest.signals, Object.freeze({ signal, rowRef })]),
+            });
+          })();
     if (reflected.value.decision === "no_change") {
       return Object.freeze({
         status: "no_change",
         reason: "reflector_no_change",
-        harvest,
+        harvest: classifiedHarvest,
         reflectionRun,
-        notification: criterionNotification(),
+        observation,
+        notification: null,
         interruption: null,
       });
     }
 
     const reflection = reflected.value;
-    const selectedRecurrence = recurrenceCitations(reflection, harvest.citations);
+    const selectedRecurrence = recurrenceCitations(reflection, classifiedHarvest.citations);
+    const scopeRunId = nextId("scope_verify");
+    const verifiedScope = await options.inference.run(
+      roleRequest({
+        runId: scopeRunId,
+        role: "reflector",
+        configuration: config.roles.reflector,
+        messages: Object.freeze([
+          Object.freeze({
+            role: "user",
+            name: "evidence",
+            content: JSON.stringify({
+              currentScope: request.capability.scope,
+              proposedScope: reflection.scope,
+              scopeRationale: reflection.scopeRationale,
+            }),
+          }),
+        ]),
+        evidenceRefs: Object.freeze([]),
+        ...(request.signal ? { signal: request.signal } : {}),
+      }),
+      ScopeRelationshipVerificationSchema,
+    );
+    const scopeVerificationRun = researchRun(
+      scopeRunId,
+      "reflector",
+      config.roles.reflector,
+      verifiedScope.trace,
+    );
+    validateScopeContract({
+      currentScope: request.capability.scope,
+      reflection,
+      verification: verifiedScope.value,
+    });
     const dedupeKey = normalizedHypothesisKey(reflection.scope, reflection.hypothesis);
     const capability = capabilityFromReflection(request.capability, reflection);
     const makeBrief = (
       experimentId: string,
-      evidenceRefs: readonly EvidenceRef[] = harvest.evidenceRefs,
+      evidenceRefs: readonly EvidenceRef[] = classifiedHarvest.evidenceRefs,
     ): ExperimentBrief =>
       freezeBrief({
         experimentId,
@@ -860,18 +884,25 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         hypothesis: reflection.hypothesis,
         hypothesisDedupeKey: dedupeKey,
         scope: reflection.scope,
+        anticipatedFutureUse: reflection.anticipatedFutureUse,
+        scopeRelationship: reflection.scopeRelationship,
+        scopeRationale: reflection.scopeRationale,
+        staleOrContradictionConditions: reflection.staleOrContradictionConditions,
+        verifiedScopeRelationship: verifiedScope.value.relationship,
+        scopeVerificationReason: verifiedScope.value.reason,
+        scopeVerificationRun,
         capability,
         baselineRevision: request.baselineRevision,
         evidenceRefs,
-        feedbackSignalIds: harvest.signals.map(({ signal }) => signal.signalId),
-        citations: harvest.citations,
+        feedbackSignalIds: classifiedHarvest.signals.map(({ signal }) => signal.signalId),
+        citations: classifiedHarvest.citations,
         recurrenceCitations: selectedRecurrence,
         sourceCases: sourceCasesFrom({
           experimentId,
           scope: reflection.scope,
           cases: reflection.sourceCases,
           evidenceRefs,
-          citations: harvest.citations,
+          citations: classifiedHarvest.citations,
         }),
         recurrenceCount: selectedRecurrence.length,
         reflectionRun,
@@ -894,12 +925,15 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
           table: "experiments",
           rowId: experiment.experimentId,
         });
-        proposed = makeBrief(experimentId, uniqueEvidenceRefs([predecessorRef, ...harvest.evidenceRefs]));
+        proposed = makeBrief(
+          experimentId,
+          uniqueEvidenceRefs([predecessorRef, ...classifiedHarvest.evidenceRefs]),
+        );
         await persistHypothesisExperiment(proposed);
         status = "experiment";
       } else {
-        await attachHarvestToExperiment(current, harvest);
-        proposed = mergeBriefObservation(current, harvest, selectedRecurrence);
+        await attachHarvestToExperiment(current, classifiedHarvest);
+        proposed = mergeBriefObservation(current, classifiedHarvest, selectedRecurrence);
         status = "deduped";
       }
       if (canonicalJson(current) === canonicalJson(proposed)) {
@@ -924,6 +958,11 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     const observed = await serializeHypothesis(dedupeKey, async () => {
       const existing = await options.briefs.findByDedupeKey(dedupeKey);
       if (!existing) {
+        validateBroadeningEvidence({
+          verifiedRelationship: verifiedScope.value.relationship,
+          recurrenceCitations: selectedRecurrence,
+          recurrenceThreshold: config.retrieval.recurrenceThreshold,
+        });
         const brief = makeBrief(experimentIdForHypothesis(dedupeKey));
         await persistHypothesisExperiment(brief);
         try {
@@ -936,33 +975,39 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         }
       }
 
+      validateBroadeningEvidence({
+        verifiedRelationship: verifiedScope.value.relationship,
+        recurrenceCitations: uniqueCitations([...existing.recurrenceCitations, ...selectedRecurrence]),
+        recurrenceThreshold: config.retrieval.recurrenceThreshold,
+      });
       return await reconcileObservation(existing);
     });
 
     if (observed.status === "deduped") {
       return Object.freeze({
         status: "deduped",
-        harvest: Object.freeze({ ...harvest, recurrenceCount: selectedRecurrence.length }),
+        harvest: Object.freeze({ ...classifiedHarvest, recurrenceCount: selectedRecurrence.length }),
         brief: observed.brief,
         reflectionRun,
-        notification: criterionNotification(),
+        observation,
+        notification: null,
         interruption: null,
       });
     }
     return Object.freeze({
       status: "experiment",
-      harvest: Object.freeze({ ...harvest, recurrenceCount: selectedRecurrence.length }),
+      harvest: Object.freeze({ ...classifiedHarvest, recurrenceCount: selectedRecurrence.length }),
       brief: observed.brief,
       reflectionRun,
+      observation,
       notification:
-        criterionNotification() ??
-        (config.notifications === "off"
+        config.notifications === "off"
           ? null
           : Object.freeze({
               mode: config.notifications,
               kind: "experiment",
               message: `Learning experiment ready: ${observed.brief.title}`,
-            })),
+            }),
       interruption: null,
     });
   };
@@ -1226,6 +1271,12 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
             experimentId: request.brief.experimentId,
             hypothesis: request.brief.hypothesis,
             scope: request.brief.scope,
+            anticipatedFutureUse: request.brief.anticipatedFutureUse,
+            scopeRelationship: request.brief.scopeRelationship,
+            scopeRationale: request.brief.scopeRationale,
+            staleOrContradictionConditions: request.brief.staleOrContradictionConditions,
+            verifiedScopeRelationship: request.brief.verifiedScopeRelationship,
+            scopeVerificationReason: request.brief.scopeVerificationReason,
             capability: request.brief.capability,
           }),
         },
@@ -1275,6 +1326,15 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       hypothesis: `A successor revision can address: ${request.failureSummary}`,
       hypothesisDedupeKey: normalizedHypothesisKey(request.parentExperiment.scope, request.failureSummary),
       scope: request.parentExperiment.scope,
+      anticipatedFutureUse: `When revising ${request.capability.name} after this observed failure recurs.`,
+      scopeRelationship: "same",
+      scopeRationale: "The follow-up revises the same capability scope implicated by the evaluated failure.",
+      staleOrContradictionConditions: Object.freeze([
+        "The observed failure no longer reproduces against the current capability revision.",
+        "The successor weakens behavior that the prior evaluation established as useful.",
+      ]),
+      verifiedScopeRelationship: "same",
+      scopeVerificationReason: "The follow-up retains the parent experiment's capability scope.",
       capability: request.capability,
       baselineRevision: predecessorRevision,
       evidenceRefs,

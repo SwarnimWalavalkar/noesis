@@ -3,13 +3,14 @@ import type { CapabilityRevisionRef } from "@noesis/domain";
 import type { BoundedRoleInput, RoleContextPolicy } from "./role-types.ts";
 
 const DEFAULT_MAX_MESSAGES = 24;
-const DEFAULT_MESSAGE_CHARACTERS = 12_000;
-const DEFAULT_TOTAL_CHARACTERS = 48_000;
+const DEFAULT_MESSAGE_CHARACTERS = 16_000;
+const DEFAULT_TOTAL_CHARACTERS = 64_000;
 const DEFAULT_EVIDENCE_REFS = 64;
 
 const isolatedRoleMessageNames = {
+  capability_router: ["turn", "prior_conversation"],
   signal_interpreter: ["turn", "related_history"],
-  reflector: ["signals", "evidence", "active_capabilities", "user_preferences"],
+  reflector: ["current_turn", "signals", "evidence", "active_capabilities", "user_preferences"],
   revision_author: ["hypothesis", "source_cases"],
   case_generator: ["behavioral_objective", "evidence", "user_criteria"],
   trial: ["case", "arm"],
@@ -106,10 +107,11 @@ function boundMessages(
   messages: readonly AgentMessage[],
   policy: RoleContextPolicy,
 ): readonly AgentMessage[] {
-  const selected = messages.slice(0, policy.maxMessages);
+  if (messages.length > policy.maxMessages)
+    throw new Error(`Context policy ${policy.policyId} rejects messages beyond its message bound`);
   const bounded: AgentMessage[] = [];
   let totalCharacters = 0;
-  for (const message of selected) {
+  for (const message of messages) {
     if (policy.allowedMessageNames) {
       if (!message.name || !policy.allowedMessageNames.includes(message.name)) {
         throw new Error(
@@ -117,14 +119,14 @@ function boundMessages(
         );
       }
     }
-    if (policy.forbiddenContent?.test(message.content)) {
-      throw new Error(`Context policy ${policy.policyId} rejects unblinded or protected context`);
-    }
-    const remaining = policy.maxTotalCharacters - totalCharacters;
-    if (remaining <= 0) break;
-    const content = message.content.slice(0, Math.min(policy.maxCharactersPerMessage, remaining));
-    totalCharacters += content.length;
-    bounded.push(Object.freeze({ ...message, content }));
+    if (message.content.length > policy.maxCharactersPerMessage)
+      throw new Error(
+        `Context policy ${policy.policyId} rejects message ${message.name ?? "<unnamed>"} beyond its character bound`,
+      );
+    totalCharacters += message.content.length;
+    if (totalCharacters > policy.maxTotalCharacters)
+      throw new Error(`Context policy ${policy.policyId} rejects messages beyond its total character bound`);
+    bounded.push(Object.freeze({ ...message }));
   }
   return Object.freeze(bounded);
 }

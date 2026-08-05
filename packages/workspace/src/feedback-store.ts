@@ -30,8 +30,10 @@ import {
 import type {
   ActivationMaterializationRecord,
   ActivationOperationRecord,
+  ClassifyExperimentObservationsRequest,
   CommitExperimentOutcomeRequest,
   ExperimentObservationRecord,
+  ExperimentObservationClassificationResult,
   ExperimentOutcomeOperationRecord,
   ExperimentResearchRunRecord,
   ProtectedFeedbackStore,
@@ -325,6 +327,136 @@ export async function createProtectedFeedbackStore(
       db.prepare("SELECT * FROM experiment_observations WHERE observation_id = ?").get(observationId),
       decodeObservation,
     );
+
+  const listObservationsForOutcome = async (
+    outcomeId: string,
+  ): Promise<readonly ExperimentObservationRecord[]> =>
+    Object.freeze(
+      db
+        .prepare(
+          `SELECT * FROM experiment_observations
+           WHERE outcome_id = ? ORDER BY created_at, observation_id`,
+        )
+        .all(outcomeId)
+        .map(decodeObservation),
+    );
+
+  const observationIsDecisionBound = (observationId: string): boolean => {
+    const citedByRun = db
+      .prepare(
+        `SELECT 1 AS found
+         FROM experiment_research_runs AS runs, json_each(runs.cited_observation_ids_json) AS cited
+         WHERE cited.value = ? LIMIT 1`,
+      )
+      .get(observationId);
+    const citedByOutcome = db
+      .prepare(
+        `SELECT 1 AS found
+         FROM experiment_outcomes AS outcomes, json_each(outcomes.evidence_refs_json) AS evidence
+         WHERE json_extract(evidence.value, '$.kind') = 'database_row'
+           AND json_extract(evidence.value, '$.table') = 'experiment_observations'
+           AND json_extract(evidence.value, '$.rowId') = ?
+         LIMIT 1`,
+      )
+      .get(observationId);
+    return citedByRun !== undefined || citedByOutcome !== undefined;
+  };
+
+  const observationClassificationState = async (
+    request: ClassifyExperimentObservationsRequest,
+  ): Promise<ExperimentObservationClassificationResult | undefined> => {
+    const observations = await listObservationsForOutcome(request.outcomeId);
+    const desiredPrecedence =
+      request.classification === "correction"
+        ? "correction"
+        : request.classification === "preference"
+          ? "preference"
+          : "none";
+    for (const observation of observations) {
+      if (observation.sessionId !== request.sessionId || observation.turnId !== request.turnId)
+        throw new Error(
+          `Experiment observation ${observation.observationId} does not belong to the classified turn`,
+        );
+      if (desiredPrecedence === "none" || observation.precedence === desiredPrecedence) continue;
+      if (observation.precedence === "user_veto") continue;
+      if (observation.precedence !== "none")
+        throw new Error(
+          `Experiment observation ${observation.observationId} has conflicting semantic precedence`,
+        );
+    }
+    if (
+      desiredPrecedence === "none" ||
+      observations.every(
+        (observation) =>
+          observation.precedence === desiredPrecedence || observation.precedence === "user_veto",
+      )
+    )
+      return Object.freeze({ status: "unchanged" as const, observations });
+    if (
+      observations.some(
+        (observation) =>
+          observation.precedence === "none" && observationIsDecisionBound(observation.observationId),
+      )
+    )
+      return Object.freeze({ status: "already_bound" as const, observations });
+    return undefined;
+  };
+
+  const classifyObservations = async (
+    request: ClassifyExperimentObservationsRequest,
+  ): Promise<ExperimentObservationClassificationResult> => {
+    const existing = await observationClassificationState(request);
+    if (existing) return existing;
+    const desiredPrecedence =
+      request.classification === "correction"
+        ? "correction"
+        : request.classification === "preference"
+          ? "preference"
+          : "none";
+    database.transaction(() => {
+      const rows = db
+        .prepare(
+          `SELECT * FROM experiment_observations
+           WHERE outcome_id = ? ORDER BY created_at, observation_id`,
+        )
+        .all(request.outcomeId);
+      for (const row of rows) {
+        const observation = decodeObservation(row);
+        if (observation.sessionId !== request.sessionId || observation.turnId !== request.turnId)
+          throw new Error(
+            `Experiment observation ${observation.observationId} does not belong to the classified turn`,
+          );
+        if (desiredPrecedence === "none" || observation.precedence === desiredPrecedence) continue;
+        if (observation.precedence === "user_veto") continue;
+        if (observation.precedence !== "none")
+          throw new Error(
+            `Experiment observation ${observation.observationId} has conflicting semantic precedence`,
+          );
+        if (observationIsDecisionBound(observation.observationId))
+          throw new Error(`Experiment observation ${observation.observationId} became decision-bound`);
+      }
+      if (desiredPrecedence === "none") return;
+      for (const row of rows) {
+        const observation = decodeObservation(row);
+        if (observation.precedence !== "none") continue;
+        db.prepare(
+          `UPDATE experiment_observations SET precedence = ?
+           WHERE observation_id = ? AND precedence = 'none'`,
+        ).run(desiredPrecedence, observation.observationId);
+        recordActivity(
+          { actorId: "protected-feedback", kind: "system" },
+          "experiment_observation.classified",
+          "experiment_observation",
+          observation.observationId,
+          [{ kind: "database_row", table: "outcomes", rowId: request.outcomeId }],
+        );
+      }
+    });
+    return Object.freeze({
+      status: "updated" as const,
+      observations: await listObservationsForOutcome(request.outcomeId),
+    });
+  };
 
   const recordObservation = async (
     record: Omit<ExperimentObservationRecord, "createdAt">,
@@ -935,7 +1067,10 @@ export async function createProtectedFeedbackStore(
   const protectedFeedback = Object.freeze({
     operationForActivation,
     recordObservation,
+    classifyObservations,
+    getObservationClassification: observationClassificationState,
     getObservation,
+    listObservationsForOutcome,
     listObservations: async (experimentId: string, limit: number) => {
       if (!Number.isInteger(limit) || limit < 1 || limit > 1_000)
         throw new Error("Observation query limit must be an integer between 1 and 1000");

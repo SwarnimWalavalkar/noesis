@@ -27,6 +27,62 @@ describe("durable automatic-learning handoff", () => {
     await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
   });
 
+  test("rehydrates legacy version-one briefs with explicit learning-contract defaults", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-legacy-learning-brief-"));
+    roots.push(root);
+    const workspace = await createWorkspaceStore(root);
+    const baseline = capabilityRevisionRef(revision("legacy-r1", fileRef("legacy"), []));
+    const legacyBrief = Object.freeze({
+      experimentId: "experiment-legacy",
+      title: "Legacy learning",
+      hypothesis: "Legacy briefs remain readable",
+      hypothesisDedupeKey: "legacy-dedupe",
+      scope: "research",
+      capability: Object.freeze({
+        capabilityId: "capability-research",
+        name: "Research",
+        scope: "research",
+        intent: "Produce grounded research",
+      }),
+      baselineRevision: baseline,
+      evidenceRefs: Object.freeze([]),
+      feedbackSignalIds: Object.freeze([]),
+      citations: Object.freeze([]),
+      recurrenceCitations: Object.freeze([]),
+      sourceCases: Object.freeze([]),
+      recurrenceCount: 0,
+    });
+    const published = await workspace.definitionPublications.publish({
+      namespace: "learning_experiment_brief",
+      definitionId: legacyBrief.hypothesisDedupeKey,
+      revision: 1,
+      workingPath: `evals/learning-briefs/${legacyBrief.hypothesisDedupeKey}.json`,
+      bytes: new TextEncoder().encode(JSON.stringify(legacyBrief)),
+      sensitivity: "private",
+      provenanceRefs: legacyBrief.evidenceRefs,
+      activity: {
+        kind: "learning.brief_publish",
+        actor: { actorId: "legacy-test", kind: "noesis" },
+        reason: "Legacy version-one brief fixture",
+      },
+    });
+    if (!published.ok) throw new Error(published.error.message);
+
+    const rehydrated = await createWorkspaceExperimentBriefStore(workspace).findByDedupeKey(
+      legacyBrief.hypothesisDedupeKey,
+    );
+
+    expect(rehydrated).toMatchObject({
+      anticipatedFutureUse: "Unspecified in legacy experiment brief",
+      scopeRelationship: "same",
+      scopeRationale: "Unspecified in legacy experiment brief",
+      staleOrContradictionConditions: ["Unspecified in legacy experiment brief"],
+      verifiedScopeRelationship: "same",
+      scopeVerificationReason: "Unspecified in legacy experiment brief",
+    });
+    workspace.close();
+  });
+
   test("rehydrates a deduped brief and exact candidate identity after restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-durable-learning-"));
     roots.push(root);
@@ -63,6 +119,12 @@ describe("durable automatic-learning handoff", () => {
       hypothesis: "Citations reduce corrections",
       hypothesisDedupeKey: "dedupe-citations",
       scope: "research",
+      anticipatedFutureUse: "When preparing future research summaries.",
+      scopeRelationship: "same",
+      scopeRationale: "The source evidence and capability are both scoped to research.",
+      staleOrContradictionConditions: Object.freeze(["The user asks for summaries without citations."]),
+      verifiedScopeRelationship: "same",
+      scopeVerificationReason: "The proposed and current research scopes match.",
       capability: Object.freeze({
         capabilityId: "capability-research",
         name: "Research",
@@ -171,6 +233,12 @@ describe("durable automatic-learning handoff", () => {
       hypothesis: "Citations reduce corrections",
       hypothesisDedupeKey: "dedupe-learning-collision",
       scope: "research",
+      anticipatedFutureUse: "When preparing future research summaries.",
+      scopeRelationship: "same",
+      scopeRationale: "The source evidence and capability are both scoped to research.",
+      staleOrContradictionConditions: Object.freeze(["The user asks for summaries without citations."]),
+      verifiedScopeRelationship: "same",
+      scopeVerificationReason: "The proposed and current research scopes match.",
       capability: Object.freeze({
         capabilityId: "capability-research",
         name: "Research",

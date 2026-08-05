@@ -19,6 +19,10 @@ function completionText(body) {
     .join("\n");
   if (system.includes("role: reflector"))
     return JSON.stringify({
+      observation: {
+        kind: "other",
+        reason: "The controlled provider found no correction or reusable preference.",
+      },
       decision: "no_change",
       reason: "The controlled Pi provider found no durable change.",
     });

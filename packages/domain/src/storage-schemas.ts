@@ -164,6 +164,7 @@ const ExperimentVariantRefSchema = z.strictObject({
 export const FeedbackSignalSchema = z.strictObject({
   signalId: z.string().min(1),
   kind: z.enum([
+    "turn_observation",
     "explicit_correction",
     "preference_expression",
     "recurring_workflow",

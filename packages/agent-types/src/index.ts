@@ -10,15 +10,16 @@ import type {
 } from "@noesis/domain";
 import {
   CapabilityRevisionRefSchema,
+  canonicalJson,
   EvidenceRefSchema,
   FileRevisionRefSchema,
-  canonicalJson,
   sha256,
 } from "@noesis/domain";
 import { z } from "zod";
 
 export type AgentRole =
   | "foreground"
+  | "capability_router"
   | "signal_interpreter"
   | "reflector"
   | "revision_author"
@@ -111,6 +112,23 @@ export interface FrozenCapabilitySelection {
   readonly permissionManifest: PermissionManifest;
 }
 
+export interface FrozenConversationHistoryEntry {
+  readonly messageId: string;
+  readonly messageRef: {
+    readonly kind: "database_row";
+    readonly table: "messages";
+    readonly rowId: string;
+  };
+  readonly role: "user" | "assistant";
+  readonly content: string;
+  readonly createdAt: string;
+  readonly contentDigest: string;
+}
+
+export const MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES = 16;
+export const MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS = 12_000;
+export const MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS = 48_000;
+
 /** The complete SQLite-authoritative input to one foreground execution. */
 export interface FrozenTurnPlan {
   readonly schemaVersion: 1;
@@ -120,6 +138,8 @@ export interface FrozenTurnPlan {
   readonly activationId: string;
   readonly activationRevision: number;
   readonly selectedCapabilities: readonly FrozenCapabilitySelection[];
+  /** Exact bounded SQLite-authoritative history served to this turn. Absent only on legacy plans. */
+  readonly conversationHistory?: readonly FrozenConversationHistoryEntry[];
   readonly renderedSystemPrompt: string;
   readonly provider: string;
   readonly model: string;
@@ -129,6 +149,10 @@ export interface FrozenTurnPlan {
   readonly routing: {
     readonly strategyId: string;
     readonly reason: string;
+    readonly learningAttribution?: {
+      readonly capabilityId: string;
+      readonly reason: string;
+    };
   };
   readonly createdAt: string;
   readonly canonicalDigest: string;
@@ -165,6 +189,18 @@ const FrozenCapabilitySelectionSchema = z.strictObject({
   router: FrozenRevisionMaterialSchema,
   permissionManifest: PermissionManifestSchema,
 });
+const FrozenConversationHistoryEntrySchema = z.strictObject({
+  messageId: z.string().min(1),
+  messageRef: z.strictObject({
+    kind: z.literal("database_row"),
+    table: z.literal("messages"),
+    rowId: z.string().min(1),
+  }),
+  role: z.enum(["user", "assistant"]),
+  content: z.string().min(1),
+  createdAt: z.string().min(1),
+  contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+});
 
 export const FrozenTurnPlanSchema = z.strictObject({
   schemaVersion: z.literal(1),
@@ -174,6 +210,7 @@ export const FrozenTurnPlanSchema = z.strictObject({
   activationId: z.string().min(1),
   activationRevision: z.number().int().positive(),
   selectedCapabilities: z.array(FrozenCapabilitySelectionSchema),
+  conversationHistory: z.array(FrozenConversationHistoryEntrySchema).optional(),
   renderedSystemPrompt: z.string().min(1),
   provider: z.string().min(1),
   model: z.string().min(1),
@@ -183,6 +220,12 @@ export const FrozenTurnPlanSchema = z.strictObject({
   routing: z.strictObject({
     strategyId: z.string().min(1),
     reason: z.string().min(1),
+    learningAttribution: z
+      .strictObject({
+        capabilityId: z.string().min(1),
+        reason: z.string().min(1),
+      })
+      .optional(),
   }),
   createdAt: z.string().min(1),
   canonicalDigest: z.string().regex(/^[a-f0-9]{64}$/u),
@@ -193,7 +236,17 @@ export function frozenTurnPlanDigest(plan: Omit<FrozenTurnPlan, "canonicalDigest
 }
 
 export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
-  const plan = FrozenTurnPlanSchema.parse(value);
+  const decoded = FrozenTurnPlanSchema.parse(value);
+  const { conversationHistory, routing, ...base } = decoded;
+  const { learningAttribution, ...routingBase } = routing;
+  const plan = Object.freeze({
+    ...base,
+    ...(conversationHistory === undefined ? {} : { conversationHistory }),
+    routing: Object.freeze({
+      ...routingBase,
+      ...(learningAttribution === undefined ? {} : { learningAttribution }),
+    }),
+  }) satisfies FrozenTurnPlan;
   for (const selection of plan.selectedCapabilities) {
     const materials = [...selection.promptModules, ...selection.skills, ...selection.tools, selection.router];
     for (const material of materials) {
@@ -203,6 +256,43 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
         );
     }
   }
+  if ((plan.conversationHistory?.length ?? 0) > MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES)
+    throw new Error(`Frozen turn plan ${plan.planId} exceeds the conversation-history message bound`);
+  const historyMessageIds = new Set<string>();
+  let historyCharacters = 0;
+  for (const entry of plan.conversationHistory ?? []) {
+    if (entry.messageRef.rowId !== entry.messageId)
+      throw new Error(
+        `Frozen turn plan ${plan.planId} history ref ${entry.messageRef.rowId} does not match ${entry.messageId}`,
+      );
+    if (sha256(entry.content) !== entry.contentDigest)
+      throw new Error(
+        `Frozen turn plan ${plan.planId} history message ${entry.messageId} failed content digest verification`,
+      );
+    if (entry.content.length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS)
+      throw new Error(
+        `Frozen turn plan ${plan.planId} history message ${entry.messageId} exceeds the per-entry character bound`,
+      );
+    historyCharacters += entry.content.length;
+    if (historyCharacters > MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS)
+      throw new Error(`Frozen turn plan ${plan.planId} exceeds the total history character bound`);
+    if (historyMessageIds.has(entry.messageId))
+      throw new Error(`Frozen turn plan ${plan.planId} repeats history message ${entry.messageId}`);
+    historyMessageIds.add(entry.messageId);
+  }
+  const narrowSelections = plan.selectedCapabilities.filter(
+    (selection) => selection.baseline.kind !== "genesis",
+  );
+  const attribution = plan.routing.learningAttribution;
+  if (narrowSelections.length === 0 && attribution !== undefined)
+    throw new Error(`Frozen turn plan ${plan.planId} attributes learning without a narrow capability`);
+  if (
+    attribution !== undefined &&
+    !narrowSelections.some((selection) => selection.capabilityId === attribution.capabilityId)
+  )
+    throw new Error(
+      `Frozen turn plan ${plan.planId} attributes learning to unselected capability ${attribution.capabilityId}`,
+    );
   const { canonicalDigest, ...unsigned } = plan;
   if (frozenTurnPlanDigest(unsigned) !== canonicalDigest)
     throw new Error(`Frozen turn plan ${plan.planId} failed canonical digest verification`);
@@ -216,6 +306,12 @@ export interface AgentRuntimeRequest {
   readonly thinkingLevel: AgentThinkingLevel;
   readonly systemPrompt: string;
   readonly prompt: string;
+  /** Prior conversation preserved at its original instruction level. */
+  readonly history?: readonly {
+    readonly role: "user" | "assistant";
+    readonly content: string;
+    readonly createdAt?: string;
+  }[];
   readonly activeCapabilities: readonly {
     readonly name: string;
     readonly version: number;
@@ -234,6 +330,8 @@ export interface AgentActionStartEvent {
   readonly input: JsonValue;
   /** Position in the adapter-observed mixed interaction timeline for this turn. */
   readonly timelineSequence?: number;
+  /** The canonical Broker recorder owns persistence for this action. */
+  readonly recordedByBroker?: boolean;
 }
 
 export interface AgentActionUpdateEvent {
@@ -243,6 +341,7 @@ export interface AgentActionUpdateEvent {
   readonly name: string;
   /** A bounded snapshot of current progress, not an unbounded output delta. */
   readonly update: JsonValue;
+  readonly recordedByBroker?: boolean;
 }
 
 export interface AgentActionEndEvent {
@@ -253,6 +352,7 @@ export interface AgentActionEndEvent {
   readonly isError: boolean;
   /** A bounded final result or error representation. */
   readonly result: JsonValue;
+  readonly recordedByBroker?: boolean;
 }
 
 export type AgentActionEvent = AgentActionStartEvent | AgentActionUpdateEvent | AgentActionEndEvent;

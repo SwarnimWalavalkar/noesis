@@ -45,6 +45,7 @@ function turnPlan(
     readonly name: string;
     readonly scope: string;
   }[],
+  learningAttribution?: { readonly capabilityId: string; readonly reason: string },
 ): FrozenTurnPlan {
   return Object.freeze({
     schemaVersion: 1,
@@ -91,14 +92,18 @@ function turnPlan(
       credentialRefs: Object.freeze([]),
     }),
     retrievalCitations: Object.freeze([]),
-    routing: Object.freeze({ strategyId: "scope-match-v1", reason: "fixture" }),
+    routing: Object.freeze({
+      strategyId: "semantic-capability-router-v1",
+      reason: "fixture",
+      ...(learningAttribution ? { learningAttribution: Object.freeze(learningAttribution) } : {}),
+    }),
     createdAt: "2026-07-25T00:00:00.000Z",
     canonicalDigest: "d".repeat(64),
   });
 }
 
 describe("turn settlement", () => {
-  test("records one canonical outcome, attributes the most-specific route, and excludes aborts", async () => {
+  test("records one canonical outcome, uses explicit learning attribution, and excludes aborts", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-turn-settlement-"));
     const workspace = await createWorkspaceStore(root);
     homes.push({ root, workspace });
@@ -119,6 +124,8 @@ describe("turn settlement", () => {
         feedbackInputs.push(input);
         return Object.freeze([]);
       },
+      classifyTurnObservations: async () =>
+        Object.freeze({ status: "unchanged" as const, observations: Object.freeze([]) }),
       evaluateExperiment: async () => undefined,
       experimentComparison: async () => {
         throw new Error("unused");
@@ -155,6 +162,15 @@ describe("turn settlement", () => {
           intent: "narrow",
         }),
       ],
+      [
+        "review-style",
+        Object.freeze({
+          capabilityId: "review-style",
+          name: "Review style",
+          scope: "project/noesis/research/review-only-writing-style",
+          intent: "A longer competing scope that must not own attribution",
+        }),
+      ],
     ]);
     const settlement = createTurnSettlement({
       workspace,
@@ -175,14 +191,27 @@ describe("turn settlement", () => {
       }),
     });
     const context = compileContext([], {}, { maxTokens: 8, maxFragmentTokens: 8 });
-    const plan = turnPlan("session-1", "turn-accepted", [
-      { capabilityId: "general", name: "General", scope: "general" },
+    const plan = turnPlan(
+      "session-1",
+      "turn-accepted",
+      [
+        { capabilityId: "general", name: "General", scope: "general" },
+        {
+          capabilityId: "noesis-research",
+          name: "Noesis research",
+          scope: "project/noesis/research",
+        },
+        {
+          capabilityId: "review-style",
+          name: "Review style",
+          scope: "project/noesis/research/review-only-writing-style",
+        },
+      ],
       {
         capabilityId: "noesis-research",
-        name: "Noesis research",
-        scope: "project/noesis/research",
+        reason: "The semantic router chose research as the primary learning context",
       },
-    ]);
+    );
     seedForegroundTurn(workspace, "session-1", "turn-accepted", plan.planId);
     seedForegroundTurn(workspace, "session-1", "turn-unrelated", "plan-turn-unrelated");
     await workspace.operational.toolCalls.put({
@@ -314,10 +343,23 @@ describe("turn settlement", () => {
         }),
       }),
     ).rejects.toThrow("fixture stops after observing attribution");
-    expect(feedbackInputs.at(-1)?.status).toBe("corrected");
-    expect(observedLearningTurns.at(-1)?.outcome).toBe("corrected");
+    expect(feedbackInputs.at(-1)?.status).toBe("unknown");
+    expect(observedLearningTurns.at(-1)?.outcome).toBe("unknown");
+    await workspace.operational.outcomes.classify({
+      outcomeId: "turn-corrected:outcome",
+      sessionId: "session-1",
+      turnId: "turn-corrected",
+      classification: "correction",
+      reason: "The semantic reflector identified a correction to the preceding behavior.",
+    });
     expect(await workspace.operational.outcomes.get("turn-corrected:outcome")).toMatchObject({
       status: "corrected",
+      metadata: {
+        semanticObservation: {
+          kind: "correction",
+          reason: "The semantic reflector identified a correction to the preceding behavior.",
+        },
+      },
     });
 
     const history = createHistoryPort({
@@ -335,12 +377,7 @@ describe("turn settlement", () => {
       strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
     });
     expect(corrections.ok).toBe(true);
-    if (corrections.ok)
-      expect(corrections.value.fragments[0]?.citation.identity).toEqual({
-        kind: "outcome",
-        sessionId: "session-1",
-        outcomeId: "turn-corrected:outcome",
-      });
+    if (corrections.ok) expect(corrections.value.fragments).toHaveLength(1);
   });
 });
 

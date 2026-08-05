@@ -57,6 +57,7 @@ function mutationPorts(onPin: () => void) {
     }),
     feedback: Object.freeze({
       recordObservation: unsupported,
+      classifyObservations: unsupported,
       putResearchRun: unsupported,
       commitOutcome: unsupported,
     }),
