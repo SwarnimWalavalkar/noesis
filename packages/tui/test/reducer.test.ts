@@ -260,8 +260,11 @@ describe("Noesis TUI reducer", () => {
 
     expect(wide).toContain("32k/114k");
     expect(wide).toContain("2 caps");
+    expect(wide).not.toContain("69b186a1");
+    expect(wide).not.toContain("session");
     expect(normal).toContain("xhigh");
     expect(normal).not.toContain("2 caps");
+    expect(normal).not.toContain("69b186a1");
     expect(narrow).toContain("openai-codex/gpt-5.6-sol");
     expect(narrow).toContain("ctx  28%");
     expect(narrow).not.toContain("session");

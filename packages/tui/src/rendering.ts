@@ -36,12 +36,6 @@ export function createTuiLayout(width: number, height: number): TuiLayout {
   };
 }
 
-export const shortSessionId = (trailId: string | undefined): string => {
-  if (!trailId) return "new";
-  const separator = trailId.indexOf("_");
-  return trailId.slice(separator < 0 ? 0 : separator + 1, (separator < 0 ? 0 : separator + 1) + 8);
-};
-
 const formatTokenCount = (tokens: number): string => {
   if (tokens < 1_000) return String(tokens);
   if (tokens < 10_000) return `${(tokens / 1_000).toFixed(1)}k`;
@@ -64,7 +58,6 @@ export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): re
   const context = formatContextUsage(state.contextUsage);
   const execution = `● ${state.execution.toUpperCase().padEnd(10)}`;
   const model = `${state.provider}/${state.model}`;
-  const session = `session ${shortSessionId(state.trailId)}`;
   const turns = `${String(state.turnCount).padStart(3)} ${state.turnCount === 1 ? "turn" : "turns"}`;
   const capabilities = Object.keys(state.capabilityVersions).length;
   const queue =
@@ -78,7 +71,6 @@ export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): re
       state.reasoningLevel,
       context.percent,
       ...(context.tokens ? [context.tokens] : []),
-      session,
       turns,
       ...(queue ? [queue] : []),
       ...(capabilities > 0 ? [`${String(capabilities)} caps`] : []),
@@ -89,7 +81,6 @@ export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): re
       model,
       state.reasoningLevel,
       context.percent,
-      `s ${shortSessionId(state.trailId)}`,
       `${String(state.turnCount).padStart(3)}t`,
       ...(queue ? [queue] : []),
     ];
@@ -138,7 +129,7 @@ export function helpHint(state: NoesisTuiState): string {
     return "enter queue · /steer redirect · alt+↑ edit newest · esc interrupt";
   if (state.interaction.queuePaused && state.interaction.queuedInputs.length > 0)
     return "/queue resume · alt+↑ edit newest";
-  return "? help · ctrl+o inspect runs · shift+enter newline · ctrl+g editor · ctrl+c quit";
+  return "? help · ctrl+o inspect runs · ctrl+c quit";
 }
 
 export function renderQueuedInputs(state: NoesisTuiState, width: number, maxVisible = 3): readonly string[] {

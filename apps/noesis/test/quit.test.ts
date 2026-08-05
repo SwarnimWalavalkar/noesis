@@ -236,21 +236,19 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
   );
 
   test("the resume picker selects the most recent session in a real PTY", async () => {
-    let selectedTrailId = "";
     const { output, result } = await runPtyExit("picker-select-quit", async (home) => {
       const runtime = await createTestRuntime(home);
       const older = await runtime.startTrail({ title: "older" });
       await runtime.debug.runTurn(older.trailId, "older real PTY history");
       const selected = await runtime.startTrail({ title: "newer" });
       await runtime.debug.runTurn(selected.trailId, "selected real PTY history");
-      selectedTrailId = selected.trailId;
       await runtime.shutdown();
       return ["--resume"];
     });
 
     expect(output).toContain("resume a session");
-    expect(output).toContain(`s ${selectedTrailId.slice(6, 14)}`);
     expect(output).toContain("selected real PTY history");
+    expect(output).not.toContain("older real PTY history");
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
 
@@ -258,7 +256,6 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     "quit-lf",
     "ctrl-c",
   ] as const)("--continue renders the latest history and %s cleanup exits cleanly", async (action) => {
-    let selectedTrailId = "";
     const { output, result } = await runPtyExit(action, async (home) => {
       const runtime = await createTestRuntime(home);
       const older = await runtime.startTrail({ title: "older continue" });
@@ -267,29 +264,27 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
         title: "latest continue",
       });
       await runtime.debug.runTurn(selected.trailId, "latest continue PTY history");
-      selectedTrailId = selected.trailId;
       await runtime.shutdown();
       return ["--continue"];
     });
 
-    expect(output).toContain(`s ${selectedTrailId.slice(6, 14)}`);
     expect(output).toContain("latest continue PTY history");
     expect(output).not.toContain("older continue PTY history");
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
 
   test("direct resume restores one exact session and picker cancellation exits cleanly", async () => {
-    let selectedTrailId = "";
     const direct = await runPtyExit("quit-lf", async (home) => {
       const runtime = await createTestRuntime(home);
       const selected = await runtime.startTrail({ title: "direct" });
       await runtime.debug.runTurn(selected.trailId, "direct real PTY history");
-      selectedTrailId = selected.trailId;
+      const other = await runtime.startTrail({ title: "other direct" });
+      await runtime.debug.runTurn(other.trailId, "other direct PTY history");
       await runtime.shutdown();
       return ["--resume", selected.trailId];
     });
-    expect(direct.output).toContain(`s ${selectedTrailId.slice(6, 14)}`);
     expect(direct.output).toContain("direct real PTY history");
+    expect(direct.output).not.toContain("other direct PTY history");
     expect(direct.result).toEqual({ code: 0, signal: null });
 
     const cancelled = await runPtyExit("picker-cancel", async (home) => {

@@ -1709,7 +1709,6 @@ describe("Noesis TUI lifecycle", () => {
 
     const running = startNoesisTui(runtime, { session: { mode: "continue" } }, terminal);
     await vi.waitFor(() => expect(terminal.output).toContain("selected-latest-history"));
-    expect(terminal.output).toContain(`s ${selected.trailId.slice(6, 14)}`);
     expect(terminal.output).toContain("preserved-provid");
     expect(terminal.output).not.toContain("other-history");
     terminal.type("/quit\n");
@@ -1743,8 +1742,9 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("resume a session"));
     terminal.send("\u001b[B");
     terminal.send("\r");
-    await vi.waitFor(() => expect(terminal.output).toContain(`s ${older.trailId.slice(6, 14)}`));
+    await vi.waitFor(() => expect(terminal.output).toContain("older-history"));
     expect(terminal.output).toContain("older-history");
+    expect(terminal.output).not.toContain("newer-history");
     terminal.type("/quit\n");
     await running;
     expect(runtime.resumedTrailIds.at(-1)).toBe(older.trailId);

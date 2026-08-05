@@ -6,6 +6,7 @@ import {
   type SelectListTheme,
   type TUI,
 } from "@earendil-works/pi-tui";
+import { isNativeModifierPressed } from "@earendil-works/pi-tui/dist/native-modifiers.js";
 import {
   createNoesisCommandAutocompleteProvider,
   loadSkillSlashCommands,
@@ -195,14 +196,21 @@ export function createSafeEditor(
   const handleInput = (data: string): void => {
     clearAmbiguityTimer();
     if (inputState.kind === "keyboard") {
+      const keyboardData =
+        process.platform === "darwin" &&
+        inputState.pending.length === 0 &&
+        data === "\r" &&
+        isNativeModifierPressed("shift")
+          ? "\u001b[13;2u"
+          : data;
       const previousPending = inputState.pending;
-      const combined = `${inputState.pending}${data}`;
+      const combined = `${inputState.pending}${keyboardData}`;
       const continuesPasteStart =
         BRACKETED_PASTE_START.startsWith(combined) || combined.startsWith(BRACKETED_PASTE_START);
       if (previousPending === "\u001b" && !continuesPasteStart) {
         inputState = { kind: "keyboard", pending: "" };
         delegateKeyboardInput(previousPending);
-        handleInput(data);
+        handleInput(keyboardData);
         return;
       }
       const start = combined.indexOf(BRACKETED_PASTE_START);
