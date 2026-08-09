@@ -4,10 +4,12 @@ import type {
   CompoundingReplayRecord,
   EvaluationRecord,
   ExperimentTrial,
+  ProjectRef,
   PreflightPlan,
   PreflightReport,
+  WorkingAdjustment,
 } from "./research.ts";
-import { DATABASE_TABLES } from "./research.ts";
+import { DATABASE_TABLES, WORKING_ADJUSTMENT_LIMITS } from "./research.ts";
 
 const ContentDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const StoredPathSchema = z.string().min(1);
@@ -77,6 +79,21 @@ export const EvidenceRefSchema = z.discriminatedUnion("kind", [
   EvidenceRevisionRefSchema,
   ArtifactFileRefSchema,
 ]);
+
+export const ProjectRefSchema = z.strictObject({
+  projectId: z.string().min(1),
+  root: z.string().min(1),
+}) satisfies z.ZodType<ProjectRef>;
+
+export const WorkingAdjustmentSchema = z.strictObject({
+  adjustmentId: z.string().min(1),
+  scope: ProjectRefSchema,
+  observation: z.string().min(1).max(WORKING_ADJUSTMENT_LIMITS.observationChars),
+  strategy: z.string().min(1).max(WORKING_ADJUSTMENT_LIMITS.strategyChars),
+  successSignal: z.string().min(1).max(WORKING_ADJUSTMENT_LIMITS.successSignalChars),
+  evidenceRefs: z.array(EvidenceRefSchema).min(1).max(WORKING_ADJUSTMENT_LIMITS.evidenceRefs),
+  createdFromTurnId: z.string().min(1),
+}) satisfies z.ZodType<WorkingAdjustment>;
 
 export const CapabilityRevisionRefSchema = z.strictObject({
   kind: z.literal("capability_revision"),
@@ -225,6 +242,7 @@ const ExperimentBaseShape = {
   activatedRevision: CapabilityRevisionRefSchema.optional(),
   feedbackSignalIds: z.array(z.string().min(1)),
   followUpExperimentId: z.string().min(1).optional(),
+  sourceAdjustmentId: z.string().min(1).optional(),
 };
 
 export const ExperimentSchema = z.discriminatedUnion("status", [

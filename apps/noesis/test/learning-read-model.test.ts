@@ -7,7 +7,12 @@ import type {
   RuntimeCoordinator,
 } from "@noesis/runtime";
 import { describe, expect, test } from "vitest";
-import { learningActivityForSession, loadLearningActivityForSession } from "../src/learning-read-model.ts";
+import {
+  enrichLearningActivityWithWorkingAdjustments,
+  learningActivityForSession,
+  loadLearningActivityForSession,
+  loadLearningInspectionForSession,
+} from "../src/learning-read-model.ts";
 
 const evidence = Object.freeze({
   kind: "database_row" as const,
@@ -86,6 +91,7 @@ function reflection(input: {
     turn: Object.freeze({
       sessionId: input.sessionId,
       turnId: `${input.sessionId}:turn`,
+      servedWorkingAdjustmentOutcomes: Object.freeze([]),
       scope: "general",
       userMessage: "Useful completed work",
       outcome: "accepted",
@@ -191,6 +197,140 @@ function preflight(
 }
 
 describe("ambient learning read model", () => {
+  test("inspects authoritative working adjustment state and bounded served evidence", async () => {
+    const projected = learningActivityForSession(
+      [
+        reflection({
+          jobId: "reflection-adjusted",
+          sessionId: "target-session",
+          status: "completed",
+          updatedAt: "2026-08-01T00:00:02.000Z",
+          result: {
+            status: "adjusted",
+            projectId: "project-1",
+            adjustmentId: "adjustment-1",
+            rationale: "Try a narrower research strategy",
+          },
+        }),
+      ],
+      "target-session",
+    );
+    const adjustment = Object.freeze({
+      adjustmentId: "adjustment-1",
+      scope: Object.freeze({ projectId: "project-1", root: "/workspace/project" }),
+      observation: "The broad research path delayed the useful answer.",
+      strategy: "Resolve the decisive unknown before expanding the search.",
+      successSignal: "The next answer directly resolves the user's decision.",
+      evidenceRefs: Object.freeze([evidence]),
+      createdFromTurnId: "target-session:turn",
+    });
+    const settledEvidence = Array.from({ length: 10 }, (_, index) =>
+      Object.freeze({
+        planId: `plan-${String(index)}`,
+        sessionId: "target-session",
+        turnId: `served-turn-${String(index)}`,
+        outcomeId: `outcome-${String(index)}`,
+        settledAt: `2026-08-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+      }),
+    );
+    const enriched = await enrichLearningActivityWithWorkingAdjustments(projected, {
+      workingAdjustments: {
+        get: async (adjustmentId) => (adjustmentId === adjustment.adjustmentId ? adjustment : undefined),
+        getActive: async () => adjustment,
+        listSettledEvidence: async ({ limit }) => Object.freeze(settledEvidence.slice(0, limit)),
+      },
+      outcomes: {
+        get: async (outcomeId) =>
+          Object.freeze({
+            outcomeId,
+            sessionId: "target-session",
+            turnId: `served-${outcomeId}`,
+            status: "accepted" as const,
+            summary: `Accepted evidence for ${outcomeId}`,
+            sensitivity: "normal" as const,
+            createdAt: "2026-08-01T00:00:00.000Z",
+            metadata: Object.freeze({}),
+          }),
+      },
+    });
+
+    expect(enriched[0]?.workingAdjustment).toEqual(
+      expect.objectContaining({
+        adjustmentId: "adjustment-1",
+        status: "active",
+        strategy: "Resolve the decisive unknown before expanding the search.",
+        successSignal: "The next answer directly resolves the user's decision.",
+      }),
+    );
+    expect(enriched[0]?.workingAdjustment?.servedEvidence).toHaveLength(8);
+    expect(enriched[0]?.workingAdjustment?.servedEvidence[0]).toEqual(
+      expect.objectContaining({ outcomeId: "outcome-0", outcome: "accepted" }),
+    );
+    const inactive = await enrichLearningActivityWithWorkingAdjustments(projected, {
+      workingAdjustments: {
+        get: async () => adjustment,
+        getActive: async () => undefined,
+        listSettledEvidence: async () => Object.freeze([]),
+      },
+      outcomes: { get: async () => undefined },
+    });
+    expect(inactive[0]?.workingAdjustment?.status).toBe("inactive");
+
+    const emptyCoordinator: Pick<RuntimeCoordinator, "listJobPage"> = {
+      listJobPage: async () => Object.freeze({ jobs: Object.freeze([]), exhausted: true }),
+    };
+    const source = {
+      workingAdjustments: {
+        get: async () => adjustment,
+        getActive: async () => adjustment,
+        listSettledEvidence: async () => Object.freeze([]),
+      },
+      outcomes: { get: async () => undefined },
+    };
+    const fresh = await loadLearningInspectionForSession(
+      emptyCoordinator,
+      "fresh-session",
+      "project-1",
+      source,
+    );
+    expect(fresh.activity).toEqual([]);
+    expect(fresh.currentWorkingAdjustment).toEqual(
+      expect.objectContaining({ adjustmentId: "adjustment-1", status: "active" }),
+    );
+
+    const representedCoordinator: Pick<RuntimeCoordinator, "listJobPage"> = {
+      listJobPage: async ({ kind } = {}) =>
+        Object.freeze({
+          jobs: Object.freeze(
+            kind === "runtime.reflect_turn"
+              ? [
+                  reflection({
+                    jobId: "represented-adjustment",
+                    sessionId: "target-session",
+                    status: "completed",
+                    updatedAt: "2026-08-01T00:00:02.000Z",
+                    result: {
+                      status: "adjusted",
+                      projectId: "project-1",
+                      adjustmentId: "adjustment-1",
+                    },
+                  }),
+                ]
+              : [],
+          ),
+          exhausted: true,
+        }),
+    };
+    const represented = await loadLearningInspectionForSession(
+      representedCoordinator,
+      "target-session",
+      "project-1",
+      source,
+    );
+    expect(represented.currentWorkingAdjustment?.adjustmentId).toBe("adjustment-1");
+    expect(represented.activity[0]?.workingAdjustment).toBeUndefined();
+  });
+
   test("projects authoritative job state and follows only this session's experiment chain", () => {
     const experimentId = "experiment-session-a";
     const activity = learningActivityForSession(
@@ -207,6 +347,18 @@ describe("ambient learning read model", () => {
           status: "completed",
           updatedAt: "2026-08-01T00:00:02.000Z",
           result: { status: "no_change", reason: "The turn already worked well" },
+        }),
+        reflection({
+          jobId: "reflection-adjusted",
+          sessionId: "session-a",
+          status: "completed",
+          updatedAt: "2026-08-01T00:00:02.500Z",
+          result: {
+            status: "adjusted",
+            projectId: "project_noesis",
+            adjustmentId: "adjustment_1",
+            rationale: "Verify observable state before claiming success",
+          },
         }),
         reflection({
           jobId: "reflection-experiment",
@@ -260,11 +412,19 @@ describe("ambient learning read model", () => {
       "preflight-complete",
       "author-failed",
       "reflection-experiment",
+      "reflection-adjusted",
       "reflection-no-change",
       "reflection-running",
     ]);
     expect(activity).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          jobId: "reflection-adjusted",
+          status: "adjusted",
+          projectId: "project_noesis",
+          adjustmentId: "adjustment_1",
+          summary: "Verify observable state before claiming success",
+        }),
         expect.objectContaining({
           jobId: "reflection-running",
           stage: "reflection",

@@ -116,6 +116,26 @@ describe("Noesis slash commands", () => {
             summary: "The turn already worked well",
             updatedAt: "2026-08-01T00:00:02.000Z",
             turnId: "turn-2",
+            projectId: "project-1",
+            adjustmentId: "adjustment-1",
+            workingAdjustment: Object.freeze({
+              adjustmentId: "adjustment-1",
+              projectId: "project-1",
+              status: "active" as const,
+              strategy: "Start research by identifying the decisive unknown.",
+              successSignal: "The answer resolves the user's actual decision.",
+              servedEvidence: Object.freeze([
+                Object.freeze({
+                  planId: "plan-1",
+                  sessionId: "trail-learning",
+                  turnId: "turn-served",
+                  outcomeId: "outcome-1",
+                  outcome: "accepted" as const,
+                  summary: "The focused research answer was accepted.",
+                  settledAt: "2026-08-01T00:00:01.500Z",
+                }),
+              ]),
+            }),
           }),
           Object.freeze({
             jobId: "job-author-failed",
@@ -159,8 +179,48 @@ describe("Noesis slash commands", () => {
     expect(published[0]).toContain("✓ completed · preflight");
     expect(published[0]).toContain("experiment experiment-1");
     expect(published[0]).toContain("capability research-brief@research-brief-v2");
+    expect(published[0]).toContain("working adjustment · active");
+    expect(published[0]).toContain("strategy · Start research by identifying the decisive unknown.");
+    expect(published[0]).toContain("success signal · The answer resolves the user's actual decision.");
+    expect(published[0]).toContain("served evidence · 1");
+    expect(published[0]).toContain("accepted · turn turn-served");
+    expect(published[0]).toContain("The focused research answer was accepted.");
     expect(published[0]).toContain("No change is a normal outcome");
     expect(published[0]).not.toContain("approve");
+  });
+
+  test("inspects the active project adjustment in a fresh session without inventing activity", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const runtime = Object.freeze({
+      ...base,
+      inspectLearning: async () =>
+        Object.freeze({
+          activity: Object.freeze([]),
+          currentWorkingAdjustment: Object.freeze({
+            adjustmentId: "adjustment-fresh",
+            projectId: "project-1",
+            status: "active" as const,
+            strategy: "Inspect observable state before making completion claims.",
+            successSignal: "Claims cite the observed state.",
+            servedEvidence: Object.freeze([]),
+          }),
+        }),
+    });
+    const published: string[] = [];
+
+    await runSlashCommand("/learning", {
+      runtime,
+      trailId: "fresh-session",
+      publishInspector: (message) => published.push(message),
+      dispatch: () => undefined,
+      requestRender: () => undefined,
+    });
+
+    expect(published).toHaveLength(1);
+    expect(published[0]).toContain("Learning activity · 0");
+    expect(published[0]).toContain("Current project working adjustment · active");
+    expect(published[0]).toContain("strategy · Inspect observable state");
+    expect(published[0]).toContain("success signal · Claims cite the observed state.");
   });
 
   test("paginates complete learning history instead of truncating later entries", async () => {

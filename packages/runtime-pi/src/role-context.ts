@@ -10,7 +10,14 @@ const DEFAULT_EVIDENCE_REFS = 64;
 const isolatedRoleMessageNames = {
   capability_router: ["turn", "prior_conversation"],
   signal_interpreter: ["turn", "related_history"],
-  reflector: ["current_turn", "signals", "evidence", "active_capabilities", "user_preferences"],
+  reflector: [
+    "current_turn",
+    "signals",
+    "evidence",
+    "active_capabilities",
+    "user_preferences",
+    "working_adjustment_context",
+  ],
   revision_author: ["hypothesis", "source_cases"],
   case_generator: ["behavioral_objective", "evidence", "user_criteria"],
   trial: ["case", "arm"],

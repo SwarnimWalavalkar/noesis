@@ -4,6 +4,7 @@ export const DATABASE_TABLES = [
   "tool_calls",
   "outcomes",
   "jobs",
+  "working_adjustments",
   "experiments",
   "experiment_trials",
   "feedback_signals",
@@ -55,6 +56,30 @@ export interface ArtifactFileRef {
 }
 
 export type EvidenceRef = DatabaseRowRef | FileRevisionRef | EvidenceRevisionRef | ArtifactFileRef;
+
+/** Host-derived identity for the canonical active directory. */
+export interface ProjectRef {
+  readonly projectId: string;
+  readonly root: string;
+}
+
+export const WORKING_ADJUSTMENT_LIMITS = Object.freeze({
+  observationChars: 2_048,
+  strategyChars: 4_096,
+  successSignalChars: 1_024,
+  evidenceRefs: 32,
+});
+
+/** One immutable, project-local strategy hypothesis produced by reflection. */
+export interface WorkingAdjustment {
+  readonly adjustmentId: string;
+  readonly scope: ProjectRef;
+  readonly observation: string;
+  readonly strategy: string;
+  readonly successSignal: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly createdFromTurnId: string;
+}
 
 export type ActorKind = "user" | "noesis" | "external_system" | "system";
 
@@ -190,6 +215,7 @@ interface ExperimentBase {
   readonly activatedRevision?: CapabilityRevisionRef;
   readonly feedbackSignalIds: readonly string[];
   readonly followUpExperimentId?: string;
+  readonly sourceAdjustmentId?: string;
 }
 
 export interface OpenExperiment extends ExperimentBase {

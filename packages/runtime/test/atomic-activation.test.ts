@@ -1,6 +1,7 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type FrozenTurnPlan, frozenTurnPlanDigest } from "@noesis/agent-types";
 import { createWorkspaceCapabilityControlStore, type CapabilityControlReadModel } from "@noesis/capabilities";
 import {
   canonicalJson,
@@ -40,6 +41,64 @@ const autonomy = Object.freeze({
 const protectedRuntime = (workspace: NoesisWorkspaceStore): ProtectedWorkspaceRuntime =>
   createWorkspaceRuntimeInternals(workspace).protectedRuntime;
 
+async function recordCompletedSourceTurn(
+  workspace: NoesisWorkspaceStore,
+  sessionId: string,
+  turnId: string,
+): Promise<void> {
+  await workspace.operational.sessions.put({
+    sessionId,
+    title: "Working adjustment source",
+    status: "idle",
+    provider: "controlled",
+    model: "controlled",
+    runtime: "pi",
+    createdAt: "2026-07-26T00:00:00.000Z",
+    updatedAt: "2026-07-26T00:00:00.000Z",
+    metadata: Object.freeze({}),
+  });
+  const runtime = protectedRuntime(workspace);
+  const activation = await runtime.activations.current();
+  if (activation === undefined) throw new Error("Source turn requires an active baseline");
+  const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
+    schemaVersion: 1,
+    planId: `plan-${turnId}`,
+    sessionId,
+    turnId,
+    activationId: activation.activationId,
+    activationRevision: activation.revision,
+    selectedCapabilities: Object.freeze([]),
+    renderedSystemPrompt: "Controlled source turn",
+    provider: "controlled",
+    model: "controlled",
+    thinkingLevel: "off",
+    permissionSnapshot: Object.freeze({ effects: [], resourcePatterns: [], credentialRefs: [] }),
+    retrievalCitations: Object.freeze([]),
+    routing: Object.freeze({ strategyId: "baseline", reason: "Controlled source turn" }),
+    createdAt: "2026-07-26T00:00:00.000Z",
+  };
+  await runtime.activations.admitTurnPlan(
+    Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) }),
+  );
+  const outcomeId = `${turnId}:outcome`;
+  await workspace.operational.outcomes.put({
+    outcomeId,
+    sessionId,
+    turnId,
+    status: "accepted",
+    summary: "The source turn completed before reflection.",
+    sensitivity: "normal",
+    createdAt: "2026-07-26T00:00:01.000Z",
+    metadata: Object.freeze({}),
+  });
+  await workspace.operational.foregroundTurns.settle({
+    turnId,
+    outcomeId,
+    status: "completed",
+    settledAt: "2026-07-26T00:00:01.000Z",
+  });
+}
+
 interface FixtureOptions {
   readonly suffix?: string;
   readonly capabilityId?: string;
@@ -54,6 +113,7 @@ interface FixtureOptions {
   readonly authorityHome?: string;
   readonly newSlot?: boolean;
   readonly claimedCrossCapabilityPredecessor?: boolean;
+  readonly sourceAdjustmentId?: string;
 }
 
 interface Fixture {
@@ -202,7 +262,32 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     baselineRevision: baselineRef,
     candidateRevisions: Object.freeze([candidateRef]),
     feedbackSignalIds: Object.freeze([]),
+    ...(options.sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId: options.sourceAdjustmentId }),
   });
+  if (options.sourceAdjustmentId !== undefined) {
+    await protectedRuntime(workspace).activations.bootstrapGenesis({
+      capabilityRevision: baselineRef,
+      activeDefinitions: Object.freeze({
+        [`${baselineCapabilityId}:prompt`]: baselinePrompt,
+        [`${baselineCapabilityId}:skill`]: baselineSkill,
+        [`${baselineCapabilityId}:tool`]: baselineTool,
+        [`${baselineCapabilityId}:router`]: baselineRouter,
+      }),
+    });
+    await recordCompletedSourceTurn(workspace, `session-${suffix}`, `turn-${suffix}`);
+    await protectedRuntime(workspace).workingAdjustments.apply({
+      adjustment: Object.freeze({
+        adjustmentId: options.sourceAdjustmentId,
+        scope: Object.freeze({ projectId: `project-${suffix}`, root }),
+        observation: "A project-local strategy may improve the next turn.",
+        strategy: "Verify observable state before claiming success.",
+        successSignal: "The activation preflight confirms the durable candidate.",
+        evidenceRefs: Object.freeze([manifestRevision]),
+        createdFromTurnId: `turn-${suffix}`,
+      }),
+      expectedActiveAdjustmentId: null,
+    });
+  }
   await workspace.research.experiments.putExperiment(
     Object.freeze({ ...experimentBase, status: "hypothesis" as const }),
   );
@@ -403,6 +488,50 @@ describe("AC-09 preflight policy", () => {
 });
 
 describe("AC-09 atomic activation with real WorkspaceStore", () => {
+  test("conditionally unapplies the exact source adjustment in the activation commit", async () => {
+    const fixture = await createFixture({
+      suffix: "source-adjustment",
+      sourceAdjustmentId: "adjustment-source",
+    });
+
+    expect(await fixture.workspace.workingAdjustments.getActive("project-source-adjustment")).toMatchObject({
+      adjustmentId: "adjustment-source",
+    });
+    await expect(fixture.controller.activateFromPreflight(fixture.handoff)).resolves.toMatchObject({
+      ok: true,
+      status: "activated",
+    });
+    expect(await fixture.workspace.workingAdjustments.getActive("project-source-adjustment")).toBeUndefined();
+  });
+
+  test("preserves a newer working adjustment when an older source candidate activates", async () => {
+    const fixture = await createFixture({
+      suffix: "replaced-source-adjustment",
+      sourceAdjustmentId: "adjustment-source-old",
+    });
+    await recordCompletedSourceTurn(fixture.workspace, "session-replacement", "turn-replacement");
+    await protectedRuntime(fixture.workspace).workingAdjustments.apply({
+      adjustment: Object.freeze({
+        adjustmentId: "adjustment-source-new",
+        scope: Object.freeze({ projectId: "project-replaced-source-adjustment", root: fixture.root }),
+        observation: "Newer evidence supports a replacement strategy.",
+        strategy: "Preserve the newer project-local hypothesis.",
+        successSignal: "Later turns continue to receive this exact adjustment.",
+        evidenceRefs: Object.freeze([fixture.handoff.manifestRevision]),
+        createdFromTurnId: "turn-replacement",
+      }),
+      expectedActiveAdjustmentId: "adjustment-source-old",
+    });
+
+    await expect(fixture.controller.activateFromPreflight(fixture.handoff)).resolves.toMatchObject({
+      ok: true,
+      status: "activated",
+    });
+    expect(
+      await fixture.workspace.workingAdjustments.getActive("project-replaced-source-adjustment"),
+    ).toMatchObject({ adjustmentId: "adjustment-source-new" });
+  });
+
   test("auto-activates a low-risk pass only after the complete immutable set is materialized", async () => {
     const fixture = await createFixture();
     const result = await fixture.controller.activateFromPreflight(fixture.handoff);

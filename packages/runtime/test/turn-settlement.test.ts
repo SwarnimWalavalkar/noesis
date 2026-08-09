@@ -52,6 +52,7 @@ function turnPlan(
     planId: `plan-${turnId}`,
     sessionId,
     turnId,
+    project: Object.freeze({ projectId: "project_test", root: "/workspace/noesis" }),
     activationId: "activation-test",
     activationRevision: 2,
     selectedCapabilities: Object.freeze(
@@ -314,7 +315,7 @@ describe("turn settlement", () => {
           frozenTurnPlan: abortedPlan,
         }),
       }),
-    ).resolves.toMatchObject({ outcome: "aborted" });
+    ).resolves.toMatchObject({ result: { outcome: "aborted" } });
     expect(feedbackInputs).toHaveLength(1);
     const outcomes = await workspace.operational.outcomes.listForSession("session-1");
     expect(outcomes).toHaveLength(2);

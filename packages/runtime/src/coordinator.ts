@@ -20,6 +20,7 @@ import {
   type CoordinatorJobKind,
   type CoordinatorJobView,
   type CoordinatorPreflightResult,
+  type CoordinatorWorkingAdjustmentMutationPort,
   coordinatorJobPayload,
   coordinatorOperationError,
   DEFAULT_RUNTIME_COORDINATOR_CONFIG,
@@ -34,6 +35,7 @@ import { authorizeScheduledJob, runScheduledJob } from "./scheduled-execution.ts
 
 export interface RuntimeCoordinatorOptions {
   readonly workspace: Pick<WorkspaceStore, "jobs" | "research">;
+  readonly workingAdjustments: CoordinatorWorkingAdjustmentMutationPort;
   readonly authority: AuthorityBoundary;
   readonly research: RuntimeCoordinatorResearchPort;
   readonly config?: RuntimeCoordinatorConfig;
@@ -48,6 +50,14 @@ export interface RuntimeCoordinator {
   readonly cancel: (jobId: string) => Promise<DurableJobRecord | undefined>;
   readonly retry: (jobId: string, additionalBudget?: number) => Promise<CoordinatorJobView>;
   readonly getJob: (jobId: string) => Promise<CoordinatorJobView | undefined>;
+  readonly waitForTerminal: (request: {
+    readonly jobId: string;
+    readonly deadline: Date;
+    readonly signal?: AbortSignal;
+  }) => Promise<
+    | { readonly status: "terminal"; readonly job: CoordinatorJobView }
+    | { readonly status: "timeout" | "missing" | "cancelled" }
+  >;
   readonly listJobs: (request?: {
     readonly kind?: CoordinatorJobKind;
     readonly limit?: number;
@@ -84,6 +94,10 @@ function stablePreflightId(experimentId: string, bundleDigest: string): string {
 
 function stablePlanId(preflightId: string): string {
   return `plan_${sha256(preflightId).slice(0, 32)}`;
+}
+
+function stableWorkingAdjustmentId(parentJobId: string, decision: unknown): string {
+  return `adjustment_${sha256(canonicalJson({ parentJobId, decision })).slice(0, 32)}`;
 }
 
 function payloadRefsForExperiment(experimentId: string) {
@@ -322,6 +336,87 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         routingStrategyId: payload.routingStrategyId,
         telemetry: reflected.telemetry,
       });
+    if (reflected.status === "apply_working_adjustment") {
+      const adjustmentId = stableWorkingAdjustmentId(parentJobId, {
+        status: reflected.status,
+        observation: reflected.observation,
+        project: reflected.project,
+        expectedActiveAdjustmentId: reflected.expectedActiveAdjustmentId,
+        rationale: reflected.rationale,
+        strategy: reflected.strategy,
+        successSignal: reflected.successSignal,
+        evidenceRefs: reflected.evidenceRefs,
+        createdFromTurnId: payload.turn.turnId,
+      });
+      const applied = await options.workingAdjustments.apply({
+        adjustment: Object.freeze({
+          adjustmentId,
+          scope: Object.freeze({ ...reflected.project }),
+          observation: reflected.observation.reason,
+          strategy: reflected.strategy,
+          successSignal: reflected.successSignal,
+          evidenceRefs: Object.freeze(
+            reflected.evidenceRefs.map((reference) => Object.freeze({ ...reference })),
+          ),
+          createdFromTurnId: payload.turn.turnId,
+        }),
+        expectedActiveAdjustmentId: reflected.expectedActiveAdjustmentId,
+      });
+      if (applied.status === "stale")
+        return Object.freeze({
+          status: "stale" as const,
+          requestedDecision: reflected.status,
+          projectId: reflected.project.projectId,
+          expectedActiveAdjustmentId: reflected.expectedActiveAdjustmentId,
+          activeAdjustmentId: applied.currentActiveAdjustmentId,
+          adjustmentId,
+          observation: reflected.observation,
+          retrievalStrategyId: payload.retrievalStrategyId,
+          routingStrategyId: payload.routingStrategyId,
+          telemetry: reflected.telemetry,
+        });
+      return Object.freeze({
+        status: reflected.expectedActiveAdjustmentId === null ? ("adjusted" as const) : ("replaced" as const),
+        adjustmentId,
+        projectId: reflected.project.projectId,
+        rationale: reflected.rationale,
+        observation: reflected.observation,
+        expectedActiveAdjustmentId: reflected.expectedActiveAdjustmentId,
+        replacedAdjustmentId: reflected.expectedActiveAdjustmentId ?? applied.replacedAdjustmentId,
+        retrievalStrategyId: payload.retrievalStrategyId,
+        routingStrategyId: payload.routingStrategyId,
+        telemetry: reflected.telemetry,
+      });
+    }
+    if (reflected.status === "unapply_working_adjustment") {
+      const unapplied = await options.workingAdjustments.unapply({
+        projectId: reflected.project.projectId,
+        expectedActiveAdjustmentId: reflected.expectedActiveAdjustmentId,
+      });
+      if (unapplied.status === "stale")
+        return Object.freeze({
+          status: "stale" as const,
+          requestedDecision: reflected.status,
+          projectId: reflected.project.projectId,
+          expectedActiveAdjustmentId: reflected.expectedActiveAdjustmentId,
+          activeAdjustmentId: unapplied.currentActiveAdjustmentId,
+          adjustmentId: reflected.expectedActiveAdjustmentId,
+          observation: reflected.observation,
+          retrievalStrategyId: payload.retrievalStrategyId,
+          routingStrategyId: payload.routingStrategyId,
+          telemetry: reflected.telemetry,
+        });
+      return Object.freeze({
+        status: "unapplied" as const,
+        adjustmentId: reflected.expectedActiveAdjustmentId,
+        projectId: reflected.project.projectId,
+        reason: reflected.reason,
+        observation: reflected.observation,
+        retrievalStrategyId: payload.retrievalStrategyId,
+        routingStrategyId: payload.routingStrategyId,
+        telemetry: reflected.telemetry,
+      });
+    }
     if (reflected.status === "deduped") {
       const existing = await options.workspace.research.experiments.getExperiment(
         reflected.experiment.experimentId,
@@ -600,6 +695,23 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     return job ? coordinatorJobPayload(job) : undefined;
   };
 
+  const waitForTerminal: RuntimeCoordinator["waitForTerminal"] = async (request) => {
+    const deadlineMs = request.deadline.getTime();
+    if (!Number.isFinite(deadlineMs)) throw new Error("Coordinator terminal wait requires a valid deadline");
+    const terminal = new Set(["completed", "failed", "cancelled", "budget_exhausted"]);
+    while (true) {
+      if (request.signal?.aborted) return Object.freeze({ status: "cancelled" as const });
+      const job = await getJob(request.jobId);
+      if (!job) return Object.freeze({ status: "missing" as const });
+      if (terminal.has(job.job.status)) return Object.freeze({ status: "terminal" as const, job });
+      const remaining = deadlineMs - Date.now();
+      if (remaining <= 0) return Object.freeze({ status: "timeout" as const });
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, Math.min(25, remaining));
+      });
+    }
+  };
+
   const listJobs = async (
     request: {
       readonly kind?: CoordinatorJobKind;
@@ -682,6 +794,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     cancel,
     retry,
     getJob,
+    waitForTerminal,
     listJobs,
     listJobPage,
     getPreflightActivationHandoff,

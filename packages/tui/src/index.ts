@@ -11,6 +11,7 @@ import { executionIdOf } from "./action-summary.ts";
 import { tuiActionForAgentEvent } from "./agent-event.ts";
 import { isExclusiveSlashCommand, runSlashCommand, steerFeedback } from "./commands.ts";
 import { editTextInExternalEditor } from "./external-editor.ts";
+import { reconcileSettledTurnPresentation } from "./learning-presentation.ts";
 import { boundedInspectorText, streamingFrameDelay } from "./lifecycle-utils.ts";
 import {
   createHeaderView,
@@ -359,40 +360,19 @@ export async function startNoesisTui(
 
   const reconcileSettledTurn = (
     trailId: string,
+    turnId: string,
     generation: number,
     outcome: "completed" | "aborted" | "failed",
   ): void => {
-    void Promise.all([runtime.getTranscript(trailId), Promise.resolve(runtime.getTrail(trailId))]).then(
-      ([transcript, trail]) => {
-        if (
-          phase !== "main" ||
-          view.state.trailId !== trailId ||
-          turnGeneration !== generation ||
-          activeTurnToken
-        )
-          return;
-        view.dispatch({
-          type: "transcript-hydrated",
-          trailId,
-          transcript,
-        });
-        if (outcome === "completed" && trail.context)
-          view.dispatch({
-            type: "turn-completed",
-            context: trail.context,
-            capabilityVersions: trail.capabilityVersions,
-            turnCount: trail.turns.length,
-            ...(view.state.contextUsage ? { contextUsage: view.state.contextUsage } : {}),
-          });
-        else if (outcome === "aborted") {
-          view.dispatch({ type: "execution-changed", execution: "idle" });
-          view.dispatch({ type: "system-message", text: "Turn interrupted." });
-        }
-        tui.requestRender();
-      },
-      (error: unknown) => {
-        if (phase !== "main" || view.state.trailId !== trailId) return;
-        reportFailure(error);
+    reconcileSettledTurnPresentation(
+      runtime,
+      { trailId, turnId, outcome, contextUsage: view.state.contextUsage },
+      {
+        isTrailCurrent: () => phase === "main" && view.state.trailId === trailId,
+        canApplySettledState: () => turnGeneration === generation && !activeTurnToken,
+        dispatch: (action) => view.dispatch(action),
+        requestRender: () => tui.requestRender(),
+        reportFailure,
       },
     );
   };
@@ -439,6 +419,7 @@ export async function startNoesisTui(
       }
       reconcileSettledTurn(
         interactionEvent.sessionId,
+        interactionEvent.turnId,
         token?.generation ?? turnGeneration,
         interactionEvent.outcome,
       );

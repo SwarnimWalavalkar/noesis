@@ -20,6 +20,7 @@ import {
   ok,
   type Result,
   sha256,
+  WORKING_ADJUSTMENT_LIMITS,
 } from "@noesis/domain";
 import type { ExactCitation, HistoryPort, HistorySearchRequest } from "@noesis/intelligence";
 import { describe, expect, test } from "vitest";
@@ -31,6 +32,7 @@ import {
   type ExperimentBrief,
   type ExperimentBriefStore,
   experimentBriefPublicationCollisionError,
+  LearningTurnInputSchema,
   ReflectorOutputSchema,
   RevisionAuthorOutputSchema,
 } from "../src/index.ts";
@@ -409,6 +411,9 @@ function turn(input: {
   return Object.freeze({
     sessionId: "session-1",
     turnId: input.turnId ?? "turn-1",
+    project: Object.freeze({ projectId: "project-noesis", root: "/work/noesis" }),
+    expectedActiveAdjustmentId: null,
+    servedWorkingAdjustmentOutcomes: Object.freeze([]),
     scope: "writing",
     userMessage: input.userMessage ?? "Please rewrite this paragraph",
     ...(input.correction ? { correction: input.correction } : {}),
@@ -611,6 +616,78 @@ function createBarrierInference(
 }
 
 describe("automatic learning organ", () => {
+  test("bounds working-adjustment model output and served outcome context at the durable job boundary", () => {
+    const exactDecision = {
+      observation: {
+        kind: "correction" as const,
+        reason: "o".repeat(WORKING_ADJUSTMENT_LIMITS.observationChars),
+      },
+      decision: "apply_working_adjustment" as const,
+      expectedActiveAdjustmentId: null,
+      rationale: "r".repeat(WORKING_ADJUSTMENT_LIMITS.observationChars),
+      strategy: "s".repeat(WORKING_ADJUSTMENT_LIMITS.strategyChars),
+      successSignal: "x".repeat(WORKING_ADJUSTMENT_LIMITS.successSignalChars),
+      evidenceCitationIndexes: [0],
+    };
+    expect(ReflectorOutputSchema.safeParse(exactDecision).success).toBe(true);
+    expect(
+      ReflectorOutputSchema.safeParse({
+        ...exactDecision,
+        strategy: `${exactDecision.strategy}x`,
+      }).success,
+    ).toBe(false);
+    expect(
+      ReflectorOutputSchema.safeParse({
+        ...exactDecision,
+        rationale: `${exactDecision.rationale}x`,
+      }).success,
+    ).toBe(false);
+    expect(
+      ReflectorOutputSchema.safeParse({
+        ...exactDecision,
+        successSignal: `${exactDecision.successSignal}x`,
+      }).success,
+    ).toBe(false);
+    expect(
+      ReflectorOutputSchema.safeParse({
+        ...exactDecision,
+        observation: { ...exactDecision.observation, reason: `${exactDecision.observation.reason}x` },
+      }).success,
+    ).toBe(false);
+
+    const base = turn({ turnId: "turn-bounded-evidence" });
+    const parsed = LearningTurnInputSchema.parse({
+      ...base,
+      servedWorkingAdjustmentOutcomes: Array.from({ length: 8 }, (_, outcomeIndex) => ({
+        adjustmentId: "adjustment-active",
+        planId: `plan-${outcomeIndex}`,
+        sessionId: `session-${outcomeIndex}`,
+        turnId: `served-turn-${outcomeIndex}`,
+        outcomeId: `outcome-${outcomeIndex}`,
+        outcome: "accepted" as const,
+        summary: "q".repeat(1_000),
+        settledAt: "2026-01-10T00:00:00.000Z",
+        evidenceRefs: Array.from({ length: 10 }, (_, referenceIndex) =>
+          databaseRef(`served-${outcomeIndex}-${referenceIndex}`),
+        ),
+      })),
+    });
+
+    expect(
+      parsed.servedWorkingAdjustmentOutcomes.reduce((total, outcome) => total + outcome.summary.length, 0),
+    ).toBe(2_048);
+    expect(parsed.servedWorkingAdjustmentOutcomes.flatMap((outcome) => outcome.evidenceRefs)).toHaveLength(
+      WORKING_ADJUSTMENT_LIMITS.evidenceRefs,
+    );
+    expect(
+      new Set(
+        parsed.servedWorkingAdjustmentOutcomes
+          .flatMap((outcome) => outcome.evidenceRefs)
+          .map((reference) => JSON.stringify(reference)),
+      ).size,
+    ).toBe(WORKING_ADJUSTMENT_LIMITS.evidenceRefs);
+  });
+
   test("keeps automatic-learning configuration on schema version 1", () => {
     expect(AutomaticLearningConfigSchema.safeParse(config).success).toBe(true);
     expect(AutomaticLearningConfigSchema.safeParse({ ...config, schemaVersion: 2 }).success).toBe(false);
@@ -828,6 +905,60 @@ describe("automatic learning organ", () => {
     });
   });
 
+  test("links an experiment to an active adjustment only when the reflector cites its evidence", async () => {
+    const activeAdjustment = Object.freeze({
+      adjustmentId: "adjustment-active",
+      scope: Object.freeze({ projectId: "project-noesis", root: "/work/noesis" }),
+      observation: "Success was claimed without checking observable state.",
+      strategy: "Verify observable state before claiming success.",
+      successSignal: "Success claims cite fresh runtime evidence.",
+      evidenceRefs: Object.freeze([databaseRef("adjustment-source")]),
+      createdFromTurnId: "turn-before",
+    });
+    const linkedStep = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        workingAdjustmentEvidenceCitationIndexes: Object.freeze([0]),
+      }),
+    });
+    const linked = createHarness({ steps: [linkedStep], citations: [citation(1)] });
+    const linkedTurn = turn({ turnId: "turn-linked", correction: "Verify the real state first." });
+    const linkedResult = await linked.organ.observeTurn({
+      turn: Object.freeze({
+        ...linkedTurn,
+        expectedActiveAdjustmentId: activeAdjustment.adjustmentId,
+      }),
+      baselineRevision: linked.baseline,
+      capability,
+      activeWorkingAdjustment: activeAdjustment,
+    });
+    if (linkedResult.status !== "experiment") throw new Error("Expected a linked experiment");
+
+    expect(linkedResult.brief.sourceAdjustmentId).toBe(activeAdjustment.adjustmentId);
+    expect(linked.experiments()[0]?.sourceAdjustmentId).toBe(activeAdjustment.adjustmentId);
+    expect(linkedResult.brief.evidenceRefs).toContainEqual({
+      kind: "database_row",
+      table: "working_adjustments",
+      rowId: activeAdjustment.adjustmentId,
+    });
+
+    const unlinked = createHarness({ steps: [reflectionStep], citations: [citation(1)] });
+    const unlinkedTurn = turn({ turnId: "turn-unlinked", correction: "Use primary sources." });
+    const unlinkedResult = await unlinked.organ.observeTurn({
+      turn: Object.freeze({
+        ...unlinkedTurn,
+        expectedActiveAdjustmentId: activeAdjustment.adjustmentId,
+      }),
+      baselineRevision: unlinked.baseline,
+      capability,
+      activeWorkingAdjustment: activeAdjustment,
+    });
+    if (unlinkedResult.status !== "experiment") throw new Error("Expected an unrelated experiment");
+    expect(unlinkedResult.brief.sourceAdjustmentId).toBeUndefined();
+    expect(unlinked.experiments()[0]?.sourceAdjustmentId).toBeUndefined();
+  });
+
   test("lets the reflector return no change for ordinary chat", async () => {
     const harness = createHarness({
       steps: [
@@ -852,6 +983,91 @@ describe("automatic learning organ", () => {
     expect(harness.feedback.signals()).toHaveLength(0);
     expect(harness.criteria.creates()).toHaveLength(0);
     expect(harness.inference.requests()).toHaveLength(1);
+  });
+
+  test("returns a cited project working-adjustment decision without opening an experiment", async () => {
+    const harness = createHarness({
+      steps: [
+        Object.freeze({
+          role: "reflector",
+          value: Object.freeze({
+            observation: Object.freeze({
+              kind: "correction",
+              reason: "The completed turn lacked observable verification.",
+            }),
+            decision: "apply_working_adjustment",
+            expectedActiveAdjustmentId: null,
+            rationale: "Claims should be grounded in fresh runtime evidence.",
+            strategy: "Verify observable state before claiming success.",
+            successSignal: "Later success claims cite runtime evidence.",
+            evidenceCitationIndexes: Object.freeze([0]),
+          }),
+        }),
+      ],
+    });
+    const currentEvidence = Object.freeze(
+      Array.from({ length: 40 }, (_, index) => databaseRef(`current-message-${index}`)),
+    );
+    const base = turn({ correction: "You said it worked without checking the actual state." });
+
+    const result = await harness.organ.observeTurn({
+      turn: Object.freeze({ ...base, evidenceRefs: currentEvidence }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    expect(result).toMatchObject({
+      status: "apply_working_adjustment",
+      project: { projectId: "project-noesis" },
+      expectedActiveAdjustmentId: null,
+      strategy: "Verify observable state before claiming success.",
+    });
+    if (result.status !== "apply_working_adjustment") throw new Error("Expected an adjustment decision");
+    expect(result.evidenceRefs).toHaveLength(WORKING_ADJUSTMENT_LIMITS.evidenceRefs);
+    expect(result.evidenceRefs[0]).toEqual(databaseRef("current-message-0"));
+    expect(harness.experiments()).toHaveLength(0);
+    expect(harness.inference.requests()[0]?.messages.at(-1)).toMatchObject({
+      name: "working_adjustment_context",
+    });
+  });
+
+  test("requires an unapply decision to target the exact adjustment served to the turn", async () => {
+    const harness = createHarness({
+      steps: [
+        Object.freeze({
+          role: "reflector",
+          value: Object.freeze({
+            observation: Object.freeze({ kind: "other", reason: "The strategy made the work worse." }),
+            decision: "unapply_working_adjustment",
+            expectedActiveAdjustmentId: "adjustment-other",
+            reason: "The adjustment did not help.",
+            evidenceCitationIndexes: Object.freeze([0]),
+          }),
+        }),
+      ],
+    });
+    const base = turn({ userMessage: "That approach was less useful." });
+
+    await expect(
+      harness.organ.observeTurn({
+        turn: Object.freeze({
+          ...base,
+          expectedActiveAdjustmentId: "adjustment-active",
+        }),
+        baselineRevision: harness.baseline,
+        capability,
+        activeWorkingAdjustment: Object.freeze({
+          adjustmentId: "adjustment-active",
+          scope: base.project,
+          observation: "Try a more structured response.",
+          strategy: "Lead with a rigid checklist.",
+          successSignal: "The user finds the work clearer.",
+          evidenceRefs: Object.freeze([databaseRef("current-message")]),
+          createdFromTurnId: "turn-before",
+        }),
+      }),
+    ).rejects.toThrow("changed the expected active identity");
+    expect(harness.experiments()).toHaveLength(0);
   });
 
   test("records a model-classified preference independently of experiment creation", async () => {
@@ -1023,7 +1239,7 @@ describe("automatic learning organ", () => {
     ]);
 
     expect([first.status, second.status].sort()).toEqual(["deduped", "experiment"]);
-    if (first.status === "no_change" || second.status === "no_change")
+    if (!("brief" in first) || !("brief" in second))
       throw new Error("Expected concurrent experiment results");
     const brief = first.status === "deduped" ? first.brief : second.brief;
     expect(brief.feedbackSignalIds).toHaveLength(2);
@@ -1072,7 +1288,7 @@ describe("automatic learning organ", () => {
     ]);
 
     expect([leftResult.status, rightResult.status].sort()).toEqual(["deduped", "experiment"]);
-    if (leftResult.status === "no_change" || rightResult.status === "no_change")
+    if (!("brief" in leftResult) || !("brief" in rightResult))
       throw new Error("Expected concurrent initial publication results");
     expect(leftResult.brief.experimentId).toBe(rightResult.brief.experimentId);
     expect(briefs.collisions()).toBe(1);
@@ -1368,7 +1584,7 @@ describe("automatic learning organ", () => {
     ]);
 
     expect([leftResult.status, rightResult.status].sort()).toEqual(["deduped", "experiment"]);
-    if (leftResult.status === "no_change" || rightResult.status === "no_change")
+    if (!("brief" in leftResult) || !("brief" in rightResult))
       throw new Error("Expected concurrent follow-up results");
     const successorId = leftResult.brief.experimentId;
     expect(rightResult.brief.experimentId).toBe(successorId);
@@ -1502,6 +1718,7 @@ describe("automatic learning organ", () => {
       "evidence",
       "active_capabilities",
       "user_preferences",
+      "working_adjustment_context",
     ]);
     expect(requests[1]?.messages.map((message) => message.name)).toEqual(["evidence"]);
     expect(JSON.parse(requests[1]?.messages[0]?.content ?? "null")).toEqual({

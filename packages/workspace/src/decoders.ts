@@ -12,6 +12,7 @@ import { z } from "zod";
 import { optionalString, parseJson, requiredNumber, requiredString } from "./database.ts";
 import type {
   ActivationApprovalRecord,
+  ActivationEvidenceBinding,
   ActivationMaterializationRecord,
   ActivationOperationRecord,
   ActivationRecord,
@@ -58,7 +59,7 @@ const WorkflowPhaseStatusSchema = z.enum(["pending", "running", "completed", "fa
 const OutcomeStatusSchema = z.enum(["accepted", "corrected", "failed", "unknown"]);
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-const ActivationEvidenceBindingSchema = z.strictObject({
+const ActivationEvidenceBindingSchema: z.ZodType<ActivationEvidenceBinding> = z.strictObject({
   experimentId: z.string().min(1),
   candidateRevision: CapabilityRevisionRefSchema,
   manifestRevision: FileRevisionRefSchema,
@@ -71,6 +72,7 @@ const ActivationEvidenceBindingSchema = z.strictObject({
   reportDigest: DigestSchema,
   definitionSetDigest: DigestSchema,
   controlRevisionId: z.string().min(1).nullable(),
+  sourceAdjustmentId: z.string().min(1).optional(),
 });
 const ActivationPolicyDecisionSchema = z.enum(["block", "approval_required", "eligible_auto_activate"]);
 const ActivationOperationStatusSchema = z.enum([

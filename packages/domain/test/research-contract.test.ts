@@ -232,6 +232,11 @@ function createFakeWorkspaceStore(): WorkspaceStore {
       }),
     }),
     research: createFakeResearchState(),
+    workingAdjustments: Object.freeze({
+      get: async () => undefined,
+      getActive: async () => undefined,
+      listSettledEvidence: async () => [],
+    }),
     jobs: Object.freeze({
       enqueue: async () => {
         throw new Error("unused fake job store");

@@ -13,6 +13,7 @@ import type {
   FileRevisionRef,
   PreflightPlan,
   PreflightReport,
+  WorkingAdjustment,
 } from "./research.ts";
 
 export const PERSISTED_DATA = [
@@ -23,6 +24,7 @@ export const PERSISTED_DATA = [
   "workflow_run",
   "workflow_phase",
   "job",
+  "working_adjustment",
   "experiment",
   "experiment_trial",
   "feedback_signal",
@@ -70,6 +72,7 @@ export const PERSISTED_AUTHORITY_BY_DATUM = {
   workflow_run: "sqlite_operational",
   workflow_phase: "sqlite_operational",
   job: "sqlite_operational",
+  working_adjustment: "sqlite_operational",
   experiment: "sqlite_operational",
   experiment_trial: "sqlite_operational",
   feedback_signal: "sqlite_operational",
@@ -256,6 +259,24 @@ export interface EvaluationStorePort {
 export interface FeedbackSignalStorePort {
   readonly getFeedbackSignal: (signalId: string) => Promise<FeedbackSignal | undefined>;
   readonly recordFeedbackSignal: (signal: FeedbackSignal) => Promise<DatabaseRowRef<"feedback_signals">>;
+}
+
+export interface WorkingAdjustmentReadPort {
+  readonly get: (adjustmentId: string) => Promise<WorkingAdjustment | undefined>;
+  readonly getActive: (projectId: string) => Promise<WorkingAdjustment | undefined>;
+  readonly listSettledEvidence: (request: {
+    readonly projectId: string;
+    readonly adjustmentId: string;
+    readonly limit: number;
+  }) => Promise<readonly WorkingAdjustmentSettledEvidence[]>;
+}
+
+export interface WorkingAdjustmentSettledEvidence {
+  readonly planId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly outcomeId: string;
+  readonly settledAt: string;
 }
 
 export type DurableJobStatus =
@@ -447,5 +468,6 @@ export interface WorkspaceStore {
   readonly artifacts: ArtifactFilePort;
   readonly research: ResearchStatePort;
   readonly jobs: DurableJobStorePort;
+  readonly workingAdjustments: WorkingAdjustmentReadPort;
   readonly declaredAuthority: typeof declaredAuthorityFor;
 }

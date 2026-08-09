@@ -23,6 +23,8 @@ import {
   type FileRevisionRef,
   sameCapabilityRevisionRef,
   sha256,
+  type WorkingAdjustment,
+  WORKING_ADJUSTMENT_LIMITS,
 } from "@noesis/domain";
 import type { ExactCitation, HistoryPort } from "@noesis/intelligence";
 import {
@@ -86,6 +88,7 @@ export interface ExperimentBrief {
   readonly sourceCases: readonly LearningSourceCase[];
   readonly recurrenceCount: number;
   readonly reflectionRun?: LearningRoleResearchRun;
+  readonly sourceAdjustmentId?: string;
 }
 
 export interface ExperimentBriefStore {
@@ -145,7 +148,7 @@ export function createInMemoryExperimentBriefStore(): ExperimentBriefStore {
 
 export interface LearningNotification {
   readonly mode: "quiet" | "detailed";
-  readonly kind: "criterion" | "experiment";
+  readonly kind: "criterion" | "experiment" | "working_adjustment";
   readonly message: string;
 }
 
@@ -156,6 +159,32 @@ export type ObserveLearningResult =
       readonly harvest: SignalHarvestResult;
       readonly reflectionRun?: LearningRoleResearchRun;
       readonly observation: SemanticTurnObservation | null;
+      readonly notification: LearningNotification | null;
+      readonly interruption: null;
+    }
+  | {
+      readonly status: "apply_working_adjustment";
+      readonly harvest: SignalHarvestResult;
+      readonly project: NonNullable<LearningTurnInput["project"]>;
+      readonly expectedActiveAdjustmentId: string | null;
+      readonly rationale: string;
+      readonly strategy: string;
+      readonly successSignal: string;
+      readonly evidenceRefs: readonly EvidenceRef[];
+      readonly reflectionRun: LearningRoleResearchRun;
+      readonly observation: SemanticTurnObservation;
+      readonly notification: LearningNotification | null;
+      readonly interruption: null;
+    }
+  | {
+      readonly status: "unapply_working_adjustment";
+      readonly harvest: SignalHarvestResult;
+      readonly project: NonNullable<LearningTurnInput["project"]>;
+      readonly expectedActiveAdjustmentId: string;
+      readonly reason: string;
+      readonly evidenceRefs: readonly EvidenceRef[];
+      readonly reflectionRun: LearningRoleResearchRun;
+      readonly observation: SemanticTurnObservation;
       readonly notification: LearningNotification | null;
       readonly interruption: null;
     }
@@ -213,6 +242,7 @@ export interface ObserveLearningTurnRequest {
   readonly capability: Capability;
   readonly signal?: AbortSignal;
   readonly activeCapabilities?: readonly Capability[];
+  readonly activeWorkingAdjustment?: WorkingAdjustment;
   readonly userPreferences?: readonly {
     readonly criterionId: string;
     readonly revision: number;
@@ -492,11 +522,12 @@ function researchRun(
   });
 }
 
-function normalizedHypothesisKey(scope: string, hypothesis: string): string {
+function normalizedHypothesisKey(scope: string, hypothesis: string, sourceAdjustmentId?: string): string {
   return sha256(
     canonicalJson({
       scope: scope.trim().toLocaleLowerCase(),
       hypothesis: hypothesis.trim().toLocaleLowerCase().replaceAll(/\s+/gu, " "),
+      ...(sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId }),
     }),
   );
 }
@@ -649,6 +680,80 @@ function mergeBriefObservation(
   });
 }
 
+interface WorkingAdjustmentEvidenceCandidate {
+  readonly kind: "current_turn" | "served_turn";
+  readonly adjustmentId: string | null;
+  readonly planId?: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly outcomeId?: string;
+  readonly userMessage?: string;
+  readonly assistantMessage?: string;
+  readonly outcome: LearningTurnInput["outcome"];
+  readonly summary?: string;
+  readonly settledAt: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+function workingAdjustmentEvidence(turn: LearningTurnInput): readonly WorkingAdjustmentEvidenceCandidate[] {
+  const current: WorkingAdjustmentEvidenceCandidate = Object.freeze({
+    kind: "current_turn",
+    adjustmentId: turn.expectedActiveAdjustmentId ?? null,
+    sessionId: turn.sessionId,
+    turnId: turn.turnId,
+    ...(turn.outcomeId === undefined ? {} : { outcomeId: turn.outcomeId }),
+    userMessage: turn.userMessage,
+    ...(turn.assistantMessage === undefined ? {} : { assistantMessage: turn.assistantMessage }),
+    outcome: turn.outcome,
+    settledAt: turn.occurredAt,
+    evidenceRefs: cloneEvidenceRefs(turn.evidenceRefs),
+  });
+  return Object.freeze([
+    current,
+    ...turn.servedWorkingAdjustmentOutcomes.map((served) =>
+      Object.freeze({
+        kind: "served_turn" as const,
+        adjustmentId: served.adjustmentId,
+        planId: served.planId,
+        sessionId: served.sessionId,
+        turnId: served.turnId,
+        outcomeId: served.outcomeId,
+        outcome: served.outcome,
+        summary: served.summary,
+        settledAt: served.settledAt,
+        evidenceRefs: cloneEvidenceRefs(served.evidenceRefs),
+      }),
+    ),
+  ]);
+}
+
+function citedWorkingAdjustmentEvidence(
+  indexes: readonly number[],
+  candidates: readonly WorkingAdjustmentEvidenceCandidate[],
+): readonly EvidenceRef[] {
+  const selected = [...new Set(indexes)].map((index) => {
+    const candidate = candidates[index];
+    if (!candidate) throw new Error(`Working-adjustment evidence citation ${index} is out of bounds`);
+    return candidate;
+  });
+  return Object.freeze(
+    uniqueEvidenceRefs(
+      selected.flatMap((candidate) => [
+        ...(candidate.adjustmentId === null
+          ? []
+          : [
+              Object.freeze({
+                kind: "database_row" as const,
+                table: "working_adjustments" as const,
+                rowId: candidate.adjustmentId,
+              }),
+            ]),
+        ...candidate.evidenceRefs,
+      ]),
+    ).slice(0, WORKING_ADJUSTMENT_LIMITS.evidenceRefs),
+  );
+}
+
 export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOptions): AutomaticLearningOrgan {
   const config = AutomaticLearningConfigSchema.parse(options.config);
   validateRoleConfiguration("reflector", config.roles.reflector);
@@ -756,6 +861,30 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         interruption: null,
       });
     }
+    const expectedAdjustmentId = harvest.turn.expectedActiveAdjustmentId;
+    if (
+      expectedAdjustmentId !== undefined &&
+      expectedAdjustmentId !== null &&
+      request.activeWorkingAdjustment?.adjustmentId !== expectedAdjustmentId
+    ) {
+      throw new Error(`Pinned working adjustment ${expectedAdjustmentId} could not be rehydrated exactly`);
+    }
+    if (
+      request.activeWorkingAdjustment &&
+      (expectedAdjustmentId !== request.activeWorkingAdjustment.adjustmentId ||
+        harvest.turn.project?.projectId !== request.activeWorkingAdjustment.scope.projectId ||
+        harvest.turn.project.root !== request.activeWorkingAdjustment.scope.root)
+    ) {
+      throw new Error("Working adjustment does not match the pinned project turn context");
+    }
+    if (
+      harvest.turn.servedWorkingAdjustmentOutcomes.some(
+        (served) => served.adjustmentId !== expectedAdjustmentId,
+      )
+    ) {
+      throw new Error("Served working-adjustment evidence does not match the pinned adjustment");
+    }
+    const adjustmentEvidence = workingAdjustmentEvidence(harvest.turn);
     const runId = nextId("reflect");
     const messages: readonly AgentMessage[] = [
       {
@@ -785,6 +914,16 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         role: "user",
         name: "user_preferences",
         content: JSON.stringify(request.userPreferences ?? []),
+      },
+      {
+        role: "user",
+        name: "working_adjustment_context",
+        content: JSON.stringify({
+          project: harvest.turn.project ?? null,
+          expectedActiveAdjustmentId: expectedAdjustmentId ?? null,
+          activeAdjustment: request.activeWorkingAdjustment ?? null,
+          evidence: adjustmentEvidence,
+        }),
       },
     ];
     const reflected = await options.inference.run(
@@ -837,8 +976,79 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       });
     }
 
+    if (
+      reflected.value.decision === "apply_working_adjustment" ||
+      reflected.value.decision === "unapply_working_adjustment"
+    ) {
+      const project = harvest.turn.project;
+      if (!project || expectedAdjustmentId === undefined)
+        throw new Error("Legacy reflection jobs cannot change project working adjustments");
+      if (reflected.value.expectedActiveAdjustmentId !== expectedAdjustmentId)
+        throw new Error("Reflector working-adjustment decision changed the expected active identity");
+      const evidenceRefs = citedWorkingAdjustmentEvidence(
+        reflected.value.evidenceCitationIndexes,
+        adjustmentEvidence,
+      );
+      if (reflected.value.decision === "apply_working_adjustment")
+        return Object.freeze({
+          status: "apply_working_adjustment" as const,
+          harvest: classifiedHarvest,
+          project: Object.freeze({ ...project }),
+          expectedActiveAdjustmentId: expectedAdjustmentId,
+          rationale: reflected.value.rationale,
+          strategy: reflected.value.strategy,
+          successSignal: reflected.value.successSignal,
+          evidenceRefs,
+          reflectionRun,
+          observation,
+          notification:
+            config.notifications === "off"
+              ? null
+              : Object.freeze({
+                  mode: config.notifications,
+                  kind: "working_adjustment" as const,
+                  message: `Adjusted this project: ${reflected.value.rationale}`,
+                }),
+          interruption: null,
+        });
+      if (expectedAdjustmentId === null)
+        throw new Error("Reflector cannot unapply a project with no pinned working adjustment");
+      return Object.freeze({
+        status: "unapply_working_adjustment" as const,
+        harvest: classifiedHarvest,
+        project: Object.freeze({ ...project }),
+        expectedActiveAdjustmentId: expectedAdjustmentId,
+        reason: reflected.value.reason,
+        evidenceRefs,
+        reflectionRun,
+        observation,
+        notification:
+          config.notifications === "off"
+            ? null
+            : Object.freeze({
+                mode: config.notifications,
+                kind: "working_adjustment" as const,
+                message: `Unapplied this project: ${reflected.value.reason}`,
+              }),
+        interruption: null,
+      });
+    }
+
     const reflection = reflected.value;
     const selectedRecurrence = recurrenceCitations(reflection, classifiedHarvest.citations);
+    const selectedAdjustmentEvidence = citedWorkingAdjustmentEvidence(
+      reflection.workingAdjustmentEvidenceCitationIndexes,
+      adjustmentEvidence,
+    );
+    if (
+      reflection.workingAdjustmentEvidenceCitationIndexes.length > 0 &&
+      request.activeWorkingAdjustment === undefined
+    )
+      throw new Error("Reflector linked an experiment to a missing working adjustment");
+    const sourceAdjustmentId =
+      reflection.workingAdjustmentEvidenceCitationIndexes.length === 0
+        ? undefined
+        : request.activeWorkingAdjustment?.adjustmentId;
     const scopeRunId = nextId("scope_verify");
     const verifiedScope = await options.inference.run(
       roleRequest({
@@ -872,7 +1082,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       reflection,
       verification: verifiedScope.value,
     });
-    const dedupeKey = normalizedHypothesisKey(reflection.scope, reflection.hypothesis);
+    const dedupeKey = normalizedHypothesisKey(reflection.scope, reflection.hypothesis, sourceAdjustmentId);
     const capability = capabilityFromReflection(request.capability, reflection);
     const makeBrief = (
       experimentId: string,
@@ -893,7 +1103,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         scopeVerificationRun,
         capability,
         baselineRevision: request.baselineRevision,
-        evidenceRefs,
+        evidenceRefs: uniqueEvidenceRefs([...selectedAdjustmentEvidence, ...evidenceRefs]),
         feedbackSignalIds: classifiedHarvest.signals.map(({ signal }) => signal.signalId),
         citations: classifiedHarvest.citations,
         recurrenceCitations: selectedRecurrence,
@@ -906,6 +1116,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         }),
         recurrenceCount: selectedRecurrence.length,
         reflectionRun,
+        ...(sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId }),
       });
 
     const reconcileObservation = async (
@@ -1022,12 +1233,14 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       candidateRevisions: Object.freeze([]),
       feedbackSignalIds: Object.freeze([...brief.feedbackSignalIds]),
       status: "hypothesis",
+      ...(brief.sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId: brief.sourceAdjustmentId }),
     });
     const existing = await options.experiments.getExperiment(brief.experimentId);
     if (existing) {
       if (
         existing.hypothesis !== experiment.hypothesis ||
         existing.scope !== experiment.scope ||
+        existing.sourceAdjustmentId !== experiment.sourceAdjustmentId ||
         !sameCapabilityRevisionRef(existing.baselineRevision, experiment.baselineRevision)
       )
         throw new Error(`Hypothesis experiment ${brief.experimentId} conflicts with its durable identity`);
@@ -1131,6 +1344,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         ...new Set([...(current?.feedbackSignalIds ?? []), ...brief.feedbackSignalIds]),
       ]),
       status: "authoring",
+      ...(brief.sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId: brief.sourceAdjustmentId }),
     });
     await options.experiments.putExperiment(experiment);
     return experiment;

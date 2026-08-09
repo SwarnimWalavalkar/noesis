@@ -25,6 +25,7 @@ import {
   type AuthorRevisionJobPayload,
   type CoordinatorCandidateResult,
   type CoordinatorResearchTelemetry,
+  type CoordinatorWorkingAdjustmentMutationPort,
   coordinatorOperationError,
   type PreflightJobPayload,
   type ReflectTurnJobPayload,
@@ -58,6 +59,7 @@ export interface CoordinatorPreflightPreparation {
 export interface RuntimeCoordinatorCompositionOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly authority: AuthorityBoundary;
+  readonly workingAdjustments: CoordinatorWorkingAdjustmentMutationPort;
   readonly learning: AutomaticLearningOrgan;
   readonly evaluation: DynamicEvaluationLaboratory;
   readonly baselineRevisions: CapabilityRevisionResolverPort;
@@ -128,6 +130,11 @@ export function createRuntimeCoordinatorComposition(
   const research: RuntimeCoordinatorResearchPort = Object.freeze({
     reflect: async (payload: ReflectTurnJobPayload, signal: AbortSignal) => {
       cancelled(signal);
+      const activeWorkingAdjustment =
+        payload.turn.expectedActiveAdjustmentId === undefined ||
+        payload.turn.expectedActiveAdjustmentId === null
+          ? undefined
+          : await options.workspace.workingAdjustments.get(payload.turn.expectedActiveAdjustmentId);
       const observed = await options.learning.observeTurn({
         turn: payload.turn,
         baselineRevision: payload.baselineRevision,
@@ -136,6 +143,7 @@ export function createRuntimeCoordinatorComposition(
           ? {}
           : { activeCapabilities: payload.activeCapabilities }),
         ...(payload.userPreferences === undefined ? {} : { userPreferences: payload.userPreferences }),
+        ...(activeWorkingAdjustment === undefined ? {} : { activeWorkingAdjustment }),
         signal,
       });
       cancelled(signal);
@@ -165,6 +173,38 @@ export function createRuntimeCoordinatorComposition(
           reason: observed.reason,
           telemetry: telemetry({
             reflectionRun: observed.reflectionRun ?? null,
+            retrievalStrategyId: payload.retrievalStrategyId,
+            routingStrategyId: payload.routingStrategyId,
+            recurrenceCount: observed.harvest.recurrenceCount,
+          }),
+        });
+      if (observed.status === "apply_working_adjustment")
+        return Object.freeze({
+          status: observed.status,
+          observation: observed.observation,
+          project: observed.project,
+          expectedActiveAdjustmentId: observed.expectedActiveAdjustmentId,
+          rationale: observed.rationale,
+          strategy: observed.strategy,
+          successSignal: observed.successSignal,
+          evidenceRefs: observed.evidenceRefs,
+          telemetry: telemetry({
+            reflectionRun: observed.reflectionRun,
+            retrievalStrategyId: payload.retrievalStrategyId,
+            routingStrategyId: payload.routingStrategyId,
+            recurrenceCount: observed.harvest.recurrenceCount,
+          }),
+        });
+      if (observed.status === "unapply_working_adjustment")
+        return Object.freeze({
+          status: observed.status,
+          observation: observed.observation,
+          project: observed.project,
+          expectedActiveAdjustmentId: observed.expectedActiveAdjustmentId,
+          reason: observed.reason,
+          evidenceRefs: observed.evidenceRefs,
+          telemetry: telemetry({
+            reflectionRun: observed.reflectionRun,
             retrievalStrategyId: payload.retrievalStrategyId,
             routingStrategyId: payload.routingStrategyId,
             recurrenceCount: observed.harvest.recurrenceCount,
@@ -205,6 +245,9 @@ export function createRuntimeCoordinatorComposition(
             baselineRevision: experiment.baselineRevision,
             feedbackSignalIds: experiment.feedbackSignalIds,
             status: "hypothesis" as const,
+            ...(experiment.sourceAdjustmentId === undefined
+              ? {}
+              : { sourceAdjustmentId: experiment.sourceAdjustmentId }),
           }),
           hypothesisDedupeKey: observed.brief.hypothesisDedupeKey,
           telemetry: reflectionTelemetry,
@@ -335,6 +378,7 @@ export function createRuntimeCoordinatorComposition(
 
   return createRuntimeCoordinator({
     workspace: options.workspace,
+    workingAdjustments: options.workingAdjustments,
     authority: options.authority,
     research,
     ...(options.config === undefined ? {} : { config: options.config }),

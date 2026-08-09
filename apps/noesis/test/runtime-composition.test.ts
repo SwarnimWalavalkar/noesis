@@ -9,7 +9,13 @@ import {
   type NoesisAgentRuntime,
 } from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
-import { EvidenceRevisionRefSchema, eventChecksum, type LedgerEvent, sha256 } from "@noesis/domain";
+import {
+  EvidenceRevisionRefSchema,
+  eventChecksum,
+  type LedgerEvent,
+  type ProjectRef,
+  sha256,
+} from "@noesis/domain";
 import { createPiAgentRoleRunner, createPiAgentRuntime, createPiSkillLibrary } from "@noesis/runtime-pi";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
@@ -1632,6 +1638,97 @@ describe("apps/noesis production control-plane composition", () => {
       skillContent,
     );
     await reopened.shutdown();
+  });
+
+  test("carries one reflected project adjustment across sessions without leaking it to another project", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-project-adjustment-"));
+    roots.push(home);
+    const projectRoot = join(home, "project-p");
+    const otherProjectRoot = join(home, "project-q");
+    await Promise.all([
+      mkdir(projectRoot, { recursive: true }),
+      mkdir(otherProjectRoot, { recursive: true }),
+    ]);
+    const project = Object.freeze({ projectId: "project-p", root: projectRoot });
+    const otherProject = Object.freeze({ projectId: "project-q", root: otherProjectRoot });
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const reflectorContexts: string[] = [];
+    let reflectorRuns = 0;
+    const strategy = "Verify the observable project state before reporting completion.";
+    const controlled = createControlledPiModels({
+      respond: ({ systemPrompt, lastUserText }) => {
+        if (!systemPrompt.includes("role: reflector")) return `Controlled completion for: ${lastUserText}`;
+        reflectorContexts.push(lastUserText);
+        reflectorRuns += 1;
+        if (reflectorRuns === 1)
+          return JSON.stringify({
+            observation: {
+              kind: "other",
+              reason: "The completed project turn supports a temporary project strategy.",
+            },
+            decision: "apply_working_adjustment",
+            expectedActiveAdjustmentId: null,
+            rationale: "This project benefits from checking observable state before completion claims.",
+            strategy,
+            successSignal: "A later settled project turn reports only verified completion state.",
+            evidenceCitationIndexes: [0],
+          });
+        return JSON.stringify({
+          observation: { kind: "other", reason: "No further project strategy change is needed." },
+          decision: "no_change",
+          reason: "Keep the current project strategy unchanged.",
+        });
+      },
+    });
+    const compose = async (activeProject: ProjectRef) =>
+      await createApplicationRuntimeComposition({
+        config,
+        project: activeProject,
+        createAgent: (_sessionTools, codeExecution, selfTools) =>
+          createPiAgentRuntime(activeProject.root, controlled.models, { codeExecution, selfTools }),
+        createRoleRunner: (configurations) =>
+          createPiAgentRoleRunner(activeProject.root, controlled.models, configurations),
+      });
+
+    const first = await compose(project);
+    const firstTrail = await first.startTrail({ title: "Project P source" });
+    const source = await first.debug.runTurn(firstTrail.trailId, "Finish the first project task.");
+    await first.controlPlane.idle();
+    const active = await first.debug.workspace.workingAdjustments.getActive(project.projectId);
+    expect(active).toMatchObject({
+      scope: project,
+      strategy,
+      createdFromTurnId: source.frozenTurnPlan?.turnId,
+    });
+    if (!active) throw new Error("Expected the source reflection to apply a project adjustment");
+    await first.shutdown();
+
+    const resumed = await compose(project);
+    const resumedTrail = await resumed.startTrail({ title: "Project P resumed" });
+    const served = await resumed.debug.runTurn(resumedTrail.trailId, "Continue in a new session.");
+    expect(served.frozenTurnPlan).toMatchObject({
+      project,
+      workingAdjustmentId: active.adjustmentId,
+    });
+    expect(served.frozenTurnPlan?.renderedSystemPrompt).toContain(strategy);
+    const next = await resumed.debug.runTurn(resumedTrail.trailId, "Check the prior result and continue.");
+    expect(next.frozenTurnPlan?.workingAdjustmentId).toBe(active.adjustmentId);
+    await resumed.controlPlane.idle();
+    expect(reflectorContexts.at(-1)).toContain(active.adjustmentId);
+    expect(reflectorContexts.at(-1)).toContain(served.frozenTurnPlan?.turnId);
+    await resumed.shutdown();
+
+    const isolated = await compose(otherProject);
+    const isolatedTrail = await isolated.startTrail({ title: "Project Q" });
+    const isolatedTurn = await isolated.debug.runTurn(isolatedTrail.trailId, "Work in another project.");
+    expect(isolatedTurn.frozenTurnPlan).toMatchObject({ project: otherProject });
+    expect(isolatedTurn.frozenTurnPlan?.workingAdjustmentId).toBeUndefined();
+    expect(isolatedTurn.frozenTurnPlan?.renderedSystemPrompt).not.toContain(strategy);
+    await isolated.shutdown();
   });
 
   test("a first-turn correction on a fresh home reflects against the immutable genesis baseline", async () => {

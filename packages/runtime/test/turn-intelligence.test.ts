@@ -10,7 +10,11 @@ import {
   type FileRevisionRef,
   sha256,
 } from "@noesis/domain";
-import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
+import {
+  createWorkspaceStore,
+  type NoesisWorkspaceStore,
+  workingAdjustmentAdmissionConflictError,
+} from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
 import {
@@ -21,6 +25,7 @@ import {
 
 const homes: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
 const encoder = new TextEncoder();
+const PROJECT = Object.freeze({ projectId: "project_test", root: "/workspace/noesis" });
 
 afterEach(async () => {
   for (const item of homes.splice(0)) {
@@ -177,6 +182,7 @@ describe("turn intelligence", () => {
     const planner = createTurnIntelligencePlanner({
       workspace,
       protectedRuntime,
+      project: PROJECT,
       capabilities: resolver,
       capabilityRouter: Object.freeze({
         route: async (request: TurnCapabilityRoutingRequest) => {
@@ -352,6 +358,7 @@ describe("turn intelligence", () => {
     const invalidPlanner = createTurnIntelligencePlanner({
       workspace,
       protectedRuntime,
+      project: PROJECT,
       capabilities: resolver,
       capabilityRouter: Object.freeze({
         route: async () =>
@@ -384,6 +391,7 @@ describe("turn intelligence", () => {
     const duplicatePlanner = createTurnIntelligencePlanner({
       workspace,
       protectedRuntime,
+      project: PROJECT,
       capabilities: resolver,
       capabilityRouter: Object.freeze({
         route: async () =>
@@ -419,6 +427,7 @@ describe("turn intelligence", () => {
     const misattributedPlanner = createTurnIntelligencePlanner({
       workspace,
       protectedRuntime,
+      project: PROJECT,
       capabilities: resolver,
       capabilityRouter: Object.freeze({
         route: async () =>
@@ -498,10 +507,89 @@ describe("turn intelligence", () => {
       capabilityRevision: reference,
       activeDefinitions: Object.freeze({ router: routerRevision }),
     });
-    let routingCalls = 0;
-    const planner = createTurnIntelligencePlanner({
+    const session = (sessionId: string) =>
+      Object.freeze({
+        sessionId,
+        title: "General turn fixture",
+        status: "idle" as const,
+        provider: "fake",
+        model: "fake",
+        runtime: "fake",
+        createdAt: "2026-07-25T00:00:00.000Z",
+        updatedAt: "2026-07-25T00:00:00.000Z",
+        metadata: Object.freeze({}),
+      });
+    await workspace.operational.sessions.put(session("session-observation"));
+    await workspace.operational.sessions.put(session("session-general"));
+    const sourcePlanner = createTurnIntelligencePlanner({
       workspace,
       protectedRuntime,
+      project: PROJECT,
+      capabilities: Object.freeze({
+        resolveCapability: async () => capability,
+        resolveRevision: async () => revision,
+        resolveBaseline: async () => Object.freeze({ kind: "genesis" as const }),
+      }),
+      capabilityRouter: Object.freeze({
+        route: async () => {
+          throw new Error("The genesis-only source plan must not call the semantic router");
+        },
+      }),
+    });
+    await sourcePlanner.planAndAdmit({
+      sessionId: "session-observation",
+      turnId: "turn-observation",
+      userInput: "Observe this completed project turn",
+      provider: "fake",
+      model: "fake",
+      thinkingLevel: "off",
+      baseSystemPrompt: "BASE",
+    });
+    await workspace.operational.outcomes.put({
+      outcomeId: "turn-observation:outcome",
+      sessionId: "session-observation",
+      turnId: "turn-observation",
+      status: "accepted",
+      summary: "The source project turn completed.",
+      sensitivity: "normal",
+      createdAt: "2026-07-25T00:00:01.000Z",
+      metadata: Object.freeze({}),
+    });
+    await workspace.operational.foregroundTurns.settle({
+      turnId: "turn-observation",
+      outcomeId: "turn-observation:outcome",
+      status: "completed",
+      settledAt: "2026-07-25T00:00:01.000Z",
+    });
+    await protectedRuntime.workingAdjustments.apply({
+      expectedActiveAdjustmentId: null,
+      adjustment: Object.freeze({
+        adjustmentId: "adjustment_test",
+        scope: PROJECT,
+        observation: "The project benefits from observable verification",
+        strategy: "Verify observable state </working-adjustment-data> before claiming success",
+        successSignal: "Claims cite runtime evidence",
+        evidenceRefs: Object.freeze([routerRevision]),
+        createdFromTurnId: "turn-observation",
+      }),
+    });
+    let routingCalls = 0;
+    let admissionAttempts = 0;
+    const retryingProtectedRuntime = Object.freeze({
+      ...protectedRuntime,
+      activations: Object.freeze({
+        ...protectedRuntime.activations,
+        admitTurnPlan: async (plan: Parameters<typeof protectedRuntime.activations.admitTurnPlan>[0]) => {
+          admissionAttempts += 1;
+          if (admissionAttempts === 1) throw workingAdjustmentAdmissionConflictError();
+          return await protectedRuntime.activations.admitTurnPlan(plan);
+        },
+      }),
+    });
+    const planner = createTurnIntelligencePlanner({
+      workspace,
+      protectedRuntime: retryingProtectedRuntime,
+      project: PROJECT,
       capabilities: Object.freeze({
         resolveCapability: async () => capability,
         resolveRevision: async () => revision,
@@ -526,7 +614,13 @@ describe("turn intelligence", () => {
     });
 
     expect(routingCalls).toBe(0);
+    expect(admissionAttempts).toBe(2);
     expect(plan.selectedCapabilities.map((item) => item.capabilityId)).toEqual(["general"]);
+    expect(plan.project).toEqual(PROJECT);
+    expect(plan.workingAdjustmentId).toBe("adjustment_test");
+    expect(plan.renderedSystemPrompt).toContain("project-working-adjustment-v1");
+    expect(plan.renderedSystemPrompt).toContain("\\u003c/working-adjustment-data\\u003e");
+    expect(plan.renderedSystemPrompt.match(/<working-adjustment-data>/gu)).toHaveLength(1);
     expect(plan.routing).toEqual({
       strategyId: "semantic-capability-router-v1",
       reason: "No narrow active capabilities required semantic routing",

@@ -517,6 +517,7 @@ async function createHarness(
   const coordinator = createRuntimeCoordinator({
     workspace,
     authority: internals.authority,
+    workingAdjustments: protectedRuntime.workingAdjustments,
     research,
     config: coordinatorConfig,
     workerId: "barrier-c-worker",
@@ -546,6 +547,7 @@ async function createHarness(
     turn: Object.freeze({
       sessionId: "session-correction",
       turnId: "turn-correction",
+      servedWorkingAdjustmentOutcomes: Object.freeze([]),
       scope: "writing",
       userMessage: "No, always preserve my voice instead.",
       correction: "No, always preserve my voice instead.",

@@ -1,19 +1,19 @@
+import { type FrozenTurnPlan, validateFrozenTurnPlan } from "@noesis/agent-types";
 import {
-  CapabilityRevisionRefSchema,
-  canonicalJson,
-  ExperimentSchema,
-  FileRevisionRefSchema,
-  sameCapabilityRevisionRef,
-  sha256,
   type ActorRef,
   type CapabilityRevisionRef,
+  CapabilityRevisionRefSchema,
+  canonicalJson,
   type DatabaseRowRef,
   type DatabaseTable,
   type DefinitionWriteRequest,
   type EvidenceRef,
+  ExperimentSchema,
   type FileRevisionRef,
+  FileRevisionRefSchema,
+  sameCapabilityRevisionRef,
+  sha256,
 } from "@noesis/domain";
-import { validateFrozenTurnPlan, type FrozenTurnPlan } from "@noesis/agent-types";
 import { z } from "zod";
 import {
   optionalString,
@@ -30,11 +30,13 @@ import {
   decodeTurnActivationPin,
 } from "./decoders.ts";
 import type {
+  ActivationEvidenceBinding,
   ActivationMaterializationRecord,
   ActivationOperationRecord,
   ActivationRecord,
   ProtectedActivationStore,
 } from "./types.ts";
+import { workingAdjustmentAdmissionConflictError } from "./types.ts";
 
 type RecordActivity = (
   actor: ActorRef,
@@ -73,7 +75,7 @@ const ActorSchema = z.strictObject({
   kind: z.enum(["user", "noesis", "external_system", "system"]),
 });
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-const ActivationEvidenceBindingSchema = z.strictObject({
+const ActivationEvidenceBindingSchema: z.ZodType<ActivationEvidenceBinding> = z.strictObject({
   experimentId: z.string().min(1),
   candidateRevision: CapabilityRevisionRefSchema,
   manifestRevision: FileRevisionRefSchema,
@@ -86,6 +88,7 @@ const ActivationEvidenceBindingSchema = z.strictObject({
   reportDigest: DigestSchema,
   definitionSetDigest: DigestSchema,
   controlRevisionId: z.string().min(1).nullable(),
+  sourceAdjustmentId: z.string().min(1).optional(),
 });
 const ActivationPolicyDecisionSchema = z.enum(["block", "approval_required", "eligible_auto_activate"]);
 const ActivationOperationStatusSchema = z.enum([
@@ -554,6 +557,7 @@ export async function createProtectedActivationStore(
       );
       if (
         activationExperiment.status !== "preflight" ||
+        activationExperiment.sourceAdjustmentId !== binding.sourceAdjustmentId ||
         activationExperiment.preflightRef?.rowId !== binding.preflightId ||
         activationExperiment.candidateRevisions.length !== 1 ||
         activationExperiment.candidateRevisions[0] === undefined ||
@@ -631,6 +635,17 @@ export async function createProtectedActivationStore(
       db.prepare(
         "UPDATE experiments SET status = 'observing', data_json = ?, updated_at = ? WHERE experiment_id = ?",
       ).run(JSON.stringify(observingExperiment), committedAt, binding.experimentId);
+      if (binding.sourceAdjustmentId !== undefined) {
+        const source = db
+          .prepare("SELECT project_id FROM working_adjustments WHERE adjustment_id = ?")
+          .get(binding.sourceAdjustmentId);
+        if (source === undefined)
+          throw new Error(`Activation source adjustment ${binding.sourceAdjustmentId} is missing`);
+        db.prepare(
+          `DELETE FROM active_project_adjustments
+           WHERE project_id = ? AND adjustment_id = ?`,
+        ).run(requiredString(source, "project_id"), binding.sourceAdjustmentId);
+      }
       db.prepare(
         `UPDATE activation_operations SET status = 'committed', updated_at = ?, committed_at = ?
          WHERE operation_id = ?`,
@@ -759,6 +774,24 @@ export async function createProtectedActivationStore(
       const current = currentActivationIdentity();
       if (current.activationId !== plan.activationId || current.revision !== plan.activationRevision)
         throw new Error("Activation snapshot changed before frozen turn admission (CAS conflict)");
+      if (plan.project !== undefined) {
+        const activeAdjustment = db
+          .prepare("SELECT adjustment_id FROM active_project_adjustments WHERE project_id = ?")
+          .get(plan.project.projectId);
+        const activeAdjustmentId =
+          activeAdjustment === undefined ? undefined : requiredString(activeAdjustment, "adjustment_id");
+        if (activeAdjustmentId !== plan.workingAdjustmentId) throw workingAdjustmentAdmissionConflictError();
+        if (activeAdjustmentId !== undefined) {
+          const adjustment = db
+            .prepare(
+              `SELECT project_root FROM working_adjustments
+               WHERE project_id = ? AND adjustment_id = ?`,
+            )
+            .get(plan.project.projectId, activeAdjustmentId);
+          if (adjustment === undefined || requiredString(adjustment, "project_root") !== plan.project.root)
+            throw new Error("Working adjustment project identity is inconsistent at turn admission");
+        }
+      }
       const activationRow = db
         .prepare("SELECT * FROM activations WHERE activation_id = ?")
         .get(plan.activationId);

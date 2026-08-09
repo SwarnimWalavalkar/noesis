@@ -16,7 +16,13 @@ export interface TurnSettlementRequest {
 }
 
 export interface TurnSettlement {
-  readonly run: (request: TurnSettlementRequest) => Promise<TurnResult>;
+  readonly run: (request: TurnSettlementRequest) => Promise<TurnSettlementResult>;
+}
+
+export interface TurnSettlementResult {
+  readonly result: TurnResult;
+  /** Exact durable reflection job created from this settled foreground turn. */
+  readonly reflectionJobId?: string;
 }
 
 export interface TurnSettlementOptions {
@@ -30,7 +36,7 @@ export interface TurnSettlementOptions {
 export function createTurnSettlement(options: TurnSettlementOptions): TurnSettlement {
   const now = options.now ?? (() => new Date().toISOString());
 
-  const run = async (request: TurnSettlementRequest): Promise<TurnResult> => {
+  const run = async (request: TurnSettlementRequest): Promise<TurnSettlementResult> => {
     const userRef = await options.workspace.operational.messages.put(
       Object.freeze({
         messageId: `${request.turnId}:user`,
@@ -56,7 +62,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
       assistantMessage?: string,
       aborted = false,
       assistantBoundaries: TurnResult["assistantMessages"] = [],
-    ): Promise<void> => {
+    ): Promise<string | undefined> => {
       for (const boundary of assistantBoundaries) {
         const messageId = `${request.turnId}:assistant:${String(boundary.timelineSequence)}`;
         const existing = await options.workspace.operational.messages.get(messageId);
@@ -172,7 +178,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         status: aborted ? "aborted" : status === "failed" ? "failed" : "completed",
         settledAt: now(),
       });
-      if (aborted || serving.length === 0) return;
+      if (aborted || serving.length === 0) return undefined;
       const outcomeId = `${request.turnId}:outcome`;
       await options.feedback.observeTurnOutcome({
         sessionId: request.sessionId,
@@ -195,15 +201,65 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         throw new Error(
           `Frozen turn plan ${request.plan.planId} attributes learning to unselected capability ${learningAttribution.capabilityId}`,
         );
-      if (!routedSelection) return;
+      if (!routedSelection) return undefined;
       const baseline = routedSelection.revision;
       const capability = options.resolveCapability(routedSelection.capabilityId);
-      if (!capability) return;
-      await options.controlPlane.observeCompletedTurn({
+      if (!capability) return undefined;
+      const admittedProject = request.plan.project;
+      const admittedAdjustmentId = request.plan.workingAdjustmentId;
+      const servedWorkingAdjustmentOutcomes =
+        admittedProject && admittedAdjustmentId
+          ? Object.freeze(
+              (
+                await Promise.all(
+                  (
+                    await options.workspace.workingAdjustments.listSettledEvidence({
+                      projectId: admittedProject.projectId,
+                      adjustmentId: admittedAdjustmentId,
+                      limit: 9,
+                    })
+                  )
+                    .filter(
+                      (served) => served.sessionId !== request.sessionId || served.turnId !== request.turnId,
+                    )
+                    .slice(0, 8)
+                    .map(async (served) => {
+                      const outcome = await options.workspace.operational.outcomes.get(served.outcomeId);
+                      if (!outcome) return undefined;
+                      return Object.freeze({
+                        adjustmentId: admittedAdjustmentId,
+                        planId: served.planId,
+                        sessionId: served.sessionId,
+                        turnId: served.turnId,
+                        outcomeId: served.outcomeId,
+                        outcome: outcome.status,
+                        summary: outcome.summary,
+                        settledAt: served.settledAt,
+                        evidenceRefs: Object.freeze([
+                          Object.freeze({
+                            kind: "database_row" as const,
+                            table: "outcomes" as const,
+                            rowId: served.outcomeId,
+                          }),
+                        ]),
+                      });
+                    }),
+                )
+              ).filter((served) => served !== undefined),
+            )
+          : Object.freeze([]);
+      const reflection = await options.controlPlane.observeCompletedTurn({
         turn: Object.freeze({
           sessionId: request.sessionId,
           turnId: request.turnId,
           outcomeId,
+          ...(admittedProject
+            ? {
+                project: admittedProject,
+                expectedActiveAdjustmentId: admittedAdjustmentId ?? null,
+              }
+            : {}),
+          servedWorkingAdjustmentOutcomes,
           scope: capability.scope,
           userMessage: request.input,
           ...(assistantMessage ? { assistantMessage } : {}),
@@ -225,6 +281,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         }),
         routingStrategyId: request.plan.routing.strategyId,
       });
+      return reflection.job.jobId;
     };
 
     let result: TurnResult;
@@ -236,10 +293,16 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
     }
     if (result.outcome === "aborted") {
       await record("failed", "Turn aborted", result.output, true, result.assistantMessages);
-      return result;
+      return Object.freeze({ result });
     }
-    await record("unknown", result.output, result.output, false, result.assistantMessages);
-    return result;
+    const reflectionJobId = await record(
+      "unknown",
+      result.output,
+      result.output,
+      false,
+      result.assistantMessages,
+    );
+    return Object.freeze({ result, ...(reflectionJobId ? { reflectionJobId } : {}) });
   };
 
   return Object.freeze({ run });

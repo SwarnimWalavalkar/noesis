@@ -8,6 +8,7 @@ import {
   paginateInspectorText,
   startNoesisTui,
 } from "../src/index.ts";
+import type { TuiLearningActivitySummary } from "../src/runtime-port.ts";
 import { createInMemoryTestRuntime, type TestNoesisRuntime } from "./support/in-memory-runtime.ts";
 import { createTestTerminal } from "./support/test-terminal.ts";
 
@@ -891,6 +892,140 @@ describe("Noesis TUI lifecycle", () => {
     resumedTerminal.type("/quit\n");
     await resumedSession;
     expect(resumed.requestedSessions).toEqual([selected.trailId]);
+  });
+
+  test("shows a completed working adjustment once after its foreground turn", async () => {
+    const base = await createRuntime({
+      name: "working-adjustment-notice",
+      async run(request) {
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const runtime = Object.freeze({
+      ...base,
+      listLearningActivity: async (sessionId: string) =>
+        Object.freeze([
+          Object.freeze({
+            jobId: "job-working-adjustment",
+            stage: "reflection" as const,
+            status: "adjusted" as const,
+            summary: "Verify observable state before claiming success",
+            updatedAt: "2026-08-01T00:00:00.000Z",
+            turnId: `${sessionId}:interaction:2`,
+            projectId: "project_noesis",
+            adjustmentId: "adjustment_1",
+          }),
+        ]),
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("verify this\r");
+    await vi.waitFor(() =>
+      expect(terminal.output).toContain("adjusted · Verify observable state before claiming success"),
+    );
+
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("shows one late adjustment notice while a subsequent turn is already running", async () => {
+    let runCount = 0;
+    let secondTurnStarted = false;
+    let releaseSecondTurn: (() => void) | undefined;
+    const secondTurnGate = new Promise<void>((resolve) => {
+      releaseSecondTurn = resolve;
+    });
+    const base = await createRuntime({
+      name: "late-working-adjustment-notice",
+      async run(request) {
+        runCount += 1;
+        if (runCount === 2) {
+          secondTurnStarted = true;
+          await secondTurnGate;
+        }
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    let resolveLateActivity: ((activity: TuiLearningActivitySummary | undefined) => void) | undefined;
+    const lateActivity = new Promise<TuiLearningActivitySummary | undefined>((resolve) => {
+      resolveLateActivity = resolve;
+    });
+    let learningReads = 0;
+    const waitedJobIds: string[] = [];
+    const runtime = Object.freeze({
+      ...base,
+      listLearningActivity: async (sessionId: string) => {
+        learningReads += 1;
+        if (learningReads > 1) return Object.freeze([]);
+        return Object.freeze([
+          Object.freeze({
+            jobId: "job-late-adjustment",
+            stage: "reflection" as const,
+            status: "running" as const,
+            summary: "Running reflection on the completed turn",
+            updatedAt: "2026-08-01T00:00:00.000Z",
+            turnId: `${sessionId}:interaction:2`,
+          }),
+        ]);
+      },
+      waitForLearningActivity: async (_sessionId: string, jobId: string) => {
+        waitedJobIds.push(jobId);
+        return await lateActivity;
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("first turn\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("learning · reviewing..."));
+    terminal.type("second turn\r");
+    await vi.waitFor(() => expect(secondTurnStarted).toBe(true));
+    resolveLateActivity?.(
+      Object.freeze({
+        jobId: "job-late-adjustment",
+        stage: "reflection",
+        status: "adjusted",
+        summary: "Verify observable state before claiming success",
+        updatedAt: "2026-08-01T00:00:01.000Z",
+        turnId: "first-turn",
+        workingAdjustment: Object.freeze({
+          adjustmentId: "adjustment-late",
+          projectId: "project-1",
+          status: "active",
+          strategy: "Verify observable state before claiming success.",
+          successSignal: "Claims cite observed state.",
+          servedEvidence: Object.freeze([]),
+        }),
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(terminal.output).toContain("strategy · Verify observable state before claiming success."),
+    );
+    expect(waitedJobIds).toEqual(["job-late-adjustment"]);
+
+    releaseSecondTurn?.();
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    terminal.type("/quit\n");
+    await running;
   });
 
   test("restores durable tool calls as expandable transcript rows", async () => {

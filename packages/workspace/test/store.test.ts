@@ -17,7 +17,12 @@ import {
 } from "@noesis/domain";
 import type { AuthorityReceipt } from "@noesis/policy";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { createWorkspaceStore, type NoesisWorkspaceStore, restoreWorkspaceBackup } from "../src/index.ts";
+import {
+  createWorkspaceStore,
+  isWorkingAdjustmentAdmissionConflictError,
+  type NoesisWorkspaceStore,
+  restoreWorkspaceBackup,
+} from "../src/index.ts";
 import { createWorkspaceRuntimeInternals } from "../src/protected-runtime.ts";
 
 const actor = { actorId: "test-user", kind: "user" as const };
@@ -46,6 +51,50 @@ const runningTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
   return Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) });
 };
 
+const admitAndSettleSourceTurn = async (
+  store: NoesisWorkspaceStore,
+  sessionId: string,
+  turnId: string,
+): Promise<void> => {
+  const runtime = createWorkspaceRuntimeInternals(store).protectedRuntime;
+  const activation = await runtime.activations.bootstrapGenesis({
+    capabilityRevision: {
+      kind: "capability_revision",
+      capabilityId: "general-collaboration",
+      capabilityRevisionId: "general-collaboration-genesis-v1",
+      bundleDigest: digest("a"),
+    },
+    activeDefinitions: Object.freeze({}),
+  });
+  const initial = runningTurnPlan(sessionId, turnId);
+  const { canonicalDigest: _discardedDigest, ...initialBody } = initial;
+  const body = Object.freeze({
+    ...initialBody,
+    activationId: activation.activationId,
+    activationRevision: activation.revision,
+  });
+  await runtime.activations.admitTurnPlan(
+    Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) }),
+  );
+  const outcomeId = `${turnId}:outcome`;
+  await store.operational.outcomes.put({
+    outcomeId,
+    sessionId,
+    turnId,
+    status: "accepted",
+    summary: "The source turn completed before reflection applied an adjustment.",
+    sensitivity: "normal",
+    createdAt: "2026-07-26T00:00:00.500Z",
+    metadata: Object.freeze({}),
+  });
+  await store.operational.foregroundTurns.settle({
+    turnId,
+    outcomeId,
+    status: "completed",
+    settledAt: "2026-07-26T00:00:00.500Z",
+  });
+};
+
 describe("WorkspaceStore", () => {
   let roots: string[] = [];
 
@@ -62,6 +111,206 @@ describe("WorkspaceStore", () => {
     roots.push(root);
     return root;
   };
+
+  test("applies, replaces, and unapplies immutable project adjustments with stale-safe CAS", async () => {
+    const root = await temporary("working-adjustments");
+    const store = await createWorkspaceStore(root);
+    await store.operational.sessions.put(session("session-adjustment"));
+    await admitAndSettleSourceTurn(store, "session-adjustment", "turn-source");
+    const protectedRuntime = createWorkspaceRuntimeInternals(store).protectedRuntime;
+    const evidence = Object.freeze({
+      kind: "database_row" as const,
+      table: "sessions" as const,
+      rowId: "session-adjustment",
+    });
+    const project = Object.freeze({ projectId: "project-alpha", root: "/tmp/project-alpha" });
+    const adjustment = (adjustmentId: string, strategy: string) =>
+      Object.freeze({
+        adjustmentId,
+        scope: project,
+        observation: "The project needs a short-lived strategy hypothesis.",
+        strategy,
+        successSignal: "The next settled turn demonstrates the requested behavior.",
+        evidenceRefs: Object.freeze([evidence]),
+        createdFromTurnId: "turn-source",
+      });
+    const first = adjustment("adjustment-a", "Verify observable state before claiming success.");
+    const second = adjustment("adjustment-b", "Compare the output with the user's stated contract.");
+    const replacement = adjustment("adjustment-c", "Compare the output with the user's stated contract.");
+
+    await expect(
+      protectedRuntime.workingAdjustments.apply({
+        adjustment: first,
+        expectedActiveAdjustmentId: null,
+      }),
+    ).resolves.toMatchObject({ status: "applied", replacedAdjustmentId: null });
+    await expect(
+      protectedRuntime.workingAdjustments.apply({
+        adjustment: first,
+        expectedActiveAdjustmentId: null,
+      }),
+    ).resolves.toMatchObject({ status: "applied", adjustment: first });
+    await expect(
+      protectedRuntime.workingAdjustments.apply({
+        adjustment: second,
+        expectedActiveAdjustmentId: null,
+      }),
+    ).resolves.toEqual({
+      status: "stale",
+      adjustmentId: "adjustment-b",
+      currentActiveAdjustmentId: "adjustment-a",
+    });
+    await expect(
+      protectedRuntime.workingAdjustments.apply({
+        adjustment: second,
+        expectedActiveAdjustmentId: null,
+      }),
+    ).resolves.toEqual({
+      status: "stale",
+      adjustmentId: "adjustment-b",
+      currentActiveAdjustmentId: "adjustment-a",
+    });
+    await expect(
+      protectedRuntime.workingAdjustments.apply({
+        adjustment: replacement,
+        expectedActiveAdjustmentId: "adjustment-a",
+      }),
+    ).resolves.toMatchObject({ status: "applied", replacedAdjustmentId: "adjustment-a" });
+    await expect(
+      protectedRuntime.workingAdjustments.unapply({
+        projectId: project.projectId,
+        expectedActiveAdjustmentId: "adjustment-a",
+      }),
+    ).resolves.toEqual({
+      status: "stale",
+      adjustmentId: "adjustment-a",
+      currentActiveAdjustmentId: "adjustment-c",
+    });
+    await expect(
+      protectedRuntime.workingAdjustments.unapply({
+        projectId: project.projectId,
+        expectedActiveAdjustmentId: "adjustment-a",
+      }),
+    ).resolves.toEqual({
+      status: "stale",
+      adjustmentId: "adjustment-a",
+      currentActiveAdjustmentId: "adjustment-c",
+    });
+    await expect(
+      protectedRuntime.workingAdjustments.unapply({
+        projectId: project.projectId,
+        expectedActiveAdjustmentId: "adjustment-c",
+      }),
+    ).resolves.toEqual({ status: "unapplied", adjustmentId: "adjustment-c" });
+    await expect(
+      protectedRuntime.workingAdjustments.unapply({
+        projectId: project.projectId,
+        expectedActiveAdjustmentId: "adjustment-c",
+      }),
+    ).resolves.toEqual({ status: "unapplied", adjustmentId: "adjustment-c" });
+
+    expect(await store.workingAdjustments.get("adjustment-a")).toEqual(first);
+    expect(await store.workingAdjustments.get("adjustment-b")).toBeUndefined();
+    expect(await store.workingAdjustments.get("adjustment-c")).toEqual(replacement);
+    expect(await store.workingAdjustments.getActive(project.projectId)).toBeUndefined();
+    store.close();
+
+    const reopened = await createWorkspaceStore(root);
+    expect(await reopened.workingAdjustments.get("adjustment-a")).toEqual(first);
+    expect(await reopened.workingAdjustments.get("adjustment-b")).toBeUndefined();
+    expect(await reopened.workingAdjustments.get("adjustment-c")).toEqual(replacement);
+    expect(await reopened.workingAdjustments.getActive(project.projectId)).toBeUndefined();
+    reopened.close();
+  });
+
+  test("admits only the current project adjustment and derives settled serving evidence", async () => {
+    const store = await createWorkspaceStore(await temporary("working-adjustment-admission"));
+    await store.operational.sessions.put(session("session-adjustment-admission"));
+    const runtime = createWorkspaceRuntimeInternals(store).protectedRuntime;
+    await runtime.activations.bootstrapGenesis({
+      capabilityRevision: {
+        kind: "capability_revision",
+        capabilityId: "general-collaboration",
+        capabilityRevisionId: "general-collaboration-genesis-v1",
+        bundleDigest: digest("a"),
+      },
+      activeDefinitions: Object.freeze({}),
+    });
+    await admitAndSettleSourceTurn(store, "session-adjustment-admission", "turn-source");
+    const evidence = Object.freeze({
+      kind: "database_row" as const,
+      table: "sessions" as const,
+      rowId: "session-adjustment-admission",
+    });
+    const project = Object.freeze({ projectId: "project-admission", root: "/tmp/project-admission" });
+    const adjustment = (adjustmentId: string) =>
+      Object.freeze({
+        adjustmentId,
+        scope: project,
+        observation: "A project strategy was inferred from settled evidence.",
+        strategy: `Serve ${adjustmentId} as bounded temporary strategy data.`,
+        successSignal: "A later completed turn records an outcome.",
+        evidenceRefs: Object.freeze([evidence]),
+        createdFromTurnId: "turn-source",
+      });
+    await runtime.workingAdjustments.apply({
+      adjustment: adjustment("adjustment-admission-a"),
+      expectedActiveAdjustmentId: null,
+    });
+    const planFor = (adjustmentId: string): FrozenTurnPlan => {
+      const initial = runningTurnPlan("session-adjustment-admission", "turn-adjustment-admission");
+      const { canonicalDigest: _discardedDigest, ...initialBody } = initial;
+      const body = Object.freeze({
+        ...initialBody,
+        project,
+        workingAdjustmentId: adjustmentId,
+      });
+      return Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) });
+    };
+    const stalePlan = planFor("adjustment-admission-a");
+    await runtime.workingAdjustments.apply({
+      adjustment: adjustment("adjustment-admission-b"),
+      expectedActiveAdjustmentId: "adjustment-admission-a",
+    });
+
+    await expect(runtime.activations.admitTurnPlan(stalePlan)).rejects.toSatisfy(
+      isWorkingAdjustmentAdmissionConflictError,
+    );
+    const admitted = await runtime.activations.admitTurnPlan(planFor("adjustment-admission-b"));
+    await store.operational.outcomes.put({
+      outcomeId: "outcome-adjustment-admission",
+      sessionId: admitted.sessionId,
+      turnId: admitted.turnId,
+      status: "accepted",
+      summary: "The adjustment was served in a completed turn.",
+      sensitivity: "normal",
+      createdAt: "2026-07-26T00:00:01.000Z",
+      metadata: Object.freeze({}),
+    });
+    await store.operational.foregroundTurns.settle({
+      turnId: admitted.turnId,
+      outcomeId: "outcome-adjustment-admission",
+      status: "completed",
+      settledAt: "2026-07-26T00:00:01.000Z",
+    });
+
+    await expect(
+      store.workingAdjustments.listSettledEvidence({
+        projectId: project.projectId,
+        adjustmentId: "adjustment-admission-b",
+        limit: 8,
+      }),
+    ).resolves.toEqual([
+      {
+        planId: admitted.planId,
+        sessionId: admitted.sessionId,
+        turnId: admitted.turnId,
+        outcomeId: "outcome-adjustment-admission",
+        settledAt: "2026-07-26T00:00:01.000Z",
+      },
+    ]);
+    store.close();
+  });
 
   test("classifies one canonical turn outcome with an idempotent semantic transition", async () => {
     const store = await createWorkspaceStore(await temporary("semantic-outcome"));
@@ -1093,7 +1342,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(29);
+    expect(versions.at(-1)).toBe(30);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

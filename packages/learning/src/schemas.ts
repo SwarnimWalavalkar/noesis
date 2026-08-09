@@ -1,9 +1,12 @@
 import {
+  canonicalJson,
   type EvidenceRef,
   EvidenceRefSchema,
   type ExperimentVariantRef,
   type FileRevisionRef,
   FileRevisionRefSchema,
+  ProjectRefSchema,
+  WORKING_ADJUSTMENT_LIMITS,
 } from "@noesis/domain";
 import { z } from "zod";
 
@@ -42,10 +45,76 @@ export const AutomaticLearningConfigSchema = z.strictObject({
 });
 export type AutomaticLearningConfig = Readonly<z.infer<typeof AutomaticLearningConfigSchema>>;
 
+const SERVED_WORKING_ADJUSTMENT_SUMMARY_CHARS = 512;
+const SERVED_WORKING_ADJUSTMENT_TOTAL_SUMMARY_CHARS = 2_048;
+const SERVED_WORKING_ADJUSTMENT_OUTCOMES = 8;
+
+const BoundedWorkingAdjustmentEvidenceRefsSchema = z
+  .array(EvidenceRefSchema)
+  .min(1)
+  .transform((references) =>
+    Object.freeze(
+      [
+        ...new Map(
+          references.map((reference) => [canonicalJson(reference), Object.freeze({ ...reference })]),
+        ).values(),
+      ].slice(0, WORKING_ADJUSTMENT_LIMITS.evidenceRefs),
+    ),
+  );
+
+export const WorkingAdjustmentOutcomeEvidenceSchema = z.strictObject({
+  adjustmentId: z.string().min(1),
+  planId: z.string().min(1),
+  sessionId: z.string().min(1),
+  turnId: z.string().min(1),
+  outcomeId: z.string().min(1),
+  outcome: z.enum(["accepted", "corrected", "failed", "unknown"]),
+  summary: z.string().transform((summary) => summary.slice(0, SERVED_WORKING_ADJUSTMENT_SUMMARY_CHARS)),
+  settledAt: z.string().datetime(),
+  evidenceRefs: BoundedWorkingAdjustmentEvidenceRefsSchema,
+});
+export type WorkingAdjustmentOutcomeEvidence = Readonly<
+  z.infer<typeof WorkingAdjustmentOutcomeEvidenceSchema>
+>;
+
 export const LearningTurnInputSchema = z.strictObject({
   sessionId: z.string().min(1),
   turnId: z.string().min(1),
   outcomeId: z.string().min(1).optional(),
+  // Optional only so durable pre-feature reflection jobs remain decodable after upgrade. New
+  // foreground settlement always supplies both fields; adjustment decisions require them.
+  project: ProjectRefSchema.optional(),
+  expectedActiveAdjustmentId: z.string().min(1).nullable().optional(),
+  servedWorkingAdjustmentOutcomes: z
+    .array(WorkingAdjustmentOutcomeEvidenceSchema)
+    .max(SERVED_WORKING_ADJUSTMENT_OUTCOMES)
+    .default([])
+    .transform((outcomes) => {
+      let remainingSummaryChars = SERVED_WORKING_ADJUSTMENT_TOTAL_SUMMARY_CHARS;
+      let remainingEvidenceRefs = WORKING_ADJUSTMENT_LIMITS.evidenceRefs;
+      const seenEvidence = new Set<string>();
+      return Object.freeze(
+        outcomes.flatMap((outcome) => {
+          const summary = outcome.summary.slice(0, remainingSummaryChars);
+          remainingSummaryChars -= summary.length;
+          const evidenceRefs = outcome.evidenceRefs.filter((reference) => {
+            const key = canonicalJson(reference);
+            if (seenEvidence.has(key) || remainingEvidenceRefs <= 0) return false;
+            seenEvidence.add(key);
+            remainingEvidenceRefs -= 1;
+            return true;
+          });
+          if (evidenceRefs.length === 0) return [];
+          return [
+            Object.freeze({
+              ...outcome,
+              summary,
+              evidenceRefs: Object.freeze(evidenceRefs),
+            }),
+          ];
+        }),
+      );
+    }),
   scope: z.string().min(1),
   userMessage: z.string().min(1),
   assistantMessage: z.string().optional(),
@@ -72,7 +141,11 @@ export const SemanticTurnObservationSchema = z.strictObject({
     .describe(
       "Whether the current user turn semantically corrects prior behavior, expresses a reusable preference, or is neither",
     ),
-  reason: z.string().min(1).describe("Brief evidence-grounded reason for the classification"),
+  reason: z
+    .string()
+    .min(1)
+    .max(WORKING_ADJUSTMENT_LIMITS.observationChars)
+    .describe("Brief evidence-grounded reason for the classification"),
 });
 export type SemanticTurnObservation = Readonly<z.infer<typeof SemanticTurnObservationSchema>>;
 
@@ -85,6 +158,22 @@ export const ReflectorOutputSchema = z.discriminatedUnion("decision", [
     ...ReflectorObservationShape,
     decision: z.literal("no_change"),
     reason: z.string().min(1),
+  }),
+  z.strictObject({
+    ...ReflectorObservationShape,
+    decision: z.literal("apply_working_adjustment"),
+    expectedActiveAdjustmentId: z.string().min(1).nullable(),
+    rationale: z.string().min(1).max(WORKING_ADJUSTMENT_LIMITS.observationChars),
+    strategy: z.string().min(1).max(WORKING_ADJUSTMENT_LIMITS.strategyChars),
+    successSignal: z.string().min(1).max(WORKING_ADJUSTMENT_LIMITS.successSignalChars),
+    evidenceCitationIndexes: z.array(z.number().int().nonnegative()).min(1).max(12),
+  }),
+  z.strictObject({
+    ...ReflectorObservationShape,
+    decision: z.literal("unapply_working_adjustment"),
+    expectedActiveAdjustmentId: z.string().min(1),
+    reason: z.string().min(1).max(WORKING_ADJUSTMENT_LIMITS.observationChars),
+    evidenceCitationIndexes: z.array(z.number().int().nonnegative()).min(1).max(12),
   }),
   z.strictObject({
     ...ReflectorObservationShape,
@@ -121,6 +210,13 @@ export const ReflectorOutputSchema = z.discriminatedUnion("decision", [
       .default([])
       .describe(
         "Zero-based indexes of supplied evidence citations that genuinely show the same behavior recurring",
+      ),
+    workingAdjustmentEvidenceCitationIndexes: z
+      .array(z.number().int().nonnegative())
+      .max(12)
+      .default([])
+      .describe(
+        "Zero-based indexes of working-adjustment evidence that this experiment explicitly builds upon",
       ),
     sourceCases: z
       .array(

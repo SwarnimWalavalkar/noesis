@@ -61,6 +61,10 @@ function mutationPorts(onPin: () => void) {
       putResearchRun: unsupported,
       commitOutcome: unsupported,
     }),
+    workingAdjustments: Object.freeze({
+      apply: unsupported,
+      unapply: unsupported,
+    }),
   });
 }
 
@@ -98,6 +102,7 @@ describe("protected workspace runtime", () => {
       verifier: owner.receiptVerifier,
       activations: ports.activations,
       feedback: ports.feedback,
+      workingAdjustments: ports.workingAdjustments,
     });
     const expected = Object.freeze({
       effect: "promote" as const,
@@ -205,6 +210,7 @@ describe("protected workspace runtime", () => {
       activations,
       feedback: baseRuntime.feedback,
       measurements: baseRuntime.measurements,
+      workingAdjustments: baseRuntime.workingAdjustments,
     });
 
     await expect(
