@@ -11,6 +11,7 @@ const preferredAliases = new Map<string, string>([
   ["files.write", "file_write"],
   ["files.replace", "file_update"],
   ["shell.run", "shell"],
+  ["history.search_sessions", "search_sessions"],
   ["web.fetch", "web_fetch"],
   ["artifacts.write", "artifact_write"],
 ]);

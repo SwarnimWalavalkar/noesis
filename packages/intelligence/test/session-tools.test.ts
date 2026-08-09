@@ -10,6 +10,7 @@ import {
   createHistoryPort,
   createSessionSearchTools,
   type HistoryPort,
+  selectSessionRetrievalStrategy,
   SESSION_RETRIEVAL_STRATEGIES,
   type SessionSearchAuthorization,
   type SessionSearchTools,
@@ -83,6 +84,15 @@ describe("AC-07 session search tools", () => {
         metadata: {},
       }),
       workspace.operational.messages.put({
+        messageId: "message-current",
+        sessionId: "session-b",
+        role: "user",
+        content: "Current marigold continuity note should not be recalled as prior work.",
+        sensitivity: "normal",
+        createdAt: later,
+        metadata: {},
+      }),
+      workspace.operational.messages.put({
         messageId: "message-private-title",
         sessionId: "session-private-title",
         role: "user",
@@ -138,6 +148,16 @@ describe("AC-07 session search tools", () => {
       sensitivity: "normal",
       provenanceRefs: [{ kind: "database_row", table: "messages", rowId: "message-public" }],
     });
+    await workspace.evidence.appendEvidence({
+      workingPath: "unrelated/orphan-release-evidence.txt",
+      bytes: Buffer.from(
+        "Orphan preserve voice exact citations release research evidence has no session provenance.",
+      ),
+      actor: { actorId: "test", kind: "system" },
+      evidenceKind: "output",
+      sensitivity: "normal",
+      provenanceRefs: [],
+    });
     await workspace.operational.searchConfiguration.put({
       lexicalLimit: 32,
       semanticLimit: 32,
@@ -182,10 +202,15 @@ describe("AC-07 session search tools", () => {
     expect(
       search.value.fragments.some((fragment) => fragment.citation.sessionIds.includes("session-a")),
     ).toBe(true);
+    expect(search.value.fragments.every((fragment) => fragment.citation.sessionIds.length > 0)).toBe(true);
+    expect(
+      search.value.fragments.every((fragment) => !fragment.citation.sessionIds.includes("session-b")),
+    ).toBe(true);
     expect(search.value.fragments.every((fragment) => fragment.citation.sensitivity === "normal")).toBe(true);
     expect(search.value.fragments.every((fragment) => fragment.untrusted)).toBe(true);
     expect(JSON.stringify(search.value)).not.toContain("ultrasecret");
     expect(JSON.stringify(search.value)).not.toContain("zephyr budget");
+    expect(JSON.stringify(search.value)).not.toContain("Orphan preserve voice");
 
     const corrections = await tools().findCorrections({
       topic: "release research exact citations",
@@ -199,6 +224,108 @@ describe("AC-07 session search tools", () => {
       sessionId: "session-a",
       outcomeId: "outcome-correction",
     });
+  });
+
+  test("defaults automatic retrieval to hybrid and only searches prior session-linked evidence", async () => {
+    expect(
+      selectSessionRetrievalStrategy({
+        query: "secret token message_session-b",
+        requested: "automatic",
+      }),
+    ).toEqual({
+      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid,
+      reason: "automatic hybrid default",
+    });
+    expect(
+      selectSessionRetrievalStrategy({
+        query: "anything",
+        requested: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
+      }),
+    ).toEqual({
+      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly,
+      reason: "explicit strategy",
+    });
+
+    const automatic = await tools().searchSessions({ query: "marigold continuity note" });
+    expect(automatic).toMatchObject({
+      ok: true,
+      value: {
+        telemetry: {
+          strategyId: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
+          routeReason: "automatic hybrid default",
+        },
+      },
+    });
+    if (!automatic.ok) return;
+    expect(
+      automatic.value.fragments.every(
+        (fragment) =>
+          fragment.citation.sessionIds.length > 0 && !fragment.citation.sessionIds.includes("session-b"),
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(automatic.value.fragments)).not.toContain("Current marigold continuity");
+    expect(JSON.stringify(automatic.value.fragments)).not.toContain("Orphan preserve voice");
+
+    const explicitCurrent = await tools().searchSessions({
+      query: "marigold continuity note",
+      sessionId: "session-b",
+    });
+    expect(explicitCurrent.ok).toBe(true);
+    if (!explicitCurrent.ok) return;
+    expect(
+      explicitCurrent.value.fragments.some(
+        (fragment) =>
+          fragment.citation.identity.kind === "message" &&
+          fragment.citation.identity.messageId === "message-current",
+      ),
+    ).toBe(true);
+    expect(
+      explicitCurrent.value.fragments.every((fragment) => fragment.citation.sessionIds.includes("session-b")),
+    ).toBe(true);
+  });
+
+  test("filters the current session before candidate limits can crowd out prior evidence", async () => {
+    const query = "saffron longitudinal recall boundary";
+    await workspace.operational.messages.put({
+      messageId: "message-prior-crowding",
+      sessionId: "session-a",
+      role: "user",
+      content: `${query} belongs to an earlier session and must remain discoverable.`,
+      sensitivity: "normal",
+      createdAt,
+      metadata: {},
+    });
+    await Promise.all(
+      Array.from({ length: 40 }, async (_, index) => {
+        await workspace.operational.messages.put({
+          messageId: `message-current-decoy-${index}`,
+          sessionId: "session-b",
+          role: "user",
+          content: `${query} current-session decoy ${index}`,
+          sensitivity: "normal",
+          createdAt: later,
+          metadata: {},
+        });
+      }),
+    );
+
+    const result = await tools().searchSessions({
+      query,
+      maxResults: 4,
+      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(
+      result.value.fragments.some(
+        (fragment) =>
+          fragment.citation.identity.kind === "message" &&
+          fragment.citation.identity.messageId === "message-prior-crowding",
+      ),
+    ).toBe(true);
+    expect(
+      result.value.fragments.every((fragment) => !fragment.citation.sessionIds.includes("session-b")),
+    ).toBe(true);
   });
 
   test("carries exact evidence revision, session, message, and provenance identity", async () => {
@@ -364,6 +491,50 @@ describe("AC-07 session search tools", () => {
       result.value.fragments.reduce((sum, fragment) => sum + fragment.content.length, 0),
     ).toBeLessThanOrEqual(70);
     expect(result.value.telemetry.contextCharacters).toBeLessThanOrEqual(70);
+  });
+
+  test("uses model ranking before a context budget truncates an otherwise fully returned candidate set", async () => {
+    let rerankCalls = 0;
+    const semanticHistory = createHistoryPort({
+      workspace,
+      embeddings: createDeterministicEmbeddingPort(),
+      reranker: {
+        rerank: async (request) => {
+          rerankCalls += 1;
+          return [...request.candidates]
+            .sort((left, right) => {
+              const leftPreferred = left.excerpt.includes("Always preserve") ? 1 : 0;
+              const rightPreferred = right.excerpt.includes("Always preserve") ? 1 : 0;
+              return rightPreferred - leftPreferred;
+            })
+            .map((candidate) => ({
+              documentId: candidate.documentId,
+              reason: "Controlled semantic preference.",
+            }));
+        },
+      },
+    });
+    const result = await tools(
+      { currentSessionId: "session-b" },
+      { maxFragmentChars: 40, maxTotalContextChars: 40, maxResults: 8 },
+      semanticHistory,
+    ).searchSessions({
+      query: "release research citations preserve voice",
+      maxResults: 8,
+      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.telemetry.candidateCount).toBeGreaterThan(1);
+    expect(result.value.telemetry.candidateCount).toBeLessThanOrEqual(8);
+    expect(rerankCalls).toBe(1);
+    expect(result.value.fragments).toHaveLength(1);
+    expect(result.value.fragments[0]?.citation.identity).toEqual({
+      kind: "message",
+      sessionId: "session-a",
+      messageId: "message-public",
+    });
   });
 
   test("filters similar tasks and completed experiment outcomes by authoritative type", async () => {

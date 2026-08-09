@@ -24,9 +24,11 @@ import {
   createPiAgentRoleRunner,
   createPiAgentRuntime,
   createPiSkillLibrary,
+  type FrozenSessionToolResolver,
   type PiFrozenToolCatalog,
   type PiWorkflowSummary,
   projectWorkflowToolName,
+  type RoleBackendRequest,
 } from "@noesis/runtime-pi";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
@@ -38,6 +40,7 @@ import {
 } from "../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 import { createScriptedAgentRoleRunner } from "../../../packages/runtime-pi/test/support/scripted-role-runner.ts";
 import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
+import { researchLoopControlledResponse } from "./support/research-loop-controlled-response.ts";
 import {
   type ApplicationRuntimeCompositionOptions,
   createApplicationRuntimeComposition,
@@ -46,6 +49,16 @@ import {
 } from "../src/runtime-composition.ts";
 
 const roots: string[] = [];
+
+function scriptedHistoryRerankResponse(request: RoleBackendRequest): { readonly text: string } {
+  const response = researchLoopControlledResponse({
+    systemPrompt: request.systemPrompt,
+    lastUserText: request.prompt,
+    context: { messages: [] },
+  });
+  if (typeof response !== "string") throw new Error("Controlled history reranker must return text");
+  return Object.freeze({ text: response });
+}
 
 test("a reflection barrier read failure cannot fail an already-settled turn", async () => {
   await expect(
@@ -2279,12 +2292,23 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const requests: AgentRuntimeRequest[] = [];
     const seenConfigurations: unknown[] = [];
+    const preparedCatalogs: PiFrozenToolCatalog[] = [];
+    let frozenSessionTools: FrozenSessionToolResolver | undefined;
     const runtime = await createApplicationRuntimeComposition({
       config,
       skills,
-      createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) => {
+      createAgent: (sessionTools, codeExecution, selfTools, skillLibrary) => {
+        frozenSessionTools = sessionTools;
+        const capturingCodeExecution = Object.freeze({
+          ...codeExecution,
+          prepare: async (...arguments_: Parameters<typeof codeExecution.prepare>) => {
+            const prepared = await codeExecution.prepare(...arguments_);
+            preparedCatalogs.push(prepared.catalog);
+            return prepared;
+          },
+        });
         const pi = createPiAgentRuntime(process.cwd(), controlled.models, {
-          codeExecution,
+          codeExecution: capturingCodeExecution,
           selfTools,
           requirePinnedSkillSnapshot: true,
           ...(skillLibrary ? { skills: skillLibrary } : {}),
@@ -2307,6 +2331,28 @@ describe("apps/noesis production control-plane composition", () => {
     const trail = await runtime.startTrail({ title: "Composition acceptance" });
     const result = await runtime.debug.runTurn(trail.trailId, "Record this ordinary turn");
     expect(result.outcome).toBe("completed");
+    expect(requests[0]?.systemPrompt).toContain(
+      "Before asking the user to repeat relevant prior work, search previous sessions when it could help.",
+    );
+    const sessionCatalogTools = [
+      "history.search_sessions",
+      "history.open_session_evidence",
+      "history.find_corrections",
+      "history.find_similar_tasks",
+      "history.prior_experiment_outcomes",
+    ];
+    expect(preparedCatalogs[0]?.tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(sessionCatalogTools),
+    );
+    if (!frozenSessionTools) throw new Error("Expected the application session-tool resolver");
+    const emptyCapabilityResolution = await frozenSessionTools.resolve(
+      recoveryTurnPlan("trail-empty-capabilities", "turn-empty-capabilities"),
+      new AbortController().signal,
+    );
+    expect(emptyCapabilityResolution.consumedMaterials).toEqual([]);
+    expect(emptyCapabilityResolution.definitions.map((definition) => definition.name)).toEqual(
+      sessionCatalogTools.map((name) => name.slice("history.".length)),
+    );
     expect(config.schemaVersion).toBe(1);
     expect(await runtime.debug.workspace.operational.sessions.get(trail.trailId)).toMatchObject({
       sessionId: trail.trailId,
@@ -2351,7 +2397,7 @@ describe("apps/noesis production control-plane composition", () => {
         },
       ],
     });
-    expect(await runtime.debug.workspace.definitionMetadata.listCurrent("runtime_role")).toHaveLength(8);
+    expect(await runtime.debug.workspace.definitionMetadata.listCurrent("runtime_role")).toHaveLength(9);
     expect(JSON.stringify(seenConfigurations)).not.toMatch(
       /protectedActivations|protectedFeedback|authorityBoundary|restorationHandle/iu,
     );
@@ -2642,7 +2688,9 @@ describe("apps/noesis production control-plane composition", () => {
     let reflectorRuns = 0;
     const strategy = "Verify the observable project state before reporting completion.";
     const controlled = createControlledPiModels({
-      respond: ({ systemPrompt, lastUserText }) => {
+      respond: (input) => {
+        const { systemPrompt, lastUserText } = input;
+        if (systemPrompt.includes("role: history_reranker")) return researchLoopControlledResponse(input);
         if (!systemPrompt.includes("role: reflector")) return `Controlled completion for: ${lastUserText}`;
         reflectorContexts.push(lastUserText);
         reflectorRuns += 1;
@@ -2724,7 +2772,9 @@ describe("apps/noesis production control-plane composition", () => {
     });
     let reflectorRuns = 0;
     const controlled = createControlledPiModels({
-      respond: ({ systemPrompt, lastUserText }) => {
+      respond: (input) => {
+        const { systemPrompt, lastUserText } = input;
+        if (systemPrompt.includes("role: history_reranker")) return researchLoopControlledResponse(input);
         if (!systemPrompt.includes("role: reflector")) return `Controlled completion for: ${lastUserText}`;
         reflectorRuns += 1;
         return JSON.stringify({
@@ -2786,6 +2836,8 @@ describe("apps/noesis production control-plane composition", () => {
         createScriptedAgentRoleRunner({
           variants: configurations,
           respond: async (request) => {
+            if (request.systemPrompt.includes("role: history_reranker"))
+              return scriptedHistoryRerankResponse(request);
             if (!request.systemPrompt.includes("role: reflector"))
               throw new Error("Only reflection should run in the bounded-shutdown fixture");
             markReflectionStarted?.();
@@ -2864,6 +2916,8 @@ describe("apps/noesis production control-plane composition", () => {
         createScriptedAgentRoleRunner({
           variants: configurations,
           respond: async (request) => {
+            if (request.systemPrompt.includes("role: history_reranker"))
+              return scriptedHistoryRerankResponse(request);
             if (!request.systemPrompt.includes("role: reflector"))
               throw new Error("Only reflection should run in the cooperative-shutdown fixture");
             markReflectionStarted?.();

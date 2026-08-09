@@ -152,7 +152,13 @@ export const BUILT_IN_EXPERIMENT_DEFAULTS: Required<ExperimentDefaults> = {
 };
 
 export const BUILT_IN_TOOL_DEFAULTS: ResolvedToolConfig = {
-  hotbar: Object.freeze(["files.read", "files.list", "shell.run", "workflows.run"]),
+  hotbar: Object.freeze([
+    "files.read",
+    "files.list",
+    "shell.run",
+    "workflows.run",
+    "history.search_sessions",
+  ]),
   projectHotbars: Object.freeze({}),
 };
 

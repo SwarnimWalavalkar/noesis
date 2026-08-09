@@ -4,6 +4,7 @@ import type {
   NoesisWorkspaceStore,
   SearchCandidate,
   SearchDocument,
+  SearchSessionScope,
 } from "@noesis/workspace";
 
 export interface ExactCitation {
@@ -18,6 +19,7 @@ export interface ExactCitation {
 export interface HistorySearchRequest {
   readonly query: string;
   readonly sessionId?: string;
+  readonly sessionScope?: SearchSessionScope;
   readonly limit?: number;
   readonly lexicalLimit?: number;
   readonly semanticLimit?: number;
@@ -154,13 +156,19 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
       configuration.maxExcerptChars,
     );
     const includePrivate = request.privacy === "include_private" && configuration.includePrivate;
+    if (request.sessionId !== undefined && request.sessionScope !== undefined)
+      throw new Error("History search accepts either sessionId or sessionScope, not both");
+    const sessionScope: SearchSessionScope | undefined =
+      request.sessionId === undefined
+        ? request.sessionScope
+        : { kind: "exact", sessionId: request.sessionId };
     if ((await options.workspace.search.listDocuments({ includePrivate: true })).length === 0)
       await rebuild();
 
     const lexical = await options.workspace.search.lexicalCandidates({
       query,
       limit: lexicalLimit,
-      ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+      ...(sessionScope === undefined ? {} : { sessionScope }),
       includePrivate,
     });
     let semantic: readonly SearchCandidate[] = [];
@@ -172,7 +180,7 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
         modelId: embedded.modelId,
         vector,
         limit: semanticLimit,
-        ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+        ...(sessionScope === undefined ? {} : { sessionScope }),
         includePrivate,
       });
     }
@@ -191,7 +199,7 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
       ]),
     );
     const reranked =
-      rerankLimit === 0
+      rerankLimit === 0 || merged.length <= 1
         ? []
         : await options.reranker.rerank({
             query,

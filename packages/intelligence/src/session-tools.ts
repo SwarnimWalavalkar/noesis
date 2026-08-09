@@ -11,6 +11,7 @@ import type {
   CanonicalSearchSource,
   NoesisWorkspaceStore,
   SearchCandidate,
+  SearchSessionScope,
   Sensitivity,
 } from "@noesis/workspace";
 import { z } from "zod";
@@ -375,15 +376,7 @@ export function selectSessionRetrievalStrategy(request: {
     if (!strategy) return { strategy: SESSION_RETRIEVAL_STRATEGIES.conservative, reason: "unknown strategy" };
     return { strategy, reason: "explicit strategy" };
   }
-  const normalized = request.query.trim();
-  if (/\b(?:password|secret|token|credential|private key)\b/iu.test(normalized))
-    return {
-      strategy: SESSION_RETRIEVAL_STRATEGIES.conservative,
-      reason: "sensitive query abstention",
-    };
-  if (/['"`]|\b(?:session|message|revision|evidence)[-_][\p{L}\p{N}_-]+/iu.test(normalized))
-    return { strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly, reason: "exact-reference query" };
-  return { strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid, reason: "semantic task query" };
+  return { strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid, reason: "automatic hybrid default" };
 }
 
 export function createSessionSearchTools(options: CreateSessionSearchToolsOptions): SessionSearchTools {
@@ -798,6 +791,10 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       const refreshedDocuments = await ensureFresh(request.signal);
       const privateResult = authorizePrivateSearch(request.includePrivate, request.sessionId);
       if (!privateResult.ok) return privateResult;
+      const sessionScope: SearchSessionScope =
+        request.sessionId === undefined
+          ? { kind: "previous", currentSessionId: options.authorization.currentSessionId }
+          : { kind: "exact", sessionId: request.sessionId };
       let candidateCount = 0;
       let ranked: readonly (RankedCitation | undefined)[];
       if (routed.strategy.mode === "fts_only") {
@@ -806,7 +803,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         const candidates = await options.workspace.search.lexicalCandidates({
           query: request.query,
           limit: Math.min(limits.maxCandidates, configuration.lexicalLimit),
-          ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+          sessionScope,
           includePrivate: privateResult.value,
         });
         ensureNotCancelled(request.signal);
@@ -817,8 +814,8 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       } else {
         const result = await options.history.search({
           query: request.query,
-          ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
-          limit: Math.min(limits.maxCandidates, 50),
+          sessionScope,
+          limit: request.maxResults,
           lexicalLimit: limits.maxCandidates,
           semanticLimit: limits.maxCandidates,
           maxExcerptChars: limits.maxFragmentChars,
@@ -833,7 +830,13 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         ensureNotCancelled(request.signal);
         if (!item) continue;
         const metadata = await resolveSourceMetadata(item.citation.source, request.signal);
-        if (metadata && (await request.accept(metadata))) accepted.push(item);
+        const matchesSessionScope =
+          metadata !== undefined &&
+          (request.sessionId === undefined
+            ? metadata.sessionIds.length > 0 &&
+              !metadata.sessionIds.includes(options.authorization.currentSessionId)
+            : metadata.sessionIds.includes(request.sessionId));
+        if (metadata && matchesSessionScope && (await request.accept(metadata))) accepted.push(item);
         if (accepted.length >= request.maxResults) break;
       }
       const hits: SessionSearchHit[] = [];

@@ -13,6 +13,7 @@ import {
 const RolePromptSchema = z.object({
   role: z.enum([
     "capability_router",
+    "history_reranker",
     "reflector",
     "revision_author",
     "revision_agent",
@@ -96,6 +97,24 @@ export function researchLoopControlledResponse(
       proposal: "revert",
       citedObservationIds: [...new Set(observationIds)],
       summary: "The controlled correction evidence requests a protected revert.",
+    });
+  }
+  if (prompt.role === "history_reranker") {
+    const candidates = prompt.messages
+      .filter((message) => message.name === "candidates")
+      .flatMap(
+        (message) =>
+          z
+            .object({
+              candidates: z.array(z.object({ documentId: z.string() })),
+            })
+            .parse(structuredPayload(message.content)).candidates,
+      );
+    return JSON.stringify({
+      ranking: candidates.map((candidate) => ({
+        documentId: candidate.documentId,
+        reason: "Controlled semantic relevance order.",
+      })),
     });
   }
   if (prompt.role === "capability_router") {

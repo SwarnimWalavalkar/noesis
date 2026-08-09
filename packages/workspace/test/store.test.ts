@@ -200,6 +200,98 @@ describe("WorkspaceStore", () => {
     return root;
   };
 
+  test("indexes tool calls only after they reach an immutable terminal status", async () => {
+    const store = await createWorkspaceStore(await temporary("search-terminal-tool-calls"));
+    await store.operational.sessions.put(session("session-search"));
+    const running = {
+      toolCallId: "tool-call-search",
+      sessionId: "session-search",
+      toolName: "shell.run",
+      request: Object.freeze({ query: "immutable terminal trace" }),
+      status: "running" as const,
+      sensitivity: "normal" as const,
+      createdAt: "2026-08-10T00:00:00.000Z",
+    };
+    await store.operational.toolCalls.put(running);
+
+    expect(
+      (await store.search.rebuildDocuments()).some(
+        (document) =>
+          document.source.kind === "database_row" &&
+          document.source.table === "tool_calls" &&
+          document.source.rowId === running.toolCallId,
+      ),
+    ).toBe(false);
+
+    await store.operational.toolCalls.put({
+      ...running,
+      response: Object.freeze({ hits: 2 }),
+      status: "completed",
+      completedAt: "2026-08-10T00:00:01.000Z",
+    });
+    const rebuilt = await store.search.rebuildDocuments();
+    const indexed = rebuilt.find(
+      (document) =>
+        document.source.kind === "database_row" &&
+        document.source.table === "tool_calls" &&
+        document.source.rowId === running.toolCallId,
+    );
+    expect(indexed?.body).toContain('"hits":2');
+    store.close();
+  });
+
+  test("never re-indexes history retrieval tool calls as derived evidence", async () => {
+    const store = await createWorkspaceStore(await temporary("search-history-tool-calls"));
+    await store.operational.sessions.put(session("session-history-search"));
+    await Promise.all([
+      store.operational.toolCalls.put({
+        toolCallId: "history-search-normal",
+        sessionId: "session-history-search",
+        toolName: "history.search_sessions",
+        request: Object.freeze({ query: "prior launch decision" }),
+        response: Object.freeze({ excerpt: "normal retrieved fragment" }),
+        status: "completed",
+        sensitivity: "normal",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        completedAt: "2026-08-10T00:00:01.000Z",
+      }),
+      store.operational.toolCalls.put({
+        toolCallId: "history-search-private",
+        sessionId: "session-history-search",
+        toolName: "history.open_session_evidence",
+        request: Object.freeze({ citation: "private-citation" }),
+        response: Object.freeze({ excerpt: "private retrieved fragment" }),
+        status: "completed",
+        sensitivity: "private",
+        createdAt: "2026-08-10T00:00:02.000Z",
+        completedAt: "2026-08-10T00:00:03.000Z",
+      }),
+      store.operational.toolCalls.put({
+        toolCallId: "ordinary-terminal",
+        sessionId: "session-history-search",
+        toolName: "files.read",
+        request: Object.freeze({ path: "README.md" }),
+        response: Object.freeze({ content: "ordinary terminal trace" }),
+        status: "completed",
+        sensitivity: "normal",
+        createdAt: "2026-08-10T00:00:04.000Z",
+        completedAt: "2026-08-10T00:00:05.000Z",
+      }),
+    ]);
+
+    const documents = await store.search.rebuildDocuments();
+    const indexedToolCallIds = documents.flatMap((document) =>
+      document.source.kind === "database_row" && document.source.table === "tool_calls"
+        ? [document.source.rowId]
+        : [],
+    );
+    expect(indexedToolCallIds).toContain("ordinary-terminal");
+    expect(indexedToolCallIds).not.toContain("history-search-normal");
+    expect(indexedToolCallIds).not.toContain("history-search-private");
+    expect(JSON.stringify(documents)).not.toContain("private retrieved fragment");
+    store.close();
+  });
+
   test("applies, replaces, and unapplies immutable project adjustments with stale-safe CAS", async () => {
     const root = await temporary("working-adjustments");
     const store = await createWorkspaceStore(root);

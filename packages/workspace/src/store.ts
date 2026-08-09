@@ -3843,6 +3843,22 @@ function createSearchIndex(
   paths: WorkspacePaths,
 ): NoesisWorkspaceStore["search"] {
   const db = database.connection;
+  const sessionIdForProvenance = (refs: readonly EvidenceRef[]): string | undefined => {
+    const sessionIds = new Set<string>();
+    for (const ref of refs) {
+      if (ref.kind !== "database_row") continue;
+      if (ref.table === "sessions") {
+        sessionIds.add(ref.rowId);
+        continue;
+      }
+      if (ref.table !== "messages" && ref.table !== "tool_calls" && ref.table !== "outcomes") continue;
+      const row = db
+        .prepare(`SELECT session_id FROM ${ref.table} WHERE ${PRIMARY_KEY_BY_TABLE[ref.table]} = ?`)
+        .get(ref.rowId);
+      if (row !== undefined) sessionIds.add(requiredString(row, "session_id"));
+    }
+    return sessionIds.size === 1 ? [...sessionIds][0] : undefined;
+  };
   const sourceRows = async (): Promise<readonly SearchDocument[]> => {
     const documents: SearchDocument[] = [];
     const add = (
@@ -3884,7 +3900,13 @@ function createSearchIndex(
         requiredString(row, "sensitivity") as SearchDocument["sensitivity"],
         requiredString(row, "session_id"),
       );
-    for (const row of db.prepare("SELECT * FROM tool_calls").all()) {
+    for (const row of db
+      .prepare(
+        `SELECT * FROM tool_calls
+           WHERE status IN ('completed', 'failed', 'denied', 'ambiguous')
+             AND tool_name NOT GLOB 'history.*'`,
+      )
+      .all()) {
       const body = [
         requiredString(row, "tool_name"),
         requiredString(row, "request_json"),
@@ -3932,6 +3954,12 @@ function createSearchIndex(
         body,
         requiredString(row, "recorded_at"),
         z.enum(["normal", "private", "secret"]).parse(requiredString(row, "sensitivity")),
+        sessionIdForProvenance(
+          z
+            .array(EvidenceRefSchema)
+            .max(64)
+            .parse(parseJson(requiredString(row, "provenance_refs_json"))),
+        ),
       );
     }
     return documents.sort((left, right) => left.documentId.localeCompare(right.documentId));
@@ -3992,6 +4020,9 @@ function createSearchIndex(
     ) => {
       const query = ftsQuery(request.query);
       if (query.length === 0 || request.limit <= 0) return [];
+      const exactSessionId = request.sessionScope?.kind === "exact" ? request.sessionScope.sessionId : null;
+      const previousSessionId =
+        request.sessionScope?.kind === "previous" ? request.sessionScope.currentSessionId : null;
       const rows = db
         .prepare(
           `SELECT search_documents.*, bm25(search_fts) AS rank
@@ -4000,13 +4031,16 @@ function createSearchIndex(
              AND sensitivity != 'secret'
              AND (sensitivity = 'normal' OR ? = 1)
              AND (? IS NULL OR session_id = ?)
+             AND (? IS NULL OR (session_id IS NOT NULL AND session_id != ?))
            ORDER BY rank, search_documents.document_id LIMIT ?`,
         )
         .all(
           query,
           request.includePrivate ? 1 : 0,
-          request.sessionId ?? null,
-          request.sessionId ?? null,
+          exactSessionId,
+          exactSessionId,
+          previousSessionId,
+          previousSessionId,
           Math.max(0, request.limit),
         );
       return rows.map((row) => ({
@@ -4033,19 +4067,25 @@ function createSearchIndex(
       request: Parameters<NoesisWorkspaceStore["search"]["semanticCandidates"]>[0],
     ) => {
       if (request.limit <= 0) return [];
+      const exactSessionId = request.sessionScope?.kind === "exact" ? request.sessionScope.sessionId : null;
+      const previousSessionId =
+        request.sessionScope?.kind === "previous" ? request.sessionScope.currentSessionId : null;
       const rows = db
         .prepare(
           `SELECT search_documents.*, search_embeddings.vector_json
            FROM search_embeddings JOIN search_documents USING(document_id)
            WHERE model_id = ? AND sensitivity != 'secret'
              AND (sensitivity = 'normal' OR ? = 1)
-             AND (? IS NULL OR session_id = ?)`,
+             AND (? IS NULL OR session_id = ?)
+             AND (? IS NULL OR (session_id IS NOT NULL AND session_id != ?))`,
         )
         .all(
           request.modelId,
           request.includePrivate ? 1 : 0,
-          request.sessionId ?? null,
-          request.sessionId ?? null,
+          exactSessionId,
+          exactSessionId,
+          previousSessionId,
+          previousSessionId,
         );
       return rows
         .map(

@@ -251,6 +251,7 @@ describe("production codemode journey", () => {
       "inspect_self",
       "list_dir",
       "remember",
+      "search_sessions",
       "shell",
       "workflows_run",
     ]);

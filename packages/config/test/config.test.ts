@@ -81,13 +81,20 @@ describe("Noesis config", () => {
       vetoes: "respect",
     });
     expect(resolved.experiments).toEqual({ maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 });
-    expect(resolved.tools.hotbar).toEqual(["files.read", "files.list", "shell.run", "workflows.run"]);
+    expect(resolved.tools.hotbar).toEqual([
+      "files.read",
+      "files.list",
+      "shell.run",
+      "workflows.run",
+      "history.search_sessions",
+    ]);
     expect(await readFile(noesisConfigPath(home), "utf8")).toBe(legacy);
   });
 
-  test("defaults workflow execution onto the hotbar without changing explicit persisted choices", async () => {
+  test("defaults workflow and session search tools without changing explicit persisted choices", async () => {
     const missing = await mkdtemp(join(tmpdir(), "noesis-config-default-hotbar-"));
     const oldPersisted = await mkdtemp(join(tmpdir(), "noesis-config-old-hotbar-"));
+    const customPersisted = await mkdtemp(join(tmpdir(), "noesis-config-custom-hotbar-"));
     const explicitlyEmpty = await mkdtemp(join(tmpdir(), "noesis-config-empty-hotbar-"));
     await writeFile(
       noesisConfigPath(oldPersisted),
@@ -95,6 +102,14 @@ describe("Noesis config", () => {
         schemaVersion: 1,
         agent: {},
         tools: { hotbar: ["files.read", "files.list", "shell.run"] },
+      }),
+    );
+    await writeFile(
+      noesisConfigPath(customPersisted),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        tools: { hotbar: ["files.read", "custom.tool"] },
       }),
     );
     await writeFile(
@@ -107,11 +122,16 @@ describe("Noesis config", () => {
       "files.list",
       "shell.run",
       "workflows.run",
+      "history.search_sessions",
     ]);
     expect((await resolveNoesisConfig({ home: oldPersisted, env: {} })).tools.hotbar).toEqual([
       "files.read",
       "files.list",
       "shell.run",
+    ]);
+    expect((await resolveNoesisConfig({ home: customPersisted, env: {} })).tools.hotbar).toEqual([
+      "files.read",
+      "custom.tool",
     ]);
     expect((await resolveNoesisConfig({ home: explicitlyEmpty, env: {} })).tools.hotbar).toEqual([]);
   });
@@ -183,7 +203,9 @@ describe("Noesis config", () => {
         vetoes: "respect",
       },
       experiments: { maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 },
-      tools: { hotbar: ["files.read", "files.list", "shell.run", "workflows.run"] },
+      tools: {
+        hotbar: ["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"],
+      },
     });
   });
 
@@ -335,6 +357,7 @@ describe("Noesis config", () => {
         "files.list",
         "shell.run",
         "workflows.run",
+        "history.search_sessions",
         "files.write",
         "artifacts.write",
       ]),
