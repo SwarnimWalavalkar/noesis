@@ -154,6 +154,7 @@ function hasUnpairedSurrogate(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const current = value.charCodeAt(index);
     if (current >= 0xd800 && current <= 0xdbff) {
+      if (index + 1 >= value.length) return true;
       const next = value.charCodeAt(index + 1);
       if (next < 0xdc00 || next > 0xdfff) return true;
       index += 1;
@@ -1250,6 +1251,8 @@ describe("automatic learning organ", () => {
   });
 
   test("does not split an emoji surrogate pair at a working-adjustment prompt boundary", async () => {
+    expect(hasUnpairedSurrogate("\ud800")).toBe(true);
+    expect(hasUnpairedSurrogate("😀")).toBe(false);
     const harness = createHarness({
       steps: [
         Object.freeze({
@@ -2185,6 +2188,7 @@ describe("automatic learning organ", () => {
       activatedRevision: harness.baseline,
       feedbackSignalIds: Object.freeze(["signal-parent"]),
       followUpExperimentId: "experiment-follow-up",
+      sourceAdjustmentId: "adjustment-parent-source",
       status: "completed",
       outcome: "revise",
     });
@@ -2197,8 +2201,10 @@ describe("automatic learning organ", () => {
     });
 
     expect(result.brief.experimentId).toBe(parent.followUpExperimentId);
+    expect(result.brief.sourceAdjustmentId).toBe(parent.sourceAdjustmentId);
     expect(result.revision.predecessorRevisionId).toBe(harness.baseline.capabilityRevisionId);
     expect(result.experiment.baselineRevision).toEqual(harness.baseline);
+    expect(result.experiment.sourceAdjustmentId).toBe(parent.sourceAdjustmentId);
     expect(result.authorRun.role).toBe("revision_agent");
     expect(result.authorRun.research).toMatchObject({
       promptRevision: revisionPrompt,

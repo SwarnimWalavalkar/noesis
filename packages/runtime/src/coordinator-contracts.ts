@@ -13,6 +13,7 @@ import {
   type PreflightDecision,
   type PreflightReport,
   type ProjectRef,
+  WORKING_ADJUSTMENT_LIMITS,
   type WorkingAdjustment,
 } from "@noesis/domain";
 import { type RetrievalStrategyId, RetrievalStrategyIdSchema } from "@noesis/intelligence";
@@ -133,7 +134,9 @@ export type CoordinatorResearchTelemetry = Readonly<Record<string, JsonValue>>;
 
 /** Evidence retained by durable reflection results and exposed through learning inspection. */
 export type CoordinatorEvidenceRef = EvidenceRef;
-export const CoordinatorEvidenceRefsSchema = z.array(EvidenceRefSchema);
+export const CoordinatorEvidenceRefsSchema = z
+  .array(EvidenceRefSchema)
+  .max(WORKING_ADJUSTMENT_LIMITS.evidenceRefs);
 
 export type CoordinatorReflectionResult =
   | {

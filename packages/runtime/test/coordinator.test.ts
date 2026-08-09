@@ -8,6 +8,7 @@ import {
   type FileRevisionRef,
   type PreflightDecision,
   sha256,
+  WORKING_ADJUSTMENT_LIMITS,
   type WorkingAdjustment,
 } from "@noesis/domain";
 import { experimentBriefPublicationCollisionError } from "@noesis/learning";
@@ -17,6 +18,7 @@ import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-r
 import {
   authorizeScheduledJob,
   type CompletedNormalTurn,
+  CoordinatorEvidenceRefsSchema,
   coordinatorOperationError,
   createRuntimeCoordinator,
   type RuntimeCoordinatorConfig,
@@ -461,6 +463,24 @@ async function fixture(decision: PreflightDecision = "pass") {
 }
 
 describe("automatic runtime coordinator", () => {
+  test("bounds durable reflection evidence at the shared working-adjustment limit", () => {
+    const references = Array.from({ length: WORKING_ADJUSTMENT_LIMITS.evidenceRefs }, (_, index) => ({
+      kind: "database_row" as const,
+      table: "messages" as const,
+      rowId: `message-evidence-${String(index)}`,
+    }));
+
+    expect(CoordinatorEvidenceRefsSchema.parse(references)).toHaveLength(
+      WORKING_ADJUSTMENT_LIMITS.evidenceRefs,
+    );
+    expect(
+      CoordinatorEvidenceRefsSchema.safeParse([
+        ...references,
+        { kind: "database_row", table: "messages", rowId: "message-evidence-overflow" },
+      ]).success,
+    ).toBe(false);
+  });
+
   test("automatically completes correction through candidate and preflight while carrying approval", async () => {
     const f = await fixture("approval_required");
     const coordinator = createRuntimeCoordinator({

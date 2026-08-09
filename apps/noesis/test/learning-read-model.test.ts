@@ -1,4 +1,4 @@
-import type { DurableJobRecord, DurableJobStatus } from "@noesis/domain";
+import { type DurableJobRecord, type DurableJobStatus, WORKING_ADJUSTMENT_LIMITS } from "@noesis/domain";
 import type {
   AuthorRevisionJobPayload,
   CoordinatorJobView,
@@ -511,6 +511,50 @@ describe("ambient learning read model", () => {
     );
     expect(activity.some(({ jobId }) => jobId === "modern-foreign-author")).toBe(false);
     expect(activity.some(({ jobId }) => jobId === "modern-local-payload-only-author")).toBe(false);
+  });
+
+  test("fails closed when durable reflection evidence exceeds the shared limit", () => {
+    const references = Array.from({ length: WORKING_ADJUSTMENT_LIMITS.evidenceRefs }, (_, index) => ({
+      kind: "database_row" as const,
+      table: "messages" as const,
+      rowId: `message-read-model-${String(index)}`,
+    }));
+    const activity = learningActivityForSession(
+      [
+        reflection({
+          jobId: "reflection-evidence-at-limit",
+          sessionId: "session-evidence",
+          status: "completed",
+          updatedAt: "2026-08-01T00:00:01.000Z",
+          result: { status: "unapplied", evidenceRefs: references },
+        }),
+        reflection({
+          jobId: "reflection-evidence-over-limit",
+          sessionId: "session-evidence",
+          status: "completed",
+          updatedAt: "2026-08-01T00:00:02.000Z",
+          result: {
+            status: "unapplied",
+            evidenceRefs: [
+              ...references,
+              {
+                kind: "database_row",
+                table: "messages",
+                rowId: "message-read-model-overflow",
+              },
+            ],
+          },
+        }),
+      ],
+      "session-evidence",
+    );
+
+    expect(activity.find(({ jobId }) => jobId === "reflection-evidence-at-limit")?.evidenceRefs).toEqual(
+      references,
+    );
+    expect(activity.find(({ jobId }) => jobId === "reflection-evidence-over-limit")?.evidenceRefs).toBe(
+      undefined,
+    );
   });
 
   test("loads a session and its experiment chain beyond one thousand older unrelated jobs", async () => {

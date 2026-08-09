@@ -1681,7 +1681,11 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       experimentId: request.parentExperiment.followUpExperimentId,
       title: `Revise ${request.capability.name}`,
       hypothesis: `A successor revision can address: ${request.failureSummary}`,
-      hypothesisDedupeKey: normalizedHypothesisKey(request.parentExperiment.scope, request.failureSummary),
+      hypothesisDedupeKey: normalizedHypothesisKey(
+        request.parentExperiment.scope,
+        request.failureSummary,
+        request.parentExperiment.sourceAdjustmentId,
+      ),
       scope: request.parentExperiment.scope,
       anticipatedFutureUse: `When revising ${request.capability.name} after this observed failure recurs.`,
       scopeRelationship: "same",
@@ -1700,6 +1704,9 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       recurrenceCitations: citations,
       sourceCases,
       recurrenceCount: citations.length,
+      ...(request.parentExperiment.sourceAdjustmentId === undefined
+        ? {}
+        : { sourceAdjustmentId: request.parentExperiment.sourceAdjustmentId }),
     });
     await options.briefs.put(brief);
     return await authorBundle({
