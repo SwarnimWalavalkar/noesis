@@ -51,6 +51,14 @@ export interface AuthorityReceiptVerifier {
   ) => value is AuthorityReceipt;
 }
 
+export interface ProtectedAuthorityExecutionOptions {
+  /**
+   * Runs after reservation but before the authority creates a receipt or invokes the mutation.
+   * A thrown error releases the unused reservation so the same operation can be retried.
+   */
+  readonly beforeExecute?: () => void;
+}
+
 export interface EffectGateway {
   run<T extends JsonValue>(request: EffectRequest<T>, handle?: GrantHandle): Promise<EffectDecision<T>>;
 }
@@ -66,11 +74,13 @@ export interface AuthorityBoundary {
     resource: string,
     idempotencyKey: string,
     execute: (receipt: AuthorityReceipt) => Promise<T>,
+    options?: ProtectedAuthorityExecutionOptions,
   ): Promise<EffectDecision<T>>;
   rollback<T extends JsonValue>(
     resource: string,
     idempotencyKey: string,
     execute: (receipt: AuthorityReceipt) => Promise<T>,
+    options?: ProtectedAuthorityExecutionOptions,
   ): Promise<EffectDecision<T>>;
   schedule<T extends JsonValue>(
     resource: string,

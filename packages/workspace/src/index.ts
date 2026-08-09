@@ -17,8 +17,8 @@ export type {
   CompoundingReplayBudgetRecord,
   CompoundingReplayReservationResult,
   CompoundingReplayRoleReservation,
-  ExperimentObservationRecord,
   ExperimentObservationClassificationResult,
+  ExperimentObservationRecord,
   ExperimentOutcomeOperationRecord,
   ExperimentResearchRunRecord,
   IntegrityReport,
@@ -52,5 +52,11 @@ export type {
   UserIntentSteerOrigin,
   WorkflowPhaseRunRecord,
   WorkflowRunRecord,
+  WorkingAdjustmentApplyResult,
+  WorkingAdjustmentUnapplyResult,
   WorkspacePaths,
+} from "./types.ts";
+export {
+  isWorkingAdjustmentAdmissionConflictError,
+  workingAdjustmentAdmissionConflictError,
 } from "./types.ts";

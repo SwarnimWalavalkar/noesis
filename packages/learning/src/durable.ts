@@ -141,6 +141,7 @@ const RawExperimentBriefSchema = z.strictObject({
   ),
   recurrenceCount: z.number().int().nonnegative(),
   reflectionRun: RoleRunSchema.optional(),
+  sourceAdjustmentId: z.string().min(1).optional(),
 });
 
 const ExperimentBriefSchema: z.ZodType<ExperimentBrief> = RawExperimentBriefSchema.transform(
@@ -150,6 +151,7 @@ const ExperimentBriefSchema: z.ZodType<ExperimentBrief> = RawExperimentBriefSche
       scopeVerificationRun,
       staleOrContradictionConditions,
       verifiedScopeRelationship,
+      sourceAdjustmentId,
       ...brief
     } = value;
     return Object.freeze({
@@ -158,6 +160,7 @@ const ExperimentBriefSchema: z.ZodType<ExperimentBrief> = RawExperimentBriefSche
       verifiedScopeRelationship: verifiedScopeRelationship ?? value.scopeRelationship,
       ...(reflectionRun === undefined ? {} : { reflectionRun }),
       ...(scopeVerificationRun === undefined ? {} : { scopeVerificationRun }),
+      ...(sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId }),
     });
   },
 );

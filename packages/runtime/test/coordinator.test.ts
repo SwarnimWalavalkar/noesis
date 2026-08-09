@@ -8,14 +8,17 @@ import {
   type FileRevisionRef,
   type PreflightDecision,
   sha256,
+  WORKING_ADJUSTMENT_LIMITS,
+  type WorkingAdjustment,
 } from "@noesis/domain";
 import { experimentBriefPublicationCollisionError } from "@noesis/learning";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
 import {
-  type CompletedNormalTurn,
   authorizeScheduledJob,
+  type CompletedNormalTurn,
+  CoordinatorEvidenceRefsSchema,
   coordinatorOperationError,
   createRuntimeCoordinator,
   type RuntimeCoordinatorConfig,
@@ -111,6 +114,44 @@ async function fixture(decision: PreflightDecision = "pass") {
         if (blockingReflect) await blockingReflect;
         if (signal.aborted)
           throw coordinatorOperationError("cancelled", { code: "cancelled", retryable: false });
+        if (payload.turn.userMessage.includes("unapply project strategy")) {
+          if (
+            !payload.turn.project ||
+            payload.turn.expectedActiveAdjustmentId === undefined ||
+            payload.turn.expectedActiveAdjustmentId === null
+          )
+            throw new Error("Working-adjustment unapply test requires a pinned active adjustment");
+          return {
+            status: "unapply_working_adjustment",
+            observation: {
+              kind: "correction",
+              reason: "The active strategy made the completed work less useful.",
+            },
+            project: payload.turn.project,
+            expectedActiveAdjustmentId: payload.turn.expectedActiveAdjustmentId,
+            reason: "Settled evidence contradicts the temporary strategy.",
+            evidenceRefs: payload.turn.evidenceRefs,
+            telemetry: { role: "fake-reflector" },
+          };
+        }
+        if (payload.turn.userMessage.includes("verify observable state")) {
+          if (!payload.turn.project || payload.turn.expectedActiveAdjustmentId === undefined)
+            throw new Error("Working-adjustment test requires pinned project context");
+          return {
+            status: "apply_working_adjustment",
+            observation: {
+              kind: "correction",
+              reason: "The completed work claimed success without observable verification.",
+            },
+            project: payload.turn.project,
+            expectedActiveAdjustmentId: payload.turn.expectedActiveAdjustmentId,
+            rationale: "A project-local verification strategy is cheap and immediately testable.",
+            strategy: "Verify observable state before claiming success.",
+            successSignal: "Claims of success cite fresh runtime evidence.",
+            evidenceRefs: payload.turn.evidenceRefs,
+            telemetry: { role: "fake-reflector" },
+          };
+        }
         if (!payload.turn.userMessage.includes("preserve"))
           return { status: "no_change", reason: "irrelevant", telemetry: { role: "fake-reflector" } };
         if (dedupedStatus) {
@@ -317,6 +358,7 @@ async function fixture(decision: PreflightDecision = "pass") {
     turn: {
       sessionId: "session-1",
       turnId,
+      servedWorkingAdjustmentOutcomes: [],
       scope: "writing",
       userMessage,
       correction: userMessage,
@@ -332,9 +374,70 @@ async function fixture(decision: PreflightDecision = "pass") {
     routingStrategyId: "router.alternative.v2",
   });
 
+  const runtimeInternals = createWorkspaceRuntimeInternals(workspace);
+  const workingAdjustmentRecords = new Map<string, WorkingAdjustment>();
+  let activeWorkingAdjustment: WorkingAdjustment | undefined;
+  const workingAdjustments = Object.freeze({
+    apply: async (request: {
+      readonly adjustment: WorkingAdjustment;
+      readonly expectedActiveAdjustmentId: string | null;
+      readonly signal?: AbortSignal;
+    }) => {
+      const currentId = activeWorkingAdjustment?.adjustmentId ?? null;
+      if (currentId === request.adjustment.adjustmentId)
+        return Object.freeze({
+          status: "applied" as const,
+          adjustment: request.adjustment,
+          replacedAdjustmentId: null,
+        });
+      if (currentId !== request.expectedActiveAdjustmentId)
+        return Object.freeze({
+          status: "stale" as const,
+          adjustmentId: request.adjustment.adjustmentId,
+          currentActiveAdjustmentId: currentId,
+        });
+      request.signal?.throwIfAborted();
+      workingAdjustmentRecords.set(request.adjustment.adjustmentId, request.adjustment);
+      activeWorkingAdjustment = request.adjustment;
+      return Object.freeze({
+        status: "applied" as const,
+        adjustment: request.adjustment,
+        replacedAdjustmentId: currentId,
+      });
+    },
+    unapply: async (request: {
+      readonly projectId: string;
+      readonly expectedActiveAdjustmentId: string;
+      readonly signal?: AbortSignal;
+    }) => {
+      const target = workingAdjustmentRecords.get(request.expectedActiveAdjustmentId);
+      if (!target) throw new Error(`Unknown working adjustment ${request.expectedActiveAdjustmentId}`);
+      if (target.scope.projectId !== request.projectId)
+        throw new Error(
+          `Working adjustment ${request.expectedActiveAdjustmentId} belongs to another project`,
+        );
+      const currentId = activeWorkingAdjustment?.adjustmentId ?? null;
+      if (currentId !== request.expectedActiveAdjustmentId)
+        return Object.freeze({
+          status: "stale" as const,
+          adjustmentId: request.expectedActiveAdjustmentId,
+          currentActiveAdjustmentId: currentId,
+        });
+      request.signal?.throwIfAborted();
+      activeWorkingAdjustment = undefined;
+      return Object.freeze({
+        status: "unapplied" as const,
+        adjustmentId: request.expectedActiveAdjustmentId,
+      });
+    },
+  });
   return {
     workspace,
-    authority: createWorkspaceRuntimeInternals(workspace).authority,
+    authority: runtimeInternals.authority,
+    workingAdjustments,
+    activeWorkingAdjustment: () => activeWorkingAdjustment,
+    workingAdjustment: (adjustmentId: string) => workingAdjustmentRecords.get(adjustmentId),
+    workingAdjustmentCount: () => workingAdjustmentRecords.size,
     research,
     turn,
     counts: () => ({ reflectCalls, authorCalls, preflightCalls, peakReflects }),
@@ -360,11 +463,30 @@ async function fixture(decision: PreflightDecision = "pass") {
 }
 
 describe("automatic runtime coordinator", () => {
+  test("bounds durable reflection evidence at the shared working-adjustment limit", () => {
+    const references = Array.from({ length: WORKING_ADJUSTMENT_LIMITS.evidenceRefs }, (_, index) => ({
+      kind: "database_row" as const,
+      table: "messages" as const,
+      rowId: `message-evidence-${String(index)}`,
+    }));
+
+    expect(CoordinatorEvidenceRefsSchema.parse(references)).toHaveLength(
+      WORKING_ADJUSTMENT_LIMITS.evidenceRefs,
+    );
+    expect(
+      CoordinatorEvidenceRefsSchema.safeParse([
+        ...references,
+        { kind: "database_row", table: "messages", rowId: "message-evidence-overflow" },
+      ]).success,
+    ).toBe(false);
+  });
+
   test("automatically completes correction through candidate and preflight while carrying approval", async () => {
     const f = await fixture("approval_required");
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config(),
     });
@@ -425,6 +547,7 @@ describe("automatic runtime coordinator", () => {
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config(),
     });
@@ -495,6 +618,7 @@ describe("automatic runtime coordinator", () => {
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config(),
       now: () => new Date(nowMs),
@@ -543,6 +667,7 @@ describe("automatic runtime coordinator", () => {
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config(),
     });
@@ -555,11 +680,261 @@ describe("automatic runtime coordinator", () => {
     f.workspace.close();
   });
 
+  test("applies a project working adjustment and waits for only that reflection job", async () => {
+    const f = await fixture();
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
+      research: f.research,
+      config: config(),
+    });
+    const input = f.turn("turn-adjustment", "verify observable state before claiming success");
+    const reflection = await coordinator.observeCompletedTurn({
+      ...input,
+      turn: {
+        ...input.turn,
+        project: { projectId: "project-noesis", root: "/work/noesis" },
+        expectedActiveAdjustmentId: null,
+      },
+    });
+
+    const waited = await coordinator.waitForTerminal({
+      jobId: reflection.job.jobId,
+      deadline: new Date(Date.now() + 2_000),
+    });
+
+    expect(waited).toMatchObject({
+      status: "terminal",
+      job: {
+        job: {
+          result: {
+            status: "adjusted",
+            projectId: "project-noesis",
+            rationale: "A project-local verification strategy is cheap and immediately testable.",
+            observation: {
+              kind: "correction",
+              reason: "The completed work claimed success without observable verification.",
+            },
+          },
+        },
+      },
+    });
+    expect(f.activeWorkingAdjustment()).toMatchObject({
+      scope: { projectId: "project-noesis", root: "/work/noesis" },
+      observation: "The completed work claimed success without observable verification.",
+      strategy: "Verify observable state before claiming success.",
+      createdFromTurnId: "turn-adjustment",
+    });
+    expect(f.counts()).toMatchObject({ authorCalls: 0, preflightCalls: 0 });
+    f.workspace.close();
+  });
+
+  test("cancels after reflection without applying the proposed project adjustment", async () => {
+    const f = await fixture();
+    let markApplyEntered: (() => void) | undefined;
+    const applyEntered = new Promise<void>((resolve) => {
+      markApplyEntered = resolve;
+    });
+    let releaseApply: (() => void) | undefined;
+    const applyBlocked = new Promise<void>((resolve) => {
+      releaseApply = resolve;
+    });
+    const workingAdjustments = Object.freeze({
+      ...f.workingAdjustments,
+      apply: async (request: Parameters<typeof f.workingAdjustments.apply>[0]) => {
+        markApplyEntered?.();
+        await applyBlocked;
+        return await f.workingAdjustments.apply(request);
+      },
+    });
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      workingAdjustments,
+      research: f.research,
+      config: config(),
+    });
+    const input = f.turn("turn-cancel-adjustment", "verify observable state before claiming success");
+    const reflection = await coordinator.observeCompletedTurn({
+      ...input,
+      turn: {
+        ...input.turn,
+        project: { projectId: "project-noesis", root: "/work/noesis" },
+        expectedActiveAdjustmentId: null,
+      },
+    });
+
+    await applyEntered;
+    await coordinator.cancel(reflection.job.jobId);
+    releaseApply?.();
+    await coordinator.idle();
+
+    expect((await coordinator.getJob(reflection.job.jobId))?.job.status).toBe("cancelled");
+    expect(f.activeWorkingAdjustment()).toBeUndefined();
+    expect(f.workingAdjustmentCount()).toBe(0);
+    f.workspace.close();
+  });
+
+  test("records a stale reflection without replacing a newer project adjustment", async () => {
+    const f = await fixture();
+    let releaseReflection: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      releaseReflection = resolve;
+    });
+    f.setBlockingReflect(blocked);
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
+      research: f.research,
+      config: config(),
+    });
+    const input = f.turn("turn-stale-adjustment", "verify observable state before claiming success");
+    const reflection = await coordinator.observeCompletedTurn({
+      ...input,
+      turn: {
+        ...input.turn,
+        project: { projectId: "project-noesis", root: "/work/noesis" },
+        expectedActiveAdjustmentId: null,
+      },
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await f.workingAdjustments.apply({
+      adjustment: {
+        adjustmentId: "adjustment-newer",
+        scope: { projectId: "project-noesis", root: "/work/noesis" },
+        observation: "A newer reflection completed first.",
+        strategy: "Keep the newer strategy.",
+        successSignal: "The newer strategy remains active.",
+        evidenceRefs: input.turn.evidenceRefs,
+        createdFromTurnId: "turn-newer",
+      },
+      expectedActiveAdjustmentId: null,
+    });
+    releaseReflection?.();
+    await coordinator.idle();
+
+    expect((await coordinator.getJob(reflection.job.jobId))?.job.result).toMatchObject({
+      status: "stale",
+      requestedDecision: "apply_working_adjustment",
+      activeAdjustmentId: "adjustment-newer",
+    });
+    expect(f.activeWorkingAdjustment()?.adjustmentId).toBe("adjustment-newer");
+    expect(f.counts()).toMatchObject({ authorCalls: 0, preflightCalls: 0 });
+    f.workspace.close();
+  });
+
+  test("unapplies only the exact served adjustment while retaining semantic observation", async () => {
+    const f = await fixture();
+    const input = f.turn("turn-unapply-adjustment", "unapply project strategy");
+    await f.workingAdjustments.apply({
+      adjustment: {
+        adjustmentId: "adjustment-active",
+        scope: { projectId: "project-noesis", root: "/work/noesis" },
+        observation: "Try a more structured response.",
+        strategy: "Lead with a rigid checklist.",
+        successSignal: "The user finds the work clearer.",
+        evidenceRefs: input.turn.evidenceRefs,
+        createdFromTurnId: "turn-before",
+      },
+      expectedActiveAdjustmentId: null,
+    });
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
+      research: f.research,
+      config: config(),
+    });
+    const reflection = await coordinator.observeCompletedTurn({
+      ...input,
+      turn: {
+        ...input.turn,
+        project: { projectId: "project-noesis", root: "/work/noesis" },
+        expectedActiveAdjustmentId: "adjustment-active",
+      },
+    });
+    await coordinator.idle();
+
+    const completed = await coordinator.getJob(reflection.job.jobId);
+    expect(completed?.job.result).toMatchObject({
+      status: "unapplied",
+      adjustmentId: "adjustment-active",
+      reason: "Settled evidence contradicts the temporary strategy.",
+      observation: {
+        kind: "correction",
+        reason: "The active strategy made the completed work less useful.",
+      },
+      evidenceRefs: input.turn.evidenceRefs,
+    });
+    expect(f.activeWorkingAdjustment()).toBeUndefined();
+    expect(f.workingAdjustment("adjustment-active")).toBeDefined();
+    expect(f.counts()).toMatchObject({ authorCalls: 0, preflightCalls: 0 });
+    f.workspace.close();
+  });
+
+  test("cancels after reflection without unapplying the served project adjustment", async () => {
+    const f = await fixture();
+    const input = f.turn("turn-cancel-unapply", "unapply project strategy");
+    const active = Object.freeze({
+      adjustmentId: "adjustment-active-for-cancel",
+      scope: Object.freeze({ projectId: "project-noesis", root: "/work/noesis" }),
+      observation: "Try a more structured response.",
+      strategy: "Lead with a rigid checklist.",
+      successSignal: "The user finds the work clearer.",
+      evidenceRefs: input.turn.evidenceRefs,
+      createdFromTurnId: "turn-before-cancel",
+    });
+    await f.workingAdjustments.apply({ adjustment: active, expectedActiveAdjustmentId: null });
+    let markUnapplyEntered: (() => void) | undefined;
+    const unapplyEntered = new Promise<void>((resolve) => {
+      markUnapplyEntered = resolve;
+    });
+    let releaseUnapply: (() => void) | undefined;
+    const unapplyBlocked = new Promise<void>((resolve) => {
+      releaseUnapply = resolve;
+    });
+    const workingAdjustments = Object.freeze({
+      ...f.workingAdjustments,
+      unapply: async (request: Parameters<typeof f.workingAdjustments.unapply>[0]) => {
+        markUnapplyEntered?.();
+        await unapplyBlocked;
+        return await f.workingAdjustments.unapply(request);
+      },
+    });
+    const coordinator = createRuntimeCoordinator({
+      workspace: f.workspace,
+      authority: f.authority,
+      workingAdjustments,
+      research: f.research,
+      config: config(),
+    });
+    const reflection = await coordinator.observeCompletedTurn({
+      ...input,
+      turn: {
+        ...input.turn,
+        project: active.scope,
+        expectedActiveAdjustmentId: active.adjustmentId,
+      },
+    });
+
+    await unapplyEntered;
+    await coordinator.cancel(reflection.job.jobId);
+    releaseUnapply?.();
+    await coordinator.idle();
+
+    expect((await coordinator.getJob(reflection.job.jobId))?.job.status).toBe("cancelled");
+    expect(f.activeWorkingAdjustment()).toEqual(active);
+    f.workspace.close();
+  });
+
   test("advances an authoritative page cursor past an undecodable legacy coordinator row", async () => {
     const f = await fixture();
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config(),
     });
@@ -609,6 +984,7 @@ describe("automatic runtime coordinator", () => {
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config(),
     });
@@ -625,6 +1001,7 @@ describe("automatic runtime coordinator", () => {
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config(),
     });
@@ -638,6 +1015,7 @@ describe("automatic runtime coordinator", () => {
     const terminal = createRuntimeCoordinator({
       workspace: second.workspace,
       authority: second.authority,
+      workingAdjustments: second.workingAdjustments,
       research: second.research,
       config: config(),
     });
@@ -660,6 +1038,7 @@ describe("automatic runtime coordinator", () => {
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config(),
     });
@@ -680,6 +1059,7 @@ describe("automatic runtime coordinator", () => {
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: Object.freeze({
         ...f.research,
         reflect: async () => {
@@ -712,6 +1092,7 @@ describe("automatic runtime coordinator", () => {
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config(),
     });
@@ -738,6 +1119,7 @@ describe("automatic runtime coordinator", () => {
     const coordinator = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config({ maxConcurrency: 1, drainBudget: 2 }),
     });
@@ -753,6 +1135,7 @@ describe("automatic runtime coordinator", () => {
     const budgeted = createRuntimeCoordinator({
       workspace: budget.workspace,
       authority: budget.authority,
+      workingAdjustments: budget.workingAdjustments,
       research: budget.research,
       config: config({
         jobs: {
@@ -790,6 +1173,7 @@ describe("automatic runtime coordinator", () => {
     const coordinator = createRuntimeCoordinator({
       workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config({ leaseMs: 100, heartbeatMs: 25 }),
     });
@@ -844,6 +1228,7 @@ describe("automatic runtime coordinator", () => {
     const coordinator = createRuntimeCoordinator({
       workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config({ maxConcurrency: 1 }),
     });
@@ -875,6 +1260,7 @@ describe("automatic runtime coordinator", () => {
     const paused = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config({ drainBudget: 0 }),
       now: () => current,
@@ -893,6 +1279,7 @@ describe("automatic runtime coordinator", () => {
     const resumed = createRuntimeCoordinator({
       workspace: f.workspace,
       authority: f.authority,
+      workingAdjustments: f.workingAdjustments,
       research: f.research,
       config: config(),
       now: () => current,

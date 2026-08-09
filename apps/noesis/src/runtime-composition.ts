@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import type {
   AgentActionEvent,
   AgentRuntimeEvent,
@@ -31,6 +32,7 @@ import {
   FileRevisionRefSchema,
   type JsonValue,
   JsonValueSchema,
+  type ProjectRef,
   sameCapabilityRevisionRef,
   sha256,
   toJsonValue,
@@ -71,6 +73,7 @@ import {
   MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
   type NoesisRuntime,
   type RunTurnOptions,
+  type RuntimeCoordinator,
   type RuntimeControlPlane,
   SESSION_PICKER_LIMIT,
   type TrailState,
@@ -116,11 +119,28 @@ import {
   createWorkspaceRuntimeInternals,
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
-import { loadLearningActivityForSession } from "./learning-read-model.ts";
+import { loadLearningActivityForSession, loadLearningInspectionForSession } from "./learning-read-model.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
 const SHUTDOWN_GRACE_MS = 250;
+const REFLECTION_BARRIER_MS = 1_500;
+const LATE_REFLECTION_REFRESH_MS = 5_000;
+
+export async function waitForReflectionBarrier(
+  coordinator: Pick<RuntimeCoordinator, "waitForTerminal">,
+  reflectionJobId: string,
+): Promise<void> {
+  try {
+    await coordinator.waitForTerminal({
+      jobId: reflectionJobId,
+      deadline: new Date(Date.now() + REFLECTION_BARRIER_MS),
+    });
+  } catch {
+    // The foreground turn is already durably settled. Reflection remains inspectable as a
+    // background job, so an unavailable read model must not rewrite the turn as failed.
+  }
+}
 const roleNames = [
   "capability_router",
   "reflector",
@@ -469,6 +489,8 @@ export interface ApplicationRuntime extends NoesisTuiRuntime {
 
 export interface ApplicationRuntimeCompositionOptions {
   readonly config: ResolvedNoesisConfig;
+  /** Canonical host-derived active directory. Optional only for legacy test callers. */
+  readonly project?: ProjectRef;
   readonly recoverInterruptedOperations?: boolean;
   readonly agent?: NoesisAgentRuntime;
   readonly createAgent?: (
@@ -481,6 +503,14 @@ export interface ApplicationRuntimeCompositionOptions {
   readonly createRoleRunner: (
     configurations: readonly RoleVariantConfiguration[],
   ) => RuntimePiAgentRoleRunner;
+}
+
+export async function resolveActiveProject(root: string): Promise<ProjectRef> {
+  const canonicalRoot = await realpath(root);
+  return Object.freeze({
+    projectId: `project_${sha256(canonicalRoot).slice(0, 32)}`,
+    root: canonicalRoot,
+  });
 }
 
 function sessionDefinitionsForBroker(
@@ -1064,6 +1094,7 @@ export async function createApplicationRuntimeComposition(
   options: ApplicationRuntimeCompositionOptions,
 ): Promise<ApplicationRuntime> {
   const agentDefaults = options.config.agent;
+  const project = options.project ?? (await resolveActiveProject(process.cwd()));
   const workspace = await createWorkspaceStore(options.config.home, {
     recoverInterruptedOperations: options.recoverInterruptedOperations ?? true,
   });
@@ -1830,7 +1861,7 @@ export async function createApplicationRuntimeComposition(
     const broker = createToolBroker({
       definitions: Object.freeze([
         ...createLocalWorkTools({
-          cwd: process.cwd(),
+          cwd: project.root,
           writeArtifact: async ({ path, content }) => {
             const bytes = encoder.encode(content);
             const artifact = await workspace.artifacts.writeArtifact({
@@ -1897,7 +1928,7 @@ export async function createApplicationRuntimeComposition(
       },
     });
     activeBroker = scriptAwareBroker;
-    const codeRuntime = createCodeModeRuntime({ cwd: process.cwd(), broker: scriptAwareBroker });
+    const codeRuntime = createCodeModeRuntime({ cwd: project.root, broker: scriptAwareBroker });
     runRecordedCode = async (
       request,
       parentExecutionId,
@@ -2735,11 +2766,11 @@ export async function createApplicationRuntimeComposition(
     basePermissionManifest: Object.freeze({
       effects: Object.freeze(["read", "write", "execute", "network"]),
       resourcePatterns: Object.freeze([
-        `file:${process.cwd()}/*`,
-        `directory:${process.cwd()}`,
-        `directory:${process.cwd()}/*`,
-        `search:${process.cwd()}`,
-        `search:${process.cwd()}/*`,
+        `file:${project.root}/*`,
+        `directory:${project.root}`,
+        `directory:${project.root}/*`,
+        `search:${project.root}`,
+        `search:${project.root}/*`,
         "shell:*",
         "url:http://*",
         "url:https://*",
@@ -2760,6 +2791,7 @@ export async function createApplicationRuntimeComposition(
       resolveRevision,
       resolveBaseline,
     }),
+    project,
   });
   const candidates: ActivationCandidateResolver = Object.freeze({
     resolve: resolveRevision,
@@ -2834,6 +2866,7 @@ export async function createApplicationRuntimeComposition(
     learning,
     evaluation,
     baselineRevisions: Object.freeze({ resolve: resolveRevision }),
+    workingAdjustments: protectedRuntime.workingAdjustments,
     preflightPreparation,
     continuousFeedback: feedback,
     config: Object.freeze({
@@ -3112,7 +3145,7 @@ export async function createApplicationRuntimeComposition(
         maxFragmentTokens: 2_000,
       });
       try {
-        const result = await settlement.run({
+        const settledTurn = await settlement.run({
           sessionId: trailId,
           turnId,
           input,
@@ -3297,6 +3330,9 @@ export async function createApplicationRuntimeComposition(
             });
           },
         });
+        const result = settledTurn.result;
+        if (settledTurn.reflectionJobId)
+          await waitForReflectionBarrier(coordinator, settledTurn.reflectionJobId);
         await persistTrail(
           Object.freeze({
             ...running,
@@ -3549,7 +3585,27 @@ export async function createApplicationRuntimeComposition(
     );
   };
   const listLearningActivity: NonNullable<NoesisTuiRuntime["listLearningActivity"]> = async (sessionId) =>
-    await loadLearningActivityForSession(coordinator, sessionId);
+    await loadLearningActivityForSession(coordinator, sessionId, {
+      workingAdjustments: workspace.workingAdjustments,
+      outcomes: workspace.operational.outcomes,
+    });
+  const inspectLearning: NonNullable<NoesisTuiRuntime["inspectLearning"]> = async (sessionId) =>
+    await loadLearningInspectionForSession(coordinator, sessionId, project.projectId, {
+      workingAdjustments: workspace.workingAdjustments,
+      outcomes: workspace.operational.outcomes,
+    });
+  const waitForLearningActivity: NonNullable<NoesisTuiRuntime["waitForLearningActivity"]> = async (
+    sessionId,
+    jobId,
+  ) => {
+    const terminal = await coordinator.waitForTerminal({
+      jobId,
+      deadline: new Date(Date.now() + LATE_REFLECTION_REFRESH_MS),
+    });
+    if (terminal.status !== "terminal") return undefined;
+    const activity = await listLearningActivity(sessionId);
+    return activity.find((entry) => entry.jobId === jobId);
+  };
   const inspectExecution: NonNullable<NoesisTuiRuntime["inspectExecution"]> = async (
     sessionId,
     executionId,
@@ -3702,6 +3758,8 @@ export async function createApplicationRuntimeComposition(
     listExecutions,
     inspectExecution,
     listLearningActivity,
+    inspectLearning,
+    waitForLearningActivity,
     shutdown,
   });
 }

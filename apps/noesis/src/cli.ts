@@ -28,7 +28,11 @@ import { createBrowserUrlOpener } from "./browser-auth.ts";
 import { renderNoesisOAuthCallbackPage } from "./oauth-callback-page.ts";
 import { runFirstLaunchOnboarding, shouldAutoOnboard } from "./onboarding.ts";
 import { createSurfaceAuthCallbacks, promptsFromSurface } from "./prompt-surface.ts";
-import { type ApplicationRuntime, createApplicationRuntimeComposition } from "./runtime-composition.ts";
+import {
+  type ApplicationRuntime,
+  createApplicationRuntimeComposition,
+  resolveActiveProject,
+} from "./runtime-composition.ts";
 
 interface CliInput {
   readonly args: readonly string[];
@@ -275,24 +279,26 @@ async function createRuntime(
   },
 ): Promise<ApplicationRuntime> {
   const services = createPiModelServices(config.home);
+  const project = await resolveActiveProject(process.cwd());
   const skills = createPiSkillLibrary({
-    cwd: process.cwd(),
+    cwd: project.root,
     agentDirectory: join(config.home, "agent"),
     workspaceTrusted: options.workspaceTrusted,
   });
   return await createApplicationRuntimeComposition({
     config,
+    project,
     skills,
     recoverInterruptedOperations: options.recoverInterruptedOperations,
     createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
-      createPiAgentRuntime(process.cwd(), services.models, {
+      createPiAgentRuntime(project.root, services.models, {
         codeExecution,
         selfTools,
         requirePinnedSkillSnapshot: true,
         ...(skillLibrary ? { skills: skillLibrary } : {}),
       }),
     createRoleRunner: (configurations) =>
-      createPiAgentRoleRunner(process.cwd(), services.models, configurations),
+      createPiAgentRoleRunner(project.root, services.models, configurations),
   });
 }
 

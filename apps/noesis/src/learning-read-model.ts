@@ -1,11 +1,19 @@
 // biome-ignore-all lint/complexity/useLiteralKeys: unknown durable job results require bracket access under noPropertyAccessFromIndexSignature.
+import type { WorkingAdjustment, WorkingAdjustmentReadPort } from "@noesis/domain";
 import type {
+  CoordinatorEvidenceRef,
   CoordinatorJobKind,
   CoordinatorJobView,
   ReflectTurnJobPayload,
   RuntimeCoordinator,
 } from "@noesis/runtime";
-import type { TuiLearningActivitySummary } from "@noesis/tui";
+import { CoordinatorEvidenceRefsSchema } from "@noesis/runtime";
+import type {
+  TuiLearningActivitySummary,
+  TuiLearningInspection,
+  TuiWorkingAdjustmentState,
+} from "@noesis/tui";
+import type { OutcomeRecord } from "@noesis/workspace";
 
 interface UnknownRecord {
   readonly [key: string]: unknown;
@@ -48,9 +56,17 @@ function status(job: CoordinatorJobView): TuiLearningActivitySummary["status"] {
   if (job.job.status === "scheduled") return "queued";
   if (job.job.status === "running") return "running";
   if (job.job.status !== "completed") return "failed";
-  return job.kind === "runtime.reflect_turn" && stringField(job.job.result, "status") === "no_change"
-    ? "no_change"
-    : "completed";
+  if (job.kind !== "runtime.reflect_turn") return "completed";
+  const resultStatus = stringField(job.job.result, "status");
+  if (
+    resultStatus === "no_change" ||
+    resultStatus === "adjusted" ||
+    resultStatus === "replaced" ||
+    resultStatus === "unapplied" ||
+    resultStatus === "stale"
+  )
+    return resultStatus;
+  return "completed";
 }
 
 function activeSummary(job: CoordinatorJobView): string {
@@ -66,6 +82,16 @@ function completedSummary(job: CoordinatorJobView): string {
     if (resultStatus === "no_change")
       return stringField(job.job.result, "reason") ?? "Reflection found no useful change";
     if (resultStatus === "deduped") return "Reflection matched an existing experiment";
+    if (resultStatus === "adjusted" || resultStatus === "replaced")
+      return (
+        stringField(job.job.result, "rationale") ??
+        (resultStatus === "replaced"
+          ? "Reflection replaced the project working adjustment"
+          : "Reflection applied a project working adjustment")
+      );
+    if (resultStatus === "unapplied")
+      return stringField(job.job.result, "reason") ?? "Reflection unapplied the project working adjustment";
+    if (resultStatus === "stale") return "Reflection left newer project adjustment state unchanged";
     return "Reflection proposed an experiment";
   }
   if (job.kind === "runtime.author_revision") return "Candidate revision authored";
@@ -85,11 +111,27 @@ function candidateRevision(job: CoordinatorJobView): UnknownRecord | undefined {
   return isRecord(value) ? value : undefined;
 }
 
+function resultEvidenceRefs(job: CoordinatorJobView): readonly CoordinatorEvidenceRef[] | undefined {
+  if (!isRecord(job.job.result)) return undefined;
+  const parsed = CoordinatorEvidenceRefsSchema.safeParse(job.job.result["evidenceRefs"]);
+  if (!parsed.success) return undefined;
+  return Object.freeze(parsed.data.map((reference) => Object.freeze({ ...reference })));
+}
+
 function activity(job: CoordinatorJobView): TuiLearningActivitySummary {
   const candidate = candidateRevision(job);
   const experiment = experimentId(job);
   const candidateCapabilityId = stringField(candidate, "capabilityId");
   const candidateRevisionId = stringField(candidate, "capabilityRevisionId");
+  const projectId =
+    stringField(job.job.result, "projectId") ??
+    (isReflection(job) ? job.payload.turn.project?.projectId : undefined);
+  const expectedAdjustmentId = isReflection(job) ? job.payload.turn.expectedActiveAdjustmentId : undefined;
+  const adjustmentId =
+    stringField(job.job.result, "adjustmentId") ??
+    (typeof expectedAdjustmentId === "string" ? expectedAdjustmentId : undefined);
+  const activeAdjustmentId = stringField(job.job.result, "activeAdjustmentId");
+  const evidenceRefs = resultEvidenceRefs(job);
   const failed =
     job.job.status === "failed" || job.job.status === "cancelled" || job.job.status === "budget_exhausted";
   return Object.freeze({
@@ -106,7 +148,217 @@ function activity(job: CoordinatorJobView): TuiLearningActivitySummary {
         ? { capabilityId: candidateCapabilityId }
         : {}),
     ...(candidateRevisionId ? { capabilityRevisionId: candidateRevisionId } : {}),
+    ...(projectId ? { projectId } : {}),
+    ...(adjustmentId ? { adjustmentId } : {}),
+    ...(activeAdjustmentId ? { activeAdjustmentId } : {}),
+    ...(evidenceRefs ? { evidenceRefs } : {}),
     ...(failed && job.job.lastError ? { failure: job.job.lastError.message } : {}),
+  });
+}
+
+export interface WorkingAdjustmentInspectionSource {
+  readonly workingAdjustments: WorkingAdjustmentReadPort;
+  readonly outcomes: {
+    readonly get: (outcomeId: string) => Promise<OutcomeRecord | undefined>;
+  };
+}
+
+const SERVED_EVIDENCE_LIMIT = 8;
+const EVIDENCE_SUMMARY_CHARACTERS = 500;
+
+function boundedSummary(summary: string): string {
+  if (summary.length <= EVIDENCE_SUMMARY_CHARACTERS) return summary;
+  return `${summary.slice(0, EVIDENCE_SUMMARY_CHARACTERS - 1)}…`;
+}
+
+async function workingAdjustmentState(
+  projectId: string,
+  adjustmentId: string,
+  source: WorkingAdjustmentInspectionSource,
+  getActive: (projectId: string) => Promise<WorkingAdjustment | undefined>,
+): Promise<TuiLearningActivitySummary["workingAdjustment"]> {
+  const adjustment = await source.workingAdjustments.get(adjustmentId);
+  if (!adjustment) return undefined;
+  if (adjustment.scope.projectId !== projectId)
+    throw new Error(
+      `Working adjustment ${adjustment.adjustmentId} belongs to project ${adjustment.scope.projectId}, not ${projectId}`,
+    );
+  const [active, settledEvidence] = await Promise.all([
+    getActive(projectId),
+    source.workingAdjustments.listSettledEvidence({
+      projectId,
+      adjustmentId: adjustment.adjustmentId,
+      limit: SERVED_EVIDENCE_LIMIT,
+    }),
+  ]);
+  return await inspectedWorkingAdjustmentState(
+    adjustment,
+    active?.adjustmentId === adjustment.adjustmentId ? "active" : "inactive",
+    settledEvidence,
+    source,
+  );
+}
+
+async function inspectedWorkingAdjustmentState(
+  adjustment: WorkingAdjustment,
+  status: TuiWorkingAdjustmentState["status"],
+  settledEvidence: Awaited<ReturnType<WorkingAdjustmentReadPort["listSettledEvidence"]>>,
+  source: WorkingAdjustmentInspectionSource,
+): Promise<TuiWorkingAdjustmentState> {
+  const servedEvidence = Object.freeze(
+    (
+      await Promise.all(
+        settledEvidence.slice(0, SERVED_EVIDENCE_LIMIT).map(async (served) => {
+          const outcome = await source.outcomes.get(served.outcomeId);
+          if (!outcome) return undefined;
+          return Object.freeze({
+            planId: served.planId,
+            sessionId: served.sessionId,
+            turnId: served.turnId,
+            outcomeId: served.outcomeId,
+            outcome: outcome.status,
+            summary: boundedSummary(outcome.summary),
+            settledAt: served.settledAt,
+          });
+        }),
+      )
+    ).filter((evidence) => evidence !== undefined),
+  );
+  return Object.freeze({
+    adjustmentId: adjustment.adjustmentId,
+    projectId: adjustment.scope.projectId,
+    status,
+    strategy: adjustment.strategy,
+    successSignal: adjustment.successSignal,
+    servedEvidence,
+  });
+}
+
+async function currentWorkingAdjustmentState(
+  projectId: string,
+  active: WorkingAdjustment | undefined,
+  source: WorkingAdjustmentInspectionSource,
+): Promise<TuiWorkingAdjustmentState | undefined> {
+  if (!active) return undefined;
+  if (active.scope.projectId !== projectId)
+    throw new Error(
+      `Active working adjustment ${active.adjustmentId} belongs to project ${active.scope.projectId}, not ${projectId}`,
+    );
+  const settledEvidence = await source.workingAdjustments.listSettledEvidence({
+    projectId,
+    adjustmentId: active.adjustmentId,
+    limit: SERVED_EVIDENCE_LIMIT,
+  });
+  return await inspectedWorkingAdjustmentState(active, "active", settledEvidence, source);
+}
+
+function validateActiveWorkingAdjustment(
+  projectId: string,
+  active: WorkingAdjustment | undefined,
+): WorkingAdjustment | undefined {
+  if (active && active.scope.projectId !== projectId)
+    throw new Error(
+      `Active working adjustment ${active.adjustmentId} belongs to project ${active.scope.projectId}, not ${projectId}`,
+    );
+  return active;
+}
+
+interface ActiveWorkingAdjustmentSnapshot {
+  readonly projectId: string;
+  readonly adjustment: WorkingAdjustment | undefined;
+}
+
+function activeWorkingAdjustmentReader(
+  source: WorkingAdjustmentInspectionSource,
+  snapshot?: ActiveWorkingAdjustmentSnapshot,
+): (projectId: string) => Promise<WorkingAdjustment | undefined> {
+  const activeByProject = new Map<string, Promise<WorkingAdjustment | undefined>>();
+  if (snapshot)
+    activeByProject.set(
+      snapshot.projectId,
+      Promise.resolve(validateActiveWorkingAdjustment(snapshot.projectId, snapshot.adjustment)),
+    );
+  return (projectId) => {
+    const pending =
+      activeByProject.get(projectId) ??
+      source.workingAdjustments
+        .getActive(projectId)
+        .then((active) => validateActiveWorkingAdjustment(projectId, active));
+    activeByProject.set(projectId, pending);
+    return pending;
+  };
+}
+
+async function enrichLearningActivity(
+  activities: readonly TuiLearningActivitySummary[],
+  source: WorkingAdjustmentInspectionSource,
+  snapshot?: ActiveWorkingAdjustmentSnapshot,
+): Promise<readonly TuiLearningActivitySummary[]> {
+  const stateByProject = new Map<
+    string,
+    Map<string, Promise<TuiLearningActivitySummary["workingAdjustment"]>>
+  >();
+  const getActive = activeWorkingAdjustmentReader(source, snapshot);
+  return Object.freeze(
+    await Promise.all(
+      activities.map(async (entry) => {
+        const inspectedAdjustmentId =
+          entry.status === "stale" && entry.activeAdjustmentId
+            ? entry.activeAdjustmentId
+            : entry.adjustmentId;
+        let state: TuiLearningActivitySummary["workingAdjustment"];
+        if (entry.projectId && inspectedAdjustmentId) {
+          const stateByAdjustment = stateByProject.get(entry.projectId) ?? new Map();
+          stateByProject.set(entry.projectId, stateByAdjustment);
+          const pending =
+            stateByAdjustment.get(inspectedAdjustmentId) ??
+            workingAdjustmentState(entry.projectId, inspectedAdjustmentId, source, getActive);
+          stateByAdjustment.set(inspectedAdjustmentId, pending);
+          state = await pending;
+        }
+        return state ? Object.freeze({ ...entry, workingAdjustment: state }) : entry;
+      }),
+    ),
+  );
+}
+
+/** Enriches learning jobs from the authoritative adjustment and settled-outcome stores. */
+export async function enrichLearningActivityWithWorkingAdjustments(
+  activities: readonly TuiLearningActivitySummary[],
+  source: WorkingAdjustmentInspectionSource,
+): Promise<readonly TuiLearningActivitySummary[]> {
+  return await enrichLearningActivity(activities, source);
+}
+
+/** Combines session-local learning jobs with the current authoritative project adjustment. */
+export async function loadLearningInspectionForSession(
+  coordinator: Pick<RuntimeCoordinator, "listJobPage">,
+  sessionId: string,
+  projectId: string,
+  inspection: WorkingAdjustmentInspectionSource,
+): Promise<TuiLearningInspection> {
+  const [rawActivity, active] = await Promise.all([
+    loadLearningActivityForSession(coordinator, sessionId),
+    inspection.workingAdjustments
+      .getActive(projectId)
+      .then((adjustment) => validateActiveWorkingAdjustment(projectId, adjustment)),
+  ]);
+  const [activity, currentWorkingAdjustment] = await Promise.all([
+    enrichLearningActivity(rawActivity, inspection, { projectId, adjustment: active }),
+    currentWorkingAdjustmentState(projectId, active, inspection),
+  ]);
+  const deduplicated = currentWorkingAdjustment
+    ? Object.freeze(
+        activity.map((entry) => {
+          if (entry.workingAdjustment?.adjustmentId !== currentWorkingAdjustment.adjustmentId) return entry;
+          const { workingAdjustment: _workingAdjustment, ...withoutDuplicateState } = entry;
+          return Object.freeze(withoutDuplicateState);
+        }),
+      )
+    : activity;
+  return Object.freeze({
+    activity: deduplicated,
+    ...(currentWorkingAdjustment ? { currentWorkingAdjustment } : {}),
   });
 }
 
@@ -179,6 +431,7 @@ function chunks<Value>(values: readonly Value[], size: number): readonly (readon
 export async function loadLearningActivityForSession(
   coordinator: Pick<RuntimeCoordinator, "listJobPage">,
   sessionId: string,
+  inspection?: WorkingAdjustmentInspectionSource,
 ): Promise<readonly TuiLearningActivitySummary[]> {
   const reflections = await listAllScopedJobs(coordinator, {
     kind: "runtime.reflect_turn",
@@ -215,9 +468,10 @@ export async function loadLearningActivityForSession(
   const uniqueLinked = new Map(
     [...sessionChildren.flat(), ...linked].map((job) => [job.job.jobId, job] as const),
   );
-  return learningActivityForSession(
+  const activity = learningActivityForSession(
     [...reflections, ...uniqueLinked.values()],
     sessionId,
     new Set(sessionChildren.flat().map((job) => job.job.jobId)),
   );
+  return inspection ? await enrichLearningActivityWithWorkingAdjustments(activity, inspection) : activity;
 }

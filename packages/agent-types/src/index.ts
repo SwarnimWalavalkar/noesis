@@ -7,12 +7,14 @@ import type {
   FileRevisionRef,
   JsonValue,
   PermissionManifest,
+  ProjectRef,
 } from "@noesis/domain";
 import {
   CapabilityRevisionRefSchema,
   canonicalJson,
   EvidenceRefSchema,
   FileRevisionRefSchema,
+  ProjectRefSchema,
   sha256,
 } from "@noesis/domain";
 import { z } from "zod";
@@ -135,6 +137,10 @@ export interface FrozenTurnPlan {
   readonly planId: string;
   readonly sessionId: string;
   readonly turnId: string;
+  /** Host-derived project identity. Absent only on plans persisted before project-local adjustment support. */
+  readonly project?: ProjectRef;
+  /** Exact immutable project adjustment admitted to this turn, when one was active. */
+  readonly workingAdjustmentId?: string;
   readonly activationId: string;
   readonly activationRevision: number;
   readonly selectedCapabilities: readonly FrozenCapabilitySelection[];
@@ -207,6 +213,8 @@ export const FrozenTurnPlanSchema = z.strictObject({
   planId: z.string().min(1),
   sessionId: z.string().min(1),
   turnId: z.string().min(1),
+  project: ProjectRefSchema.optional(),
+  workingAdjustmentId: z.string().min(1).optional(),
   activationId: z.string().min(1),
   activationRevision: z.number().int().positive(),
   selectedCapabilities: z.array(FrozenCapabilitySelectionSchema),
@@ -237,11 +245,13 @@ export function frozenTurnPlanDigest(plan: Omit<FrozenTurnPlan, "canonicalDigest
 
 export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
   const decoded = FrozenTurnPlanSchema.parse(value);
-  const { conversationHistory, routing, ...base } = decoded;
+  const { conversationHistory, project, workingAdjustmentId, routing, ...base } = decoded;
   const { learningAttribution, ...routingBase } = routing;
   const plan = Object.freeze({
     ...base,
     ...(conversationHistory === undefined ? {} : { conversationHistory }),
+    ...(project === undefined ? {} : { project: Object.freeze({ ...project }) }),
+    ...(workingAdjustmentId === undefined ? {} : { workingAdjustmentId }),
     routing: Object.freeze({
       ...routingBase,
       ...(learningAttribution === undefined ? {} : { learningAttribution }),
@@ -256,6 +266,10 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
         );
     }
   }
+  if (plan.workingAdjustmentId !== undefined && plan.project === undefined)
+    throw new Error(
+      `Frozen turn plan ${plan.planId} pins a working adjustment without a host-derived project`,
+    );
   if ((plan.conversationHistory?.length ?? 0) > MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES)
     throw new Error(`Frozen turn plan ${plan.planId} exceeds the conversation-history message bound`);
   const historyMessageIds = new Set<string>();

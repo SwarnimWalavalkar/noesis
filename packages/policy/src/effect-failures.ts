@@ -1,11 +1,16 @@
 export type EffectExecutionFailureCode = "cancelled" | "invalid_output" | "result_too_large";
 
 const failureBrand = Symbol("noesis.effect-execution-failure");
+const preEffectFailureBrand = Symbol("noesis.pre-effect-execution-failure");
 const durablePrefix = "noesis-effect-failure-v2:";
 const legacyDurablePrefix = "noesis-effect-failure-v1:";
 
 interface BrandedEffectExecutionFailure extends Error {
   readonly [failureBrand]: EffectExecutionFailureCode;
+}
+
+interface BrandedPreEffectExecutionFailure extends BrandedEffectExecutionFailure {
+  readonly [preEffectFailureBrand]: true;
 }
 
 export interface EffectExecutionFailureDetails {
@@ -31,6 +36,30 @@ export function createEffectExecutionFailure(code: EffectExecutionFailureCode, m
     writable: false,
   });
   return error;
+}
+
+/**
+ * Marks a trusted callback failure that occurred before its effect began. The authority may release
+ * this reservation for retry; ordinary execution failures remain terminal.
+ */
+export function createPreEffectExecutionFailure(code: EffectExecutionFailureCode, message: string): Error {
+  const error = createEffectExecutionFailure(code, message) as BrandedPreEffectExecutionFailure;
+  Object.defineProperty(error, preEffectFailureBrand, {
+    configurable: false,
+    enumerable: false,
+    value: true,
+    writable: false,
+  });
+  return error;
+}
+
+export function inspectPreEffectExecutionFailure(value: unknown): EffectExecutionFailureDetails | undefined {
+  if (
+    !(value instanceof Error) ||
+    (value as Partial<BrandedPreEffectExecutionFailure>)[preEffectFailureBrand] !== true
+  )
+    return undefined;
+  return inspectEffectExecutionFailure(value);
 }
 
 export function inspectEffectExecutionFailure(value: unknown): EffectExecutionFailureDetails | undefined {

@@ -1,4 +1,5 @@
 import type {
+  CoordinatorEvidenceRef,
   InteractionCommand,
   InteractionDispatchResult,
   InteractionSnapshot,
@@ -101,14 +102,52 @@ export interface TuiExecutionDetail extends TuiExecutionSummary {
 export interface TuiLearningActivitySummary {
   readonly jobId: string;
   readonly stage: "reflection" | "authoring" | "preflight";
-  readonly status: "queued" | "running" | "completed" | "no_change" | "failed";
+  readonly status:
+    | "queued"
+    | "running"
+    | "completed"
+    | "no_change"
+    | "adjusted"
+    | "replaced"
+    | "unapplied"
+    | "stale"
+    | "failed";
   readonly summary: string;
   readonly updatedAt: string;
   readonly turnId?: string;
   readonly experimentId?: string;
   readonly capabilityId?: string;
   readonly capabilityRevisionId?: string;
+  readonly projectId?: string;
+  readonly adjustmentId?: string;
+  readonly activeAdjustmentId?: string;
+  readonly evidenceRefs?: readonly CoordinatorEvidenceRef[];
+  readonly workingAdjustment?: TuiWorkingAdjustmentState;
   readonly failure?: string;
+}
+
+export interface TuiWorkingAdjustmentEvidenceSummary {
+  readonly planId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly outcomeId: string;
+  readonly outcome: "accepted" | "corrected" | "failed" | "unknown";
+  readonly summary: string;
+  readonly settledAt: string;
+}
+
+export interface TuiWorkingAdjustmentState {
+  readonly adjustmentId: string;
+  readonly projectId: string;
+  readonly status: "active" | "inactive";
+  readonly strategy: string;
+  readonly successSignal: string;
+  readonly servedEvidence: readonly TuiWorkingAdjustmentEvidenceSummary[];
+}
+
+export interface TuiLearningInspection {
+  readonly activity: readonly TuiLearningActivitySummary[];
+  readonly currentWorkingAdjustment?: TuiWorkingAdjustmentState;
 }
 
 export type NoesisTuiRuntime = Pick<
@@ -138,4 +177,9 @@ export type NoesisTuiRuntime = Pick<
     executionId: string,
   ) => Promise<TuiExecutionDetail | undefined>;
   readonly listLearningActivity?: (sessionId: string) => Promise<readonly TuiLearningActivitySummary[]>;
+  readonly inspectLearning?: (sessionId: string) => Promise<TuiLearningInspection>;
+  readonly waitForLearningActivity?: (
+    sessionId: string,
+    jobId: string,
+  ) => Promise<TuiLearningActivitySummary | undefined>;
 };

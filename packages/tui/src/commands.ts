@@ -1,5 +1,11 @@
 import { paginateInspectorText } from "./lifecycle-utils.ts";
-import type { NoesisTuiRuntime, TuiInteractionResult, TuiLearningActivitySummary } from "./runtime-port.ts";
+import type {
+  NoesisTuiRuntime,
+  TuiInteractionResult,
+  TuiLearningActivitySummary,
+  TuiLearningInspection,
+  TuiWorkingAdjustmentState,
+} from "./runtime-port.ts";
 import type { NoesisTuiAction } from "./state.ts";
 
 export interface SlashCommandContext {
@@ -23,6 +29,19 @@ export const HELP_LINES = [
   "/quit · learning, experiments, activation, and revert run ambiently",
 ] as const;
 
+function workingAdjustmentLines(adjustment: TuiWorkingAdjustmentState, heading: string): readonly string[] {
+  return [
+    `${heading} · ${adjustment.status}`,
+    `strategy · ${adjustment.strategy}`,
+    `success signal · ${adjustment.successSignal}`,
+    `served evidence · ${String(adjustment.servedEvidence.length)}`,
+    ...adjustment.servedEvidence.flatMap((evidence) => [
+      `  ${evidence.outcome} · turn ${evidence.turnId} · ${evidence.settledAt}`,
+      `    ${evidence.summary}`,
+    ]),
+  ];
+}
+
 function learningActivityLine(activity: TuiLearningActivitySummary): string {
   const glyph =
     activity.status === "running"
@@ -31,9 +50,11 @@ function learningActivityLine(activity: TuiLearningActivitySummary): string {
         ? "○"
         : activity.status === "failed"
           ? "×"
-          : activity.status === "no_change"
-            ? "—"
-            : "✓";
+          : activity.status === "stale"
+            ? "!"
+            : activity.status === "no_change"
+              ? "—"
+              : "✓";
   const references = [
     activity.turnId ? `turn ${activity.turnId}` : undefined,
     activity.experimentId ? `experiment ${activity.experimentId}` : undefined,
@@ -42,11 +63,29 @@ function learningActivityLine(activity: TuiLearningActivitySummary): string {
       : activity.capabilityId
         ? `capability ${activity.capabilityId}`
         : undefined,
+    activity.projectId ? `project ${activity.projectId}` : undefined,
+    activity.adjustmentId ? `adjustment ${activity.adjustmentId}` : undefined,
   ].filter((value): value is string => value !== undefined);
+  const adjustment = activity.workingAdjustment;
+  const adjustmentLines = adjustment
+    ? workingAdjustmentLines(adjustment, "working adjustment").map((line) => `  ${line}`)
+    : [];
+  const decisionEvidenceLines = activity.evidenceRefs
+    ? [
+        `  decision evidence · ${String(activity.evidenceRefs.length)}`,
+        ...activity.evidenceRefs.map((reference) => {
+          if (reference.kind === "database_row") return `    ${reference.table}:${reference.rowId}`;
+          if (reference.kind === "artifact_file") return `    artifact:${reference.artifactId}`;
+          return `    ${reference.kind}:${reference.revisionId}`;
+        }),
+      ]
+    : [];
   return [
     `${glyph} ${activity.status.replaceAll("_", " ")} · ${activity.stage}`,
     `  ${activity.summary}`,
     ...(references.length > 0 ? [`  ${references.join(" · ")}`] : []),
+    ...decisionEvidenceLines,
+    ...adjustmentLines,
     `  ${activity.updatedAt} · ${activity.jobId}`,
   ].join("\n");
 }
@@ -297,19 +336,31 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
   }
 
   if (command === "/learning") {
-    if (!runtime.listLearningActivity) {
+    if (!runtime.inspectLearning && !runtime.listLearningActivity) {
       publishInspector("Learning activity inspection is unavailable in this runtime.");
       return true;
     }
-    const activity = await runtime.listLearningActivity(trailId);
-    if (activity.length === 0) {
+    const inspection: TuiLearningInspection = runtime.inspectLearning
+      ? await runtime.inspectLearning(trailId)
+      : runtime.listLearningActivity
+        ? Object.freeze({ activity: await runtime.listLearningActivity(trailId) })
+        : Object.freeze({ activity: Object.freeze([]) });
+    if (inspection.activity.length === 0 && !inspection.currentWorkingAdjustment) {
       publishInspector("No ambient learning activity has been recorded for this session yet.");
       return true;
     }
     const pages = paginateInspectorText(
-      `Learning activity · ${String(activity.length)}`,
+      `Learning activity · ${String(inspection.activity.length)}`,
       [
-        ...activity.map(learningActivityLine),
+        ...(inspection.currentWorkingAdjustment
+          ? [
+              workingAdjustmentLines(
+                inspection.currentWorkingAdjustment,
+                "Current project working adjustment",
+              ).join("\n"),
+            ]
+          : []),
+        ...inspection.activity.map(learningActivityLine),
         "Noesis reflects after useful work. No change is a normal outcome.",
       ].join("\n\n"),
     );

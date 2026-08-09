@@ -82,6 +82,7 @@ import {
 import { createProtectedFeedbackStore } from "./feedback-store.ts";
 import { importLegacyWorkspace } from "./importer.ts";
 import { createDurableJobStore } from "./jobs.ts";
+import { createProtectedWorkingAdjustmentStore } from "./working-adjustments.ts";
 import {
   initializeWorkspaceDirectories,
   pathInside,
@@ -227,6 +228,7 @@ const PRIMARY_KEY_BY_TABLE: Readonly<Record<DatabaseTable, string>> = {
   tool_calls: "tool_call_id",
   outcomes: "outcome_id",
   jobs: "job_id",
+  working_adjustments: "adjustment_id",
   experiments: "experiment_id",
   experiment_trials: "trial_id",
   feedback_signals: "signal_id",
@@ -924,6 +926,12 @@ export async function createWorkspaceStore(
   const jobs = createDurableJobStore(database, recordActivity, (reference) =>
     assertStoredReference(db, reference),
   );
+  const protectedWorkingAdjustments = createProtectedWorkingAdjustmentStore({
+    database,
+    now,
+    assertStoredReference: (reference) => assertStoredReference(db, reference),
+    recordActivity,
+  });
   const compoundingMeasurements = createCompoundingMeasurementStore(database, now);
   const definitionMetadataRepository = createDefinitionMetadataRepository(database, recordActivity, now);
   const definitionMetadata: DefinitionMetadataPort = Object.freeze({
@@ -1434,6 +1442,11 @@ export async function createWorkspaceStore(
     artifacts: Object.freeze({ writeArtifact }),
     research,
     jobs,
+    workingAdjustments: Object.freeze({
+      get: protectedWorkingAdjustments.get,
+      getActive: protectedWorkingAdjustments.getActive,
+      listSettledEvidence: protectedWorkingAdjustments.listSettledEvidence,
+    }),
     declaredAuthority: declaredAuthorityFor,
     operational,
     search,
@@ -1481,6 +1494,7 @@ export async function createWorkspaceStore(
           activations: protectedActivations,
           feedback: protectedFeedback,
           measurements: compoundingMeasurements,
+          workingAdjustments: protectedWorkingAdjustments,
         }),
       }),
     );
@@ -3597,6 +3611,10 @@ function createResearchRepositories(
             .prepare("SELECT status, data_json FROM experiments WHERE experiment_id = ?")
             .get(requested.experimentId);
           const stored = decodeExperiment(current);
+          if (stored !== undefined && stored.sourceAdjustmentId !== requested.sourceAdjustmentId)
+            throw new Error(
+              `Experiment ${requested.experimentId} cannot change its source working adjustment`,
+            );
           const value = ExperimentSchema.parse({
             ...requested,
             evidenceRefs: mergeEvidenceReferences(stored?.evidenceRefs ?? [], requested.evidenceRefs),
@@ -3605,6 +3623,15 @@ function createResearchRepositories(
             ],
           });
           const encoded = JSON.stringify(value);
+          if (
+            value.sourceAdjustmentId !== undefined &&
+            db
+              .prepare("SELECT 1 FROM working_adjustments WHERE adjustment_id = ?")
+              .get(value.sourceAdjustmentId) === undefined
+          )
+            throw new Error(
+              `Experiment ${value.experimentId} references unknown source working adjustment ${value.sourceAdjustmentId}`,
+            );
           for (const ref of value.evidenceRefs) assertStoredReference(db, ref);
           if (value.preflightRef) assertStoredReference(db, value.preflightRef);
           if (current === undefined) {

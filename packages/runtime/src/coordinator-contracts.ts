@@ -6,14 +6,18 @@ import {
   type DurableJobRecord,
   durableJobFailureError,
   type EvidenceRef,
+  EvidenceRefSchema,
   type Experiment,
   type FileRevisionRef,
   type JsonValue,
   type PreflightDecision,
   type PreflightReport,
+  type ProjectRef,
+  WORKING_ADJUSTMENT_LIMITS,
+  type WorkingAdjustment,
 } from "@noesis/domain";
 import { type RetrievalStrategyId, RetrievalStrategyIdSchema } from "@noesis/intelligence";
-import { LearningTurnInputSchema } from "@noesis/learning";
+import { LearningTurnInputSchema, type SemanticTurnObservation } from "@noesis/learning";
 import { z } from "zod";
 
 export const CoordinatorJobKindSchema = z.enum([
@@ -128,7 +132,33 @@ export const DEFAULT_RUNTIME_COORDINATOR_CONFIG: RuntimeCoordinatorConfig = Obje
 
 export type CoordinatorResearchTelemetry = Readonly<Record<string, JsonValue>>;
 
+/** Evidence retained by durable reflection results and exposed through learning inspection. */
+export type CoordinatorEvidenceRef = EvidenceRef;
+export const CoordinatorEvidenceRefsSchema = z
+  .array(EvidenceRefSchema)
+  .max(WORKING_ADJUSTMENT_LIMITS.evidenceRefs);
+
 export type CoordinatorReflectionResult =
+  | {
+      readonly status: "apply_working_adjustment";
+      readonly observation: SemanticTurnObservation;
+      readonly project: ProjectRef;
+      readonly expectedActiveAdjustmentId: string | null;
+      readonly rationale: string;
+      readonly strategy: string;
+      readonly successSignal: string;
+      readonly evidenceRefs: readonly EvidenceRef[];
+      readonly telemetry: CoordinatorResearchTelemetry;
+    }
+  | {
+      readonly status: "unapply_working_adjustment";
+      readonly observation: SemanticTurnObservation;
+      readonly project: ProjectRef;
+      readonly expectedActiveAdjustmentId: string;
+      readonly reason: string;
+      readonly evidenceRefs: readonly EvidenceRef[];
+      readonly telemetry: CoordinatorResearchTelemetry;
+    }
   | {
       readonly status: "no_change";
       readonly reason: string;
@@ -144,6 +174,7 @@ export type CoordinatorReflectionResult =
         readonly baselineRevision: CapabilityRevisionRef;
         readonly feedbackSignalIds: readonly string[];
         readonly status: "hypothesis";
+        readonly sourceAdjustmentId?: string;
       };
       readonly hypothesisDedupeKey: string;
       readonly telemetry: CoordinatorResearchTelemetry;
@@ -154,6 +185,37 @@ export type CoordinatorReflectionResult =
       readonly hypothesisDedupeKey: string;
       readonly telemetry: CoordinatorResearchTelemetry;
     };
+
+export interface CoordinatorWorkingAdjustmentMutationPort {
+  readonly apply: (request: {
+    readonly adjustment: WorkingAdjustment;
+    readonly expectedActiveAdjustmentId: string | null;
+    readonly signal: AbortSignal;
+  }) => Promise<
+    | {
+        readonly status: "applied";
+        readonly adjustment: WorkingAdjustment;
+        readonly replacedAdjustmentId: string | null;
+      }
+    | {
+        readonly status: "stale";
+        readonly adjustmentId: string;
+        readonly currentActiveAdjustmentId: string | null;
+      }
+  >;
+  readonly unapply: (request: {
+    readonly projectId: string;
+    readonly expectedActiveAdjustmentId: string;
+    readonly signal: AbortSignal;
+  }) => Promise<
+    | { readonly status: "unapplied"; readonly adjustmentId: string }
+    | {
+        readonly status: "stale";
+        readonly adjustmentId: string;
+        readonly currentActiveAdjustmentId: string | null;
+      }
+  >;
+}
 
 export interface CoordinatorCandidateResult {
   readonly experimentId: string;

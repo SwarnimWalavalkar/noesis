@@ -399,6 +399,9 @@ export function createAtomicActivationController(
         ),
       ),
       controlRevisionId: controlMetadata?.definitionRevision.revisionId ?? null,
+      ...(experiment.sourceAdjustmentId === undefined
+        ? {}
+        : { sourceAdjustmentId: experiment.sourceAdjustmentId }),
     }) satisfies ActivationEvidenceBinding;
     return Object.freeze({
       binding,

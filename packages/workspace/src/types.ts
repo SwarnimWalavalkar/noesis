@@ -13,6 +13,8 @@ import type {
   FileRevisionRef,
   JsonValue,
   PermissionManifest,
+  WorkingAdjustment,
+  WorkingAdjustmentReadPort,
   WorkspaceStore,
 } from "@noesis/domain";
 
@@ -220,6 +222,55 @@ export interface ActivationEvidenceBinding {
   readonly reportDigest: string;
   readonly definitionSetDigest: string;
   readonly controlRevisionId: string | null;
+  readonly sourceAdjustmentId?: string | undefined;
+}
+
+export type WorkingAdjustmentApplyResult =
+  | {
+      readonly status: "applied";
+      readonly adjustment: WorkingAdjustment;
+      readonly replacedAdjustmentId: string | null;
+    }
+  | {
+      readonly status: "stale";
+      readonly adjustmentId: string;
+      readonly currentActiveAdjustmentId: string | null;
+    };
+
+export type WorkingAdjustmentUnapplyResult =
+  | {
+      readonly status: "unapplied";
+      readonly adjustmentId: string;
+    }
+  | {
+      readonly status: "stale";
+      readonly adjustmentId: string;
+      readonly currentActiveAdjustmentId: string | null;
+    };
+
+export interface ProtectedWorkingAdjustmentStore extends WorkingAdjustmentReadPort {
+  readonly apply: (request: {
+    readonly adjustment: WorkingAdjustment;
+    readonly expectedActiveAdjustmentId: string | null;
+    readonly signal?: AbortSignal;
+  }) => Promise<WorkingAdjustmentApplyResult>;
+  readonly unapply: (request: {
+    readonly projectId: string;
+    readonly expectedActiveAdjustmentId: string;
+    readonly signal?: AbortSignal;
+  }) => Promise<WorkingAdjustmentUnapplyResult>;
+}
+
+const workingAdjustmentAdmissionConflicts = new WeakSet<Error>();
+
+export function workingAdjustmentAdmissionConflictError(): Error {
+  const error = new Error("Working adjustment changed before frozen turn admission (CAS conflict)");
+  workingAdjustmentAdmissionConflicts.add(error);
+  return error;
+}
+
+export function isWorkingAdjustmentAdmissionConflictError(error: unknown): error is Error {
+  return error instanceof Error && workingAdjustmentAdmissionConflicts.has(error);
 }
 
 export interface ActivationMaterializationRecord {
