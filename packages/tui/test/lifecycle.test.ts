@@ -996,7 +996,8 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("first turn\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("learning · reviewing..."));
+    await vi.waitFor(() => expect(waitedJobIds).toEqual(["job-late-adjustment"]));
+    expect(terminal.output).not.toContain("learning · reviewing...");
     terminal.type("second turn\r");
     await vi.waitFor(() => expect(secondTurnStarted).toBe(true));
     resolveLateActivity?.(

@@ -159,7 +159,6 @@ Existing durable capability observation, outcome judging, revision, and rollback
 Reuse the existing learning job and TUI read model.
 
 ```text
-learning · reviewing the completed turn
 adjusted · noesis project · verify observable state before claiming success
 ```
 
@@ -170,6 +169,8 @@ unapplied · evidence suggests the working adjustment did not help
 ```
 
 Leaving an adjustment applied is the ordinary `no_change` outcome, not a recurring TUI notification. Its current state and evidence remain inspectable on demand.
+
+In-progress reflection stays out of the transcript. The TUI watches the exact job quietly and surfaces only a material adjustment outcome or diagnostic.
 
 The assistant's useful answer remains visible first. Turn settlement surfaces the exact reflection `jobId`, and the composition root retains the latest such ID per project for the running process. Add a bounded `waitForTerminal(jobId, deadline)` operation to the existing coordinator. Before freezing another turn in that project, the runtime observes only that exact durable job until it reaches a terminal state or its deadline. It must not await the coordinator's general drain, candidate authorship, preflight, activation, or outcome judging.
 

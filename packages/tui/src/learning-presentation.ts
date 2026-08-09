@@ -134,7 +134,6 @@ export async function settledTurnPresentation(
       activity.stage === "reflection" &&
       (activity.status === "queued" || activity.status === "running"),
   )?.jobId;
-  if (pendingReflectionJobId) actions.push({ type: "system-message", text: "learning · reviewing..." });
   return Object.freeze({
     actions: Object.freeze(actions),
     ...(pendingReflectionJobId ? { pendingReflectionJobId } : {}),

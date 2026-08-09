@@ -67,7 +67,7 @@ describe("working-adjustment notice presentation", () => {
     ).toBeUndefined();
   });
 
-  test("includes the applied strategy and marks a running reflection for one late refresh", async () => {
+  test("includes the applied strategy and tracks a running reflection without a transcript placeholder", async () => {
     const adjusted = Object.freeze({
       ...activity("adjusted"),
       workingAdjustment: Object.freeze({
@@ -110,10 +110,9 @@ describe("working-adjustment notice presentation", () => {
       },
     );
     expect(presentation.pendingReflectionJobId).toBe("job-running");
-    expect(presentation.actions).toContainEqual({
-      type: "system-message",
-      text: "learning · reviewing...",
-    });
+    expect(presentation.actions).not.toContainEqual(
+      expect.objectContaining({ type: "system-message", text: expect.stringContaining("reviewing") }),
+    );
   });
 
   test.each([
