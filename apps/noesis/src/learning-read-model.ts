@@ -1,11 +1,13 @@
 // biome-ignore-all lint/complexity/useLiteralKeys: unknown durable job results require bracket access under noPropertyAccessFromIndexSignature.
 import type { WorkingAdjustment, WorkingAdjustmentReadPort } from "@noesis/domain";
 import type {
+  CoordinatorEvidenceRef,
   CoordinatorJobKind,
   CoordinatorJobView,
   ReflectTurnJobPayload,
   RuntimeCoordinator,
 } from "@noesis/runtime";
+import { CoordinatorEvidenceRefsSchema } from "@noesis/runtime";
 import type {
   TuiLearningActivitySummary,
   TuiLearningInspection,
@@ -109,6 +111,13 @@ function candidateRevision(job: CoordinatorJobView): UnknownRecord | undefined {
   return isRecord(value) ? value : undefined;
 }
 
+function resultEvidenceRefs(job: CoordinatorJobView): readonly CoordinatorEvidenceRef[] | undefined {
+  if (!isRecord(job.job.result)) return undefined;
+  const parsed = CoordinatorEvidenceRefsSchema.safeParse(job.job.result["evidenceRefs"]);
+  if (!parsed.success) return undefined;
+  return Object.freeze(parsed.data.map((reference) => Object.freeze({ ...reference })));
+}
+
 function activity(job: CoordinatorJobView): TuiLearningActivitySummary {
   const candidate = candidateRevision(job);
   const experiment = experimentId(job);
@@ -122,6 +131,7 @@ function activity(job: CoordinatorJobView): TuiLearningActivitySummary {
     stringField(job.job.result, "adjustmentId") ??
     (typeof expectedAdjustmentId === "string" ? expectedAdjustmentId : undefined);
   const activeAdjustmentId = stringField(job.job.result, "activeAdjustmentId");
+  const evidenceRefs = resultEvidenceRefs(job);
   const failed =
     job.job.status === "failed" || job.job.status === "cancelled" || job.job.status === "budget_exhausted";
   return Object.freeze({
@@ -141,6 +151,7 @@ function activity(job: CoordinatorJobView): TuiLearningActivitySummary {
     ...(projectId ? { projectId } : {}),
     ...(adjustmentId ? { adjustmentId } : {}),
     ...(activeAdjustmentId ? { activeAdjustmentId } : {}),
+    ...(evidenceRefs ? { evidenceRefs } : {}),
     ...(failed && job.job.lastError ? { failure: job.job.lastError.message } : {}),
   });
 }

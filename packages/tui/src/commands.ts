@@ -70,10 +70,21 @@ function learningActivityLine(activity: TuiLearningActivitySummary): string {
   const adjustmentLines = adjustment
     ? workingAdjustmentLines(adjustment, "working adjustment").map((line) => `  ${line}`)
     : [];
+  const decisionEvidenceLines = activity.evidenceRefs
+    ? [
+        `  decision evidence · ${String(activity.evidenceRefs.length)}`,
+        ...activity.evidenceRefs.map((reference) => {
+          if (reference.kind === "database_row") return `    ${reference.table}:${reference.rowId}`;
+          if (reference.kind === "artifact_file") return `    artifact:${reference.artifactId}`;
+          return `    ${reference.kind}:${reference.revisionId}`;
+        }),
+      ]
+    : [];
   return [
     `${glyph} ${activity.status.replaceAll("_", " ")} · ${activity.stage}`,
     `  ${activity.summary}`,
     ...(references.length > 0 ? [`  ${references.join(" · ")}`] : []),
+    ...decisionEvidenceLines,
     ...adjustmentLines,
     `  ${activity.updatedAt} · ${activity.jobId}`,
   ].join("\n");

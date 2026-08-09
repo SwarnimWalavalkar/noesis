@@ -1177,6 +1177,10 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       reflection.workingAdjustmentEvidenceCitationIndexes,
       adjustmentEvidence,
     );
+    const experimentHarvest: SignalHarvestResult = Object.freeze({
+      ...classifiedHarvest,
+      evidenceRefs: uniqueEvidenceRefs([...selectedAdjustmentEvidence, ...classifiedHarvest.evidenceRefs]),
+    });
     if (
       reflection.workingAdjustmentEvidenceCitationIndexes.length > 0 &&
       request.activeWorkingAdjustment === undefined
@@ -1223,9 +1227,9 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     const capability = capabilityFromReflection(request.capability, reflection);
     const makeBrief = (
       experimentId: string,
-      evidenceRefs: readonly EvidenceRef[] = classifiedHarvest.evidenceRefs,
+      evidenceRefs: readonly EvidenceRef[] = experimentHarvest.evidenceRefs,
     ): ExperimentBrief => {
-      const mergedEvidenceRefs = uniqueEvidenceRefs([...selectedAdjustmentEvidence, ...evidenceRefs]);
+      const mergedEvidenceRefs = uniqueEvidenceRefs(evidenceRefs);
       return freezeBrief({
         experimentId,
         title: reflection.title,
@@ -1277,13 +1281,13 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         });
         proposed = makeBrief(
           experimentId,
-          uniqueEvidenceRefs([predecessorRef, ...classifiedHarvest.evidenceRefs]),
+          uniqueEvidenceRefs([predecessorRef, ...experimentHarvest.evidenceRefs]),
         );
         await persistHypothesisExperiment(proposed);
         status = "experiment";
       } else {
-        await attachHarvestToExperiment(current, classifiedHarvest);
-        proposed = mergeBriefObservation(current, classifiedHarvest, selectedRecurrence);
+        await attachHarvestToExperiment(current, experimentHarvest);
+        proposed = mergeBriefObservation(current, experimentHarvest, selectedRecurrence);
         status = "deduped";
       }
       if (canonicalJson(current) === canonicalJson(proposed)) {

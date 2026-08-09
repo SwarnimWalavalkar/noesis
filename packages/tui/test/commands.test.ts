@@ -118,6 +118,13 @@ describe("Noesis slash commands", () => {
             turnId: "turn-2",
             projectId: "project-1",
             adjustmentId: "adjustment-1",
+            evidenceRefs: Object.freeze([
+              Object.freeze({
+                kind: "database_row" as const,
+                table: "messages" as const,
+                rowId: "message-learning-decision",
+              }),
+            ]),
             workingAdjustment: Object.freeze({
               adjustmentId: "adjustment-1",
               projectId: "project-1",
@@ -183,6 +190,8 @@ describe("Noesis slash commands", () => {
     expect(published[0]).toContain("strategy · Start research by identifying the decisive unknown.");
     expect(published[0]).toContain("success signal · The answer resolves the user's actual decision.");
     expect(published[0]).toContain("served evidence · 1");
+    expect(published[0]).toContain("decision evidence · 1");
+    expect(published[0]).toContain("messages:message-learning-decision");
     expect(published[0]).toContain("accepted · turn turn-served");
     expect(published[0]).toContain("The focused research answer was accepted.");
     expect(published[0]).toContain("No change is a normal outcome");

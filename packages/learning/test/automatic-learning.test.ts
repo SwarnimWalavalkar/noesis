@@ -1558,6 +1558,88 @@ describe("automatic learning organ", () => {
     expect(authored.experiment.candidateRevisions).toEqual([authored.revisionRef]);
   });
 
+  test("reconciles newly cited working-adjustment evidence into a deduped brief and experiment", async () => {
+    const activeAdjustment = Object.freeze({
+      adjustmentId: "adjustment-deduped-evidence",
+      scope: Object.freeze({ projectId: "project-noesis", root: "/work/noesis" }),
+      observation: "The project needs observable verification.",
+      strategy: "Verify observable state before claiming success.",
+      successSignal: "Success claims cite fresh runtime evidence.",
+      evidenceRefs: Object.freeze([databaseRef("adjustment-original-evidence")]),
+      createdFromTurnId: "turn-before",
+    });
+    const firstLinkedStep = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        workingAdjustmentEvidenceCitationIndexes: Object.freeze([0]),
+      }),
+    });
+    const secondLinkedStep = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        workingAdjustmentEvidenceCitationIndexes: Object.freeze([1]),
+      }),
+    });
+    const newlyCitedServedEvidence = databaseRef("newly-cited-served-adjustment-outcome");
+    const harness = createHarness({
+      steps: [firstLinkedStep, secondLinkedStep],
+      citations: [citation(1)],
+    });
+
+    const firstTurn = turn({ turnId: "turn-adjustment-dedupe-1", correction: "Verify the real state." });
+    const first = await harness.organ.observeTurn({
+      turn: Object.freeze({
+        ...firstTurn,
+        expectedActiveAdjustmentId: activeAdjustment.adjustmentId,
+      }),
+      baselineRevision: harness.baseline,
+      capability,
+      activeWorkingAdjustment: activeAdjustment,
+    });
+    const secondTurn = turn({
+      turnId: "turn-adjustment-dedupe-2",
+      correction: "Keep verifying the real state.",
+      evidenceRef: databaseRef("current-adjustment-dedupe-2"),
+    });
+    const second = await harness.organ.observeTurn({
+      turn: Object.freeze({
+        ...secondTurn,
+        expectedActiveAdjustmentId: activeAdjustment.adjustmentId,
+        servedWorkingAdjustmentOutcomes: Object.freeze([
+          Object.freeze({
+            adjustmentId: activeAdjustment.adjustmentId,
+            planId: "plan-adjustment-dedupe",
+            sessionId: "session-before",
+            turnId: "turn-served-adjustment-dedupe",
+            outcomeId: "outcome-served-adjustment-dedupe",
+            outcome: "accepted" as const,
+            summary: "The strategy produced a verified completion.",
+            settledAt: "2026-01-09T00:00:00.000Z",
+            evidenceRefs: Object.freeze([newlyCitedServedEvidence]),
+          }),
+        ]),
+      }),
+      baselineRevision: harness.baseline,
+      capability,
+      activeWorkingAdjustment: activeAdjustment,
+    });
+
+    if (first.status !== "experiment" || second.status !== "deduped")
+      throw new Error("Expected an experiment followed by a deduped observation");
+    expect(second.brief.experimentId).toBe(first.brief.experimentId);
+    expect(second.brief.evidenceRefs).toContainEqual(newlyCitedServedEvidence);
+    expect(second.brief.sourceCases[0]?.evidenceRefs).toContainEqual(newlyCitedServedEvidence);
+    expect(new Set(second.brief.evidenceRefs.map((reference) => JSON.stringify(reference))).size).toBe(
+      second.brief.evidenceRefs.length,
+    );
+    const durableExperiment = harness
+      .experiments()
+      .find((experiment) => experiment.experimentId === second.brief.experimentId);
+    expect(durableExperiment?.evidenceRefs).toContainEqual(newlyCitedServedEvidence);
+  });
+
   test("serializes two reflected observations without losing either provenance set", async () => {
     const inference = createBarrierInference([
       reflectionStep,

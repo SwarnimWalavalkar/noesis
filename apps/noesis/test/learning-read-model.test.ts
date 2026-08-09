@@ -406,6 +406,19 @@ describe("ambient learning read model", () => {
           updatedAt: "2026-08-01T00:00:03.000Z",
           result: { status: "experiment", experimentId },
         }),
+        reflection({
+          jobId: "reflection-unapplied",
+          sessionId: "session-a",
+          status: "completed",
+          updatedAt: "2026-08-01T00:00:03.500Z",
+          result: {
+            status: "unapplied",
+            projectId: "project_noesis",
+            adjustmentId: "adjustment_removed",
+            reason: "The strategy no longer helped",
+            evidenceRefs: [evidence],
+          },
+        }),
         author({
           jobId: "author-failed",
           experimentId,
@@ -450,6 +463,7 @@ describe("ambient learning read model", () => {
     expect(activity.map(({ jobId }) => jobId)).toEqual([
       "preflight-complete",
       "author-failed",
+      "reflection-unapplied",
       "reflection-experiment",
       "reflection-adjusted",
       "reflection-no-change",
@@ -463,6 +477,11 @@ describe("ambient learning read model", () => {
           projectId: "project_noesis",
           adjustmentId: "adjustment_1",
           summary: "Verify observable state before claiming success",
+        }),
+        expect.objectContaining({
+          jobId: "reflection-unapplied",
+          status: "unapplied",
+          evidenceRefs: [evidence],
         }),
         expect.objectContaining({
           jobId: "reflection-running",

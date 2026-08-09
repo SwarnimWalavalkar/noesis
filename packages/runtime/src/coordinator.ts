@@ -414,6 +414,9 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         projectId: reflected.project.projectId,
         reason: reflected.reason,
         observation: reflected.observation,
+        evidenceRefs: Object.freeze(
+          reflected.evidenceRefs.map((reference) => Object.freeze({ ...reference })),
+        ),
         retrievalStrategyId: payload.retrievalStrategyId,
         routingStrategyId: payload.routingStrategyId,
         telemetry: reflected.telemetry,

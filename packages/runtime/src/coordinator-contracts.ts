@@ -6,6 +6,7 @@ import {
   type DurableJobRecord,
   durableJobFailureError,
   type EvidenceRef,
+  EvidenceRefSchema,
   type Experiment,
   type FileRevisionRef,
   type JsonValue,
@@ -129,6 +130,10 @@ export const DEFAULT_RUNTIME_COORDINATOR_CONFIG: RuntimeCoordinatorConfig = Obje
 });
 
 export type CoordinatorResearchTelemetry = Readonly<Record<string, JsonValue>>;
+
+/** Evidence retained by durable reflection results and exposed through learning inspection. */
+export type CoordinatorEvidenceRef = EvidenceRef;
+export const CoordinatorEvidenceRefsSchema = z.array(EvidenceRefSchema);
 
 export type CoordinatorReflectionResult =
   | {

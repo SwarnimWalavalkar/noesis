@@ -837,7 +837,8 @@ describe("automatic runtime coordinator", () => {
     });
     await coordinator.idle();
 
-    expect((await coordinator.getJob(reflection.job.jobId))?.job.result).toMatchObject({
+    const completed = await coordinator.getJob(reflection.job.jobId);
+    expect(completed?.job.result).toMatchObject({
       status: "unapplied",
       adjustmentId: "adjustment-active",
       reason: "Settled evidence contradicts the temporary strategy.",
@@ -845,6 +846,7 @@ describe("automatic runtime coordinator", () => {
         kind: "correction",
         reason: "The active strategy made the completed work less useful.",
       },
+      evidenceRefs: input.turn.evidenceRefs,
     });
     expect(f.activeWorkingAdjustment()).toBeUndefined();
     expect(f.workingAdjustment("adjustment-active")).toBeDefined();

@@ -1,4 +1,5 @@
 import type {
+  CoordinatorEvidenceRef,
   InteractionCommand,
   InteractionDispatchResult,
   InteractionSnapshot,
@@ -120,6 +121,7 @@ export interface TuiLearningActivitySummary {
   readonly projectId?: string;
   readonly adjustmentId?: string;
   readonly activeAdjustmentId?: string;
+  readonly evidenceRefs?: readonly CoordinatorEvidenceRef[];
   readonly workingAdjustment?: TuiWorkingAdjustmentState;
   readonly failure?: string;
 }
