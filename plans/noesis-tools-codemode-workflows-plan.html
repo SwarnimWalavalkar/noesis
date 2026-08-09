@@ -941,9 +941,11 @@ Pi AgentHarness
         <h3>Agent and user invocation</h3>
         <ul>
           <li>
-            At turn start, the frozen prompt contains Pi-formatted
-            <code>&lt;available_skills&gt;</code> metadata and an analogous
-            Noesis <code>&lt;available_workflows&gt;</code> index.
+            At turn start, Pi-formatted <code>&lt;available_skills&gt;</code>
+            metadata remains in the prompt. The always-visible
+            <code>execute</code> tool description carries an analogous bounded,
+            frozen <code>&lt;available_workflows&gt;</code> index containing only
+            names and short descriptions.
           </li>
           <li>
             When the agent recognizes a match, it calls
@@ -963,6 +965,15 @@ Pi AgentHarness
             <code>/workflow:&lt;name&gt;</code>, the workflow library, normal
             conversation, or <code>noesis.workflows.run()</code> inside
             <code>execute</code>.
+          </li>
+          <li>
+            The generic <code>workflows.run</code> runner is in the default
+            hotbar. Each frozen saved workflow also appears under an exact,
+            project-qualified Tool Catalog identity shown in the workflow index.
+            Pinning it with <code>adapt</code> exposes a friendly
+            <code>workflow_&lt;name&gt;</code> tool with its typed contract, without
+            creating another execution path or retargeting the pin across
+            projects.
           </li>
         </ul>
 

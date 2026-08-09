@@ -80,7 +80,39 @@ describe("Noesis config", () => {
       vetoes: "respect",
     });
     expect(resolved.experiments).toEqual({ maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 });
+    expect(resolved.tools.hotbar).toEqual(["files.read", "files.list", "shell.run", "workflows.run"]);
     expect(await readFile(noesisConfigPath(home), "utf8")).toBe(legacy);
+  });
+
+  test("defaults workflow execution onto the hotbar without changing explicit persisted choices", async () => {
+    const missing = await mkdtemp(join(tmpdir(), "noesis-config-default-hotbar-"));
+    const oldPersisted = await mkdtemp(join(tmpdir(), "noesis-config-old-hotbar-"));
+    const explicitlyEmpty = await mkdtemp(join(tmpdir(), "noesis-config-empty-hotbar-"));
+    await writeFile(
+      noesisConfigPath(oldPersisted),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        tools: { hotbar: ["files.read", "files.list", "shell.run"] },
+      }),
+    );
+    await writeFile(
+      noesisConfigPath(explicitlyEmpty),
+      JSON.stringify({ schemaVersion: 1, agent: {}, tools: { hotbar: [] } }),
+    );
+
+    expect((await resolveNoesisConfig({ home: missing, env: {} })).tools.hotbar).toEqual([
+      "files.read",
+      "files.list",
+      "shell.run",
+      "workflows.run",
+    ]);
+    expect((await resolveNoesisConfig({ home: oldPersisted, env: {} })).tools.hotbar).toEqual([
+      "files.read",
+      "files.list",
+      "shell.run",
+    ]);
+    expect((await resolveNoesisConfig({ home: explicitlyEmpty, env: {} })).tools.hotbar).toEqual([]);
   });
 
   test.each(["off", "low"])("preserves explicit %s autonomy with zero-value defaults", async (riskLevel) => {
@@ -150,7 +182,7 @@ describe("Noesis config", () => {
         vetoes: "respect",
       },
       experiments: { maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 },
-      tools: { hotbar: ["files.read", "files.list", "shell.run"] },
+      tools: { hotbar: ["files.read", "files.list", "shell.run", "workflows.run"] },
     });
   });
 

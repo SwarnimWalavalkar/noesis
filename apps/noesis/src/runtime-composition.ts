@@ -73,8 +73,8 @@ import {
   MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
   type NoesisRuntime,
   type RunTurnOptions,
-  type RuntimeCoordinator,
   type RuntimeControlPlane,
+  type RuntimeCoordinator,
   SESSION_PICKER_LIMIT,
   type TrailState,
   type TrailSummary,
@@ -82,9 +82,9 @@ import {
   type TurnResult,
 } from "@noesis/runtime";
 import {
+  createHotbarToolAliases,
   createRestrictedRoleContextPolicy,
   createStructuredInferencePort,
-  createHotbarToolAliases,
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
   hotbarToolAlias,
@@ -92,6 +92,9 @@ import {
   type PiSelfToolAdapter,
   type PiSkillLibrary,
   type PiSkillSnapshot,
+  PROJECT_WORKFLOW_TOOL_ADAPTER_REVISION,
+  projectWorkflowExecutionCatalogDigest,
+  projectWorkflowToolName,
   type RoleVariantConfiguration,
   type RuntimePiAgentRoleRunner,
   reconcileHotbarTools,
@@ -244,6 +247,34 @@ const WorkflowSaveResultSchema = z.strictObject({
   manifest: WorkflowManifestSchema,
   definitionRevision: FileRevisionRefSchema,
 });
+
+function savedWorkflowToolName(project: ProjectRef, workflowName: string): string {
+  return projectWorkflowToolName(project.projectId, workflowName);
+}
+
+function savedWorkflowValueSchema(schema: WorkflowManifest["inputSchema"]): z.ZodType<JsonValue> {
+  // Workflow manifests admit JSON Schema expressed entirely as JsonValue, and the Broker validates
+  // every invocation and result through this decoded schema. Preserve that exact schema in the
+  // frozen descriptor while making its already-bounded JSON output explicit to TypeScript.
+  return z.fromJSONSchema(schema) as z.ZodType<JsonValue>;
+}
+
+function savedWorkflowInputAdapter(schema: WorkflowManifest["inputSchema"]): Readonly<{
+  schema: z.ZodType<JsonValue>;
+  unwrap: (input: JsonValue) => JsonValue;
+}> {
+  const valueSchema = savedWorkflowValueSchema(schema);
+  if (schema["type"] === "object")
+    return Object.freeze({
+      schema: valueSchema,
+      unwrap: (input: JsonValue) => input,
+    });
+  const wrappedSchema = z.strictObject({ input: valueSchema });
+  return Object.freeze({
+    schema: wrappedSchema,
+    unwrap: (input: JsonValue) => wrappedSchema.parse(input).input,
+  });
+}
 
 interface SavedDefinitionScope {
   readonly namespace: string;
@@ -1910,6 +1941,42 @@ export async function createApplicationRuntimeComposition(
         },
       }),
     ]);
+    const savedWorkflowTools = Object.freeze(
+      frozenWorkflows.map((stored) => {
+        const { manifest, definitionRevision } = stored;
+        const inputAdapter = savedWorkflowInputAdapter(manifest.inputSchema);
+        return defineTool({
+          name: savedWorkflowToolName(project, manifest.name),
+          label: manifest.name,
+          description: manifest.description,
+          visibility: "codemode_only",
+          identityMaterial: Object.freeze({
+            adapterRevision: PROJECT_WORKFLOW_TOOL_ADAPTER_REVISION,
+            projectId: project.projectId,
+            workflowRevision: manifest.revision,
+            definitionRevisionId: definitionRevision.revisionId,
+            definitionDigest: definitionRevision.contentDigest,
+          }),
+          inputSchema: inputAdapter.schema,
+          outputSchema: savedWorkflowValueSchema(manifest.outputSchema),
+          effect: () => ({
+            effect: "execute",
+            resource: `${workflowResource(manifest.name)}:run`,
+            estimatedCost: 1,
+          }),
+          execute: async (input, context) => {
+            if (!runWorkflow) throw new Error("Workflow runtime is not initialized");
+            const result = await runWorkflow(
+              stored,
+              inputAdapter.unwrap(JsonValueSchema.parse(input)),
+              context,
+            );
+            return result.value;
+          },
+        });
+      }),
+    );
+    const savedWorkflowToolNames = new Set(savedWorkflowTools.map((tool) => tool.name));
     const skillLoadTool = defineTool({
       name: "skills.load",
       label: "Load skill",
@@ -1977,6 +2044,7 @@ export async function createApplicationRuntimeComposition(
         skillLoadTool,
         ...scriptTools,
         ...workflowTools,
+        ...savedWorkflowTools,
         ...sessionDefinitionsForBroker(sessionDefinitions, plan.canonicalDigest),
       ]),
       authority,
@@ -2158,6 +2226,15 @@ export async function createApplicationRuntimeComposition(
           if (!broker.describe(requiredTool))
             throw new Error(`Workflow phase ${phase.name} requires unavailable tool ${requiredTool}`);
       }
+      // workflow.* entries are derived convenience projections. Exact saved definitions remain
+      // independently pinned by definitionDependenciesDigest below.
+      const executionCatalogDescriptors = broker
+        .list()
+        .filter((descriptor) => !savedWorkflowToolNames.has(descriptor.name));
+      const executionCatalogDigest = projectWorkflowExecutionCatalogDigest(
+        toJsonValue(executionCatalogDescriptors),
+      );
+      const executionCatalogId = `catalog_${executionCatalogDigest}`;
       const existing = existingRunId
         ? await workspace.operational.workflows.getRun(existingRunId)
         : undefined;
@@ -2172,7 +2249,7 @@ export async function createApplicationRuntimeComposition(
         throw new Error(`Workflow run ${existing.runId} has no frozen tool catalog pin`);
       if (
         existing &&
-        (existing.catalogId !== broker.catalogId || existing.catalogDigest !== broker.catalogDigest)
+        (existing.catalogId !== executionCatalogId || existing.catalogDigest !== executionCatalogDigest)
       )
         throw new Error(
           `Workflow run ${existing.runId} is pinned to unavailable tool catalog ${existing.catalogId ?? "unknown"}`,
@@ -2208,8 +2285,8 @@ export async function createApplicationRuntimeComposition(
           workflowName: manifest.name,
           workflowRevision: manifest.revision,
           definitionRevisionId: definitionRevision.revisionId,
-          catalogId: broker.catalogId,
-          catalogDigest: broker.catalogDigest,
+          catalogId: executionCatalogId,
+          catalogDigest: executionCatalogDigest,
           definitionDependenciesDigest: currentDefinitionDependenciesDigest,
           permissionDigest,
           provider: plan.provider,
@@ -2416,6 +2493,15 @@ export async function createApplicationRuntimeComposition(
       return closePromise;
     };
     return Object.freeze({
+      workflowSummaries: Object.freeze(
+        frozenWorkflows.map(({ manifest }) =>
+          Object.freeze({
+            name: manifest.name,
+            description: manifest.description,
+            toolName: savedWorkflowToolName(project, manifest.name),
+          }),
+        ),
+      ),
       catalog: Object.freeze({
         catalogId: broker.catalogId,
         catalogDigest: broker.catalogDigest,

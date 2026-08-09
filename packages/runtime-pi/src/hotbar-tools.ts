@@ -1,5 +1,5 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { type JsonValue, JsonValueSchema, sha256 } from "@noesis/domain";
+import { canonicalJson, type JsonValue, JsonValueSchema, sha256 } from "@noesis/domain";
 import { z } from "zod";
 import type * as ZodCore from "zod/v4/core";
 import type { PiCodeExecutionEvent, PiFrozenToolCatalog, PreparedPiCodeExecution } from "./execute-tool.ts";
@@ -16,6 +16,35 @@ const preferredAliases = new Map<string, string>([
 ]);
 
 const reservedCoreToolNames = new Set(["inspect_self", "remember", "adapt", "execute"]);
+const PROJECT_WORKFLOW_DIGEST_CHARACTERS = 16;
+const savedWorkflowToolNamePattern = /^workflow\.[a-f0-9]{16}\.([a-z][a-z0-9-]{0,63})$/u;
+
+export const PROJECT_WORKFLOW_TOOL_ADAPTER_REVISION = "project-workflow-tool-v1";
+
+export function projectWorkflowToolName(projectId: string, workflowName: string): string {
+  return `workflow.${sha256(projectId).slice(0, PROJECT_WORKFLOW_DIGEST_CHARACTERS)}.${workflowName}`;
+}
+
+export function projectWorkflowExecutionCatalogDigest(tools: JsonValue): string {
+  return sha256(
+    canonicalJson({
+      tools,
+      savedWorkflowAdapterRevision: PROJECT_WORKFLOW_TOOL_ADAPTER_REVISION,
+    }),
+  );
+}
+
+function savedWorkflowAlias(canonicalName: string): string | undefined {
+  const match = savedWorkflowToolNamePattern.exec(canonicalName);
+  const workflowName = match?.[1];
+  return workflowName ? `workflow_${workflowName}` : undefined;
+}
+
+function aliasPriority(canonicalName: string): number {
+  if (preferredAliases.has(canonicalName)) return 0;
+  if (savedWorkflowAlias(canonicalName)) return 1;
+  return 2;
+}
 
 function disambiguatedAlias(base: string, canonicalName: string, suffix = ""): string {
   return `${base}_${sha256(canonicalName).slice(0, 8)}${suffix}`;
@@ -23,7 +52,8 @@ function disambiguatedAlias(base: string, canonicalName: string, suffix = ""): s
 
 export function hotbarToolAlias(canonicalName: string): string {
   const preferred = preferredAliases.get(canonicalName);
-  const alias = preferred ?? canonicalName.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
+  const alias =
+    preferred ?? savedWorkflowAlias(canonicalName) ?? canonicalName.replaceAll(/[^a-zA-Z0-9_-]/gu, "_");
   if (!alias) throw new Error(`Tool ${canonicalName} has no valid direct alias`);
   return reservedCoreToolNames.has(alias) ? disambiguatedAlias(alias, canonicalName) : alias;
 }
@@ -33,8 +63,8 @@ export function createHotbarToolAliases(catalog: PiFrozenToolCatalog): ReadonlyM
   const aliases = new Map<string, string>();
   const used = new Set(reservedCoreToolNames);
   const descriptors = [...catalog.tools].sort((left, right) => {
-    const leftPreferred = preferredAliases.has(left.name) ? 0 : 1;
-    const rightPreferred = preferredAliases.has(right.name) ? 0 : 1;
+    const leftPreferred = aliasPriority(left.name);
+    const rightPreferred = aliasPriority(right.name);
     if (leftPreferred !== rightPreferred) return leftPreferred - rightPreferred;
     if (left.name === right.name) return 0;
     return left.name < right.name ? -1 : 1;

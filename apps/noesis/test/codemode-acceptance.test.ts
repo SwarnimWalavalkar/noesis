@@ -138,6 +138,7 @@ describe("production codemode journey", () => {
       "list_dir",
       "remember",
       "shell",
+      "workflows_run",
     ]);
     const storedCalls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
     const nestedCall = storedCalls.find((call) => call.toolName === "files.read");

@@ -57,8 +57,9 @@ The default hotbar also contains:
 - `file_read`, backed by `files.read`
 - `list_dir`, backed by `files.list`
 - `shell`, backed by `shell.run`
+- `workflows_run`, backed by `workflows.run`
 
-These common tools avoid unnecessary JavaScript for ordinary work. `execute` remains available when the model needs to discover tools or combine several calls. The model can also use it for loops and reusable programs.
+These common tools avoid unnecessary JavaScript for ordinary work. `execute` remains available when the model needs to discover tools or combine several calls. Its description carries a bounded, frozen index of saved project workflow names and descriptions; full schemas stay behind `workflows.describe`. The model can also use `execute` for loops and reusable programs.
 
 `adapt` has two immediate actions:
 
@@ -71,7 +72,7 @@ The change is available on the next model step in the same turn. Noesis saves it
 
 ## Foreground project adaptation
 
-When explicit project work produces a reusable program, the foreground agent may save and publish a project-local script or workflow without waiting for reflection or evaluation. It is immediately usable through the generic runners in the frozen Tool Catalog, under the same Broker and permissions. Its editable definition remains inspectable, executions pin immutable revisions, and the user can inspect, edit, or replace it while prior revisions remain preserved.
+When explicit project work produces a reusable program, the foreground agent may save and publish a project-local script or workflow without waiting for reflection or evaluation. It is immediately usable through the generic runners in the frozen Tool Catalog, under the same Broker and permissions. On the next frozen turn, each saved workflow also has a typed, project-qualified catalog entry. The compact workflow index names that exact entry; pinning it with `adapt` exposes a friendly `workflow_<name>` direct tool. This remains a thin interface over the same workflow runner and immutable revision, and a pin from one project cannot silently retarget to a same-named workflow in another. The editable definition remains inspectable, executions pin immutable revisions, and the user can inspect, edit, or replace it while prior revisions remain preserved.
 
 Reflection observes runs and feedback. The experiment and protected activation path is required only when evidence supports consolidating the local program into broader learned or global behavior. A project-local program cannot change permissions, evaluation, activation, rollback, or any other protected control-plane rule.
 

@@ -141,7 +141,7 @@ export const BUILT_IN_EXPERIMENT_DEFAULTS: Required<ExperimentDefaults> = {
 };
 
 export const BUILT_IN_TOOL_DEFAULTS: ResolvedToolConfig = {
-  hotbar: Object.freeze(["files.read", "files.list", "shell.run"]),
+  hotbar: Object.freeze(["files.read", "files.list", "shell.run", "workflows.run"]),
 };
 
 export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {

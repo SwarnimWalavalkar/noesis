@@ -5,7 +5,7 @@ import {
   type FrozenTurnPlan,
   frozenTurnPlanDigest,
 } from "@noesis/agent-types";
-import { type FileRevisionRef, type JsonValue, sha256, toJsonValue } from "@noesis/domain";
+import { canonicalJson, type FileRevisionRef, type JsonValue, sha256, toJsonValue } from "@noesis/domain";
 import type { SessionToolDefinition, SessionToolName } from "@noesis/intelligence";
 import { describe, expect, test, vi } from "vitest";
 import { z } from "zod";
@@ -14,6 +14,7 @@ import {
   createHotbarToolAliases,
   createPiAgentRuntime,
   createPiExecuteTool,
+  createPiHotbarTools,
   createPiSelfTools,
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
@@ -21,7 +22,10 @@ import {
   type PiFrozenToolCatalog,
   type PiSelfToolAdapter,
   type PiSkillLibrary,
+  PROJECT_WORKFLOW_TOOL_ADAPTER_REVISION,
   type PreparedPiCodeExecution,
+  projectWorkflowExecutionCatalogDigest,
+  projectWorkflowToolName,
   reconcileHotbarTools,
   resolveFrozenSessionToolDefinitions,
   resolvePiSkillInvocation,
@@ -210,6 +214,88 @@ describe("agent runtime factories", () => {
     expect(values).not.toContain("adapt");
     expect(values).not.toContain("execute");
     expect([...createHotbarToolAliases(catalog)]).toEqual([...aliases]);
+  });
+
+  test("keeps scalar and array workflow hotbar parameters object-shaped", async () => {
+    const scalarName = projectWorkflowToolName("project_hotbar_schema", "scalar");
+    const arrayName = projectWorkflowToolName("project_hotbar_schema", "array");
+    const catalog: PiFrozenToolCatalog = Object.freeze({
+      catalogId: "catalog-workflow-hotbar-schema",
+      catalogDigest: sha256("catalog-workflow-hotbar-schema"),
+      tools: Object.freeze([
+        Object.freeze({
+          name: scalarName,
+          label: "scalar",
+          description: "Run a scalar workflow",
+          revisionId: "tool-workflow-scalar-v1",
+          inputSchema: Object.freeze({
+            type: "object",
+            properties: Object.freeze({ input: Object.freeze({ type: "number" }) }),
+            required: Object.freeze(["input"]),
+            additionalProperties: false,
+          }),
+          outputSchema: Object.freeze({ type: "number" }),
+        }),
+        Object.freeze({
+          name: arrayName,
+          label: "array",
+          description: "Run an array workflow",
+          revisionId: "tool-workflow-array-v1",
+          inputSchema: Object.freeze({
+            type: "object",
+            properties: Object.freeze({
+              input: Object.freeze({ type: "array", items: Object.freeze({ type: "number" }) }),
+            }),
+            required: Object.freeze(["input"]),
+            additionalProperties: false,
+          }),
+          outputSchema: Object.freeze({ type: "array", items: Object.freeze({ type: "number" }) }),
+        }),
+      ]),
+    });
+    const invocations: Array<{ readonly name: string; readonly input: JsonValue }> = [];
+    const prepared: PreparedPiCodeExecution = Object.freeze({
+      catalog,
+      invoke: async (name: string, input: JsonValue) => {
+        invocations.push(Object.freeze({ name, input }));
+        return input;
+      },
+      execute: async () => Object.freeze({ executionId: "unused", value: null, calls: 0, durationMs: 0 }),
+      close: async () => undefined,
+    });
+    const tools = createPiHotbarTools({
+      prepared,
+      turnId: "turn-workflow-hotbar-schema",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+    });
+    const scalar = tools.find((tool) => tool.name === "workflow_scalar");
+    const array = tools.find((tool) => tool.name === "workflow_array");
+    if (!scalar || !array) throw new Error("Expected friendly workflow hotbar aliases");
+
+    await scalar.execute("scalar-call", { input: 7 });
+    await array.execute("array-call", { input: [1, 2, 3] });
+
+    expect(invocations).toEqual([
+      { name: scalarName, input: { input: 7 } },
+      { name: arrayName, input: { input: [1, 2, 3] } },
+    ]);
+    await expect(scalar.execute("invalid-scalar-call", 7)).rejects.toThrow();
+    await expect(array.execute("invalid-array-call", [1, 2, 3])).rejects.toThrow();
+  });
+
+  test("pins the saved-workflow adapter revision into workflow execution catalogs", () => {
+    const tools = Object.freeze([Object.freeze({ name: "files.read", revisionId: "tool-read-v1" })]);
+
+    expect(projectWorkflowExecutionCatalogDigest(tools)).toBe(
+      sha256(
+        canonicalJson({
+          tools,
+          savedWorkflowAdapterRevision: PROJECT_WORKFLOW_TOOL_ADAPTER_REVISION,
+        }),
+      ),
+    );
+    expect(projectWorkflowExecutionCatalogDigest(tools)).not.toBe(sha256(canonicalJson(tools)));
   });
 
   test("aggregates authoritative Pi text deltas across tool-loop assistant messages", () => {
