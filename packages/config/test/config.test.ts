@@ -375,6 +375,29 @@ describe("Noesis config", () => {
     ).rejects.toThrow("would contain 17 tools");
   });
 
+  test("rejects a seventeenth global tool and preserves the config", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-global-hotbar-limit-"));
+    const original = {
+      schemaVersion: 1,
+      agent: {},
+      tools: { hotbar: Array.from({ length: 16 }, (_, index) => `global.${String(index)}`) },
+    };
+    await writeFile(noesisConfigPath(home), JSON.stringify(original));
+
+    await expect(
+      updateToolHotbar(home, {
+        projectId: "project_global_limit",
+        projectToolNamespace: "workflow.cccccccccccccccc.",
+        scope: "global",
+        action: "add",
+        tool: "global.16",
+        legacyGlobalProjectTools: [],
+        legacyActiveProjectTools: [],
+      }),
+    ).rejects.toThrow("global hotbar would contain 17 tools");
+    expect(JSON.parse(await readFile(noesisConfigPath(home), "utf8"))).toEqual(original);
+  });
+
   test("a global delta cannot overflow another project's persisted or legacy hotbar", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-cross-project-limit-"));
     const global = Array.from({ length: 15 }, (_, index) => `global.${String(index)}`);

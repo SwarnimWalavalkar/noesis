@@ -3406,10 +3406,25 @@ function createOperationalRepositories(
               `UPDATE workflow_runs
                SET status = 'running', error = NULL, updated_at = ?, completed_at = NULL
                WHERE run_id = ? AND session_id = ?
-                 AND (project_id = ? OR project_id IS NULL)
+                 AND (
+                   project_id = ?
+                   OR (
+                     project_id IS NULL
+                     AND EXISTS (
+                       SELECT 1
+                       FROM definition_revision_metadata AS metadata
+                       WHERE metadata.definition_id = workflow_runs.workflow_name
+                         AND metadata.definition_revision_id = workflow_runs.definition_revision_id
+                         AND (
+                           metadata.namespace = 'workflow:' || ?
+                           OR metadata.namespace = 'workflow'
+                         )
+                     )
+                   )
+                 )
                  AND status = 'paused'`,
             )
-            .run(claimedAt, runId, sessionId, projectId);
+            .run(claimedAt, runId, sessionId, projectId, projectId);
           if (Number(claimed.changes) !== 1) return undefined;
           const row = db.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get(runId);
           if (row === undefined) throw new Error(`Claimed workflow run ${runId} disappeared`);

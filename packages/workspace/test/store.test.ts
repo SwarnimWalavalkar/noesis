@@ -96,6 +96,93 @@ const admitAndSettleSourceTurn = async (
   });
 };
 
+const seedWorkspaceThroughMigration32 = async (
+  root: string,
+): Promise<{ readonly databasePath: string; readonly database: DatabaseSync }> => {
+  await mkdir(join(root, "database"), { recursive: true });
+  const databasePath = join(root, "database", "noesis.sqlite");
+  const database = new DatabaseSync(databasePath);
+  const migrationNames = (await readdir(new URL("../migrations/", import.meta.url)))
+    .filter((name) => /^\d{3}_.+\.sql$/u.test(name))
+    .sort()
+    .filter((name) => Number(name.slice(0, 3)) <= 32);
+  for (const name of migrationNames) {
+    const version = Number(name.slice(0, 3));
+    database.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
+    database
+      .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+      .run(version, name, "2026-07-26T00:00:00.000Z");
+  }
+  return Object.freeze({ databasePath, database });
+};
+
+const seedLegacyWorkflowDependencyRun = (
+  database: DatabaseSync,
+  suffix: string,
+  definitionDependenciesDigest: string,
+): { readonly runId: string } => {
+  const sessionId = `session-workflow-digest-${suffix}`;
+  const revisionId = `revision-workflow-digest-${suffix}`;
+  const runId = `workflow-run-digest-${suffix}`;
+  database
+    .prepare(
+      `INSERT INTO sessions(
+        session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      sessionId,
+      `Workflow digest ${suffix}`,
+      "idle",
+      "controlled",
+      "controlled",
+      "pi",
+      "2026-07-26T00:00:00.000Z",
+      "2026-07-26T00:00:00.000Z",
+      "{}",
+    );
+  database
+    .prepare(
+      `INSERT INTO file_revisions(
+        revision_id, revision_kind, working_path, snapshot_path, content_digest,
+        actor_id, actor_kind, recorded_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      revisionId,
+      "definition",
+      `workflows/digest-${suffix}/workflow.json`,
+      `revisions/definition/${revisionId}.json`,
+      digest("b"),
+      "test-user",
+      "user",
+      "2026-07-26T00:00:00.000Z",
+    );
+  database
+    .prepare(
+      `INSERT INTO workflow_runs(
+        run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
+        definition_dependencies_digest, session_id, status, current_phase, input_json,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      runId,
+      `project-workflow-digest-${suffix}`,
+      `digest-${suffix}`,
+      1,
+      revisionId,
+      definitionDependenciesDigest,
+      sessionId,
+      "running",
+      0,
+      "{}",
+      "2026-07-26T00:00:00.000Z",
+      "2026-07-26T00:00:00.000Z",
+    );
+  return Object.freeze({ runId });
+};
+
 describe("WorkspaceStore", () => {
   let roots: string[] = [];
 
@@ -883,7 +970,13 @@ describe("WorkspaceStore", () => {
       bytes: text('{"name":"digest"}'),
       actor,
     });
-    const invalidDigests = [digest("A"), "a".repeat(63), `${"a".repeat(63)}g`] as const;
+    const invalidDigests = [
+      digest("A"),
+      "a".repeat(63),
+      `${"a".repeat(63)}g`,
+      `${digest("a")}\0z`,
+      `${"a".repeat(63)}\0`,
+    ] as const;
 
     await store.operational.workflows.putRun({
       runId: "workflow-run-valid-digest",
@@ -919,7 +1012,7 @@ describe("WorkspaceStore", () => {
           createdAt: "2026-07-26T00:00:00.000Z",
           updatedAt: "2026-07-26T00:00:00.000Z",
         }),
-      ).rejects.toThrow(/64 lowercase hexadecimal characters/iu);
+      ).rejects.toThrow(/64 lowercase hexadecimal ASCII bytes/iu);
 
       expect(() =>
         decodeWorkflowRun({
@@ -954,85 +1047,19 @@ describe("WorkspaceStore", () => {
 
   test("hardens workflow definition dependency digests after migrations 31 and 32 were recorded", async () => {
     const root = await temporary("workflow-definition-dependency-digest-upgrade");
-    await mkdir(join(root, "database"), { recursive: true });
-    const databasePath = join(root, "database", "noesis.sqlite");
-    const seed = new DatabaseSync(databasePath);
-    const migrationNames = (await readdir(new URL("../migrations/", import.meta.url)))
-      .filter((name) => /^\d{3}_.+\.sql$/u.test(name))
-      .sort()
-      .filter((name) => Number(name.slice(0, 3)) <= 32);
-    for (const name of migrationNames) {
-      const version = Number(name.slice(0, 3));
-      seed.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
-      seed
-        .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
-        .run(version, name, "2026-07-26T00:00:00.000Z");
-    }
-    seed
-      .prepare(
-        `INSERT INTO sessions(
-          session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        "session-workflow-digest-upgrade",
-        "Workflow digest upgrade",
-        "idle",
-        "controlled",
-        "controlled",
-        "pi",
-        "2026-07-26T00:00:00.000Z",
-        "2026-07-26T00:00:00.000Z",
-        "{}",
-      );
-    seed
-      .prepare(
-        `INSERT INTO file_revisions(
-          revision_id, revision_kind, working_path, snapshot_path, content_digest,
-          actor_id, actor_kind, recorded_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        "revision-workflow-digest-upgrade",
-        "definition",
-        "workflows/digest-upgrade/workflow.json",
-        "revisions/definition/revision-workflow-digest-upgrade.json",
-        digest("b"),
-        "test-user",
-        "user",
-        "2026-07-26T00:00:00.000Z",
-      );
-    seed
-      .prepare(
-        `INSERT INTO workflow_runs(
-          run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
-          definition_dependencies_digest, session_id, status, current_phase, input_json,
-          created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        "workflow-run-digest-upgrade",
-        "project-workflow-digest-upgrade",
-        "digest-upgrade",
-        1,
-        "revision-workflow-digest-upgrade",
-        digest("a"),
-        "session-workflow-digest-upgrade",
-        "running",
-        0,
-        "{}",
-        "2026-07-26T00:00:00.000Z",
-        "2026-07-26T00:00:00.000Z",
-      );
-    seed.close();
+    const { databasePath, database } = await seedWorkspaceThroughMigration32(root);
+    const legacy = seedLegacyWorkflowDependencyRun(database, "upgrade", digest("a"));
+    database.close();
 
     const upgraded = await createWorkspaceStore(root);
-    await expect(upgraded.operational.workflows.getRun("workflow-run-digest-upgrade")).resolves.toMatchObject(
-      {
-        definitionDependenciesDigest: digest("a"),
-      },
-    );
-    for (const [index, definitionDependenciesDigest] of [digest("A"), `${"a".repeat(63)}g`].entries()) {
+    await expect(upgraded.operational.workflows.getRun(legacy.runId)).resolves.toMatchObject({
+      definitionDependenciesDigest: digest("a"),
+    });
+    for (const [index, definitionDependenciesDigest] of [
+      digest("A"),
+      `${"a".repeat(63)}g`,
+      `${digest("a")}\0z`,
+    ].entries()) {
       await expect(
         upgraded.operational.workflows.putRun({
           runId: `workflow-run-invalid-upgraded-digest-${String(index)}`,
@@ -1048,7 +1075,7 @@ describe("WorkspaceStore", () => {
           createdAt: "2026-07-26T00:00:01.000Z",
           updatedAt: "2026-07-26T00:00:01.000Z",
         }),
-      ).rejects.toThrow(/64 lowercase hexadecimal characters/iu);
+      ).rejects.toThrow(/64 lowercase hexadecimal ASCII bytes/iu);
     }
     upgraded.close();
 
@@ -1057,6 +1084,147 @@ describe("WorkspaceStore", () => {
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
     ).toEqual({ version: 33 });
     inspection.close();
+  });
+
+  test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
+    const root = await temporary("workflow-definition-dependency-digest-invalid-upgrade");
+    const { database } = await seedWorkspaceThroughMigration32(root);
+    const legacy = seedLegacyWorkflowDependencyRun(database, "invalid-upgrade", digest("A"));
+    const migration = await readFile(
+      new URL("../migrations/033_workflow_definition_dependency_digest.sql", import.meta.url),
+      "utf8",
+    );
+
+    let migrationError: unknown;
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.exec(migration);
+      database
+        .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+        .run(33, "033_workflow_definition_dependency_digest.sql", "2026-07-26T00:00:01.000Z");
+      database.exec("COMMIT");
+    } catch (error) {
+      migrationError = error;
+      database.exec("ROLLBACK");
+    }
+
+    expect(migrationError).toBeInstanceOf(Error);
+    expect(String(migrationError)).toMatch(/check constraint failed/iu);
+    expect(database.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
+      version: 32,
+    });
+    expect(
+      database
+        .prepare("SELECT definition_dependencies_digest FROM workflow_runs WHERE run_id = ?")
+        .get(legacy.runId),
+    ).toEqual({ definition_dependencies_digest: digest("A") });
+    expect(
+      database
+        .prepare(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'trigger' AND name = 'workflow_definition_dependency_digest_insert'`,
+        )
+        .get(),
+    ).toBeUndefined();
+    expect(
+      database
+        .prepare(
+          `SELECT name FROM sqlite_master
+           WHERE type = 'table' AND name = 'migration_033_workflow_digest_validation'`,
+        )
+        .get(),
+    ).toBeUndefined();
+    database.close();
+  });
+
+  test("claims legacy workflow runs only through an exact visible definition revision", async () => {
+    const store = await createWorkspaceStore(await temporary("legacy-workflow-run-project-claim"));
+    await store.operational.sessions.put({
+      sessionId: "session-legacy-workflows",
+      title: "Legacy workflows",
+      status: "idle",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const publish = async (namespace: string, definitionId: string) => {
+      const publication = await store.definitionPublications.publish({
+        namespace,
+        definitionId,
+        revision: 1,
+        workingPath: `definitions/workflows/${definitionId}/workflow.json`,
+        bytes: text(JSON.stringify({ name: definitionId })),
+        activity: Object.freeze({
+          kind: "workflow.saved",
+          actor,
+          reason: "Legacy workflow claim fixture",
+        }),
+      });
+      if (!publication.ok) throw new Error(publication.error.message);
+      return publication.value.definitionRevision;
+    };
+    const [visibleRevision, foreignRevision, globalRevision] = await Promise.all([
+      publish("workflow:project-visible", "visible"),
+      publish("workflow:project-foreign", "foreign"),
+      publish("workflow", "global"),
+    ]);
+    const database = new DatabaseSync(store.unsafeDatabasePathForTesting);
+    const insertLegacyRun = database.prepare(
+      `INSERT INTO workflow_runs(
+        run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
+        session_id, status, current_phase, input_json, created_at, updated_at
+      ) VALUES (?, NULL, ?, 1, ?, 'session-legacy-workflows', 'paused', 0, '{}', ?, ?)`,
+    );
+    for (const [runId, workflowName, revisionId] of [
+      ["legacy-visible", "visible", visibleRevision.revisionId],
+      ["legacy-foreign", "foreign", foreignRevision.revisionId],
+      ["legacy-global", "global", globalRevision.revisionId],
+    ] as const)
+      insertLegacyRun.run(
+        runId,
+        workflowName,
+        revisionId,
+        "2026-07-26T00:00:00.000Z",
+        "2026-07-26T00:00:00.000Z",
+      );
+    database.close();
+
+    await expect(
+      store.operational.workflows.claimPausedRun(
+        "legacy-foreign",
+        "session-legacy-workflows",
+        "project-visible",
+        "2026-07-26T00:01:00.000Z",
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      store.operational.workflows.claimPausedRun(
+        "legacy-visible",
+        "session-legacy-workflows",
+        "project-visible",
+        "2026-07-26T00:01:00.000Z",
+      ),
+    ).resolves.toMatchObject({ runId: "legacy-visible", status: "running" });
+    await expect(
+      store.operational.workflows.claimPausedRun(
+        "legacy-foreign",
+        "session-legacy-workflows",
+        "project-foreign",
+        "2026-07-26T00:01:00.000Z",
+      ),
+    ).resolves.toMatchObject({ runId: "legacy-foreign", status: "running" });
+    await expect(
+      store.operational.workflows.claimPausedRun(
+        "legacy-global",
+        "session-legacy-workflows",
+        "project-visible",
+        "2026-07-26T00:01:00.000Z",
+      ),
+    ).resolves.toMatchObject({ runId: "legacy-global", status: "running" });
+    store.close();
   });
 
   test("rehydrates unfinished workflows as paused with their phase identity intact", async () => {

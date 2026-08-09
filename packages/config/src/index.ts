@@ -551,6 +551,7 @@ function assertEffectiveHotbarBounds(
     bucket.add(tool);
     namespaceBuckets.set(namespace, bucket);
   };
+  assertBound("global", Object.freeze([]));
   for (const [projectId, hotbar] of Object.entries(projectHotbars)) {
     assertBound(`project ${projectId}`, hotbar);
     for (const tool of hotbar) addToNamespace(tool);

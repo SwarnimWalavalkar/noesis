@@ -363,16 +363,23 @@ async function seedProjectDefinitionFromLegacy(
   if (legacyRevisions.length === 0) return;
   while (true) {
     const projectRevisions = await workspace.definitionMetadata.listRevisions(projectScope.namespace, name);
-    const firstProject = projectRevisions[0];
-    const firstLegacy = legacyRevisions[0];
-    // A separately authored project definition shadows the legacy fallback and owns its own lineage.
-    if (
-      firstProject &&
-      firstLegacy &&
-      firstProject.definitionRevision.contentDigest !== firstLegacy.definitionRevision.contentDigest
-    )
-      return;
-    for (let index = 0; index < Math.min(projectRevisions.length, legacyRevisions.length); index += 1) {
+    const projectActivities = await Promise.all(
+      projectRevisions.map(async (revision) => {
+        const activity = await workspace.reads.readDatabaseRow(revision.activityRow);
+        const activityKind = activity?.["activity_kind"];
+        if (typeof activityKind !== "string")
+          throw new Error(`Project ${kind} ${name} revision ${revision.revision} has no activity kind`);
+        return activityKind;
+      }),
+    );
+    const seededActivityKind = `${kind}.legacy_definition_seeded`;
+    const localSuccessorIndex = projectActivities.findIndex(
+      (activityKind) => activityKind !== seededActivityKind,
+    );
+    // A separately authored project definition, or a completed fork with any local successor,
+    // shadows later legacy updates. Only an all-seeded prefix is eligible for resumption.
+    const seededRevisionCount = localSuccessorIndex === -1 ? projectRevisions.length : localSuccessorIndex;
+    for (let index = 0; index < seededRevisionCount; index += 1) {
       const projectRevision = projectRevisions[index];
       const legacyRevision = legacyRevisions[index];
       if (
@@ -383,6 +390,7 @@ async function seedProjectDefinitionFromLegacy(
       )
         throw new Error(`Project ${kind} ${name} diverged from its partially seeded legacy lineage`);
     }
+    if (localSuccessorIndex !== -1) return;
     if (projectRevisions.length >= legacyRevisions.length) return;
     const legacy = legacyRevisions[projectRevisions.length];
     if (!legacy) return;

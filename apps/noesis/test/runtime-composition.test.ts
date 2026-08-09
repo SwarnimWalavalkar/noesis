@@ -637,6 +637,7 @@ describe("apps/noesis production control-plane composition", () => {
     if (legacySource.output === undefined || !legacySource.completedAt)
       throw new Error("Expected a completed source workflow run for legacy compatibility");
     const legacyDatabase = new DatabaseSync(first.debug.workspace.unsafeDatabasePathForTesting);
+    legacyDatabase.exec("PRAGMA busy_timeout = 5000");
     legacyDatabase
       .prepare(
         `INSERT INTO workflow_runs(
@@ -807,7 +808,7 @@ describe("apps/noesis production control-plane composition", () => {
           bytes: await seed.reads.readRevision(legacy.definitionRevision),
           ...(current ? { expectedCurrentRevisionId: current.revisionId } : {}),
           provenanceRefs: Object.freeze([legacy.definitionRevision]),
-          activity: Object.freeze({ kind: `${namespace}.partial_legacy_seed`, actor }),
+          activity: Object.freeze({ kind: `${namespace}.legacy_definition_seeded`, actor }),
         });
         if (!publication.ok) throw new Error(publication.error.message);
         current = publication.value.definitionRevision;
@@ -897,17 +898,21 @@ describe("apps/noesis production control-plane composition", () => {
         }),
     });
     const trail = await runtime.startTrail({ title: "Continue legacy definition revisions" });
+    const parseSavedRevisions = (value: unknown) =>
+      z
+        .strictObject({
+          scripts: z.array(z.strictObject({ revision: z.number() }).passthrough()),
+          workflows: z.array(
+            z
+              .strictObject({ manifest: z.strictObject({ revision: z.number() }).passthrough() })
+              .passthrough(),
+          ),
+        })
+        .parse(value);
 
     await runtime.debug.runTurn(trail.trailId, "Save project-local successors.");
 
-    const savedRevisions = z
-      .strictObject({
-        scripts: z.array(z.strictObject({ revision: z.number() }).passthrough()),
-        workflows: z.array(
-          z.strictObject({ manifest: z.strictObject({ revision: z.number() }).passthrough() }).passthrough(),
-        ),
-      })
-      .parse(saved);
+    const savedRevisions = parseSavedRevisions(saved);
     expect(savedRevisions.scripts.map((script) => script.revision).sort()).toEqual([6, 7]);
     expect(savedRevisions.workflows.map(({ manifest }) => manifest.revision).sort()).toEqual([8, 9]);
     expect(
@@ -928,6 +933,59 @@ describe("apps/noesis production control-plane composition", () => {
     expect(
       await runtime.debug.workspace.definitionMetadata.getCurrent("workflow", "legacy-increment"),
     ).toMatchObject({ revision: 7 });
+    const laterLegacyScript = await runtime.debug.workspace.definitionPublications.publish({
+      namespace: "script",
+      definitionId: legacyScript.name,
+      revision: 6,
+      workingPath: "scripts/legacy-double/script.json",
+      bytes: bytes(
+        `${canonicalJson({ ...legacyScript, description: "A later legacy script revision.", revision: 6 })}\n`,
+      ),
+      expectedCurrentRevisionId: scriptDefinitionRevision.revisionId,
+      provenanceRefs: Object.freeze([scriptDefinitionRevision]),
+      activity: Object.freeze({ kind: "script.later_legacy_revision", actor }),
+    });
+    if (!laterLegacyScript.ok) throw new Error(laterLegacyScript.error.message);
+    const laterLegacyWorkflow = await runtime.debug.workspace.definitionPublications.publish({
+      namespace: "workflow",
+      definitionId: legacyWorkflow.name,
+      revision: 8,
+      workingPath: "workflows/legacy-increment/workflow.json",
+      bytes: bytes(
+        `${canonicalJson({ ...legacyWorkflow, description: "A later legacy workflow revision.", revision: 8 })}\n`,
+      ),
+      expectedCurrentRevisionId: workflowDefinitionRevision.revisionId,
+      provenanceRefs: Object.freeze([workflowDefinitionRevision]),
+      activity: Object.freeze({ kind: "workflow.later_legacy_revision", actor }),
+    });
+    if (!laterLegacyWorkflow.ok) throw new Error(laterLegacyWorkflow.error.message);
+
+    await runtime.debug.runTurn(
+      trail.trailId,
+      "Save more project-local successors after the legacy fallback changes.",
+    );
+
+    const laterSavedRevisions = parseSavedRevisions(saved);
+    expect(laterSavedRevisions.scripts.map((script) => script.revision).sort()).toEqual([8, 9]);
+    expect(laterSavedRevisions.workflows.map(({ manifest }) => manifest.revision).sort()).toEqual([10, 11]);
+    expect(
+      await runtime.debug.workspace.definitionMetadata.getCurrent(
+        `script:${project.projectId}`,
+        "legacy-double",
+      ),
+    ).toMatchObject({ revision: 9 });
+    expect(
+      await runtime.debug.workspace.definitionMetadata.getCurrent(
+        `workflow:${project.projectId}`,
+        "legacy-increment",
+      ),
+    ).toMatchObject({ revision: 11 });
+    expect(
+      await runtime.debug.workspace.definitionMetadata.getCurrent("script", "legacy-double"),
+    ).toMatchObject({ revision: 6 });
+    expect(
+      await runtime.debug.workspace.definitionMetadata.getCurrent("workflow", "legacy-increment"),
+    ).toMatchObject({ revision: 8 });
     await runtime.shutdown();
   });
 
