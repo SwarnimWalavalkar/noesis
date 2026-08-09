@@ -241,7 +241,9 @@ export function decodeWorkflowRun(row: unknown): WorkflowRunRecord {
     definitionRevisionId: requiredString(row, "definition_revision_id"),
     ...(catalogId === undefined ? {} : { catalogId }),
     ...(catalogDigest === undefined ? {} : { catalogDigest }),
-    ...(definitionDependenciesDigest === undefined ? {} : { definitionDependenciesDigest }),
+    ...(definitionDependenciesDigest === undefined
+      ? {}
+      : { definitionDependenciesDigest: DigestSchema.parse(definitionDependenciesDigest) }),
     ...(permissionDigest === undefined ? {} : { permissionDigest }),
     ...(provider === undefined ? {} : { provider }),
     ...(model === undefined ? {} : { model }),

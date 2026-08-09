@@ -25,6 +25,14 @@ export function projectWorkflowToolName(projectId: string, workflowName: string)
   return `workflow.${sha256(projectId).slice(0, PROJECT_WORKFLOW_DIGEST_CHARACTERS)}.${workflowName}`;
 }
 
+export function isProjectWorkflowToolName(toolName: string): boolean {
+  return savedWorkflowToolNamePattern.test(toolName);
+}
+
+export function isProjectWorkflowToolForProject(projectId: string, toolName: string): boolean {
+  return isProjectWorkflowToolName(toolName) && toolName.startsWith(projectWorkflowToolName(projectId, ""));
+}
+
 export function projectWorkflowExecutionCatalogDigest(tools: JsonValue): string {
   return sha256(
     canonicalJson({

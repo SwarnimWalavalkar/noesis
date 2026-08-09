@@ -11,8 +11,10 @@ import {
 } from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
 import {
+  canonicalJson,
   EvidenceRevisionRefSchema,
   eventChecksum,
+  type FileRevisionRef,
   type LedgerEvent,
   type ProjectRef,
   sha256,
@@ -39,6 +41,7 @@ import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src
 import {
   type ApplicationRuntimeCompositionOptions,
   createApplicationRuntimeComposition,
+  resolveProjectHotbarSelection,
   waitForReflectionBarrier,
 } from "../src/runtime-composition.ts";
 
@@ -55,6 +58,56 @@ test("a reflection barrier read failure cannot fail an already-settled turn", as
       "job-reflection-settled",
     ),
   ).resolves.toBeUndefined();
+});
+
+test("project workflow pins compose only with their own project's global hotbar", () => {
+  const alphaTool = projectWorkflowToolName("project_alpha", "alpha");
+  const alphaSecondTool = projectWorkflowToolName("project_alpha", "second");
+  const betaTool = projectWorkflowToolName("project_beta", "beta");
+  const tools = Object.freeze({
+    hotbar: Object.freeze(["files.read", "workflows.run", alphaTool, betaTool]),
+    projectHotbars: Object.freeze({
+      project_alpha: Object.freeze([alphaSecondTool, betaTool]),
+      project_beta: Object.freeze([betaTool]),
+    }),
+  });
+
+  expect(resolveProjectHotbarSelection(tools, "project_alpha")).toEqual({
+    global: ["files.read", "workflows.run"],
+    project: [alphaSecondTool, alphaTool],
+    effective: ["files.read", "workflows.run", alphaSecondTool, alphaTool],
+  });
+  expect(resolveProjectHotbarSelection(tools, "project_beta")).toEqual({
+    global: ["files.read", "workflows.run"],
+    project: [betaTool],
+    effective: ["files.read", "workflows.run", betaTool],
+  });
+});
+
+test("active project hotbar load rejects an effective global and project union above 16", () => {
+  const projectId = "project_overflow";
+  const projectTool = projectWorkflowToolName(projectId, "project-tool");
+  const legacyTool = projectWorkflowToolName(projectId, "legacy-tool");
+  const globalTools = Array.from({ length: 16 }, (_, index) => `global.${String(index)}`);
+
+  expect(() =>
+    resolveProjectHotbarSelection(
+      {
+        hotbar: globalTools,
+        projectHotbars: { [projectId]: [projectTool] },
+      },
+      projectId,
+    ),
+  ).toThrow("contains 17 tools");
+  expect(() =>
+    resolveProjectHotbarSelection(
+      {
+        hotbar: [...globalTools.slice(0, 15), legacyTool],
+        projectHotbars: { [projectId]: [projectTool] },
+      },
+      projectId,
+    ),
+  ).toThrow("contains 17 tools");
 });
 
 const recoveryTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
@@ -307,6 +360,20 @@ describe("apps/noesis production control-plane composition", () => {
                     '  outputSchema: { type: "array", items: { type: "number" } },',
                     '  phases: [{ name: "reverse", description: "Reverse the values.", source: "return [...input].reverse();", inputSchema: { type: "array", items: { type: "number" } }, outputSchema: { type: "array", items: { type: "number" } }, requiredTools: [] }]',
                     "});",
+                    "await tools.workflows.save({",
+                    '  name: "referenced-object",',
+                    '  description: "Increment an object resolved through a composed reference.",',
+                    '  inputSchema: { $defs: { payload: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false } }, allOf: [{ $ref: "#/$defs/payload" }] },',
+                    '  outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                    '  phases: [{ name: "increment", description: "Increment the referenced object.", source: "return { value: input.value + 1 };", inputSchema: { $defs: { payload: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false } }, allOf: [{ $ref: "#/$defs/payload" }] }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: [] }]',
+                    "});",
+                    "await tools.workflows.save({",
+                    '  name: "ambiguous-value",',
+                    '  description: "Preserve a schema that does not constrain inputs to objects.",',
+                    '  inputSchema: { properties: { value: { type: "number" } } },',
+                    "  outputSchema: {},",
+                    '  phases: [{ name: "identity", description: "Return the input.", source: "return input;", inputSchema: { properties: { value: { type: "number" } } }, outputSchema: {}, requiredTools: [] }]',
+                    "});",
                     "const listed = await tools.workflows.list({});",
                     "const described = await tools.workflows.describe({ name: saved.manifest.name });",
                     "const run = await tools.workflows.run({ name: saved.manifest.name, input: { value: 41 } });",
@@ -317,6 +384,9 @@ describe("apps/noesis production control-plane composition", () => {
                       `const direct = await noesis.invoke(${JSON.stringify(firstWorkflowTool("project-increment"))}, { value: 41 });`,
                       `const scalar = await noesis.invoke(${JSON.stringify(firstWorkflowTool("scalar-increment"))}, { input: 41 });`,
                       `const array = await noesis.invoke(${JSON.stringify(firstWorkflowTool("reverse-values"))}, { input: [1, 2, 3] });`,
+                      `const referencedDirect = await noesis.invoke(${JSON.stringify(firstWorkflowTool("referenced-object"))}, { value: 41 });`,
+                      'const referencedGeneric = await tools.workflows.run({ name: "referenced-object", input: { value: 41 } });',
+                      `const ambiguous = await noesis.invoke(${JSON.stringify(firstWorkflowTool("ambiguous-value"))}, { input: 41 });`,
                       "const updated = await tools.workflows.save({",
                       '  name: "project-increment",',
                       '  description: "Increment one numeric input by two.",',
@@ -331,7 +401,7 @@ describe("apps/noesis production control-plane composition", () => {
                       "    requiredTools: []",
                       "  }]",
                       "});",
-                      "return { direct, scalar, array, updated };",
+                      "return { direct, scalar, array, referencedDirect, referencedGeneric, ambiguous, updated };",
                     ].join("\n")
                   : turn === 2
                     ? `return await noesis.invoke(${JSON.stringify(firstWorkflowTool("project-increment"))}, { value: 41 });`
@@ -430,8 +500,10 @@ describe("apps/noesis production control-plane composition", () => {
     expect(Object.keys(genericRevisionSnapshots[0] ?? {})).toHaveLength(genericLibraryToolNames.size);
     expect(workflowToolSnapshots[0]).toEqual([]);
     expect(workflowToolSnapshots[1]?.map((tool) => tool.name)).toEqual([
+      firstWorkflowTool("ambiguous-value"),
       firstWorkflowTool("execute"),
       firstWorkflowTool("project-increment"),
+      firstWorkflowTool("referenced-object"),
       firstWorkflowTool("reverse-values"),
       firstWorkflowTool("scalar-increment"),
     ]);
@@ -465,6 +537,9 @@ describe("apps/noesis production control-plane composition", () => {
       direct: { value: 42 },
       scalar: 42,
       array: [3, 2, 1],
+      referencedDirect: { value: 42 },
+      referencedGeneric: { value: { value: 42 } },
+      ambiguous: 41,
       updated: { manifest: { revision: 2 } },
     });
     expect(firstClassRevisionTwoValue).toEqual({ value: 43 });
@@ -489,6 +564,26 @@ describe("apps/noesis production control-plane composition", () => {
         additionalProperties: false,
       },
       outputSchema: { type: "array", items: { type: "number" } },
+    });
+    expect(
+      workflowToolSnapshots[1]?.find((tool) => tool.name === firstWorkflowTool("referenced-object")),
+    ).toMatchObject({
+      inputSchema: {
+        type: "object",
+        properties: { value: { type: "number" } },
+        required: ["value"],
+        additionalProperties: false,
+      },
+    });
+    expect(
+      workflowToolSnapshots[1]?.find((tool) => tool.name === firstWorkflowTool("ambiguous-value")),
+    ).toMatchObject({
+      inputSchema: {
+        type: "object",
+        properties: { input: {} },
+        required: ["input"],
+        additionalProperties: false,
+      },
     });
     expect(frozenWorkflowSummaries).toEqual(
       expect.arrayContaining([
@@ -532,7 +627,7 @@ describe("apps/noesis production control-plane composition", () => {
       savedReceipts.saved.definitionRevision.revisionId,
       updatedReceipts.updated.definitionRevision.revisionId,
     ]);
-    expect(new Set(projectWorkflowRuns.map((run) => run.catalogDigest))).toHaveLength(1);
+    expect(new Set(projectWorkflowRuns.map((run) => run.catalogDigest)).size).toBe(1);
     expect(projectWorkflowRuns.every((run) => run.catalogId === `catalog_${run.catalogDigest}`)).toBe(true);
     expect(projectWorkflowRuns.every((run) => run.projectId === firstProject.projectId)).toBe(true);
     foreignWorkflowRunId = projectWorkflowRuns[0]?.runId;
@@ -603,7 +698,240 @@ describe("apps/noesis production control-plane composition", () => {
     await second.shutdown();
   });
 
-  test("workflow resume fails closed when an explicitly required saved tool revision changes", async () => {
+  test("project saves continue revision lineage from legacy definitions", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-legacy-definition-revisions-"));
+    const projectRoot = join(home, "host-project");
+    await mkdir(projectRoot, { recursive: true });
+    roots.push(home);
+    const project: ProjectRef = Object.freeze({ projectId: "project_legacy_seed", root: projectRoot });
+    const actor = Object.freeze({ actorId: "legacy-definition-fixture", kind: "system" as const });
+    const bytes = (value: string): Uint8Array => new TextEncoder().encode(value);
+    const objectSchema = Object.freeze({
+      type: "object",
+      properties: Object.freeze({ value: Object.freeze({ type: "number" }) }),
+      required: Object.freeze(["value"]),
+      additionalProperties: false,
+    });
+    const createdFrom = Object.freeze({
+      sessionId: "legacy-session",
+      turnId: "legacy-turn",
+      planId: "legacy-plan",
+    });
+    const seed = await createWorkspaceStore(home);
+    const sourceRevision = await seed.definitions.recordWorkingDefinition({
+      workingPath: "scripts/legacy-double/index.mjs",
+      bytes: bytes("return { value: input.value * 2 };"),
+      actor,
+    });
+    const legacyScript = Object.freeze({
+      kind: "noesis_script",
+      name: "legacy-double",
+      description: "A legacy saved script.",
+      revision: 5,
+      sourceRevision,
+      inputSchema: objectSchema,
+      outputSchema: objectSchema,
+      requiredTools: Object.freeze([]),
+      createdFrom,
+    });
+    let scriptDefinitionRevision: FileRevisionRef | undefined;
+    for (let revision = 1; revision <= legacyScript.revision; revision += 1) {
+      const publication = await seed.definitionPublications.publish({
+        namespace: "script",
+        definitionId: legacyScript.name,
+        revision,
+        workingPath: "scripts/legacy-double/script.json",
+        bytes: bytes(`${canonicalJson({ ...legacyScript, revision })}\n`),
+        ...(scriptDefinitionRevision
+          ? { expectedCurrentRevisionId: scriptDefinitionRevision.revisionId }
+          : {}),
+        provenanceRefs: Object.freeze([sourceRevision]),
+        activity: Object.freeze({ kind: "script.legacy_seeded", actor }),
+      });
+      if (!publication.ok) throw new Error(publication.error.message);
+      scriptDefinitionRevision = publication.value.definitionRevision;
+    }
+    if (!scriptDefinitionRevision) throw new Error("Expected a seeded legacy script revision");
+    const legacyWorkflow = Object.freeze({
+      kind: "noesis_workflow",
+      name: "legacy-increment",
+      description: "A legacy saved workflow.",
+      revision: 7,
+      inputSchema: objectSchema,
+      outputSchema: objectSchema,
+      phases: Object.freeze([
+        Object.freeze({
+          name: "increment",
+          description: "Increment the value.",
+          source: "return { value: input.value + 1 };",
+          inputSchema: objectSchema,
+          outputSchema: objectSchema,
+          requiredTools: Object.freeze([]),
+        }),
+      ]),
+      createdFrom,
+    });
+    let workflowDefinitionRevision: FileRevisionRef | undefined;
+    for (let revision = 1; revision <= legacyWorkflow.revision; revision += 1) {
+      const publication = await seed.definitionPublications.publish({
+        namespace: "workflow",
+        definitionId: legacyWorkflow.name,
+        revision,
+        workingPath: "workflows/legacy-increment/workflow.json",
+        bytes: bytes(`${canonicalJson({ ...legacyWorkflow, revision })}\n`),
+        ...(workflowDefinitionRevision
+          ? { expectedCurrentRevisionId: workflowDefinitionRevision.revisionId }
+          : {}),
+        provenanceRefs: Object.freeze([scriptDefinitionRevision]),
+        activity: Object.freeze({ kind: "workflow.legacy_seeded", actor }),
+      });
+      if (!publication.ok) throw new Error(publication.error.message);
+      workflowDefinitionRevision = publication.value.definitionRevision;
+    }
+    if (!workflowDefinitionRevision) throw new Error("Expected a seeded legacy workflow revision");
+    const seedPartialProjectPrefix = async (
+      namespace: "script" | "workflow",
+      workingPath: string,
+    ): Promise<void> => {
+      const legacyRevisions = await seed.definitionMetadata.listRevisions(
+        namespace,
+        namespace === "script" ? legacyScript.name : legacyWorkflow.name,
+      );
+      let current: FileRevisionRef | undefined;
+      for (const legacy of legacyRevisions.slice(0, 2)) {
+        const publication = await seed.definitionPublications.publish({
+          namespace: `${namespace}:${project.projectId}`,
+          definitionId: namespace === "script" ? legacyScript.name : legacyWorkflow.name,
+          revision: legacy.revision,
+          workingPath,
+          bytes: await seed.reads.readRevision(legacy.definitionRevision),
+          ...(current ? { expectedCurrentRevisionId: current.revisionId } : {}),
+          provenanceRefs: Object.freeze([legacy.definitionRevision]),
+          activity: Object.freeze({ kind: `${namespace}.partial_legacy_seed`, actor }),
+        });
+        if (!publication.ok) throw new Error(publication.error.message);
+        current = publication.value.definitionRevision;
+      }
+    };
+    await seedPartialProjectPrefix(
+      "script",
+      `scripts/projects/${project.projectId}/legacy-double/script.json`,
+    );
+    await seedPartialProjectPrefix(
+      "workflow",
+      `workflows/projects/${project.projectId}/legacy-increment/workflow.json`,
+    );
+    seed.close();
+
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    let saved: unknown;
+    const noOp = async (): Promise<void> => undefined;
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      project,
+      createAgent: (_sessionTools, codeExecution) =>
+        Object.freeze({
+          name: "legacy-definition-save-agent",
+          run: async (request: AgentRuntimeRequest) => {
+            const plan = request.frozenTurnPlan;
+            if (!plan) throw new Error("Expected a frozen turn plan");
+            const signal = new AbortController().signal;
+            const prepared = await codeExecution.prepare(plan, signal, { skills: Object.freeze([]) });
+            try {
+              saved = (
+                await prepared.execute(
+                  [
+                    "const scripts = await Promise.all([3, 4].map(async (multiplier) => await tools.scripts.save({",
+                    '  name: "legacy-double", description: "A project-local script revision.",',
+                    "  source: `return { value: input.value * ${multiplier} };`,",
+                    '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                    '  outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                    "  requiredTools: []",
+                    "})));",
+                    "const workflows = await Promise.all([2, 3].map(async (increment) => await tools.workflows.save({",
+                    '  name: "legacy-increment", description: "A project-local workflow revision.",',
+                    '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                    '  outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                    '  phases: [{ name: "increment", description: "Increment the value.", source: `return { value: input.value + ${increment} };`, inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: [] }]',
+                    "})));",
+                    "return { scripts, workflows };",
+                  ].join("\n"),
+                  undefined,
+                  signal,
+                  () => undefined,
+                )
+              ).value;
+            } finally {
+              await prepared.close();
+            }
+            return Object.freeze({
+              outcome: "completed" as const,
+              stopReason: "stop" as const,
+              text: "Legacy definitions continued in project scope.",
+              provider: request.provider,
+              model: request.model,
+            });
+          },
+          steer: async () =>
+            Object.freeze({
+              status: "consumed" as const,
+              timelineSequence: 1,
+              consumedAt: new Date().toISOString(),
+            }),
+          abort: noOp,
+        }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled fixture."},"decision":"no_change","reason":"disabled"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Continue legacy definition revisions" });
+
+    await runtime.debug.runTurn(trail.trailId, "Save project-local successors.");
+
+    const savedRevisions = z
+      .strictObject({
+        scripts: z.array(z.strictObject({ revision: z.number() }).passthrough()),
+        workflows: z.array(
+          z.strictObject({ manifest: z.strictObject({ revision: z.number() }).passthrough() }).passthrough(),
+        ),
+      })
+      .parse(saved);
+    expect(savedRevisions.scripts.map((script) => script.revision).sort()).toEqual([6, 7]);
+    expect(savedRevisions.workflows.map(({ manifest }) => manifest.revision).sort()).toEqual([8, 9]);
+    expect(
+      await runtime.debug.workspace.definitionMetadata.getCurrent(
+        `script:${project.projectId}`,
+        "legacy-double",
+      ),
+    ).toMatchObject({ revision: 7 });
+    expect(
+      await runtime.debug.workspace.definitionMetadata.getCurrent(
+        `workflow:${project.projectId}`,
+        "legacy-increment",
+      ),
+    ).toMatchObject({ revision: 9 });
+    expect(
+      await runtime.debug.workspace.definitionMetadata.getCurrent("script", "legacy-double"),
+    ).toMatchObject({ revision: 5 });
+    expect(
+      await runtime.debug.workspace.definitionMetadata.getCurrent("workflow", "legacy-increment"),
+    ).toMatchObject({ revision: 7 });
+    await runtime.shutdown();
+  });
+
+  test("workflow resume fails closed when any visible saved definition changes", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-workflow-required-tool-pin-"));
     const projectRoot = join(home, "host-project");
     await mkdir(projectRoot, { recursive: true });

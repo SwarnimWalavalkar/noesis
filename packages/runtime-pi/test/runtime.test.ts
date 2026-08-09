@@ -18,6 +18,8 @@ import {
   createPiSelfTools,
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
+  isProjectWorkflowToolForProject,
+  isProjectWorkflowToolName,
   type PiCodeExecutionAdapter,
   type PiFrozenToolCatalog,
   type PiSelfToolAdapter,
@@ -186,6 +188,17 @@ describe("agent runtime factories", () => {
       active: ["files.read"],
       unavailable: ["removed.tool"],
     });
+  });
+
+  test("recognizes exact project workflow tool identities", () => {
+    const alpha = projectWorkflowToolName("project_alpha", "summarize");
+    const beta = projectWorkflowToolName("project_beta", "summarize");
+
+    expect(isProjectWorkflowToolName(alpha)).toBe(true);
+    expect(isProjectWorkflowToolForProject("project_alpha", alpha)).toBe(true);
+    expect(isProjectWorkflowToolForProject("project_alpha", beta)).toBe(false);
+    expect(isProjectWorkflowToolName("workflows.run")).toBe(false);
+    expect(isProjectWorkflowToolName("workflow.not-a-digest.summarize")).toBe(false);
   });
 
   test("assigns injective catalog aliases without shadowing core tools", () => {

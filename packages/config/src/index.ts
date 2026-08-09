@@ -48,12 +48,23 @@ export const ExperimentDefaultsSchema = z.strictObject({
 });
 export type ExperimentDefaults = Readonly<z.infer<typeof ExperimentDefaultsSchema>>;
 
+export const MAX_DIRECT_TOOL_HOTBAR_TOOLS = 16;
+
 export const ToolConfigSchema = z.strictObject({
-  hotbar: z.array(z.string().trim().min(1).max(128)).max(16).optional(),
+  // Version 1 briefly stored project-qualified workflow pins here. Keep those
+  // legacy entries readable; the active global + project union is bounded below.
+  hotbar: z.array(z.string().trim().min(1).max(128)).max(256).optional(),
+  projectHotbars: z
+    .record(
+      z.string().trim().min(1).max(128),
+      z.array(z.string().trim().min(1).max(128)).max(MAX_DIRECT_TOOL_HOTBAR_TOOLS),
+    )
+    .optional(),
 });
 export type ToolConfig = Readonly<z.infer<typeof ToolConfigSchema>>;
 export interface ResolvedToolConfig {
   readonly hotbar: readonly string[];
+  readonly projectHotbars: Readonly<Record<string, readonly string[]>>;
 }
 
 export const NoesisConfigSchema = z.strictObject({
@@ -142,6 +153,7 @@ export const BUILT_IN_EXPERIMENT_DEFAULTS: Required<ExperimentDefaults> = {
 
 export const BUILT_IN_TOOL_DEFAULTS: ResolvedToolConfig = {
   hotbar: Object.freeze(["files.read", "files.list", "shell.run", "workflows.run"]),
+  projectHotbars: Object.freeze({}),
 };
 
 export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
@@ -306,6 +318,14 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
     },
     tools: {
       hotbar: Object.freeze([...(tools.hotbar ?? BUILT_IN_TOOL_DEFAULTS.hotbar)]),
+      projectHotbars: Object.freeze(
+        Object.fromEntries(
+          Object.entries(tools.projectHotbars ?? {}).map(([projectId, hotbar]) => [
+            projectId,
+            Object.freeze([...hotbar]),
+          ]),
+        ),
+      ),
     },
     sources: {
       provider: providerSource,
@@ -476,6 +496,113 @@ export async function updateUserControlConfig(
     if (!decoded.ok) throw decoded.error;
     await persistConfig(home, decoded.value);
     return decoded.value;
+  });
+}
+
+export interface ToolHotbarDelta {
+  readonly projectId: string;
+  readonly projectToolNamespace: string;
+  readonly scope: "global" | "project";
+  readonly action: "add" | "remove";
+  readonly tool: string;
+  /** All version-1 project workflow pins still present in the global array. */
+  readonly legacyGlobalProjectTools: readonly string[];
+  /** The subset of legacy pins that belongs to this project. */
+  readonly legacyActiveProjectTools: readonly string[];
+}
+
+export interface CommittedToolHotbarSelection {
+  readonly global: readonly string[];
+  readonly project: readonly string[];
+  readonly effective: readonly string[];
+}
+
+function applyHotbarDelta(
+  current: readonly string[],
+  action: ToolHotbarDelta["action"],
+  tool: string,
+): readonly string[] {
+  return action === "add"
+    ? Object.freeze([...new Set([...current, tool])])
+    : Object.freeze(current.filter((name) => name !== tool));
+}
+
+const projectWorkflowNamespacePattern = /^(workflow\.[a-f0-9]{16}\.)/u;
+
+function assertEffectiveHotbarBounds(
+  path: string,
+  global: readonly string[],
+  projectHotbars: Readonly<Record<string, readonly string[]>>,
+  legacyProjectTools: readonly string[],
+): void {
+  const assertBound = (label: string, tools: readonly string[]): void => {
+    const effectiveCount = new Set([...global, ...tools]).size;
+    if (effectiveCount > MAX_DIRECT_TOOL_HOTBAR_TOOLS)
+      throw new NoesisConfigError(
+        path,
+        `${label} hotbar would contain ${String(effectiveCount)} tools; the maximum is ${String(MAX_DIRECT_TOOL_HOTBAR_TOOLS)}`,
+      );
+  };
+  const namespaceBuckets = new Map<string, Set<string>>();
+  const addToNamespace = (tool: string): void => {
+    const namespace = projectWorkflowNamespacePattern.exec(tool)?.[1];
+    if (!namespace) return;
+    const bucket = namespaceBuckets.get(namespace) ?? new Set<string>();
+    bucket.add(tool);
+    namespaceBuckets.set(namespace, bucket);
+  };
+  for (const [projectId, hotbar] of Object.entries(projectHotbars)) {
+    assertBound(`project ${projectId}`, hotbar);
+    for (const tool of hotbar) addToNamespace(tool);
+  }
+  for (const tool of legacyProjectTools) addToNamespace(tool);
+  for (const [namespace, tools] of namespaceBuckets)
+    assertBound(`project workflow namespace ${namespace}`, [...tools]);
+}
+
+/** Apply one exact hotbar action against the latest locked config and return the committed view. */
+export async function updateToolHotbar(
+  home: string,
+  update: ToolHotbarDelta,
+): Promise<CommittedToolHotbarSelection> {
+  return await withConfigWriter(home, async () => {
+    const loaded = await readNoesisConfig(home);
+    if (!loaded.ok) throw loaded.error;
+    const path = noesisConfigPath(home);
+    const current = loaded.value.config ?? DEFAULT_NOESIS_CONFIG;
+    const rawGlobal = current.tools?.hotbar ?? BUILT_IN_TOOL_DEFAULTS.hotbar;
+    const projectHotbars = { ...(current.tools?.projectHotbars ?? {}) };
+    const legacyGlobal = new Set(update.legacyGlobalProjectTools);
+    const legacyActive = new Set(update.legacyActiveProjectTools);
+    const global = Object.freeze([...new Set(rawGlobal.filter((tool) => !legacyGlobal.has(tool)))]);
+    const project = Object.freeze([
+      ...new Set([
+        ...(projectHotbars[update.projectId] ?? []).filter((tool) =>
+          tool.startsWith(update.projectToolNamespace),
+        ),
+        ...rawGlobal.filter((tool) => legacyActive.has(tool)),
+      ]),
+    ]);
+    const nextGlobal =
+      update.scope === "global" ? applyHotbarDelta(global, update.action, update.tool) : global;
+    const nextProject =
+      update.scope === "project" ? applyHotbarDelta(project, update.action, update.tool) : project;
+    const effective = Object.freeze([...new Set([...nextGlobal, ...nextProject])]);
+    if (nextProject.length === 0) delete projectHotbars[update.projectId];
+    else projectHotbars[update.projectId] = [...nextProject];
+    const inactiveLegacy = rawGlobal.filter((tool) => legacyGlobal.has(tool) && !legacyActive.has(tool));
+    assertEffectiveHotbarBounds(path, nextGlobal, projectHotbars, inactiveLegacy);
+    const candidate: NoesisConfig = {
+      ...current,
+      tools: {
+        hotbar: [...new Set([...nextGlobal, ...inactiveLegacy])],
+        ...(Object.keys(projectHotbars).length > 0 ? { projectHotbars } : {}),
+      },
+    };
+    const decoded = decodeConfig(path, candidate);
+    if (!decoded.ok) throw decoded.error;
+    await persistConfig(home, decoded.value);
+    return Object.freeze({ global: nextGlobal, project: nextProject, effective });
   });
 }
 

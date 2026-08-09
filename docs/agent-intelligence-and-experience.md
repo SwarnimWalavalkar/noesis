@@ -45,12 +45,15 @@ The `remember` tool remains the direct way to record an explicit durable instruc
 
 ## Direct tool hotbar
 
-The foreground model always has:
+For an admitted turn, the foreground model has:
 
 - `inspect_self`
 - `remember`
-- `adapt`
-- `execute`
+
+When that turn also has a prepared executable tool catalog, it has:
+
+- `adapt`, which changes the direct-tool hotbar
+- `execute`, which invokes and composes tools from that catalog
 
 The default hotbar also contains:
 
