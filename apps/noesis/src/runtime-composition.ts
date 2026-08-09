@@ -1659,7 +1659,11 @@ export async function createApplicationRuntimeComposition(
             readonly definitionRevision: FileRevisionRef;
           },
           input: JsonValue,
-          context: { readonly executionId: string; readonly signal: AbortSignal },
+          context: {
+            readonly executionId: string;
+            readonly parentExecutionId?: string;
+            readonly signal: AbortSignal;
+          },
           existingRunId?: string,
           resumeValue?: JsonValue,
         ) => Promise<{
@@ -1850,7 +1854,7 @@ export async function createApplicationRuntimeComposition(
               turnId: plan.turnId,
               signal: context.signal,
             },
-            context.executionId,
+            context.parentExecutionId,
           );
           z.fromJSONSchema(manifest.outputSchema).parse(result.value);
           return {
@@ -2582,7 +2586,7 @@ export async function createApplicationRuntimeComposition(
               turnId: plan.turnId,
               signal: context.signal,
             },
-            context.executionId,
+            context.parentExecutionId,
             undefined,
             async () => {
               executionPrepared = true;

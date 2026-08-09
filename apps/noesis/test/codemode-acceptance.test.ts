@@ -2,7 +2,7 @@ import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveNoesisConfig } from "@noesis/config";
-import { createPiAgentRuntime } from "@noesis/runtime-pi";
+import { createPiAgentRuntime, projectWorkflowToolName } from "@noesis/runtime-pi";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   CONTROLLED_PI_MODEL,
@@ -74,6 +74,120 @@ describe("production codemode journey", () => {
     expect(await runtime.debug.workspace.operational.codeExecutions.listForSession(trail.trailId)).toEqual(
       [],
     );
+    await runtime.shutdown();
+  });
+
+  test("direct saved-code hotbar calls do not persist synthetic codemode parents", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-direct-saved-code-"));
+    roots.push(home);
+    const project = Object.freeze({ projectId: "project_direct_saved_code", root: process.cwd() });
+    const workflowTool = projectWorkflowToolName(project.projectId, "direct-increment");
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+      tools: Object.freeze({
+        hotbar: Object.freeze([...resolved.tools.hotbar, "scripts.run"]),
+        projectHotbars: Object.freeze({ [project.projectId]: Object.freeze([workflowTool]) }),
+      }),
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText }) => {
+        if (context.messages.at(-1)?.role === "toolResult") return `Completed: ${lastUserText}`;
+        if (lastUserText.includes("Save"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: [
+                "await tools.scripts.save({",
+                '  name: "direct-double", description: "Double one value.",',
+                '  source: "return { doubled: input.value * 2 };",',
+                '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                '  outputSchema: { type: "object", properties: { doubled: { type: "number" } }, required: ["doubled"], additionalProperties: false },',
+                "  requiredTools: []",
+                "});",
+                "await tools.workflows.save({",
+                '  name: "direct-increment", description: "Increment one value.",',
+                '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                '  outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                '  phases: [{ name: "increment", description: "Increment.", source: "return { value: input.value + 1 };", inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: [] }]',
+                "});",
+                "return null;",
+              ].join("\n"),
+            },
+            "call-save-direct-code",
+          );
+        if (lastUserText.includes("generic workflow"))
+          return controlledToolCallResponse(
+            "workflows_run",
+            { name: "direct-increment", input: { value: 41 } },
+            "call-direct-generic-workflow",
+          );
+        if (lastUserText.includes("saved workflow"))
+          return controlledToolCallResponse(
+            "workflow_direct-increment",
+            { value: 41 },
+            "call-direct-saved-workflow",
+          );
+        return controlledToolCallResponse(
+          "scripts_run",
+          { name: "direct-double", input: { value: 21 } },
+          "call-direct-script",
+        );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      project,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Direct saved-code acceptance" });
+
+    await runtime.debug.runTurn(trail.trailId, "Save a script and workflow.");
+    await runtime.debug.runTurn(trail.trailId, "Run the generic workflow hotbar tool.");
+    await runtime.debug.runTurn(trail.trailId, "Run the saved workflow hotbar tool.");
+    await runtime.debug.runTurn(trail.trailId, "Run the saved script hotbar tool.");
+
+    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    expect(
+      calls
+        .filter((call) => ["workflows.run", workflowTool, "scripts.run"].includes(call.toolName))
+        .map((call) => ({ toolName: call.toolName, status: call.status })),
+    ).toEqual([
+      { toolName: "workflows.run", status: "completed" },
+      { toolName: workflowTool, status: "completed" },
+      { toolName: "scripts.run", status: "completed" },
+    ]);
+    expect(
+      await runtime.debug.workspace.operational.workflows.listRunsForSession(trail.trailId),
+    ).toMatchObject([
+      { workflowName: "direct-increment", status: "completed", output: { value: 42 } },
+      { workflowName: "direct-increment", status: "completed", output: { value: 42 } },
+    ]);
+    const executions = await runtime.debug.workspace.operational.codeExecutions.listForSession(trail.trailId);
+    expect(executions).toHaveLength(4);
+    expect(executions.every((execution) => execution.parentExecutionId === undefined)).toBe(true);
+    expect(executions.some((execution) => JSON.stringify(execution.result) === '{"doubled":42}')).toBe(true);
+    const directActions = (await runtime.getTranscript(trail.trailId)).filter(
+      (entry) =>
+        entry.kind === "action" && ["workflows.run", workflowTool, "scripts.run"].includes(entry.name),
+    );
+    expect(directActions).toHaveLength(3);
+    expect(
+      directActions.every((action) => action.kind === "action" && action.parentActionId === undefined),
+    ).toBe(true);
     await runtime.shutdown();
   });
 
