@@ -14,6 +14,8 @@ A coherent Noesis experience follows one recurring shape without forcing every s
 
 The loop is successful only when the present interaction is useful on its own. Compounding is an additional advantage, not a tax charged to every conversation.
 
+Explicit foreground project adaptations do not wait for this learning loop. A project-local script or workflow may be published and used immediately through `execute`; reflection and evaluation enter only when Noesis considers broader learned consolidation.
+
 ## Collaboration posture
 
 Noesis has two default postures. They are inferred behaviors, not mandatory modes that the user must configure.
@@ -77,7 +79,7 @@ The primary interaction remains conversational. A user can ask “Why did you ap
 
 Contesting a learning does not erase history. It records a correction, narrows or retires the current revision, and preserves the evidence behind earlier behavior. Revert restores the prior complete activation rather than reconstructing it from mutable files.
 
-Generated reflection and candidate authorship never receive promotion authority. Protected evaluation, permission, workspace-integrity, activation, and rollback code remains outside generated or self-modifiable content.
+Generated reflection and candidate authorship never receive broader promotion authority. Foreground generated code may publish a project-local script or workflow under existing authority, but protected evaluation, permission, workspace-integrity, activation, and rollback code remains outside generated or self-modifiable content.
 
 ## Representative user flows
 
@@ -115,6 +117,6 @@ The absence of compounding machinery in the visible experience is a feature: not
 
 The user asks Noesis to investigate a repository, modify files, run commands, consult the web, or create an artifact. Noesis uses a small direct-tool hotbar for common work and `execute` to discover and compose host tools in JavaScript. The conversation receives the selected final value while operations, effects, and revisions remain inspectable.
 
-When the program has a credible future use, the user or ambient reflection may propose saving it. One reusable computation becomes a typed script. Work that needs named phases, durable progress, corrections between phases, or resume becomes a workflow. Skills remain portable instructional context that can teach when and how to use these primitives without silently installing executable authority.
+When the program has a credible project use, the user or foreground agent may save and publish it directly. One reusable computation becomes a typed script. Work that needs named phases, durable progress, corrections between phases, or resume becomes a workflow. Skills remain portable instructional context that can teach when and how to use these primitives without silently installing executable authority.
 
-Scripts and workflows remain ordinary editable files. Executions pin immutable revisions, and SQLite records code, nested calls, workflow runs, and phases. A later correction resumes from completed work rather than replaying it, while protected code—not generated content—retains authority over promotion and permission.
+Scripts and workflows remain ordinary editable files. Once published, they are immediately usable through `execute` under the existing catalog, Broker, and permissions. Executions pin immutable revisions, and SQLite records code, nested calls, workflow runs, and phases. A later correction resumes from completed work rather than replaying it. Reflection observes outcomes; only broader learned or global consolidation requires protected evaluation and activation.

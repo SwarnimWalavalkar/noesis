@@ -221,9 +221,11 @@ export function decodeCodeExecution(row: unknown): CodeExecutionRecord {
 }
 
 export function decodeWorkflowRun(row: unknown): WorkflowRunRecord {
+  const projectId = optionalString(row, "project_id");
   const turnId = optionalString(row, "turn_id");
   const catalogId = optionalString(row, "catalog_id");
   const catalogDigest = optionalString(row, "catalog_digest");
+  const definitionDependenciesDigest = optionalString(row, "definition_dependencies_digest");
   const permissionDigest = optionalString(row, "permission_digest");
   const provider = optionalString(row, "provider");
   const model = optionalString(row, "model");
@@ -233,11 +235,15 @@ export function decodeWorkflowRun(row: unknown): WorkflowRunRecord {
   const completedAt = optionalString(row, "completed_at");
   return {
     runId: requiredString(row, "run_id"),
+    ...(projectId === undefined ? {} : { projectId }),
     workflowName: requiredString(row, "workflow_name"),
     workflowRevision: requiredNumber(row, "workflow_revision"),
     definitionRevisionId: requiredString(row, "definition_revision_id"),
     ...(catalogId === undefined ? {} : { catalogId }),
     ...(catalogDigest === undefined ? {} : { catalogDigest }),
+    ...(definitionDependenciesDigest === undefined
+      ? {}
+      : { definitionDependenciesDigest: DigestSchema.parse(definitionDependenciesDigest) }),
     ...(permissionDigest === undefined ? {} : { permissionDigest }),
     ...(provider === undefined ? {} : { provider }),
     ...(model === undefined ? {} : { model }),

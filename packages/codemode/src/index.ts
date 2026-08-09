@@ -371,6 +371,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                   : invocationValue(
                       await options.broker.invoke(message.name, message.input, {
                         executionId,
+                        parentExecutionId: executionId,
                         logicalExecutionId,
                         callId,
                         sessionId: request.sessionId,

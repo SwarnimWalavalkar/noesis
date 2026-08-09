@@ -73,7 +73,7 @@ Noesis should work with the user when the work is ambiguous, intellectual, explo
 
 ### Self-improvement as a legible collaboration
 
-Noesis may change prompts, skills, tools, toolsets, routing, and generated code. The ability to mutate is not itself product value. A useful adaptation connects observed friction to a bounded hypothesis, concrete change, evidence, anticipated future use, and a retain, revise, or revert outcome.
+Noesis may change prompts, skills, tools, toolsets, routing, and generated code. The ability to mutate is not itself product value. An explicit project-local script or workflow may be published and used immediately when it helps the current work. Broader learned or global adaptation connects observed friction to a bounded hypothesis, concrete change, evidence, anticipated future use, and a retain, revise, or revert outcome.
 
 The result should feel magical because useful changes happen ambiently, but never mysterious because the user can inspect, contest, pin, or reverse them.
 
@@ -88,13 +88,13 @@ The result should feel magical because useful changes happen ambiently, but neve
 7. **Make adaptation legible and contestable.** The user can see what changed, why, where it applies, what evidence supported it, and how to contest or revert it.
 8. **Use ambition to deepen the promise.** New models, tools, interfaces, and research mechanisms should strengthen the compounding partnership rather than multiply disconnected surfaces.
 9. **Let evidence revise the product.** The persona, interaction patterns, scopes, continuity choices, and autonomy defaults remain falsifiable through real use.
-10. **Keep authority outside generated behavior.** Generated content may propose and implement candidate behavior. Permission, evaluation integrity, activation, promotion, and rollback remain protected.
+10. **Keep authority outside generated behavior.** Generated content may publish project-local scripts and workflows under current authority and may propose broader behavior. Permission, evaluation integrity, activation, promotion, and rollback remain protected.
 
 ## Non-goals
 
 - **Not a generic agent that wins by supporting the most isolated tasks.** Breadth matters only when it strengthens a real collaboration or tests a relevant hypothesis.
 - **Not a warehouse of sessions, memories, prompts, and generated code.** Accumulation and retrieval volume are not evidence of compounding.
-- **Not an opaque autonomous self-rewriter.** A change without provenance, anticipated use, evaluation, and reversibility is drift.
+- **Not an opaque autonomous self-rewriter.** Project-local programs need provenance and reversibility. Broader learned or global changes also need anticipated use and evaluation.
 - **Not a research demonstration detached from sustained utility.** Novelty does not replace voluntary repeated use, better work, stronger understanding, or reduced re-explanation.
 - **Not a productivity system that optimizes the user out of the loop.** Execution that consistently weakens judgment or learning conflicts with the product promise.
 - **Not a forced four-mode workflow.** A session may use one orientation, blend several, or simply complete a task.

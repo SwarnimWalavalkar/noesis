@@ -15,13 +15,6 @@ const rememberInput = z.strictObject({
 });
 const adaptInput = z.discriminatedUnion("action", [
   z.strictObject({
-    action: z.literal("propose"),
-    target: z.enum(["prompt", "skill", "tool", "script", "workflow", "toolset", "router", "tui"]),
-    change: z.string().trim().min(1).max(16_384),
-    scope: z.string().trim().min(1).max(512),
-    rationale: z.string().trim().min(1).max(4_096),
-  }),
-  z.strictObject({
     action: z.literal("add_tool"),
     tool: z.string().trim().min(1).max(128),
   }),
@@ -115,7 +108,7 @@ export function createPiSelfTools(input: {
   readonly catalog?: PiFrozenToolCatalog;
   readonly applyHotbar: (canonicalToolNames: readonly string[]) => Promise<void>;
 }): readonly AgentTool[] {
-  return Object.freeze([
+  const semanticTools = [
     directTool({
       name: "inspect_self",
       label: "Inspect self",
@@ -142,11 +135,16 @@ export function createPiSelfTools(input: {
       execute: async (parameters, signal) =>
         await input.adapter.remember({ ...parameters, plan: input.plan, signal }),
     }),
+  ];
+  const catalog = input.catalog;
+  if (!catalog) return Object.freeze(semanticTools);
+  return Object.freeze([
+    ...semanticTools,
     directTool({
       name: "adapt",
-      label: "Adapt",
+      label: "Adapt toolbox",
       description:
-        "Change the direct-tool hotbar immediately with add_tool or remove_tool, or propose a scoped behavior change for reflection and evaluation. Tool names are the canonical names shown by inspect_self(section: 'tools'). Hotbar changes never widen the frozen catalog or permissions; proposals never self-promote.",
+        "Change the direct-tool hotbar immediately with add_tool or remove_tool. Tool names are the canonical names shown by inspect_self(section: 'tools'). To create a new executable capability, use execute with scripts.save for one reusable program or workflows.save for durable phases, then verify it immediately. Hotbar changes never widen the frozen catalog or permissions.",
       schema: adaptInput,
       signal: input.signal,
       execute: async (parameters, signal) =>
@@ -155,7 +153,7 @@ export function createPiSelfTools(input: {
           plan: input.plan,
           signal,
           applyHotbar: input.applyHotbar,
-          ...(input.catalog ? { catalog: input.catalog } : {}),
+          catalog,
         }),
     }),
   ]);

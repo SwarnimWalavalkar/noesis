@@ -41,24 +41,28 @@ Code may record facts such as a failed tool, cancellation, latency, or explicit 
 
 An experiment names its anticipated future use, explains why its scope is the narrowest supported by the evidence, and records conditions that would make it stale or contradicted. A broader scope requires distinct recurring evidence; a one-off observation cannot silently become a global rule.
 
-The `remember` tool remains the direct way to record an explicit durable instruction. Ambient reflection may propose broader learning, but protected evaluation and activation still control whether executable behavior changes.
+The `remember` tool remains the direct way to record an explicit durable instruction. Ambient reflection may propose broader learning, but protected evaluation and activation control only broader learned executable behavior, not explicit foreground publication of a project-local program.
 
 ## Direct tool hotbar
 
-The foreground model always has:
+For an admitted turn, the foreground model has:
 
 - `inspect_self`
 - `remember`
-- `adapt`
-- `execute`
+
+When that turn also has a prepared executable tool catalog, it has:
+
+- `adapt`, which changes the direct-tool hotbar
+- `execute`, which invokes and composes tools from that catalog
 
 The default hotbar also contains:
 
 - `file_read`, backed by `files.read`
 - `list_dir`, backed by `files.list`
 - `shell`, backed by `shell.run`
+- `workflows_run`, backed by `workflows.run`
 
-These common tools avoid unnecessary JavaScript for ordinary work. `execute` remains available when the model needs to discover tools or combine several calls. The model can also use it for loops and reusable programs.
+These common tools avoid unnecessary JavaScript for ordinary work. `execute` remains available when the model needs to discover tools or combine several calls. Its description carries a bounded, frozen index of saved project workflow names and descriptions; full schemas stay behind `workflows.describe`. The model can also use `execute` for loops and reusable programs.
 
 `adapt` has two immediate actions:
 
@@ -67,7 +71,13 @@ These common tools avoid unnecessary JavaScript for ordinary work. `execute` rem
 
 The change is available on the next model step in the same turn. Noesis saves it to `~/.noesis/config.json` for later turns. It only changes which available tools are direct. It does not widen the frozen catalog or protected authority.
 
-`adapt` also keeps its `propose` action for scoped changes to prompts, skills, tools, scripts, workflows, routing, or the TUI. Proposals remain evidence for reflection and evaluation. They do not promote themselves.
+`adapt` changes only the direct-tool hotbar. New executable project capabilities are created through `execute` with `scripts.save` or `workflows.save`; they do not enter a proposal queue. Ambient reflection may separately use their outcomes as evidence for broader learned changes.
+
+## Foreground project adaptation
+
+When explicit project work produces a reusable program, the foreground agent may save and publish a project-local script or workflow without waiting for reflection or evaluation. It is immediately usable through the generic runners in the frozen Tool Catalog, under the same Broker and permissions. On the next frozen turn, each saved workflow also has a typed, project-qualified catalog entry. The compact workflow index names that exact entry; pinning it with `adapt` exposes a friendly `workflow_<name>` direct tool. This remains a thin interface over the same workflow runner and immutable revision, and a pin from one project cannot silently retarget to a same-named workflow in another. The editable definition remains inspectable, executions pin immutable revisions, and the user can inspect, edit, or replace it while prior revisions remain preserved.
+
+Reflection observes runs and feedback. The experiment and protected activation path is required only when evidence supports consolidating the local program into broader learned or global behavior. A project-local program cannot change permissions, evaluation, activation, rollback, or any other protected control-plane rule.
 
 ## Current boundary
 

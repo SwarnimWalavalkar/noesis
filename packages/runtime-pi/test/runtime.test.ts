@@ -5,7 +5,7 @@ import {
   type FrozenTurnPlan,
   frozenTurnPlanDigest,
 } from "@noesis/agent-types";
-import { type FileRevisionRef, type JsonValue, sha256, toJsonValue } from "@noesis/domain";
+import { canonicalJson, type FileRevisionRef, type JsonValue, sha256, toJsonValue } from "@noesis/domain";
 import type { SessionToolDefinition, SessionToolName } from "@noesis/intelligence";
 import { describe, expect, test, vi } from "vitest";
 import { z } from "zod";
@@ -14,14 +14,20 @@ import {
   createHotbarToolAliases,
   createPiAgentRuntime,
   createPiExecuteTool,
+  createPiHotbarTools,
   createPiSelfTools,
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
+  isProjectWorkflowToolForProject,
+  isProjectWorkflowToolName,
   type PiCodeExecutionAdapter,
   type PiFrozenToolCatalog,
   type PiSelfToolAdapter,
   type PiSkillLibrary,
+  PROJECT_WORKFLOW_TOOL_ADAPTER_REVISION,
   type PreparedPiCodeExecution,
+  projectWorkflowExecutionCatalogDigest,
+  projectWorkflowToolName,
   reconcileHotbarTools,
   resolveFrozenSessionToolDefinitions,
   resolvePiSkillInvocation,
@@ -184,6 +190,17 @@ describe("agent runtime factories", () => {
     });
   });
 
+  test("recognizes exact project workflow tool identities", () => {
+    const alpha = projectWorkflowToolName("project_alpha", "summarize");
+    const beta = projectWorkflowToolName("project_beta", "summarize");
+
+    expect(isProjectWorkflowToolName(alpha)).toBe(true);
+    expect(isProjectWorkflowToolForProject("project_alpha", alpha)).toBe(true);
+    expect(isProjectWorkflowToolForProject("project_alpha", beta)).toBe(false);
+    expect(isProjectWorkflowToolName("workflows.run")).toBe(false);
+    expect(isProjectWorkflowToolName("workflow.not-a-digest.summarize")).toBe(false);
+  });
+
   test("assigns injective catalog aliases without shadowing core tools", () => {
     const catalog: PiFrozenToolCatalog = Object.freeze({
       catalogId: "catalog-aliases",
@@ -210,6 +227,88 @@ describe("agent runtime factories", () => {
     expect(values).not.toContain("adapt");
     expect(values).not.toContain("execute");
     expect([...createHotbarToolAliases(catalog)]).toEqual([...aliases]);
+  });
+
+  test("keeps scalar and array workflow hotbar parameters object-shaped", async () => {
+    const scalarName = projectWorkflowToolName("project_hotbar_schema", "scalar");
+    const arrayName = projectWorkflowToolName("project_hotbar_schema", "array");
+    const catalog: PiFrozenToolCatalog = Object.freeze({
+      catalogId: "catalog-workflow-hotbar-schema",
+      catalogDigest: sha256("catalog-workflow-hotbar-schema"),
+      tools: Object.freeze([
+        Object.freeze({
+          name: scalarName,
+          label: "scalar",
+          description: "Run a scalar workflow",
+          revisionId: "tool-workflow-scalar-v1",
+          inputSchema: Object.freeze({
+            type: "object",
+            properties: Object.freeze({ input: Object.freeze({ type: "number" }) }),
+            required: Object.freeze(["input"]),
+            additionalProperties: false,
+          }),
+          outputSchema: Object.freeze({ type: "number" }),
+        }),
+        Object.freeze({
+          name: arrayName,
+          label: "array",
+          description: "Run an array workflow",
+          revisionId: "tool-workflow-array-v1",
+          inputSchema: Object.freeze({
+            type: "object",
+            properties: Object.freeze({
+              input: Object.freeze({ type: "array", items: Object.freeze({ type: "number" }) }),
+            }),
+            required: Object.freeze(["input"]),
+            additionalProperties: false,
+          }),
+          outputSchema: Object.freeze({ type: "array", items: Object.freeze({ type: "number" }) }),
+        }),
+      ]),
+    });
+    const invocations: Array<{ readonly name: string; readonly input: JsonValue }> = [];
+    const prepared: PreparedPiCodeExecution = Object.freeze({
+      catalog,
+      invoke: async (name: string, input: JsonValue) => {
+        invocations.push(Object.freeze({ name, input }));
+        return input;
+      },
+      execute: async () => Object.freeze({ executionId: "unused", value: null, calls: 0, durationMs: 0 }),
+      close: async () => undefined,
+    });
+    const tools = createPiHotbarTools({
+      prepared,
+      turnId: "turn-workflow-hotbar-schema",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+    });
+    const scalar = tools.find((tool) => tool.name === "workflow_scalar");
+    const array = tools.find((tool) => tool.name === "workflow_array");
+    if (!scalar || !array) throw new Error("Expected friendly workflow hotbar aliases");
+
+    await scalar.execute("scalar-call", { input: 7 });
+    await array.execute("array-call", { input: [1, 2, 3] });
+
+    expect(invocations).toEqual([
+      { name: scalarName, input: { input: 7 } },
+      { name: arrayName, input: { input: [1, 2, 3] } },
+    ]);
+    await expect(scalar.execute("invalid-scalar-call", 7)).rejects.toThrow();
+    await expect(array.execute("invalid-array-call", [1, 2, 3])).rejects.toThrow();
+  });
+
+  test("pins the saved-workflow adapter revision into workflow execution catalogs", () => {
+    const tools = Object.freeze([Object.freeze({ name: "files.read", revisionId: "tool-read-v1" })]);
+
+    expect(projectWorkflowExecutionCatalogDigest(tools)).toBe(
+      sha256(
+        canonicalJson({
+          tools,
+          savedWorkflowAdapterRevision: PROJECT_WORKFLOW_TOOL_ADAPTER_REVISION,
+        }),
+      ),
+    );
+    expect(projectWorkflowExecutionCatalogDigest(tools)).not.toBe(sha256(canonicalJson(tools)));
   });
 
   test("aggregates authoritative Pi text deltas across tool-loop assistant messages", () => {
@@ -571,8 +670,10 @@ describe("agent runtime factories", () => {
     expect(byteBounded.description).toContain("return await noesis.search(query)");
     expect(byteBounded.description).toContain("return await noesis.describe(exactName)");
     expect(byteBounded.description).toContain("do not return that value to you");
-    expect(byteBounded.description).toContain("prefer scripts.save over a loose helper file");
-    expect(byteBounded.description).toContain("verify it immediately with scripts.run");
+    expect(byteBounded.description).toContain("a reusable project-local program would materially help");
+    expect(byteBounded.description).toContain("script with scripts.save");
+    expect(byteBounded.description).toContain("Do not defer executable project-local work");
+    expect(byteBounded.description).toContain("Verify a new script immediately with scripts.run");
     expect(byteBounded.description).toContain("store(key, value)");
     expect(executions).toBe(0);
   });
@@ -695,6 +796,7 @@ describe("agent runtime factories", () => {
     const inspect = tools.find((tool) => tool.name === "inspect_self");
     const remember = tools.find((tool) => tool.name === "remember");
     if (!inspect || !remember) throw new Error("Expected direct self tools");
+    expect(tools.map((tool) => tool.name)).toEqual(["inspect_self", "remember"]);
 
     await expect(inspect.execute("inspect", {})).rejects.toThrow("result exceeds");
     expect(observedSignal).toBeDefined();
@@ -756,6 +858,47 @@ describe("agent runtime factories", () => {
     expect(inspectedCatalog).toBe(catalog);
     expect(result.content).toEqual([{ type: "text", text: JSON.stringify(catalog) }]);
     expect(inspect.description).toContain("exact frozen tool names");
+  });
+
+  test("keeps adapt focused on immediate toolbox changes and rejects proposal red tape", async () => {
+    const plan = frozenPlan();
+    const tools = createPiSelfTools({
+      plan,
+      request: {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "Create a reusable tool.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      signal: new AbortController().signal,
+      catalog: emptyCatalog("catalog-adapt-contract"),
+      applyHotbar: async () => undefined,
+      adapter: {
+        hotbar: async () => Object.freeze([]),
+        inspect: async () => null,
+        remember: async () => null,
+        adapt: async () => null,
+      },
+    });
+    const adapt = tools.find((tool) => tool.name === "adapt");
+    if (!adapt) throw new Error("Expected adapt tool");
+
+    expect(adapt.description).toContain("scripts.save");
+    expect(adapt.description).toContain("workflows.save");
+    expect(adapt.description).not.toContain("propose");
+    await expect(
+      adapt.execute("proposal", {
+        action: "propose",
+        target: "tool",
+        change: "Add a tool",
+        scope: "project",
+        rationale: "Useful",
+      }),
+    ).rejects.toThrow();
   });
 
   test("activates a catalog tool through adapt for the next model step in the same turn", async () => {

@@ -9,7 +9,8 @@
 - Start new learning at the narrowest plausible scope. Every durable learning names its anticipated future use, and recurring evidence is required before its scope broadens.
 - Run reflection ambiently after useful work. `no_change` is a valid result, and not every session must compound.
 - Keep every adaptation inspectable, contestable, and revertible. Normal workflows stay conversational instead of becoming approval dialogs.
-- Generated content may propose a change, but protected promotion remains outside generated or self-modifiable content.
+- An explicit foreground task may publish a project-local script or workflow and use it immediately through `execute` under the current authority. Do not force this path through reflection, a candidate, or evaluation. Reflection observes its results; broader learned or global consolidation still uses protected evaluation and activation.
+- Generated content may create project-local executable definitions, but it cannot modify the protected control plane or approve broader promotion.
 - Keep durable product doctrine under `docs/`. Keep implementation plans under `plans/`.
 
 ## Architecture
@@ -33,7 +34,7 @@
 
 ## Protected control plane
 
-- Reflection may propose memory, knowledge, workflows, cases, or candidates. It must never promote executable behavior.
+- Reflection may propose memory, knowledge, workflows, cases, or candidates. It must never promote broader learned executable behavior. Explicit foreground publication of a project-local script or workflow is not promotion.
 - Permission, evaluation, workspace integrity, activation, promotion, and rollback rules stay outside generated or self-modifiable content.
 - All side effects and protected promotion, rollback, and scheduling transitions go through `AuthorityBoundary` and `EffectGateway`. Ordinary callers never install grants or mint receipts.
 - Reserve grant use and cost durably in authoritative operational state before execution. Rehydrate reservations and completions from SQLite and fail closed when a reservation has no unambiguous outcome.

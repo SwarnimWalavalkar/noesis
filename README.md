@@ -45,6 +45,8 @@ The ability to change is only the beginning. A useful change needs a reason, a s
 
 Not every session needs to change the harness. A trace may contain no durable lesson. That is a successful outcome.
 
+Explicit project work has a shorter path. Noesis can save a useful script or workflow as an inspectable project-local program and use it immediately through `execute`. Reflection can learn from later runs, but evaluation is required only before consolidating that program into broader learned behavior.
+
 Every lasting change should remain open to inspection. You should be able to ask what changed, why it changed, where it applies, which evidence supported it, and how to undo it.
 
 ## How it works
@@ -53,7 +55,7 @@ Noesis separates behavior that may evolve from code that protects the user and t
 
 Instructions, knowledge, capabilities, and programs may change. A person or the agent can inspect and edit these resources.
 
-Protected code controls permissions and durable state. It also controls evaluation, activation, and rollback. Generated content may propose a change, but it cannot approve itself or grant itself more authority.
+Protected code controls permissions and durable state. It also controls evaluation, activation, and rollback. Generated content may publish project-local scripts and workflows under existing authority, but it cannot change the control plane, approve broader learned behavior, or grant itself more authority.
 
 Noesis records exact revisions when a session or experiment depends on them. This makes it possible to understand which version produced a result and to return to an earlier version.
 
@@ -63,6 +65,8 @@ The harness also separates different ways of extending the agent:
 - Skills teach the agent how and when to use its capabilities.
 - Scripts turn useful code into reusable programs.
 - Workflows connect programs into longer work that can pause and resume.
+
+Project-local scripts and workflows are ordinary editable definitions with immutable execution revisions. Saving one publishes it for immediate use through generic runners in the same tool catalog, broker, and permissions as other execution.
 
 Noesis currently runs locally and provides a terminal interface. It uses a language model to interpret, create, reflect, and judge. Dependable code retains control over permissions and changes to active behavior.
 

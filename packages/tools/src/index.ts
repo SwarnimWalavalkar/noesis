@@ -37,6 +37,8 @@ export type ToolVisibility = "always" | "codemode_only";
 
 export interface ToolExecutionContext {
   readonly executionId: string;
+  /** Durable codemode execution that owns this call; absent for direct Broker invocations. */
+  readonly parentExecutionId?: string;
   readonly logicalExecutionId: string;
   readonly callId: string;
   readonly sessionId: string;

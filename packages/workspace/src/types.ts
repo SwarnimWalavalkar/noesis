@@ -127,11 +127,14 @@ export interface CodeExecutionRecord {
 
 export interface WorkflowRunRecord {
   readonly runId: string;
+  /** Absent only for runs created before project ownership was persisted. */
+  readonly projectId?: string;
   readonly workflowName: string;
   readonly workflowRevision: number;
   readonly definitionRevisionId: string;
   readonly catalogId?: string;
   readonly catalogDigest?: string;
+  readonly definitionDependenciesDigest?: string;
   readonly permissionDigest?: string;
   readonly provider?: string;
   readonly model?: string;
@@ -699,6 +702,7 @@ export interface OperationalRepositories {
     readonly claimPausedRun: (
       runId: string,
       sessionId: string,
+      projectId: string,
       claimedAt: string,
     ) => Promise<WorkflowRunRecord | undefined>;
     readonly listRunsForSession: (sessionId: string) => Promise<readonly WorkflowRunRecord[]>;

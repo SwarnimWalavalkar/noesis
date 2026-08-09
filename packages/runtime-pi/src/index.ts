@@ -388,7 +388,9 @@ export function createPiAgentRuntime(
         ? createHotbarToolAliases(preparedCode.catalog)
         : new Map<string, string>();
       const activeNames = (canonicalNames: readonly string[]): string[] => [
-        ...(plan && options.selfTools ? ["inspect_self", "remember", "adapt"] : []),
+        ...(plan && options.selfTools
+          ? ["inspect_self", "remember", ...(preparedCode ? ["adapt"] : [])]
+          : []),
         ...(preparedCode
           ? [
               "execute",
