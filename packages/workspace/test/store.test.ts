@@ -119,7 +119,7 @@ const seedWorkspaceThroughMigration32 = async (
 const seedLegacyWorkflowDependencyRun = (
   database: DatabaseSync,
   suffix: string,
-  definitionDependenciesDigest: string,
+  definitionDependenciesDigest: string | Uint8Array,
 ): { readonly runId: string } => {
   const sessionId = `session-workflow-digest-${suffix}`;
   const revisionId = `revision-workflow-digest-${suffix}`;
@@ -1042,6 +1042,40 @@ describe("WorkspaceStore", () => {
       ).toThrow();
     }
 
+    const database = new DatabaseSync(store.unsafeDatabasePathForTesting);
+    database.exec("PRAGMA busy_timeout = 5000");
+    const blobDigest = Buffer.from(digest("a"));
+    expect(() =>
+      database
+        .prepare(
+          `INSERT INTO workflow_runs(
+            run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
+            definition_dependencies_digest, session_id, status, current_phase, input_json,
+            created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "workflow-run-blob-digest",
+          "project-workflow-digest",
+          "digest",
+          1,
+          definitionRevision.revisionId,
+          blobDigest,
+          "session-workflow-digest",
+          "running",
+          0,
+          "{}",
+          "2026-07-26T00:00:00.000Z",
+          "2026-07-26T00:00:00.000Z",
+        ),
+    ).toThrow(/64 lowercase hexadecimal ASCII bytes|cannot store BLOB value in TEXT column/iu);
+    expect(() =>
+      database
+        .prepare("UPDATE workflow_runs SET definition_dependencies_digest = ? WHERE run_id = ?")
+        .run(blobDigest, "workflow-run-valid-digest"),
+    ).toThrow(/64 lowercase hexadecimal ASCII bytes|cannot store BLOB value in TEXT column/iu);
+    database.close();
+
     store.close();
   });
 
@@ -1134,6 +1168,78 @@ describe("WorkspaceStore", () => {
         )
         .get(),
     ).toBeUndefined();
+    database.close();
+  });
+
+  test("aborts migration 33 when an older workspace contains a BLOB workflow dependency digest", async () => {
+    const root = await temporary("workflow-definition-dependency-blob-upgrade");
+    const seeded = await seedWorkspaceThroughMigration32(root);
+    const schemaRow = seeded.database
+      .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'workflow_runs'")
+      .get();
+    const strictSchemaSql =
+      schemaRow && typeof schemaRow === "object" ? Reflect.get(schemaRow, "sql") : undefined;
+    if (typeof strictSchemaSql !== "string") throw new Error("Expected workflow_runs schema SQL");
+    const relaxedSchemaSql = strictSchemaSql.replace(/\s+STRICT$/u, "");
+    if (relaxedSchemaSql === strictSchemaSql) throw new Error("Expected a strict workflow_runs table");
+    const replaceWorkflowSchema = (database: DatabaseSync, sql: string): void => {
+      const versionRow = database.prepare("PRAGMA schema_version").get();
+      const version =
+        versionRow && typeof versionRow === "object" ? Reflect.get(versionRow, "schema_version") : undefined;
+      if (typeof version !== "number") throw new Error("Expected a numeric SQLite schema version");
+      database.exec("PRAGMA writable_schema = ON");
+      database.prepare("UPDATE sqlite_schema SET sql = ? WHERE name = 'workflow_runs'").run(sql);
+      database.exec(`PRAGMA schema_version = ${String(version + 1)}`);
+      database.exec("PRAGMA writable_schema = OFF");
+    };
+    replaceWorkflowSchema(seeded.database, relaxedSchemaSql);
+    seeded.database.close();
+
+    const corrupt = new DatabaseSync(seeded.databasePath);
+    const blobDigest = Buffer.from(digest("a"));
+    const legacy = seedLegacyWorkflowDependencyRun(corrupt, "blob-upgrade", blobDigest);
+    replaceWorkflowSchema(corrupt, strictSchemaSql);
+    corrupt.close();
+
+    const database = new DatabaseSync(seeded.databasePath);
+    expect(
+      database
+        .prepare(
+          `SELECT typeof(definition_dependencies_digest) AS storage_class
+           FROM workflow_runs WHERE run_id = ?`,
+        )
+        .get(legacy.runId),
+    ).toEqual({ storage_class: "blob" });
+    const migration = await readFile(
+      new URL("../migrations/033_workflow_definition_dependency_digest.sql", import.meta.url),
+      "utf8",
+    );
+    let migrationError: unknown;
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.exec(migration);
+      database
+        .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+        .run(33, "033_workflow_definition_dependency_digest.sql", "2026-07-26T00:00:01.000Z");
+      database.exec("COMMIT");
+    } catch (error) {
+      migrationError = error;
+      database.exec("ROLLBACK");
+    }
+
+    expect(migrationError).toBeInstanceOf(Error);
+    expect(String(migrationError)).toMatch(/check constraint failed/iu);
+    expect(database.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
+      version: 32,
+    });
+    expect(
+      database
+        .prepare(
+          `SELECT typeof(definition_dependencies_digest) AS storage_class
+           FROM workflow_runs WHERE run_id = ?`,
+        )
+        .get(legacy.runId),
+    ).toEqual({ storage_class: "blob" });
     database.close();
   });
 

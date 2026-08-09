@@ -9,7 +9,8 @@ SELECT CASE
     FROM workflow_runs
     WHERE definition_dependencies_digest IS NOT NULL
       AND (
-        length(CAST(definition_dependencies_digest AS BLOB)) != 64
+        typeof(definition_dependencies_digest) != 'text'
+        OR length(CAST(definition_dependencies_digest AS BLOB)) != 64
         OR EXISTS (
           WITH RECURSIVE byte_positions(position) AS (
             SELECT 1
@@ -37,7 +38,8 @@ CREATE TRIGGER workflow_definition_dependency_digest_insert
 BEFORE INSERT ON workflow_runs
 WHEN NEW.definition_dependencies_digest IS NOT NULL
   AND (
-    length(CAST(NEW.definition_dependencies_digest AS BLOB)) != 64
+    typeof(NEW.definition_dependencies_digest) != 'text'
+    OR length(CAST(NEW.definition_dependencies_digest AS BLOB)) != 64
     OR EXISTS (
       WITH RECURSIVE byte_positions(position) AS (
         SELECT 1
@@ -56,14 +58,15 @@ WHEN NEW.definition_dependencies_digest IS NOT NULL
     )
   )
 BEGIN
-  SELECT RAISE(ABORT, 'Workflow definition dependency digest must be 64 lowercase hexadecimal ASCII bytes');
+  SELECT RAISE(ABORT, 'Workflow definition dependency digest must be stored as 64 lowercase hexadecimal ASCII bytes');
 END;
 
 CREATE TRIGGER workflow_definition_dependency_digest_update
 BEFORE UPDATE OF definition_dependencies_digest ON workflow_runs
 WHEN NEW.definition_dependencies_digest IS NOT NULL
   AND (
-    length(CAST(NEW.definition_dependencies_digest AS BLOB)) != 64
+    typeof(NEW.definition_dependencies_digest) != 'text'
+    OR length(CAST(NEW.definition_dependencies_digest AS BLOB)) != 64
     OR EXISTS (
       WITH RECURSIVE byte_positions(position) AS (
         SELECT 1
@@ -82,5 +85,5 @@ WHEN NEW.definition_dependencies_digest IS NOT NULL
     )
   )
 BEGIN
-  SELECT RAISE(ABORT, 'Workflow definition dependency digest must be 64 lowercase hexadecimal ASCII bytes');
+  SELECT RAISE(ABORT, 'Workflow definition dependency digest must be stored as 64 lowercase hexadecimal ASCII bytes');
 END;
