@@ -11,6 +11,7 @@ import {
   type DurableAuthorityOperation,
   type DurableAuthorityReservation,
   type DurableAuthorityStatePort,
+  type ProtectedAuthorityExecutionOptions,
 } from "@noesis/policy";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "../src/index.ts";
@@ -227,10 +228,11 @@ describe("protected workspace runtime", () => {
         resource: string,
         idempotencyKey: string,
         execute: (receipt: AuthorityReceipt) => Promise<Result>,
+        options?: ProtectedAuthorityExecutionOptions,
       ) => {
         markAuthorityEntered?.();
         await authorityBlocked;
-        return await authority.promote(resource, idempotencyKey, execute);
+        return await authority.promote(resource, idempotencyKey, execute, options);
       };
       return Object.freeze({
         ...authority,
@@ -238,8 +240,9 @@ describe("protected workspace runtime", () => {
       });
     });
     const controller = new AbortController();
+    const candidate = adjustment("adjustment-cancelled-during-authority");
     const pending = runtime.workingAdjustments.apply({
-      adjustment: adjustment("adjustment-cancelled-during-authority"),
+      adjustment: candidate,
       expectedActiveAdjustmentId: null,
       signal: controller.signal,
     });
@@ -250,6 +253,105 @@ describe("protected workspace runtime", () => {
 
     await expect(pending).rejects.toThrow("cancelled before protected state changed");
     expect(mutations.applyCalls()).toBe(0);
+    await expect(mutations.store.getActive(project.projectId)).resolves.toBeUndefined();
+
+    await expect(
+      runtime.workingAdjustments.apply({
+        adjustment: candidate,
+        expectedActiveAdjustmentId: null,
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ status: "applied", replacedAdjustmentId: null });
+    expect(mutations.applyCalls()).toBe(1);
+    await expect(mutations.store.getActive(project.projectId)).resolves.toEqual(candidate);
+  });
+
+  test("retries the same unapply after cancellation during authority reservation", async () => {
+    const mutations = mutableWorkingAdjustments();
+    const active = adjustment("adjustment-unapply-cancelled-during-authority");
+    await mutations.store.apply({ adjustment: active, expectedActiveAdjustmentId: null });
+    let markAuthorityEntered: (() => void) | undefined;
+    const authorityEntered = new Promise<void>((resolve) => {
+      markAuthorityEntered = resolve;
+    });
+    let releaseAuthority: (() => void) | undefined;
+    const authorityBlocked = new Promise<void>((resolve) => {
+      releaseAuthority = resolve;
+    });
+    const runtime = await runtimeWithWorkingAdjustments(mutations.store, (authority) => {
+      const rollback: AuthorityBoundary["rollback"] = async <Result extends JsonValue>(
+        resource: string,
+        idempotencyKey: string,
+        execute: (receipt: AuthorityReceipt) => Promise<Result>,
+        options?: ProtectedAuthorityExecutionOptions,
+      ) => {
+        markAuthorityEntered?.();
+        await authorityBlocked;
+        return await authority.rollback(resource, idempotencyKey, execute, options);
+      };
+      return Object.freeze({ ...authority, rollback });
+    });
+    const controller = new AbortController();
+    const pending = runtime.workingAdjustments.unapply({
+      projectId: project.projectId,
+      expectedActiveAdjustmentId: active.adjustmentId,
+      signal: controller.signal,
+    });
+
+    await authorityEntered;
+    controller.abort("cancelled");
+    releaseAuthority?.();
+
+    await expect(pending).rejects.toThrow("cancelled before protected state changed");
+    expect(mutations.unapplyCalls()).toBe(0);
+    await expect(mutations.store.getActive(project.projectId)).resolves.toEqual(active);
+
+    await expect(
+      runtime.workingAdjustments.unapply({
+        projectId: project.projectId,
+        expectedActiveAdjustmentId: active.adjustmentId,
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toEqual({ status: "unapplied", adjustmentId: active.adjustmentId });
+    expect(mutations.unapplyCalls()).toBe(1);
+    await expect(mutations.store.getActive(project.projectId)).resolves.toBeUndefined();
+  });
+
+  test("abandons cancellation detected at the receipt callback boundary", async () => {
+    const mutations = mutableWorkingAdjustments();
+    const controller = new AbortController();
+    let abortAfterAuthorityPreflight = true;
+    const runtime = await runtimeWithWorkingAdjustments(mutations.store, (authority) => {
+      const promote: AuthorityBoundary["promote"] = async <Result extends JsonValue>(
+        resource: string,
+        idempotencyKey: string,
+        execute: (receipt: AuthorityReceipt) => Promise<Result>,
+        options?: ProtectedAuthorityExecutionOptions,
+      ) =>
+        await authority.promote(resource, idempotencyKey, execute, {
+          beforeExecute: () => {
+            options?.beforeExecute?.();
+            if (abortAfterAuthorityPreflight) controller.abort("cancelled after preflight");
+          },
+        });
+      return Object.freeze({ ...authority, promote });
+    });
+    const candidate = adjustment("adjustment-cancelled-at-callback");
+
+    await expect(
+      runtime.workingAdjustments.apply({
+        adjustment: candidate,
+        expectedActiveAdjustmentId: null,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("cancelled before protected state changed");
+    expect(mutations.applyCalls()).toBe(0);
+
+    abortAfterAuthorityPreflight = false;
+    await expect(
+      runtime.workingAdjustments.apply({ adjustment: candidate, expectedActiveAdjustmentId: null }),
+    ).resolves.toMatchObject({ status: "applied" });
+    expect(mutations.applyCalls()).toBe(1);
   });
 
   test("reports a replayed successful apply as stale after the active binding changes", async () => {
@@ -496,6 +598,9 @@ describe("protected workspace runtime", () => {
         terminalWrites += 1;
       },
       fail: async () => {
+        terminalWrites += 1;
+      },
+      abandon: async () => {
         terminalWrites += 1;
       },
     });

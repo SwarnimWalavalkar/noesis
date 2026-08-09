@@ -694,8 +694,20 @@ interface WorkingAdjustmentEvidenceCandidate {
 }
 
 const WORKING_ADJUSTMENT_CONTEXT_MAX_CHARACTERS = 11_999;
-const WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS = Object.freeze({
-  adjustmentIdentity: 256,
+const WORKING_ADJUSTMENT_PROMPT_IDENTITY_LIMIT = 256;
+interface WorkingAdjustmentPromptStringLimits {
+  readonly projectId: number;
+  readonly projectRoot: number;
+  readonly observation: number;
+  readonly strategy: number;
+  readonly successSignal: number;
+  readonly createdFromTurnId: number;
+  readonly evidenceTurnId: number;
+  readonly evidenceSummary: number;
+  readonly evidenceSettledAt: number;
+}
+
+const WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS: WorkingAdjustmentPromptStringLimits = Object.freeze({
   projectId: 256,
   projectRoot: 512,
   observation: 1_024,
@@ -704,80 +716,119 @@ const WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS = Object.freeze({
   createdFromTurnId: 128,
   evidenceTurnId: 128,
   evidenceSummary: 256,
+  evidenceSettledAt: 64,
 });
 
-function boundedPromptString(value: string, maxCharacters: number): string {
-  if (value.length <= maxCharacters) return value;
+const COMPACT_WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS: WorkingAdjustmentPromptStringLimits = Object.freeze({
+  projectId: 17,
+  projectRoot: 17,
+  observation: 17,
+  strategy: 17,
+  successSignal: 17,
+  createdFromTurnId: 17,
+  evidenceTurnId: 17,
+  evidenceSummary: 17,
+  evidenceSettledAt: 17,
+});
+
+function jsonStringContentLength(value: string): number {
+  return JSON.stringify(value).length - 2;
+}
+
+function boundedPromptString(value: string, maxEscapedCharacters: number): string {
+  if (jsonStringContentLength(value) <= maxEscapedCharacters) return value;
   const digest = sha256(value).slice(0, 16);
-  return `${value.slice(0, maxCharacters - digest.length - 1)}…${digest}`;
+  const suffix = `…${digest}`;
+  const suffixLength = jsonStringContentLength(suffix);
+  if (suffixLength > maxEscapedCharacters) return digest.slice(0, maxEscapedCharacters);
+
+  let prefix = "";
+  let prefixLength = 0;
+  const availablePrefixCharacters = maxEscapedCharacters - suffixLength;
+  // Iterating strings yields complete Unicode code points, so the prompt boundary can never split
+  // a valid UTF-16 surrogate pair while accounting for JSON escape expansion.
+  for (const character of value) {
+    const characterLength = jsonStringContentLength(character);
+    if (prefixLength + characterLength > availablePrefixCharacters) break;
+    prefix += character;
+    prefixLength += characterLength;
+  }
+  return `${prefix}${suffix}`;
 }
 
 function workingAdjustmentPromptIdentity(adjustmentId: string | null | undefined): string | null {
   if (adjustmentId === null || adjustmentId === undefined) return null;
-  return boundedPromptString(adjustmentId, WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.adjustmentIdentity);
+  return boundedPromptString(adjustmentId, WORKING_ADJUSTMENT_PROMPT_IDENTITY_LIMIT);
 }
 
 function serializeWorkingAdjustmentContext(input: {
   readonly turn: LearningTurnInput;
   readonly activeAdjustment?: WorkingAdjustment;
   readonly evidence: readonly WorkingAdjustmentEvidenceCandidate[];
-}): string {
-  const content = JSON.stringify({
+}): Readonly<{ content: string; expectedActiveAdjustmentId: string | null }> {
+  const expectedActiveAdjustmentId = workingAdjustmentPromptIdentity(input.turn.expectedActiveAdjustmentId);
+  const projectContext = (
+    limits: WorkingAdjustmentPromptStringLimits,
+    includeEvidenceSummaries: boolean,
+  ) => ({
     project:
       input.turn.project === undefined
         ? null
         : {
-            projectId: boundedPromptString(
-              input.turn.project.projectId,
-              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.projectId,
-            ),
-            root: boundedPromptString(
-              input.turn.project.root,
-              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.projectRoot,
-            ),
+            projectId: boundedPromptString(input.turn.project.projectId, limits.projectId),
+            root: boundedPromptString(input.turn.project.root, limits.projectRoot),
           },
-    expectedActiveAdjustmentId: workingAdjustmentPromptIdentity(input.turn.expectedActiveAdjustmentId),
+    expectedActiveAdjustmentId,
     activeAdjustment:
       input.activeAdjustment === undefined
         ? null
         : {
-            observation: boundedPromptString(
-              input.activeAdjustment.observation,
-              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.observation,
-            ),
-            strategy: boundedPromptString(
-              input.activeAdjustment.strategy,
-              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.strategy,
-            ),
-            successSignal: boundedPromptString(
-              input.activeAdjustment.successSignal,
-              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.successSignal,
-            ),
+            observation: boundedPromptString(input.activeAdjustment.observation, limits.observation),
+            strategy: boundedPromptString(input.activeAdjustment.strategy, limits.strategy),
+            successSignal: boundedPromptString(input.activeAdjustment.successSignal, limits.successSignal),
             createdFromTurnId: boundedPromptString(
               input.activeAdjustment.createdFromTurnId,
-              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.createdFromTurnId,
+              limits.createdFromTurnId,
             ),
           },
     evidence: input.evidence.map((candidate, citationIndex) => ({
       citationIndex,
       kind: candidate.kind,
-      turnId: boundedPromptString(candidate.turnId, WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.evidenceTurnId),
+      turnId: boundedPromptString(candidate.turnId, limits.evidenceTurnId),
       outcome: candidate.outcome,
-      ...(candidate.summary === undefined
+      ...(candidate.summary === undefined || !includeEvidenceSummaries
         ? {}
         : {
-            summary: boundedPromptString(
-              candidate.summary,
-              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.evidenceSummary,
-            ),
+            summary: boundedPromptString(candidate.summary, limits.evidenceSummary),
           }),
-      settledAt: candidate.settledAt,
+      settledAt: boundedPromptString(candidate.settledAt, limits.evidenceSettledAt),
     })),
   });
-  if (content.length > WORKING_ADJUSTMENT_CONTEXT_MAX_CHARACTERS) {
-    throw new Error("Working-adjustment context projection exceeded the reflector message policy");
-  }
-  return content;
+
+  const content = JSON.stringify(projectContext(WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS, true));
+  if (content.length <= WORKING_ADJUSTMENT_CONTEXT_MAX_CHARACTERS)
+    return Object.freeze({ content, expectedActiveAdjustmentId });
+
+  // This compact projection preserves the ordered citation index mapping and digest identity while
+  // ensuring future structural growth cannot turn prompt shaping into a failed reflection job.
+  const compactContent = JSON.stringify(
+    projectContext(COMPACT_WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS, false),
+  );
+  if (compactContent.length <= WORKING_ADJUSTMENT_CONTEXT_MAX_CHARACTERS)
+    return Object.freeze({ content: compactContent, expectedActiveAdjustmentId });
+
+  // Parsed learning turns contain at most one current and eight served evidence candidates. This
+  // final projection is therefore structurally bounded while retaining the exact private citation
+  // indexes and the same expected-adjustment token used by decision validation.
+  return Object.freeze({
+    content: JSON.stringify({
+      project: null,
+      expectedActiveAdjustmentId,
+      activeAdjustment: null,
+      evidence: input.evidence.map((_, citationIndex) => ({ citationIndex })),
+    }),
+    expectedActiveAdjustmentId,
+  });
 }
 
 function workingAdjustmentEvidence(turn: LearningTurnInput): readonly WorkingAdjustmentEvidenceCandidate[] {
@@ -968,7 +1019,14 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       throw new Error("Served working-adjustment evidence does not match the pinned adjustment");
     }
     const adjustmentEvidence = workingAdjustmentEvidence(harvest.turn);
-    const promptExpectedAdjustmentId = workingAdjustmentPromptIdentity(expectedAdjustmentId);
+    const workingAdjustmentContext = serializeWorkingAdjustmentContext({
+      turn: harvest.turn,
+      ...(request.activeWorkingAdjustment === undefined
+        ? {}
+        : { activeAdjustment: request.activeWorkingAdjustment }),
+      evidence: adjustmentEvidence,
+    });
+    const promptExpectedAdjustmentId = workingAdjustmentContext.expectedActiveAdjustmentId;
     const runId = nextId("reflect");
     const messages: readonly AgentMessage[] = [
       {
@@ -1002,13 +1060,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       {
         role: "user",
         name: "working_adjustment_context",
-        content: serializeWorkingAdjustmentContext({
-          turn: harvest.turn,
-          ...(request.activeWorkingAdjustment === undefined
-            ? {}
-            : { activeAdjustment: request.activeWorkingAdjustment }),
-          evidence: adjustmentEvidence,
-        }),
+        content: workingAdjustmentContext.content,
       },
     ];
     const reflected = await options.inference.run(

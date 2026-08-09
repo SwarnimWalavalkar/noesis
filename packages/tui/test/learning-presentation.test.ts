@@ -177,6 +177,17 @@ describe("working-adjustment notice presentation", () => {
     expect(reported).toEqual([]);
   });
 
+  test.each([
+    Object.create(null),
+    Object.freeze({
+      [Symbol.toPrimitive]: () => {
+        throw new Error("conversion failed");
+      },
+    }),
+  ])("keeps unstringifiable learning failures nonfatal", (failure) => {
+    expect(learningDiagnosticNotice(failure)).toBe("learning · unavailable");
+  });
+
   test("reports errors thrown while applying a fulfilled settled presentation", async () => {
     const failure = new Error("dispatch failed");
     const reported: unknown[] = [];

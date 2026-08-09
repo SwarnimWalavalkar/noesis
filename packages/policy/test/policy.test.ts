@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   createEffectExecutionFailure,
   createDurableAuthorityBoundary,
+  createPreEffectExecutionFailure,
   parseEffectExecutionError,
   parseEffectExecutionFailure,
   serializeEffectExecutionFailure,
@@ -13,6 +14,7 @@ import {
 
 interface StoredOperation {
   readonly operation: DurableAuthorityOperation;
+  readonly grantId: string;
   status: "reserved" | "completed" | "failed";
   result?: JsonValue;
   reason?: string;
@@ -64,7 +66,11 @@ function createInMemoryDurableAuthorityState(
     const uses = usedByGrant.get(grant.grantId) ?? 0;
     if (uses >= grant.maxUses) return { status: "denied", reason: "Grant budget exhausted" };
     usedByGrant.set(grant.grantId, uses + 1);
-    operations.set(operation.identity.idempotencyKey, { operation, status: "reserved" });
+    operations.set(operation.identity.idempotencyKey, {
+      operation,
+      grantId: grant.grantId,
+      status: "reserved",
+    });
     return { status: "reserved", grantId: grant.grantId };
   };
   return Object.freeze({
@@ -93,6 +99,23 @@ function createInMemoryDurableAuthorityState(
       if (!stored) throw new Error("Cannot fail an unreserved operation");
       stored.status = "failed";
       stored.reason = reason;
+    },
+    abandon: async ({
+      operation,
+      grantId,
+      discardGrant,
+    }: Parameters<DurableAuthorityStatePort["abandon"]>[0]) => {
+      const stored = operations.get(operation.identity.idempotencyKey);
+      if (
+        !stored ||
+        stored.status !== "reserved" ||
+        stored.operation.fingerprint !== operation.fingerprint ||
+        stored.grantId !== grantId
+      )
+        throw new Error("Cannot abandon an unreserved operation");
+      operations.delete(operation.identity.idempotencyKey);
+      usedByGrant.set(grantId, Math.max(0, (usedByGrant.get(grantId) ?? 0) - 1));
+      if (discardGrant) grants.delete(grantId);
     },
   });
 }
@@ -222,6 +245,40 @@ describe("durable authority boundary", () => {
       code: "invalid_output",
       reason: "Output did not match its schema",
     });
+    expect(executions).toBe(1);
+  });
+
+  test("releases only explicitly pre-effect failures for deterministic retry", async () => {
+    const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
+    let abandonedReceipt: unknown;
+    let executions = 0;
+
+    await expect(
+      authority.promote("capability:retry", "promote:retry", async (receipt): Promise<null> => {
+        abandonedReceipt = receipt;
+        throw createPreEffectExecutionFailure("cancelled", "Cancelled before mutation");
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "cancelled" });
+    expect(
+      authority.receiptVerifier.verify(abandonedReceipt, {
+        effect: "promote",
+        resource: "capability:retry",
+        operationId: receiptOperationId(abandonedReceipt),
+      }),
+    ).toBe(false);
+
+    await expect(
+      authority.promote("capability:retry", "promote:retry", async () => {
+        executions += 1;
+        return null;
+      }),
+    ).resolves.toMatchObject({ ok: true, replayed: false });
+    await expect(
+      authority.promote("capability:retry", "promote:retry", async () => {
+        executions += 1;
+        return null;
+      }),
+    ).resolves.toMatchObject({ ok: true, replayed: true });
     expect(executions).toBe(1);
   });
 

@@ -19,9 +19,11 @@ import type {
   EffectDecision,
   EffectRequest,
   GrantHandle,
+  ProtectedAuthorityExecutionOptions,
 } from "./index.ts";
 import {
   inspectEffectExecutionFailure,
+  inspectPreEffectExecutionFailure,
   parseEffectExecutionError,
   serializeEffectExecutionError,
 } from "./effect-failures.ts";
@@ -67,6 +69,11 @@ export interface DurableAuthorityStatePort {
     readonly grantId: string;
     readonly reason: string;
     readonly receiptLineageId: string;
+  }) => Promise<void>;
+  readonly abandon: (request: {
+    readonly operation: DurableAuthorityOperation;
+    readonly grantId: string;
+    readonly discardGrant: boolean;
   }) => Promise<void>;
 }
 
@@ -160,6 +167,8 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     request: EffectRequest<T>,
     operation: DurableAuthorityOperation,
     reservation: DurableAuthorityReservation,
+    options?: ProtectedAuthorityExecutionOptions,
+    discardGrant = false,
   ): Promise<EffectDecision<T>> => {
     if (reservation.status === "completed")
       return Object.freeze({
@@ -184,6 +193,25 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
         reason: executionFailure?.message ?? reservation.reason,
       });
     }
+    try {
+      options?.beforeExecute?.();
+    } catch (error) {
+      try {
+        await state.abandon({ operation, grantId: reservation.grantId, discardGrant });
+      } catch (abandonError) {
+        return Object.freeze({
+          ok: false,
+          code: "ambiguous" as const,
+          reason: `Pre-execution reservation could not be released: ${abandonError instanceof Error ? abandonError.message : String(abandonError)}`,
+        });
+      }
+      const executionFailure = inspectEffectExecutionFailure(error);
+      return Object.freeze({
+        ok: false,
+        code: executionFailure?.code ?? ("failed" as const),
+        reason: executionFailure?.message ?? (error instanceof Error ? error.message : String(error)),
+      });
+    }
     const lineage = createReceipt(operation);
     try {
       const value = await request.execute(lineage.receipt);
@@ -195,6 +223,24 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
       });
       return Object.freeze({ ok: true, value, replayed: false });
     } catch (error) {
+      const preEffectFailure = inspectPreEffectExecutionFailure(error);
+      if (preEffectFailure) {
+        receipts.delete(lineage.receipt);
+        try {
+          await state.abandon({ operation, grantId: reservation.grantId, discardGrant });
+        } catch (abandonError) {
+          return Object.freeze({
+            ok: false,
+            code: "ambiguous" as const,
+            reason: `Pre-effect reservation could not be released: ${abandonError instanceof Error ? abandonError.message : String(abandonError)}`,
+          });
+        }
+        return Object.freeze({
+          ok: false,
+          code: preEffectFailure.code,
+          reason: preEffectFailure.message,
+        });
+      }
       const executionFailure = inspectEffectExecutionFailure(error);
       const reason = executionFailure?.message ?? (error instanceof Error ? error.message : String(error));
       await state.fail({
@@ -224,10 +270,17 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
   const runWithFreshGrant = async <T extends JsonValue>(
     request: EffectRequest<T>,
     grant: Grant,
+    options?: ProtectedAuthorityExecutionOptions,
   ): Promise<EffectDecision<T>> => {
     assertGrant(grant);
     const operation = operationFromRequest(request);
-    return await settleReservation(request, operation, await state.reserveWithGrant(operation, grant));
+    return await settleReservation(
+      request,
+      operation,
+      await state.reserveWithGrant(operation, grant),
+      options,
+      true,
+    );
   };
 
   const runProtected = async <T extends JsonValue>(
@@ -238,6 +291,7 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     maxUses: number,
     idempotencyKey: string,
     execute: (receipt: AuthorityReceipt) => Promise<T>,
+    options?: ProtectedAuthorityExecutionOptions,
   ): Promise<EffectDecision<T>> => {
     const request = Object.freeze({
       ...authorityOperationFields(principal, effect, resource, cost, idempotencyKey),
@@ -248,22 +302,26 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
       idempotencyKey,
       execute,
     });
-    return await runWithFreshGrant(request, {
-      schemaVersion: 1,
-      grantId: createId("grant"),
-      principal,
-      effects: [effect],
-      resourcePrefixes: [resource],
-      expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      maxUses,
-      maxCost: cost,
-    });
+    return await runWithFreshGrant(
+      request,
+      {
+        schemaVersion: 1,
+        grantId: createId("grant"),
+        principal,
+        effects: [effect],
+        resourcePrefixes: [resource],
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        maxUses,
+        maxCost: cost,
+      },
+      options,
+    );
   };
 
-  const promote: AuthorityBoundary["promote"] = async (resource, idempotencyKey, execute) =>
-    await runProtected("promoter", "promote", resource, 0, 1, idempotencyKey, execute);
-  const rollback: AuthorityBoundary["rollback"] = async (resource, idempotencyKey, execute) =>
-    await runProtected("promoter", "promote", resource, 0, 1, idempotencyKey, execute);
+  const promote: AuthorityBoundary["promote"] = async (resource, idempotencyKey, execute, options) =>
+    await runProtected("promoter", "promote", resource, 0, 1, idempotencyKey, execute, options);
+  const rollback: AuthorityBoundary["rollback"] = async (resource, idempotencyKey, execute, options) =>
+    await runProtected("promoter", "promote", resource, 0, 1, idempotencyKey, execute, options);
   const schedule: AuthorityBoundary["schedule"] = async (resource, idempotencyKey, execute) =>
     await runProtected("foreground", "schedule", resource, 0, 1, idempotencyKey, execute);
 

@@ -4,6 +4,7 @@ import {
   type AuthorityReceipt,
   type AuthorityReceiptVerifier,
   authorityOperationFields,
+  createPreEffectExecutionFailure,
   type EffectDecision,
 } from "@noesis/policy";
 import { z } from "zod";
@@ -284,10 +285,14 @@ async function runAuthorizedResult<Result>(
   mutation: ProtectedMutationBinding,
   schema: z.ZodType<Result>,
   authorityAction: "promote" | "rollback" = "promote",
+  beforeExecute?: () => void,
 ): Promise<Result> {
   const authorize = authorityAction === "rollback" ? authority.rollback : authority.promote;
-  const decision = await authorize(mutation.resource, mutation.idempotencyKey, async (receipt) =>
-    toJsonValue(await guarded(mutation, receipt)),
+  const decision = await authorize(
+    mutation.resource,
+    mutation.idempotencyKey,
+    async (receipt) => toJsonValue(await guarded(mutation, receipt)),
+    beforeExecute === undefined ? undefined : Object.freeze({ beforeExecute }),
   );
   if (!decision.ok) throw decisionFailure(decision);
   return schema.parse(decision.value);
@@ -302,9 +307,10 @@ function workingAdjustmentIdempotencyKey(
 
 function assertWorkingAdjustmentMutationActive(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
-  throw new Error("Working adjustment mutation was cancelled before protected state changed", {
-    cause: signal.reason,
-  });
+  throw createPreEffectExecutionFailure(
+    "cancelled",
+    "Working adjustment mutation was cancelled before protected state changed",
+  );
 }
 
 async function reconcileApplyResult(
@@ -542,6 +548,8 @@ export function createProtectedWorkspaceRuntime(
           }),
         ),
         WorkingAdjustmentApplyResultSchema,
+        "promote",
+        () => assertWorkingAdjustmentMutationActive(request.signal),
       );
       return await reconcileApplyResult(options.workingAdjustments, request, durableResult);
     },
@@ -563,6 +571,7 @@ export function createProtectedWorkspaceRuntime(
         ),
         WorkingAdjustmentUnapplyResultSchema,
         "rollback",
+        () => assertWorkingAdjustmentMutationActive(request.signal),
       );
       return await reconcileUnapplyResult(options.workingAdjustments, request, durableResult);
     },

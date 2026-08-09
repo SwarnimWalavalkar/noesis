@@ -252,6 +252,33 @@ export function createWorkspaceAuthorityBoundary(
           );
       });
     },
+    abandon: async (request: {
+      readonly operation: DurableAuthorityOperation;
+      readonly grantId: string;
+      readonly discardGrant: boolean;
+    }) => {
+      database.transaction(() => {
+        const result = db
+          .prepare(
+            `DELETE FROM authority_operations
+             WHERE operation_id = ? AND operation_fingerprint = ? AND grant_id = ?
+               AND status = 'reserved'`,
+          )
+          .run(request.operation.identity.operationId, request.operation.fingerprint, request.grantId);
+        if (Number(result.changes) !== 1)
+          throw new Error(
+            `Authority operation ${request.operation.identity.operationId} was not releasably reserved`,
+          );
+        if (request.discardGrant)
+          db.prepare(
+            `DELETE FROM authority_grants
+             WHERE grant_id = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM authority_operations WHERE grant_id = authority_grants.grant_id
+               )`,
+          ).run(request.grantId);
+      });
+    },
   });
 
   return createDurableAuthorityBoundary(state);

@@ -49,9 +49,13 @@ export function workingAdjustmentNotice(activity: TuiLearningActivitySummary): s
 
 /** Keep an auxiliary learning failure visible without turning a settled foreground turn into an error. */
 export function learningDiagnosticNotice(error: unknown): string {
-  const detail = safeTerminalText(error instanceof Error ? error.message : String(error))
-    .replaceAll("\n", " ")
-    .slice(0, MAX_DIAGNOSTIC_LENGTH);
+  let message = "";
+  try {
+    message = error instanceof Error ? error.message : String(error);
+  } catch {
+    // Unknown rejection values may not support string conversion. The diagnostic must remain nonfatal.
+  }
+  const detail = safeTerminalText(message).replaceAll("\n", " ").slice(0, MAX_DIAGNOSTIC_LENGTH);
   return `learning · unavailable${detail ? ` · ${detail}` : ""}`;
 }
 
