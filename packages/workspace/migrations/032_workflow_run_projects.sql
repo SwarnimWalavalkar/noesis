@@ -3,9 +3,6 @@ ALTER TABLE workflow_runs
     project_id IS NULL OR length(project_id) > 0
   );
 
-CREATE INDEX workflow_runs_session_project_created
-ON workflow_runs(session_id, project_id, created_at, run_id);
-
 CREATE TRIGGER workflow_run_project_immutable
 BEFORE UPDATE OF project_id
 ON workflow_runs
