@@ -484,11 +484,11 @@
                 <td><strong>Self tool</strong></td>
                 <td>
                   A thin semantic operation for inspecting, remembering, or
-                  proposing a change to Noesis.
+                  changing Noesis's direct-tool hotbar.
                 </td>
                 <td>
                   Directly model-visible; implementation uses existing workspace,
-                  learning, policy, and activation services.
+                  learning, Tool Catalog, and hotbar services.
                 </td>
               </tr>
               <tr>
@@ -586,10 +586,10 @@
         <pre aria-label="Architecture flow">
 Pi AgentHarness
   │
-  ├── inspect_self / remember / adapt ──→ semantic self services
-  │                                         │
-  │                                         └──→ WorkspaceStore + learning /
-  │                                              evaluation / activation
+  ├── inspect_self / remember ──→ semantic self services
+  │                                  └──→ WorkspaceStore + learning
+  │
+  ├── adapt ──→ frozen Tool Catalog selection ──→ active hotbar + persisted preference
   │
   └── execute({ source }) ──→ CodemodeSession ──→ local Node child process
                                                  │
@@ -802,12 +802,13 @@ Pi AgentHarness
             decides evaluation, activation, and rollback.
           </li>
           <li>
-            Reflection can call these tools ambiently. <code>no_change</code>
-            remains valid and should be common.
+            Ambient reflection is a separate process. It may produce
+            <code>no_change</code>, which remains valid and should be common.
           </li>
           <li>
             Ordinary user feedback such as “that was worse” is translated into
-            contest/revise/revert behavior without forcing an approval form.
+            evidence for ambient reflection and any broader protected
+            consolidation; it is not a hidden <code>adapt</code> operation.
           </li>
         </ul>
         <div class="callout warning">
@@ -870,8 +871,10 @@ Pi AgentHarness
                   detail loading as a skill.
                 </td>
                 <td>
-                  Created through <code>adapt</code>, evaluated from real work,
-                  and activated through the existing capability system.
+                  Published immediately as a project-local definition through
+                  <code>execute</code>. Ambient reflection may later propose
+                  broader consolidation through the protected evaluation and
+                  activation path.
                 </td>
               </tr>
               <tr>
@@ -1626,23 +1629,26 @@ revisions/scripts/&lt;revision-id&gt;/
             <dt>Outcome</dt>
             <dd>
               The agent can inspect its active behavior, create narrow durable
-              memory, and propose/revise/revert adaptations without seeing
-              storage internals.
+              memory, and add or remove exact frozen Tool Catalog entries from
+              its direct-tool hotbar without seeing storage internals.
             </dd>
             <dt>Work</dt>
             <dd>
               Create domain functions and Pi adapters for
               <code>inspect_self</code>, <code>remember</code>, and
               <code>adapt</code>. Bind provenance and anticipated-use evidence
-              host-side. Reuse experiments, evaluations, capabilities,
-              activation, and rollback.
+              host-side for learning operations. Keep <code>adapt</code> limited
+              to resolving current-catalog identities and changing hotbar
+              selection.
             </dd>
             <dt>Acceptance</dt>
             <dd>
-              A reflection turn can produce <code>no_change</code>, a scoped
-              memory candidate, or a broader script/prompt candidate; generated
-              content cannot activate broader learned behavior itself. Explicit
-              foreground script publication uses the direct project-local path.
+              Inspection and scoped memory use their existing semantic services;
+              adding or removing a tool updates the current turn's direct hotbar
+              and its persisted preference without widening authority. Ambient
+              reflection may separately produce <code>no_change</code> or a
+              broader candidate, while explicit foreground script publication
+              uses the direct project-local path.
             </dd>
           </dl>
         </article>
@@ -2014,10 +2020,11 @@ Wave 5                   TCW-11 compounding loop
         <p>
           Noesis can install and progressively load portable Agent Skills;
           complete real local and web work through one model-visible
-          <code>execute</code> tool; inspect and intentionally modify its own
-          memory and behavior through three thin semantic tools; save successful
-          programs as inspectable scripts; run typed multi-phase work durably; and
-          learn from the outcomes without creating duplicate authority systems.
+          <code>execute</code> tool; inspect its active behavior, record narrow
+          memory, and manage its direct-tool hotbar through three thin semantic
+          tools; save successful programs as inspectable scripts; run typed
+          multi-phase work durably; and learn from the outcomes without creating
+          duplicate authority systems.
         </p>
         <p>
           The feature is complete only when a user can understand what ran, what

@@ -523,6 +523,17 @@ async function readStoredWorkflowRevision(
   });
 }
 
+async function workflowRunVisibleInProject(
+  workspace: NoesisWorkspaceStore,
+  project: ProjectRef,
+  run: WorkflowRunRecord,
+): Promise<boolean> {
+  if (run.projectId !== undefined) return run.projectId === project.projectId;
+  return Boolean(
+    await readStoredWorkflowRevision(workspace, project, run.workflowName, run.definitionRevisionId),
+  );
+}
+
 async function listStoredWorkflows(
   workspace: NoesisWorkspaceStore,
   project: ProjectRef,
@@ -1781,15 +1792,29 @@ export async function createApplicationRuntimeComposition(
           estimatedCost: 0,
         }),
         execute: async () =>
-          (await workspace.operational.workflows.listRunsForSession(plan.sessionId)).map((run) => ({
-            runId: run.runId,
-            workflowName: run.workflowName,
-            workflowRevision: run.workflowRevision,
-            status: run.status,
-            currentPhase: run.currentPhase,
-            createdAt: run.createdAt,
-            updatedAt: run.updatedAt,
-          })),
+          (
+            await Promise.all(
+              (
+                await workspace.operational.workflows.listRunsForSession(plan.sessionId)
+              ).map(async (run) =>
+                (await workflowRunVisibleInProject(workspace, project, run)) ? run : undefined,
+              ),
+            )
+          ).flatMap((run) =>
+            run
+              ? [
+                  {
+                    runId: run.runId,
+                    workflowName: run.workflowName,
+                    workflowRevision: run.workflowRevision,
+                    status: run.status,
+                    currentPhase: run.currentPhase,
+                    createdAt: run.createdAt,
+                    updatedAt: run.updatedAt,
+                  },
+                ]
+              : [],
+          ),
       }),
       defineTool({
         name: "workflows.save",
@@ -1918,6 +1943,19 @@ export async function createApplicationRuntimeComposition(
           if (!run) throw new Error(`Unknown workflow run ${runId}`);
           if (run.sessionId !== plan.sessionId)
             throw new Error(`Workflow run ${runId} belongs to another session`);
+          if (run.projectId !== undefined && run.projectId !== project.projectId)
+            throw new Error(`Workflow run ${runId} belongs to another project`);
+          const legacyStored =
+            run.projectId === undefined
+              ? await readStoredWorkflowRevision(
+                  workspace,
+                  project,
+                  run.workflowName,
+                  run.definitionRevisionId,
+                )
+              : undefined;
+          if (run.projectId === undefined && !legacyStored)
+            throw new Error(`Legacy workflow run ${runId} is not available in project ${project.projectId}`);
           if (run.status === "completed") {
             if (run.output === undefined) throw new Error(`Completed workflow run ${runId} has no output`);
             return {
@@ -1929,13 +1967,20 @@ export async function createApplicationRuntimeComposition(
           }
           if (run.status !== "paused")
             throw new Error(`Workflow run ${runId} is ${run.status} and cannot be resumed`);
-          const stored = await readStoredWorkflowRevision(
-            workspace,
-            project,
-            run.workflowName,
-            run.definitionRevisionId,
-          );
-          if (!stored) throw new Error(`Pinned workflow revision ${run.definitionRevisionId} is missing`);
+          const stored =
+            legacyStored ??
+            (await readStoredWorkflowRevision(
+              workspace,
+              project,
+              run.workflowName,
+              run.definitionRevisionId,
+            ));
+          if (!stored)
+            throw new Error(
+              run.projectId === undefined
+                ? `Legacy workflow run ${runId} is not available in project ${project.projectId}`
+                : `Pinned workflow revision ${run.definitionRevisionId} is missing`,
+            );
           if (!runWorkflow) throw new Error("Workflow runtime is not initialized");
           return await runWorkflow(stored, run.input, context, runId, correction);
         },
@@ -2241,6 +2286,8 @@ export async function createApplicationRuntimeComposition(
       if (existingRunId && !existing) throw new Error(`Unknown workflow run ${existingRunId}`);
       if (existing && existing.sessionId !== plan.sessionId)
         throw new Error(`Workflow run ${existing.runId} belongs to another session`);
+      if (existing?.projectId !== undefined && existing.projectId !== project.projectId)
+        throw new Error(`Workflow run ${existing.runId} belongs to another project`);
       if (existing && existing.status !== "paused")
         throw new Error(`Workflow run ${existing.runId} is ${existing.status} and cannot be resumed`);
       const permissionDigest = sha256(canonicalJson(plan.permissionSnapshot));
@@ -2282,6 +2329,7 @@ export async function createApplicationRuntimeComposition(
       if (!existing) {
         await workspace.operational.workflows.putRun({
           runId,
+          projectId: project.projectId,
           workflowName: manifest.name,
           workflowRevision: manifest.revision,
           definitionRevisionId: definitionRevision.revisionId,
@@ -2313,6 +2361,7 @@ export async function createApplicationRuntimeComposition(
         const claimed = await workspace.operational.workflows.claimPausedRun(
           existing.runId,
           plan.sessionId,
+          project.projectId,
           new Date().toISOString(),
         );
         if (!claimed)
@@ -3681,11 +3730,18 @@ export async function createApplicationRuntimeComposition(
     });
   };
   const listExecutions: NonNullable<NoesisTuiRuntime["listExecutions"]> = async (sessionId) => {
-    const [executions, calls, workflowRuns] = await Promise.all([
+    const [executions, calls, allWorkflowRuns] = await Promise.all([
       workspace.operational.codeExecutions.listForSession(sessionId),
       workspace.operational.toolCalls.listForSession(sessionId),
       workspace.operational.workflows.listRunsForSession(sessionId),
     ]);
+    const workflowRuns = (
+      await Promise.all(
+        allWorkflowRuns.map(async (run) =>
+          (await workflowRunVisibleInProject(workspace, project, run)) ? run : undefined,
+        ),
+      )
+    ).flatMap((run) => (run ? [run] : []));
     const namesByExecution = new Map<string, Set<string>>();
     for (const call of calls) {
       const request =
@@ -3806,7 +3862,11 @@ export async function createApplicationRuntimeComposition(
       });
     }
     const workflow = await workspace.operational.workflows.getRun(executionId);
-    if (workflow?.sessionId !== sessionId) return undefined;
+    if (
+      workflow?.sessionId !== sessionId ||
+      !(await workflowRunVisibleInProject(workspace, project, workflow))
+    )
+      return undefined;
     const phases = await workspace.operational.workflows.listPhases(executionId);
     return Object.freeze({
       kind: "workflow",

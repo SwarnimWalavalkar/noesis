@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import {
   type AgentRuntimeEvent,
   type AgentRuntimeRequest,
@@ -184,6 +185,9 @@ describe("apps/noesis production control-plane composition", () => {
     let firstClassRevisionTwoValue: unknown;
     let secondProjectCatalog: PiFrozenToolCatalog | undefined;
     let secondProjectDirectValue: unknown;
+    let foreignWorkflowRunId: string | undefined;
+    const foreignLegacyWorkflowRunId = "workflow-run-legacy-project-one";
+    let secondProjectSharedSessionValue: unknown;
     let turn = 0;
     const noOp = async (): Promise<void> => undefined;
     const createAgent: ApplicationRuntimeCompositionOptions["createAgent"] = (_sessionTools, codeExecution) =>
@@ -333,13 +337,17 @@ describe("apps/noesis production control-plane composition", () => {
                     ? `return await noesis.invoke(${JSON.stringify(firstWorkflowTool("project-increment"))}, { value: 41 });`
                     : turn === 3
                       ? [
-                          "return await tools.workflows.save({",
+                          "const visibleBeforeSave = await tools.workflows.runs({});",
+                          `let foreignResumeError; try { await tools.workflows.resume({ runId: ${JSON.stringify(foreignWorkflowRunId)} }); } catch (error) { foreignResumeError = String(error?.message ?? error); }`,
+                          `let legacyResumeError; try { await tools.workflows.resume({ runId: ${JSON.stringify(foreignLegacyWorkflowRunId)} }); } catch (error) { legacyResumeError = String(error?.message ?? error); }`,
+                          "const saved = await tools.workflows.save({",
                           '  name: "project-increment",',
                           '  description: "Increment the second project input by ten.",',
                           '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
                           '  outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
                           '  phases: [{ name: "increment", description: "Increment by ten.", source: "return { value: input.value + 10 };", inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: [] }]',
                           "});",
+                          "return { visibleBeforeSave, foreignResumeError, legacyResumeError, saved };",
                         ].join("\n")
                       : turn === 4
                         ? `return await noesis.invoke(${JSON.stringify(secondWorkflowTool("project-increment"))}, { value: 32 });`
@@ -348,6 +356,7 @@ describe("apps/noesis production control-plane composition", () => {
             if (turn === 0) savedAndRunValue = result.value;
             else if (turn === 1) firstClassRevisionOneValue = result.value;
             else if (turn === 2) firstClassRevisionTwoValue = result.value;
+            else if (turn === 3) secondProjectSharedSessionValue = result.value;
             else if (turn === 4) secondProjectDirectValue = result.value;
           } finally {
             turn += 1;
@@ -525,6 +534,36 @@ describe("apps/noesis production control-plane composition", () => {
     ]);
     expect(new Set(projectWorkflowRuns.map((run) => run.catalogDigest))).toHaveLength(1);
     expect(projectWorkflowRuns.every((run) => run.catalogId === `catalog_${run.catalogDigest}`)).toBe(true);
+    expect(projectWorkflowRuns.every((run) => run.projectId === firstProject.projectId)).toBe(true);
+    foreignWorkflowRunId = projectWorkflowRuns[0]?.runId;
+    if (!foreignWorkflowRunId) throw new Error("Expected a first-project workflow run");
+    const legacySource = projectWorkflowRuns[0];
+    if (!legacySource) throw new Error("Expected a source workflow run for legacy compatibility");
+    if (legacySource.output === undefined || !legacySource.completedAt)
+      throw new Error("Expected a completed source workflow run for legacy compatibility");
+    const legacyDatabase = new DatabaseSync(first.debug.workspace.unsafeDatabasePathForTesting);
+    legacyDatabase
+      .prepare(
+        `INSERT INTO workflow_runs(
+          run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
+          session_id, status, current_phase, input_json, output_json,
+          created_at, updated_at, completed_at
+        ) VALUES (?, NULL, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        foreignLegacyWorkflowRunId,
+        legacySource.workflowName,
+        legacySource.workflowRevision,
+        legacySource.definitionRevisionId,
+        legacySource.sessionId,
+        legacySource.currentPhase,
+        JSON.stringify(legacySource.input),
+        JSON.stringify(legacySource.output),
+        legacySource.createdAt,
+        legacySource.updatedAt,
+        legacySource.completedAt,
+      );
+    legacyDatabase.close();
     await first.shutdown();
 
     const second = await createApplicationRuntimeComposition({
@@ -535,10 +574,9 @@ describe("apps/noesis production control-plane composition", () => {
     });
     expect(await second.listScripts?.()).toEqual([]);
     expect(await second.listWorkflows?.()).toEqual([]);
-    const isolatedTrail = await second.startTrail({ title: "Other project catalog" });
-    await second.debug.runTurn(isolatedTrail.trailId, "Save the same workflow name in this project.");
+    await second.debug.runTurn(trail.trailId, "Save the same workflow name in this project.");
     expect(workflowToolSnapshots[3]).toEqual([]);
-    await second.debug.runTurn(isolatedTrail.trailId, "Run this project's workflow tool.");
+    await second.debug.runTurn(trail.trailId, "Run this project's workflow tool.");
     expect(workflowToolSnapshots[4]?.map((tool) => tool.name)).toEqual([
       secondWorkflowTool("project-increment"),
     ]);
@@ -546,6 +584,18 @@ describe("apps/noesis production control-plane composition", () => {
       workflowToolSnapshots[4]?.some((tool) => tool.name === firstWorkflowTool("project-increment")),
     ).toBe(false);
     expect(secondProjectDirectValue).toEqual({ value: 42 });
+    expect(secondProjectSharedSessionValue).toMatchObject({
+      visibleBeforeSave: [],
+      foreignResumeError: expect.stringContaining("belongs to another project"),
+      legacyResumeError: expect.stringContaining("is not available in project"),
+    });
+    expect(await second.inspectExecution?.(trail.trailId, foreignWorkflowRunId)).toBeUndefined();
+    expect(await second.inspectExecution?.(trail.trailId, foreignLegacyWorkflowRunId)).toBeUndefined();
+    expect(
+      (await second.listExecutions?.(trail.trailId))
+        ?.filter((execution) => execution.kind === "workflow")
+        .map((execution) => execution.label),
+    ).toEqual(["project-increment · r1"]);
     if (!secondProjectCatalog) throw new Error("Expected the second project workflow catalog");
     expect(createHotbarToolAliases(secondProjectCatalog).get(secondWorkflowTool("project-increment"))).toBe(
       "workflow_project-increment",

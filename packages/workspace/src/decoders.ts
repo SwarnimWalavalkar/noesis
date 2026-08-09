@@ -221,6 +221,7 @@ export function decodeCodeExecution(row: unknown): CodeExecutionRecord {
 }
 
 export function decodeWorkflowRun(row: unknown): WorkflowRunRecord {
+  const projectId = optionalString(row, "project_id");
   const turnId = optionalString(row, "turn_id");
   const catalogId = optionalString(row, "catalog_id");
   const catalogDigest = optionalString(row, "catalog_digest");
@@ -234,6 +235,7 @@ export function decodeWorkflowRun(row: unknown): WorkflowRunRecord {
   const completedAt = optionalString(row, "completed_at");
   return {
     runId: requiredString(row, "run_id"),
+    ...(projectId === undefined ? {} : { projectId }),
     workflowName: requiredString(row, "workflow_name"),
     workflowRevision: requiredNumber(row, "workflow_revision"),
     definitionRevisionId: requiredString(row, "definition_revision_id"),

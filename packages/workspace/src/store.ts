@@ -2897,6 +2897,8 @@ function createOperationalRepositories(
           throw new Error(`Workflow run ${record.runId} turn does not belong to its session`);
       }
       const currentRow = db.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get(record.runId);
+      if (currentRow === undefined && !record.projectId)
+        throw new Error(`New workflow run ${record.runId} requires a project`);
       if (currentRow !== undefined) {
         const current = decodeWorkflowRun(currentRow);
         const transitions: Readonly<
@@ -2933,18 +2935,19 @@ function createOperationalRepositories(
       }
       db.prepare(
         `INSERT INTO workflow_runs(
-          run_id, workflow_name, workflow_revision, definition_revision_id,
+          run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
           catalog_id, catalog_digest, definition_dependencies_digest,
           permission_digest, provider, model, thinking_level, session_id,
           turn_id, status, current_phase, input_json, output_json, error,
           created_at, updated_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
           status = excluded.status, current_phase = excluded.current_phase,
           output_json = excluded.output_json, error = excluded.error,
           updated_at = excluded.updated_at, completed_at = excluded.completed_at`,
       ).run(
         record.runId,
+        record.projectId ?? null,
         record.workflowName,
         record.workflowRevision,
         record.definitionRevisionId,
@@ -3396,15 +3399,17 @@ function createOperationalRepositories(
           decodeWorkflowRun,
         ),
       putRun: putWorkflowRun,
-      claimPausedRun: async (runId: string, sessionId: string, claimedAt: string) =>
+      claimPausedRun: async (runId: string, sessionId: string, projectId: string, claimedAt: string) =>
         database.transaction(() => {
           const claimed = db
             .prepare(
               `UPDATE workflow_runs
                SET status = 'running', error = NULL, updated_at = ?, completed_at = NULL
-               WHERE run_id = ? AND session_id = ? AND status = 'paused'`,
+               WHERE run_id = ? AND session_id = ?
+                 AND (project_id = ? OR project_id IS NULL)
+                 AND status = 'paused'`,
             )
-            .run(claimedAt, runId, sessionId);
+            .run(claimedAt, runId, sessionId, projectId);
           if (Number(claimed.changes) !== 1) return undefined;
           const row = db.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get(runId);
           if (row === undefined) throw new Error(`Claimed workflow run ${runId} disappeared`);

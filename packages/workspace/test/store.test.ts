@@ -903,8 +903,23 @@ describe("WorkspaceStore", () => {
         { kind: "database_row" as const, table: "sessions" as const, rowId: "session-workflow" },
       ]),
     });
+    await expect(
+      first.operational.workflows.putRun({
+        runId: "workflow-run-without-project",
+        workflowName: "recover",
+        workflowRevision: 1,
+        definitionRevisionId: definitionRevision.revisionId,
+        sessionId: "session-workflow",
+        status: "running",
+        currentPhase: 0,
+        input: { value: 1 },
+        createdAt: "2026-07-26T00:00:00.000Z",
+        updatedAt: "2026-07-26T00:00:00.000Z",
+      }),
+    ).rejects.toThrow("requires a project");
     await first.operational.workflows.putRun({
       runId: "workflow-run-unfinished",
+      projectId: "project-workflow",
       workflowName: "recover",
       workflowRevision: 1,
       definitionRevisionId: definitionRevision.revisionId,
@@ -1019,6 +1034,11 @@ describe("WorkspaceStore", () => {
     ).toThrow("lineage is immutable");
     expect(() =>
       lineageDatabase
+        .prepare("UPDATE workflow_runs SET project_id = ? WHERE run_id = ?")
+        .run("project-other", "workflow-run-unfinished"),
+    ).toThrow("project is immutable");
+    expect(() =>
+      lineageDatabase
         .prepare("UPDATE workflow_phase_runs SET run_id = ? WHERE run_id = ? AND phase_index = 0")
         .run("other-run", "workflow-run-unfinished"),
     ).toThrow("lineage is immutable");
@@ -1055,6 +1075,7 @@ describe("WorkspaceStore", () => {
       recovered.operational.workflows.claimPausedRun(
         "workflow-run-unfinished",
         "session-other",
+        "project-workflow",
         "2026-07-26T00:02:00.000Z",
       ),
     ).resolves.toBeUndefined();
@@ -1062,6 +1083,15 @@ describe("WorkspaceStore", () => {
       recovered.operational.workflows.claimPausedRun(
         "workflow-run-unfinished",
         "session-workflow",
+        "project-other",
+        "2026-07-26T00:02:00.000Z",
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      recovered.operational.workflows.claimPausedRun(
+        "workflow-run-unfinished",
+        "session-workflow",
+        "project-workflow",
         "2026-07-26T00:02:00.000Z",
       ),
     ).resolves.toMatchObject({ status: "running" });
@@ -1069,6 +1099,7 @@ describe("WorkspaceStore", () => {
       recovered.operational.workflows.claimPausedRun(
         "workflow-run-unfinished",
         "session-workflow",
+        "project-workflow",
         "2026-07-26T00:02:00.000Z",
       ),
     ).resolves.toBeUndefined();
@@ -1342,7 +1373,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(31);
+    expect(versions.at(-1)).toBe(32);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
