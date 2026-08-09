@@ -341,16 +341,42 @@ describe("ambient learning read model", () => {
       evidenceRefs: Object.freeze([evidence]),
       createdFromTurnId: "session-1:turn-1",
     });
+    const historicalAdjustment = Object.freeze({
+      ...adjustment,
+      adjustmentId: "adjustment-historical",
+      strategy: "Inspect the failure before choosing the next action.",
+    });
     let activeReadCount = 0;
     const inspection = await loadLearningInspectionForSession(
       {
-        listJobPage: async () => Object.freeze({ jobs: Object.freeze([]), exhausted: true }),
+        listJobPage: async ({ kind } = {}) =>
+          Object.freeze({
+            jobs: Object.freeze(
+              kind === "runtime.reflect_turn"
+                ? [
+                    reflection({
+                      jobId: "historical-adjustment",
+                      sessionId: "session-1",
+                      status: "completed",
+                      updatedAt: "2026-08-01T00:00:02.000Z",
+                      result: {
+                        status: "adjusted",
+                        projectId: "project-1",
+                        adjustmentId: historicalAdjustment.adjustmentId,
+                      },
+                    }),
+                  ]
+                : [],
+            ),
+            exhausted: true,
+          }),
       },
       "session-1",
       "project-1",
       {
         workingAdjustments: {
-          get: async () => undefined,
+          get: async (adjustmentId) =>
+            adjustmentId === historicalAdjustment.adjustmentId ? historicalAdjustment : undefined,
           getActive: async () => {
             activeReadCount += 1;
             return activeReadCount === 1 ? adjustment : undefined;
@@ -367,6 +393,86 @@ describe("ambient learning read model", () => {
         adjustmentId: "adjustment-active-snapshot",
         status: "active",
       }),
+    );
+    expect(inspection.activity[0]?.workingAdjustment).toEqual(
+      expect.objectContaining({
+        adjustmentId: "adjustment-historical",
+        status: "inactive",
+      }),
+    );
+  });
+
+  test("keeps adjustment cache identity unambiguous across project and adjustment ids", async () => {
+    const first = Object.freeze({
+      adjustmentId: "gamma",
+      scope: Object.freeze({ projectId: "alpha:beta", root: "/workspace/first" }),
+      observation: "First observation",
+      strategy: "First strategy",
+      successSignal: "First success signal",
+      evidenceRefs: Object.freeze([evidence]),
+      createdFromTurnId: "session-1:turn-1",
+    });
+    const second = Object.freeze({
+      adjustmentId: "beta:gamma",
+      scope: Object.freeze({ projectId: "alpha", root: "/workspace/second" }),
+      observation: "Second observation",
+      strategy: "Second strategy",
+      successSignal: "Second success signal",
+      evidenceRefs: Object.freeze([evidence]),
+      createdFromTurnId: "session-1:turn-2",
+    });
+    const projected = learningActivityForSession(
+      [
+        reflection({
+          jobId: "first-adjustment",
+          sessionId: "session-1",
+          status: "completed",
+          updatedAt: "2026-08-01T00:00:01.000Z",
+          result: {
+            status: "adjusted",
+            projectId: first.scope.projectId,
+            adjustmentId: first.adjustmentId,
+          },
+        }),
+        reflection({
+          jobId: "second-adjustment",
+          sessionId: "session-1",
+          status: "completed",
+          updatedAt: "2026-08-01T00:00:02.000Z",
+          result: {
+            status: "adjusted",
+            projectId: second.scope.projectId,
+            adjustmentId: second.adjustmentId,
+          },
+        }),
+      ],
+      "session-1",
+    );
+
+    const enriched = await enrichLearningActivityWithWorkingAdjustments(projected, {
+      workingAdjustments: {
+        get: async (adjustmentId) =>
+          adjustmentId === first.adjustmentId
+            ? first
+            : adjustmentId === second.adjustmentId
+              ? second
+              : undefined,
+        getActive: async (projectId) =>
+          projectId === first.scope.projectId
+            ? first
+            : projectId === second.scope.projectId
+              ? second
+              : undefined,
+        listSettledEvidence: async () => Object.freeze([]),
+      },
+      outcomes: { get: async () => undefined },
+    });
+
+    expect(enriched.find(({ jobId }) => jobId === "first-adjustment")?.workingAdjustment).toEqual(
+      expect.objectContaining({ projectId: "alpha:beta", adjustmentId: "gamma" }),
+    );
+    expect(enriched.find(({ jobId }) => jobId === "second-adjustment")?.workingAdjustment).toEqual(
+      expect.objectContaining({ projectId: "alpha", adjustmentId: "beta:gamma" }),
     );
   });
 

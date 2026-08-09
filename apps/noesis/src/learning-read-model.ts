@@ -175,6 +175,7 @@ async function workingAdjustmentState(
   projectId: string,
   adjustmentId: string,
   source: WorkingAdjustmentInspectionSource,
+  getActive: (projectId: string) => Promise<WorkingAdjustment | undefined>,
 ): Promise<TuiLearningActivitySummary["workingAdjustment"]> {
   const adjustment = await source.workingAdjustments.get(adjustmentId);
   if (!adjustment) return undefined;
@@ -183,7 +184,7 @@ async function workingAdjustmentState(
       `Working adjustment ${adjustment.adjustmentId} belongs to project ${adjustment.scope.projectId}, not ${projectId}`,
     );
   const [active, settledEvidence] = await Promise.all([
-    source.workingAdjustments.getActive(projectId),
+    getActive(projectId),
     source.workingAdjustments.listSettledEvidence({
       projectId,
       adjustmentId: adjustment.adjustmentId,
@@ -235,9 +236,9 @@ async function inspectedWorkingAdjustmentState(
 
 async function currentWorkingAdjustmentState(
   projectId: string,
+  active: WorkingAdjustment | undefined,
   source: WorkingAdjustmentInspectionSource,
 ): Promise<TuiWorkingAdjustmentState | undefined> {
-  const active = await source.workingAdjustments.getActive(projectId);
   if (!active) return undefined;
   if (active.scope.projectId !== projectId)
     throw new Error(
@@ -251,12 +252,53 @@ async function currentWorkingAdjustmentState(
   return await inspectedWorkingAdjustmentState(active, "active", settledEvidence, source);
 }
 
-/** Enriches learning jobs from the authoritative adjustment and settled-outcome stores. */
-export async function enrichLearningActivityWithWorkingAdjustments(
+function validateActiveWorkingAdjustment(
+  projectId: string,
+  active: WorkingAdjustment | undefined,
+): WorkingAdjustment | undefined {
+  if (active && active.scope.projectId !== projectId)
+    throw new Error(
+      `Active working adjustment ${active.adjustmentId} belongs to project ${active.scope.projectId}, not ${projectId}`,
+    );
+  return active;
+}
+
+interface ActiveWorkingAdjustmentSnapshot {
+  readonly projectId: string;
+  readonly adjustment: WorkingAdjustment | undefined;
+}
+
+function activeWorkingAdjustmentReader(
+  source: WorkingAdjustmentInspectionSource,
+  snapshot?: ActiveWorkingAdjustmentSnapshot,
+): (projectId: string) => Promise<WorkingAdjustment | undefined> {
+  const activeByProject = new Map<string, Promise<WorkingAdjustment | undefined>>();
+  if (snapshot)
+    activeByProject.set(
+      snapshot.projectId,
+      Promise.resolve(validateActiveWorkingAdjustment(snapshot.projectId, snapshot.adjustment)),
+    );
+  return (projectId) => {
+    const pending =
+      activeByProject.get(projectId) ??
+      source.workingAdjustments
+        .getActive(projectId)
+        .then((active) => validateActiveWorkingAdjustment(projectId, active));
+    activeByProject.set(projectId, pending);
+    return pending;
+  };
+}
+
+async function enrichLearningActivity(
   activities: readonly TuiLearningActivitySummary[],
   source: WorkingAdjustmentInspectionSource,
+  snapshot?: ActiveWorkingAdjustmentSnapshot,
 ): Promise<readonly TuiLearningActivitySummary[]> {
-  const stateByKey = new Map<string, Promise<TuiLearningActivitySummary["workingAdjustment"]>>();
+  const stateByProject = new Map<
+    string,
+    Map<string, Promise<TuiLearningActivitySummary["workingAdjustment"]>>
+  >();
+  const getActive = activeWorkingAdjustmentReader(source, snapshot);
   return Object.freeze(
     await Promise.all(
       activities.map(async (entry) => {
@@ -266,16 +308,26 @@ export async function enrichLearningActivityWithWorkingAdjustments(
             : entry.adjustmentId;
         let state: TuiLearningActivitySummary["workingAdjustment"];
         if (entry.projectId && inspectedAdjustmentId) {
-          const key = `${entry.projectId}:${inspectedAdjustmentId}`;
+          const stateByAdjustment = stateByProject.get(entry.projectId) ?? new Map();
+          stateByProject.set(entry.projectId, stateByAdjustment);
           const pending =
-            stateByKey.get(key) ?? workingAdjustmentState(entry.projectId, inspectedAdjustmentId, source);
-          stateByKey.set(key, pending);
+            stateByAdjustment.get(inspectedAdjustmentId) ??
+            workingAdjustmentState(entry.projectId, inspectedAdjustmentId, source, getActive);
+          stateByAdjustment.set(inspectedAdjustmentId, pending);
           state = await pending;
         }
         return state ? Object.freeze({ ...entry, workingAdjustment: state }) : entry;
       }),
     ),
   );
+}
+
+/** Enriches learning jobs from the authoritative adjustment and settled-outcome stores. */
+export async function enrichLearningActivityWithWorkingAdjustments(
+  activities: readonly TuiLearningActivitySummary[],
+  source: WorkingAdjustmentInspectionSource,
+): Promise<readonly TuiLearningActivitySummary[]> {
+  return await enrichLearningActivity(activities, source);
 }
 
 /** Combines session-local learning jobs with the current authoritative project adjustment. */
@@ -285,9 +337,15 @@ export async function loadLearningInspectionForSession(
   projectId: string,
   inspection: WorkingAdjustmentInspectionSource,
 ): Promise<TuiLearningInspection> {
+  const [rawActivity, active] = await Promise.all([
+    loadLearningActivityForSession(coordinator, sessionId),
+    inspection.workingAdjustments
+      .getActive(projectId)
+      .then((adjustment) => validateActiveWorkingAdjustment(projectId, adjustment)),
+  ]);
   const [activity, currentWorkingAdjustment] = await Promise.all([
-    loadLearningActivityForSession(coordinator, sessionId, inspection),
-    currentWorkingAdjustmentState(projectId, inspection),
+    enrichLearningActivity(rawActivity, inspection, { projectId, adjustment: active }),
+    currentWorkingAdjustmentState(projectId, active, inspection),
   ]);
   const deduplicated = currentWorkingAdjustment
     ? Object.freeze(
