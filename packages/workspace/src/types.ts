@@ -252,10 +252,12 @@ export interface ProtectedWorkingAdjustmentStore extends WorkingAdjustmentReadPo
   readonly apply: (request: {
     readonly adjustment: WorkingAdjustment;
     readonly expectedActiveAdjustmentId: string | null;
+    readonly signal?: AbortSignal;
   }) => Promise<WorkingAdjustmentApplyResult>;
   readonly unapply: (request: {
     readonly projectId: string;
     readonly expectedActiveAdjustmentId: string;
+    readonly signal?: AbortSignal;
   }) => Promise<WorkingAdjustmentUnapplyResult>;
 }
 

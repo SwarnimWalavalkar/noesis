@@ -687,12 +687,97 @@ interface WorkingAdjustmentEvidenceCandidate {
   readonly sessionId: string;
   readonly turnId: string;
   readonly outcomeId?: string;
-  readonly userMessage?: string;
-  readonly assistantMessage?: string;
   readonly outcome: LearningTurnInput["outcome"];
   readonly summary?: string;
   readonly settledAt: string;
   readonly evidenceRefs: readonly EvidenceRef[];
+}
+
+const WORKING_ADJUSTMENT_CONTEXT_MAX_CHARACTERS = 11_999;
+const WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS = Object.freeze({
+  adjustmentIdentity: 256,
+  projectId: 256,
+  projectRoot: 512,
+  observation: 1_024,
+  strategy: 3_072,
+  successSignal: 768,
+  createdFromTurnId: 128,
+  evidenceTurnId: 128,
+  evidenceSummary: 256,
+});
+
+function boundedPromptString(value: string, maxCharacters: number): string {
+  if (value.length <= maxCharacters) return value;
+  const digest = sha256(value).slice(0, 16);
+  return `${value.slice(0, maxCharacters - digest.length - 1)}…${digest}`;
+}
+
+function workingAdjustmentPromptIdentity(adjustmentId: string | null | undefined): string | null {
+  if (adjustmentId === null || adjustmentId === undefined) return null;
+  return boundedPromptString(adjustmentId, WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.adjustmentIdentity);
+}
+
+function serializeWorkingAdjustmentContext(input: {
+  readonly turn: LearningTurnInput;
+  readonly activeAdjustment?: WorkingAdjustment;
+  readonly evidence: readonly WorkingAdjustmentEvidenceCandidate[];
+}): string {
+  const content = JSON.stringify({
+    project:
+      input.turn.project === undefined
+        ? null
+        : {
+            projectId: boundedPromptString(
+              input.turn.project.projectId,
+              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.projectId,
+            ),
+            root: boundedPromptString(
+              input.turn.project.root,
+              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.projectRoot,
+            ),
+          },
+    expectedActiveAdjustmentId: workingAdjustmentPromptIdentity(input.turn.expectedActiveAdjustmentId),
+    activeAdjustment:
+      input.activeAdjustment === undefined
+        ? null
+        : {
+            observation: boundedPromptString(
+              input.activeAdjustment.observation,
+              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.observation,
+            ),
+            strategy: boundedPromptString(
+              input.activeAdjustment.strategy,
+              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.strategy,
+            ),
+            successSignal: boundedPromptString(
+              input.activeAdjustment.successSignal,
+              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.successSignal,
+            ),
+            createdFromTurnId: boundedPromptString(
+              input.activeAdjustment.createdFromTurnId,
+              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.createdFromTurnId,
+            ),
+          },
+    evidence: input.evidence.map((candidate, citationIndex) => ({
+      citationIndex,
+      kind: candidate.kind,
+      turnId: boundedPromptString(candidate.turnId, WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.evidenceTurnId),
+      outcome: candidate.outcome,
+      ...(candidate.summary === undefined
+        ? {}
+        : {
+            summary: boundedPromptString(
+              candidate.summary,
+              WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS.evidenceSummary,
+            ),
+          }),
+      settledAt: candidate.settledAt,
+    })),
+  });
+  if (content.length > WORKING_ADJUSTMENT_CONTEXT_MAX_CHARACTERS) {
+    throw new Error("Working-adjustment context projection exceeded the reflector message policy");
+  }
+  return content;
 }
 
 function workingAdjustmentEvidence(turn: LearningTurnInput): readonly WorkingAdjustmentEvidenceCandidate[] {
@@ -702,8 +787,6 @@ function workingAdjustmentEvidence(turn: LearningTurnInput): readonly WorkingAdj
     sessionId: turn.sessionId,
     turnId: turn.turnId,
     ...(turn.outcomeId === undefined ? {} : { outcomeId: turn.outcomeId }),
-    userMessage: turn.userMessage,
-    ...(turn.assistantMessage === undefined ? {} : { assistantMessage: turn.assistantMessage }),
     outcome: turn.outcome,
     settledAt: turn.occurredAt,
     evidenceRefs: cloneEvidenceRefs(turn.evidenceRefs),
@@ -885,6 +968,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       throw new Error("Served working-adjustment evidence does not match the pinned adjustment");
     }
     const adjustmentEvidence = workingAdjustmentEvidence(harvest.turn);
+    const promptExpectedAdjustmentId = workingAdjustmentPromptIdentity(expectedAdjustmentId);
     const runId = nextId("reflect");
     const messages: readonly AgentMessage[] = [
       {
@@ -918,10 +1002,11 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       {
         role: "user",
         name: "working_adjustment_context",
-        content: JSON.stringify({
-          project: harvest.turn.project ?? null,
-          expectedActiveAdjustmentId: expectedAdjustmentId ?? null,
-          activeAdjustment: request.activeWorkingAdjustment ?? null,
+        content: serializeWorkingAdjustmentContext({
+          turn: harvest.turn,
+          ...(request.activeWorkingAdjustment === undefined
+            ? {}
+            : { activeAdjustment: request.activeWorkingAdjustment }),
           evidence: adjustmentEvidence,
         }),
       },
@@ -983,7 +1068,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       const project = harvest.turn.project;
       if (!project || expectedAdjustmentId === undefined)
         throw new Error("Legacy reflection jobs cannot change project working adjustments");
-      if (reflected.value.expectedActiveAdjustmentId !== expectedAdjustmentId)
+      if (reflected.value.expectedActiveAdjustmentId !== promptExpectedAdjustmentId)
         throw new Error("Reflector working-adjustment decision changed the expected active identity");
       const evidenceRefs = citedWorkingAdjustmentEvidence(
         reflected.value.evidenceCitationIndexes,
@@ -1087,8 +1172,9 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     const makeBrief = (
       experimentId: string,
       evidenceRefs: readonly EvidenceRef[] = classifiedHarvest.evidenceRefs,
-    ): ExperimentBrief =>
-      freezeBrief({
+    ): ExperimentBrief => {
+      const mergedEvidenceRefs = uniqueEvidenceRefs([...selectedAdjustmentEvidence, ...evidenceRefs]);
+      return freezeBrief({
         experimentId,
         title: reflection.title,
         hypothesis: reflection.hypothesis,
@@ -1103,7 +1189,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         scopeVerificationRun,
         capability,
         baselineRevision: request.baselineRevision,
-        evidenceRefs: uniqueEvidenceRefs([...selectedAdjustmentEvidence, ...evidenceRefs]),
+        evidenceRefs: mergedEvidenceRefs,
         feedbackSignalIds: classifiedHarvest.signals.map(({ signal }) => signal.signalId),
         citations: classifiedHarvest.citations,
         recurrenceCitations: selectedRecurrence,
@@ -1111,13 +1197,14 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
           experimentId,
           scope: reflection.scope,
           cases: reflection.sourceCases,
-          evidenceRefs,
+          evidenceRefs: mergedEvidenceRefs,
           citations: classifiedHarvest.citations,
         }),
         recurrenceCount: selectedRecurrence.length,
         reflectionRun,
         ...(sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId }),
       });
+    };
 
     const reconcileObservation = async (
       current: ExperimentBrief,

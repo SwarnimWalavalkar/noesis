@@ -1,6 +1,14 @@
+import type { TrailState } from "@noesis/runtime";
 import { describe, expect, test } from "vitest";
-import { settledTurnPresentation, workingAdjustmentNoticeForTurn } from "../src/learning-presentation.ts";
+import {
+  learningDiagnosticNotice,
+  reconcileSettledTurnPresentation,
+  settledTurnPresentation,
+  startLateLearningNoticeRefresh,
+  workingAdjustmentNoticeForTurn,
+} from "../src/learning-presentation.ts";
 import type { TuiLearningActivitySummary } from "../src/runtime-port.ts";
+import { initialTuiState, reduceTui } from "../src/state.ts";
 
 function activity(
   status: TuiLearningActivitySummary["status"],
@@ -15,6 +23,33 @@ function activity(
     turnId,
   });
 }
+
+const settledTrail: TrailState = Object.freeze({
+  trailId: "trail-1",
+  title: "Trail 1",
+  paneId: "pane-1",
+  runtime: "test",
+  provider: "test",
+  model: "test",
+  status: "idle" as const,
+  turns: Object.freeze([{ input: "hello", output: "hi" }]),
+  capabilityVersions: Object.freeze({}),
+  context: Object.freeze({
+    schemaVersion: 1 as const,
+    snapshotId: "context-1",
+    createdAt: "2026-08-01T00:00:00.000Z",
+    maxTokens: 1_000,
+    usedTokens: 10,
+    fragments: [],
+    capabilityVersions: {},
+  }),
+  createdAt: "2026-08-01T00:00:00.000Z",
+  updatedAt: "2026-08-01T00:00:00.000Z",
+});
+
+const waitForAsyncPresentation = async (): Promise<void> => {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+};
 
 describe("working-adjustment notice presentation", () => {
   test.each([
@@ -81,35 +116,142 @@ describe("working-adjustment notice presentation", () => {
     });
   });
 
-  test("surfaces learning read failures through the settled-turn failure path", async () => {
-    const failure = new Error("learning read failed");
-    await expect(
-      settledTurnPresentation(
-        {
-          getTranscript: async () => Object.freeze([]),
-          getTrail: async () =>
+  test.each([
+    "idle",
+    "thinking",
+  ] as const)("keeps a %s foreground state intact while surfacing an auxiliary learning read failure", async (foregroundState) => {
+    const failure = new Error("learning read failed\u001b[31m\nplease retry");
+    let state = initialTuiState("test", {
+      provider: "test",
+      model: "test",
+      reasoningLevel: "off",
+      colorEnabled: false,
+    });
+    state = reduceTui(state, { type: "trail-selected", trail: settledTrail });
+    if (foregroundState === "thinking") state = reduceTui(state, { type: "prompt-submitted", text: "newer" });
+    const reported: unknown[] = [];
+    reconcileSettledTurnPresentation(
+      {
+        getTranscript: async () =>
+          Object.freeze([
             Object.freeze({
-              trailId: "trail-1",
-              title: "Trail 1",
-              paneId: "pane-1",
-              runtime: "test",
-              provider: "test",
-              model: "test",
-              status: "idle" as const,
-              turns: Object.freeze([]),
-              capabilityVersions: Object.freeze({}),
+              kind: "message" as const,
+              messageId: "message-1",
+              role: "assistant" as const,
+              text: "hi",
               createdAt: "2026-08-01T00:00:00.000Z",
-              updatedAt: "2026-08-01T00:00:00.000Z",
             }),
-          listLearningActivity: async () => await Promise.reject(failure),
+          ]),
+        getTrail: async () => settledTrail,
+        listLearningActivity: async () => await Promise.reject(failure),
+      },
+      {
+        trailId: "trail-1",
+        turnId: "turn-1",
+        outcome: "completed",
+        contextUsage: undefined,
+      },
+      {
+        isTrailCurrent: () => true,
+        canApplySettledState: () => foregroundState === "idle",
+        dispatch: (action) => {
+          state = reduceTui(state, action);
         },
-        {
-          trailId: "trail-1",
-          turnId: "turn-1",
-          outcome: "completed",
-          contextUsage: undefined,
+        requestRender: () => undefined,
+        reportDiagnostic: (error) => {
+          state = reduceTui(state, { type: "system-message", text: learningDiagnosticNotice(error) });
         },
-      ),
-    ).rejects.toBe(failure);
+        reportFailure: (error) => reported.push(error),
+      },
+    );
+
+    await waitForAsyncPresentation();
+
+    expect(state.execution).toBe(foregroundState);
+    expect(state.error).toBeUndefined();
+    expect(state.timeline.at(-1)).toMatchObject({
+      kind: "message",
+      role: "system",
+      text: "learning · unavailable · learning read failed [31m please retry",
+    });
+    expect(reported).toEqual([]);
+  });
+
+  test("reports errors thrown while applying a fulfilled settled presentation", async () => {
+    const failure = new Error("dispatch failed");
+    const reported: unknown[] = [];
+    reconcileSettledTurnPresentation(
+      {
+        getTranscript: async () => Object.freeze([]),
+        getTrail: async () => settledTrail,
+        listLearningActivity: async () => Object.freeze([]),
+      },
+      {
+        trailId: "trail-1",
+        turnId: "turn-1",
+        outcome: "completed",
+        contextUsage: undefined,
+      },
+      {
+        isTrailCurrent: () => true,
+        canApplySettledState: () => true,
+        dispatch: () => {
+          throw failure;
+        },
+        requestRender: () => undefined,
+        reportDiagnostic: () => undefined,
+        reportFailure: (error) => reported.push(error),
+      },
+    );
+
+    await waitForAsyncPresentation();
+
+    expect(reported).toEqual([failure]);
+  });
+
+  test("reports errors thrown by the late notice fulfillment handler", async () => {
+    const failure = new Error("notice failed");
+    const reported: unknown[] = [];
+    startLateLearningNoticeRefresh(
+      {
+        waitForLearningActivity: async () => activity("adjusted"),
+      },
+      {
+        trailId: "trail-1",
+        jobId: "job-adjusted",
+        onNotice: () => {
+          throw failure;
+        },
+        onFailure: (error) => reported.push(error),
+        onError: (error) => reported.push(error),
+      },
+    );
+
+    await waitForAsyncPresentation();
+
+    expect(reported).toEqual([failure]);
+  });
+
+  test("surfaces a late learning read rejection through the nonfatal callback", async () => {
+    const failure = new Error("late learning unavailable");
+    const diagnostics: unknown[] = [];
+    const fatal: unknown[] = [];
+    startLateLearningNoticeRefresh(
+      {
+        waitForLearningActivity: async () => await Promise.reject(failure),
+      },
+      {
+        trailId: "trail-1",
+        jobId: "job-adjusted",
+        onNotice: () => undefined,
+        onFailure: (error) => diagnostics.push(error),
+        onError: (error) => fatal.push(error),
+      },
+    );
+
+    await waitForAsyncPresentation();
+
+    expect(diagnostics).toEqual([failure]);
+    expect(fatal).toEqual([]);
   });
 });

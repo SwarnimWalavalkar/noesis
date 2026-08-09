@@ -331,6 +331,45 @@ describe("ambient learning read model", () => {
     expect(represented.activity[0]?.workingAdjustment).toBeUndefined();
   });
 
+  test("builds the current adjustment from one authoritative active read", async () => {
+    const adjustment = Object.freeze({
+      adjustmentId: "adjustment-active-snapshot",
+      scope: Object.freeze({ projectId: "project-1", root: "/workspace/project" }),
+      observation: "The previous turn exposed an avoidable gap.",
+      strategy: "Verify the decisive fact before answering.",
+      successSignal: "The answer cites the verified fact.",
+      evidenceRefs: Object.freeze([evidence]),
+      createdFromTurnId: "session-1:turn-1",
+    });
+    let activeReadCount = 0;
+    const inspection = await loadLearningInspectionForSession(
+      {
+        listJobPage: async () => Object.freeze({ jobs: Object.freeze([]), exhausted: true }),
+      },
+      "session-1",
+      "project-1",
+      {
+        workingAdjustments: {
+          get: async () => undefined,
+          getActive: async () => {
+            activeReadCount += 1;
+            return activeReadCount === 1 ? adjustment : undefined;
+          },
+          listSettledEvidence: async () => Object.freeze([]),
+        },
+        outcomes: { get: async () => undefined },
+      },
+    );
+
+    expect(activeReadCount).toBe(1);
+    expect(inspection.currentWorkingAdjustment).toEqual(
+      expect.objectContaining({
+        adjustmentId: "adjustment-active-snapshot",
+        status: "active",
+      }),
+    );
+  });
+
   test("projects authoritative job state and follows only this session's experiment chain", () => {
     const experimentId = "experiment-session-a";
     const activity = learningActivityForSession(

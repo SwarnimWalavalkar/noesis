@@ -73,6 +73,7 @@ import {
   MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
   type NoesisRuntime,
   type RunTurnOptions,
+  type RuntimeCoordinator,
   type RuntimeControlPlane,
   SESSION_PICKER_LIMIT,
   type TrailState,
@@ -125,6 +126,21 @@ const decoder = new TextDecoder("utf8", { fatal: true });
 const SHUTDOWN_GRACE_MS = 250;
 const REFLECTION_BARRIER_MS = 1_500;
 const LATE_REFLECTION_REFRESH_MS = 5_000;
+
+export async function waitForReflectionBarrier(
+  coordinator: Pick<RuntimeCoordinator, "waitForTerminal">,
+  reflectionJobId: string,
+): Promise<void> {
+  try {
+    await coordinator.waitForTerminal({
+      jobId: reflectionJobId,
+      deadline: new Date(Date.now() + REFLECTION_BARRIER_MS),
+    });
+  } catch {
+    // The foreground turn is already durably settled. Reflection remains inspectable as a
+    // background job, so an unavailable read model must not rewrite the turn as failed.
+  }
+}
 const roleNames = [
   "capability_router",
   "reflector",
@@ -3315,12 +3331,8 @@ export async function createApplicationRuntimeComposition(
           },
         });
         const result = settledTurn.result;
-        if (settledTurn.reflectionJobId) {
-          await coordinator.waitForTerminal({
-            jobId: settledTurn.reflectionJobId,
-            deadline: new Date(Date.now() + REFLECTION_BARRIER_MS),
-          });
-        }
+        if (settledTurn.reflectionJobId)
+          await waitForReflectionBarrier(coordinator, settledTurn.reflectionJobId);
         await persistTrail(
           Object.freeze({
             ...running,

@@ -1,6 +1,7 @@
 import type { RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
 import type { TuiLearningActivitySummary } from "./runtime-port.ts";
 import type { NoesisTuiAction, TuiContextUsage } from "./state.ts";
+import { safeTerminalText } from "./theme.ts";
 
 interface SettledTurnPresentationRuntime {
   readonly getTranscript: (trailId: string) => Promise<readonly RuntimeTranscriptEntry[]>;
@@ -15,6 +16,14 @@ interface LateLearningRefreshRuntime {
   ) => Promise<TuiLearningActivitySummary | undefined>;
 }
 
+interface LearningActivityLoad {
+  readonly activities: readonly TuiLearningActivitySummary[];
+  readonly failure?: Readonly<{ readonly error: unknown }>;
+}
+
+const noLearningActivity: readonly TuiLearningActivitySummary[] = Object.freeze([]);
+const MAX_DIAGNOSTIC_LENGTH = 240;
+
 export interface SettledTurnPresentationRequest {
   readonly trailId: string;
   readonly turnId: string;
@@ -25,6 +34,7 @@ export interface SettledTurnPresentationRequest {
 export interface SettledTurnPresentation {
   readonly actions: readonly NoesisTuiAction[];
   readonly pendingReflectionJobId?: string;
+  readonly learningActivityFailure?: Readonly<{ readonly error: unknown }>;
 }
 
 export function workingAdjustmentNotice(activity: TuiLearningActivitySummary): string | undefined {
@@ -37,6 +47,14 @@ export function workingAdjustmentNotice(activity: TuiLearningActivitySummary): s
   return undefined;
 }
 
+/** Keep an auxiliary learning failure visible without turning a settled foreground turn into an error. */
+export function learningDiagnosticNotice(error: unknown): string {
+  const detail = safeTerminalText(error instanceof Error ? error.message : String(error))
+    .replaceAll("\n", " ")
+    .slice(0, MAX_DIAGNOSTIC_LENGTH);
+  return `learning · unavailable${detail ? ` · ${detail}` : ""}`;
+}
+
 /** Run the single exact-job late refresh without making the TUI root own job orchestration. */
 export function startLateLearningNoticeRefresh(
   runtime: LateLearningRefreshRuntime,
@@ -44,15 +62,19 @@ export function startLateLearningNoticeRefresh(
     trailId: string;
     jobId: string;
     onNotice: (notice: string) => void;
+    onFailure: (error: unknown) => void;
     onError: (error: unknown) => void;
   }>,
 ): void {
   if (!runtime.waitForLearningActivity) return;
-  void runtime.waitForLearningActivity(request.trailId, request.jobId).then((activity) => {
-    if (!activity) return;
-    const notice = workingAdjustmentNotice(activity);
-    if (notice) request.onNotice(notice);
-  }, request.onError);
+  void runtime
+    .waitForLearningActivity(request.trailId, request.jobId)
+    .then((activity) => {
+      if (!activity) return;
+      const notice = workingAdjustmentNotice(activity);
+      if (notice) request.onNotice(notice);
+    }, request.onFailure)
+    .catch(request.onError);
 }
 
 /** Present the first user-visible working-adjustment outcome for a settled turn. */
@@ -71,10 +93,17 @@ export async function settledTurnPresentation(
   runtime: SettledTurnPresentationRuntime,
   request: SettledTurnPresentationRequest,
 ): Promise<SettledTurnPresentation> {
-  const learningActivity = runtime.listLearningActivity
-    ? runtime.listLearningActivity(request.trailId)
-    : Promise.resolve(Object.freeze([]));
-  const [transcript, trail, activities] = await Promise.all([
+  const learningActivity: Promise<LearningActivityLoad> = runtime.listLearningActivity
+    ? runtime.listLearningActivity(request.trailId).then(
+        (activities) => Object.freeze({ activities }),
+        (error: unknown) =>
+          Object.freeze({
+            activities: noLearningActivity,
+            failure: Object.freeze({ error }),
+          }),
+      )
+    : Promise.resolve(Object.freeze({ activities: noLearningActivity }));
+  const [transcript, trail, learning] = await Promise.all([
     runtime.getTranscript(request.trailId),
     Promise.resolve(runtime.getTrail(request.trailId)),
     learningActivity,
@@ -93,9 +122,9 @@ export async function settledTurnPresentation(
       { type: "execution-changed", execution: "idle" },
       { type: "system-message", text: "Turn interrupted." },
     );
-  const learningNotice = workingAdjustmentNoticeForTurn(activities, request.turnId);
+  const learningNotice = workingAdjustmentNoticeForTurn(learning.activities, request.turnId);
   if (learningNotice) actions.push({ type: "system-message", text: learningNotice });
-  const pendingReflectionJobId = activities.find(
+  const pendingReflectionJobId = learning.activities.find(
     (activity) =>
       activity.turnId === request.turnId &&
       activity.stage === "reflection" &&
@@ -105,6 +134,7 @@ export async function settledTurnPresentation(
   return Object.freeze({
     actions: Object.freeze(actions),
     ...(pendingReflectionJobId ? { pendingReflectionJobId } : {}),
+    ...(learning.failure ? { learningActivityFailure: learning.failure } : {}),
   });
 }
 
@@ -117,11 +147,12 @@ export function reconcileSettledTurnPresentation(
     canApplySettledState: () => boolean;
     dispatch: (action: NoesisTuiAction) => void;
     requestRender: () => void;
+    reportDiagnostic: (error: unknown) => void;
     reportFailure: (error: unknown) => void;
   }>,
 ): void {
-  void settledTurnPresentation(runtime, request).then(
-    (presentation) => {
+  void settledTurnPresentation(runtime, request)
+    .then((presentation) => {
       const currentTrail = host.isTrailCurrent();
       if (currentTrail && presentation.pendingReflectionJobId)
         startLateLearningNoticeRefresh(runtime, {
@@ -131,6 +162,9 @@ export function reconcileSettledTurnPresentation(
             if (!host.isTrailCurrent()) return;
             host.dispatch({ type: "system-message", text: notice });
             host.requestRender();
+          },
+          onFailure: (error) => {
+            if (host.isTrailCurrent()) host.reportDiagnostic(error);
           },
           onError: (error) => {
             if (host.isTrailCurrent()) host.reportFailure(error);
@@ -143,13 +177,16 @@ export function reconcileSettledTurnPresentation(
           }
           host.requestRender();
         }
+        if (currentTrail && presentation.learningActivityFailure)
+          host.reportDiagnostic(presentation.learningActivityFailure.error);
         return;
       }
       for (const action of presentation.actions) host.dispatch(action);
       host.requestRender();
-    },
-    (error: unknown) => {
+      if (presentation.learningActivityFailure)
+        host.reportDiagnostic(presentation.learningActivityFailure.error);
+    })
+    .catch((error: unknown) => {
       if (host.isTrailCurrent()) host.reportFailure(error);
-    },
-  );
+    });
 }

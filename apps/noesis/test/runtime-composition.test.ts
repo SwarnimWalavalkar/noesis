@@ -27,9 +27,22 @@ import {
 } from "../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 import { createScriptedAgentRoleRunner } from "../../../packages/runtime-pi/test/support/scripted-role-runner.ts";
 import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
-import { createApplicationRuntimeComposition } from "../src/runtime-composition.ts";
+import { createApplicationRuntimeComposition, waitForReflectionBarrier } from "../src/runtime-composition.ts";
 
 const roots: string[] = [];
+
+test("a reflection barrier read failure cannot fail an already-settled turn", async () => {
+  await expect(
+    waitForReflectionBarrier(
+      {
+        waitForTerminal: async () => {
+          throw new Error("reflection read model unavailable");
+        },
+      },
+      "job-reflection-settled",
+    ),
+  ).resolves.toBeUndefined();
+});
 
 const recoveryTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
   const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
@@ -1698,11 +1711,12 @@ describe("apps/noesis production control-plane composition", () => {
     const firstTrail = await first.startTrail({ title: "Project P source" });
     const source = await first.debug.runTurn(firstTrail.trailId, "Finish the first project task.");
     await first.controlPlane.idle();
+    if (!source.frozenTurnPlan) throw new Error("Expected the source turn to retain its frozen plan");
     const active = await first.debug.workspace.workingAdjustments.getActive(project.projectId);
     expect(active).toMatchObject({
       scope: project,
       strategy,
-      createdFromTurnId: source.frozenTurnPlan?.turnId,
+      createdFromTurnId: source.frozenTurnPlan.turnId,
     });
     if (!active) throw new Error("Expected the source reflection to apply a project adjustment");
     await first.shutdown();

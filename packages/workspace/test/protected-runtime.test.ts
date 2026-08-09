@@ -2,8 +2,9 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
-import type { CapabilityRevisionRef, FileRevisionRef } from "@noesis/domain";
+import type { CapabilityRevisionRef, FileRevisionRef, JsonValue, WorkingAdjustment } from "@noesis/domain";
 import {
+  type AuthorityBoundary,
   type AuthorityReceipt,
   authorityOperationFields,
   createDurableAuthorityBoundary,
@@ -18,6 +19,7 @@ import {
   createReceiptGuardedProtectedMutations,
   createWorkspaceRuntimeInternals,
 } from "../src/protected-runtime.ts";
+import type { ProtectedWorkingAdjustmentStore } from "../src/types.ts";
 
 const roots: string[] = [];
 const stores: NoesisWorkspaceStore[] = [];
@@ -30,6 +32,95 @@ afterEach(async () => {
 const unsupported = async (): Promise<never> => {
   throw new Error("unused protected mutation");
 };
+
+const project = Object.freeze({ projectId: "project-protected", root: "/tmp/project-protected" });
+
+function adjustment(adjustmentId: string, scope: WorkingAdjustment["scope"] = project): WorkingAdjustment {
+  return Object.freeze({
+    adjustmentId,
+    scope,
+    observation: "Recent work exposed a project-level opportunity.",
+    strategy: `Apply strategy ${adjustmentId}.`,
+    successSignal: "The next relevant turn improves observably.",
+    evidenceRefs: Object.freeze([
+      Object.freeze({ kind: "database_row" as const, table: "sessions" as const, rowId: "session-1" }),
+    ]),
+    createdFromTurnId: "turn-1",
+  });
+}
+
+function mutableWorkingAdjustments(): {
+  readonly store: ProtectedWorkingAdjustmentStore;
+  readonly applyCalls: () => number;
+  readonly unapplyCalls: () => number;
+} {
+  const records = new Map<string, WorkingAdjustment>();
+  const activeByProject = new Map<string, WorkingAdjustment>();
+  let applyCalls = 0;
+  let unapplyCalls = 0;
+  const store: ProtectedWorkingAdjustmentStore = Object.freeze({
+    get: async (adjustmentId: string) => records.get(adjustmentId),
+    getActive: async (projectId: string) => activeByProject.get(projectId),
+    listSettledEvidence: async () => Object.freeze([]),
+    apply: async (request: Parameters<ProtectedWorkingAdjustmentStore["apply"]>[0]) => {
+      applyCalls += 1;
+      const projectId = request.adjustment.scope.projectId;
+      const currentActiveAdjustmentId = activeByProject.get(projectId)?.adjustmentId ?? null;
+      if (currentActiveAdjustmentId !== request.expectedActiveAdjustmentId)
+        return Object.freeze({
+          status: "stale" as const,
+          adjustmentId: request.adjustment.adjustmentId,
+          currentActiveAdjustmentId,
+        });
+      records.set(request.adjustment.adjustmentId, request.adjustment);
+      activeByProject.set(projectId, request.adjustment);
+      return Object.freeze({
+        status: "applied" as const,
+        adjustment: request.adjustment,
+        replacedAdjustmentId: currentActiveAdjustmentId,
+      });
+    },
+    unapply: async (request: Parameters<ProtectedWorkingAdjustmentStore["unapply"]>[0]) => {
+      unapplyCalls += 1;
+      const currentActiveAdjustmentId = activeByProject.get(request.projectId)?.adjustmentId ?? null;
+      if (currentActiveAdjustmentId !== request.expectedActiveAdjustmentId)
+        return Object.freeze({
+          status: "stale" as const,
+          adjustmentId: request.expectedActiveAdjustmentId,
+          currentActiveAdjustmentId,
+        });
+      activeByProject.delete(request.projectId);
+      return Object.freeze({
+        status: "unapplied" as const,
+        adjustmentId: request.expectedActiveAdjustmentId,
+      });
+    },
+  });
+  return Object.freeze({
+    store,
+    applyCalls: () => applyCalls,
+    unapplyCalls: () => unapplyCalls,
+  });
+}
+
+async function runtimeWithWorkingAdjustments(
+  workingAdjustments: ProtectedWorkingAdjustmentStore,
+  wrapAuthority: (authority: AuthorityBoundary) => AuthorityBoundary = (authority) => authority,
+) {
+  const root = await mkdtemp(join(tmpdir(), "noesis-protected-adjustments-"));
+  roots.push(root);
+  const workspace = await createWorkspaceStore(root);
+  stores.push(workspace);
+  const internals = createWorkspaceRuntimeInternals(workspace);
+  return createProtectedWorkspaceRuntime({
+    workspaceRoot: root,
+    authority: wrapAuthority(internals.authority),
+    activations: internals.protectedRuntime.activations,
+    feedback: internals.protectedRuntime.feedback,
+    measurements: internals.protectedRuntime.measurements,
+    workingAdjustments,
+  });
+}
 
 function mutationPorts(onPin: () => void) {
   return Object.freeze({
@@ -89,6 +180,218 @@ async function captureReceipt(
 }
 
 describe("protected workspace runtime", () => {
+  test("checks cancellation inside protected adjustment authority before store mutation", async () => {
+    const mutations = mutableWorkingAdjustments();
+    const runtime = await runtimeWithWorkingAdjustments(mutations.store);
+    const first = adjustment("adjustment-cancelled-apply");
+    const cancelledApply = new AbortController();
+    cancelledApply.abort("cancelled");
+
+    await expect(
+      runtime.workingAdjustments.apply({
+        adjustment: first,
+        expectedActiveAdjustmentId: null,
+        signal: cancelledApply.signal,
+      }),
+    ).rejects.toThrow("cancelled before protected state changed");
+    expect(mutations.applyCalls()).toBe(0);
+
+    const active = adjustment("adjustment-cancelled-unapply");
+    await mutations.store.apply({ adjustment: active, expectedActiveAdjustmentId: null });
+    const cancelledUnapply = new AbortController();
+    cancelledUnapply.abort("cancelled");
+
+    await expect(
+      runtime.workingAdjustments.unapply({
+        projectId: project.projectId,
+        expectedActiveAdjustmentId: active.adjustmentId,
+        signal: cancelledUnapply.signal,
+      }),
+    ).rejects.toThrow("cancelled before protected state changed");
+    expect(mutations.unapplyCalls()).toBe(0);
+    await expect(mutations.store.getActive(project.projectId)).resolves.toEqual(active);
+  });
+
+  test("rechecks cancellation after authority reservation and before adjustment mutation", async () => {
+    const mutations = mutableWorkingAdjustments();
+    let markAuthorityEntered: (() => void) | undefined;
+    const authorityEntered = new Promise<void>((resolve) => {
+      markAuthorityEntered = resolve;
+    });
+    let releaseAuthority: (() => void) | undefined;
+    const authorityBlocked = new Promise<void>((resolve) => {
+      releaseAuthority = resolve;
+    });
+    const runtime = await runtimeWithWorkingAdjustments(mutations.store, (authority) => {
+      const promote: AuthorityBoundary["promote"] = async <Result extends JsonValue>(
+        resource: string,
+        idempotencyKey: string,
+        execute: (receipt: AuthorityReceipt) => Promise<Result>,
+      ) => {
+        markAuthorityEntered?.();
+        await authorityBlocked;
+        return await authority.promote(resource, idempotencyKey, execute);
+      };
+      return Object.freeze({
+        ...authority,
+        promote,
+      });
+    });
+    const controller = new AbortController();
+    const pending = runtime.workingAdjustments.apply({
+      adjustment: adjustment("adjustment-cancelled-during-authority"),
+      expectedActiveAdjustmentId: null,
+      signal: controller.signal,
+    });
+
+    await authorityEntered;
+    controller.abort("cancelled");
+    releaseAuthority?.();
+
+    await expect(pending).rejects.toThrow("cancelled before protected state changed");
+    expect(mutations.applyCalls()).toBe(0);
+  });
+
+  test("reports a replayed successful apply as stale after the active binding changes", async () => {
+    const mutations = mutableWorkingAdjustments();
+    const runtime = await runtimeWithWorkingAdjustments(mutations.store);
+    const first = adjustment("adjustment-first");
+    const replacement = adjustment("adjustment-replacement");
+
+    await expect(
+      runtime.workingAdjustments.apply({ adjustment: first, expectedActiveAdjustmentId: null }),
+    ).resolves.toMatchObject({ status: "applied", replacedAdjustmentId: null });
+    await expect(
+      runtime.workingAdjustments.apply({
+        adjustment: replacement,
+        expectedActiveAdjustmentId: first.adjustmentId,
+      }),
+    ).resolves.toMatchObject({ status: "applied", replacedAdjustmentId: first.adjustmentId });
+    await expect(
+      runtime.workingAdjustments.apply({ adjustment: first, expectedActiveAdjustmentId: null }),
+    ).resolves.toEqual({
+      status: "stale",
+      adjustmentId: first.adjustmentId,
+      currentActiveAdjustmentId: replacement.adjustmentId,
+    });
+    expect(mutations.applyCalls()).toBe(2);
+  });
+
+  test("reports a replayed successful unapply as stale after the adjustment is reactivated", async () => {
+    const mutations = mutableWorkingAdjustments();
+    const runtime = await runtimeWithWorkingAdjustments(mutations.store);
+    const first = adjustment("adjustment-first");
+    const intermediate = adjustment("adjustment-intermediate");
+
+    await runtime.workingAdjustments.apply({ adjustment: first, expectedActiveAdjustmentId: null });
+    await expect(
+      runtime.workingAdjustments.unapply({
+        projectId: project.projectId,
+        expectedActiveAdjustmentId: first.adjustmentId,
+      }),
+    ).resolves.toEqual({ status: "unapplied", adjustmentId: first.adjustmentId });
+    await runtime.workingAdjustments.apply({ adjustment: intermediate, expectedActiveAdjustmentId: null });
+    await runtime.workingAdjustments.apply({
+      adjustment: first,
+      expectedActiveAdjustmentId: intermediate.adjustmentId,
+    });
+
+    await expect(
+      runtime.workingAdjustments.unapply({
+        projectId: project.projectId,
+        expectedActiveAdjustmentId: first.adjustmentId,
+      }),
+    ).resolves.toEqual({
+      status: "stale",
+      adjustmentId: first.adjustmentId,
+      currentActiveAdjustmentId: first.adjustmentId,
+    });
+    expect(mutations.unapplyCalls()).toBe(1);
+  });
+
+  test("uses a new apply operation when the caller updates its expected active binding", async () => {
+    const mutations = mutableWorkingAdjustments();
+    const runtime = await runtimeWithWorkingAdjustments(mutations.store);
+    const first = adjustment("adjustment-first");
+    const next = adjustment("adjustment-next");
+
+    await runtime.workingAdjustments.apply({ adjustment: first, expectedActiveAdjustmentId: null });
+    await expect(
+      runtime.workingAdjustments.apply({ adjustment: next, expectedActiveAdjustmentId: null }),
+    ).resolves.toEqual({
+      status: "stale",
+      adjustmentId: next.adjustmentId,
+      currentActiveAdjustmentId: first.adjustmentId,
+    });
+    await expect(
+      runtime.workingAdjustments.apply({
+        adjustment: next,
+        expectedActiveAdjustmentId: first.adjustmentId,
+      }),
+    ).resolves.toMatchObject({ status: "applied", replacedAdjustmentId: first.adjustmentId });
+    expect(mutations.applyCalls()).toBe(3);
+  });
+
+  test("does not replay adjustment operations across projects with the same adjustment identity", async () => {
+    const mutations = mutableWorkingAdjustments();
+    const runtime = await runtimeWithWorkingAdjustments(mutations.store);
+    const firstProject = Object.freeze({ projectId: "project-first", root: "/tmp/project-first" });
+    const secondProject = Object.freeze({ projectId: "project-second", root: "/tmp/project-second" });
+
+    await expect(
+      runtime.workingAdjustments.apply({
+        adjustment: adjustment("adjustment-shared", firstProject),
+        expectedActiveAdjustmentId: null,
+      }),
+    ).resolves.toMatchObject({ status: "applied" });
+    await expect(
+      runtime.workingAdjustments.apply({
+        adjustment: adjustment("adjustment-shared", secondProject),
+        expectedActiveAdjustmentId: null,
+      }),
+    ).resolves.toMatchObject({ status: "applied" });
+    await expect(
+      runtime.workingAdjustments.unapply({
+        projectId: firstProject.projectId,
+        expectedActiveAdjustmentId: "adjustment-shared",
+      }),
+    ).resolves.toMatchObject({ status: "unapplied" });
+    await expect(
+      runtime.workingAdjustments.unapply({
+        projectId: secondProject.projectId,
+        expectedActiveAdjustmentId: "adjustment-shared",
+      }),
+    ).resolves.toMatchObject({ status: "unapplied" });
+
+    expect(mutations.applyCalls()).toBe(2);
+    expect(mutations.unapplyCalls()).toBe(2);
+  });
+
+  test("canonicalizes apply identities so delimiter-shaped fields cannot replay another operation", async () => {
+    const mutations = mutableWorkingAdjustments();
+    const runtime = await runtimeWithWorkingAdjustments(mutations.store);
+    const firstProject = Object.freeze({ projectId: "p", root: "/tmp/p" });
+    const secondProject = Object.freeze({
+      projectId: "p:apply:x:expected:id:v",
+      root: "/tmp/p-delimiter",
+    });
+
+    await expect(
+      runtime.workingAdjustments.apply({
+        adjustment: adjustment("x:expected:id:v:apply:x", firstProject),
+        expectedActiveAdjustmentId: "e",
+      }),
+    ).resolves.toMatchObject({ status: "stale" });
+    await expect(
+      runtime.workingAdjustments.apply({
+        adjustment: adjustment("x", secondProject),
+        expectedActiveAdjustmentId: "v:apply:x:expected:id:e",
+      }),
+    ).resolves.toMatchObject({ status: "stale" });
+
+    expect(mutations.applyCalls()).toBe(2);
+  });
+
   test("rejects forged, foreign, wrong-effect, wrong-resource, and wrong-workspace receipts before mutation", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-protected-receipts-"));
     roots.push(root);

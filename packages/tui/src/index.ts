@@ -11,7 +11,7 @@ import { executionIdOf } from "./action-summary.ts";
 import { tuiActionForAgentEvent } from "./agent-event.ts";
 import { isExclusiveSlashCommand, runSlashCommand, steerFeedback } from "./commands.ts";
 import { editTextInExternalEditor } from "./external-editor.ts";
-import { reconcileSettledTurnPresentation } from "./learning-presentation.ts";
+import { learningDiagnosticNotice, reconcileSettledTurnPresentation } from "./learning-presentation.ts";
 import { boundedInspectorText, streamingFrameDelay } from "./lifecycle-utils.ts";
 import {
   createHeaderView,
@@ -111,6 +111,10 @@ export async function startNoesisTui(
       type: "failed",
       error: safeTerminalText(error instanceof Error ? error.message : String(error)),
     });
+    tui.requestRender();
+  };
+  const reportLearningDiagnostic = (error: unknown): void => {
+    view.dispatch({ type: "system-message", text: learningDiagnosticNotice(error) });
     tui.requestRender();
   };
   const headerView = createHeaderView(colorEnabled, () => terminal.rows);
@@ -372,6 +376,7 @@ export async function startNoesisTui(
         canApplySettledState: () => turnGeneration === generation && !activeTurnToken,
         dispatch: (action) => view.dispatch(action),
         requestRender: () => tui.requestRender(),
+        reportDiagnostic: reportLearningDiagnostic,
         reportFailure,
       },
     );

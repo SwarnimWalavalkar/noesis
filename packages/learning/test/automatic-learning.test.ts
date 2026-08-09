@@ -959,6 +959,66 @@ describe("automatic learning organ", () => {
     expect(unlinked.experiments()[0]?.sourceAdjustmentId).toBeUndefined();
   });
 
+  test("carries cited working-adjustment outcome evidence into revision-author source cases", async () => {
+    const activeAdjustment = Object.freeze({
+      adjustmentId: "adjustment-source-cases",
+      scope: Object.freeze({ projectId: "project-noesis", root: "/work/noesis" }),
+      observation: "Success was claimed without checking observable state.",
+      strategy: "Verify observable state before claiming success.",
+      successSignal: "Success claims cite fresh runtime evidence.",
+      evidenceRefs: Object.freeze([databaseRef("adjustment-original-evidence")]),
+      createdFromTurnId: "turn-before",
+    });
+    const citedServedOutcome = databaseRef("served-adjustment-outcome");
+    const linkedStep = Object.freeze({
+      ...reflectionStep,
+      value: Object.freeze({
+        ...reflectionStep.value,
+        workingAdjustmentEvidenceCitationIndexes: Object.freeze([1]),
+      }),
+    });
+    const harness = createHarness({ steps: [linkedStep, authorStep], citations: [citation(1)] });
+    const observed = await harness.organ.observeTurn({
+      turn: Object.freeze({
+        ...turn({ turnId: "turn-adjustment-source-case", correction: "Verify the real state first." }),
+        expectedActiveAdjustmentId: activeAdjustment.adjustmentId,
+        servedWorkingAdjustmentOutcomes: Object.freeze([
+          Object.freeze({
+            adjustmentId: activeAdjustment.adjustmentId,
+            planId: "plan-adjustment-source-case",
+            sessionId: "session-before",
+            turnId: "turn-served-adjustment",
+            outcomeId: "outcome-served-adjustment",
+            outcome: "accepted" as const,
+            summary: "The verification strategy produced an evidence-backed completion.",
+            settledAt: "2026-01-09T00:00:00.000Z",
+            evidenceRefs: Object.freeze([citedServedOutcome]),
+          }),
+        ]),
+      }),
+      baselineRevision: harness.baseline,
+      capability,
+      activeWorkingAdjustment: activeAdjustment,
+    });
+    if (observed.status !== "experiment") throw new Error("Expected an adjustment-backed experiment");
+
+    const expectedAdjustmentEvidence = Object.freeze({
+      kind: "database_row" as const,
+      table: "working_adjustments" as const,
+      rowId: activeAdjustment.adjustmentId,
+    });
+    expect(observed.brief.sourceAdjustmentId).toBe(activeAdjustment.adjustmentId);
+    expect(observed.brief.sourceCases[0]?.evidenceRefs).toEqual(observed.brief.evidenceRefs);
+    expect(observed.brief.sourceCases[0]?.evidenceRefs).toContainEqual(expectedAdjustmentEvidence);
+    expect(observed.brief.sourceCases[0]?.evidenceRefs).toContainEqual(citedServedOutcome);
+
+    await harness.organ.authorExperimentRevision({ brief: observed.brief });
+    const authorRequest = harness.inference.requests().find((request) => request.role === "revision_author");
+    const sourceCasesMessage = authorRequest?.messages.find((message) => message.name === "source_cases");
+    const authoredSourceCases: unknown = JSON.parse(sourceCasesMessage?.content ?? "null");
+    expect(authoredSourceCases).toEqual(observed.brief.sourceCases);
+  });
+
   test("lets the reflector return no change for ordinary chat", async () => {
     const harness = createHarness({
       steps: [
@@ -1029,6 +1089,150 @@ describe("automatic learning organ", () => {
     expect(harness.inference.requests()[0]?.messages.at(-1)).toMatchObject({
       name: "working_adjustment_context",
     });
+  });
+
+  test("does not duplicate current-turn message text in working-adjustment evidence context", async () => {
+    const harness = createHarness({
+      steps: [
+        Object.freeze({
+          role: "reflector",
+          value: Object.freeze({
+            observation: Object.freeze({ kind: "other", reason: "No adjustment is useful." }),
+            decision: "no_change",
+            reason: "The completed turn does not suggest a reusable change.",
+          }),
+        }),
+      ],
+    });
+    const userMessage = `unique-user-message-${"u".repeat(20_000)}`;
+    const assistantMessage = `unique-assistant-message-${"a".repeat(20_000)}`;
+
+    await harness.organ.observeTurn({
+      turn: Object.freeze({
+        ...turn({ userMessage }),
+        assistantMessage,
+      }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    const request = harness.inference.requests()[0];
+    const currentTurnMessage = request?.messages.find((message) => message.name === "current_turn");
+    const adjustmentContextMessage = request?.messages.find(
+      (message) => message.name === "working_adjustment_context",
+    );
+    if (!currentTurnMessage || !adjustmentContextMessage)
+      throw new Error("Expected reflector context messages");
+
+    expect(currentTurnMessage.content).toContain(userMessage);
+    expect(currentTurnMessage.content).toContain(assistantMessage);
+    expect(adjustmentContextMessage.content).not.toContain(userMessage);
+    expect(adjustmentContextMessage.content).not.toContain(assistantMessage);
+    expect(adjustmentContextMessage.content).toContain('"kind":"current_turn"');
+    expect(adjustmentContextMessage.content).toContain('"turnId":"turn-1"');
+    expect(adjustmentContextMessage.content).toContain('"outcome":"corrected"');
+    expect(adjustmentContextMessage.content.length).toBeLessThan(4_000);
+  });
+
+  test("keeps worst-case working-adjustment context below the reflector message policy without losing citation indexes", async () => {
+    const activeAdjustmentId = `adjustment-${"d".repeat(4_000)}`;
+    const promptAdjustmentIdentity = `${activeAdjustmentId.slice(0, 239)}…${sha256(activeAdjustmentId).slice(0, 16)}`;
+    const servedEvidence = Array.from({ length: 8 }, (_, outcomeIndex) =>
+      Object.freeze(
+        Array.from({ length: 4 }, (_, referenceIndex) =>
+          databaseRef(`served-${outcomeIndex}-${referenceIndex}-${"e".repeat(2_000)}`),
+        ),
+      ),
+    );
+    const lastServedEvidence = servedEvidence[7]?.[3];
+    if (!lastServedEvidence) throw new Error("Expected worst-case served evidence");
+    const harness = createHarness({
+      steps: [
+        Object.freeze({
+          role: "reflector",
+          value: Object.freeze({
+            observation: Object.freeze({
+              kind: "correction",
+              reason: "The served strategy should be replaced.",
+            }),
+            decision: "apply_working_adjustment",
+            expectedActiveAdjustmentId: promptAdjustmentIdentity,
+            rationale: "The evidence supports a more useful strategy.",
+            strategy: "Use the improved project strategy.",
+            successSignal: "The next turn improves.",
+            evidenceCitationIndexes: Object.freeze([8]),
+          }),
+        }),
+      ],
+    });
+    const project = Object.freeze({
+      projectId: `project-${"p".repeat(4_000)}`,
+      root: `/work/${"r".repeat(4_000)}`,
+    });
+    const activeAdjustment = Object.freeze({
+      adjustmentId: activeAdjustmentId,
+      scope: project,
+      observation: "o".repeat(WORKING_ADJUSTMENT_LIMITS.observationChars),
+      strategy: "s".repeat(WORKING_ADJUSTMENT_LIMITS.strategyChars),
+      successSignal: "x".repeat(WORKING_ADJUSTMENT_LIMITS.successSignalChars),
+      evidenceRefs: Object.freeze(
+        Array.from({ length: WORKING_ADJUSTMENT_LIMITS.evidenceRefs }, (_, index) =>
+          databaseRef(`active-${index}-${"a".repeat(2_000)}`),
+        ),
+      ),
+      createdFromTurnId: `turn-${"t".repeat(2_000)}`,
+    });
+    const base = turn({ turnId: "turn-worst-case-context" });
+
+    const result = await harness.organ.observeTurn({
+      turn: Object.freeze({
+        ...base,
+        project,
+        expectedActiveAdjustmentId: activeAdjustmentId,
+        servedWorkingAdjustmentOutcomes: Object.freeze(
+          servedEvidence.map((evidenceRefs, outcomeIndex) =>
+            Object.freeze({
+              adjustmentId: activeAdjustmentId,
+              planId: `plan-${outcomeIndex}-${"l".repeat(2_000)}`,
+              sessionId: `session-${outcomeIndex}-${"n".repeat(2_000)}`,
+              turnId: `served-turn-${outcomeIndex}-${"u".repeat(2_000)}`,
+              outcomeId: `outcome-${outcomeIndex}-${"i".repeat(2_000)}`,
+              outcome: "accepted" as const,
+              summary: "q".repeat(512),
+              settledAt: "2026-01-10T00:00:00.000Z",
+              evidenceRefs,
+            }),
+          ),
+        ),
+      }),
+      baselineRevision: harness.baseline,
+      capability,
+      activeWorkingAdjustment: activeAdjustment,
+    });
+
+    if (result.status !== "apply_working_adjustment")
+      throw new Error("Expected a replacement working adjustment");
+    expect(result.expectedActiveAdjustmentId).toBe(activeAdjustmentId);
+    expect(result.evidenceRefs).toContainEqual(lastServedEvidence);
+
+    const adjustmentContextMessage = harness.inference
+      .requests()[0]
+      ?.messages.find((message) => message.name === "working_adjustment_context");
+    if (!adjustmentContextMessage) throw new Error("Expected working-adjustment context");
+    expect(adjustmentContextMessage.content.length).toBeLessThan(12_000);
+    const promptContext = JSON.parse(adjustmentContextMessage.content) as {
+      readonly expectedActiveAdjustmentId: string;
+      readonly activeAdjustment: Readonly<Record<string, unknown>>;
+      readonly evidence: readonly Readonly<Record<string, unknown>>[];
+    };
+    expect(promptContext.expectedActiveAdjustmentId).toBe(promptAdjustmentIdentity);
+    expect(promptContext.activeAdjustment).not.toHaveProperty("evidenceRefs");
+    expect(promptContext.evidence).toHaveLength(9);
+    expect(promptContext.evidence.map((candidate) => candidate["citationIndex"])).toEqual([
+      0, 1, 2, 3, 4, 5, 6, 7, 8,
+    ]);
+    expect(promptContext.evidence.every((candidate) => !("evidenceRefs" in candidate))).toBe(true);
+    expect(adjustmentContextMessage.content).not.toContain(lastServedEvidence.rowId);
   });
 
   test("requires an unapply decision to target the exact adjustment served to the turn", async () => {

@@ -9,9 +9,9 @@ import {
   type Experiment,
   type FileRevisionRef,
   type JsonValue,
-  type ProjectRef,
   type PreflightDecision,
   type PreflightReport,
+  type ProjectRef,
   type WorkingAdjustment,
 } from "@noesis/domain";
 import { type RetrievalStrategyId, RetrievalStrategyIdSchema } from "@noesis/intelligence";
@@ -182,6 +182,7 @@ export interface CoordinatorWorkingAdjustmentMutationPort {
   readonly apply: (request: {
     readonly adjustment: WorkingAdjustment;
     readonly expectedActiveAdjustmentId: string | null;
+    readonly signal: AbortSignal;
   }) => Promise<
     | {
         readonly status: "applied";
@@ -197,6 +198,7 @@ export interface CoordinatorWorkingAdjustmentMutationPort {
   readonly unapply: (request: {
     readonly projectId: string;
     readonly expectedActiveAdjustmentId: string;
+    readonly signal: AbortSignal;
   }) => Promise<
     | { readonly status: "unapplied"; readonly adjustmentId: string }
     | {

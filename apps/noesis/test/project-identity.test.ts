@@ -10,7 +10,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
 });
 
-describe("active project identity", () => {
+describe.skipIf(process.platform === "win32")("active project identity", () => {
   test("maps a directory and its symlink to one stable host-derived project", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-project-identity-"));
     roots.push(root);

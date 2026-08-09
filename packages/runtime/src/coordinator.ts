@@ -1,9 +1,9 @@
 import {
   canonicalJson,
-  durableJobFailureFromError,
   type DurableJobFailure,
   type DurableJobListCursor,
   type DurableJobRecord,
+  durableJobFailureFromError,
   type Experiment,
   sameCapabilityRevisionRef,
   sha256,
@@ -361,6 +361,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
           createdFromTurnId: payload.turn.turnId,
         }),
         expectedActiveAdjustmentId: reflected.expectedActiveAdjustmentId,
+        signal,
       });
       if (applied.status === "stale")
         return Object.freeze({
@@ -376,13 +377,13 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
           telemetry: reflected.telemetry,
         });
       return Object.freeze({
-        status: reflected.expectedActiveAdjustmentId === null ? ("adjusted" as const) : ("replaced" as const),
+        status: applied.replacedAdjustmentId === null ? ("adjusted" as const) : ("replaced" as const),
         adjustmentId,
         projectId: reflected.project.projectId,
         rationale: reflected.rationale,
         observation: reflected.observation,
         expectedActiveAdjustmentId: reflected.expectedActiveAdjustmentId,
-        replacedAdjustmentId: reflected.expectedActiveAdjustmentId ?? applied.replacedAdjustmentId,
+        replacedAdjustmentId: applied.replacedAdjustmentId,
         retrievalStrategyId: payload.retrievalStrategyId,
         routingStrategyId: payload.routingStrategyId,
         telemetry: reflected.telemetry,
@@ -392,6 +393,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       const unapplied = await options.workingAdjustments.unapply({
         projectId: reflected.project.projectId,
         expectedActiveAdjustmentId: reflected.expectedActiveAdjustmentId,
+        signal,
       });
       if (unapplied.status === "stale")
         return Object.freeze({
@@ -707,7 +709,8 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       const remaining = deadlineMs - Date.now();
       if (remaining <= 0) return Object.freeze({ status: "timeout" as const });
       await new Promise<void>((resolve) => {
-        setTimeout(resolve, Math.min(25, remaining));
+        const timer = setTimeout(resolve, Math.min(25, remaining));
+        timer.unref();
       });
     }
   };

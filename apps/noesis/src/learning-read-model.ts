@@ -1,5 +1,5 @@
 // biome-ignore-all lint/complexity/useLiteralKeys: unknown durable job results require bracket access under noPropertyAccessFromIndexSignature.
-import type { WorkingAdjustmentReadPort } from "@noesis/domain";
+import type { WorkingAdjustment, WorkingAdjustmentReadPort } from "@noesis/domain";
 import type {
   CoordinatorJobKind,
   CoordinatorJobView,
@@ -179,6 +179,20 @@ async function workingAdjustmentState(
       limit: SERVED_EVIDENCE_LIMIT,
     }),
   ]);
+  return await inspectedWorkingAdjustmentState(
+    adjustment,
+    active?.adjustmentId === adjustment.adjustmentId ? "active" : "inactive",
+    settledEvidence,
+    source,
+  );
+}
+
+async function inspectedWorkingAdjustmentState(
+  adjustment: WorkingAdjustment,
+  status: TuiWorkingAdjustmentState["status"],
+  settledEvidence: Awaited<ReturnType<WorkingAdjustmentReadPort["listSettledEvidence"]>>,
+  source: WorkingAdjustmentInspectionSource,
+): Promise<TuiWorkingAdjustmentState> {
   const servedEvidence = Object.freeze(
     (
       await Promise.all(
@@ -201,7 +215,7 @@ async function workingAdjustmentState(
   return Object.freeze({
     adjustmentId: adjustment.adjustmentId,
     projectId: adjustment.scope.projectId,
-    status: active?.adjustmentId === adjustment.adjustmentId ? ("active" as const) : ("inactive" as const),
+    status,
     strategy: adjustment.strategy,
     successSignal: adjustment.successSignal,
     servedEvidence,
@@ -214,7 +228,16 @@ async function currentWorkingAdjustmentState(
 ): Promise<TuiWorkingAdjustmentState | undefined> {
   const active = await source.workingAdjustments.getActive(projectId);
   if (!active) return undefined;
-  return await workingAdjustmentState(projectId, active.adjustmentId, source);
+  if (active.scope.projectId !== projectId)
+    throw new Error(
+      `Active working adjustment ${active.adjustmentId} belongs to project ${active.scope.projectId}, not ${projectId}`,
+    );
+  const settledEvidence = await source.workingAdjustments.listSettledEvidence({
+    projectId,
+    adjustmentId: active.adjustmentId,
+    limit: SERVED_EVIDENCE_LIMIT,
+  });
+  return await inspectedWorkingAdjustmentState(active, "active", settledEvidence, source);
 }
 
 /** Enriches learning jobs from the authoritative adjustment and settled-outcome stores. */
