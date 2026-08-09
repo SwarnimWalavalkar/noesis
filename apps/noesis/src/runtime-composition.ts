@@ -1435,6 +1435,9 @@ export async function createApplicationRuntimeComposition(
     };
     const visibleWorkflow = (name: string) =>
       savedThisTurnWorkflowsByName.get(name) ?? frozenWorkflowsByName.get(name);
+    // Workflow manifests do not yet declare exact saved-definition dependencies. Pin the complete
+    // visible project library so resume fails closed rather than silently switching executable
+    // code. This is deliberately conservative until the workflow contract gains declared pins.
     const definitionDependenciesDigest = (): string =>
       sha256(
         canonicalJson({

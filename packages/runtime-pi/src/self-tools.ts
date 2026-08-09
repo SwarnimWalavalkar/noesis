@@ -108,7 +108,7 @@ export function createPiSelfTools(input: {
   readonly catalog?: PiFrozenToolCatalog;
   readonly applyHotbar: (canonicalToolNames: readonly string[]) => Promise<void>;
 }): readonly AgentTool[] {
-  return Object.freeze([
+  const semanticTools = [
     directTool({
       name: "inspect_self",
       label: "Inspect self",
@@ -135,6 +135,11 @@ export function createPiSelfTools(input: {
       execute: async (parameters, signal) =>
         await input.adapter.remember({ ...parameters, plan: input.plan, signal }),
     }),
+  ];
+  const catalog = input.catalog;
+  if (!catalog) return Object.freeze(semanticTools);
+  return Object.freeze([
+    ...semanticTools,
     directTool({
       name: "adapt",
       label: "Adapt toolbox",
@@ -148,7 +153,7 @@ export function createPiSelfTools(input: {
           plan: input.plan,
           signal,
           applyHotbar: input.applyHotbar,
-          ...(input.catalog ? { catalog: input.catalog } : {}),
+          catalog,
         }),
     }),
   ]);

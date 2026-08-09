@@ -697,6 +697,7 @@ describe("agent runtime factories", () => {
     const inspect = tools.find((tool) => tool.name === "inspect_self");
     const remember = tools.find((tool) => tool.name === "remember");
     if (!inspect || !remember) throw new Error("Expected direct self tools");
+    expect(tools.map((tool) => tool.name)).toEqual(["inspect_self", "remember"]);
 
     await expect(inspect.execute("inspect", {})).rejects.toThrow("result exceeds");
     expect(observedSignal).toBeDefined();
@@ -775,6 +776,7 @@ describe("agent runtime factories", () => {
         frozenTurnPlan: plan,
       },
       signal: new AbortController().signal,
+      catalog: emptyCatalog("catalog-adapt-contract"),
       applyHotbar: async () => undefined,
       adapter: {
         hotbar: async () => Object.freeze([]),

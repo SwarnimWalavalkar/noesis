@@ -1303,8 +1303,11 @@ revisions/scripts/&lt;revision-id&gt;/
             automatic continuation until reconciled.
           </li>
           <li>
-            A workflow run pins its definition, scripts, capabilities, model
-            routing, and tool catalog. Later edits affect later runs.
+            A workflow run pins its definition, capabilities, model routing,
+            tool catalog, and the visible project script/workflow library. Until
+            manifests declare exact saved-definition dependencies, any library
+            edit conservatively blocks resume rather than silently switching
+            executable code. Later edits always affect later runs.
           </li>
           <li>
             User feedback can be an explicit phase input, a conversational
