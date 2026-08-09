@@ -132,6 +132,7 @@ export interface WorkflowRunRecord {
   readonly definitionRevisionId: string;
   readonly catalogId?: string;
   readonly catalogDigest?: string;
+  readonly definitionDependenciesDigest?: string;
   readonly permissionDigest?: string;
   readonly provider?: string;
   readonly model?: string;

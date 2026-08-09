@@ -571,8 +571,10 @@ describe("agent runtime factories", () => {
     expect(byteBounded.description).toContain("return await noesis.search(query)");
     expect(byteBounded.description).toContain("return await noesis.describe(exactName)");
     expect(byteBounded.description).toContain("do not return that value to you");
-    expect(byteBounded.description).toContain("prefer scripts.save over a loose helper file");
-    expect(byteBounded.description).toContain("verify it immediately with scripts.run");
+    expect(byteBounded.description).toContain("a reusable project-local program would materially help");
+    expect(byteBounded.description).toContain("script with scripts.save");
+    expect(byteBounded.description).toContain("Do not defer executable project-local work");
+    expect(byteBounded.description).toContain("Verify a new script immediately with scripts.run");
     expect(byteBounded.description).toContain("store(key, value)");
     expect(executions).toBe(0);
   });
@@ -756,6 +758,46 @@ describe("agent runtime factories", () => {
     expect(inspectedCatalog).toBe(catalog);
     expect(result.content).toEqual([{ type: "text", text: JSON.stringify(catalog) }]);
     expect(inspect.description).toContain("exact frozen tool names");
+  });
+
+  test("keeps adapt focused on immediate toolbox changes and rejects proposal red tape", async () => {
+    const plan = frozenPlan();
+    const tools = createPiSelfTools({
+      plan,
+      request: {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "Create a reusable tool.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      signal: new AbortController().signal,
+      applyHotbar: async () => undefined,
+      adapter: {
+        hotbar: async () => Object.freeze([]),
+        inspect: async () => null,
+        remember: async () => null,
+        adapt: async () => null,
+      },
+    });
+    const adapt = tools.find((tool) => tool.name === "adapt");
+    if (!adapt) throw new Error("Expected adapt tool");
+
+    expect(adapt.description).toContain("scripts.save");
+    expect(adapt.description).toContain("workflows.save");
+    expect(adapt.description).not.toContain("propose");
+    await expect(
+      adapt.execute("proposal", {
+        action: "propose",
+        target: "tool",
+        change: "Add a tool",
+        scope: "project",
+        rationale: "Useful",
+      }),
+    ).rejects.toThrow();
   });
 
   test("activates a catalog tool through adapt for the next model step in the same turn", async () => {

@@ -240,24 +240,70 @@ const WorkflowManifestSchema = z.strictObject({
   }),
 });
 type WorkflowManifest = Readonly<z.infer<typeof WorkflowManifestSchema>>;
+const WorkflowSaveResultSchema = z.strictObject({
+  manifest: WorkflowManifestSchema,
+  definitionRevision: FileRevisionRefSchema,
+});
+
+interface SavedDefinitionScope {
+  readonly namespace: string;
+  readonly workingRoot: string;
+}
+
+function savedDefinitionScopes(
+  kind: "script" | "workflow",
+  project: ProjectRef,
+): readonly SavedDefinitionScope[] {
+  const directory = kind === "script" ? "scripts" : "workflows";
+  return Object.freeze([
+    Object.freeze({
+      namespace: `${kind}:${project.projectId}`,
+      workingRoot: `${directory}/projects/${project.projectId}`,
+    }),
+    Object.freeze({ namespace: kind, workingRoot: directory }),
+  ]);
+}
+
+function projectDefinitionScope(kind: "script" | "workflow", project: ProjectRef): SavedDefinitionScope {
+  const scope = savedDefinitionScopes(kind, project)[0];
+  if (!scope) throw new Error(`Project ${kind} definition scope is missing`);
+  return scope;
+}
+
+async function currentDefinition(
+  workspace: NoesisWorkspaceStore,
+  kind: "script" | "workflow",
+  project: ProjectRef,
+  name: string,
+) {
+  for (const scope of savedDefinitionScopes(kind, project)) {
+    const metadata = await workspace.definitionMetadata.getCurrent(scope.namespace, name);
+    if (metadata) return Object.freeze({ metadata, scope });
+  }
+  return undefined;
+}
 
 async function readStoredScript(
   workspace: NoesisWorkspaceStore,
+  project: ProjectRef,
   name: string,
 ): Promise<ScriptManifest | undefined> {
-  const current = await workspace.definitionMetadata.getCurrent("script", name);
+  const current = await currentDefinition(workspace, "script", project, name);
   if (!current) return undefined;
   return ScriptManifestSchema.parse(
-    JSON.parse(decoder.decode(await workspace.reads.readRevision(current.definitionRevision))),
+    JSON.parse(decoder.decode(await workspace.reads.readRevision(current.metadata.definitionRevision))),
   );
 }
 
 async function reconcileStoredScript(
   workspace: NoesisWorkspaceStore,
+  project: ProjectRef,
   name: string,
 ): Promise<ScriptManifest | undefined> {
-  let current = await workspace.definitionMetadata.getCurrent("script", name);
-  if (!current) return undefined;
+  const resolved = await currentDefinition(workspace, "script", project, name);
+  if (!resolved) return undefined;
+  const { scope } = resolved;
+  let current = resolved.metadata;
   let manifest = ScriptManifestSchema.parse(
     JSON.parse(decoder.decode(await workspace.reads.readRevision(current.definitionRevision))),
   );
@@ -272,7 +318,7 @@ async function reconcileStoredScript(
       createdFrom: manifest.createdFrom,
     });
     const publication = await workspace.definitionPublications.publish({
-      namespace: "script",
+      namespace: scope.namespace,
       definitionId: name,
       revision: manifest.revision,
       workingPath: current.definitionRevision.workingPath,
@@ -301,10 +347,10 @@ async function reconcileStoredScript(
     sourceRevision,
   });
   const publication = await workspace.definitionPublications.publish({
-    namespace: "script",
+    namespace: scope.namespace,
     definitionId: name,
     revision: updated.revision,
-    workingPath: `scripts/${name}/script.json`,
+    workingPath: `${scope.workingRoot}/${name}/script.json`,
     bytes: encoder.encode(`${canonicalJson(updated)}\n`),
     expectedCurrentRevisionId: current.definitionRevision.revisionId,
     provenanceRefs: Object.freeze([sourceRevision]),
@@ -318,10 +364,20 @@ async function reconcileStoredScript(
   return updated;
 }
 
-async function listStoredScripts(workspace: NoesisWorkspaceStore): Promise<readonly ScriptManifest[]> {
-  const current = await workspace.definitionMetadata.listCurrent("script");
+async function listStoredScripts(
+  workspace: NoesisWorkspaceStore,
+  project: ProjectRef,
+): Promise<readonly ScriptManifest[]> {
+  const current = (
+    await Promise.all(
+      savedDefinitionScopes("script", project).map(
+        async (scope) => await workspace.definitionMetadata.listCurrent(scope.namespace),
+      ),
+    )
+  ).flat();
+  const names = [...new Set(current.map((metadata) => metadata.definitionId))];
   const scripts = await Promise.all(
-    current.map(async (metadata) => await readStoredScript(workspace, metadata.definitionId)),
+    names.map(async (name) => await readStoredScript(workspace, project, name)),
   );
   return Object.freeze(
     scripts
@@ -330,13 +386,14 @@ async function listStoredScripts(workspace: NoesisWorkspaceStore): Promise<reado
   );
 }
 
-async function reconcileStoredScripts(workspace: NoesisWorkspaceStore): Promise<void> {
-  const current = await workspace.definitionMetadata.listCurrent("script");
-  for (const metadata of current) await reconcileStoredScript(workspace, metadata.definitionId);
+async function reconcileStoredScripts(workspace: NoesisWorkspaceStore, project: ProjectRef): Promise<void> {
+  const scripts = await listStoredScripts(workspace, project);
+  for (const script of scripts) await reconcileStoredScript(workspace, project, script.name);
 }
 
 async function readStoredWorkflow(
   workspace: NoesisWorkspaceStore,
+  project: ProjectRef,
   name: string,
 ): Promise<
   | {
@@ -345,18 +402,19 @@ async function readStoredWorkflow(
     }
   | undefined
 > {
-  const current = await workspace.definitionMetadata.getCurrent("workflow", name);
+  const current = await currentDefinition(workspace, "workflow", project, name);
   if (!current) return undefined;
   return Object.freeze({
     manifest: WorkflowManifestSchema.parse(
-      JSON.parse(decoder.decode(await workspace.reads.readRevision(current.definitionRevision))),
+      JSON.parse(decoder.decode(await workspace.reads.readRevision(current.metadata.definitionRevision))),
     ),
-    definitionRevision: current.definitionRevision,
+    definitionRevision: current.metadata.definitionRevision,
   });
 }
 
 async function reconcileStoredWorkflow(
   workspace: NoesisWorkspaceStore,
+  project: ProjectRef,
   name: string,
 ): Promise<
   | {
@@ -365,32 +423,33 @@ async function reconcileStoredWorkflow(
     }
   | undefined
 > {
-  const current = await workspace.definitionMetadata.getCurrent("workflow", name);
+  const current = await currentDefinition(workspace, "workflow", project, name);
   if (!current) return undefined;
+  const { metadata, scope } = current;
   const storedManifest = WorkflowManifestSchema.parse(
-    JSON.parse(decoder.decode(await workspace.reads.readRevision(current.definitionRevision))),
+    JSON.parse(decoder.decode(await workspace.reads.readRevision(metadata.definitionRevision))),
   );
-  const working = await workspace.reads.readWorkingFile(current.definitionRevision.workingPath);
-  if (!working || sha256(working) === current.definitionRevision.contentDigest)
+  const working = await workspace.reads.readWorkingFile(metadata.definitionRevision.workingPath);
+  if (!working || sha256(working) === metadata.definitionRevision.contentDigest)
     return Object.freeze({
       manifest: storedManifest,
-      definitionRevision: current.definitionRevision,
+      definitionRevision: metadata.definitionRevision,
     });
   const edited = WorkflowManifestSchema.parse(JSON.parse(decoder.decode(working)));
   if (edited.name !== name) throw new Error(`Direct workflow edit cannot rename ${name} to ${edited.name}`);
   const manifest = WorkflowManifestSchema.parse({
     ...edited,
-    revision: current.revision + 1,
+    revision: metadata.revision + 1,
     createdFrom: storedManifest.createdFrom,
   });
   const publication = await workspace.definitionPublications.publish({
-    namespace: "workflow",
+    namespace: scope.namespace,
     definitionId: name,
     revision: manifest.revision,
-    workingPath: current.definitionRevision.workingPath,
+    workingPath: metadata.definitionRevision.workingPath,
     bytes: encoder.encode(`${canonicalJson(manifest)}\n`),
-    expectedCurrentRevisionId: current.definitionRevision.revisionId,
-    provenanceRefs: Object.freeze([current.definitionRevision]),
+    expectedCurrentRevisionId: metadata.definitionRevision.revisionId,
+    provenanceRefs: Object.freeze([metadata.definitionRevision]),
     activity: Object.freeze({
       kind: "workflow.direct_edit_recorded",
       actor: Object.freeze({ actorId: "workspace-user", kind: "user" as const }),
@@ -406,6 +465,7 @@ async function reconcileStoredWorkflow(
 
 async function readStoredWorkflowRevision(
   workspace: NoesisWorkspaceStore,
+  project: ProjectRef,
   name: string,
   revisionId: string,
 ): Promise<
@@ -415,7 +475,13 @@ async function readStoredWorkflowRevision(
     }
   | undefined
 > {
-  const revisions = await workspace.definitionMetadata.listRevisions("workflow", name);
+  const revisions = (
+    await Promise.all(
+      savedDefinitionScopes("workflow", project).map(
+        async (scope) => await workspace.definitionMetadata.listRevisions(scope.namespace, name),
+      ),
+    )
+  ).flat();
   const selected = revisions.find((candidate) => candidate.definitionRevision.revisionId === revisionId);
   if (!selected) return undefined;
   return Object.freeze({
@@ -426,15 +492,25 @@ async function readStoredWorkflowRevision(
   });
 }
 
-async function listStoredWorkflows(workspace: NoesisWorkspaceStore): Promise<
+async function listStoredWorkflows(
+  workspace: NoesisWorkspaceStore,
+  project: ProjectRef,
+): Promise<
   readonly {
     readonly manifest: WorkflowManifest;
     readonly definitionRevision: FileRevisionRef;
   }[]
 > {
-  const current = await workspace.definitionMetadata.listCurrent("workflow");
+  const current = (
+    await Promise.all(
+      savedDefinitionScopes("workflow", project).map(
+        async (scope) => await workspace.definitionMetadata.listCurrent(scope.namespace),
+      ),
+    )
+  ).flat();
+  const names = [...new Set(current.map((metadata) => metadata.definitionId))];
   const workflows = await Promise.all(
-    current.map(async (metadata) => await readStoredWorkflow(workspace, metadata.definitionId)),
+    names.map(async (name) => await readStoredWorkflow(workspace, project, name)),
   );
   return Object.freeze(
     workflows
@@ -443,9 +519,9 @@ async function listStoredWorkflows(workspace: NoesisWorkspaceStore): Promise<
   );
 }
 
-async function reconcileStoredWorkflows(workspace: NoesisWorkspaceStore): Promise<void> {
-  const current = await workspace.definitionMetadata.listCurrent("workflow");
-  for (const metadata of current) await reconcileStoredWorkflow(workspace, metadata.definitionId);
+async function reconcileStoredWorkflows(workspace: NoesisWorkspaceStore, project: ProjectRef): Promise<void> {
+  const workflows = await listStoredWorkflows(workspace, project);
+  for (const workflow of workflows) await reconcileStoredWorkflow(workspace, project, workflow.manifest.name);
 }
 
 function withoutWorkflowTerminalFields(
@@ -1325,12 +1401,14 @@ export async function createApplicationRuntimeComposition(
       ...(event.parentActionId ? { parentActionId: `${turnId}:${event.parentActionId}` } : {}),
     });
   const prepareCodeExecution: PiCodeExecutionAdapter["prepare"] = async (plan, signal, resources) => {
-    await reconcileStoredScripts(workspace);
-    await reconcileStoredWorkflows(workspace);
+    if (!plan.project || plan.project.projectId !== project.projectId || plan.project.root !== project.root)
+      throw new Error(`Frozen turn plan ${plan.planId} does not belong to project ${project.projectId}`);
+    await reconcileStoredScripts(workspace, project);
+    await reconcileStoredWorkflows(workspace, project);
     const sessionDefinitions = await resolveFrozenSessionToolDefinitions(plan, sessionTools, signal);
     const [frozenScripts, frozenWorkflows] = await Promise.all([
-      listStoredScripts(workspace),
-      listStoredWorkflows(workspace),
+      listStoredScripts(workspace, project),
+      listStoredWorkflows(workspace, project),
     ]);
     const frozenScriptsByName = new Map(frozenScripts.map((script) => [script.name, script]));
     const savedThisTurnByName = new Map<string, ScriptManifest>();
@@ -1344,6 +1422,40 @@ export async function createApplicationRuntimeComposition(
     const frozenWorkflowsByName = new Map(
       frozenWorkflows.map((workflow) => [workflow.manifest.name, workflow]),
     );
+    const savedThisTurnWorkflowsByName = new Map<
+      string,
+      { readonly manifest: WorkflowManifest; readonly definitionRevision: FileRevisionRef }
+    >();
+    const visibleWorkflows = () => {
+      const workflows = new Map(frozenWorkflowsByName);
+      for (const [name, workflow] of savedThisTurnWorkflowsByName) workflows.set(name, workflow);
+      return Object.freeze(
+        [...workflows.values()].sort((left, right) => left.manifest.name.localeCompare(right.manifest.name)),
+      );
+    };
+    const visibleWorkflow = (name: string) =>
+      savedThisTurnWorkflowsByName.get(name) ?? frozenWorkflowsByName.get(name);
+    const definitionDependenciesDigest = (): string =>
+      sha256(
+        canonicalJson({
+          scripts: visibleScripts().map((script) => ({
+            name: script.name,
+            revision: script.revision,
+            sourceRevisionId: script.sourceRevision.revisionId,
+            sourceDigest: script.sourceRevision.contentDigest,
+          })),
+          workflows: visibleWorkflows().map(({ manifest, definitionRevision }) => ({
+            name: manifest.name,
+            revision: manifest.revision,
+            definitionRevisionId: definitionRevision.revisionId,
+            definitionDigest: definitionRevision.contentDigest,
+          })),
+        }),
+      );
+    const scriptScope = projectDefinitionScope("script", project);
+    const workflowScope = projectDefinitionScope("workflow", project);
+    const scriptResource = (name: string): string => `${scriptScope.namespace}:${name}`;
+    const workflowResource = (name: string): string => `${workflowScope.namespace}:${name}`;
     let activeBroker: ToolBroker | undefined;
     let runRecordedCode:
       | ((
@@ -1376,12 +1488,6 @@ export async function createApplicationRuntimeComposition(
         label: "List scripts",
         description: "List saved, inspectable Noesis scripts without loading their source.",
         visibility: "codemode_only",
-        identityMaterial: frozenScripts.map((script) => ({
-          name: script.name,
-          revision: script.revision,
-          sourceRevisionId: script.sourceRevision.revisionId,
-          sourceDigest: script.sourceRevision.contentDigest,
-        })),
         inputSchema: z.strictObject({}),
         outputSchema: z.array(
           z.strictObject({
@@ -1392,7 +1498,11 @@ export async function createApplicationRuntimeComposition(
             sourceDigest: z.string(),
           }),
         ),
-        effect: () => ({ effect: "read", resource: "scripts:index", estimatedCost: 0 }),
+        effect: () => ({
+          effect: "read",
+          resource: `${scriptScope.namespace}:index`,
+          estimatedCost: 0,
+        }),
         execute: async () =>
           visibleScripts().map((script) => ({
             name: script.name,
@@ -1407,12 +1517,6 @@ export async function createApplicationRuntimeComposition(
         label: "Describe script",
         description: "Load one saved script manifest and exact source revision.",
         visibility: "codemode_only",
-        identityMaterial: frozenScripts.map((script) => ({
-          name: script.name,
-          revision: script.revision,
-          sourceRevisionId: script.sourceRevision.revisionId,
-          sourceDigest: script.sourceRevision.contentDigest,
-        })),
         inputSchema: z.strictObject({ name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u) }),
         outputSchema: z.union([
           z.null(),
@@ -1421,7 +1525,7 @@ export async function createApplicationRuntimeComposition(
             source: z.string(),
           }),
         ]),
-        effect: ({ name }) => ({ effect: "read", resource: `script:${name}`, estimatedCost: 0 }),
+        effect: ({ name }) => ({ effect: "read", resource: scriptResource(name), estimatedCost: 0 }),
         execute: async ({ name }) => {
           const manifest = visibleScript(name);
           if (!manifest) return null;
@@ -1449,13 +1553,16 @@ export async function createApplicationRuntimeComposition(
         outputSchema: ScriptSaveResultSchema,
         effect: ({ name }) => ({
           effect: "write",
-          resource: `script:${name}`,
+          resource: scriptResource(name),
           estimatedCost: 1,
         }),
         execute: async ({ name, description, source, inputSchema, outputSchema, requiredTools }) => {
-          const current = await workspace.definitionMetadata.getCurrent("script", name);
-          const currentManifest = current ? await reconcileStoredScript(workspace, name) : undefined;
-          const reconciledCurrent = await workspace.definitionMetadata.getCurrent("script", name);
+          const current = await workspace.definitionMetadata.getCurrent(scriptScope.namespace, name);
+          const currentManifest = current ? await reconcileStoredScript(workspace, project, name) : undefined;
+          const reconciledCurrent = await workspace.definitionMetadata.getCurrent(
+            scriptScope.namespace,
+            name,
+          );
           const revision = (reconciledCurrent?.revision ?? 0) + 1;
           for (const requiredTool of requiredTools)
             if (!activeBroker?.describe(requiredTool))
@@ -1464,7 +1571,7 @@ export async function createApplicationRuntimeComposition(
           z.fromJSONSchema(outputSchema);
           const actor = Object.freeze({ actorId: "noesis-script-library", kind: "noesis" as const });
           const sourceRevision = await workspace.definitions.recordWorkingDefinition({
-            workingPath: `scripts/${name}/index.mjs`,
+            workingPath: `${scriptScope.workingRoot}/${name}/index.mjs`,
             bytes: encoder.encode(source),
             actor,
             reason: `Script source saved from turn ${plan.turnId}`,
@@ -1486,10 +1593,10 @@ export async function createApplicationRuntimeComposition(
             },
           });
           const publication = await workspace.definitionPublications.publish({
-            namespace: "script",
+            namespace: scriptScope.namespace,
             definitionId: name,
             revision,
-            workingPath: `scripts/${name}/script.json`,
+            workingPath: `${scriptScope.workingRoot}/${name}/script.json`,
             bytes: encoder.encode(`${canonicalJson(manifest)}\n`),
             ...(reconciledCurrent
               ? {
@@ -1521,12 +1628,6 @@ export async function createApplicationRuntimeComposition(
         label: "Run script",
         description: "Run the exact current revision of a saved script with JSON-schema-validated I/O.",
         visibility: "codemode_only",
-        identityMaterial: frozenScripts.map((script) => ({
-          name: script.name,
-          revision: script.revision,
-          sourceRevisionId: script.sourceRevision.revisionId,
-          sourceDigest: script.sourceRevision.contentDigest,
-        })),
         inputSchema: z.strictObject({
           name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
           input: z.json(),
@@ -1540,7 +1641,7 @@ export async function createApplicationRuntimeComposition(
         }),
         effect: ({ name }) => ({
           effect: "execute",
-          resource: `script:${name}:run`,
+          resource: `${scriptResource(name)}:run`,
           estimatedCost: 1,
         }),
         execute: async ({ name, input }, context) => {
@@ -1579,12 +1680,6 @@ export async function createApplicationRuntimeComposition(
         label: "List workflows",
         description: "List saved multi-phase workflows without loading their phase source.",
         visibility: "codemode_only",
-        identityMaterial: frozenWorkflows.map(({ manifest, definitionRevision }) => ({
-          name: manifest.name,
-          revision: manifest.revision,
-          definitionRevisionId: definitionRevision.revisionId,
-          definitionDigest: definitionRevision.contentDigest,
-        })),
         inputSchema: z.strictObject({}),
         outputSchema: z.array(
           z.strictObject({
@@ -1595,9 +1690,13 @@ export async function createApplicationRuntimeComposition(
             definitionDigest: z.string(),
           }),
         ),
-        effect: () => ({ effect: "read", resource: "workflows:index", estimatedCost: 0 }),
+        effect: () => ({
+          effect: "read",
+          resource: `${workflowScope.namespace}:index`,
+          estimatedCost: 0,
+        }),
         execute: async () =>
-          frozenWorkflows.map(({ manifest, definitionRevision }) => ({
+          visibleWorkflows().map(({ manifest, definitionRevision }) => ({
             name: manifest.name,
             description: manifest.description,
             revision: manifest.revision,
@@ -1610,12 +1709,6 @@ export async function createApplicationRuntimeComposition(
         label: "Describe workflow",
         description: "Load the exact current workflow definition, including all typed phases.",
         visibility: "codemode_only",
-        identityMaterial: frozenWorkflows.map(({ manifest, definitionRevision }) => ({
-          name: manifest.name,
-          revision: manifest.revision,
-          definitionRevisionId: definitionRevision.revisionId,
-          definitionDigest: definitionRevision.contentDigest,
-        })),
         inputSchema: z.strictObject({ name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u) }),
         outputSchema: z.union([
           z.null(),
@@ -1624,8 +1717,12 @@ export async function createApplicationRuntimeComposition(
             definitionRevision: FileRevisionRefSchema,
           }),
         ]),
-        effect: ({ name }) => ({ effect: "read", resource: `workflow:${name}`, estimatedCost: 0 }),
-        execute: async ({ name }) => toJsonValue(frozenWorkflowsByName.get(name) ?? null),
+        effect: ({ name }) => ({
+          effect: "read",
+          resource: workflowResource(name),
+          estimatedCost: 0,
+        }),
+        execute: async ({ name }) => toJsonValue(visibleWorkflow(name) ?? null),
       }),
       defineTool({
         name: "workflows.runs",
@@ -1646,7 +1743,7 @@ export async function createApplicationRuntimeComposition(
         ),
         effect: () => ({
           effect: "read",
-          resource: `workflow-runs:${plan.sessionId}`,
+          resource: `${workflowScope.namespace}:runs:${plan.sessionId}`,
           estimatedCost: 0,
         }),
         execute: async () =>
@@ -1673,13 +1770,10 @@ export async function createApplicationRuntimeComposition(
           outputSchema: z.record(z.string(), JsonValueSchema),
           phases: z.array(WorkflowPhaseSchema).min(1).max(64),
         }),
-        outputSchema: z.strictObject({
-          manifest: WorkflowManifestSchema,
-          definitionRevision: FileRevisionRefSchema,
-        }),
+        outputSchema: WorkflowSaveResultSchema,
         effect: ({ name }) => ({
           effect: "write",
-          resource: `workflow:${name}`,
+          resource: workflowResource(name),
           estimatedCost: 1,
         }),
         execute: async ({ name, description, inputSchema, outputSchema, phases }) => {
@@ -1695,8 +1789,9 @@ export async function createApplicationRuntimeComposition(
               if (!activeBroker?.describe(requiredTool))
                 throw new Error(`Workflow phase ${phase.name} requires unavailable tool ${requiredTool}`);
           }
-          await reconcileStoredWorkflow(workspace, name);
-          const current = await workspace.definitionMetadata.getCurrent("workflow", name);
+          const projectCurrent = await workspace.definitionMetadata.getCurrent(workflowScope.namespace, name);
+          if (projectCurrent) await reconcileStoredWorkflow(workspace, project, name);
+          const current = await workspace.definitionMetadata.getCurrent(workflowScope.namespace, name);
           const revision = (current?.revision ?? 0) + 1;
           const manifest = WorkflowManifestSchema.parse({
             kind: "noesis_workflow",
@@ -1713,10 +1808,10 @@ export async function createApplicationRuntimeComposition(
             },
           });
           const publication = await workspace.definitionPublications.publish({
-            namespace: "workflow",
+            namespace: workflowScope.namespace,
             definitionId: name,
             revision,
-            workingPath: `workflows/${name}/workflow.json`,
+            workingPath: `${workflowScope.workingRoot}/${name}/workflow.json`,
             bytes: encoder.encode(`${canonicalJson(manifest)}\n`),
             ...(current ? { expectedCurrentRevisionId: current.definitionRevision.revisionId } : {}),
             provenanceRefs: Object.freeze([foregroundEvidence(plan)]),
@@ -1742,12 +1837,6 @@ export async function createApplicationRuntimeComposition(
         description:
           "Run a saved workflow at its exact current revision. Phase state is durable and resumable.",
         visibility: "codemode_only",
-        identityMaterial: frozenWorkflows.map(({ manifest, definitionRevision }) => ({
-          name: manifest.name,
-          revision: manifest.revision,
-          definitionRevisionId: definitionRevision.revisionId,
-          definitionDigest: definitionRevision.contentDigest,
-        })),
         inputSchema: z.strictObject({
           name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
           input: z.json(),
@@ -1760,11 +1849,11 @@ export async function createApplicationRuntimeComposition(
         }),
         effect: ({ name }) => ({
           effect: "execute",
-          resource: `workflow:${name}:run`,
+          resource: `${workflowResource(name)}:run`,
           estimatedCost: 1,
         }),
         execute: async ({ name, input }, context) => {
-          const stored = frozenWorkflowsByName.get(name);
+          const stored = visibleWorkflow(name);
           if (!stored) throw new Error(`Unknown workflow ${name}`);
           if (!runWorkflow) throw new Error("Workflow runtime is not initialized");
           return await runWorkflow(stored, input, context);
@@ -1787,7 +1876,7 @@ export async function createApplicationRuntimeComposition(
         }),
         effect: ({ runId }) => ({
           effect: "execute",
-          resource: `workflow-run:${runId}:resume`,
+          resource: `${workflowScope.namespace}:run:${runId}:resume`,
           estimatedCost: 1,
         }),
         execute: async ({ runId, correction }, context) => {
@@ -1808,6 +1897,7 @@ export async function createApplicationRuntimeComposition(
             throw new Error(`Workflow run ${runId} is ${run.status} and cannot be resumed`);
           const stored = await readStoredWorkflowRevision(
             workspace,
+            project,
             run.workflowName,
             run.definitionRevisionId,
           );
@@ -1923,6 +2013,16 @@ export async function createApplicationRuntimeComposition(
               createdFrom: saved.createdFrom,
             }),
           );
+        }
+        if (arguments_[0] === "workflows.save" && result.ok) {
+          const saved = WorkflowSaveResultSchema.parse(result.value);
+          if (
+            saved.manifest.createdFrom.sessionId !== plan.sessionId ||
+            saved.manifest.createdFrom.turnId !== plan.turnId ||
+            saved.manifest.createdFrom.planId !== plan.planId
+          )
+            throw new Error("workflows.save replay resolved a revision from outside the frozen turn plan");
+          savedThisTurnWorkflowsByName.set(saved.manifest.name, saved);
         }
         return result;
       },
@@ -2064,6 +2164,7 @@ export async function createApplicationRuntimeComposition(
       if (existing && existing.status !== "paused")
         throw new Error(`Workflow run ${existing.runId} is ${existing.status} and cannot be resumed`);
       const permissionDigest = sha256(canonicalJson(plan.permissionSnapshot));
+      const currentDefinitionDependenciesDigest = definitionDependenciesDigest();
       if (existing && (!existing.catalogId || !existing.catalogDigest))
         throw new Error(`Workflow run ${existing.runId} has no frozen tool catalog pin`);
       if (
@@ -2073,6 +2174,13 @@ export async function createApplicationRuntimeComposition(
         throw new Error(
           `Workflow run ${existing.runId} is pinned to unavailable tool catalog ${existing.catalogId ?? "unknown"}`,
         );
+      if (existing && !existing.definitionDependenciesDigest)
+        throw new Error(`Workflow run ${existing.runId} has no frozen definition dependency pin`);
+      if (
+        existing?.definitionDependenciesDigest !== undefined &&
+        existing.definitionDependenciesDigest !== currentDefinitionDependenciesDigest
+      )
+        throw new Error(`Workflow run ${existing.runId} is pinned to changed saved definitions`);
       if (existing && !existing.permissionDigest)
         throw new Error(`Workflow run ${existing.runId} has no frozen permission pin`);
       if (existing?.permissionDigest !== undefined && existing.permissionDigest !== permissionDigest)
@@ -2099,6 +2207,7 @@ export async function createApplicationRuntimeComposition(
           definitionRevisionId: definitionRevision.revisionId,
           catalogId: broker.catalogId,
           catalogDigest: broker.catalogDigest,
+          definitionDependenciesDigest: currentDefinitionDependenciesDigest,
           permissionDigest,
           provider: plan.provider,
           model: plan.model,
@@ -2536,105 +2645,61 @@ export async function createApplicationRuntimeComposition(
     return decision.value;
   };
   const adapt: PiSelfToolAdapter["adapt"] = async (input) => {
-    if (input.action === "add_tool" || input.action === "remove_tool") {
-      return await serializeHotbarMutation(async () => {
-        if (!input.catalog) throw new Error("This turn has no executable tool catalog");
-        const available = new Set(input.catalog.tools.map((tool) => tool.name));
-        if (input.action === "add_tool" && !available.has(input.tool))
-          throw new Error(`Tool ${input.tool} is not available in this turn; inspect section 'tools' first`);
-        const current = [...hotbarToolNames];
-        if (input.action === "remove_tool" && !current.includes(input.tool))
-          throw new Error(`Tool ${input.tool} is not configured on the hotbar`);
-        const next =
-          input.action === "add_tool"
-            ? [...new Set([...current, input.tool])]
-            : current.filter((name) => name !== input.tool);
-        if (next.length > 16) throw new Error("The direct-tool hotbar supports at most 16 tools");
-        const activeNext = reconcileHotbarTools(input.catalog, next).active;
-        const requestDigest = sha256(
-          canonicalJson({ action: input.action, tool: input.tool, hotbar: next, turnId: input.plan.turnId }),
-        );
-        const decision = await authority.runForeground(
-          {
-            operationId: `operation_${requestDigest}`,
-            effect: "write",
-            resource: "config:tools.hotbar",
-            estimatedCost: 1,
-            idempotencyKey: `adapt-hotbar:${requestDigest}`,
-            requestDigest,
-            execute: async () => {
-              await updateUserControlConfig(options.config.home, { tools: { hotbar: next } });
-              hotbarToolNames = Object.freeze([...next]);
-              let activationError: string | undefined;
-              try {
-                await input.applyHotbar(activeNext);
-              } catch (error) {
-                activationError = error instanceof Error ? error.message : String(error);
-              }
-              return toJsonValue({
-                status: "hotbar_updated",
-                action: input.action,
-                tool: input.tool,
-                hotbar: hotbarToolNames,
-                activeHotbar: activeNext,
-                currentTurnUpdated: activationError === undefined,
-                availableImmediately: input.action === "add_tool" && activationError === undefined,
-                ...(activationError ? { activationError } : {}),
-              });
-            },
+    return await serializeHotbarMutation(async () => {
+      if (!input.catalog) throw new Error("This turn has no executable tool catalog");
+      const available = new Set(input.catalog.tools.map((tool) => tool.name));
+      if (input.action === "add_tool" && !available.has(input.tool))
+        throw new Error(`Tool ${input.tool} is not available in this turn; inspect section 'tools' first`);
+      const current = [...hotbarToolNames];
+      if (input.action === "remove_tool" && !current.includes(input.tool))
+        throw new Error(`Tool ${input.tool} is not configured on the hotbar`);
+      const next =
+        input.action === "add_tool"
+          ? [...new Set([...current, input.tool])]
+          : current.filter((name) => name !== input.tool);
+      if (next.length > 16) throw new Error("The direct-tool hotbar supports at most 16 tools");
+      const activeNext = reconcileHotbarTools(input.catalog, next).active;
+      const requestDigest = sha256(
+        canonicalJson({ action: input.action, tool: input.tool, hotbar: next, turnId: input.plan.turnId }),
+      );
+      const decision = await authority.runForeground(
+        {
+          operationId: `operation_${requestDigest}`,
+          effect: "write",
+          resource: "config:tools.hotbar",
+          estimatedCost: 1,
+          idempotencyKey: `adapt-hotbar:${requestDigest}`,
+          requestDigest,
+          execute: async () => {
+            await updateUserControlConfig(options.config.home, { tools: { hotbar: next } });
+            hotbarToolNames = Object.freeze([...next]);
+            let activationError: string | undefined;
+            try {
+              await input.applyHotbar(activeNext);
+            } catch (error) {
+              activationError = error instanceof Error ? error.message : String(error);
+            }
+            return toJsonValue({
+              status: "hotbar_updated",
+              action: input.action,
+              tool: input.tool,
+              hotbar: hotbarToolNames,
+              activeHotbar: activeNext,
+              currentTurnUpdated: activationError === undefined,
+              availableImmediately: input.action === "add_tool" && activationError === undefined,
+              ...(activationError ? { activationError } : {}),
+            });
           },
-          Object.freeze({
-            effects: Object.freeze(["write"]),
-            resourcePatterns: Object.freeze(["config:tools.hotbar"]),
-            credentialRefs: Object.freeze([]),
-          }),
-        );
-        if (!decision.ok) throw new Error(`adapt ${decision.code}: ${decision.reason}`);
-        return decision.value;
-      });
-    }
-    const { target, change, scope, rationale, plan } = input;
-    const signalId = `signal_adapt_${sha256(
-      canonicalJson({ target, change, scope, rationale, turnId: plan.turnId }),
-    ).slice(0, 32)}`;
-    const requestDigest = sha256(canonicalJson({ signalId, target, change, scope, rationale }));
-    const decision = await authority.runForeground(
-      {
-        operationId: `operation_${requestDigest}`,
-        effect: "write",
-        resource: `adaptation-proposal:${signalId}`,
-        estimatedCost: 1,
-        idempotencyKey: `adapt:${signalId}`,
-        requestDigest,
-        execute: async () => {
-          const row = await workspace.research.feedbackSignals.recordFeedbackSignal({
-            signalId,
-            kind: "user_request",
-            scope,
-            evidenceRefs: Object.freeze([foregroundEvidence(plan)]),
-            strength: 1,
-            novelty: 1,
-            sensitivity: "normal",
-          });
-          return toJsonValue({
-            status: "proposal_recorded",
-            target,
-            scope,
-            change,
-            rationale,
-            evidence: row,
-            promotion: "protected_reflection_evaluation_only",
-          });
         },
-      },
-      Object.freeze({
-        effects: Object.freeze(["write"]),
-        resourcePatterns: Object.freeze([`adaptation-proposal:${signalId}`]),
-        credentialRefs: Object.freeze([]),
-      }),
-    );
-    if (!decision.ok) throw new Error(`adapt ${decision.code}: ${decision.reason}`);
-    return decision.value;
+        Object.freeze({
+          effects: Object.freeze(["write"]),
+          resourcePatterns: Object.freeze(["config:tools.hotbar"]),
+          credentialRefs: Object.freeze([]),
+        }),
+      );
+      if (!decision.ok) throw new Error(`adapt ${decision.code}: ${decision.reason}`);
+      return decision.value;
+    });
   };
   const selfTools: PiSelfToolAdapter = Object.freeze({
     hotbar,
@@ -3456,9 +3521,9 @@ export async function createApplicationRuntimeComposition(
       : undefined;
   };
   const listScripts: NonNullable<NoesisTuiRuntime["listScripts"]> = async () => {
-    await reconcileStoredScripts(workspace);
+    await reconcileStoredScripts(workspace, project);
     return Object.freeze(
-      (await listStoredScripts(workspace)).map((script) =>
+      (await listStoredScripts(workspace, project)).map((script) =>
         Object.freeze({
           name: script.name,
           description: script.description,
@@ -3471,9 +3536,9 @@ export async function createApplicationRuntimeComposition(
     );
   };
   const listWorkflows: NonNullable<NoesisTuiRuntime["listWorkflows"]> = async () => {
-    await reconcileStoredWorkflows(workspace);
+    await reconcileStoredWorkflows(workspace, project);
     return Object.freeze(
-      (await listStoredWorkflows(workspace)).map(({ manifest, definitionRevision }) =>
+      (await listStoredWorkflows(workspace, project)).map(({ manifest, definitionRevision }) =>
         Object.freeze({
           name: manifest.name,
           description: manifest.description,
@@ -3486,8 +3551,8 @@ export async function createApplicationRuntimeComposition(
     );
   };
   const inspectScript: NonNullable<NoesisTuiRuntime["inspectScript"]> = async (name) => {
-    await reconcileStoredScript(workspace, name);
-    const script = await readStoredScript(workspace, name);
+    await reconcileStoredScript(workspace, project, name);
+    const script = await readStoredScript(workspace, project, name);
     if (!script) return undefined;
     return Object.freeze({
       name: script.name,
@@ -3502,8 +3567,8 @@ export async function createApplicationRuntimeComposition(
     });
   };
   const inspectWorkflow: NonNullable<NoesisTuiRuntime["inspectWorkflow"]> = async (name) => {
-    await reconcileStoredWorkflow(workspace, name);
-    const stored = await readStoredWorkflow(workspace, name);
+    await reconcileStoredWorkflow(workspace, project, name);
+    const stored = await readStoredWorkflow(workspace, project, name);
     if (!stored) return undefined;
     return Object.freeze({
       name: stored.manifest.name,

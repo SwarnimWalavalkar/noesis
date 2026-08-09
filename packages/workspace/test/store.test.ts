@@ -1342,7 +1342,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(30);
+    expect(versions.at(-1)).toBe(31);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

@@ -224,6 +224,7 @@ export function decodeWorkflowRun(row: unknown): WorkflowRunRecord {
   const turnId = optionalString(row, "turn_id");
   const catalogId = optionalString(row, "catalog_id");
   const catalogDigest = optionalString(row, "catalog_digest");
+  const definitionDependenciesDigest = optionalString(row, "definition_dependencies_digest");
   const permissionDigest = optionalString(row, "permission_digest");
   const provider = optionalString(row, "provider");
   const model = optionalString(row, "model");
@@ -238,6 +239,7 @@ export function decodeWorkflowRun(row: unknown): WorkflowRunRecord {
     definitionRevisionId: requiredString(row, "definition_revision_id"),
     ...(catalogId === undefined ? {} : { catalogId }),
     ...(catalogDigest === undefined ? {} : { catalogDigest }),
+    ...(definitionDependenciesDigest === undefined ? {} : { definitionDependenciesDigest }),
     ...(permissionDigest === undefined ? {} : { permissionDigest }),
     ...(provider === undefined ? {} : { provider }),
     ...(model === undefined ? {} : { model }),

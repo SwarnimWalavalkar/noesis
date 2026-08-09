@@ -2934,10 +2934,11 @@ function createOperationalRepositories(
       db.prepare(
         `INSERT INTO workflow_runs(
           run_id, workflow_name, workflow_revision, definition_revision_id,
-          catalog_id, catalog_digest, permission_digest, provider, model, thinking_level, session_id,
+          catalog_id, catalog_digest, definition_dependencies_digest,
+          permission_digest, provider, model, thinking_level, session_id,
           turn_id, status, current_phase, input_json, output_json, error,
           created_at, updated_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
           status = excluded.status, current_phase = excluded.current_phase,
           output_json = excluded.output_json, error = excluded.error,
@@ -2949,6 +2950,7 @@ function createOperationalRepositories(
         record.definitionRevisionId,
         record.catalogId ?? null,
         record.catalogDigest ?? null,
+        record.definitionDependenciesDigest ?? null,
         record.permissionDigest ?? null,
         record.provider ?? null,
         record.model ?? null,

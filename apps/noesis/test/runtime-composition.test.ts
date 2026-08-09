@@ -27,7 +27,11 @@ import {
 } from "../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 import { createScriptedAgentRoleRunner } from "../../../packages/runtime-pi/test/support/scripted-role-runner.ts";
 import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
-import { createApplicationRuntimeComposition, waitForReflectionBarrier } from "../src/runtime-composition.ts";
+import {
+  type ApplicationRuntimeCompositionOptions,
+  createApplicationRuntimeComposition,
+  waitForReflectionBarrier,
+} from "../src/runtime-composition.ts";
 
 const roots: string[] = [];
 
@@ -126,6 +130,181 @@ async function writeLegacyCompletedTurn(
 }
 
 describe("apps/noesis production control-plane composition", () => {
+  test("saved definitions are immediate, project-local, and do not revise generic library tools", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-project-definitions-"));
+    const firstProjectRoot = join(home, "host-project-one");
+    const secondProjectRoot = join(home, "host-project-two");
+    await Promise.all([
+      mkdir(firstProjectRoot, { recursive: true }),
+      mkdir(secondProjectRoot, { recursive: true }),
+    ]);
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const firstProject: ProjectRef = Object.freeze({
+      projectId: "project_one",
+      root: firstProjectRoot,
+    });
+    const secondProject: ProjectRef = Object.freeze({
+      projectId: "project_two",
+      root: secondProjectRoot,
+    });
+    const genericLibraryToolNames = new Set([
+      "scripts.list",
+      "scripts.describe",
+      "scripts.run",
+      "workflows.list",
+      "workflows.describe",
+      "workflows.run",
+    ]);
+    const genericRevisionSnapshots: Array<Readonly<Record<string, string>>> = [];
+    let savedAndRunValue: unknown;
+    let turn = 0;
+    const noOp = async (): Promise<void> => undefined;
+    const createAgent: ApplicationRuntimeCompositionOptions["createAgent"] = (_sessionTools, codeExecution) =>
+      Object.freeze({
+        name: "project-definition-agent",
+        run: async (request: AgentRuntimeRequest) => {
+          const plan = request.frozenTurnPlan;
+          if (!plan) throw new Error("Expected a frozen turn plan");
+          const signal = new AbortController().signal;
+          if (turn === 0)
+            await expect(
+              codeExecution.prepare(Object.freeze({ ...plan, project: secondProject }), signal, {
+                skills: Object.freeze([]),
+              }),
+            ).rejects.toThrow("does not belong to project");
+          const prepared = await codeExecution.prepare(plan, signal, { skills: Object.freeze([]) });
+          genericRevisionSnapshots.push(
+            Object.freeze(
+              Object.fromEntries(
+                prepared.catalog.tools
+                  .filter((tool) => genericLibraryToolNames.has(tool.name))
+                  .map((tool) => [tool.name, tool.revisionId]),
+              ),
+            ),
+          );
+          try {
+            const source =
+              turn === 0
+                ? [
+                    "const script = await tools.scripts.save({",
+                    '  name: "project-double",',
+                    '  description: "Double one numeric input.",',
+                    '  source: "return { value: input.value * 2 };",',
+                    '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                    '  outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                    "  requiredTools: []",
+                    "});",
+                    "const saved = await tools.workflows.save({",
+                    '  name: "project-increment",',
+                    '  description: "Increment one numeric input.",',
+                    '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                    '  outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                    "  phases: [{",
+                    '    name: "increment",',
+                    '    description: "Increment the value.",',
+                    '    source: "return { value: input.value + 1 };",',
+                    '    inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                    '    outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
+                    "    requiredTools: []",
+                    "  }]",
+                    "});",
+                    "const listed = await tools.workflows.list({});",
+                    "const described = await tools.workflows.describe({ name: saved.manifest.name });",
+                    "const run = await tools.workflows.run({ name: saved.manifest.name, input: { value: 41 } });",
+                    "return { script, saved, listed, described, run };",
+                  ].join("\n")
+                : "return { scripts: await tools.scripts.list({}), workflows: await tools.workflows.list({}) };";
+            const result = await prepared.execute(source, undefined, signal, () => undefined);
+            if (turn === 0) savedAndRunValue = result.value;
+          } finally {
+            turn += 1;
+            await prepared.close();
+          }
+          const text = "Project definition operation completed.";
+          return Object.freeze({
+            outcome: "completed" as const,
+            stopReason: "stop" as const,
+            text,
+            assistantMessages: Object.freeze([
+              Object.freeze({ text, timelineSequence: 1, createdAt: new Date().toISOString() }),
+            ]),
+            provider: request.provider,
+            model: request.model,
+          });
+        },
+        steer: async () =>
+          Object.freeze({
+            status: "consumed" as const,
+            timelineSequence: 1,
+            consumedAt: new Date().toISOString(),
+          }),
+        abort: noOp,
+      });
+    const createRoleRunner: ApplicationRuntimeCompositionOptions["createRoleRunner"] = (configurations) =>
+      createScriptedAgentRoleRunner({
+        variants: configurations,
+        respond: () => ({
+          text: '{"observation":{"kind":"other","reason":"Controlled fixture."},"decision":"no_change","reason":"disabled"}',
+        }),
+      });
+    const first = await createApplicationRuntimeComposition({
+      config,
+      project: firstProject,
+      createAgent,
+      createRoleRunner,
+    });
+    const trail = await first.startTrail({ title: "Project-local definitions" });
+
+    await first.debug.runTurn(trail.trailId, "Save and run project-local definitions.");
+    const firstProjectScripts = await first.listScripts?.();
+    const firstProjectWorkflows = await first.listWorkflows?.();
+    await first.debug.runTurn(trail.trailId, "List the project-local definitions again.");
+
+    expect(savedAndRunValue).toMatchObject({
+      saved: { manifest: { name: "project-increment", revision: 1 } },
+      listed: [{ name: "project-increment", revision: 1 }],
+      described: { manifest: { name: "project-increment", revision: 1 } },
+      run: { workflowRevision: 1, status: "completed", value: { value: 42 } },
+    });
+    expect(firstProjectScripts).toMatchObject([
+      {
+        name: "project-double",
+        revision: 1,
+        workingPath: "definitions/scripts/projects/project_one/project-double/index.mjs",
+      },
+    ]);
+    expect(firstProjectWorkflows).toMatchObject([
+      {
+        name: "project-increment",
+        revision: 1,
+        workingPath: "definitions/workflows/projects/project_one/project-increment/workflow.json",
+      },
+    ]);
+    expect(genericRevisionSnapshots).toHaveLength(2);
+    expect(genericRevisionSnapshots[1]).toEqual(genericRevisionSnapshots[0]);
+    expect(Object.keys(genericRevisionSnapshots[0] ?? {})).toHaveLength(genericLibraryToolNames.size);
+    await first.shutdown();
+
+    const second = await createApplicationRuntimeComposition({
+      config,
+      project: secondProject,
+      createAgent,
+      createRoleRunner,
+    });
+    expect(await second.listScripts?.()).toEqual([]);
+    expect(await second.listWorkflows?.()).toEqual([]);
+    await second.shutdown();
+  });
+
   test("rehydrates an exactly replayed script save before same-scope resume runs it", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-script-save-replay-"));
     roots.push(home);

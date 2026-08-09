@@ -4,6 +4,8 @@ Status: proposed for review. This plan does not authorize implementation.
 
 This is the smallest useful next step toward a self-evolving harness. It adds a fast project-local branch to the learning loop Noesis already has.
 
+This plan governs ambient strategy learning only. Explicit foreground work may publish and immediately use project-local scripts and workflows through the existing execution authority. Reflection observes those runs; the experiment path is required only for broader learned or global consolidation.
+
 ## Decision
 
 After a completed turn, the existing reflector may make one temporary adjustment for the active project. For now, the project is the canonical active directory.
@@ -41,7 +43,7 @@ This is intentionally not a general project-detection system. There are no repos
 
 `WorkingAdjustment` is a bounded live hypothesis about how Noesis should behave before that change has earned durable status.
 
-The abstraction is generic around its lifecycle, evidence, and evaluation. Its implementation is deliberately concrete: the only supported scope is `ProjectRef`, and the only supported change is a temporary strategy. Do not add a generic scope union or change-kind registry until a second real use requires one.
+The abstraction is generic around its lifecycle, evidence, and evaluation. Within this ambient reflection branch, the only supported scope is `ProjectRef`, and the only supported change is a temporary strategy. Do not add a generic scope union or change-kind registry until a second real use requires one.
 
 ```ts
 interface WorkingAdjustment {
@@ -212,14 +214,14 @@ Run `pnpm check`, then dogfood this loop before adding another adaptation surfac
 - General project detection or project-management UI.
 - More than one active adjustment per project.
 - Automatic expiry or a fixed turn-count lifetime for an adjustment.
-- Generated tools, a project toolbox, or automatic hotbar changes.
+- Ambient reflection silently creating executable project tools or changing the hotbar. Explicit foreground publication uses the existing script and workflow path.
 - Parallel model workers or a sub-agent system.
-- Prompt, memory, skill, workflow, router, or capability CRUD in the fast path.
+- Prompt, memory, skill, workflow, router, or capability CRUD in the ambient working-adjustment branch.
 - Direct promotion from a working adjustment to active durable behavior.
 - New pull-rate, opportunity-classification, or compounding dashboards.
 - Model-weight training.
 
-These ideas have not yet earned implementation complexity.
+These exclusions keep the ambient working-adjustment branch narrow.
 
 ## Definition of done
 

@@ -361,11 +361,9 @@ describe("production codemode journey", () => {
     );
     expect(firstScriptExecution).toBeDefined();
     if (!firstScriptExecution) throw new Error("Expected a completed nested script execution");
-    await writeFile(
-      join(home, "definitions", "scripts", "double-value", "index.mjs"),
-      "return { doubled: input.value * 3 };",
-      "utf8",
-    );
+    const scriptWorkingPath = scripts?.[0]?.workingPath;
+    if (!scriptWorkingPath) throw new Error("Expected the saved script working path");
+    await writeFile(join(home, scriptWorkingPath), "return { doubled: input.value * 3 };", "utf8");
     const editedScripts = await runtime.listScripts?.();
     const rerun = await runtime.debug.runTurn(
       trail.trailId,
@@ -417,7 +415,7 @@ describe("production codemode journey", () => {
           run: { tool: "scripts.run", name: "double-value" },
           inspect: { tool: "scripts.describe", name: "double-value" },
           list: { tool: "scripts.list" },
-          workingPath: "definitions/scripts/double-value/index.mjs",
+          workingPath: scriptWorkingPath,
         },
       },
     });
@@ -451,7 +449,7 @@ describe("production codemode journey", () => {
             "execute",
             {
               source: [
-                "return await tools.workflows.save({",
+                "await tools.workflows.save({",
                 '  name: "increment-and-double",',
                 '  description: "Increment a number and then double it.",',
                 '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
@@ -461,6 +459,7 @@ describe("production codemode journey", () => {
                 '    { name: "double", description: "Double the corrected value.", source: "return { value: input.value * 2 };", inputSchema: { type: "object", properties: { value: { type: "number" }, allow: { type: "boolean" } }, required: ["value", "allow"], additionalProperties: false }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: [] }',
                 "  ]",
                 "});",
+                'return await tools.workflows.run({ name: "increment-and-double", input: { value: 20 } });',
               ].join("\n"),
             },
             "call-save-workflow",
@@ -511,9 +510,8 @@ describe("production codemode journey", () => {
     });
     const trail = await runtime.startTrail({ title: "Workflow acceptance" });
 
-    const saved = await runtime.debug.runTurn(trail.trailId, "Save a two-phase arithmetic workflow.");
+    const saved = await runtime.debug.runTurn(trail.trailId, "Save and run a two-phase arithmetic workflow.");
     const workflows = await runtime.listWorkflows?.();
-    const paused = await runtime.debug.runTurn(trail.trailId, "Run increment-and-double for 20.");
     const pausedRuns = await runtime.debug.workspace.operational.workflows.listRunsForSession(trail.trailId);
     const pausedPhases = pausedRuns[0]
       ? await runtime.debug.workspace.operational.workflows.listPhases(pausedRuns[0].runId)
@@ -546,11 +544,11 @@ describe("production codemode journey", () => {
         phaseNames: ["increment", "double"],
       },
     ]);
-    expect(paused.output).toBe("Workflow paused for a correction.");
     expect(pausedRuns).toMatchObject([{ status: "paused", currentPhase: 1 }]);
     expect(pausedRuns[0]).toMatchObject({
       catalogId: expect.stringMatching(/^catalog_[a-f0-9]{64}$/u),
       catalogDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      definitionDependenciesDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
       permissionDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
       provider: CONTROLLED_PI_PROVIDER,
       model: CONTROLLED_PI_MODEL,

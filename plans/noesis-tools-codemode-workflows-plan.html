@@ -779,9 +779,10 @@ Pi AgentHarness
           <article class="card">
             <h3><code>adapt</code></h3>
             <p>
-              Propose, revise, contest, or revert a prompt, skill, atomic tool,
-              script, workflow, toolset, router, or later TUI definition. It
-              creates an inspectable candidate; it does not mint authority.
+              Add or remove tools from the small direct-tool hotbar. It changes
+              convenience, not authority: every hotbar entry still comes from the
+              current frozen Tool Catalog and uses the same Broker and permissions.
+              New project-local scripts and workflows use <code>execute</code>.
             </p>
           </article>
         </div>
@@ -796,8 +797,9 @@ Pi AgentHarness
             names anticipated future use. Repeated evidence may broaden it later.
           </li>
           <li>
-            <code>adapt</code> may write a candidate definition and request
-            evaluation. Existing protected code decides activation and rollback.
+            <code>adapt</code> changes the hotbar only. Ambient reflection may
+            separately propose broader learned behavior; existing protected code
+            decides evaluation, activation, and rollback.
           </li>
           <li>
             Reflection can call these tools ambiently. <code>no_change</code>
@@ -1205,20 +1207,20 @@ noesis skills install --workspace ./team-skills</code></pre>
       <section id="scripts">
         <h2>Scripts: successful code that becomes reusable</h2>
         <p>
-          A script is the smallest reusable unit above an atomic tool. It may be
-          saved because the user asks, because the agent anticipates a credible
-          future use, or because ambient reflection sees recurring evidence.
-          Saving creates a candidate; repeated use and feedback can promote it
-          into a capability revision later.
+          A script is the smallest reusable unit above an atomic tool. During
+          explicit foreground work, the user or agent may save and publish one
+          directly for this project. It is immediately usable through
+          <code>execute</code> under current authority. Reflection may observe later
+          runs and propose broader learned consolidation when evidence recurs.
         </p>
         <h3>Inspectable definition</h3>
-        <pre><code>definitions/scripts/repo-health/
+        <pre><code>definitions/scripts/projects/&lt;project-id&gt;/repo-health/
   script.json   # name, description, input/output JSON schemas, tool requirements
-  main.mjs       # exported run({ input, tools, noesis }) function
+  index.mjs      # program body invoked with { input, tools, noesis }
 
 revisions/scripts/&lt;revision-id&gt;/
   script.json   # byte-stable snapshot
-  main.mjs       # byte-stable snapshot</code></pre>
+  index.mjs      # byte-stable snapshot</code></pre>
         <p>
           The editable files are authoritative for the working definition. Every
           execution pins an immutable recorded revision. Editing the working file
@@ -1226,12 +1228,12 @@ revisions/scripts/&lt;revision-id&gt;/
         </p>
         <h3>Lifecycle</h3>
         <pre>ad hoc code succeeds
-  → user asks "save that" or reflection sees credible reuse
-  → adapt(target: "script") materializes a candidate definition
-  → validate schemas + static contract + controlled execution
-  → make available to codemode as scripts.run(...)
+  → user asks "save that" or the foreground agent identifies project reuse
+  → materialize and validate a project-local definition
+  → publish it to codemode as scripts.run(...) under current authority
+  → use it immediately through execute
   → collect task outcome and conversational feedback
-  → revise, retain, promote into a capability, or revert</pre>
+  → inspect, edit, or replace locally; evaluate only broader learned consolidation</pre>
         <ul>
           <li>
             Scripts declare required tool names and effect classes. The run still
@@ -1624,8 +1626,9 @@ revisions/scripts/&lt;revision-id&gt;/
             <dt>Acceptance</dt>
             <dd>
               A reflection turn can produce <code>no_change</code>, a scoped
-              memory candidate, or a script/prompt candidate; generated content
-              cannot activate itself.
+              memory candidate, or a broader script/prompt candidate; generated
+              content cannot activate broader learned behavior itself. Explicit
+              foreground script publication uses the direct project-local path.
             </dd>
           </dl>
         </article>
@@ -1734,9 +1737,9 @@ revisions/scripts/&lt;revision-id&gt;/
             <dt>Work</dt>
             <dd>
               Add script definition directories, revision snapshots, schemas,
-              required-tool manifests, list/describe/run SDK calls, controlled
-              preflight, explicit “save that” behavior, and ambient proposals
-              after recurring evidence. Complete the <code>/scripts</code>
+              required-tool manifests, list/describe/run SDK calls, publication
+              validation, explicit foreground save behavior, and ambient proposals
+              for broader consolidation after recurring evidence. Complete the <code>/scripts</code>
               library, detail/source view, revision comparison, recent runs, and
               run/edit/inspect actions on the TCW-07 read-model seam.
             </dd>
@@ -1943,7 +1946,8 @@ Wave 5                   TCW-11 compounding loop
                 <td>“Save that as my repo-health script.”</td>
                 <td>
                   Exact code and schemas become editable files plus immutable
-                  revision; rerun uses current permissions.
+                  revision. The script is immediately usable through
+                  <code>execute</code>; rerun uses current permissions.
                 </td>
               </tr>
               <tr>

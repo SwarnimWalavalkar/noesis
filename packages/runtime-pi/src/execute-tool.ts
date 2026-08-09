@@ -109,7 +109,7 @@ export function createPiExecuteTool(input: {
       "Discover before guessing: return await noesis.search(query), then return await noesis.describe(exactName) to inspect its input schema.",
       "Invoke with return await tools.<family>.<operation>(input), or return await noesis.invoke(exactName, input).",
       "emit(value) and notify(value) show progress to the user but do not return that value to you; use return for the final result that should enter conversation context.",
-      "When the user asks to preserve successful reusable work, prefer scripts.save over a loose helper file, verify it immediately with scripts.run in the same execution, and return the save receipt, verification, and reuse instructions.",
+      "When the user asks you to create a reusable capability, or a reusable project-local program would materially help the current work, implement it immediately as a script with scripts.save, or as a workflow with workflows.save when it needs durable phases. Do not defer executable project-local work to reflection or evaluation. Verify a new script immediately with scripts.run in the same execution and return the save receipt, verification, and reuse instructions.",
       "Use store(key, value)/load(key) for codemode-session scratch state.",
     ].join(" "),
     parameters: executeParametersJsonSchema,
