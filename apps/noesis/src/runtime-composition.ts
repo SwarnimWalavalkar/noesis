@@ -820,6 +820,7 @@ function createModelHistoryRerankPort(options: {
           messages: Object.freeze(candidateMessages),
           evidenceRefs: Object.freeze([]),
           availableTools: Object.freeze([]),
+          ...(request.signal ? { signal: request.signal } : {}),
         },
         z.strictObject({ ranking: RankingSchema }),
       );

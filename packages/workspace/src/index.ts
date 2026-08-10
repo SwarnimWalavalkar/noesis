@@ -38,6 +38,7 @@ export type {
   SearchDocument,
   SearchIndexPort,
   SearchSessionScope,
+  SearchSourceScope,
   Sensitivity,
   SessionRecord,
   SessionStatus,

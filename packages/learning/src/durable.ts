@@ -34,7 +34,7 @@ const CitationSchema = z.strictObject({
   source: z.union([
     z.strictObject({
       kind: z.literal("database_row"),
-      table: z.enum(["sessions", "messages", "tool_calls", "outcomes"]),
+      table: z.enum(["sessions", "messages", "tool_calls", "outcomes", "experiments"]),
       rowId: z.string().min(1),
       field: z.string().min(1),
     }),

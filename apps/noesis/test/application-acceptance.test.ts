@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { resolveNoesisConfig } from "@noesis/config";
 import { createPiAgentRoleRunner, createPiAgentRuntime } from "@noesis/runtime-pi";
 import { afterEach, describe, expect, test } from "vitest";
+import { z } from "zod";
 import {
   CONTROLLED_PI_MODEL,
   CONTROLLED_PI_PROVIDER,
@@ -80,6 +81,50 @@ describe("credential-free Pi application acceptance", () => {
       expect(related.output).toBe(
         "Served immutable research-brief behavior through the pinned search_sessions tool.",
       );
+      const relatedSearchCall = (
+        await runtime.debug.workspace.operational.toolCalls.listForSession(relatedSession.trailId)
+      ).find((toolCall) => toolCall.toolName === "history.search_sessions");
+      const rankedSearch = z
+        .object({
+          output: z.object({
+            hits: z
+              .array(
+                z.object({
+                  fragmentId: z.string(),
+                  rerankReason: z.string(),
+                }),
+              )
+              .min(2),
+            fragments: z
+              .array(
+                z.object({
+                  id: z.string(),
+                  citation: z.object({
+                    documentId: z.string(),
+                    contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+                  }),
+                }),
+              )
+              .min(2),
+          }),
+        })
+        .parse(relatedSearchCall?.response).output;
+      const citationsByFragmentId = new Map(
+        rankedSearch.fragments.map((fragment) => [fragment.id, fragment.citation]),
+      );
+      let previousRank = 0;
+      for (const hit of rankedSearch.hits) {
+        const citation = citationsByFragmentId.get(hit.fragmentId);
+        expect(citation).toBeDefined();
+        const reason = z
+          .string()
+          .regex(/^Controlled reverse rank \d+ for [a-f0-9]{64}\.$/u)
+          .parse(hit.rerankReason);
+        expect(reason).toContain(`for ${citation?.documentId}.`);
+        const rank = Number.parseInt(reason.match(/rank (\d+)/u)?.[1] ?? "0", 10);
+        expect(rank).toBeGreaterThan(previousRank);
+        previousRank = rank;
+      }
 
       const unrelatedSession = await runtime.startTrail({ title: "Unrelated return" });
       const unrelated = await runtime.debug.runTurn(unrelatedSession.trailId, "Draft a meeting agenda.");

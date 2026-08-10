@@ -416,7 +416,7 @@ export function decodeSearchDocument(row: unknown): SearchDocument {
     .discriminatedUnion("kind", [
       z.strictObject({
         kind: z.literal("database_row"),
-        table: z.enum(["sessions", "messages", "tool_calls", "outcomes"]),
+        table: z.enum(["sessions", "messages", "tool_calls", "outcomes", "experiments"]),
         rowId: z.string(),
         field: z.string(),
       }),

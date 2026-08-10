@@ -102,6 +102,7 @@ import type {
   SearchCandidate,
   SearchConfiguration,
   SearchDocument,
+  SearchSourceScope,
   SessionRecord,
   StageDefinitionRequest,
   StagedDefinition,
@@ -132,6 +133,11 @@ const ActorSchema = z.strictObject({
   kind: z.enum(["user", "noesis", "external_system", "system"]),
 });
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
+const SearchSourceScopeSchema = z.enum([
+  "session_or_outcome",
+  "corrected_outcome",
+  "completed_experiment",
+]) satisfies z.ZodType<SearchSourceScope>;
 const ClassifyOutcomeRequestSchema: z.ZodType<ClassifyOutcomeRequest> = z.strictObject({
   outcomeId: z.string().min(1),
   sessionId: z.string().min(1),
@@ -3843,23 +3849,131 @@ function createSearchIndex(
   paths: WorkspacePaths,
 ): NoesisWorkspaceStore["search"] {
   const db = database.connection;
-  const sessionIdForProvenance = (refs: readonly EvidenceRef[]): string | undefined => {
-    const sessionIds = new Set<string>();
-    for (const ref of refs) {
-      if (ref.kind !== "database_row") continue;
-      if (ref.table === "sessions") {
-        sessionIds.add(ref.rowId);
-        continue;
-      }
-      if (ref.table !== "messages" && ref.table !== "tool_calls" && ref.table !== "outcomes") continue;
-      const row = db
-        .prepare(`SELECT session_id FROM ${ref.table} WHERE ${PRIMARY_KEY_BY_TABLE[ref.table]} = ?`)
-        .get(ref.rowId);
-      if (row !== undefined) sessionIds.add(requiredString(row, "session_id"));
-    }
-    return sessionIds.size === 1 ? [...sessionIds][0] : undefined;
-  };
   const sourceRows = async (): Promise<readonly SearchDocument[]> => {
+    type ProvenanceResolution = {
+      readonly sensitivity: SearchDocument["sensitivity"];
+      readonly sessionIds: readonly string[];
+    };
+    const failClosed: ProvenanceResolution = Object.freeze({ sensitivity: "secret", sessionIds: [] });
+    const resolutionMemo = new Map<string, ProvenanceResolution>();
+    const resolving = new Set<string>();
+    let remainingResolutionNodes = 10_000;
+    const maxSensitivity = (
+      left: SearchDocument["sensitivity"],
+      right: SearchDocument["sensitivity"],
+    ): SearchDocument["sensitivity"] => {
+      if (left === "secret" || right === "secret") return "secret";
+      if (left === "private" || right === "private") return "private";
+      return "normal";
+    };
+    const mergeResolutions = (
+      base: SearchDocument["sensitivity"],
+      resolutions: readonly ProvenanceResolution[],
+    ): ProvenanceResolution => {
+      let sensitivity = base;
+      const sessionIds = new Set<string>();
+      for (const resolution of resolutions) {
+        sensitivity = maxSensitivity(sensitivity, resolution.sensitivity);
+        for (const sessionId of resolution.sessionIds) sessionIds.add(sessionId);
+      }
+      return Object.freeze({ sensitivity, sessionIds: [...sessionIds].sort() });
+    };
+    const parseRefs = (raw: unknown): readonly EvidenceRef[] | undefined => {
+      const parsed = z.array(EvidenceRefSchema).safeParse(raw);
+      return parsed.success ? parsed.data : undefined;
+    };
+    const resolveRefs = (refs: readonly EvidenceRef[]): ProvenanceResolution =>
+      mergeResolutions(
+        "normal",
+        refs.map((ref) => resolveRef(ref)),
+      );
+    const resolveFileRevision = (revisionId: string): ProvenanceResolution => {
+      const row = db
+        .prepare("SELECT sensitivity, provenance_refs_json FROM file_revisions WHERE revision_id = ?")
+        .get(revisionId);
+      if (row === undefined) return failClosed;
+      const sensitivity = SensitivitySchema.safeParse(optionalString(row, "sensitivity") ?? "private");
+      const refs = parseRefs(parseJson(requiredString(row, "provenance_refs_json")));
+      if (!sensitivity.success || !refs) return failClosed;
+      return mergeResolutions(sensitivity.data, [resolveRefs(refs)]);
+    };
+    const resolveDatabaseRow = (ref: DatabaseRowRef): ProvenanceResolution => {
+      if (ref.table === "sessions") {
+        const row = db.prepare("SELECT session_id FROM sessions WHERE session_id = ?").get(ref.rowId);
+        if (row === undefined) return failClosed;
+        return Object.freeze({
+          sensitivity: sessionSensitivity(db, ref.rowId) ?? "private",
+          sessionIds: [ref.rowId],
+        });
+      }
+      if (ref.table === "messages" || ref.table === "tool_calls" || ref.table === "outcomes") {
+        const row = db
+          .prepare(
+            `SELECT session_id, sensitivity FROM ${ref.table} WHERE ${PRIMARY_KEY_BY_TABLE[ref.table]} = ?`,
+          )
+          .get(ref.rowId);
+        if (row === undefined) return failClosed;
+        const sensitivity = SensitivitySchema.safeParse(requiredString(row, "sensitivity"));
+        return sensitivity.success
+          ? Object.freeze({ sensitivity: sensitivity.data, sessionIds: [requiredString(row, "session_id")] })
+          : failClosed;
+      }
+      if (ref.table === "file_revisions") return resolveFileRevision(ref.rowId);
+      if (ref.table === "feedback_signals") {
+        const row = db
+          .prepare("SELECT sensitivity, data_json FROM feedback_signals WHERE signal_id = ?")
+          .get(ref.rowId);
+        if (row === undefined) return failClosed;
+        const sensitivity = SensitivitySchema.safeParse(requiredString(row, "sensitivity"));
+        const feedback = FeedbackSignalSchema.safeParse(parseJson(requiredString(row, "data_json")));
+        if (!sensitivity.success || !feedback.success) return failClosed;
+        return mergeResolutions(sensitivity.data, [resolveRefs(feedback.data.evidenceRefs)]);
+      }
+      if (ref.table === "experiments") {
+        const row = db.prepare("SELECT data_json FROM experiments WHERE experiment_id = ?").get(ref.rowId);
+        if (row === undefined) return failClosed;
+        const experiment = ExperimentSchema.safeParse(parseJson(requiredString(row, "data_json")));
+        return experiment.success ? resolveRefs(experiment.data.evidenceRefs) : failClosed;
+      }
+      return failClosed;
+    };
+    const resolveArtifact = (artifactId: string): ProvenanceResolution => {
+      const row = db
+        .prepare("SELECT relationship_refs_json FROM artifacts WHERE artifact_id = ?")
+        .get(artifactId);
+      if (row === undefined) return failClosed;
+      const refs = parseRefs(parseJson(requiredString(row, "relationship_refs_json")));
+      return refs ? mergeResolutions("private", [resolveRefs(refs)]) : failClosed;
+    };
+    function resolveRef(ref: EvidenceRef): ProvenanceResolution {
+      const key = evidenceReferenceIdentity(ref);
+      const memoized = resolutionMemo.get(key);
+      if (memoized) return memoized;
+      if (remainingResolutionNodes <= 0 || resolving.has(key)) return failClosed;
+      remainingResolutionNodes -= 1;
+      resolving.add(key);
+      let resolution: ProvenanceResolution;
+      try {
+        if (ref.kind === "file_revision" || ref.kind === "evidence_revision")
+          resolution = resolveFileRevision(ref.revisionId);
+        else if (ref.kind === "artifact_file") resolution = resolveArtifact(ref.artifactId);
+        else resolution = resolveDatabaseRow(ref);
+      } catch {
+        resolution = failClosed;
+      }
+      resolving.delete(key);
+      resolutionMemo.set(key, resolution);
+      return resolution;
+    }
+    const resolveProvenance = (
+      baseSensitivity: SearchDocument["sensitivity"],
+      rawRefs: unknown,
+    ): ProvenanceResolution => {
+      const refs = parseRefs(rawRefs);
+      return refs ? mergeResolutions(baseSensitivity, [resolveRefs(refs)]) : failClosed;
+    };
+    const singleSessionId = (resolution: ProvenanceResolution): string | undefined =>
+      resolution.sessionIds.length === 1 ? resolution.sessionIds[0] : undefined;
     const documents: SearchDocument[] = [];
     const add = (
       source: CanonicalSearchSource,
@@ -3938,6 +4052,25 @@ function createSearchIndex(
         requiredString(row, "sensitivity") as SearchDocument["sensitivity"],
         requiredString(row, "session_id"),
       );
+    for (const row of db.prepare("SELECT * FROM experiments WHERE status = 'completed'").all()) {
+      const body = requiredString(row, "data_json");
+      const experiment = ExperimentSchema.safeParse(parseJson(body));
+      const resolution = experiment.success
+        ? resolveProvenance("normal", experiment.data.evidenceRefs)
+        : failClosed;
+      add(
+        {
+          kind: "database_row",
+          table: "experiments",
+          rowId: requiredString(row, "experiment_id"),
+          field: "data_json",
+        },
+        body,
+        requiredString(row, "updated_at"),
+        resolution.sensitivity,
+        singleSessionId(resolution),
+      );
+    }
     for (const row of db.prepare("SELECT * FROM file_revisions").all()) {
       const snapshotPath = requiredString(row, "snapshot_path");
       let body: string;
@@ -3949,17 +4082,16 @@ function createSearchIndex(
         if (isMissing(error)) continue;
         throw error;
       }
+      const rowSensitivity = SensitivitySchema.safeParse(requiredString(row, "sensitivity"));
+      const resolution = rowSensitivity.success
+        ? resolveProvenance(rowSensitivity.data, parseJson(requiredString(row, "provenance_refs_json")))
+        : failClosed;
       add(
         { kind: "file_revision", revisionId: requiredString(row, "revision_id"), field: "bytes" },
         body,
         requiredString(row, "recorded_at"),
-        z.enum(["normal", "private", "secret"]).parse(requiredString(row, "sensitivity")),
-        sessionIdForProvenance(
-          z
-            .array(EvidenceRefSchema)
-            .max(64)
-            .parse(parseJson(requiredString(row, "provenance_refs_json"))),
-        ),
+        resolution.sensitivity,
+        singleSessionId(resolution),
       );
     }
     return documents.sort((left, right) => left.documentId.localeCompare(right.documentId));
@@ -4000,6 +4132,33 @@ function createSearchIndex(
       .all(options.includePrivate ? 1 : 0, options.includeSecret ? 1 : 0);
     return rows.map(decodeSearchDocument);
   };
+  const sourceScopeParameters = (
+    value: SearchSourceScope | undefined,
+  ): readonly [number, number, number, number] => {
+    const scope = value === undefined ? undefined : SearchSourceScopeSchema.parse(value);
+    return [
+      scope === undefined ? 1 : 0,
+      scope === "session_or_outcome" ? 1 : 0,
+      scope === "corrected_outcome" ? 1 : 0,
+      scope === "completed_experiment" ? 1 : 0,
+    ];
+  };
+  const sourceScopeSql = `(
+    ? = 1
+    OR (? = 1 AND source_kind = 'database_row' AND source_table IN ('sessions', 'outcomes'))
+    OR (? = 1 AND source_kind = 'database_row' AND source_table = 'outcomes'
+      AND EXISTS (
+        SELECT 1 FROM outcomes
+        WHERE outcomes.outcome_id = search_documents.source_id
+          AND outcomes.status = 'corrected'
+      ))
+    OR (? = 1 AND source_kind = 'database_row' AND source_table = 'experiments'
+      AND EXISTS (
+        SELECT 1 FROM experiments
+        WHERE experiments.experiment_id = search_documents.source_id
+          AND experiments.status = 'completed'
+      ))
+  )`;
   return Object.freeze({
     clear: async () => {
       database.transaction(() => {
@@ -4023,6 +4182,7 @@ function createSearchIndex(
       const exactSessionId = request.sessionScope?.kind === "exact" ? request.sessionScope.sessionId : null;
       const previousSessionId =
         request.sessionScope?.kind === "previous" ? request.sessionScope.currentSessionId : null;
+      const sourceScope = sourceScopeParameters(request.sourceScope);
       const rows = db
         .prepare(
           `SELECT search_documents.*, bm25(search_fts) AS rank
@@ -4032,6 +4192,7 @@ function createSearchIndex(
              AND (sensitivity = 'normal' OR ? = 1)
              AND (? IS NULL OR session_id = ?)
              AND (? IS NULL OR (session_id IS NOT NULL AND session_id != ?))
+             AND ${sourceScopeSql}
            ORDER BY rank, search_documents.document_id LIMIT ?`,
         )
         .all(
@@ -4041,6 +4202,7 @@ function createSearchIndex(
           exactSessionId,
           previousSessionId,
           previousSessionId,
+          ...sourceScope,
           Math.max(0, request.limit),
         );
       return rows.map((row) => ({
@@ -4070,6 +4232,7 @@ function createSearchIndex(
       const exactSessionId = request.sessionScope?.kind === "exact" ? request.sessionScope.sessionId : null;
       const previousSessionId =
         request.sessionScope?.kind === "previous" ? request.sessionScope.currentSessionId : null;
+      const sourceScope = sourceScopeParameters(request.sourceScope);
       const rows = db
         .prepare(
           `SELECT search_documents.*, search_embeddings.vector_json
@@ -4077,7 +4240,8 @@ function createSearchIndex(
            WHERE model_id = ? AND sensitivity != 'secret'
              AND (sensitivity = 'normal' OR ? = 1)
              AND (? IS NULL OR session_id = ?)
-             AND (? IS NULL OR (session_id IS NOT NULL AND session_id != ?))`,
+             AND (? IS NULL OR (session_id IS NOT NULL AND session_id != ?))
+             AND ${sourceScopeSql}`,
         )
         .all(
           request.modelId,
@@ -4086,6 +4250,7 @@ function createSearchIndex(
           exactSessionId,
           previousSessionId,
           previousSessionId,
+          ...sourceScope,
         );
       return rows
         .map(
@@ -4151,6 +4316,7 @@ async function openCanonicalSource(
       trace: "tool_name || '\n' || request_json || '\n' || COALESCE(response_json, '')",
     },
     outcomes: { key: "outcome_id", summary: "summary" },
+    experiments: { key: "experiment_id", data_json: "data_json" },
   } as const;
   const table = mapping[source.table];
   if (!(source.field in table) || source.field === "key") return undefined;

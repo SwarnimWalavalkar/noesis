@@ -110,10 +110,13 @@ export function researchLoopControlledResponse(
             })
             .parse(structuredPayload(message.content)).candidates,
       );
+    if (candidates.length < 2)
+      throw new Error("Controlled history reranker requires at least two candidates to prove ordering");
+    const reversed = candidates.toReversed();
     return JSON.stringify({
-      ranking: candidates.map((candidate) => ({
+      ranking: reversed.map((candidate, index) => ({
         documentId: candidate.documentId,
-        reason: "Controlled semantic relevance order.",
+        reason: `Controlled reverse rank ${String(index + 1)} for ${candidate.documentId}.`,
       })),
     });
   }
