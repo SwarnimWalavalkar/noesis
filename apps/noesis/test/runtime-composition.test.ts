@@ -24,6 +24,8 @@ import {
   createPiAgentRoleRunner,
   createPiAgentRuntime,
   createPiSkillLibrary,
+  createRestrictedRoleContextPolicy,
+  createStructuredInferencePort,
   type FrozenSessionToolResolver,
   type PiFrozenToolCatalog,
   type PiWorkflowSummary,
@@ -45,6 +47,7 @@ import { researchLoopControlledResponse } from "./support/research-loop-controll
 import {
   type ApplicationRuntimeCompositionOptions,
   createApplicationRuntimeComposition,
+  createModelHistoryRerankPort,
   resolveProjectHotbarSelection,
   waitForReflectionBarrier,
 } from "../src/runtime-composition.ts";
@@ -60,6 +63,61 @@ function scriptedHistoryRerankResponse(request: RoleBackendRequest): { readonly 
   if (typeof response !== "string") throw new Error("Controlled history reranker must return text");
   return Object.freeze({ text: response });
 }
+
+test("model history reranking can select a candidate beyond the first fifty", async () => {
+  const promptRevision: FileRevisionRef = Object.freeze({
+    kind: "file_revision",
+    revisionId: "history-reranker-prompt-revision",
+    workingPath: "prompts/history-reranker.md",
+    snapshotPath: "snapshots/history-reranker.md",
+    contentDigest: sha256("history-reranker-prompt"),
+  });
+  const configuration = Object.freeze({
+    role: "history_reranker" as const,
+    variant: Object.freeze({
+      variantId: "history-reranker-boundary-v1",
+      axis: "role" as const,
+      configurationRefs: Object.freeze([promptRevision]),
+    }),
+    provider: "controlled",
+    model: "controlled",
+    reasoning: "off" as const,
+    systemPrompt: "Noesis protected role: history_reranker.",
+    contextPolicy: createRestrictedRoleContextPolicy("history_reranker", {
+      maxMessages: 12,
+      maxCharactersPerMessage: 12_000,
+      maxTotalCharacters: 48_000,
+    }),
+  });
+  const runner = createScriptedAgentRoleRunner({
+    variants: [configuration],
+    respond: scriptedHistoryRerankResponse,
+  });
+  const reranker = createModelHistoryRerankPort({
+    inference: createStructuredInferencePort({ runner }),
+    configuration,
+  });
+  const candidates = Array.from({ length: 100 }, (_, index) =>
+    Object.freeze({
+      documentId: `document-${String(index).padStart(3, "0")}`,
+      excerpt: `Bounded candidate ${String(index)}. ${'"\\\n'.repeat(240)}`,
+      combinedScore: 100 - index,
+    }),
+  );
+
+  const result = await reranker.rerank({
+    query: "Select the final candidate",
+    candidates,
+    maxResults: 1,
+  });
+
+  expect(result).toEqual([
+    {
+      documentId: "document-099",
+      reason: "Controlled reverse rank 1 for document-099.",
+    },
+  ]);
+});
 
 test("a reflection barrier read failure cannot fail an already-settled turn", async () => {
   await expect(

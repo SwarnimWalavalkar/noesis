@@ -20,10 +20,11 @@ export interface ExactCitation {
 export interface HistorySearchRequest {
   readonly query: string;
   readonly signal?: AbortSignal;
-  /** Authoritative structural filtering applied before configured candidate and rerank bounds. */
+  /** Defense-in-depth canonical eligibility applied after store retrieval and before merge/rerank bounds. */
   readonly candidateFilter?: (source: CanonicalSearchSource) => boolean | Promise<boolean>;
   readonly sessionId?: string;
   readonly sessionScope?: SearchSessionScope;
+  /** Typed structural filtering applied by the store before lexical and semantic retrieval bounds. */
   readonly sourceScope?: SearchSourceScope;
   readonly limit?: number;
   readonly lexicalLimit?: number;
@@ -113,6 +114,9 @@ export interface CreateHistoryPortOptions {
   readonly reranker: HistoryRerankPort;
 }
 
+/** Maximum merged retrieval candidates admitted to one bounded model rerank. */
+export const MAX_HISTORY_RERANK_CANDIDATES = 100;
+
 export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPort {
   const rebuild = async (): Promise<{ readonly documents: number; readonly embeddings: number }> => {
     const documents = await options.workspace.search.rebuildDocuments();
@@ -154,8 +158,13 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
     const rerankLimit =
       configuration.rerankLimit === 0
         ? 0
-        : Math.min(Math.max(resultLimit, configuration.rerankLimit), lexicalLimit + semanticLimit, 100);
-    const candidateLimit = rerankLimit === 0 ? Math.min(lexicalLimit + semanticLimit, 100) : rerankLimit;
+        : Math.min(
+            Math.max(resultLimit, configuration.rerankLimit),
+            lexicalLimit + semanticLimit,
+            MAX_HISTORY_RERANK_CANDIDATES,
+          );
+    const candidateLimit =
+      rerankLimit === 0 ? Math.min(lexicalLimit + semanticLimit, MAX_HISTORY_RERANK_CANDIDATES) : rerankLimit;
     const maxExcerptChars = boundedInteger(
       request.maxExcerptChars ?? configuration.maxExcerptChars,
       32,

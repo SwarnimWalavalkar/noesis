@@ -51,6 +51,7 @@ import {
   createSessionSearchTools,
   type HistoryPort,
   type HistoryRerankPort,
+  MAX_HISTORY_RERANK_CANDIDATES,
   type RerankRequest,
 } from "@noesis/intelligence";
 import {
@@ -133,6 +134,9 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
 const SHUTDOWN_GRACE_MS = 250;
 const REFLECTION_BARRIER_MS = 1_500;
+const HISTORY_RERANK_MIN_EXCERPT_CHARACTERS = 32;
+const HISTORY_RERANK_MAX_EXCERPT_CHARACTERS = 480;
+const HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE = 4_096;
 const LATE_REFLECTION_REFRESH_MS = 5_000;
 
 export async function waitForReflectionBarrier(
@@ -754,48 +758,84 @@ export async function resolveActiveProject(root: string): Promise<ProjectRef> {
   });
 }
 
-function createModelHistoryRerankPort(options: {
+export function createModelHistoryRerankPort(options: {
   readonly inference: ReturnType<typeof createStructuredInferencePort>;
   readonly configuration: ApplicationRoleConfiguration;
 }): HistoryRerankPort {
-  const maxCandidates = 50;
   const candidatesPerMessage = 12;
-  const maxExcerptCharacters = 480;
   return Object.freeze({
     rerank: async (request: RerankRequest) => {
-      const candidates = Object.freeze(
-        request.candidates.slice(0, maxCandidates).map((candidate) =>
-          Object.freeze({
-            ...candidate,
-            excerpt: candidate.excerpt.slice(0, maxExcerptCharacters),
-          }),
-        ),
-      );
-      if (candidates.length === 0) return Object.freeze([]);
+      if (request.candidates.length > MAX_HISTORY_RERANK_CANDIDATES)
+        throw new Error(
+          `History reranker accepts at most ${String(MAX_HISTORY_RERANK_CANDIDATES)} candidates`,
+        );
+      if (request.candidates.length === 0) return Object.freeze([]);
+      const buildInput = (excerptCharacters: number) => {
+        const candidates = Object.freeze(
+          request.candidates.map((candidate) =>
+            Object.freeze({
+              ...candidate,
+              excerpt: candidate.excerpt.slice(0, excerptCharacters),
+            }),
+          ),
+        );
+        const messages = Object.freeze(
+          Array.from({ length: Math.ceil(candidates.length / candidatesPerMessage) }, (_, index) =>
+            Object.freeze({
+              role: "user" as const,
+              name: "candidates",
+              content: canonicalJson(
+                toJsonValue({
+                  ...(index === 0
+                    ? {
+                        instruction:
+                          "Rank every candidate from most to least useful for answering the query. Prefer meaningfully relevant evidence over literal word overlap. Return every document ID exactly once with a brief reason.",
+                        query: request.query,
+                      }
+                    : {}),
+                  candidates: candidates.slice(
+                    index * candidatesPerMessage,
+                    (index + 1) * candidatesPerMessage,
+                  ),
+                }),
+              ),
+            }),
+          ),
+        );
+        return Object.freeze({ candidates, messages });
+      };
+      const fitsContextPolicy = (input: ReturnType<typeof buildInput>): boolean => {
+        if (input.messages.length > options.configuration.contextPolicy.maxMessages) return false;
+        const lastIndex = input.messages.length - 1;
+        if (
+          input.messages.some(
+            (message, index) =>
+              message.content.length + (index === lastIndex ? HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE : 0) >
+              options.configuration.contextPolicy.maxCharactersPerMessage,
+          )
+        )
+          return false;
+        return (
+          input.messages.reduce((total, message) => total + message.content.length, 0) +
+            HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE <=
+          options.configuration.contextPolicy.maxTotalCharacters
+        );
+      };
+      let selected = buildInput(HISTORY_RERANK_MIN_EXCERPT_CHARACTERS);
+      if (!fitsContextPolicy(selected))
+        throw new Error("History reranker candidate identities exceed the configured role context policy");
+      let lower = HISTORY_RERANK_MIN_EXCERPT_CHARACTERS + 1;
+      let upper = HISTORY_RERANK_MAX_EXCERPT_CHARACTERS;
+      while (lower <= upper) {
+        const midpoint = Math.floor((lower + upper) / 2);
+        const candidate = buildInput(midpoint);
+        if (fitsContextPolicy(candidate)) {
+          selected = candidate;
+          lower = midpoint + 1;
+        } else upper = midpoint - 1;
+      }
+      const { candidates, messages: candidateMessages } = selected;
       const candidateIds = new Set(candidates.map((candidate) => candidate.documentId));
-      const candidateMessages = Array.from(
-        { length: Math.ceil(candidates.length / candidatesPerMessage) },
-        (_, index) =>
-          Object.freeze({
-            role: "user" as const,
-            name: "candidates",
-            content: canonicalJson(
-              toJsonValue({
-                ...(index === 0
-                  ? {
-                      instruction:
-                        "Rank every candidate from most to least useful for answering the query. Prefer meaningfully relevant evidence over literal word overlap. Return every document ID exactly once with a brief reason.",
-                      query: request.query,
-                    }
-                  : {}),
-                candidates: candidates.slice(
-                  index * candidatesPerMessage,
-                  (index + 1) * candidatesPerMessage,
-                ),
-              }),
-            ),
-          }),
-      );
       const RankingSchema = z
         .array(HistoryRerankItemSchema)
         .length(candidates.length)
