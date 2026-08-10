@@ -200,6 +200,361 @@ describe("WorkspaceStore", () => {
     return root;
   };
 
+  test("indexes tool calls only after they reach an immutable terminal status", async () => {
+    const store = await createWorkspaceStore(await temporary("search-terminal-tool-calls"));
+    await store.operational.sessions.put(session("session-search"));
+    const running = {
+      toolCallId: "tool-call-search",
+      sessionId: "session-search",
+      toolName: "shell.run",
+      request: Object.freeze({ query: "immutable terminal trace" }),
+      status: "running" as const,
+      sensitivity: "normal" as const,
+      createdAt: "2026-08-10T00:00:00.000Z",
+    };
+    await store.operational.toolCalls.put(running);
+
+    expect(
+      (await store.search.rebuildDocuments()).some(
+        (document) =>
+          document.source.kind === "database_row" &&
+          document.source.table === "tool_calls" &&
+          document.source.rowId === running.toolCallId,
+      ),
+    ).toBe(false);
+
+    await store.operational.toolCalls.put({
+      ...running,
+      response: Object.freeze({ hits: 2 }),
+      status: "completed",
+      completedAt: "2026-08-10T00:00:01.000Z",
+    });
+    const rebuilt = await store.search.rebuildDocuments();
+    const indexed = rebuilt.find(
+      (document) =>
+        document.source.kind === "database_row" &&
+        document.source.table === "tool_calls" &&
+        document.source.rowId === running.toolCallId,
+    );
+    expect(indexed?.body).toContain('"hits":2');
+    store.close();
+  });
+
+  test("never re-indexes history retrieval tool calls as derived evidence", async () => {
+    const store = await createWorkspaceStore(await temporary("search-history-tool-calls"));
+    await store.operational.sessions.put(session("session-history-search"));
+    await Promise.all([
+      store.operational.toolCalls.put({
+        toolCallId: "history-search-normal",
+        sessionId: "session-history-search",
+        toolName: "history.search_sessions",
+        request: Object.freeze({ query: "prior launch decision" }),
+        response: Object.freeze({ excerpt: "normal retrieved fragment" }),
+        status: "completed",
+        sensitivity: "normal",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        completedAt: "2026-08-10T00:00:01.000Z",
+      }),
+      store.operational.toolCalls.put({
+        toolCallId: "history-search-private",
+        sessionId: "session-history-search",
+        toolName: "history.open_session_evidence",
+        request: Object.freeze({ citation: "private-citation" }),
+        response: Object.freeze({ excerpt: "private retrieved fragment" }),
+        status: "completed",
+        sensitivity: "private",
+        createdAt: "2026-08-10T00:00:02.000Z",
+        completedAt: "2026-08-10T00:00:03.000Z",
+      }),
+      store.operational.toolCalls.put({
+        toolCallId: "ordinary-terminal",
+        sessionId: "session-history-search",
+        toolName: "files.read",
+        request: Object.freeze({ path: "README.md" }),
+        response: Object.freeze({ content: "ordinary terminal trace" }),
+        status: "completed",
+        sensitivity: "normal",
+        createdAt: "2026-08-10T00:00:04.000Z",
+        completedAt: "2026-08-10T00:00:05.000Z",
+      }),
+    ]);
+
+    const documents = await store.search.rebuildDocuments();
+    const indexedToolCallIds = documents.flatMap((document) =>
+      document.source.kind === "database_row" && document.source.table === "tool_calls"
+        ? [document.source.rowId]
+        : [],
+    );
+    expect(indexedToolCallIds).toContain("ordinary-terminal");
+    expect(indexedToolCallIds).not.toContain("history-search-normal");
+    expect(indexedToolCallIds).not.toContain("history-search-private");
+    expect(JSON.stringify(documents)).not.toContain("private retrieved fragment");
+    store.close();
+  });
+
+  test("rebuilds file revisions with more than 64 authoritative provenance references", async () => {
+    const store = await createWorkspaceStore(await temporary("search-large-provenance"));
+    await Promise.all([
+      store.operational.sessions.put(session("session-provenance-a")),
+      store.operational.sessions.put(session("session-provenance-b")),
+    ]);
+    const refs: Array<{
+      readonly kind: "database_row";
+      readonly table: "messages";
+      readonly rowId: string;
+    }> = [];
+    for (let index = 0; index < 66; index += 1) {
+      const messageId = `message-provenance-${index}`;
+      await store.operational.messages.put({
+        messageId,
+        sessionId: index === 65 ? "session-provenance-b" : "session-provenance-a",
+        role: "user",
+        content: `Authoritative provenance message ${index}`,
+        sensitivity: "normal",
+        createdAt: `2026-08-10T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
+        metadata: Object.freeze({}),
+      });
+      refs.push({ kind: "database_row" as const, table: "messages" as const, rowId: messageId });
+    }
+    const oneSessionEvidence = await store.evidence.appendEvidence({
+      workingPath: "history/large-single-session-provenance.txt",
+      bytes: text("Evidence with 65 authoritative references from one session."),
+      actor,
+      evidenceKind: "output",
+      sensitivity: "normal",
+      provenanceRefs: refs.slice(0, 65),
+    });
+    const multipleSessionEvidence = await store.evidence.appendEvidence({
+      workingPath: "history/large-multiple-session-provenance.txt",
+      bytes: text("Evidence whose 66th reference introduces another session."),
+      actor,
+      evidenceKind: "output",
+      sensitivity: "normal",
+      provenanceRefs: refs,
+    });
+
+    const documents = await store.search.rebuildDocuments();
+    const revisionDocument = (revisionId: string) =>
+      documents.find(
+        (document) => document.source.kind === "file_revision" && document.source.revisionId === revisionId,
+      );
+    expect(revisionDocument(oneSessionEvidence.revisionId)?.sessionId).toBe("session-provenance-a");
+    expect(revisionDocument(multipleSessionEvidence.revisionId)?.sessionId).toBeUndefined();
+    const authoritativeRow = await store.reads.readDatabaseRow({
+      kind: "database_row",
+      table: "file_revisions",
+      rowId: multipleSessionEvidence.revisionId,
+    });
+    expect(JSON.parse(String(authoritativeRow?.["provenance_refs_json"]))).toHaveLength(66);
+    store.close();
+  });
+
+  test("projects late private and secret provenance before ordinary search candidates", async () => {
+    const store = await createWorkspaceStore(await temporary("search-provenance-sensitivity"));
+    await store.operational.sessions.put(session("session-sensitive-provenance"));
+    const refs: Array<{
+      readonly kind: "database_row";
+      readonly table: "messages";
+      readonly rowId: string;
+    }> = [];
+    for (let index = 0; index < 66; index += 1) {
+      const messageId = `message-sensitive-provenance-${index}`;
+      await store.operational.messages.put({
+        messageId,
+        sessionId: "session-sensitive-provenance",
+        role: "user",
+        content: `Provenance sensitivity anchor ${index}`,
+        sensitivity: index === 65 ? "secret" : index === 64 ? "private" : "normal",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        metadata: Object.freeze({}),
+      });
+      refs.push({ kind: "database_row", table: "messages", rowId: messageId });
+    }
+    const privateEvidence = await store.evidence.appendEvidence({
+      workingPath: "history/late-private-provenance.txt",
+      bytes: text("Late private provenance visibility sentinel."),
+      actor,
+      evidenceKind: "output",
+      sensitivity: "normal",
+      provenanceRefs: refs.slice(0, 65),
+    });
+    const secretEvidence = await store.evidence.appendEvidence({
+      workingPath: "history/late-secret-provenance.txt",
+      bytes: text("Late secret provenance visibility sentinel."),
+      actor,
+      evidenceKind: "output",
+      sensitivity: "normal",
+      provenanceRefs: refs,
+    });
+
+    const rebuilt = await store.search.rebuildDocuments();
+    const revisionDocument = (revisionId: string) =>
+      rebuilt.find(
+        (document) => document.source.kind === "file_revision" && document.source.revisionId === revisionId,
+      );
+    expect(revisionDocument(privateEvidence.revisionId)?.sensitivity).toBe("private");
+    expect(revisionDocument(secretEvidence.revisionId)?.sensitivity).toBe("secret");
+    const ordinaryDocuments = await store.search.listDocuments();
+    expect(ordinaryDocuments.map((document) => document.documentId)).not.toContain(
+      revisionDocument(privateEvidence.revisionId)?.documentId,
+    );
+    expect(ordinaryDocuments.map((document) => document.documentId)).not.toContain(
+      revisionDocument(secretEvidence.revisionId)?.documentId,
+    );
+    const ordinaryLexical = await store.search.lexicalCandidates({
+      query: "provenance visibility sentinel",
+      limit: 8,
+      includePrivate: false,
+    });
+    const sensitiveDocumentIds = [
+      revisionDocument(privateEvidence.revisionId)?.documentId,
+      revisionDocument(secretEvidence.revisionId)?.documentId,
+    ];
+    expect(ordinaryLexical.every((candidate) => !sensitiveDocumentIds.includes(candidate.documentId))).toBe(
+      true,
+    );
+    await store.search.putEmbeddings(
+      "sensitivity-test",
+      new Map(rebuilt.map((document) => [document.documentId, [1, 0] as const])),
+    );
+    const ordinarySemantic = await store.search.semanticCandidates({
+      modelId: "sensitivity-test",
+      vector: [1, 0],
+      limit: 8,
+      includePrivate: false,
+    });
+    expect(ordinarySemantic.every((candidate) => !sensitiveDocumentIds.includes(candidate.documentId))).toBe(
+      true,
+    );
+    store.close();
+  });
+
+  test("applies typed source scopes before lexical and semantic candidate limits", async () => {
+    const store = await createWorkspaceStore(await temporary("search-source-scopes"));
+    await store.operational.sessions.put({
+      ...session("session-source-scopes"),
+      title: "Scope eligibility sentinel session",
+    });
+    const evidenceMessageId = "message-source-scope-evidence";
+    await store.operational.messages.put({
+      messageId: evidenceMessageId,
+      sessionId: "session-source-scopes",
+      role: "user",
+      content: "Experiment source evidence without the query phrase.",
+      sensitivity: "normal",
+      createdAt: "2026-08-10T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    for (let index = 0; index < 40; index += 1)
+      await store.operational.messages.put({
+        messageId: `message-source-scope-decoy-${index}`,
+        sessionId: "session-source-scopes",
+        role: "user",
+        content: `${"scope eligibility sentinel ".repeat(20)}decoy ${index}`,
+        sensitivity: "normal",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        metadata: Object.freeze({}),
+      });
+    await Promise.all([
+      store.operational.outcomes.put({
+        outcomeId: "outcome-source-scope-corrected",
+        sessionId: "session-source-scopes",
+        status: "corrected",
+        summary: "Scope eligibility sentinel corrected outcome.",
+        sensitivity: "normal",
+        createdAt: "2026-08-10T00:00:01.000Z",
+        metadata: Object.freeze({}),
+      }),
+      store.operational.outcomes.put({
+        outcomeId: "outcome-source-scope-accepted",
+        sessionId: "session-source-scopes",
+        status: "accepted",
+        summary: "Scope eligibility sentinel accepted outcome.",
+        sensitivity: "normal",
+        createdAt: "2026-08-10T00:00:01.000Z",
+        metadata: Object.freeze({}),
+      }),
+    ]);
+    const experimentBase = Object.freeze({
+      experimentId: "experiment-source-scope",
+      hypothesis: "Scope eligibility sentinel completed experiment.",
+      scope: "source scope regression",
+      evidenceRefs: Object.freeze([
+        { kind: "database_row" as const, table: "messages" as const, rowId: evidenceMessageId },
+      ]),
+      baselineRevision: revision("source-scope-baseline", "a"),
+      candidateRevisions: Object.freeze([revision("source-scope-candidate", "b")]),
+      feedbackSignalIds: Object.freeze([]),
+    });
+    for (const status of ["hypothesis", "authoring", "preflight", "observing"] as const)
+      await store.research.experiments.putExperiment({ ...experimentBase, status });
+    await store.research.experiments.putExperiment({
+      ...experimentBase,
+      status: "completed",
+      outcome: "keep",
+    });
+
+    const documents = await store.search.rebuildDocuments();
+    const lexical = async (
+      sourceScope: "session_or_outcome" | "corrected_outcome" | "completed_experiment",
+    ) =>
+      await store.search.lexicalCandidates({
+        query: "scope eligibility sentinel",
+        limit: 2,
+        sourceScope,
+        includePrivate: false,
+      });
+    const sessionOrOutcomeLexical = await lexical("session_or_outcome");
+    expect(sessionOrOutcomeLexical).toHaveLength(2);
+    expect(
+      sessionOrOutcomeLexical.every(
+        (candidate) =>
+          candidate.source.kind === "database_row" &&
+          ["sessions", "outcomes"].includes(candidate.source.table),
+      ),
+    ).toBe(true);
+    expect(await lexical("corrected_outcome")).toMatchObject([
+      { source: { kind: "database_row", table: "outcomes", rowId: "outcome-source-scope-corrected" } },
+    ]);
+    expect(await lexical("completed_experiment")).toMatchObject([
+      { source: { kind: "database_row", table: "experiments", rowId: "experiment-source-scope" } },
+    ]);
+
+    const embeddings = new Map<string, readonly number[]>();
+    for (const document of documents)
+      embeddings.set(
+        document.documentId,
+        document.source.kind === "database_row" && document.source.table === "messages" ? [1, 0] : [0.8, 0.2],
+      );
+    await store.search.putEmbeddings("source-scope-test", embeddings);
+    const semantic = async (
+      sourceScope: "session_or_outcome" | "corrected_outcome" | "completed_experiment",
+    ) =>
+      await store.search.semanticCandidates({
+        modelId: "source-scope-test",
+        vector: [1, 0],
+        limit: 2,
+        sourceScope,
+        includePrivate: false,
+      });
+    const sessionOrOutcomeSemantic = await semantic("session_or_outcome");
+    expect(sessionOrOutcomeSemantic).toHaveLength(2);
+    expect(
+      sessionOrOutcomeSemantic.every(
+        (candidate) =>
+          candidate.source.kind === "database_row" &&
+          ["sessions", "outcomes"].includes(candidate.source.table),
+      ),
+    ).toBe(true);
+    expect(await semantic("corrected_outcome")).toMatchObject([
+      { source: { kind: "database_row", table: "outcomes", rowId: "outcome-source-scope-corrected" } },
+    ]);
+    expect(await semantic("completed_experiment")).toMatchObject([
+      { source: { kind: "database_row", table: "experiments", rowId: "experiment-source-scope" } },
+    ]);
+    store.close();
+  });
+
   test("applies, replaces, and unapplies immutable project adjustments with stale-safe CAS", async () => {
     const root = await temporary("working-adjustments");
     const store = await createWorkspaceStore(root);

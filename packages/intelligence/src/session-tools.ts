@@ -11,6 +11,8 @@ import type {
   CanonicalSearchSource,
   NoesisWorkspaceStore,
   SearchCandidate,
+  SearchSessionScope,
+  SearchSourceScope,
   Sensitivity,
 } from "@noesis/workspace";
 import { z } from "zod";
@@ -21,6 +23,14 @@ const querySchema = z.string().trim().min(2).max(500);
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const sensitivitySchema = z.enum(["normal", "private", "secret"]);
 const evidenceKindSchema = z.enum(["input", "output", "tool_trace", "judgment", "report"]);
+const MAX_CITATION_PROVENANCE_REFS = 64;
+const MAX_CITATION_SESSION_IDS = 32;
+const MAX_CITATION_MESSAGE_IDS = 32;
+const boundedProjectionSchema = z.strictObject({
+  truncated: z.literal(true),
+  totalCount: z.number().int().positive(),
+  fullDigest: digestSchema,
+});
 
 const canonicalSearchSourceSchema = z.union([
   z.strictObject({
@@ -59,12 +69,6 @@ const canonicalSearchSourceSchema = z.union([
     field: z.literal("bytes"),
   }),
 ]);
-type SessionCanonicalSource = z.infer<typeof canonicalSearchSourceSchema>;
-type StrictHistorySource = Exclude<
-  SessionCanonicalSource,
-  { readonly kind: "database_row"; readonly table: "experiments" }
->;
-
 const citationIdentitySchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("session"), sessionId: identifierSchema }),
   z.strictObject({
@@ -96,10 +100,13 @@ const unsignedCitationSchema = z.strictObject({
   documentId: identifierSchema,
   source: canonicalSearchSourceSchema,
   identity: citationIdentitySchema,
-  sessionIds: z.array(identifierSchema).max(32),
-  messageIds: z.array(identifierSchema).max(32),
+  sessionIds: z.array(identifierSchema).max(MAX_CITATION_SESSION_IDS),
+  sessionIdsProjection: boundedProjectionSchema.optional(),
+  messageIds: z.array(identifierSchema).max(MAX_CITATION_MESSAGE_IDS),
+  messageIdsProjection: boundedProjectionSchema.optional(),
   sensitivity: sensitivitySchema,
-  provenanceRefs: z.array(EvidenceRefSchema).max(64),
+  provenanceRefs: z.array(EvidenceRefSchema).max(MAX_CITATION_PROVENANCE_REFS),
+  provenanceProjection: boundedProjectionSchema.optional(),
   occurredAt: z.string().min(1).max(64),
   excerptDigest: digestSchema,
   startOffset: z.number().int().nonnegative(),
@@ -111,6 +118,49 @@ export const SessionEvidenceCitationSchema = unsignedCitationSchema.extend({
   citationDigest: digestSchema,
 });
 export type SessionEvidenceCitation = Readonly<z.infer<typeof SessionEvidenceCitationSchema>>;
+
+function citationProvenanceProjection(refs: readonly EvidenceRef[]): {
+  readonly provenanceRefs: readonly EvidenceRef[];
+  readonly provenanceProjection?: {
+    readonly truncated: true;
+    readonly totalCount: number;
+    readonly fullDigest: string;
+  };
+} {
+  const provenanceRefs = refs.slice(0, MAX_CITATION_PROVENANCE_REFS);
+  if (refs.length <= MAX_CITATION_PROVENANCE_REFS) return { provenanceRefs };
+  return {
+    provenanceRefs,
+    provenanceProjection: {
+      truncated: true,
+      totalCount: refs.length,
+      fullDigest: sha256(canonicalJson(refs)),
+    },
+  };
+}
+
+function citationStringProjection(
+  values: readonly string[],
+  limit: number,
+): {
+  readonly values: readonly string[];
+  readonly projection?: {
+    readonly truncated: true;
+    readonly totalCount: number;
+    readonly fullDigest: string;
+  };
+} {
+  const bounded = values.slice(0, limit);
+  if (values.length <= limit) return { values: bounded };
+  return {
+    values: bounded,
+    projection: {
+      truncated: true,
+      totalCount: values.length,
+      fullDigest: sha256(canonicalJson(values)),
+    },
+  };
+}
 
 export const RetrievalStrategyIdSchema = z.enum([
   "session-search.fts-only.v1",
@@ -341,6 +391,14 @@ interface SourceMetadata {
   readonly occurredAt: string;
 }
 
+interface ProvenanceResolution {
+  readonly sessionIds: readonly string[];
+  readonly messageIds: readonly string[];
+  readonly sensitivity: Sensitivity;
+}
+
+const MAX_PROVENANCE_RESOLUTION_NODES = 10_000;
+
 interface RankedCitation {
   readonly citation: SessionEvidenceCitation;
   readonly excerpt: string;
@@ -364,6 +422,29 @@ const experimentRowSchema = z.looseObject({
   updated_at: z.string().min(1),
 });
 
+function maxSensitivity(left: Sensitivity, right: Sensitivity): Sensitivity {
+  if (left === "secret" || right === "secret") return "secret";
+  if (left === "private" || right === "private") return "private";
+  return "normal";
+}
+
+function parseEvidenceRefs(encoded: string): readonly EvidenceRef[] | undefined {
+  try {
+    const parsed = z.array(EvidenceRefSchema).safeParse(JSON.parse(encoded));
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function provenanceResolutionKey(ref: EvidenceRef): string {
+  if (ref.kind === "file_revision" || ref.kind === "evidence_revision")
+    return `file_revision:${ref.revisionId}`;
+  if (ref.kind === "artifact_file") return `artifact_file:${ref.artifactId}`;
+  if (ref.table === "file_revisions") return `file_revision:${ref.rowId}`;
+  return `database_row:${ref.table}:${ref.rowId}`;
+}
+
 export function selectSessionRetrievalStrategy(request: {
   readonly query: string;
   readonly requested?: z.infer<typeof requestedStrategySchema>;
@@ -375,15 +456,7 @@ export function selectSessionRetrievalStrategy(request: {
     if (!strategy) return { strategy: SESSION_RETRIEVAL_STRATEGIES.conservative, reason: "unknown strategy" };
     return { strategy, reason: "explicit strategy" };
   }
-  const normalized = request.query.trim();
-  if (/\b(?:password|secret|token|credential|private key)\b/iu.test(normalized))
-    return {
-      strategy: SESSION_RETRIEVAL_STRATEGIES.conservative,
-      reason: "sensitive query abstention",
-    };
-  if (/['"`]|\b(?:session|message|revision|evidence)[-_][\p{L}\p{N}_-]+/iu.test(normalized))
-    return { strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly, reason: "exact-reference query" };
-  return { strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid, reason: "semantic task query" };
+  return { strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid, reason: "automatic hybrid default" };
 }
 
 export function createSessionSearchTools(options: CreateSessionSearchToolsOptions): SessionSearchTools {
@@ -416,32 +489,143 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     return report.documents;
   };
 
-  const resolveSessionsFromRefs = async (
+  const resolveTransitiveProvenance = async (
     refs: readonly EvidenceRef[],
     signal?: AbortSignal,
-  ): Promise<{ readonly sessionIds: readonly string[]; readonly messageIds: readonly string[] }> => {
-    const sessionIds = new Set<string>();
-    const messageIds = new Set<string>();
-    for (const ref of refs.slice(0, 64)) {
-      ensureNotCancelled(signal);
-      if (ref.kind !== "database_row") continue;
-      if (ref.table === "sessions") sessionIds.add(ref.rowId);
+  ): Promise<ProvenanceResolution> => {
+    const failClosed: ProvenanceResolution = Object.freeze({
+      sessionIds: [],
+      messageIds: [],
+      sensitivity: "secret",
+    });
+    const memo = new Map<string, ProvenanceResolution>();
+    const resolving = new Set<string>();
+    let remainingNodes = MAX_PROVENANCE_RESOLUTION_NODES;
+
+    const merge = (
+      baseSensitivity: Sensitivity,
+      resolutions: readonly ProvenanceResolution[],
+    ): ProvenanceResolution => {
+      let sensitivity = baseSensitivity;
+      const sessionIds = new Set<string>();
+      const messageIds = new Set<string>();
+      for (const resolution of resolutions) {
+        sensitivity = maxSensitivity(sensitivity, resolution.sensitivity);
+        for (const sessionId of resolution.sessionIds) sessionIds.add(sessionId);
+        for (const messageId of resolution.messageIds) messageIds.add(messageId);
+      }
+      return Object.freeze({
+        sessionIds: [...sessionIds].sort(),
+        messageIds: [...messageIds].sort(),
+        sensitivity,
+      });
+    };
+
+    const resolveRefs = async (nestedRefs: readonly EvidenceRef[]): Promise<ProvenanceResolution> => {
+      const resolutions: ProvenanceResolution[] = [];
+      for (const ref of nestedRefs) {
+        ensureNotCancelled(signal);
+        resolutions.push(await resolveRef(ref));
+      }
+      return merge("normal", resolutions);
+    };
+
+    const resolveFileRevision = async (revisionId: string): Promise<ProvenanceResolution> => {
+      const raw = await options.workspace.reads.readDatabaseRow({
+        kind: "database_row",
+        table: "file_revisions",
+        rowId: revisionId,
+      });
+      if (!raw) return failClosed;
+      const parsed = fileRevisionRowSchema.safeParse(raw);
+      if (!parsed.success) return failClosed;
+      const provenanceRefs = parseEvidenceRefs(parsed.data.provenance_refs_json);
+      return provenanceRefs
+        ? merge(parsed.data.sensitivity, [await resolveRefs(provenanceRefs)])
+        : failClosed;
+    };
+
+    const resolveDatabaseRow = async (
+      ref: Extract<EvidenceRef, { readonly kind: "database_row" }>,
+    ): Promise<ProvenanceResolution> => {
+      if (ref.table === "sessions") {
+        const session = await options.workspace.operational.sessions.get(ref.rowId);
+        const sensitivity = await options.workspace.operational.sessions.sensitivity(ref.rowId);
+        return session && sensitivity
+          ? Object.freeze({ sessionIds: [session.sessionId], messageIds: [], sensitivity })
+          : failClosed;
+      }
       if (ref.table === "messages") {
         const message = await options.workspace.operational.messages.get(ref.rowId);
-        if (message) {
-          messageIds.add(message.messageId);
-          sessionIds.add(message.sessionId);
-        }
+        return message
+          ? Object.freeze({
+              sessionIds: [message.sessionId],
+              messageIds: [message.messageId],
+              sensitivity: message.sensitivity,
+            })
+          : failClosed;
       }
       if (ref.table === "tool_calls") {
         const toolCall = await options.workspace.operational.toolCalls.get(ref.rowId);
-        if (toolCall) {
-          sessionIds.add(toolCall.sessionId);
-          if (toolCall.messageId) messageIds.add(toolCall.messageId);
-        }
+        return toolCall
+          ? Object.freeze({
+              sessionIds: [toolCall.sessionId],
+              messageIds: toolCall.messageId ? [toolCall.messageId] : [],
+              sensitivity: toolCall.sensitivity,
+            })
+          : failClosed;
       }
+      if (ref.table === "outcomes") {
+        const outcome = await options.workspace.operational.outcomes.get(ref.rowId);
+        return outcome
+          ? Object.freeze({
+              sessionIds: [outcome.sessionId],
+              messageIds: [],
+              sensitivity: outcome.sensitivity,
+            })
+          : failClosed;
+      }
+      if (ref.table === "file_revisions") return await resolveFileRevision(ref.rowId);
+      if (ref.table === "feedback_signals") {
+        const feedback = await options.workspace.research.feedbackSignals.getFeedbackSignal(ref.rowId);
+        return feedback
+          ? merge(feedback.sensitivity, [await resolveRefs(feedback.evidenceRefs)])
+          : failClosed;
+      }
+      if (ref.table === "experiments") {
+        const experiment = await options.workspace.research.experiments.getExperiment(ref.rowId);
+        return experiment ? await resolveRefs(experiment.evidenceRefs) : failClosed;
+      }
+      return failClosed;
+    };
+
+    async function resolveRef(ref: EvidenceRef): Promise<ProvenanceResolution> {
+      const key = provenanceResolutionKey(ref);
+      const memoized = memo.get(key);
+      if (memoized) return memoized;
+      if (remainingNodes <= 0 || resolving.has(key)) return failClosed;
+      remainingNodes -= 1;
+      resolving.add(key);
+      let resolution: ProvenanceResolution;
+      try {
+        if (ref.kind === "file_revision" || ref.kind === "evidence_revision")
+          resolution = await resolveFileRevision(ref.revisionId);
+        else if (ref.kind === "artifact_file") {
+          // Artifact relationship refs are not exposed by WorkspaceStore. Treating the artifact as
+          // secret prevents a search index's richer provenance from being reopened under weaker scope.
+          resolution = failClosed;
+        } else resolution = await resolveDatabaseRow(ref);
+      } catch (error) {
+        if (errorMessage(error) === "SESSION_SEARCH_CANCELLED") throw error;
+        resolution = failClosed;
+      } finally {
+        resolving.delete(key);
+      }
+      memo.set(key, resolution);
+      return resolution;
     }
-    return { sessionIds: [...sessionIds].sort(), messageIds: [...messageIds].sort() };
+
+    return await resolveRefs(refs);
   };
 
   const resolveFileRevisionMetadata = async (
@@ -456,8 +640,8 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     });
     if (!raw) return undefined;
     const row = fileRevisionRowSchema.parse(raw);
-    const provenanceRefs = z.array(EvidenceRefSchema).max(64).parse(JSON.parse(row.provenance_refs_json));
-    const related = await resolveSessionsFromRefs(provenanceRefs, signal);
+    const provenanceRefs = z.array(EvidenceRefSchema).parse(JSON.parse(row.provenance_refs_json));
+    const provenance = await resolveTransitiveProvenance(provenanceRefs, signal);
     return {
       identity:
         row.revision_kind === "evidence" && row.evidence_kind
@@ -467,9 +651,9 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
               evidenceKind: row.evidence_kind,
             }
           : { kind: "file_revision", revisionId },
-      sessionIds: related.sessionIds,
-      messageIds: related.messageIds,
-      sensitivity: row.sensitivity,
+      sessionIds: provenance.sessionIds,
+      messageIds: provenance.messageIds,
+      sensitivity: maxSensitivity(row.sensitivity, provenance.sensitivity),
       provenanceRefs,
       occurredAt: row.recorded_at,
     };
@@ -491,12 +675,12 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       });
       if (!raw) return undefined;
       const row = experimentRowSchema.parse(raw);
-      const related = await resolveSessionsFromRefs(experiment.evidenceRefs, signal);
+      const provenance = await resolveTransitiveProvenance(experiment.evidenceRefs, signal);
       return {
         identity: { kind: "experiment", experimentId: experiment.experimentId },
-        sessionIds: related.sessionIds,
-        messageIds: related.messageIds,
-        sensitivity: await sensitivityForRefs(experiment.evidenceRefs, signal),
+        sessionIds: provenance.sessionIds,
+        messageIds: provenance.messageIds,
+        sensitivity: provenance.sensitivity,
         provenanceRefs: experiment.evidenceRefs,
         occurredAt: row.updated_at,
       };
@@ -559,45 +743,6 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       : undefined;
   };
 
-  const sensitivityForRefs = async (
-    refs: readonly EvidenceRef[],
-    signal?: AbortSignal,
-  ): Promise<Sensitivity> => {
-    let sensitivity: Sensitivity = "normal";
-    for (const ref of refs.slice(0, 64)) {
-      ensureNotCancelled(signal);
-      if (ref.kind === "artifact_file") return "private";
-      if (ref.kind === "file_revision" || ref.kind === "evidence_revision") {
-        const metadata = await resolveFileRevisionMetadata(ref.revisionId, signal);
-        if (!metadata) return "private";
-        if (metadata.sensitivity === "secret") return "secret";
-        if (metadata.sensitivity === "private") sensitivity = "private";
-        continue;
-      }
-      if (ref.table === "messages") {
-        const record = await options.workspace.operational.messages.get(ref.rowId);
-        if (!record) return "private";
-        if (record.sensitivity === "secret") return "secret";
-        if (record.sensitivity === "private") sensitivity = "private";
-      } else if (ref.table === "tool_calls") {
-        const record = await options.workspace.operational.toolCalls.get(ref.rowId);
-        if (!record) return "private";
-        if (record.sensitivity === "secret") return "secret";
-        if (record.sensitivity === "private") sensitivity = "private";
-      } else if (ref.table === "feedback_signals") {
-        const record = await options.workspace.research.feedbackSignals.getFeedbackSignal(ref.rowId);
-        if (!record) return "private";
-        if (record.sensitivity === "secret") return "secret";
-        if (record.sensitivity === "private") sensitivity = "private";
-      } else if (ref.table !== "sessions") {
-        // Other operational rows can transitively point at sensitive evidence but expose no
-        // sensitivity-bearing public read model here. Unknown provenance therefore fails closed.
-        return "private";
-      }
-    }
-    return sensitivity;
-  };
-
   const isAuthorized = (metadata: SourceMetadata): boolean => {
     if (metadata.sensitivity === "secret") return false;
     if (metadata.sensitivity === "normal") return true;
@@ -624,19 +769,42 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     endOffset: number,
     contentDigest: string,
   ): SessionEvidenceCitation => {
+    const sessionIds = citationStringProjection(metadata.sessionIds, MAX_CITATION_SESSION_IDS);
+    const messageIds = citationStringProjection(metadata.messageIds, MAX_CITATION_MESSAGE_IDS);
     const unsigned = unsignedCitationSchema.parse({
       documentId,
       source,
       identity: metadata.identity,
-      sessionIds: [...metadata.sessionIds],
-      messageIds: [...metadata.messageIds],
+      sessionIds: sessionIds.values,
+      ...(sessionIds.projection ? { sessionIdsProjection: sessionIds.projection } : {}),
+      messageIds: messageIds.values,
+      ...(messageIds.projection ? { messageIdsProjection: messageIds.projection } : {}),
       sensitivity: metadata.sensitivity,
-      provenanceRefs: [...metadata.provenanceRefs],
+      ...citationProvenanceProjection(metadata.provenanceRefs),
       occurredAt: metadata.occurredAt,
       excerptDigest: sha256(excerpt),
       startOffset,
       endOffset,
       contentDigest,
+    });
+    return SessionEvidenceCitationSchema.parse({
+      ...unsigned,
+      citationDigest: sha256(canonicalJson(unsigned)),
+    });
+  };
+
+  const resizeCitationExcerpt = (
+    citation: SessionEvidenceCitation,
+    excerpt: string,
+    startOffset: number,
+    endOffset: number,
+  ): SessionEvidenceCitation => {
+    const { citationDigest: _citationDigest, ...current } = citation;
+    const unsigned = unsignedCitationSchema.parse({
+      ...current,
+      excerptDigest: sha256(excerpt),
+      startOffset,
+      endOffset,
     });
     return SessionEvidenceCitationSchema.parse({
       ...unsigned,
@@ -672,21 +840,11 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     const boundedCitation =
       allowed === excerpt.length
         ? citation
-        : makeCitation(
-            citation.source,
-            citation.documentId,
-            {
-              identity: citation.identity,
-              sessionIds: citation.sessionIds,
-              messageIds: citation.messageIds,
-              sensitivity: citation.sensitivity,
-              provenanceRefs: citation.provenanceRefs,
-              occurredAt: citation.occurredAt,
-            },
+        : resizeCitationExcerpt(
+            citation,
             excerpt.slice(0, allowed),
             citation.startOffset,
             citation.startOffset + allowed,
-            citation.contentDigest,
           );
     const boundedExcerpt = excerpt.slice(0, allowed);
     remainingContextCharacters -= boundedExcerpt.length;
@@ -765,6 +923,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     readonly maxResults: number;
     readonly requestedStrategy?: z.infer<typeof requestedStrategySchema>;
     readonly includePrivate: boolean;
+    readonly sourceScope?: SearchSourceScope;
     readonly accept: (metadata: SourceMetadata) => boolean | Promise<boolean>;
     readonly signal?: AbortSignal;
   }): Promise<SessionToolResult<SessionSearchOutput>> => {
@@ -798,6 +957,10 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       const refreshedDocuments = await ensureFresh(request.signal);
       const privateResult = authorizePrivateSearch(request.includePrivate, request.sessionId);
       if (!privateResult.ok) return privateResult;
+      const sessionScope: SearchSessionScope =
+        request.sessionId === undefined
+          ? { kind: "previous", currentSessionId: options.authorization.currentSessionId }
+          : { kind: "exact", sessionId: request.sessionId };
       let candidateCount = 0;
       let ranked: readonly (RankedCitation | undefined)[];
       if (routed.strategy.mode === "fts_only") {
@@ -806,7 +969,8 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         const candidates = await options.workspace.search.lexicalCandidates({
           query: request.query,
           limit: Math.min(limits.maxCandidates, configuration.lexicalLimit),
-          ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+          sessionScope,
+          ...(request.sourceScope === undefined ? {} : { sourceScope: request.sourceScope }),
           includePrivate: privateResult.value,
         });
         ensureNotCancelled(request.signal);
@@ -817,12 +981,21 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       } else {
         const result = await options.history.search({
           query: request.query,
-          ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
-          limit: Math.min(limits.maxCandidates, 50),
+          sessionScope,
+          ...(request.sourceScope === undefined ? {} : { sourceScope: request.sourceScope }),
+          limit: limits.maxCandidates,
+          candidateFilter: async (source: CanonicalSearchSource) => {
+            const metadata = await resolveSourceMetadata(
+              canonicalSearchSourceSchema.parse(source),
+              request.signal,
+            );
+            return metadata !== undefined && isAuthorized(metadata) && (await request.accept(metadata));
+          },
           lexicalLimit: limits.maxCandidates,
           semanticLimit: limits.maxCandidates,
           maxExcerptChars: limits.maxFragmentChars,
           ...(privateResult.value ? { privacy: "include_private" } : {}),
+          ...(request.signal ? { signal: request.signal } : {}),
         });
         ensureNotCancelled(request.signal);
         candidateCount = result.candidateCount;
@@ -833,7 +1006,13 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         ensureNotCancelled(request.signal);
         if (!item) continue;
         const metadata = await resolveSourceMetadata(item.citation.source, request.signal);
-        if (metadata && (await request.accept(metadata))) accepted.push(item);
+        const matchesSessionScope =
+          metadata !== undefined &&
+          (request.sessionId === undefined
+            ? metadata.sessionIds.length > 0 &&
+              !metadata.sessionIds.includes(options.authorization.currentSessionId)
+            : metadata.sessionIds.includes(request.sessionId));
+        if (metadata && matchesSessionScope && (await request.accept(metadata))) accepted.push(item);
         if (accepted.length >= request.maxResults) break;
       }
       const hits: SessionSearchHit[] = [];
@@ -905,6 +1084,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       maxResults: Math.min(parsed.data.maxResults ?? limits.maxResults, limits.maxResults),
       ...(parsed.data.strategy === undefined ? {} : { requestedStrategy: parsed.data.strategy }),
       includePrivate: parsed.data.includePrivate ?? false,
+      sourceScope: "corrected_outcome",
       accept: async (metadata) => {
         if (metadata.identity.kind !== "outcome") return false;
         const outcome = await options.workspace.operational.outcomes.get(metadata.identity.outcomeId);
@@ -926,6 +1106,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       maxResults: Math.min(parsed.data.maxResults ?? limits.maxResults, limits.maxResults),
       ...(parsed.data.strategy === undefined ? {} : { requestedStrategy: parsed.data.strategy }),
       includePrivate: parsed.data.includePrivate ?? false,
+      sourceScope: "session_or_outcome",
       accept: (metadata) => metadata.identity.kind === "session" || metadata.identity.kind === "outcome",
       ...(execution.signal ? { signal: execution.signal } : {}),
     });
@@ -944,47 +1125,44 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       const { citationDigest: suppliedDigest, ...unsigned } = supplied;
       if (sha256(canonicalJson(unsigned)) !== suppliedDigest)
         return fail("invalid_citation", "Session evidence citation integrity check failed.");
-      const expectedDocumentId =
-        supplied.source.kind === "database_row" && supplied.source.table === "experiments"
-          ? `experiment_${sha256(canonicalJson(supplied.source)).slice(0, 32)}`
-          : isHistorySource(supplied.source)
-            ? documentIdForSource(supplied.source)
-            : undefined;
-      if (!expectedDocumentId)
-        return fail("invalid_citation", "Session evidence citation source is invalid.");
+      const expectedDocumentId = documentIdForSource(supplied.source);
       if (supplied.documentId !== expectedDocumentId)
         return fail("invalid_citation", "Session evidence citation source identity is invalid.");
       const metadata = await resolveSourceMetadata(supplied.source, execution.signal);
       if (!metadata) return fail("not_found", "Session evidence source no longer exists.");
       if (!isAuthorized(metadata))
         return fail("unauthorized", "Session evidence is outside the authorized sensitivity scope.");
+      const authoritativeSessionIds = citationStringProjection(metadata.sessionIds, MAX_CITATION_SESSION_IDS);
+      const authoritativeMessageIds = citationStringProjection(metadata.messageIds, MAX_CITATION_MESSAGE_IDS);
       const authoritativeEnvelope = canonicalJson({
         identity: metadata.identity,
-        sessionIds: metadata.sessionIds,
-        messageIds: metadata.messageIds,
+        sessionIds: authoritativeSessionIds.values,
+        ...(authoritativeSessionIds.projection
+          ? { sessionIdsProjection: authoritativeSessionIds.projection }
+          : {}),
+        messageIds: authoritativeMessageIds.values,
+        ...(authoritativeMessageIds.projection
+          ? { messageIdsProjection: authoritativeMessageIds.projection }
+          : {}),
         sensitivity: metadata.sensitivity,
-        provenanceRefs: metadata.provenanceRefs,
+        ...citationProvenanceProjection(metadata.provenanceRefs),
         occurredAt: metadata.occurredAt,
       });
       const suppliedEnvelope = canonicalJson({
         identity: supplied.identity,
         sessionIds: supplied.sessionIds,
+        ...(supplied.sessionIdsProjection ? { sessionIdsProjection: supplied.sessionIdsProjection } : {}),
         messageIds: supplied.messageIds,
+        ...(supplied.messageIdsProjection ? { messageIdsProjection: supplied.messageIdsProjection } : {}),
         sensitivity: supplied.sensitivity,
         provenanceRefs: supplied.provenanceRefs,
+        ...(supplied.provenanceProjection ? { provenanceProjection: supplied.provenanceProjection } : {}),
         occurredAt: supplied.occurredAt,
       });
       if (authoritativeEnvelope !== suppliedEnvelope)
         return fail("stale_citation", "Session evidence citation metadata is stale or was altered.");
-      let content: string;
-      if (supplied.source.kind === "database_row" && supplied.source.table === "experiments") {
-        const experiment = await options.workspace.research.experiments.getExperiment(supplied.source.rowId);
-        if (!experiment) return fail("not_found", "Experiment evidence no longer exists.");
-        content = canonicalJson(experiment);
-      } else {
-        content = (await options.workspace.search.openCanonicalSource(supplied.source)) ?? "";
-        if (content.length === 0) return fail("not_found", "Session evidence source no longer exists.");
-      }
+      const content = (await options.workspace.search.openCanonicalSource(supplied.source)) ?? "";
+      if (content.length === 0) return fail("not_found", "Session evidence source no longer exists.");
       verifyExactExcerpt(content, supplied);
       ensureNotCancelled(execution.signal);
       if (sha256(content) !== supplied.contentDigest)
@@ -1043,55 +1221,51 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     const startedAt = now();
     try {
       ensureNotCancelled(execution.signal);
-      const experiments = await options.workspace.research.experiments.listExperiments({
-        status: "completed",
-        limit: limits.maxExperimentScan,
+      const refreshedDocuments = await ensureFresh(execution.signal);
+      const requestedResults = Math.min(parsed.data.maxResults ?? limits.maxResults, limits.maxResults);
+      const searched = await options.history.search({
+        query: parsed.data.task,
+        sourceScope: "completed_experiment",
+        limit: limits.maxCandidates,
+        lexicalLimit: limits.maxCandidates,
+        semanticLimit: limits.maxCandidates,
+        maxExcerptChars: limits.maxFragmentChars,
+        candidateFilter: async (source) => {
+          const metadata = await resolveSourceMetadata(
+            canonicalSearchSourceSchema.parse(source),
+            execution.signal,
+          );
+          if (!metadata || !isAuthorized(metadata) || metadata.identity.kind !== "experiment") return false;
+          const experiment = await options.workspace.research.experiments.getExperiment(
+            metadata.identity.experimentId,
+          );
+          return experiment !== undefined && isCompletedExperiment(experiment);
+        },
+        ...(execution.signal ? { signal: execution.signal } : {}),
       });
       ensureNotCancelled(execution.signal);
-      const ranked = experiments
-        .filter(isCompletedExperiment)
-        .map((experiment) => ({
-          experiment,
-          score: tokenOverlap(parsed.data.task, experimentText(experiment)),
-        }))
-        .filter((item) => item.score > 0)
-        .sort(
-          (left, right) =>
-            right.score - left.score ||
-            left.experiment.experimentId.localeCompare(right.experiment.experimentId),
-        );
       const hits: PriorExperimentOutcomeHit[] = [];
       const fragments: SessionContextFragment[] = [];
-      for (const item of ranked) {
+      for (const searchedHit of searched.hits) {
         ensureNotCancelled(execution.signal);
-        if (hits.length >= Math.min(parsed.data.maxResults ?? limits.maxResults, limits.maxResults)) break;
-        const source: z.infer<typeof canonicalSearchSourceSchema> = {
-          kind: "database_row",
-          table: "experiments",
-          rowId: item.experiment.experimentId,
-          field: "data_json",
-        };
-        const metadata = await resolveSourceMetadata(source, execution.signal);
-        if (!metadata || !isAuthorized(metadata)) continue;
-        const body = canonicalJson(item.experiment);
-        const excerpt = createExcerpt(body, parsed.data.task, limits.maxFragmentChars);
-        const citation = makeCitation(
-          source,
-          `experiment_${sha256(canonicalJson(source)).slice(0, 32)}`,
-          metadata,
-          excerpt.excerpt,
-          excerpt.startOffset,
-          excerpt.endOffset,
-          sha256(body),
+        if (hits.length >= requestedResults) break;
+        const ranked = await rankedFromHistory(searchedHit, execution.signal);
+        if (!ranked || ranked.citation.identity.kind !== "experiment") continue;
+        const experiment = await options.workspace.research.experiments.getExperiment(
+          ranked.citation.identity.experimentId,
         );
-        const reserved = reserveCitation(citation, excerpt.excerpt, item.score);
+        if (!experiment || !isCompletedExperiment(experiment)) continue;
+        const reserved = reserveCitation(ranked.citation, ranked.excerpt, ranked.score);
         if (!reserved) break;
         fragments.push(reserved.fragment);
         hits.push({
-          experimentId: item.experiment.experimentId,
-          outcome: item.experiment.outcome,
+          experimentId: experiment.experimentId,
+          outcome: experiment.outcome,
           fragmentId: reserved.fragment.id,
-          score: item.score,
+          score: ranked.score,
+          ...(ranked.lexicalScore === undefined ? {} : { lexicalScore: ranked.lexicalScore }),
+          ...(ranked.semanticScore === undefined ? {} : { semanticScore: ranked.semanticScore }),
+          ...(ranked.rerankReason === undefined ? {} : { rerankReason: ranked.rerankReason }),
         });
       }
       return {
@@ -1102,12 +1276,12 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
           fragments,
           telemetry: telemetry({
             strategyId: "session-search.experiment-outcomes.v1",
-            routeReason: "completed experiment outcome filter",
-            candidateCount: experiments.length,
+            routeReason: "model-ranked completed experiment outcomes",
+            candidateCount: searched.candidateCount,
             fragments,
             limits,
             latencyMs: Math.max(0, now() - startedAt),
-            refreshedDocuments: 0,
+            refreshedDocuments,
             status: "completed",
           }),
         },
@@ -1219,10 +1393,6 @@ function createExcerpt(
   return { excerpt: content.slice(startOffset, endOffset), startOffset, endOffset };
 }
 
-function isHistorySource(source: SessionCanonicalSource): source is StrictHistorySource {
-  return source.kind === "file_revision" || source.table !== "experiments";
-}
-
 function verifyExactExcerpt(content: string, citation: SessionEvidenceCitation): void {
   if (
     sha256(content) !== citation.contentDigest ||
@@ -1248,16 +1418,6 @@ function invalidInput(error: z.ZodError): SessionToolResult<never> {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function tokenOverlap(query: string, content: string): number {
-  const terms = new Set(query.toLocaleLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
-  const lower = content.toLocaleLowerCase();
-  return [...terms].filter((term) => lower.includes(term)).length;
-}
-
-function experimentText(experiment: CompletedExperiment): string {
-  return `${experiment.hypothesis}\n${experiment.scope}\n${experiment.outcome}`;
 }
 
 function isCompletedExperiment(experiment: Experiment): experiment is CompletedExperiment {

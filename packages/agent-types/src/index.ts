@@ -22,6 +22,7 @@ import { z } from "zod";
 export type AgentRole =
   | "foreground"
   | "capability_router"
+  | "history_reranker"
   | "signal_interpreter"
   | "reflector"
   | "revision_author"

@@ -748,7 +748,7 @@ export interface StageDefinitionRequest {
 export type CanonicalSearchSource =
   | {
       readonly kind: "database_row";
-      readonly table: "sessions" | "messages" | "tool_calls" | "outcomes";
+      readonly table: "sessions" | "messages" | "tool_calls" | "outcomes" | "experiments";
       readonly rowId: string;
       readonly field: string;
     }
@@ -772,6 +772,12 @@ export interface SearchCandidate extends SearchDocument {
   readonly semanticScore?: number;
 }
 
+export type SearchSessionScope =
+  | { readonly kind: "exact"; readonly sessionId: string }
+  | { readonly kind: "previous"; readonly currentSessionId: string };
+
+export type SearchSourceScope = "session_or_outcome" | "corrected_outcome" | "completed_experiment";
+
 export interface SearchIndexPort {
   readonly clear: () => Promise<void>;
   readonly rebuildDocuments: () => Promise<readonly SearchDocument[]>;
@@ -782,7 +788,8 @@ export interface SearchIndexPort {
   readonly lexicalCandidates: (request: {
     readonly query: string;
     readonly limit: number;
-    readonly sessionId?: string;
+    readonly sessionScope?: SearchSessionScope;
+    readonly sourceScope?: SearchSourceScope;
     readonly includePrivate: boolean;
   }) => Promise<readonly SearchCandidate[]>;
   readonly putEmbeddings: (
@@ -793,7 +800,8 @@ export interface SearchIndexPort {
     readonly modelId: string;
     readonly vector: readonly number[];
     readonly limit: number;
-    readonly sessionId?: string;
+    readonly sessionScope?: SearchSessionScope;
+    readonly sourceScope?: SearchSourceScope;
     readonly includePrivate: boolean;
   }) => Promise<readonly SearchCandidate[]>;
   readonly openCanonicalSource: (source: CanonicalSearchSource) => Promise<string | undefined>;

@@ -290,7 +290,7 @@ export interface LearningCitation {
   readonly source:
     | {
         readonly kind: "database_row";
-        readonly table: "sessions" | "messages" | "tool_calls" | "outcomes";
+        readonly table: "sessions" | "messages" | "tool_calls" | "outcomes" | "experiments";
         readonly rowId: string;
         readonly field: string;
       }

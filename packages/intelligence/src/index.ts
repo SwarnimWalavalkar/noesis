@@ -4,6 +4,8 @@ import type {
   NoesisWorkspaceStore,
   SearchCandidate,
   SearchDocument,
+  SearchSessionScope,
+  SearchSourceScope,
 } from "@noesis/workspace";
 
 export interface ExactCitation {
@@ -17,7 +19,13 @@ export interface ExactCitation {
 
 export interface HistorySearchRequest {
   readonly query: string;
+  readonly signal?: AbortSignal;
+  /** Defense-in-depth canonical eligibility applied after store retrieval and before merge/rerank bounds. */
+  readonly candidateFilter?: (source: CanonicalSearchSource) => boolean | Promise<boolean>;
   readonly sessionId?: string;
+  readonly sessionScope?: SearchSessionScope;
+  /** Typed structural filtering applied by the store before lexical and semantic retrieval bounds. */
+  readonly sourceScope?: SearchSourceScope;
   readonly limit?: number;
   readonly lexicalLimit?: number;
   readonly semanticLimit?: number;
@@ -87,6 +95,7 @@ export interface RerankRequest {
   readonly query: string;
   readonly candidates: readonly RerankCandidate[];
   readonly maxResults: number;
+  readonly signal?: AbortSignal;
 }
 
 export interface RerankResultItem {
@@ -104,6 +113,9 @@ export interface CreateHistoryPortOptions {
   readonly embeddings: EmbeddingPort;
   readonly reranker: HistoryRerankPort;
 }
+
+/** Maximum merged retrieval candidates admitted to one bounded model rerank. */
+export const MAX_HISTORY_RERANK_CANDIDATES = 100;
 
 export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPort {
   const rebuild = async (): Promise<{ readonly documents: number; readonly embeddings: number }> => {
@@ -146,21 +158,33 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
     const rerankLimit =
       configuration.rerankLimit === 0
         ? 0
-        : Math.min(Math.max(resultLimit, configuration.rerankLimit), lexicalLimit + semanticLimit, 100);
-    const candidateLimit = rerankLimit === 0 ? Math.min(lexicalLimit + semanticLimit, 100) : rerankLimit;
+        : Math.min(
+            Math.max(resultLimit, configuration.rerankLimit),
+            lexicalLimit + semanticLimit,
+            MAX_HISTORY_RERANK_CANDIDATES,
+          );
+    const candidateLimit =
+      rerankLimit === 0 ? Math.min(lexicalLimit + semanticLimit, MAX_HISTORY_RERANK_CANDIDATES) : rerankLimit;
     const maxExcerptChars = boundedInteger(
       request.maxExcerptChars ?? configuration.maxExcerptChars,
       32,
       configuration.maxExcerptChars,
     );
     const includePrivate = request.privacy === "include_private" && configuration.includePrivate;
+    if (request.sessionId !== undefined && request.sessionScope !== undefined)
+      throw new Error("History search accepts either sessionId or sessionScope, not both");
+    const sessionScope: SearchSessionScope | undefined =
+      request.sessionId === undefined
+        ? request.sessionScope
+        : { kind: "exact", sessionId: request.sessionId };
     if ((await options.workspace.search.listDocuments({ includePrivate: true })).length === 0)
       await rebuild();
 
     const lexical = await options.workspace.search.lexicalCandidates({
       query,
       limit: lexicalLimit,
-      ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+      ...(sessionScope === undefined ? {} : { sessionScope }),
+      ...(request.sourceScope === undefined ? {} : { sourceScope: request.sourceScope }),
       includePrivate,
     });
     let semantic: readonly SearchCandidate[] = [];
@@ -172,13 +196,26 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
         modelId: embedded.modelId,
         vector,
         limit: semanticLimit,
-        ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+        ...(sessionScope === undefined ? {} : { sessionScope }),
+        ...(request.sourceScope === undefined ? {} : { sourceScope: request.sourceScope }),
         includePrivate,
       });
     }
 
-    const merged = mergeCandidates(lexical, semantic)
-      .filter((candidate) => candidate.sensitivity === "normal" || includePrivate)
+    const visible = mergeCandidates(lexical, semantic).filter(
+      (candidate) => candidate.sensitivity === "normal" || includePrivate,
+    );
+    let eligible: readonly MergedCandidate[] = visible;
+    if (request.candidateFilter) {
+      const decisions = await Promise.all(
+        visible.map(async (candidate) => ({
+          candidate,
+          accepted: await request.candidateFilter?.(candidate.source),
+        })),
+      );
+      eligible = decisions.filter((decision) => decision.accepted === true).map(({ candidate }) => candidate);
+    }
+    const merged = [...eligible]
       .sort(
         (left, right) =>
           right.combinedScore - left.combinedScore || left.documentId.localeCompare(right.documentId),
@@ -191,7 +228,7 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
       ]),
     );
     const reranked =
-      rerankLimit === 0
+      rerankLimit === 0 || merged.length <= 1
         ? []
         : await options.reranker.rerank({
             query,
@@ -203,6 +240,7 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
               combinedScore: candidate.combinedScore,
             })),
             maxResults: resultLimit,
+            ...(request.signal ? { signal: request.signal } : {}),
           });
     const candidateById = new Map(merged.map((candidate) => [candidate.documentId, candidate]));
     const selected: Array<{ readonly candidate: MergedCandidate; readonly reason?: string }> = [];

@@ -113,6 +113,38 @@ describe("durable automatic-learning handoff", () => {
       rowId: "message-correction",
     };
     const baseline = capabilityRevisionRef(revision("capability-r1", fileRef("baseline"), [evidence]));
+    const priorExperimentRef = Object.freeze({
+      kind: "database_row" as const,
+      table: "experiments" as const,
+      rowId: "experiment-prior-completed",
+    });
+    await workspace.research.experiments.putExperiment(
+      Object.freeze({
+        experimentId: priorExperimentRef.rowId,
+        hypothesis: "Citing primary sources improves research summaries",
+        scope: "research",
+        evidenceRefs: Object.freeze([evidence]),
+        baselineRevision: baseline,
+        candidateRevisions: Object.freeze([]),
+        feedbackSignalIds: Object.freeze([]),
+        status: "completed" as const,
+        outcome: "keep" as const,
+      }),
+    );
+    const priorExperimentExcerpt = "The citation experiment completed with outcome keep";
+    const priorExperimentCitation = Object.freeze({
+      source: Object.freeze({
+        kind: "database_row" as const,
+        table: "experiments" as const,
+        rowId: priorExperimentRef.rowId,
+        field: "data_json",
+      }),
+      occurredAt: "2026-07-21T10:00:00.000Z",
+      excerpt: priorExperimentExcerpt,
+      startOffset: 0,
+      endOffset: priorExperimentExcerpt.length,
+      contentDigest: sha256(priorExperimentExcerpt),
+    });
     const brief: ExperimentBrief = Object.freeze({
       experimentId: "experiment-durable",
       title: "Cite sources",
@@ -132,10 +164,10 @@ describe("durable automatic-learning handoff", () => {
         intent: "Produce grounded research",
       }),
       baselineRevision: baseline,
-      evidenceRefs: Object.freeze([evidence]),
+      evidenceRefs: Object.freeze([evidence, priorExperimentRef]),
       feedbackSignalIds: Object.freeze([]),
-      citations: Object.freeze([]),
-      recurrenceCitations: Object.freeze([]),
+      citations: Object.freeze([priorExperimentCitation]),
+      recurrenceCitations: Object.freeze([priorExperimentCitation]),
       sourceCases: Object.freeze([
         Object.freeze({
           caseId: "source-1",
@@ -143,8 +175,8 @@ describe("durable automatic-learning handoff", () => {
           scope: "research",
           input: "Draft a summary",
           expectedBehavior: "Cite the source",
-          evidenceRefs: Object.freeze([evidence]),
-          citations: Object.freeze([]),
+          evidenceRefs: Object.freeze([evidence, priorExperimentRef]),
+          citations: Object.freeze([priorExperimentCitation]),
         }),
       ]),
       recurrenceCount: 1,

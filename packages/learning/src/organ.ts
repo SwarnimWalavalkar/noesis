@@ -323,6 +323,7 @@ function toEvidenceRef(citation: ExactCitation): EvidenceRef | undefined {
     case "messages":
     case "tool_calls":
     case "outcomes":
+    case "experiments":
       return Object.freeze({
         kind: "database_row",
         table: source.table,

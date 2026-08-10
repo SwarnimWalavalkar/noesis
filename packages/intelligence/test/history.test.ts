@@ -121,7 +121,7 @@ describe("longitudinal history", () => {
 
     const normal = await history.search({
       query: "project codename zephyr ultrasecretvalue",
-      limit: 3,
+      limit: 1,
       maxExcerptChars: 64,
     });
     expect(
@@ -135,7 +135,7 @@ describe("longitudinal history", () => {
     const privateResult = await history.search({
       query: "project codename zephyr",
       privacy: "include_private",
-      limit: 3,
+      limit: 1,
       maxExcerptChars: 64,
     });
     expect(
@@ -154,9 +154,10 @@ describe("longitudinal history", () => {
       lexicalLimit: 8,
       semanticLimit: 8,
       rerankLimit: 4,
-      resultLimit: 3,
+      resultLimit: 1,
       maxExcerptChars: 64,
     });
+    expect(observed.length).toBeGreaterThan(0);
   });
 
   test("retrieves bounded prior evidence with an immutable file-revision citation", async () => {

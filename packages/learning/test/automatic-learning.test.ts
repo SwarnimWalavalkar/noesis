@@ -135,6 +135,17 @@ function outcomeCitation(rowId: string, excerpt: string): ExactCitation {
   });
 }
 
+function experimentCitation(rowId: string, excerpt: string): ExactCitation {
+  return Object.freeze({
+    source: Object.freeze({ kind: "database_row", table: "experiments", rowId, field: "data_json" }),
+    occurredAt: "2026-01-08T00:00:00.000Z",
+    excerpt,
+    startOffset: 0,
+    endOffset: excerpt.length,
+    contentDigest: sha256(excerpt),
+  });
+}
+
 function fileRevisionCitation(revisionId: string, excerpt: string): ExactCitation {
   return Object.freeze({
     source: Object.freeze({ kind: "file_revision", revisionId, field: "bytes" }),
@@ -1784,6 +1795,29 @@ describe("automatic learning organ", () => {
         revisionId: "revision-prior-report",
       }),
     );
+  });
+
+  test("retains completed experiment citations as authoritative learning evidence", async () => {
+    const experiment = experimentCitation(
+      "experiment-prior",
+      "A prior citation experiment completed with outcome keep",
+    );
+    const harness = createHarness({ steps: [reflectionStep], citations: [experiment] });
+
+    const result = await harness.organ.observeTurn({
+      turn: turn({ correction: "Use primary sources." }),
+      baselineRevision: harness.baseline,
+      capability,
+    });
+
+    if (result.status !== "experiment") throw new Error("Expected an experiment");
+    expect(result.brief.citations).toEqual([experiment]);
+    expect(result.brief.recurrenceCitations).toEqual([experiment]);
+    expect(result.brief.evidenceRefs).toContainEqual({
+      kind: "database_row",
+      table: "experiments",
+      rowId: "experiment-prior",
+    });
   });
 
   test("does not count a current-turn file revision returned by history as recurrence", async () => {

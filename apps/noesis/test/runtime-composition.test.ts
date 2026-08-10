@@ -24,9 +24,13 @@ import {
   createPiAgentRoleRunner,
   createPiAgentRuntime,
   createPiSkillLibrary,
+  createRestrictedRoleContextPolicy,
+  createStructuredInferencePort,
+  type FrozenSessionToolResolver,
   type PiFrozenToolCatalog,
   type PiWorkflowSummary,
   projectWorkflowToolName,
+  type RoleBackendRequest,
 } from "@noesis/runtime-pi";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
@@ -34,18 +38,86 @@ import { z } from "zod";
 import {
   CONTROLLED_PI_MODEL,
   CONTROLLED_PI_PROVIDER,
+  controlledToolCallResponse,
   createControlledPiModels,
 } from "../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 import { createScriptedAgentRoleRunner } from "../../../packages/runtime-pi/test/support/scripted-role-runner.ts";
 import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
+import { researchLoopControlledResponse } from "./support/research-loop-controlled-response.ts";
 import {
   type ApplicationRuntimeCompositionOptions,
   createApplicationRuntimeComposition,
+  createModelHistoryRerankPort,
   resolveProjectHotbarSelection,
   waitForReflectionBarrier,
 } from "../src/runtime-composition.ts";
 
 const roots: string[] = [];
+
+function scriptedHistoryRerankResponse(request: RoleBackendRequest): { readonly text: string } {
+  const response = researchLoopControlledResponse({
+    systemPrompt: request.systemPrompt,
+    lastUserText: request.prompt,
+    context: { messages: [] },
+  });
+  if (typeof response !== "string") throw new Error("Controlled history reranker must return text");
+  return Object.freeze({ text: response });
+}
+
+test("model history reranking can select a candidate beyond the first fifty", async () => {
+  const promptRevision: FileRevisionRef = Object.freeze({
+    kind: "file_revision",
+    revisionId: "history-reranker-prompt-revision",
+    workingPath: "prompts/history-reranker.md",
+    snapshotPath: "snapshots/history-reranker.md",
+    contentDigest: sha256("history-reranker-prompt"),
+  });
+  const configuration = Object.freeze({
+    role: "history_reranker" as const,
+    variant: Object.freeze({
+      variantId: "history-reranker-boundary-v1",
+      axis: "role" as const,
+      configurationRefs: Object.freeze([promptRevision]),
+    }),
+    provider: "controlled",
+    model: "controlled",
+    reasoning: "off" as const,
+    systemPrompt: "Noesis protected role: history_reranker.",
+    contextPolicy: createRestrictedRoleContextPolicy("history_reranker", {
+      maxMessages: 12,
+      maxCharactersPerMessage: 12_000,
+      maxTotalCharacters: 48_000,
+    }),
+  });
+  const runner = createScriptedAgentRoleRunner({
+    variants: [configuration],
+    respond: scriptedHistoryRerankResponse,
+  });
+  const reranker = createModelHistoryRerankPort({
+    inference: createStructuredInferencePort({ runner }),
+    configuration,
+  });
+  const candidates = Array.from({ length: 100 }, (_, index) =>
+    Object.freeze({
+      documentId: `document-${String(index).padStart(3, "0")}`,
+      excerpt: `Bounded candidate ${String(index)}. ${'"\\\n'.repeat(240)}`,
+      combinedScore: 100 - index,
+    }),
+  );
+
+  const result = await reranker.rerank({
+    query: "Select the final candidate",
+    candidates,
+    maxResults: 1,
+  });
+
+  expect(result).toEqual([
+    {
+      documentId: "document-099",
+      reason: "Controlled reverse rank 1 for document-099.",
+    },
+  ]);
+});
 
 test("a reflection barrier read failure cannot fail an already-settled turn", async () => {
   await expect(
@@ -2279,12 +2351,23 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const requests: AgentRuntimeRequest[] = [];
     const seenConfigurations: unknown[] = [];
+    const preparedCatalogs: PiFrozenToolCatalog[] = [];
+    let frozenSessionTools: FrozenSessionToolResolver | undefined;
     const runtime = await createApplicationRuntimeComposition({
       config,
       skills,
-      createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) => {
+      createAgent: (sessionTools, codeExecution, selfTools, skillLibrary) => {
+        frozenSessionTools = sessionTools;
+        const capturingCodeExecution = Object.freeze({
+          ...codeExecution,
+          prepare: async (...arguments_: Parameters<typeof codeExecution.prepare>) => {
+            const prepared = await codeExecution.prepare(...arguments_);
+            preparedCatalogs.push(prepared.catalog);
+            return prepared;
+          },
+        });
         const pi = createPiAgentRuntime(process.cwd(), controlled.models, {
-          codeExecution,
+          codeExecution: capturingCodeExecution,
           selfTools,
           requirePinnedSkillSnapshot: true,
           ...(skillLibrary ? { skills: skillLibrary } : {}),
@@ -2307,6 +2390,28 @@ describe("apps/noesis production control-plane composition", () => {
     const trail = await runtime.startTrail({ title: "Composition acceptance" });
     const result = await runtime.debug.runTurn(trail.trailId, "Record this ordinary turn");
     expect(result.outcome).toBe("completed");
+    expect(requests[0]?.systemPrompt).toContain(
+      "Before asking the user to repeat relevant prior work, search previous sessions when it could help.",
+    );
+    const sessionCatalogTools = [
+      "history.search_sessions",
+      "history.open_session_evidence",
+      "history.find_corrections",
+      "history.find_similar_tasks",
+      "history.prior_experiment_outcomes",
+    ];
+    expect(preparedCatalogs[0]?.tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(sessionCatalogTools),
+    );
+    if (!frozenSessionTools) throw new Error("Expected the application session-tool resolver");
+    const emptyCapabilityResolution = await frozenSessionTools.resolve(
+      recoveryTurnPlan("trail-empty-capabilities", "turn-empty-capabilities"),
+      new AbortController().signal,
+    );
+    expect(emptyCapabilityResolution.consumedMaterials).toEqual([]);
+    expect(emptyCapabilityResolution.definitions.map((definition) => definition.name)).toEqual(
+      sessionCatalogTools.map((name) => name.slice("history.".length)),
+    );
     expect(config.schemaVersion).toBe(1);
     expect(await runtime.debug.workspace.operational.sessions.get(trail.trailId)).toMatchObject({
       sessionId: trail.trailId,
@@ -2351,7 +2456,7 @@ describe("apps/noesis production control-plane composition", () => {
         },
       ],
     });
-    expect(await runtime.debug.workspace.definitionMetadata.listCurrent("runtime_role")).toHaveLength(8);
+    expect(await runtime.debug.workspace.definitionMetadata.listCurrent("runtime_role")).toHaveLength(9);
     expect(JSON.stringify(seenConfigurations)).not.toMatch(
       /protectedActivations|protectedFeedback|authorityBoundary|restorationHandle/iu,
     );
@@ -2642,7 +2747,9 @@ describe("apps/noesis production control-plane composition", () => {
     let reflectorRuns = 0;
     const strategy = "Verify the observable project state before reporting completion.";
     const controlled = createControlledPiModels({
-      respond: ({ systemPrompt, lastUserText }) => {
+      respond: (input) => {
+        const { systemPrompt, lastUserText } = input;
+        if (systemPrompt.includes("role: history_reranker")) return researchLoopControlledResponse(input);
         if (!systemPrompt.includes("role: reflector")) return `Controlled completion for: ${lastUserText}`;
         reflectorContexts.push(lastUserText);
         reflectorRuns += 1;
@@ -2724,7 +2831,9 @@ describe("apps/noesis production control-plane composition", () => {
     });
     let reflectorRuns = 0;
     const controlled = createControlledPiModels({
-      respond: ({ systemPrompt, lastUserText }) => {
+      respond: (input) => {
+        const { systemPrompt, lastUserText } = input;
+        if (systemPrompt.includes("role: history_reranker")) return researchLoopControlledResponse(input);
         if (!systemPrompt.includes("role: reflector")) return `Controlled completion for: ${lastUserText}`;
         reflectorRuns += 1;
         return JSON.stringify({
@@ -2761,6 +2870,208 @@ describe("apps/noesis production control-plane composition", () => {
     await runtime.shutdown();
   });
 
+  test("propagates an interrupted history tool signal into the protected model reranker", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-history-rerank-cancellation-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    let activeController: AbortController | undefined;
+    let markRerankerStarted: (() => void) | undefined;
+    const rerankerStarted = new Promise<void>((resolve) => {
+      markRerankerStarted = resolve;
+    });
+    let markRerankerAborted: (() => void) | undefined;
+    const rerankerAborted = new Promise<void>((resolve) => {
+      markRerankerAborted = resolve;
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution) =>
+        Object.freeze({
+          name: "history-rerank-cancellation-agent",
+          run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+            const plan = request.frozenTurnPlan;
+            if (!plan) throw new Error("Expected a frozen turn plan for history cancellation");
+            const controller = new AbortController();
+            activeController = controller;
+            emit({ type: "status", status: "started" });
+            const prepared = await codeExecution.prepare(plan, controller.signal);
+            try {
+              if (!prepared.invoke) throw new Error("Expected a direct Broker invocation path");
+              await prepared.invoke(
+                "history.search_sessions",
+                Object.freeze({ query: "cancellation boundary sentinel", maxResults: 2 }),
+                controller.signal,
+                Object.freeze({
+                  executionId: `direct:${plan.turnId}`,
+                  logicalExecutionId: `${plan.turnId}:history-cancellation`,
+                  callId: `${plan.turnId}:direct:history-cancellation`,
+                }),
+              );
+              emit({ type: "status", status: "completed" });
+              return Object.freeze({
+                outcome: "completed" as const,
+                stopReason: "stop" as const,
+                text: "unexpected history completion",
+                provider: request.provider,
+                model: request.model,
+              });
+            } catch (error) {
+              if (!controller.signal.aborted) throw error;
+              emit({ type: "status", status: "aborted" });
+              return Object.freeze({
+                outcome: "aborted" as const,
+                stopReason: "aborted" as const,
+                text: "",
+                provider: request.provider,
+                model: request.model,
+              });
+            } finally {
+              activeController = undefined;
+              await prepared.close();
+            }
+          },
+          steer: async () =>
+            Object.freeze({ status: "not-consumed" as const, reason: "not-running" as const }),
+          abort: async () => activeController?.abort(new Error("Interrupted history search")),
+        }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: async (request) => {
+            if (request.systemPrompt.includes("role: history_reranker")) {
+              markRerankerStarted?.();
+              await new Promise<void>((resolve) => {
+                const onAbort = () => {
+                  markRerankerAborted?.();
+                  resolve();
+                };
+                if (request.signal.aborted) onAbort();
+                else request.signal.addEventListener("abort", onAbort, { once: true });
+              });
+            }
+            return scriptedHistoryRerankResponse(request);
+          },
+        }),
+    });
+    for (const suffix of ["alpha", "beta"] as const) {
+      const sessionId = `prior-${suffix}`;
+      await runtime.debug.workspace.operational.sessions.put({
+        sessionId,
+        title: `Prior ${suffix}`,
+        status: "completed",
+        provider: "controlled",
+        model: "controlled",
+        runtime: "controlled",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        updatedAt: "2026-08-10T00:00:01.000Z",
+        metadata: {},
+      });
+      await runtime.debug.workspace.operational.messages.put({
+        messageId: `message-${suffix}`,
+        sessionId,
+        role: "user",
+        content: `Cancellation boundary sentinel from ${suffix}.`,
+        sensitivity: "normal",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        metadata: {},
+      });
+    }
+
+    const trail = await runtime.startTrail({ title: "History rerank cancellation" });
+    await runtime.interact(trail.trailId, {
+      type: "submit",
+      text: "Search the cancellation boundary sentinel.",
+    });
+    await rerankerStarted;
+    const activeTurnId = (await runtime.inspectInteraction(trail.trailId)).active?.turnId;
+    if (!activeTurnId) throw new Error("Expected an active history-search turn");
+    await runtime.interact(trail.trailId, { type: "interrupt", turnId: activeTurnId });
+    await expect(rerankerAborted).resolves.toBeUndefined();
+    await waitUntil(async () => (await runtime.inspectInteraction(trail.trailId)).phase === "idle");
+    await runtime.shutdown();
+  });
+
+  test("contains a malformed protected reranking as a failed Broker tool call", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-history-rerank-malformed-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels({
+      respond: (input) => {
+        if (!input.systemPrompt.includes("role:")) {
+          if (!input.context.messages.some((message) => message.role === "toolResult"))
+            return controlledToolCallResponse(
+              "search_sessions",
+              { query: "malformed reranking sentinel", maxResults: 2 },
+              "malformed-history-search",
+            );
+          return "The failed history tool call remained contained in the foreground turn.";
+        }
+        return researchLoopControlledResponse(input);
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: async (request) =>
+            request.systemPrompt.includes("role: history_reranker")
+              ? Object.freeze({ text: JSON.stringify({ ranking: [] }) })
+              : scriptedHistoryRerankResponse(request),
+        }),
+    });
+    for (const suffix of ["alpha", "beta"] as const) {
+      const sessionId = `malformed-prior-${suffix}`;
+      await runtime.debug.workspace.operational.sessions.put({
+        sessionId,
+        title: `Malformed prior ${suffix}`,
+        status: "completed",
+        provider: "controlled",
+        model: "controlled",
+        runtime: "controlled",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        updatedAt: "2026-08-10T00:00:01.000Z",
+        metadata: {},
+      });
+      await runtime.debug.workspace.operational.messages.put({
+        messageId: `malformed-message-${suffix}`,
+        sessionId,
+        role: "user",
+        content: `Malformed reranking sentinel from ${suffix}.`,
+        sensitivity: "normal",
+        createdAt: "2026-08-10T00:00:00.000Z",
+        metadata: {},
+      });
+    }
+
+    const trail = await runtime.startTrail({ title: "Malformed history reranking" });
+    const result = await runtime.debug.runTurn(trail.trailId, "Recall malformed reranking evidence.");
+    expect(result).toMatchObject({
+      outcome: "completed",
+      output: "The failed history tool call remained contained in the foreground turn.",
+    });
+    const failedSearch = (
+      await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId)
+    ).find((toolCall) => toolCall.toolName === "history.search_sessions");
+    expect(failedSearch).toMatchObject({
+      status: "failed",
+      response: {
+        error: expect.stringMatching(/backend_failure|malformed/iu),
+      },
+    });
+    await runtime.shutdown();
+  });
+
   test("bounds shutdown when ambient reflection ignores abort and leaves recovery to its durable lease", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-bounded-shutdown-"));
     roots.push(home);
@@ -2786,6 +3097,8 @@ describe("apps/noesis production control-plane composition", () => {
         createScriptedAgentRoleRunner({
           variants: configurations,
           respond: async (request) => {
+            if (request.systemPrompt.includes("role: history_reranker"))
+              return scriptedHistoryRerankResponse(request);
             if (!request.systemPrompt.includes("role: reflector"))
               throw new Error("Only reflection should run in the bounded-shutdown fixture");
             markReflectionStarted?.();
@@ -2864,6 +3177,8 @@ describe("apps/noesis production control-plane composition", () => {
         createScriptedAgentRoleRunner({
           variants: configurations,
           respond: async (request) => {
+            if (request.systemPrompt.includes("role: history_reranker"))
+              return scriptedHistoryRerankResponse(request);
             if (!request.systemPrompt.includes("role: reflector"))
               throw new Error("Only reflection should run in the cooperative-shutdown fixture");
             markReflectionStarted?.();

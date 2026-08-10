@@ -206,15 +206,16 @@ describe("agent runtime factories", () => {
       catalogId: "catalog-aliases",
       catalogDigest: sha256("catalog-aliases"),
       tools: Object.freeze(
-        ["files.read", "file_read", "adapt", "execute"].map((name) =>
-          Object.freeze({
-            name,
-            label: name,
-            description: name,
-            revisionId: `${name}-v1`,
-            inputSchema: Object.freeze({ type: "object" }),
-            outputSchema: Object.freeze({ type: "object" }),
-          }),
+        ["files.read", "file_read", "history.search_sessions", "search_sessions", "adapt", "execute"].map(
+          (name) =>
+            Object.freeze({
+              name,
+              label: name,
+              description: name,
+              revisionId: `${name}-v1`,
+              inputSchema: Object.freeze({ type: "object" }),
+              outputSchema: Object.freeze({ type: "object" }),
+            }),
         ),
       ),
     });
@@ -223,6 +224,8 @@ describe("agent runtime factories", () => {
     const values = [...aliases.values()];
 
     expect(aliases.get("files.read")).toBe("file_read");
+    expect(aliases.get("history.search_sessions")).toBe("search_sessions");
+    expect(aliases.get("search_sessions")).not.toBe("search_sessions");
     expect(new Set(values).size).toBe(values.length);
     expect(values).not.toContain("adapt");
     expect(values).not.toContain("execute");
