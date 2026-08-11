@@ -1,6 +1,6 @@
 # Noesis project-level self-evaluation loop
 
-Status: proposed for review. This plan does not authorize implementation.
+Status: implemented. This file is the historical design record for the project working adjustment loop.
 
 This is the smallest useful next step toward a self-evolving harness. It adds a fast project-local branch to the learning loop Noesis already has.
 
@@ -191,7 +191,7 @@ A timeout allows the next turn to proceed; a late adjustment begins with a follo
 
 No new package or top-level module is needed.
 
-## One implementation slice
+## Implemented slice
 
 1. Add host-derived `ProjectRef` to turn planning, the frozen turn plan, settlement, and learning input.
 2. Add immutable working-adjustment rows plus one SQLite-owned active binding per project.

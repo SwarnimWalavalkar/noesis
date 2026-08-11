@@ -950,8 +950,8 @@ html&gt;body{padding:0}&lt;/style&gt;
   &lt;/style&gt;
 
   &lt;div class=&quot;card&quot; role=&quot;note&quot; aria-label=&quot;Architecture supersession notice&quot;&gt;
-    &lt;div class=&quot;text-destructive&quot;&gt;Storage architecture superseded&lt;/div&gt;
-    &lt;p class=&quot;summary-copy&quot;&gt;The JSONL-ledger, SQLite-projection, Markdown-projection, and content-addressed-artifact portions of this historical first-iteration plan are superseded by &lt;code&gt;plans/noesis-autonomous-compounding-implementation-plan.html&lt;/code&gt;. Active architecture uses &lt;code&gt;WorkspaceStore&lt;/code&gt;: SQLite is authoritative for operational state, editable workspace files are authoritative for declarative definitions, byte-stable snapshots pin revisions and evaluation evidence, and search indexes are rebuildable. Every persisted datum has one declared authority. Unrelated product and boundary decisions below remain historical context.&lt;/p&gt;
+    &lt;div class=&quot;text-destructive&quot;&gt;Historical implementation plan&lt;/div&gt;
+    &lt;p class=&quot;summary-copy&quot;&gt;The core first iteration shipped, but this plan no longer describes the current architecture. Its JSONL ledger, SQLite projection, Markdown projection, and content addressed artifact design was superseded. Current Noesis uses &lt;code&gt;WorkspaceStore&lt;/code&gt;. SQLite owns operational state, editable files own declarative definitions, immutable snapshots pin revisions and evaluation evidence, and search data is rebuildable. Read &lt;code&gt;docs/&lt;/code&gt; and &lt;code&gt;AGENTS.md&lt;/code&gt; for current behavior and boundaries.&lt;/p&gt;
   &lt;/div&gt;
 
   &lt;div class=&quot;viz-grid&quot; aria-label=&quot;Plan summary&quot;&gt;

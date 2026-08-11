@@ -2,121 +2,120 @@
 
 ## The core loop
 
-A coherent Noesis experience follows one recurring shape without forcing every session through every step:
+Noesis follows one broad loop, but it does not force every session through every step:
 
-1. **Understand intent.** Interpret what the user is trying to accomplish and how they want to collaborate.
-2. **Work in the right posture.** Explore and think together when the problem is ambiguous; execute directly when the request is explicit.
-3. **Produce present value.** Create an artifact, understanding, decision, sharper question, or useful experiment.
-4. **Reflect ambiently.** After the useful work, inspect corrections, friction, outcomes, and recurrence without interrupting the conversation.
-5. **Compound selectively.** Preserve nothing when there is no credible future advantage. Otherwise propose the narrowest evidence-linked learning with an anticipated future use.
-6. **Evaluate and adapt.** Test behavioral changes against the behavior they intend to improve. Protected code decides whether a candidate may activate.
-7. **Return with continuity.** A later relevant turn retrieves the selected prior context or active adaptation, and the exact reason for its presence remains inspectable.
+1. Understand what the user wants to achieve and how they want to work together.
+2. Think together when the problem is unclear. Act directly when the request is clear.
+3. Produce something useful now, such as an artifact, decision, explanation, sharper question, or experiment.
+4. Reflect quietly after the work. Look for corrections, friction, outcomes, and repeated patterns without interrupting the conversation.
+5. Keep a lesson only when it has a credible future use. Give it the narrowest reach supported by the evidence.
+6. Test broader behavior changes. Protected code decides whether they may become active.
+7. Bring relevant context or active changes into later work. Keep the reason for their presence available for inspection.
 
-The loop is successful only when the present interaction is useful on its own. Compounding is an additional advantage, not a tax charged to every conversation.
+The current interaction must be useful on its own. Development over time is an added benefit, not a cost charged to every conversation.
 
-Explicit foreground project adaptations do not wait for this learning loop. A project-local script or workflow may be published and used immediately through `execute`; reflection and evaluation enter only when Noesis considers broader learned consolidation.
+An explicit project change does not wait for this loop. Noesis may publish and use a project script or workflow at once through `execute`. Reflection and evaluation apply only when it considers a broader learned change.
 
-## Collaboration posture
+## How Noesis works with the user
 
-Noesis has two default postures. They are inferred behaviors, not mandatory modes that the user must configure.
+Noesis has two default ways of working. It infers them from the conversation. The user does not need to configure a mode.
 
-| Posture | Default trigger | Noesis behavior |
+| Approach | When to use it | What Noesis does |
 | --- | --- | --- |
-| Work with me | Ambiguous intellectual work, exploration, learning, reflection, framing, or consequential judgment. | Surface assumptions, develop the question, preserve uncertainty, offer alternatives, and keep the user’s reasoning active. |
-| Do for me | Explicit execution with a sufficiently clear outcome and scope. | Act directly, make reasonable implementation decisions, report material tradeoffs, and return the finished result. |
+| Work with me | The work is unclear, exploratory, educational, or calls for judgment. | Surface assumptions, develop the question, preserve uncertainty, offer alternatives, and keep the user's reasoning active. |
+| Do for me | The user asks for a clear outcome within a clear scope. | Act directly, make reasonable decisions, report important tradeoffs, and return the finished result. |
 
-Conversational overrides are authoritative. “Just do it,” “think this through with me,” “teach me rather than solving it,” or a correction during the interaction should change the posture without requiring a settings screen or mode command.
+The user's words take priority. Phrases such as "just do it," "think this through with me," or "teach me instead of solving it" should change how Noesis works without a setting or command.
 
-The posture is allowed to change within a session. A build can expose a study need; reflection can become execution; an exploratory discussion can end with a concrete implementation request. Noesis should preserve why the transition happened.
+The approach can change during a session. A build can expose something the user needs to learn. Reflection can turn into execution. An open discussion can end with a concrete task. Noesis should preserve why the change happened.
 
-## Selective compounding
+## Selective learning
 
-### A durable learning contract
+### A contract for lasting learning
 
-Every proposed durable learning must answer:
+Every proposed lasting lesson must answer:
 
 - What did Noesis observe?
-- Which evidence supports the observation?
-- What is the narrowest plausible scope?
-- In what anticipated future situation should this help?
-- What behavior should change in that situation?
-- What would make the learning stale, contradicted, or harmful?
+- Which evidence supports it?
+- Where should it apply?
+- When should it help again?
+- What behavior should change then?
+- What would make it outdated, wrong, or harmful?
 
-If these questions cannot be answered credibly, the correct outcome is no durable change.
+If Noesis cannot answer these questions well, it should make no lasting change.
 
-New learning stays narrow by default. A correction about one repository, project, relationship, workflow, or kind of task must not silently become a universal preference. Scope may broaden when recurring evidence shows the same behavior is useful across distinct contexts. Broadening is a new attributable decision, not a mutation of history.
+New learning stays narrow by default. A correction about one repository, project, relationship, workflow, or kind of task must not become a universal preference. Its reach may grow when repeated evidence shows that it helps in different settings. That expansion is a new recorded decision. It does not rewrite history.
 
-### Ambient, not compulsory
+### Quiet, not compulsory
 
-Reflection and evaluation run automatically after suitable evidence appears. They should be low-noise and should accept `no change` as a normal result. The user should not have to issue learning commands or operate an experiment pipeline.
+Reflection and evaluation run automatically when there is useful evidence. They should stay quiet and accept `no change` as a normal result. The user should not have to run learning commands or manage an experiment pipeline.
 
-The interface may show quiet activity such as:
+The interface shows important outcomes instead of pinning work in progress into the transcript. For example:
 
 ```text
-learning · noticed a correction in Noesis planning
-learning · comparing a narrower planning adaptation
-learned  · preserve review-only constraints in Noesis plans
+adjusted · preserve review-only constraints in Noesis plans
+unapplied · the project strategy did not help
 ```
 
-Routine ambient work does not interrupt the conversation. Authority expansion, credential use, or a broader effect is different: it requires explicit user authority through the protected control plane.
+Routine background work does not interrupt the conversation. A request for more access, credential use, or a broader effect is different. It requires clear user approval through protected code.
 
-## Legible self-improvement
+## Self-improvement the user can understand
 
-Adaptation should feel magical but never mysterious.
+Improvement may feel effortless, but it should never be hidden.
 
-Each durable adaptation has an inspectable history that connects:
+Each lasting change has a history that the user can inspect. It connects:
 
-- the observation and exact evidence;
-- the anticipated future use and scope;
-- the baseline behavior and candidate change;
-- the prompt, skill, tool, router, and permission revisions involved;
-- the evaluation evidence and protected decision;
-- the activation that served each turn;
-- later feedback and experiment outcome; and
-- prior revisions available for contest or revert.
+- the observation and exact evidence
+- the intended future use and where the change applies
+- the old behavior and proposed change
+- the prompt, skill, tool, router, or permission revision involved
+- the evaluation and protected decision
+- the version used for each turn
+- later feedback and the experiment outcome
+- prior revisions that the user can restore.
 
-The primary interaction remains conversational. A user can ask “Why did you approach this as a collaboration?”, “What have you learned about this project?”, “Why was this capability used?”, or “Undo that change.” Expert commands and views may provide precise inspection, but they are shortcuts into the same product model rather than the only way to use it.
+The main interaction remains conversational. A user can ask, "Why did you work with me instead of doing it?", "What have you learned about this project?", "Why did you use this ability?", or "Undo that change." Commands and detailed views can offer precise inspection, but they are not the only way to use the system.
 
-Contesting a learning does not erase history. It records a correction, narrows or retires the current revision, and preserves the evidence behind earlier behavior. Revert restores the prior complete activation rather than reconstructing it from mutable files.
+Challenging a lesson does not erase history. Noesis records the correction and may narrow or retire the current revision. It keeps the evidence behind the earlier behavior. A revert restores the prior complete version instead of rebuilding it from files that may have changed.
 
-Generated reflection and candidate authorship never receive broader promotion authority. Foreground generated code may publish a project-local script or workflow under existing authority, but protected evaluation, permission, workspace-integrity, activation, and rollback code remains outside generated or self-modifiable content.
+Generated reflection cannot approve a broader change. Generated code may publish a project script or workflow with its current permissions. Evaluation, permissions, workspace integrity, activation, and rollback remain in protected code.
 
 ## Representative user flows
 
 ### A consequential question becomes a build
 
-The user arrives with an important but underspecified question about what should be built or why a direction matters.
+The user arrives with an important but unclear question about what to build or why a direction matters.
 
-Noesis defaults to working with the user. It surfaces assumptions, relates selected prior thought, develops criteria, and keeps unresolved uncertainty visible. When the user asks to make the result concrete, Noesis moves into execution and creates or revises the artifact using those criteria.
+Noesis works with the user. It surfaces assumptions, recalls relevant prior thought, develops criteria, and keeps uncertainty visible. When the user asks for a concrete result, Noesis creates or revises the artifact using those criteria.
 
-The question, alternatives, criteria, decision, artifact, and uncertainty remain linked. On return, Noesis can reopen the work from its reasoning rather than only from its last output.
+The question and decision stay linked to the reasons, alternatives, artifact, and remaining uncertainty. On return, Noesis can reopen the reasoning instead of showing only the last output.
 
 ### A build exposes a learning need
 
-During execution, the user encounters a concept they cannot yet justify or apply confidently. They say, conversationally, that they want to understand it rather than merely unblock the task.
+During execution, the user encounters a concept they cannot yet explain or apply with confidence. They say that they want to understand it instead of only unblocking the task.
 
-Noesis shifts from doing to working together. It uses the real artifact as the study context, helps the user form and test an explanation, and then applies that understanding back to the work. The difficulty, explanation, remaining uncertainty, and applied change remain connected.
+Noesis shifts from doing to working together. It uses the real artifact as study material. It helps the user form and test an explanation, then apply that understanding to the work. The difficulty and explanation stay linked to the change and any remaining uncertainty.
 
-A later related problem can retrieve the principle and its concrete example. Contrary evidence can revise it. The retained object is reusable capability, not an isolated answer.
+A later problem can recall the principle and its concrete example. Contrary evidence can revise it. What remains is something the user can apply again, not an isolated answer.
 
-### Repeated friction becomes a self-improvement experiment
+### Repeated friction becomes an experiment
 
-Across related work, Noesis receives corrections about a recurring behavior. Ambient reflection detects the recurrence and proposes a narrow adaptation with a stated future use.
+Across related work, Noesis receives the same kind of correction more than once. Quiet reflection notices the pattern and proposes a narrow change with a clear future use.
 
-The candidate is evaluated against the prior behavior. A low-risk passing revision activates through the protected control plane without turning the conversation into an approval workflow. A quiet notification explains what improved. Later relevant turns pin and use the exact revision.
+Noesis tests the change against the prior behavior. Protected code may activate a passing low-risk revision without turning the conversation into an approval flow. A short notice explains what changed. Later turns use the exact recorded revision when it is relevant.
 
-The user can ask why the change happened, inspect the evidence and comparison, contest its scope, pin it, or revert it. A retained change provides a traceable advantage; a revised or reverted change still contributes negative evidence.
+The user can ask why the change happened, inspect the evidence, challenge where it applies, keep it, or reverse it. Even a rejected or reversed change provides useful evidence.
 
 ### Clear execution remains simple
 
-The user asks for a bounded, explicit task. Noesis defaults to doing it, produces the result, and reports material limitations. Ambient reflection finds no credible reusable learning and records no durable change.
+The user asks for a clear task. Noesis does it and reports important limits. Reflection finds no useful lesson and records no lasting change.
 
-The absence of compounding machinery in the visible experience is a feature: not every useful session needs to become memory, policy, or an experiment.
+It is useful when the learning system stays out of sight. Not every session needs to become a memory, rule, or experiment.
 
 ### Useful execution becomes an inspectable program
 
-The user asks Noesis to investigate a repository, modify files, run commands, consult the web, or create an artifact. Noesis uses a small direct-tool hotbar for common work and `execute` to discover and compose host tools in JavaScript. The conversation receives the selected final value while operations, effects, and revisions remain inspectable.
+The user asks Noesis to investigate a repository, change files, run commands, search the web, or create an artifact. Noesis uses a small set of direct tools for common work. It uses `execute` to discover and combine more tools with JavaScript. The conversation gets the final result, while the user can still inspect tool calls and revisions.
 
-When the program has a credible project use, the user or foreground agent may save and publish it directly. One reusable computation becomes a typed script. Work that needs named phases, durable progress, corrections between phases, or resume becomes a workflow. Skills remain portable instructional context that can teach when and how to use these primitives without silently installing executable authority.
+When a program has a clear use in the project, the user or agent may save it directly. One reusable computation becomes a typed script. Work with named phases and durable progress becomes a workflow. A workflow can also pause for corrections and resume later. Skills provide portable instructions, but they do not install executable access on their own.
 
-Scripts and workflows remain ordinary editable files. Once published, they are immediately usable through `execute` under the existing catalog, Broker, and permissions. Executions pin immutable revisions, and SQLite records code, nested calls, workflow runs, and phases. A later correction resumes from completed work rather than replaying it. Reflection observes outcomes; only broader learned or global consolidation requires protected evaluation and activation.
+Scripts and workflows remain ordinary editable files. Once published, they are available through `execute` with the current catalog, Broker, and permissions. Each run records the exact immutable revision it used. SQLite records the code, nested calls, workflow runs, and phases. After a correction, a workflow can resume from completed work instead of repeating it. Reflection observes the results. Only broader learned or global changes require protected evaluation and activation.

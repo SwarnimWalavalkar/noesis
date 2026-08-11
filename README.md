@@ -2,97 +2,55 @@
 
 > The self-evolving agent harness for tinkerers.
 
-Noesis is for hackers, researchers, writers, and other curious people doing creative knowledge work. You can use it to think and make. As you work together, Noesis can improve its memory and skills. It can create tools and workflows. It can also change how it works with you.
+Noesis learns how you think and work. It uses that shared experience to find better ways to help. It also helps you understand more and take on harder projects.
 
-![The Noesis loop: creative work leaves session traces, those traces guide selective evolution, and the evolved harness makes the next related session better.](docs/noesis-compounding-loop.jpg)
+It is built for hackers, researchers, writers, and other curious people who move between thinking and making.
 
-Self-evolution begins with the traces a session leaves behind. Noesis can learn from your corrections and from the way you steered it. It can notice repeated friction. It can preserve a tool or approach that proved useful. Noesis keeps a change only when there is a good reason to expect that it will help again.
+![Creative work leaves traces. Noesis uses selected traces to develop new ways to help.](docs/noesis-compounding-loop.jpg)
 
-The aim is a useful agent harness that remains open to inspection and change as it grows.
+The aim is for you and Noesis to develop together. Noesis adapts as your goals and judgment change. You gain new understanding and better ways to work.
 
-## Why Noesis
+## What makes Noesis different
 
-Current agents can carry context across requests and remember preferences. Many can search past conversations or reuse prior work. Noesis focuses on whether it can learn from those traces. The test is whether its judgment improves and it develops capabilities that help in later sessions.
+Noesis treats your ongoing collaboration with it as the core product loop. It can act now, learn from the work, and change how it helps.
 
-Creative work depends on continuity. A question can lead to research. Research can change what you build. Building can expose something you need to learn. A useful tool can emerge from one project and change how you approach the next one.
+It can search previous sessions when their context may help. It can preserve an effective project strategy across sessions. It can turn useful code into a project script or workflow. When evidence supports a broader change, it can evaluate that change against the current behavior before activation.
 
-Noesis records the traces that show these transitions and looks for narrow improvements that could help in related sessions.
+Noesis is built for people who move between open questions and direct execution. It can think with you when the problem is unclear. When the outcome is clear, it can do the work. You can change this balance through ordinary conversation.
 
-> Create with it. Steer it. Learn from the traces. Change the harness. Keep what helps.
+## Three paths for improvement
 
-## A harness for creative knowledge work
+Noesis uses three paths to improve:
 
-Noesis is built for people who move between thinking and making.
+1. It can save a project script or workflow and use it at once with its current permissions.
+2. It can apply a temporary strategy to the current project. Further use shows whether to keep, replace, or remove it.
+3. It can test a broader change as an experiment before protected code activates it.
 
-A hacker may turn a repeated command into a tool. A researcher may develop a better way to gather and test evidence. A writer may teach the agent how to critique an argument without flattening their voice. The same person may do all of these things in one project.
+All three paths use the same records, tools, and permissions. They do not create hidden execution systems.
 
-Noesis does not force this work into fixed modes. When the problem is open, it can explore with you. When the task is clear, it can do the work. You can change that relationship through ordinary conversation.
+## What is available today
 
-Noesis lets you modify the harness while you use it. You can inspect its current behavior. You can teach it something new, try the result, and undo a change that did not work.
+Noesis currently includes:
 
-## What self-evolving means
+- a local terminal interface with streaming responses and visible tool activity
+- new, continued, and interactively resumed sessions
+- search across previous sessions with source citations
+- direct tools for files, directories, shell commands, saved workflows, and session search
+- `execute` for combining tools with JavaScript
+- project scripts and durable workflows with immutable execution revisions
+- ambient reflection and temporary project strategies
+- experiments, evaluation, activation, feedback, and rollback for broader learned changes
+- SQLite storage for operational state, with ordinary files for editable definitions and artifacts.
 
-Noesis can change parts of the system that shape its behavior. It can learn through memory and skills. It can create tools, scripts, and workflows. It can also change its instructions and decide when a capability should apply.
+Noesis is an early research preview. Its interfaces and internal design will change as we use it.
 
-The ability to change is only the beginning. A useful change needs a reason, a scope, and evidence that it helped. Noesis treats self-evolution as an ongoing experiment:
+## Trust and control
 
-1. During a session, Noesis records how you steered the agent and where it struggled. It also records which approaches worked.
-2. Noesis studies those traces and forms a narrow hypothesis.
-3. It proposes a concrete change for a future kind of work.
-4. The candidate is compared with the current behavior.
-5. A passing change becomes active only where it is meant to help.
-6. Later sessions provide more evidence to keep, revise, broaden, or revert it.
+Generated code can use the permissions already granted to the current turn. It can create project scripts and workflows. It cannot grant itself more access or change the protected control plane.
 
-Not every session needs to change the harness. A trace may contain no durable lesson. That is a successful outcome.
+Protected code controls permissions, durable state, evaluation, activation, and rollback. Each turn and execution records the exact revision it used. Later inspection does not depend on files that may have changed.
 
-Explicit project work has a shorter path. Noesis can save a useful script or workflow as an inspectable project-local program and use it immediately through `execute`. Reflection can learn from later runs, but evaluation is required only before consolidating that program into broader learned behavior.
-
-Every lasting change should remain open to inspection. You should be able to ask what changed, why it changed, where it applies, which evidence supported it, and how to undo it.
-
-## How it works
-
-Noesis separates behavior that may evolve from code that protects the user and the integrity of the system.
-
-Instructions, knowledge, capabilities, and programs may change. A person or the agent can inspect and edit these resources.
-
-Protected code controls permissions and durable state. It also controls evaluation, activation, and rollback. Generated content may publish project-local scripts and workflows under existing authority, but it cannot change the control plane, approve broader learned behavior, or grant itself more authority.
-
-Noesis records exact revisions when a session or experiment depends on them. This makes it possible to understand which version produced a result and to return to an earlier version.
-
-The harness also separates different ways of extending the agent:
-
-- Tools provide individual capabilities.
-- Skills teach the agent how and when to use its capabilities.
-- Scripts turn useful code into reusable programs.
-- Workflows connect programs into longer work that can pause and resume.
-
-Project-local scripts and workflows are ordinary editable definitions with immutable execution revisions. Saving one publishes it for immediate use through generic runners in the same tool catalog, broker, and permissions as other execution.
-
-Noesis currently runs locally and provides a terminal interface. It uses a language model to interpret, create, reflect, and judge. Dependable code retains control over permissions and changes to active behavior.
-
-## Design principles
-
-- Make something useful in the current session.
-- Learn from past traces and explicit steering.
-- Start every learning at the narrowest useful scope.
-- Preserve the connections between thinking, learning, and making.
-- Keep changes inspectable and reversible.
-- Let generated behavior propose changes, but never approve its own authority.
-- Treat the user as a participant in the evolving system.
-
-## Project status
-
-Noesis is an early research preview. It is ready to run and tinker with, but its interfaces and internal design will continue to change.
-
-Product documentation lives under `docs/`.
-
-The repository includes a local terminal experience, persistent sessions, tools, skills, reusable scripts, durable workflows, and the first complete path from reflection to evaluated and reversible behavior change. Some parts of the intended experience are still easier to inspect in the underlying records than through the interface.
-
-The central research question remains open:
-
-> Can an agent learn from how you steer it and become more useful without drifting or hiding how it changed?
-
-Noesis is an attempt to answer that question by building the complete system and using it.
+Changes remain attributable and reversible. The user can inspect what changed, why it changed, where it applies, and which evidence supported it.
 
 ## Quick start
 
@@ -101,28 +59,31 @@ Noesis requires Node.js 22.19 or newer and pnpm 10.
 ```sh
 pnpm install
 pnpm check
-```
-
-The first launch guides you through choosing a model provider and signing in:
-
-```sh
 pnpm start
 ```
 
-Start a new session with `pnpm start`. Resume a saved session with:
+The first launch guides you through model selection and authentication. A normal start creates a new session.
+
+Choose a prior session interactively:
 
 ```sh
 pnpm start -- --resume
 ```
 
-Continue the most recently active session with:
+Resume an exact session:
+
+```sh
+pnpm start -- --resume SESSION_ID
+```
+
+Continue the most recently active session:
 
 ```sh
 pnpm start -- --continue
 ```
 
-Noesis stores its local state in `~/.noesis` by default.
+Noesis stores local state in `~/.noesis/` by default.
 
----
+## Documentation
 
-> Noesis is being built in public for people who want to do creative work with an agent and tinker with what that agent can become.
+Current product documentation lives in [docs/](docs/README.md). Implementation plans and historical design records live in `plans/` and are not required reading for using Noesis.
