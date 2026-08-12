@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
+import { NoesisConfigSchema } from "@noesis/config";
 import { sha256 } from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { describe, expect, test } from "vitest";
@@ -130,6 +131,73 @@ describe("Noesis CLI grammar", () => {
     expect(shown.output).toContain('"model": "configured-model"');
   });
 
+  test("rejects a provider change that would preserve an incompatible model", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-cli-provider-pair-"));
+    expect((await runCli(["config", "init", "--home", home])).code).toBe(0);
+
+    const changed = await runCli(["config", "set", "--home", home, "--provider", "opencode"]);
+
+    expect(changed.code).toBe(1);
+    expect(changed.output).toContain("Model gpt-5.6-sol belongs to openai-codex, not provider opencode");
+    expect(changed.output).toContain("Choose a matching model with --model");
+    const persisted = NoesisConfigSchema.parse(
+      JSON.parse(await readFile(join(home, "config.json"), "utf8")) as unknown,
+    );
+    expect(persisted.agent).toMatchObject({ provider: "openai-codex", model: "gpt-5.6-sol" });
+  });
+
+  test("rejects an incompatible runtime selection before creating workspace state", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-cli-runtime-pair-"));
+
+    const result = await runCli(["inspect", "--home", home, "--provider", "anthropic"]);
+
+    expect(result.code).toBe(1);
+    expect(result.output).toContain("Model gpt-5.6-sol belongs to openai-codex, not provider anthropic");
+    await expect(readFile(join(home, "database", "noesis.sqlite"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  test("accepts a custom OpenRouter model absent from Pi's static catalog", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-cli-custom-openrouter-"));
+    expect((await runCli(["config", "init", "--home", home])).code).toBe(0);
+
+    const changed = await runCli([
+      "config",
+      "set",
+      "--home",
+      home,
+      "--provider",
+      "openrouter",
+      "--model",
+      "research-lab/future-model",
+    ]);
+
+    expect(changed.code).toBe(0);
+    const persisted = NoesisConfigSchema.parse(
+      JSON.parse(await readFile(join(home, "config.json"), "utf8")) as unknown,
+    );
+    expect(persisted.agent).toMatchObject({
+      provider: "openrouter",
+      model: "research-lab/future-model",
+    });
+  });
+
+  test("rejects a thinking-level update when it would preserve an invalid provider-model pair", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-cli-invalid-persisted-pair-"));
+    const invalid = {
+      schemaVersion: 1,
+      agent: { provider: "opencode", model: "gpt-5.6-sol", thinkingLevel: "low" },
+    };
+    await writeFile(join(home, "config.json"), JSON.stringify(invalid));
+
+    const changed = await runCli(["config", "set", "--home", home, "--thinking-level", "high"]);
+
+    expect(changed.code).toBe(1);
+    expect(changed.output).toContain("Model gpt-5.6-sol belongs to openai-codex, not provider opencode");
+    expect(JSON.parse(await readFile(join(home, "config.json"), "utf8")) as unknown).toEqual(invalid);
+  });
+
   test("documents continue ordering and strict non-interactive semantics in help", async () => {
     const result = await runCli(["--help"]);
 
@@ -137,6 +205,7 @@ describe("Noesis CLI grammar", () => {
     expect(result.output).toContain("Defaults to ~/.noesis");
     expect(result.output).toContain("--home PATH overrides NOESIS_HOME");
     expect(result.output).toContain("Codex default: gpt-5.6-sol");
+    expect(result.output).toContain("Pair with --model when changing providers");
     expect(result.output).toContain("Reasoning level (default: high)");
     expect(result.output).toContain("noesis --continue");
     expect(result.output).toContain("single most recently active session");

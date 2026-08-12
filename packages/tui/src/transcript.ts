@@ -203,9 +203,25 @@ export interface TranscriptRenderer {
   readonly metrics: () => TranscriptRenderMetrics;
 }
 
-export const EMPTY_TRANSCRIPT_HINT = "A clear question is a good place to begin.";
+export const EMPTY_TRANSCRIPT_HINTS = Object.freeze([
+  "What are you thinking about?",
+  "What do you want to understand, make, or change?",
+  "Bring a question, a half-formed idea, or a concrete task.",
+  "What are you working on?",
+  "Start anywhere. We can sharpen the question together.",
+] as const);
 
-export function createTranscriptRenderer(): TranscriptRenderer {
+export function selectEmptyTranscriptHint(randomValue = Math.random()): string {
+  const bounded = Number.isFinite(randomValue) ? Math.min(Math.max(randomValue, 0), 1) : 0;
+  const index = Math.min(
+    EMPTY_TRANSCRIPT_HINTS.length - 1,
+    Math.floor(bounded * EMPTY_TRANSCRIPT_HINTS.length),
+  );
+  return EMPTY_TRANSCRIPT_HINTS[index] ?? EMPTY_TRANSCRIPT_HINTS[0];
+}
+
+export function createTranscriptRenderer(random: () => number = Math.random): TranscriptRenderer {
+  const emptyTranscriptHint = selectEmptyTranscriptHint(random());
   const cache = new WeakMap<
     TuiTimelineEntry,
     { readonly key: string; readonly block: RenderedTimelineBlock }
@@ -262,7 +278,7 @@ export function createTranscriptRenderer(): TranscriptRenderer {
     render(state, width, maxBodyRows = DEFAULT_EXPANDED_BODY_ROWS) {
       if (width <= 0) return [];
       if (state.timeline.length === 0)
-        return [elideText(styled(state.colorEnabled, ANSI.dim, EMPTY_TRANSCRIPT_HINT), width)];
+        return [elideText(styled(state.colorEnabled, ANSI.dim, emptyTranscriptHint), width)];
       const actions = timelineActions(state.timeline);
       return state.timeline.flatMap((entry, index) => {
         // Nested codemode calls read as a list under their parent, so they are not separated.

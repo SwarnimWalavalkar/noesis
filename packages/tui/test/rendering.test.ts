@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   createSafeEditor,
   createTranscriptRenderer,
+  EMPTY_TRANSCRIPT_HINTS,
   executionIdOf,
   formatDuration,
   initialTuiState,
@@ -14,6 +15,7 @@ import {
   renderMessageBlock,
   renderNoesisState,
   renderRichText,
+  selectEmptyTranscriptHint,
   safeTerminalText,
   sanitizeEditorText,
   streamingFrameDelay,
@@ -266,6 +268,32 @@ describe("Noesis transcript rendering", () => {
     };
     return { execute, read, write, all: [execute, read, write] };
   };
+
+  test("selects one empty-state hint per renderer and keeps it stable across repaint", () => {
+    const state = initialTuiState("fake");
+    const renderer = createTranscriptRenderer(() => 0.41);
+
+    const first = renderer.render(state, 80);
+    const resized = renderer.render(state, 32);
+
+    expect(first).toEqual([EMPTY_TRANSCRIPT_HINTS[2]]);
+    expect(resized).toEqual([selectEmptyTranscriptHint(0.41).slice(0, 31) + "…"]);
+    expect(createTranscriptRenderer(() => 0).render(state, 80)).toEqual([EMPTY_TRANSCRIPT_HINTS[0]]);
+    expect(createTranscriptRenderer(() => 0.999).render(state, 80)).toEqual([EMPTY_TRANSCRIPT_HINTS.at(-1)]);
+  });
+
+  test("does not show an empty-state hint once the transcript has content", () => {
+    const rendered = createTranscriptRenderer(() => 0).render(
+      {
+        ...initialTuiState("fake"),
+        timeline: [{ kind: "message", role: "user", text: "Begin." }],
+      },
+      80,
+    );
+
+    expect(rendered.join("\n")).toContain("Begin.");
+    expect(rendered.join("\n")).not.toContain(EMPTY_TRANSCRIPT_HINTS[0]);
+  });
 
   test("collapses each codemode call to one summarized row", () => {
     const { execute, read, write, all } = codemodeActions();

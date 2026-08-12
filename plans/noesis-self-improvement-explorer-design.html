@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Noesis self-improvement explorer</title>
+  <style>
+    :root { color-scheme: dark; --bg: #090a0c; --panel: #111318; --text: #f2f0e9; --muted: #9a9da6; --line: #292d35; --accent: #d0a8ff; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 52px 24px; background: var(--bg); color: var(--text); font: 16px/1.65 ui-sans-serif, system-ui; }
+    main { max-width: 980px; margin: auto; }
+    h1 { margin: .2em 0; font-size: clamp(34px, 7vw, 68px); line-height: 1; }
+    h2 { margin-top: 2.4em; }
+    code, .tag { font-family: ui-monospace, monospace; }
+    .tag { color: var(--accent); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+    .lead { max-width: 800px; color: #d7d4cc; font-size: 21px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .card { padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+    .muted { color: var(--muted); }
+    li { margin: .55em 0; }
+    .decision { padding-left: 18px; border-left: 3px solid var(--accent); }
+    pre { overflow: auto; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+  </style>
+</head>
+<body><main>
+  <div class="tag">Design workshop · open</div>
+  <h1>The changes Noesis has made to itself</h1>
+  <p class="lead">The user should be able to browse what changed, why it changed, where it applies, whether it helped, and how to reverse it.</p>
+
+  <section><h2>Current surface</h2>
+    <p>The existing <code>/learning</code> command shows session activity and the current project strategy as flat text. The durable system already contains much more: evidence, experiments, authored revisions, preflight, activation, feedback, outcomes, and reversals.</p>
+  </section>
+
+  <section><h2>Smallest coherent product</h2>
+    <p class="decision">Build an inspect-only Changes browser as a TUI overlay. Its default shows changes currently applicable in the active project, plus pending or evaluating changes that originated here before their applicability is settled. Origin remains visible but secondary to where a change can affect work.</p>
+    <div class="grid">
+      <div class="card"><strong>List</strong><p class="muted">Chronology, short title, applicability, current state, kind, latest outcome, and origin.</p></div>
+      <div class="card"><strong>Detail</strong><p class="muted">Observation, intended future use, applicability, origin, evidence, exact revision, evaluation, activation, feedback, and current status.</p></div>
+      <div class="card"><strong>Raw view</strong><p class="muted">Authorized resolvers expose exact IDs and bounded, sensitivity-redacted stored records. Missing authority, provenance, or access fails closed instead of showing guessed or unredacted data.</p></div>
+    </div>
+  </section>
+
+  <section><h2>Information architecture questions</h2><ol>
+    <li>Which secondary filters should expose changes from this project that no longer apply here, or all personal changes regardless of origin?</li>
+    <li>Should project strategies and durable capability revisions share one list but different detail templates?</li>
+    <li>Do we show only material changes, while keeping <code>no_change</code> and routine jobs under diagnostics?</li>
+    <li>After the inspect-only version, which protected action should ship first: unapply a project strategy, contest a lesson, or revert a durable revision?</li>
+    <li>Should filters and diagnostics stay in the overlay or receive their own command arguments?</li>
+    <li>How should the TUI explain a change whose evaluation is still running without pinning transient status into the transcript?</li>
+  </ol></section>
+
+  <section><h2>Interaction sketch</h2>
+    <p><code>/changes</code> opens the list. <code>/change &lt;id&gt;</code> opens one exact change. <code>/learning pause|resume</code> remains the control surface for ambient learning and is not repurposed as a browser.</p>
+    <pre><code>CHANGES · current project
+
+  active       Review claims against observable state
+  evaluating   Prefer narrow research questions before broad plans
+
+↑/↓ select · enter inspect · f filter · esc close</code></pre>
+    <p class="muted">A secondary history filter shows settled, superseded, and reverted changes that no longer apply here.</p>
+  </section>
+
+  <section><h2>Read-model boundary</h2>
+    <p class="muted">The application composes one read model across authoritative adjustments, experiments, revisions, evaluation, activation, and feedback. It derives origin project through exact links to the source adjustment or source turn's frozen <code>ProjectRef</code>. Applicability remains a separate field from experiment or capability scope. The read model creates no second durable Change authority. The TUI renders it and owns no durable state. Missing links remain visible as incomplete data rather than being guessed from activity history.</p>
+    <ul>
+      <li>Adjustment content comes from immutable working-adjustment rows; whether it is current comes from the active project binding.</li>
+      <li>Hypothesis, experiment state, source adjustment, and final outcome come from the authoritative experiment row.</li>
+      <li>Candidate material comes from immutable capability and file revisions. Evaluation evidence comes from trial, report, and evaluation rows.</li>
+      <li>Currently served durable behavior comes from activation state. Feedback comes from authoritative signals and outcomes.</li>
+      <li>Origin comes from the source adjustment or frozen source-turn <code>ProjectRef</code>. Coordinator jobs supply diagnostic progress only.</li>
+      <li>Current state and outcomes are never reconstructed from activity chronology, notices, or job history.</li>
+    </ul>
+  </section>
+
+  <section><h2>Future protected actions</h2>
+    <p class="muted">A later unapply, contest, or revert control emits an application intent with the exact target revision and expected current state. AuthorityBoundary and EffectGateway validate and execute it as a durable operation. The overlay never writes operational tables, mints authority, or treats an optimistic UI update as completion.</p>
+  </section>
+</main></body>
+</html>
