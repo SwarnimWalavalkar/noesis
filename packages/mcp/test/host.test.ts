@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -17,6 +17,69 @@ const emptyCredentials = (): McpOAuthCredentialStore => ({
 });
 
 describe("MCP host", () => {
+  test("closing during an in-flight connection leaves no installed client or stdio child", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-close-race-"));
+    const home = join(root, "home");
+    const marker = join(root, "started.pid");
+    await writeMcpServer({
+      home,
+      projectDirectory: root,
+      scope: "project",
+      name: "controlled",
+      config: {
+        type: "local",
+        command: process.execPath,
+        args: [fixture],
+        timeout: 5_000,
+        environment: {
+          CONTROLLED_STARTUP_DELAY: "NOESIS_MCP_STARTUP_DELAY",
+          CONTROLLED_STARTUP_MARKER: "NOESIS_MCP_STARTUP_MARKER",
+        },
+      },
+    });
+    const connections: string[] = [];
+    const manager = createMcpHostManager({
+      home,
+      projectDirectory: root,
+      config: await loadMcpConfig({ home, projectDirectory: root }),
+      credentials: emptyCredentials(),
+      environment: {
+        NOESIS_MCP_STARTUP_DELAY: "1000",
+        NOESIS_MCP_STARTUP_MARKER: marker,
+      },
+      handlers: {
+        sample: async () => ({
+          role: "assistant",
+          model: "controlled",
+          stopReason: "endTurn",
+          content: { type: "text", text: "ok" },
+        }),
+        elicit: async () => ({ action: "decline" }),
+        onOAuthRedirect: () => undefined,
+        onEvent: (event) => {
+          if (event.type === "connection") connections.push(JSON.stringify(event.payload));
+        },
+      },
+    });
+
+    const start = manager.start();
+    await vi.waitFor(async () => expect(await readFile(marker, "utf8")).toMatch(/^\d+\n$/u), {
+      timeout: 5_000,
+    });
+    const childPid = Number((await readFile(marker, "utf8")).trim());
+    await manager.close();
+    await start;
+
+    expect(manager.listServers()).toEqual([]);
+    expect(manager.listTools()).toEqual([]);
+    expect(connections.some((payload) => payload.includes('"connected"'))).toBe(false);
+    await manager.reconnect("controlled");
+    expect(manager.listServers()).toEqual([]);
+    await vi.waitFor(() => {
+      expect(() => process.kill(childPid, 0)).toThrow();
+    });
+  });
+
   test("discovers and invokes the complete ordinary capability surface through stdio", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-mcp-host-"));
     await writeMcpServer({

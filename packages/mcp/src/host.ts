@@ -172,6 +172,13 @@ interface Connection {
   diagnostics: McpDiagnostic[];
 }
 
+interface ConnectionAttempt {
+  readonly connection: Connection;
+  readonly client: Client;
+  readonly transport: Transport | RemoteTransport;
+  readonly taskStore: InMemoryTaskStore;
+}
+
 interface ResourceSubscriptions {
   readonly serverIdentityDigest: string;
   readonly uris: Set<string>;
@@ -405,6 +412,8 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
   let activeConfig = input.config;
   let closing = false;
   const connections = new Map<string, Connection>();
+  const connectionAttempts = new Set<ConnectionAttempt>();
+  const inFlightConnects = new Set<Promise<void>>();
   const pendingOAuthTransports = new Map<string, RemoteTransport>();
   const resourceSubscriptions = new Map<string, ResourceSubscriptions>();
   const interactiveAuthentication = new Set<string>();
@@ -678,10 +687,10 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     scheduleReconnect(connection);
   };
 
-  const createClient = (connection: Connection): Client => {
-    connection.taskStore?.cleanup();
+  const createClient = (
+    connection: Connection,
+  ): Readonly<{ client: Client; taskStore: InMemoryTaskStore }> => {
     const taskStore = new InMemoryTaskStore();
-    connection.taskStore = taskStore;
     const markDirty = (): void => {
       connection.dirty = true;
       void emit(connection.server.name, "catalog_changed", { dirty: true });
@@ -761,7 +770,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     client.setNotificationHandler(ElicitationCompleteNotificationSchema, async (notification) => {
       await emit(connection.server.name, "elicitation_complete", notification.params as JsonValue);
     });
-    return client;
+    return { client, taskStore };
   };
 
   const remoteTransports = (
@@ -817,6 +826,32 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
   };
 
   async function connect(server: ScopedMcpServer): Promise<void> {
+    if (closing) return;
+    const operation = performConnect(server);
+    inFlightConnects.add(operation);
+    try {
+      await operation;
+    } finally {
+      inFlightConnects.delete(operation);
+    }
+  }
+
+  const closeConnectionAttempt = async (attempt: ConnectionAttempt): Promise<void> => {
+    connectionAttempts.delete(attempt);
+    if (attempt.connection.client === attempt.client) {
+      attempt.connection.client = undefined;
+      attempt.connection.transport = undefined;
+    }
+    if (attempt.connection.taskStore === attempt.taskStore) {
+      attempt.connection.taskStore = undefined;
+    }
+    await attempt.client.close().catch(() => undefined);
+    await attempt.transport.close().catch(() => undefined);
+    attempt.taskStore.cleanup();
+  };
+
+  async function performConnect(server: ScopedMcpServer): Promise<void> {
+    if (closing) return;
     const connection: Connection = connections.get(server.name) ?? {
       server,
       status: "connecting",
@@ -835,6 +870,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       intentionalClose: false,
       diagnostics: [],
     };
+    if (closing) return;
     connections.set(server.name, connection);
     if (server.config.enabled === false) {
       connection.status = "disabled";
@@ -883,33 +919,58 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     }
     let lastError: unknown;
     for (const transport of transports) {
-      const client = createClient(connection);
+      const { client, taskStore } = createClient(connection);
+      const attempt: ConnectionAttempt = { connection, client, transport, taskStore };
+      connectionAttempts.add(attempt);
+      const isCurrent = (): boolean =>
+        !closing && !connection.intentionalClose && connections.get(connection.server.name) === connection;
       try {
         await client.connect(transport as Transport, { timeout: server.config.timeout ?? DEFAULT_TIMEOUT });
+        if (!isCurrent()) {
+          await closeConnectionAttempt(attempt);
+          return;
+        }
         connection.client = client;
         connection.transport = transport;
+        connection.taskStore?.cleanup();
+        connection.taskStore = taskStore;
         connection.status = "connected";
         await refreshCatalog(connection);
+        if (!isCurrent() || connection.client !== client) {
+          await closeConnectionAttempt(attempt);
+          return;
+        }
         await restoreResourceSubscriptions(connection);
+        if (!isCurrent() || connection.client !== client) {
+          await closeConnectionAttempt(attempt);
+          return;
+        }
         connection.reconnectAttempts = 0;
         if (connection.reconnectTimer) clearTimeout(connection.reconnectTimer);
         connection.reconnectTimer = undefined;
         await emit(server.name, "connection", { status: "connected" });
+        connectionAttempts.delete(attempt);
         return;
       } catch (error) {
         lastError = error;
+        if (!isCurrent()) {
+          await closeConnectionAttempt(attempt);
+          return;
+        }
         if (connection.client === client) {
           connection.client = undefined;
           connection.transport = undefined;
         }
+        if (connection.taskStore === taskStore) connection.taskStore = undefined;
         if (error instanceof UnauthorizedError && server.config.type === "remote") {
+          connectionAttempts.delete(attempt);
           await replacePendingOAuthTransport(server.name, transport as RemoteTransport);
           connection.status = "auth_required";
           connection.lastError = error.message;
           await emit(server.name, "connection", { status: "auth_required" });
           return;
         }
-        await transport.close().catch(() => undefined);
+        await closeConnectionAttempt(attempt);
       }
     }
     connection.status = "failed";
@@ -926,6 +987,11 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     connection.intentionalClose = true;
     if (connection.reconnectTimer) clearTimeout(connection.reconnectTimer);
     connection.reconnectTimer = undefined;
+    await Promise.all(
+      [...connectionAttempts]
+        .filter((attempt) => attempt.connection === connection)
+        .map(closeConnectionAttempt),
+    );
     await connection.transport?.close().catch(() => undefined);
     connection.client = undefined;
     connection.transport = undefined;
@@ -952,6 +1018,8 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
   const close = async (): Promise<void> => {
     closing = true;
     await Promise.all([...connections.keys()].map(disconnect));
+    await Promise.all([...connectionAttempts].map(closeConnectionAttempt));
+    await Promise.allSettled([...inFlightConnects]);
     await Promise.all([...pendingOAuthTransports.keys()].map(closePendingOAuthTransport));
     connections.clear();
     resourceSubscriptions.clear();
