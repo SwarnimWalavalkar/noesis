@@ -101,64 +101,54 @@ async function managerFor(
   });
 }
 
+async function unauthorizedOAuthManager(callbackPort: number) {
+  const root = await mkdtemp(join(tmpdir(), "noesis-mcp-oauth-lifecycle-"));
+  const home = join(root, "home");
+  await writeMcpServer({
+    home,
+    projectDirectory: root,
+    scope: "project",
+    name: "remote",
+    config: {
+      type: "remote",
+      url: "https://example.test/mcp",
+      transport: "streamable_http",
+      oauth: { redirectUri: `http://127.0.0.1:${String(callbackPort)}/oauth/callback` },
+    },
+  });
+  return createMcpHostManager({
+    home,
+    projectDirectory: root,
+    config: await loadMcpConfig({ home, projectDirectory: root }),
+    credentials: {
+      read: async () => undefined,
+      write: async () => undefined,
+      update: async () => undefined,
+      delete: async () => undefined,
+      deleteIf: async () => undefined,
+    },
+    handlers: {
+      connect: async () => {
+        throw new UnauthorizedError("authentication required");
+      },
+      sample: async () => ({
+        role: "assistant",
+        model: "controlled",
+        content: { type: "text", text: "ok" },
+      }),
+      elicit: async () => ({ action: "decline" }),
+      onOAuthRedirect: () => undefined,
+    },
+  });
+}
+
 describe("remote MCP transports", () => {
-  test("closes and awaits an active OAuth callback listener during host shutdown", async () => {
-    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-oauth-shutdown-"));
-    const home = join(root, "home");
+  test("aborts callback listener startup during host shutdown", async () => {
     const callbackPort = await availablePort();
-    await writeMcpServer({
-      home,
-      projectDirectory: root,
-      scope: "project",
-      name: "remote",
-      config: {
-        type: "remote",
-        url: "https://example.test/mcp",
-        transport: "streamable_http",
-        oauth: { redirectUri: `http://127.0.0.1:${String(callbackPort)}/oauth/callback` },
-      },
-    });
-    let authRequired: (() => void) | undefined;
-    const authRequiredEvent = new Promise<void>((resolve) => {
-      authRequired = resolve;
-    });
-    const manager = createMcpHostManager({
-      home,
-      projectDirectory: root,
-      config: await loadMcpConfig({ home, projectDirectory: root }),
-      credentials: {
-        read: async () => undefined,
-        write: async () => undefined,
-        update: async () => undefined,
-        delete: async () => undefined,
-        deleteIf: async () => undefined,
-      },
-      handlers: {
-        connect: async () => {
-          throw new UnauthorizedError("authentication required");
-        },
-        sample: async () => ({
-          role: "assistant",
-          model: "controlled",
-          content: { type: "text", text: "ok" },
-        }),
-        elicit: async () => ({ action: "decline" }),
-        onOAuthRedirect: () => undefined,
-        onEvent: (event) => {
-          if (
-            event.type === "connection" &&
-            typeof event.payload === "object" &&
-            event.payload !== null &&
-            Reflect.get(event.payload, "status") === "auth_required"
-          )
-            authRequired?.();
-        },
-      },
-    });
+    const manager = await unauthorizedOAuthManager(callbackPort);
 
     const authentication = manager.authenticate("remote", { timeout: 30_000 });
     void authentication.catch(() => undefined);
-    await authRequiredEvent;
     await manager.close();
     await expect(authentication).rejects.toThrow("MCP host closed during OAuth authentication");
 
@@ -170,6 +160,35 @@ describe("remote MCP transports", () => {
         rebound.listen(callbackPort, "127.0.0.1", resolve);
       }),
     ).resolves.toBeUndefined();
+  });
+
+  test("keeps the replacement OAuth flow active when the older flow cleans up", async () => {
+    const callbackPort = await availablePort();
+    const manager = await unauthorizedOAuthManager(callbackPort);
+    const first = manager.authenticate("remote", { timeout: 30_000 });
+    void first.catch(() => undefined);
+    await vi.waitFor(async () => {
+      expect((await fetch(`http://127.0.0.1:${String(callbackPort)}/not-the-callback`)).status).toBe(404);
+    });
+
+    const second = manager.authenticate("remote", { timeout: 30_000 });
+    void second.catch(() => undefined);
+    await expect(first).rejects.toThrow("was replaced");
+    await vi.waitFor(async () => {
+      expect((await fetch(`http://127.0.0.1:${String(callbackPort)}/not-the-callback`)).status).toBe(404);
+      expect(manager.inspectServer("remote")?.status).toBe("auth_required");
+    });
+
+    let finishError: unknown;
+    try {
+      await manager.finishAuthentication("remote", "controlled-code");
+    } catch (error) {
+      finishError = error;
+    }
+    expect(finishError instanceof Error ? finishError.message : "").not.toContain("no pending OAuth flow");
+
+    await manager.close();
+    await expect(second).rejects.toThrow("MCP host closed during OAuth authentication");
   });
 
   test("serves an accepted OAuth callback over IPv6 loopback", async () => {

@@ -530,6 +530,58 @@ describe("tool broker", () => {
     expect(sequence).toEqual(["artifact-settled", "primary-settled"]);
   });
 
+  it("never hands an oversized unprepared result to durable authority persistence", async () => {
+    const persisted: JsonValue[] = [];
+    const authority: Pick<AuthorityBoundary, "runForeground"> = Object.freeze({
+      runForeground: async <T extends JsonValue>(
+        request: Parameters<AuthorityBoundary["runForeground"]>[0],
+      ): Promise<EffectDecision<T>> => {
+        try {
+          const value = (await request.execute(receiptFor(request))) as T;
+          persisted.push(value);
+          return Object.freeze({ ok: true, value, replayed: false });
+        } catch (error) {
+          const failure = inspectEffectExecutionFailure(error);
+          return Object.freeze({
+            ok: false,
+            code: failure?.code ?? ("failed" as const),
+            reason: failure?.message ?? (error instanceof Error ? error.message : String(error)),
+          });
+        }
+      },
+    });
+    const resultTool = (name: string, result: string): ToolDefinition =>
+      defineTool({
+        name,
+        label: name,
+        description: `Return ${name}`,
+        visibility: "codemode_only",
+        inputSchema: z.strictObject({}),
+        outputSchema: z.string(),
+        effect: () => ({ effect: "read", resource: name, estimatedCost: 0 }),
+        execute: async () => result,
+      });
+    const broker = createToolBroker({
+      definitions: [
+        resultTool("test.unprepared-small", "small"),
+        resultTool("test.unprepared-large", "x".repeat(300 * 1024)),
+      ],
+      authority,
+      permission,
+      prepareResultForPersistence: async () => undefined,
+    });
+
+    await expect(broker.invoke("test.unprepared-large", {}, invocationContext())).resolves.toMatchObject({
+      ok: false,
+      code: "result_too_large",
+    });
+    await expect(broker.invoke("test.unprepared-small", {}, invocationContext())).resolves.toMatchObject({
+      ok: true,
+      value: "small",
+    });
+    expect(persisted).toEqual(["small"]);
+  });
+
   it("settles a valid effect before reporting a protocol-owned tool failure", async () => {
     const details = toJsonValue({
       content: Object.freeze([Object.freeze({ type: "text", text: "remote failure" })]),

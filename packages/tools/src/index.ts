@@ -560,7 +560,15 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
                 : String(error);
           throw createEffectExecutionFailure("invalid_output", `Tool returned invalid output: ${detail}`);
         }
-        if (!options.prepareResultForPersistence) return output;
+        const requireBoundedResult = (value: JsonValue): JsonValue => {
+          if (Buffer.byteLength(JSON.stringify(value), "utf8") > MAX_TOOL_RESULT_BYTES)
+            throw createEffectExecutionFailure(
+              "result_too_large",
+              `Tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`,
+            );
+          return value;
+        };
+        if (!options.prepareResultForPersistence) return requireBoundedResult(output);
         let prepared: JsonValue | undefined;
         try {
           prepared = await options.prepareResultForPersistence(name, output, context);
@@ -569,12 +577,10 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
             `Tool result persistence preparation failed: ${error instanceof Error ? error.message : String(error)}`,
           );
         }
-        if (prepared === undefined) return output;
+        if (prepared === undefined) return requireBoundedResult(output);
+        let projected: JsonValue;
         try {
-          const projected = JsonValueSchema.parse(prepared);
-          if (Buffer.byteLength(JSON.stringify(projected), "utf8") > MAX_TOOL_RESULT_BYTES)
-            throw new Error(`Durable tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`);
-          return projected;
+          projected = JsonValueSchema.parse(prepared);
         } catch (error) {
           const detail =
             error instanceof z.ZodError
@@ -587,6 +593,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
             `Tool result persistence projection is invalid: ${detail}`,
           );
         }
+        return requireBoundedResult(projected);
       },
     });
     const decision = await options.authority.runForeground(request, permission);

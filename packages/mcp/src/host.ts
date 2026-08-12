@@ -215,6 +215,17 @@ interface ResourceSubscriptions {
   readonly uris: Set<string>;
 }
 
+interface ActiveAuthentication {
+  readonly controller: AbortController;
+  readonly settled: Promise<void>;
+  readonly settle: () => void;
+}
+
+interface PendingOAuthTransport {
+  readonly transport: RemoteTransport;
+  readonly owner: ActiveAuthentication | undefined;
+}
+
 type RemoteTransport = StreamableHTTPClientTransport | SSEClientTransport;
 
 const EMPTY_CATALOG: Catalog = Object.freeze({
@@ -446,16 +457,10 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
   const connectionGenerations = new Map<string, number>();
   const connectionAttempts = new Set<ConnectionAttempt>();
   const inFlightConnects = new Set<Promise<void>>();
-  const pendingOAuthTransports = new Map<string, RemoteTransport>();
+  const pendingOAuthTransports = new Map<string, PendingOAuthTransport>();
   const resourceSubscriptions = new Map<string, ResourceSubscriptions>();
-  const interactiveAuthentication = new Set<string>();
-  const activeAuthentications = new Set<
-    Readonly<{ controller: AbortController; settled: Promise<void>; settle: () => void }>
-  >();
-  const latestAuthenticationByServer = new Map<
-    string,
-    Readonly<{ controller: AbortController; settled: Promise<void>; settle: () => void }>
-  >();
+  const activeAuthentications = new Set<ActiveAuthentication>();
+  const latestAuthenticationByServer = new Map<string, ActiveAuthentication>();
   const credentialKey = (server: ScopedMcpServer): string =>
     server.scope === "global"
       ? `global:${server.name}`
@@ -491,18 +496,21 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     });
   };
 
-  const closePendingOAuthTransport = async (name: string): Promise<void> => {
+  const closePendingOAuthTransport = async (name: string, owner?: ActiveAuthentication): Promise<void> => {
     const pending = pendingOAuthTransports.get(name);
-    if (!pending) return;
+    if (!pending || (owner && pending.owner !== owner)) return;
     pendingOAuthTransports.delete(name);
-    await pending.close().catch(() => undefined);
+    await pending.transport.close().catch(() => undefined);
   };
 
   const replacePendingOAuthTransport = async (name: string, transport: RemoteTransport): Promise<void> => {
     const previous = pendingOAuthTransports.get(name);
-    if (previous === transport) return;
-    pendingOAuthTransports.set(name, transport);
-    await previous?.close().catch(() => undefined);
+    if (previous?.transport === transport) return;
+    pendingOAuthTransports.set(name, {
+      transport,
+      owner: latestAuthenticationByServer.get(name),
+    });
+    await previous?.transport.close().catch(() => undefined);
   };
 
   const withInvocation = async <Result>(
@@ -867,6 +875,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     server: ScopedMcpServer,
     config: McpRemoteServerConfig,
   ): readonly RemoteTransport[] => {
+    const authentication = latestAuthenticationByServer.get(server.name);
     const oauth = config.oauth === false ? undefined : config.oauth;
     const oauthConfig = typeof oauth === "object" ? oauth : undefined;
     const redirectUrl =
@@ -885,7 +894,9 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
             ...(oauthConfig ? { config: oauthConfig } : {}),
             credentialStore: input.credentials,
             onRedirect: async (redirect) => {
-              if (interactiveAuthentication.has(server.name)) await input.handlers.onOAuthRedirect(redirect);
+              if (authentication && latestAuthenticationByServer.get(server.name) === authentication) {
+                await input.handlers.onOAuthRedirect(redirect);
+              }
             },
             environment: input.environment ?? process.env,
           });
@@ -1103,7 +1114,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
           connectionAttempts.delete(attempt);
           await replacePendingOAuthTransport(server.name, transport as RemoteTransport);
           if (!isCurrent()) {
-            if (pendingOAuthTransports.get(server.name) === transport) {
+            if (pendingOAuthTransports.get(server.name)?.transport === transport) {
               pendingOAuthTransports.delete(server.name);
               await transport.close().catch(() => undefined);
             }
@@ -1177,7 +1188,9 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     await Promise.all([...connections.keys()].map(disconnect));
     await Promise.all([...connectionAttempts].map(closeConnectionAttempt));
     await Promise.allSettled([...inFlightConnects]);
-    await Promise.all([...pendingOAuthTransports.keys()].map(closePendingOAuthTransport));
+    await Promise.all(
+      [...pendingOAuthTransports.keys()].map(async (name) => await closePendingOAuthTransport(name)),
+    );
     connections.clear();
     resourceSubscriptions.clear();
   };
@@ -1248,16 +1261,27 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     );
   };
 
-  const finishAuthentication = async (name: string, authorizationCode: string): Promise<void> => {
-    const transport = pendingOAuthTransports.get(name);
-    if (!transport) throw new Error(`MCP server ${JSON.stringify(name)} has no pending OAuth flow`);
+  const finishAuthenticationFor = async (
+    name: string,
+    authorizationCode: string,
+    owner?: ActiveAuthentication,
+  ): Promise<void> => {
+    const pending = pendingOAuthTransports.get(name);
+    if (!pending || (owner && pending.owner !== owner)) {
+      throw new Error(`MCP server ${JSON.stringify(name)} has no pending OAuth flow`);
+    }
     try {
-      await transport.finishAuth(authorizationCode);
+      await pending.transport.finishAuth(authorizationCode);
     } finally {
-      await closePendingOAuthTransport(name);
+      await closePendingOAuthTransport(name, owner);
+    }
+    if (owner && latestAuthenticationByServer.get(name) !== owner) {
+      throw new Error(`MCP OAuth authentication for ${name} was replaced`);
     }
     await reconnect(name);
   };
+  const finishAuthentication = async (name: string, authorizationCode: string): Promise<void> =>
+    await finishAuthenticationFor(name, authorizationCode);
 
   const authenticate: McpHostManager["authenticate"] = async (name, options) => {
     if (closing) throw new Error("MCP host is closed");
@@ -1302,7 +1326,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       ?.controller.abort(new Error(`MCP OAuth authentication for ${name} was replaced`));
     activeAuthentications.add(authentication);
     latestAuthenticationByServer.set(name, authentication);
-    interactiveAuthentication.add(name);
     try {
       let callbackTimer: NodeJS.Timeout | undefined;
       let abortCallback: (() => void) | undefined;
@@ -1372,8 +1395,31 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       void callback.catch(() => undefined);
       if (authenticationController.signal.aborted) await callback;
       await new Promise<void>((resolve, reject) => {
-        listener.once("listening", resolve);
-        listener.once("error", reject);
+        const cleanup = (): void => {
+          listener.removeListener("listening", onListening);
+          listener.removeListener("error", onError);
+          authenticationController.signal.removeEventListener("abort", onAbort);
+        };
+        const onListening = (): void => {
+          cleanup();
+          resolve();
+        };
+        const onError = (error: Error): void => {
+          cleanup();
+          reject(error);
+        };
+        const onAbort = (): void => {
+          cleanup();
+          listener.close();
+          reject(authenticationController.signal.reason ?? new Error("MCP OAuth was cancelled"));
+        };
+        listener.once("listening", onListening);
+        listener.once("error", onError);
+        if (authenticationController.signal.aborted) {
+          onAbort();
+          return;
+        }
+        authenticationController.signal.addEventListener("abort", onAbort, { once: true });
         listener.listen(port, callbackHost);
       });
       try {
@@ -1383,7 +1429,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         if (status !== "auth_required")
           throw new Error(`MCP server ${name} could not start OAuth authentication (${status ?? "missing"})`);
         const code = await callback;
-        await finishAuthentication(name, code);
+        await finishAuthenticationFor(name, code, authentication);
       } finally {
         if (callbackTimer) clearTimeout(callbackTimer);
         if (abortCallback) authenticationController.signal.removeEventListener("abort", abortCallback);
@@ -1391,13 +1437,15 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       }
     } finally {
       options?.signal?.removeEventListener("abort", cancelAuthentication);
-      authentication.settle();
-      activeAuthentications.delete(authentication);
-      if (latestAuthenticationByServer.get(name) === authentication) {
-        latestAuthenticationByServer.delete(name);
+      try {
+        if (latestAuthenticationByServer.get(name) === authentication) {
+          latestAuthenticationByServer.delete(name);
+        }
+        await closePendingOAuthTransport(name, authentication);
+      } finally {
+        activeAuthentications.delete(authentication);
+        authentication.settle();
       }
-      interactiveAuthentication.delete(name);
-      await closePendingOAuthTransport(name);
     }
   };
 
