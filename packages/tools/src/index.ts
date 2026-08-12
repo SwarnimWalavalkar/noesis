@@ -377,6 +377,16 @@ export interface CreateToolBrokerOptions {
   readonly permission: PermissionManifest;
   readonly recorder?: ToolInvocationRecorder;
   readonly now?: () => Date;
+  /**
+   * Pure projection stored as the durable effect result. On a fresh execution, post-effect
+   * materialization still receives the validated original value after the authority settles.
+   * Replays receive this projection because the original value is intentionally not durable.
+   */
+  readonly projectResultForPersistence?: (
+    name: string,
+    value: JsonValue,
+    context: ToolExecutionContext,
+  ) => JsonValue;
   /** Post-effect storage seam. Runs only after AuthorityBoundary has settled the tool effect successfully. */
   readonly materializeResult?: (
     name: string,
@@ -521,6 +531,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         effect,
       }),
     );
+    let freshResult: { readonly value: JsonValue } | undefined;
     const request: Omit<EffectRequest<JsonValue>, "principal"> = Object.freeze({
       operationId: `operation_${sha256(`${callId}:${requestDigest}`)}`,
       effect: effect.effect,
@@ -555,7 +566,25 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
                 : String(error);
           throw createEffectExecutionFailure("invalid_output", `Tool returned invalid output: ${detail}`);
         }
-        return output;
+        freshResult = Object.freeze({ value: output });
+        if (!options.projectResultForPersistence) return output;
+        try {
+          const projected = JsonValueSchema.parse(options.projectResultForPersistence(name, output, context));
+          if (Buffer.byteLength(JSON.stringify(projected), "utf8") > MAX_TOOL_RESULT_BYTES)
+            throw new Error(`Durable tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`);
+          return projected;
+        } catch (error) {
+          const detail =
+            error instanceof z.ZodError
+              ? z.prettifyError(error)
+              : error instanceof Error
+                ? error.message
+                : String(error);
+          throw createEffectExecutionFailure(
+            "invalid_output",
+            `Tool result persistence projection is invalid: ${detail}`,
+          );
+        }
       },
     });
     const decision = await options.authority.runForeground(request, permission);
@@ -578,11 +607,12 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         );
       return result;
     }
-    let completedValue = decision.value;
+    const materializationInput = decision.replayed ? decision.value : (freshResult?.value ?? decision.value);
+    let completedValue = materializationInput;
     try {
       completedValue = options.materializeResult
-        ? await options.materializeResult(name, decision.value, context)
-        : decision.value;
+        ? await options.materializeResult(name, materializationInput, context)
+        : materializationInput;
     } catch (error) {
       const message = `Tool effect completed, but its result could not be materialized: ${error instanceof Error ? error.message : String(error)}`;
       if (!recordedIsTerminal)
@@ -599,7 +629,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         );
       return failure("result_too_large", message);
     }
-    const reportedFailure = entry.definition.reportedFailure?.(decision.value);
+    const reportedFailure = entry.definition.reportedFailure?.(materializationInput);
     if (reportedFailure) {
       if (!recordedIsTerminal)
         await options.recorder?.record(

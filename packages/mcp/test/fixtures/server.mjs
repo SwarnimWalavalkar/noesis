@@ -54,6 +54,14 @@ server.registerTool("failing", { description: "Return a structured MCP tool fail
   isError: true,
 }));
 
+const largeResultArgument = process.argv.find((argument) => argument.startsWith("--large-result-bytes="));
+if (largeResultArgument) {
+  const largeResultBytes = Number(largeResultArgument.slice("--large-result-bytes=".length));
+  server.registerTool("large-result", { description: "Return a controlled oversized result" }, async () => ({
+    content: [{ type: "text", text: "x".repeat(largeResultBytes) }],
+  }));
+}
+
 server.registerTool(
   "environment",
   { description: "Read a controlled child environment variable" },

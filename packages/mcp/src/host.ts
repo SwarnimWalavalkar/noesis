@@ -1263,10 +1263,11 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     );
     if (
       redirectUrl.protocol !== "http:" ||
-      !["127.0.0.1", "localhost", "::1"].includes(redirectUrl.hostname)
+      !["127.0.0.1", "localhost", "[::1]"].includes(redirectUrl.hostname)
     ) {
       throw new Error("Automatic MCP OAuth callbacks require a loopback http redirect URI");
     }
+    const callbackHost = redirectUrl.hostname === "[::1]" ? "::1" : redirectUrl.hostname;
     const port = redirectUrl.port ? Number(redirectUrl.port) : 80;
     const timeout = options?.timeout ?? 120_000;
     interactiveAuthentication.add(name);
@@ -1341,7 +1342,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       await new Promise<void>((resolve, reject) => {
         listener.once("listening", resolve);
         listener.once("error", reject);
-        listener.listen(port, redirectUrl.hostname);
+        listener.listen(port, callbackHost);
       });
       try {
         await reconnect(name);

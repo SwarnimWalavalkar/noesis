@@ -1,13 +1,13 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdtemp } from "node:fs/promises";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { afterEach, describe, expect, test } from "vitest";
-import { createMcpHostManager } from "../src/host.ts";
 import { loadMcpConfig, writeMcpServer } from "../src/config.ts";
+import { createMcpHostManager } from "../src/host.ts";
 
 const listeners: ReturnType<typeof createServer>[] = [];
 afterEach(
@@ -78,6 +78,29 @@ async function managerFor(
 }
 
 describe("remote MCP transports", () => {
+  test("accepts an IPv6 loopback OAuth callback redirect", async () => {
+    const protocol = controlledServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => crypto.randomUUID(),
+    });
+    await protocol.connect(transport as never);
+    const serverPort = await listen((request, response) => {
+      if (request.url !== "/mcp") return void response.writeHead(404).end();
+      if (request.method === "POST")
+        void body(request).then(async (parsed) => await transport.handleRequest(request, response, parsed));
+      else void transport.handleRequest(request, response);
+    });
+    const manager = await managerFor(`http://127.0.0.1:${String(serverPort)}/mcp`, "streamable_http", {
+      redirectUri: "http://[::1]:0/oauth/callback",
+    });
+    try {
+      await expect(manager.authenticate("remote")).resolves.toBeUndefined();
+    } finally {
+      await manager.close();
+      await protocol.close();
+    }
+  });
+
   test("observes callback rejection when the OAuth listener cannot bind", async () => {
     const protocol = controlledServer();
     const transport = new StreamableHTTPServerTransport({
