@@ -407,21 +407,50 @@ describe("Noesis config", () => {
       projectToolNamespace: "workflow.1111111111111111.",
       scope: "project",
       action: "add",
-      tool: "mcp.linear.list_abcdef123456",
+      tool: legacyMcp,
       legacyGlobalProjectTools: [legacyMcp],
       legacyActiveProjectTools: [legacyMcp],
     });
 
     expect(committed).toEqual({
       global: ["files.read"],
-      project: [legacyMcp, "mcp.linear.list_abcdef123456"],
-      effective: ["files.read", legacyMcp, "mcp.linear.list_abcdef123456"],
+      project: [legacyMcp],
+      effective: ["files.read", legacyMcp],
     });
     expect((await resolveNoesisConfig({ home, env: {} })).tools).toMatchObject({
       hotbar: ["files.read"],
       projectHotbars: {
-        project_alpha: [legacyMcp, "mcp.linear.list_abcdef123456"],
+        project_alpha: [legacyMcp],
       },
+    });
+  });
+
+  test("preserves an inactive legacy MCP pin during an unrelated project mutation", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-preserve-global-mcp-hotbar-"));
+    const legacyMcp = "mcp.github.search_123456789abc";
+    await writeFile(
+      noesisConfigPath(home),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        tools: { hotbar: ["files.read", legacyMcp] },
+      }),
+    );
+
+    await updateToolHotbar(home, {
+      projectId: "project_beta",
+      projectToolNamespace: "workflow.2222222222222222.",
+      scope: "project",
+      action: "add",
+      tool: "mcp.linear.list_abcdef123456",
+      legacyGlobalProjectTools: [legacyMcp],
+      legacyActiveProjectTools: [],
+    });
+
+    const tools = (await resolveNoesisConfig({ home, env: {} })).tools;
+    expect(tools).toMatchObject({
+      hotbar: ["files.read", legacyMcp],
+      projectHotbars: { project_beta: ["mcp.linear.list_abcdef123456"] },
     });
   });
 

@@ -289,8 +289,9 @@ export function resolveProjectHotbarSelection(
     ...new Set(
       [
         ...(tools.projectHotbars[projectId] ?? []),
-        // Adopt legacy project-specific workflow pins and pre-overlay MCP pins into this project.
-        ...tools.hotbar,
+        // Legacy workflow names encode their project. Legacy MCP names do not, so they remain
+        // inactive until one project explicitly claims or removes the exact pin.
+        ...tools.hotbar.filter((toolName) => !toolName.startsWith("mcp.")),
       ].filter(
         (toolName) => isProjectWorkflowToolForProject(projectId, toolName) || toolName.startsWith("mcp."),
       ),
@@ -1499,9 +1500,8 @@ export async function createApplicationRuntimeComposition(
     ),
   );
   const legacyActiveProjectTools = Object.freeze(
-    legacyGlobalProjectTools.filter(
-      (toolName) =>
-        toolName.startsWith("mcp.") || isProjectWorkflowToolForProject(project.projectId, toolName),
+    legacyGlobalProjectTools.filter((toolName) =>
+      isProjectWorkflowToolForProject(project.projectId, toolName),
     ),
   );
   const configuredHotbar = resolveProjectHotbarSelection(options.config.tools, project.projectId);
@@ -3228,6 +3228,10 @@ export async function createApplicationRuntimeComposition(
       if (input.action === "add_tool" && !available.has(input.tool))
         throw new Error(`Tool ${input.tool} is not available in this turn; inspect section 'tools' first`);
       const projectScoped = isProjectWorkflowToolName(input.tool) || input.tool.startsWith("mcp.");
+      const legacyToolsClaimedByThisMutation =
+        input.tool.startsWith("mcp.") && legacyGlobalProjectTools.includes(input.tool)
+          ? Object.freeze([...new Set([...legacyActiveProjectTools, input.tool])])
+          : legacyActiveProjectTools;
       if (
         isProjectWorkflowToolName(input.tool) &&
         !isProjectWorkflowToolForProject(project.projectId, input.tool)
@@ -3258,7 +3262,7 @@ export async function createApplicationRuntimeComposition(
               action: input.action === "add_tool" ? "add" : "remove",
               tool: input.tool,
               legacyGlobalProjectTools,
-              legacyActiveProjectTools,
+              legacyActiveProjectTools: legacyToolsClaimedByThisMutation,
             });
             hotbarToolNames = committed.effective;
             const activeNext = reconcileHotbarTools(catalog, hotbarToolNames).active;

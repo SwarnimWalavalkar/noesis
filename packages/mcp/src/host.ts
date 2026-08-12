@@ -1108,6 +1108,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     await disconnect(name);
     connections.delete(name);
     await connect(server);
+    if (closing) return;
+    const connection = connections.get(name);
+    if (connection?.status === "failed") {
+      throw new Error(
+        `MCP server ${JSON.stringify(name)} failed to connect: ${connection.lastError ?? "unknown error"}`,
+      );
+    }
   };
 
   const reload = async (config: LoadedMcpConfig): Promise<void> => {
@@ -1140,8 +1147,16 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       [...connections.values()]
         .filter((connection) => connection.status === "connected" && connection.dirty)
         .map(async (connection) => {
-          await refreshCatalog(connection, signal).catch(async (error: unknown) => {
+          const generation = connectionGenerations.get(connection.server.name);
+          const canCommit = (): boolean =>
+            !closing &&
+            generation !== undefined &&
+            connectionGenerations.get(connection.server.name) === generation &&
+            connections.get(connection.server.name) === connection &&
+            connection.status === "connected";
+          await refreshCatalog(connection, signal, canCommit).catch(async (error: unknown) => {
             if (signal?.aborted) throw signal.reason ?? error;
+            if (!canCommit()) return;
             connection.lastError = error instanceof Error ? error.message : String(error);
             connection.dirty = true;
             await emit(connection.server.name, "catalog_changed", {
@@ -1573,24 +1588,20 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     getTaskResult: async (serverName, taskId, signal, invocation) => {
       void invocation;
       const { connection, client } = requireClient(serverName);
-      try {
-        return await client.experimental.tasks.getTaskResult(
-          taskId,
-          CallToolResultSchema,
-          signal ? { signal } : undefined,
-        );
-      } finally {
-        connection.taskInvocations.delete(taskId);
-      }
+      const result = await client.experimental.tasks.getTaskResult(
+        taskId,
+        CallToolResultSchema,
+        signal ? { signal } : undefined,
+      );
+      connection.taskInvocations.delete(taskId);
+      return result;
     },
     cancelTask: async (serverName, taskId, signal, invocation) => {
       void invocation;
       const { connection, client } = requireClient(serverName);
-      try {
-        return await client.experimental.tasks.cancelTask(taskId, signal ? { signal } : undefined);
-      } finally {
-        connection.taskInvocations.delete(taskId);
-      }
+      const result = await client.experimental.tasks.cancelTask(taskId, signal ? { signal } : undefined);
+      connection.taskInvocations.delete(taskId);
+      return result;
     },
   };
   return Object.freeze(manager);

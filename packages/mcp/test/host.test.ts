@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -82,6 +82,85 @@ describe("MCP host", () => {
     await vi.waitFor(() => expect(() => process.kill(childPids[0] ?? 0, 0)).toThrow());
     expect(() => process.kill(childPids[1] ?? 0, 0)).not.toThrow();
     await manager.close();
+  });
+
+  test("does not publish a discovery refresh from a replaced connection generation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-stale-discovery-"));
+    const home = join(root, "home");
+    const catalogMarker = join(root, "catalog-v2");
+    const blockMarker = join(root, "block-discovery");
+    await writeMcpServer({
+      home,
+      projectDirectory: root,
+      scope: "project",
+      name: "controlled",
+      config: {
+        type: "local",
+        command: process.execPath,
+        args: [fixture],
+        timeout: 5_000,
+        environment: {
+          CONTROLLED_DYNAMIC_CATALOG_MARKER: "NOESIS_MCP_DYNAMIC_CATALOG_MARKER",
+          CONTROLLED_DISCOVERY_BLOCK_MARKER: "NOESIS_MCP_DISCOVERY_BLOCK_MARKER",
+        },
+      },
+    });
+    let dirtyEvents = 0;
+    const manager = createMcpHostManager({
+      home,
+      projectDirectory: root,
+      config: await loadMcpConfig({ home, projectDirectory: root }),
+      credentials: emptyCredentials(),
+      environment: {
+        NOESIS_MCP_DYNAMIC_CATALOG_MARKER: catalogMarker,
+        NOESIS_MCP_DISCOVERY_BLOCK_MARKER: blockMarker,
+      },
+      handlers: {
+        sample: async () => ({
+          role: "assistant",
+          model: "controlled",
+          stopReason: "endTurn",
+          content: { type: "text", text: "ok" },
+        }),
+        elicit: async () => ({ action: "decline" }),
+        onOAuthRedirect: () => undefined,
+        onEvent: (event) => {
+          if (
+            event.type === "catalog_changed" &&
+            typeof event.payload === "object" &&
+            event.payload !== null &&
+            Reflect.get(event.payload, "dirty") === true
+          )
+            dirtyEvents += 1;
+        },
+      },
+    });
+    try {
+      await writeFile(catalogMarker, "1");
+      await manager.start();
+      expect(manager.inspectServer("controlled")?.tools.map((tool) => tool.name)).toContain("catalog-v1");
+      await writeFile(blockMarker, "block\n");
+      await manager.callTool("mcp.controlled.mark-catalog-dirty", {});
+      await vi.waitFor(() => expect(dirtyEvents).toBe(1));
+
+      const staleRefresh = manager.refreshDiscovery();
+      await vi.waitFor(async () => {
+        const claimed = await readFile(`${blockMarker}.claimed`, "utf8").catch(() => "");
+        expect(claimed).toMatch(/^\d+\n$/u);
+      });
+      await writeFile(catalogMarker, "3");
+      await manager.start();
+      await unlink(blockMarker);
+      await staleRefresh;
+
+      const tools = manager.inspectServer("controlled")?.tools.map((tool) => tool.name);
+      expect(tools).toContain("catalog-v3");
+      expect(tools).not.toContain("catalog-v2");
+      expect(manager.inspectServer("controlled")?.status).toBe("connected");
+    } finally {
+      await unlink(blockMarker).catch(() => undefined);
+      await manager.close();
+    }
   });
 
   test("rejects an already-aborted OAuth request before opening a callback listener", async () => {
@@ -310,6 +389,79 @@ describe("MCP host", () => {
     }
   });
 
+  test("retains task invocation authority when result polling or cancellation fails", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-task-retry-"));
+    const home = join(root, "home");
+    await writeMcpServer({
+      home,
+      projectDirectory: root,
+      scope: "project",
+      name: "controlled",
+      config: {
+        type: "local",
+        command: process.execPath,
+        args: [fixture],
+      },
+    });
+    const manager = createMcpHostManager({
+      home,
+      projectDirectory: root,
+      config: await loadMcpConfig({ home, projectDirectory: root }),
+      credentials: emptyCredentials(),
+      handlers: {
+        sample: async () => ({
+          role: "assistant",
+          model: "controlled",
+          stopReason: "endTurn",
+          content: { type: "text", text: "sampled task result" },
+        }),
+        elicit: async () => ({ action: "decline" }),
+        onOAuthRedirect: () => undefined,
+      },
+    });
+    const invocation = Object.freeze({
+      route: Object.freeze({ provider: "controlled", model: "test", reasoning: "high" as const }),
+      sessionId: "session-1",
+      turnId: "turn-1",
+      executionId: "execution-1",
+      logicalExecutionId: "logical-1",
+      callId: "call-1",
+    });
+    try {
+      await manager.start();
+
+      const first = await manager.startToolTask("mcp.controlled.task-tool", {}, { invocation });
+      const firstTaskId =
+        typeof first === "object" && first !== null ? Reflect.get(first, "taskId") : undefined;
+      if (typeof firstTaskId !== "string") throw new Error("Expected controlled task id");
+      const controller = new AbortController();
+      controller.abort(new Error("cancelled result poll"));
+      await expect(manager.getTaskResult("controlled", firstTaskId, controller.signal)).rejects.toThrow(
+        "cancelled result poll",
+      );
+      expect((await manager.getTaskResult("controlled", firstTaskId)).content[0]).toMatchObject({
+        type: "text",
+        text: "task complete",
+      });
+
+      const second = await manager.startToolTask("mcp.controlled.task-tool", {}, { invocation });
+      const secondTaskId =
+        typeof second === "object" && second !== null ? Reflect.get(second, "taskId") : undefined;
+      if (typeof secondTaskId !== "string") throw new Error("Expected controlled task id");
+      const cancelController = new AbortController();
+      cancelController.abort(new Error("cancelled task cancellation"));
+      await expect(manager.cancelTask("controlled", secondTaskId, cancelController.signal)).rejects.toThrow(
+        "cancelled task cancellation",
+      );
+      expect((await manager.getTaskResult("controlled", secondTaskId)).content[0]).toMatchObject({
+        type: "text",
+        text: "task complete",
+      });
+    } finally {
+      await manager.close();
+    }
+  });
+
   test("isolates one failed server while healthy servers remain usable", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-mcp-isolation-"));
     const home = join(root, "home");
@@ -434,6 +586,7 @@ describe("MCP host", () => {
     try {
       await manager.start();
       expect(manager.inspectServer("delayed")?.status).toBe("failed");
+      await expect(manager.reconnect("delayed")).rejects.toThrow('MCP server "delayed" failed to connect');
       await writeFile(delayedFixture, `await import(${JSON.stringify(pathToFileURL(fixture).href)});\n`);
       await manager.reconnect("delayed");
       await vi.waitFor(() => expect(manager.inspectServer("delayed")?.status).toBe("connected"), {

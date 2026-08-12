@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { InMemoryTaskStore } from "@modelcontextprotocol/sdk/experimental/tasks/stores/in-memory.js";
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -126,6 +126,38 @@ if (catalogMarker && existsSync(catalogMarker)) {
   server.registerTool("catalog-v2", { description: "Change the discovery identity" }, async () => ({
     content: [{ type: "text", text: "v2" }],
   }));
+}
+
+const dynamicCatalogMarker = process.env.CONTROLLED_DYNAMIC_CATALOG_MARKER;
+const discoveryBlockMarker = process.env.CONTROLLED_DISCOVERY_BLOCK_MARKER;
+if (dynamicCatalogMarker && discoveryBlockMarker) {
+  server.registerTool("mark-catalog-dirty", { description: "Mark discovery as dirty" }, async () => {
+    const nextVersion = String(Number(readFileSync(dynamicCatalogMarker, "utf8")) + 1);
+    writeFileSync(dynamicCatalogMarker, nextVersion);
+    setTimeout(() => {
+      void server.sendToolListChanged();
+    }, 10);
+    return { content: [{ type: "text", text: "dirty" }] };
+  });
+  server.server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const version = readFileSync(dynamicCatalogMarker, "utf8").trim();
+    try {
+      if (version === "2" && existsSync(discoveryBlockMarker)) {
+        writeFileSync(`${discoveryBlockMarker}.claimed`, `${String(process.pid)}\n`, { flag: "wx" });
+        while (existsSync(discoveryBlockMarker)) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+      }
+    } catch {
+      // A newer connection must remain free to publish its discovery snapshot.
+    }
+    return {
+      tools: [
+        { name: "mark-catalog-dirty", inputSchema: { type: "object" } },
+        { name: `catalog-v${version}`, inputSchema: { type: "object" } },
+      ],
+    };
+  });
 }
 
 server.experimental.tasks.registerToolTask(

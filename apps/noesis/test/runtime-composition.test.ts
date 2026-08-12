@@ -157,7 +157,7 @@ test("project workflow pins compose only with their own project's global hotbar"
   });
 });
 
-test("legacy global MCP pins are adopted by the active project alongside project-owned pins", () => {
+test("legacy global MCP pins stay inactive while explicit project pins stay isolated", () => {
   const tools = Object.freeze({
     hotbar: Object.freeze(["files.read", "mcp.github.search_123456789abc"]),
     projectHotbars: Object.freeze({
@@ -166,14 +166,25 @@ test("legacy global MCP pins are adopted by the active project alongside project
   });
   expect(resolveProjectHotbarSelection(tools, "project_alpha")).toEqual({
     global: ["files.read"],
-    project: ["mcp.github.search_123456789abc"],
-    effective: ["files.read", "mcp.github.search_123456789abc"],
+    project: [],
+    effective: ["files.read"],
   });
   expect(resolveProjectHotbarSelection(tools, "project_beta")).toEqual({
     global: ["files.read"],
-    project: ["mcp.linear.list_abcdef123456", "mcp.github.search_123456789abc"],
-    effective: ["files.read", "mcp.linear.list_abcdef123456", "mcp.github.search_123456789abc"],
+    project: ["mcp.linear.list_abcdef123456"],
+    effective: ["files.read", "mcp.linear.list_abcdef123456"],
   });
+});
+
+test("an explicitly migrated MCP pin activates only in its owning project", () => {
+  const legacyMcp = "mcp.github.search_123456789abc";
+  const tools = Object.freeze({
+    hotbar: Object.freeze(["files.read"]),
+    projectHotbars: Object.freeze({ project_alpha: Object.freeze([legacyMcp]) }),
+  });
+
+  expect(resolveProjectHotbarSelection(tools, "project_alpha").effective).toEqual(["files.read", legacyMcp]);
+  expect(resolveProjectHotbarSelection(tools, "project_beta").effective).toEqual(["files.read"]);
 });
 
 test("active project hotbar load rejects an effective global and project union above 16", () => {
