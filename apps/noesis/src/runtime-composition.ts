@@ -131,7 +131,10 @@ import {
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
 import { loadLearningActivityForSession, loadLearningInspectionForSession } from "./learning-read-model.ts";
-import type { ApplicationMcpSamplingAuthorizer } from "./mcp-integration.ts";
+import type {
+  ApplicationMcpLifecycleAuthorizer,
+  ApplicationMcpSamplingAuthorizer,
+} from "./mcp-integration.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
@@ -761,6 +764,7 @@ export interface ApplicationRuntimeCompositionOptions {
     inspectMcpServer: NonNullable<NoesisTuiRuntime["inspectMcpServer"]>;
     mutateMcp: NonNullable<NoesisTuiRuntime["mutateMcp"]>;
     setSamplingAuthorizer: (authorizer: ApplicationMcpSamplingAuthorizer) => void;
+    setLifecycleAuthorizer: (authorizer: ApplicationMcpLifecycleAuthorizer) => void;
   }>;
   readonly createRoleRunner: (
     configurations: readonly RoleVariantConfiguration[],
@@ -1527,6 +1531,28 @@ export async function createApplicationRuntimeComposition(
     }
   };
   const { authority, protectedRuntime } = createWorkspaceRuntimeInternals(workspace);
+  options.mcp?.setLifecycleAuthorizer(async ({ operationId, effect, resource, request, execute }) => {
+    const protectedResource = `mcp:${project.projectId}:${resource}`;
+    const requestDigest = sha256(canonicalJson({ operationId, resource: protectedResource, request }));
+    const decision = await authority.runForeground(
+      {
+        operationId,
+        effect,
+        resource: protectedResource,
+        estimatedCost: 1,
+        idempotencyKey: `mcp-lifecycle:${operationId}`,
+        requestDigest,
+        execute: async () => await execute(),
+      },
+      Object.freeze({
+        effects: Object.freeze([effect]),
+        resourcePatterns: Object.freeze([protectedResource]),
+        credentialRefs: Object.freeze([]),
+      }),
+    );
+    if (!decision.ok) throw new Error(`MCP lifecycle ${decision.code}: ${decision.reason}`);
+    return decision.value;
+  });
   options.mcp?.setSamplingAuthorizer(async ({ serverName, request, signal, invocation, execute }) => {
     if (!invocation.turnId) throw new Error("MCP sampling requires an admitted foreground turn identity");
     const plan = await protectedRuntime.activations.getTurnPlan(invocation.sessionId, invocation.turnId);

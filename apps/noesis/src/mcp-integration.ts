@@ -15,9 +15,12 @@ import {
   type McpHostManager,
   type McpServerDetail,
   type McpInvocationContext,
+  createMcpConnectionLifecycleFailure,
+  type McpOAuthCredential,
+  type McpOAuthCredentialStore,
 } from "@noesis/mcp";
 import { adaptMcpSamplingRequest, type PiMcpSamplingPort } from "@noesis/runtime-pi";
-import { canonicalJson } from "@noesis/domain";
+import { canonicalJson, createId, type JsonValue, toJsonValue } from "@noesis/domain";
 import type {
   NoesisTuiRuntime,
   TuiMcpFormField,
@@ -36,6 +39,7 @@ export interface ApplicationMcpIntegration {
   readonly inspectMcpServer: NonNullable<NoesisTuiRuntime["inspectMcpServer"]>;
   readonly mutateMcp: NonNullable<NoesisTuiRuntime["mutateMcp"]>;
   readonly setSamplingAuthorizer: (authorizer: ApplicationMcpSamplingAuthorizer) => void;
+  readonly setLifecycleAuthorizer: (authorizer: ApplicationMcpLifecycleAuthorizer) => void;
 }
 
 export type ApplicationMcpSamplingAuthorizer = (input: {
@@ -45,6 +49,14 @@ export type ApplicationMcpSamplingAuthorizer = (input: {
   readonly invocation: McpInvocationContext;
   readonly execute: () => Promise<unknown>;
 }) => Promise<unknown>;
+
+export type ApplicationMcpLifecycleAuthorizer = (input: {
+  readonly operationId: string;
+  readonly effect: "write" | "execute" | "network";
+  readonly resource: string;
+  readonly request: JsonValue;
+  readonly execute: () => Promise<JsonValue>;
+}) => Promise<JsonValue>;
 
 function hostConfig(config: LoadedMcpConfig, workspaceTrusted: boolean): LoadedMcpConfig {
   if (workspaceTrusted) return config;
@@ -229,6 +241,47 @@ export function createApplicationMcpIntegration(input: {
   let eventConfig: LoadedMcpConfig | undefined;
   let host: McpHostManager;
   let samplingAuthorizer: ApplicationMcpSamplingAuthorizer | undefined;
+  let lifecycleAuthorizer: ApplicationMcpLifecycleAuthorizer | undefined;
+  const authorizeLifecycle = async (input: {
+    readonly operation: string;
+    readonly effect: "write" | "execute" | "network";
+    readonly resource: string;
+    readonly request: JsonValue;
+    readonly execute: () => Promise<JsonValue>;
+  }): Promise<JsonValue> => {
+    if (!lifecycleAuthorizer) throw new Error("MCP lifecycle authority is not available");
+    return await lifecycleAuthorizer({
+      operationId: createId(`mcp-${input.operation}`),
+      effect: input.effect,
+      resource: input.resource,
+      request: input.request,
+      execute: input.execute,
+    });
+  };
+  const authorizeCredentialStore = (store: McpOAuthCredentialStore): McpOAuthCredentialStore => {
+    const mutate = async (operation: string, key: string, execute: () => Promise<void>): Promise<void> => {
+      await authorizeLifecycle({
+        operation: `credential-${operation}`,
+        effect: "write",
+        resource: `credentials:${key}`,
+        request: toJsonValue({ operation, key }),
+        execute: async () => {
+          await execute();
+          return null;
+        },
+      });
+    };
+    return Object.freeze({
+      read: store.read,
+      write: async (key: string, credential: McpOAuthCredential) =>
+        await mutate("write", key, async () => await store.write(key, credential)),
+      update: async (key: string, update: (current: McpOAuthCredential | undefined) => McpOAuthCredential) =>
+        await mutate("update", key, async () => await store.update(key, update)),
+      delete: async (key: string) => await mutate("delete", key, async () => await store.delete(key)),
+      deleteIf: async (key: string, predicate: (current: McpOAuthCredential | undefined) => boolean) =>
+        await mutate("delete-if", key, async () => await store.deleteIf(key, predicate)),
+    });
+  };
   const recentErrors = new Map<
     string,
     { readonly identity: string; readonly entries: readonly TuiMcpRecentError[] }
@@ -267,8 +320,40 @@ export function createApplicationMcpIntegration(input: {
       home: input.home,
       projectDirectory: input.projectDirectory,
       config: activeConfig,
-      credentials: createSecureMcpOAuthCredentialStore(mcpCredentialPath(input.home)),
+      credentials: authorizeCredentialStore(
+        createSecureMcpOAuthCredentialStore(mcpCredentialPath(input.home)),
+      ),
       handlers: {
+        connect: async ({ serverName, scope, transport, execute }) => {
+          let effectStarted = false;
+          let effectFailed = false;
+          let effectFailure: unknown;
+          try {
+            await authorizeLifecycle({
+              operation: "connect",
+              effect: transport === "stdio" ? "execute" : "network",
+              resource: `server:${scope}:${serverName}:connection`,
+              request: toJsonValue({ serverName, scope, transport }),
+              execute: async () => {
+                effectStarted = true;
+                try {
+                  await execute();
+                } catch (error) {
+                  effectFailed = true;
+                  effectFailure = error;
+                  throw error;
+                }
+                return null;
+              },
+            });
+          } catch (error) {
+            if (effectFailed) throw effectFailure;
+            throw createMcpConnectionLifecycleFailure(
+              error instanceof Error ? error.message : String(error),
+              effectStarted,
+            );
+          }
+        },
         sample: async (serverName, request, signal, invocation) => {
           if (!invocation)
             throw new Error("MCP sampling is allowed only during an admitted foreground invocation");
@@ -456,40 +541,96 @@ export function createApplicationMcpIntegration(input: {
         throw new Error(`MCP server ${intent.name} does not use OAuth`);
       if (intent.type === "authenticate") {
         signal?.throwIfAborted();
-        await manager.authenticate(intent.name, signal ? { signal } : undefined);
-      } else if (intent.type === "logout") await manager.logout(intent.name);
-      else await manager.reconnect(intent.name);
+        await authorizeLifecycle({
+          operation: "authenticate",
+          effect: "network",
+          resource: `server:${intent.scope}:${intent.name}:authentication`,
+          request: toJsonValue(intent),
+          execute: async () => {
+            await manager.authenticate(intent.name, signal ? { signal } : undefined);
+            return null;
+          },
+        });
+      } else if (intent.type === "logout")
+        await authorizeLifecycle({
+          operation: "logout",
+          effect: "write",
+          resource: `server:${intent.scope}:${intent.name}:authentication`,
+          request: toJsonValue(intent),
+          execute: async () => {
+            await manager.logout(intent.name);
+            return null;
+          },
+        });
+      else
+        await authorizeLifecycle({
+          operation: "reconnect",
+          effect: effective.config.type === "local" ? "execute" : "network",
+          resource: `server:${intent.scope}:${intent.name}:connection`,
+          request: toJsonValue(intent),
+          execute: async () => {
+            await manager.reconnect(intent.name);
+            return null;
+          },
+        });
       return {
         message: `${intent.type === "authenticate" ? "Authenticated" : intent.type === "logout" ? "Logged out of" : "Reconnected"} ${intent.name}.`,
       };
     }
     if (intent.type === "remove") {
-      await removeMcpServer({ ...input, scope: intent.scope, name: intent.name });
+      await authorizeLifecycle({
+        operation: "config-remove",
+        effect: "write",
+        resource: `config:${intent.scope}:${intent.name}`,
+        request: toJsonValue(intent),
+        execute: async () => {
+          await removeMcpServer({ ...input, scope: intent.scope, name: intent.name });
+          return null;
+        },
+      });
     } else if (intent.type === "set-enabled") {
-      await setMcpServerEnabled({
-        ...input,
-        scope: intent.scope,
-        name: intent.name,
-        enabled: intent.enabled,
+      await authorizeLifecycle({
+        operation: "config-set-enabled",
+        effect: "write",
+        resource: `config:${intent.scope}:${intent.name}`,
+        request: toJsonValue(intent),
+        execute: async () => {
+          await setMcpServerEnabled({
+            ...input,
+            scope: intent.scope,
+            name: intent.name,
+            enabled: intent.enabled,
+          });
+          return null;
+        },
       });
     } else if (intent.type === "add-local" || intent.type === "edit-local") {
       const existing = (await configPromise).installed.find(
         (entry) => entry.scope === intent.scope && entry.name === intent.name,
       )?.config;
-      await writeMcpServer({
-        ...input,
-        scope: intent.scope,
-        name: intent.name,
-        config: normalizeMcpLocalServerConfig({
-          ...(intent.type === "edit-local" && existing?.type === "local" ? existing : {}),
-          type: "local",
-          command:
-            intent.command[0] ??
-            (() => {
-              throw new Error("MCP command cannot be empty");
-            })(),
-          args: intent.command.slice(1),
-        }),
+      await authorizeLifecycle({
+        operation: "config-write-local",
+        effect: "write",
+        resource: `config:${intent.scope}:${intent.name}`,
+        request: toJsonValue(intent),
+        execute: async () => {
+          await writeMcpServer({
+            ...input,
+            scope: intent.scope,
+            name: intent.name,
+            config: normalizeMcpLocalServerConfig({
+              ...(intent.type === "edit-local" && existing?.type === "local" ? existing : {}),
+              type: "local",
+              command:
+                intent.command[0] ??
+                (() => {
+                  throw new Error("MCP command cannot be empty");
+                })(),
+              args: intent.command.slice(1),
+            }),
+          });
+          return null;
+        },
       });
     } else if (intent.type === "add-remote" || intent.type === "edit-remote") {
       const url = validatedRemoteUrl(intent.url);
@@ -503,15 +644,24 @@ export function createApplicationMcpIntegration(input: {
         typeof existing.oauth === "object"
           ? existing.oauth
           : intent.oauth;
-      await writeMcpServer({
-        ...input,
-        scope: intent.scope,
-        name: intent.name,
-        config: {
-          ...(intent.type === "edit-remote" && existing?.type === "remote" ? existing : {}),
-          type: "remote",
-          url,
-          oauth,
+      await authorizeLifecycle({
+        operation: "config-write-remote",
+        effect: "write",
+        resource: `config:${intent.scope}:${intent.name}`,
+        request: toJsonValue(intent),
+        execute: async () => {
+          await writeMcpServer({
+            ...input,
+            scope: intent.scope,
+            name: intent.name,
+            config: {
+              ...(intent.type === "edit-remote" && existing?.type === "remote" ? existing : {}),
+              type: "remote",
+              url,
+              oauth,
+            },
+          });
+          return null;
         },
       });
     } else throw new Error(`Unsupported MCP mutation ${intent.type}`);
@@ -534,6 +684,10 @@ export function createApplicationMcpIntegration(input: {
     setSamplingAuthorizer: (authorizer: ApplicationMcpSamplingAuthorizer) => {
       if (samplingAuthorizer) throw new Error("MCP sampling authority is already configured");
       samplingAuthorizer = authorizer;
+    },
+    setLifecycleAuthorizer: (authorizer: ApplicationMcpLifecycleAuthorizer) => {
+      if (lifecycleAuthorizer) throw new Error("MCP lifecycle authority is already configured");
+      lifecycleAuthorizer = authorizer;
     },
   });
 }

@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, test, vi } from "vitest";
 import { loadMcpConfig, writeMcpServer } from "../src/config.ts";
-import { createMcpHostManager } from "../src/host.ts";
+import { createMcpConnectionLifecycleFailure, createMcpHostManager } from "../src/host.ts";
 import type { McpOAuthCredentialStore } from "../src/oauth.ts";
 
 const fixture = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "server.mjs");
@@ -18,6 +18,43 @@ const emptyCredentials = (): McpOAuthCredentialStore => ({
 });
 
 describe("MCP host", () => {
+  test("does not retry a connection attempt rejected before its lifecycle effect begins", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-denied-connect-"));
+    const home = join(root, "home");
+    await writeMcpServer({
+      home,
+      projectDirectory: root,
+      scope: "project",
+      name: "controlled",
+      config: { type: "local", command: process.execPath, args: [fixture] },
+    });
+    let attempts = 0;
+    const manager = createMcpHostManager({
+      home,
+      projectDirectory: root,
+      config: await loadMcpConfig({ home, projectDirectory: root }),
+      credentials: emptyCredentials(),
+      handlers: {
+        connect: async () => {
+          attempts += 1;
+          throw createMcpConnectionLifecycleFailure("denied", false);
+        },
+        sample: async () => {
+          throw new Error("sampling is not expected");
+        },
+        elicit: async () => ({ action: "decline" }),
+        onOAuthRedirect: () => undefined,
+      },
+    });
+
+    await manager.start();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(attempts).toBe(1);
+    expect(manager.inspectServer("controlled")).toMatchObject({ status: "failed", lastError: "denied" });
+    await manager.close();
+  });
+
   test("only the latest overlapping start attempt can publish a connection", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-mcp-overlapping-connect-"));
     const home = join(root, "home");
@@ -456,6 +493,60 @@ describe("MCP host", () => {
       expect((await manager.getTaskResult("controlled", secondTaskId)).content[0]).toMatchObject({
         type: "text",
         text: "task complete",
+      });
+    } finally {
+      await manager.close();
+    }
+  });
+
+  test("starts tasks only for tools that explicitly allow task execution", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-task-support-"));
+    const home = join(root, "home");
+    await writeMcpServer({
+      home,
+      projectDirectory: root,
+      scope: "project",
+      name: "controlled",
+      config: {
+        type: "local",
+        command: process.execPath,
+        args: [fixture],
+        environment: { CONTROLLED_TASK_SUPPORT: "NOESIS_MCP_TASK_SUPPORT" },
+      },
+    });
+    const manager = createMcpHostManager({
+      home,
+      projectDirectory: root,
+      config: await loadMcpConfig({ home, projectDirectory: root }),
+      credentials: emptyCredentials(),
+      environment: { NOESIS_MCP_TASK_SUPPORT: "true" },
+      handlers: {
+        sample: async () => ({
+          role: "assistant",
+          model: "controlled",
+          stopReason: "endTurn",
+          content: { type: "text", text: "ok" },
+        }),
+        elicit: async () => ({ action: "decline" }),
+        onOAuthRedirect: () => undefined,
+      },
+    });
+    try {
+      await manager.start();
+
+      await expect(manager.startToolTask("mcp.controlled.environment", {}, {})).rejects.toThrow(
+        "does not support task execution (forbidden)",
+      );
+      await expect(manager.startToolTask("mcp.controlled.forbidden-task-tool", {}, {})).rejects.toThrow(
+        "does not support task execution (forbidden)",
+      );
+      await expect(manager.startToolTask("mcp.controlled.optional-task-tool", {}, {})).resolves.toMatchObject(
+        {
+          status: "completed",
+        },
+      );
+      await expect(manager.startToolTask("mcp.controlled.task-tool", {}, {})).resolves.toMatchObject({
+        status: "completed",
       });
     } finally {
       await manager.close();

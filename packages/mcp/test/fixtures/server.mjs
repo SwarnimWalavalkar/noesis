@@ -176,6 +176,29 @@ server.experimental.tasks.registerToolTask(
   },
 );
 
+if (process.env.CONTROLLED_TASK_SUPPORT === "true") {
+  server.experimental.tasks.registerToolTask(
+    "optional-task-tool",
+    { description: "Optionally complete through MCP tasks", execution: { taskSupport: "optional" } },
+    {
+      createTask: async (extra) => {
+        const task = await extra.taskStore.createTask({ ttl: 60_000, pollInterval: 1 });
+        await extra.taskStore.storeTaskResult(task.taskId, "completed", {
+          content: [{ type: "text", text: "optional task complete" }],
+        });
+        return { task: await extra.taskStore.getTask(task.taskId) };
+      },
+      getTask: async (extra) => await extra.taskStore.getTask(extra.taskId),
+      getTaskResult: async (extra) => await extra.taskStore.getTaskResult(extra.taskId),
+    },
+  );
+  server.registerTool(
+    "forbidden-task-tool",
+    { description: "Forbid MCP task execution", execution: { taskSupport: "forbidden" } },
+    async () => ({ content: [{ type: "text", text: "ordinary result" }] }),
+  );
+}
+
 server.registerPrompt(
   "greet",
   {

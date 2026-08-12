@@ -119,6 +119,12 @@ export interface McpInvocationContext {
 }
 
 export interface McpHostHandlers {
+  readonly connect?: (input: {
+    readonly serverName: string;
+    readonly scope: "global" | "project";
+    readonly transport: "stdio" | "streamable_http" | "sse";
+    readonly execute: () => Promise<void>;
+  }) => Promise<void>;
   readonly sample: (
     serverName: string,
     request: CreateMessageRequest,
@@ -133,6 +139,30 @@ export interface McpHostHandlers {
   ) => Promise<ElicitResult>;
   readonly onOAuthRedirect: (redirect: McpOAuthRedirect) => void | Promise<void>;
   readonly onEvent?: (event: McpHostEvent) => void | Promise<void>;
+}
+
+const connectionLifecycleFailureBrand = Symbol("noesis.mcp.connection-lifecycle-failure");
+
+interface McpConnectionLifecycleFailure extends Error {
+  readonly [connectionLifecycleFailureBrand]: boolean;
+}
+
+/** Prevents an authority denial from being mistaken for a retryable transport failure. */
+export function createMcpConnectionLifecycleFailure(message: string, retryable: boolean): Error {
+  const error = new Error(message) as McpConnectionLifecycleFailure;
+  Object.defineProperty(error, connectionLifecycleFailureBrand, {
+    configurable: false,
+    enumerable: false,
+    value: retryable,
+    writable: false,
+  });
+  return error;
+}
+
+function connectionLifecycleFailureRetryable(error: unknown): boolean | undefined {
+  return error instanceof Error
+    ? (error as Partial<McpConnectionLifecycleFailure>)[connectionLifecycleFailureBrand]
+    : undefined;
 }
 
 export interface CreateMcpHostManagerInput {
@@ -879,7 +909,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       connection.status = "failed";
       connection.lastError = error instanceof Error ? error.message : String(error);
       await emit(server.name, "connection", { status: "failed", error: connection.lastError });
-      scheduleReconnect(connection);
+      if (connectionLifecycleFailureRetryable(error) !== false) scheduleReconnect(connection);
     });
     inFlightConnects.add(operation);
     try {
@@ -983,7 +1013,23 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       const attempt: ConnectionAttempt = { connection, client, transport, taskStore };
       connectionAttempts.add(attempt);
       try {
-        await client.connect(transport as Transport, { timeout: server.config.timeout ?? DEFAULT_TIMEOUT });
+        const connectTransport = async (): Promise<void> =>
+          await client.connect(transport as Transport, {
+            timeout: server.config.timeout ?? DEFAULT_TIMEOUT,
+          });
+        if (input.handlers.connect) {
+          await input.handlers.connect({
+            serverName: server.name,
+            scope: server.scope,
+            transport:
+              transport instanceof StdioClientTransport
+                ? "stdio"
+                : transport instanceof SSEClientTransport
+                  ? "sse"
+                  : "streamable_http",
+            execute: connectTransport,
+          });
+        } else await connectTransport();
         if (!isCurrent()) {
           await closeConnectionAttempt(attempt);
           return;
@@ -1046,6 +1092,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
           return;
         }
         await closeConnectionAttempt(attempt);
+        if (connectionLifecycleFailureRetryable(error) === false) break;
       }
     }
     if (!isCurrent()) return;
@@ -1053,7 +1100,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     connection.lastError =
       lastError instanceof Error ? lastError.message : String(lastError ?? "connection failed");
     await emit(server.name, "connection", { status: "failed", error: connection.lastError });
-    scheduleReconnect(connection);
+    if (connectionLifecycleFailureRetryable(lastError) !== false) scheduleReconnect(connection);
   }
 
   const disconnect = async (name: string): Promise<void> => {
@@ -1480,6 +1527,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         const live = requireClient(target.serverName);
         if (live.connection !== connection || live.client !== client)
           throw new Error(`MCP tool ${canonicalName} connection changed while its call was queued`);
+        const definition = connection.catalog.tools.find((tool) => tool.name === target.toolName);
+        const taskSupport = definition?.execution?.taskSupport;
+        if (taskSupport !== "optional" && taskSupport !== "required") {
+          throw new Error(
+            `MCP tool ${canonicalName} does not support task execution (${taskSupport ?? "not declared"})`,
+          );
+        }
         for await (const message of client.experimental.tasks.callToolStream(
           { name: target.toolName, arguments: { ...args } },
           undefined,

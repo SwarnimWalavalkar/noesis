@@ -23,7 +23,88 @@ const sampling: PiMcpSamplingPort = Object.freeze({
   },
 });
 
+function createTestMcpIntegration(
+  input: Parameters<typeof createApplicationMcpIntegration>[0],
+): ReturnType<typeof createApplicationMcpIntegration> {
+  const integration = createApplicationMcpIntegration(input);
+  integration.setLifecycleAuthorizer(async ({ execute }) => await execute());
+  return integration;
+}
+
 describe("application MCP integration", () => {
+  test("fails closed before launching a server when lifecycle authority is unavailable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-lifecycle-authority-"));
+    temporaryDirectories.push(root);
+    const home = join(root, "home");
+    const projectDirectory = join(root, "project");
+    const marker = join(root, "started");
+    await Promise.all([
+      mkdir(home, { recursive: true }),
+      mkdir(join(projectDirectory, ".noesis"), { recursive: true }),
+    ]);
+    await writeFile(
+      join(projectDirectory, ".noesis", "mcp.json"),
+      JSON.stringify({
+        servers: {
+          controlled: {
+            type: "local",
+            command: process.execPath,
+            args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started")`],
+          },
+        },
+      }),
+    );
+    const integration = createApplicationMcpIntegration({
+      home,
+      projectDirectory,
+      sampling,
+      interactions: createTuiMcpInteractionBridge(),
+      openUrl: async () => undefined,
+      workspaceTrusted: true,
+    });
+
+    await integration.start();
+
+    await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(integration.host.inspectServer("controlled")).toMatchObject({
+      status: "failed",
+      lastError: "MCP lifecycle authority is not available",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await integration.close();
+  });
+
+  test("does not write MCP configuration when lifecycle authority denies the operation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-config-authority-"));
+    temporaryDirectories.push(root);
+    const home = join(root, "home");
+    const projectDirectory = join(root, "project");
+    await Promise.all([mkdir(home, { recursive: true }), mkdir(projectDirectory, { recursive: true })]);
+    const integration = createApplicationMcpIntegration({
+      home,
+      projectDirectory,
+      sampling,
+      interactions: createTuiMcpInteractionBridge(),
+      openUrl: async () => undefined,
+      workspaceTrusted: true,
+    });
+    integration.setLifecycleAuthorizer(async () => {
+      throw new Error("denied by controlled authority");
+    });
+
+    await expect(
+      integration.mutateMcp({
+        type: "add-local",
+        scope: "global",
+        name: "blocked",
+        command: [process.execPath, controlledServerFixture],
+      }),
+    ).rejects.toThrow("denied by controlled authority");
+    await expect(readFile(join(home, "mcp.json"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await integration.close();
+  });
+
   test("rejects reverse sampling unless it is bound to an authorized foreground invocation", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-mcp-sampling-authority-"));
     temporaryDirectories.push(root);
@@ -52,7 +133,7 @@ describe("application MCP integration", () => {
         content: { type: "text" as const, text: "authorized sample" },
       }),
     });
-    const integration = createApplicationMcpIntegration({
+    const integration = createTestMcpIntegration({
       home,
       projectDirectory,
       sampling: controlledSampling,
@@ -112,7 +193,7 @@ describe("application MCP integration", () => {
         },
       }),
     );
-    const integration = createApplicationMcpIntegration({
+    const integration = createTestMcpIntegration({
       home,
       projectDirectory,
       sampling,
@@ -168,7 +249,7 @@ describe("application MCP integration", () => {
         },
       }),
     );
-    const integration = createApplicationMcpIntegration({
+    const integration = createTestMcpIntegration({
       home,
       projectDirectory,
       sampling,
@@ -219,7 +300,7 @@ describe("application MCP integration", () => {
         },
       }),
     );
-    const integration = createApplicationMcpIntegration({
+    const integration = createTestMcpIntegration({
       home,
       projectDirectory,
       sampling,
@@ -285,7 +366,7 @@ describe("application MCP integration", () => {
         servers: { remote: { type: "remote", url: "https://valid.example.test/mcp", enabled: false } },
       }),
     );
-    const integration = createApplicationMcpIntegration({
+    const integration = createTestMcpIntegration({
       home,
       projectDirectory,
       sampling,
@@ -331,7 +412,7 @@ describe("application MCP integration", () => {
       join(home, "mcp.json"),
       JSON.stringify({ servers: { broken: { type: "local", command: "/missing-global-server" } } }),
     );
-    const integration = createApplicationMcpIntegration({
+    const integration = createTestMcpIntegration({
       home,
       projectDirectory,
       sampling,
