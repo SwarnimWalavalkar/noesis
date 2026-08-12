@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Noesis session compaction</title>
+  <style>
+    :root { color-scheme: dark; --bg: #090a0c; --panel: #111318; --text: #f2f0e9; --muted: #9a9da6; --line: #292d35; --accent: #a8ff60; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 52px 24px; background: var(--bg); color: var(--text); font: 16px/1.65 ui-sans-serif, system-ui; }
+    main { max-width: 980px; margin: auto; }
+    h1 { margin: .2em 0; font-size: clamp(34px, 7vw, 68px); line-height: 1; }
+    h2 { margin-top: 2.4em; }
+    code, .tag { font-family: ui-monospace, monospace; }
+    .tag { color: var(--accent); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
+    .lead { max-width: 760px; color: #d7d4cc; font-size: 21px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .card { padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
+    .muted { color: var(--muted); }
+    li { margin: .55em 0; }
+    .decision { padding-left: 18px; border-left: 3px solid var(--accent); }
+  </style>
+</head>
+<body><main>
+  <div class="tag">Design workshop · open</div>
+  <h1>Durable session compaction</h1>
+  <p class="lead">Compaction should reduce future model context without deleting, rewriting, or hiding the real conversation.</p>
+
+  <section><h2>What exists now</h2><div class="grid">
+    <div class="card"><strong>Complete durable transcript</strong><p class="muted">SQLite owns messages, tool calls, code runs, and their chronology. Resume rebuilds this full view.</p></div>
+    <div class="card"><strong>Bounded turn context</strong><p class="muted">Each turn creates a fresh Pi harness and admits only a recent bounded set of complete conversation turns.</p></div>
+    <div class="card"><strong>A misleading command</strong><p class="muted"><code>/compact</code> exists, but the production runtime has no durable compaction state.</p></div>
+  </div></section>
+
+  <section><h2>Smallest coherent model</h2>
+    <p class="decision">Append immutable context checkpoints and keep one active-checkpoint binding per session. A checkpoint preserves the useful meaning of older covered work so new work can fit; it does not promise full-fidelity replay inside model context. Its summary and retained raw tail remain subject to the existing hard per-fragment and total context bounds.</p>
+    <ul>
+      <li>Raw transcript rows remain untouched and searchable.</li>
+      <li>Each checkpoint has its own identity and digest, a model-written summary, exact covered message or turn references and digests, sensitivity, model configuration, usage, and creation time.</li>
+      <li>A future turn freezes the exact checkpoint ID, digest, summary material, and recent raw-tail references into its <code>FrozenTurnPlan</code>.</li>
+      <li>Repeated compaction writes a new checkpoint from the prior checkpoint plus new eligible work. It never edits the earlier row.</li>
+      <li>After summary generation, checkpoint insertion and compare-and-swap of the active binding happen in one SQLite transaction. A failed or stale write changes neither.</li>
+      <li>Old frozen plans continue to cite the exact immutable checkpoint and raw context they used.</li>
+    </ul>
+  </section>
+
+  <section><h2>Questions to settle together</h2><ol>
+    <li>Should the first version be manual only, automatic only near context pressure, or both?</li>
+    <li>Where may a cutoff fall around steering, partial turns, and tool calls?</li>
+    <li>Should private and secret content require a provider-specific replay grant before summarization?</li>
+    <li>How much recent raw context must always survive beside the summary?</li>
+    <li>What should the TUI show: checkpoint age, coverage, token reduction, and an inspect action?</li>
+    <li>Should an overflowed turn compact and retry automatically, or ask the user to rerun?</li>
+  </ol></section>
+
+  <section><h2>Acceptance boundary</h2><ul>
+    <li>Resume still renders the complete original transcript.</li>
+    <li>Search still cites original authoritative rows.</li>
+    <li>Only future model context changes.</li>
+    <li>The checkpoint and retained raw tail always fit the same hard context limits as an uncompacted turn plan.</li>
+    <li>Every checkpoint can be inspected. Replacement changes only the active binding and never edits an earlier checkpoint.</li>
+    <li>No summary can widen permissions or instruction priority.</li>
+  </ul></section>
+</main></body>
+</html>

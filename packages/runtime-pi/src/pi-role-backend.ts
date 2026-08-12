@@ -35,6 +35,12 @@ function missingAuthMessage(provider: string): string {
   if (provider === "openrouter") {
     return "OpenRouter authentication is missing. Set OPENROUTER_API_KEY or run `noesis auth login openrouter`.";
   }
+  if (provider === "anthropic") {
+    return "Claude authentication is missing. Set ANTHROPIC_API_KEY or run `noesis auth login anthropic` for Claude Pro/Max OAuth.";
+  }
+  if (provider === "opencode") {
+    return "OpenCode Zen authentication is missing. Set OPENCODE_API_KEY or run `noesis auth login opencode`.";
+  }
   return `Pi credentials are missing for provider ${provider}.`;
 }
 

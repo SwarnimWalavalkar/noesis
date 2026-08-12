@@ -63,6 +63,7 @@ pnpm start
 ```
 
 The first launch guides you through model selection and authentication. A normal start creates a new session.
+Supported providers are OpenAI Codex, Claude through Anthropic, OpenRouter, and OpenCode Zen.
 
 Choose a prior session interactively:
 

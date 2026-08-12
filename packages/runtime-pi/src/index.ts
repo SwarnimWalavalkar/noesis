@@ -55,6 +55,7 @@ export {
   resolveFrozenSessionToolDefinitions,
 } from "./frozen-session-tools.ts";
 export * from "./hotbar-tools.ts";
+export * from "./model-selection.ts";
 export * from "./pi-role-backend.ts";
 export * from "./role-context.ts";
 export * from "./role-runner.ts";
@@ -321,6 +322,14 @@ export function createPiAgentRuntime(
         if (request.provider === "openrouter")
           throw new Error(
             "OpenRouter authentication is missing. Set OPENROUTER_API_KEY or run `noesis auth login openrouter`.",
+          );
+        if (request.provider === "anthropic")
+          throw new Error(
+            "Claude authentication is missing. Set ANTHROPIC_API_KEY or run `noesis auth login anthropic` for Claude Pro/Max OAuth.",
+          );
+        if (request.provider === "opencode")
+          throw new Error(
+            "OpenCode Zen authentication is missing. Set OPENCODE_API_KEY or run `noesis auth login opencode`.",
           );
         throw new Error(`Pi credentials are missing for provider ${request.provider}.`);
       }

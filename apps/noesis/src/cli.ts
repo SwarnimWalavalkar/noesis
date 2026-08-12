@@ -12,10 +12,12 @@ import {
   updateNoesisConfig,
 } from "@noesis/config";
 import {
+  assertPiModelSelection,
   createPiAgentRoleRunner,
   createPiAgentRuntime,
   createPiModelServices,
   createPiSkillLibrary,
+  NOESIS_PROVIDER_IDS,
   type PiAuthOperations,
 } from "@noesis/runtime-pi";
 import {
@@ -256,7 +258,8 @@ Session startup:
   noesis --resume SESSION_ID   Resume that exact prior session
 
 Agent options:
-  --provider ID              Provider (default: openai-codex)
+  --provider ID              openai-codex, anthropic, openrouter, or opencode
+                             Pair with --model when changing providers
   --model ID                 Model (Codex default: gpt-5.6-sol)
   --thinking-level LEVEL     Reasoning level (default: high)
 
@@ -279,6 +282,7 @@ async function createRuntime(
   },
 ): Promise<ApplicationRuntime> {
   const services = createPiModelServices(config.home);
+  assertPiModelSelection(services.models, config.agent);
   const project = await resolveActiveProject(process.cwd());
   const skills = createPiSkillLibrary({
     cwd: project.root,
@@ -347,14 +351,15 @@ function hasExplicitAgentSettings(input: CliInput): boolean {
 }
 
 async function runOnboarding(input: CliInput): Promise<void> {
-  const auth = createPiModelServices(input.home).auth;
+  const services = createPiModelServices(input.home);
   await runSetupSurface(
     async (surface) =>
       await runFirstLaunchOnboarding({
         home: input.home,
         prompts: promptsFromSurface(surface),
-        auth,
+        auth: services.auth,
         authCallbacks: surfaceAuthCallbacks(surface),
+        validateModelSelection: (selection) => assertPiModelSelection(services.models, selection),
       }),
     {
       subtitle: "first-launch setup",
@@ -369,7 +374,7 @@ async function runAuth(input: CliInput, auth: PiAuthOperations): Promise<void> {
   const action = input.subcommand ?? "status";
   const provider = input.authProvider;
   if (action === "status") {
-    const providers = provider ? [provider] : ["openai-codex", "openrouter"];
+    const providers = provider ? [provider] : NOESIS_PROVIDER_IDS;
     console.log(JSON.stringify(await Promise.all(providers.map((id) => auth.status(id))), null, 2));
     return;
   }
@@ -410,6 +415,14 @@ async function runConfig(input: CliInput): Promise<void> {
     return;
   }
   if (action === "set") {
+    if (input.overrides.provider !== undefined || input.overrides.model !== undefined) {
+      const current = await resolveNoesisConfig({ home: input.home, env: {} });
+      const selection = {
+        provider: input.overrides.provider ?? current.agent.provider,
+        model: input.overrides.model ?? current.agent.model,
+      };
+      assertPiModelSelection(createPiModelServices(input.home).models, selection);
+    }
     console.log(JSON.stringify(await updateNoesisConfig(input.home, input.overrides), null, 2));
     return;
   }

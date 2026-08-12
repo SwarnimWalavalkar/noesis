@@ -12,9 +12,17 @@ import {
 } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
+import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 
 type CredentialFile = Readonly<Record<string, Credential>>;
+
+export const NOESIS_PROVIDER_IDS = Object.freeze([
+  "openai-codex",
+  "anthropic",
+  "openrouter",
+  "opencode",
+] as const);
 
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -475,6 +483,7 @@ export function createPiModelServices(
   models.setProvider(openaiCodexProvider());
   models.setProvider(openrouterProvider());
   models.setProvider(anthropicProvider());
+  models.setProvider(opencodeProvider());
   return Object.freeze({ models, credentials, auth: createPiAuthManager(models, credentials) });
 }
 

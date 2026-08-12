@@ -8,13 +8,17 @@ import {
   type CredentialStore,
 } from "@earendil-works/pi-ai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { describe, expect, test } from "vitest";
 import {
+  assertPiModelSelection,
   credentialFileMode,
   createPiAgentRuntime,
   createPiAgentRoleRunner,
   createPiAuthManager,
+  createPiModelServices,
   createDefaultRoleContextPolicy,
   createSecurePiCredentialStore,
   piAuthPath,
@@ -26,6 +30,34 @@ const emptyAuthContext = {
 };
 
 describe("Pi authentication", () => {
+  test("registers every provider supported by Noesis", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-registration-"));
+    const services = createPiModelServices(home, { authContext: emptyAuthContext });
+
+    expect(
+      ["openai-codex", "anthropic", "openrouter", "opencode"].map(
+        (id) => services.models.getProvider(id)?.id,
+      ),
+    ).toEqual(["openai-codex", "anthropic", "openrouter", "opencode"]);
+    expect(services.models.getModel("anthropic", "claude-opus-4-8")?.id).toBe("claude-opus-4-8");
+    expect(services.models.getModel("opencode", "kimi-k2.6")?.id).toBe("kimi-k2.6");
+  });
+
+  test("validates provider and model as one selection through Pi's registered catalog", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-selection-"));
+    const services = createPiModelServices(home, { authContext: emptyAuthContext });
+
+    expect(() =>
+      assertPiModelSelection(services.models, { provider: "opencode", model: "kimi-k2.6" }),
+    ).not.toThrow();
+    expect(() =>
+      assertPiModelSelection(services.models, { provider: "opencode", model: "gpt-5.6-sol" }),
+    ).toThrow("Choose a matching model with --model");
+    expect(() => assertPiModelSelection(services.models, { provider: "missing", model: "anything" })).toThrow(
+      "Supported providers: anthropic, openai-codex, opencode, openrouter",
+    );
+  });
+
   test("persists mocked OAuth login and refresh through Pi's credential-store contract", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-auth-oauth-"));
     const credentials = createSecurePiCredentialStore(piAuthPath(home));
@@ -123,6 +155,45 @@ describe("Pi authentication", () => {
       activeCapabilities: [],
     };
     await expect(runtime.run(request, () => undefined)).rejects.toThrow("OPENROUTER_API_KEY");
+  });
+
+  test.each([
+    {
+      provider: "anthropic",
+      model: "claude-opus-4-8",
+      providerFactory: anthropicProvider,
+      expected: "ANTHROPIC_API_KEY",
+    },
+    {
+      provider: "opencode",
+      model: "kimi-k2.6",
+      providerFactory: opencodeProvider,
+      expected: "OPENCODE_API_KEY",
+    },
+  ])("fails before $provider execution with actionable authentication guidance", async ({
+    provider,
+    model,
+    providerFactory,
+    expected,
+  }) => {
+    const models = createModels({ authContext: emptyAuthContext });
+    models.setProvider(providerFactory());
+    const runtime = createPiAgentRuntime(process.cwd(), models);
+
+    await expect(
+      runtime.run(
+        {
+          trailId: `trail-missing-${provider}`,
+          provider,
+          model,
+          thinkingLevel: "off",
+          systemPrompt: "test",
+          prompt: "must not reach the network",
+          activeCapabilities: [],
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow(expected);
   });
 
   test("reuses the Pi provider and auth lifecycle for isolated roles without reaching the network", async () => {
