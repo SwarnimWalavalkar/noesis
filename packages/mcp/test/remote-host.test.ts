@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -165,6 +166,9 @@ describe("remote MCP transports", () => {
   test("keeps the replacement OAuth flow active when the older flow cleans up", async () => {
     const callbackPort = await availablePort();
     const manager = await unauthorizedOAuthManager(callbackPort);
+    const finishAuth = vi
+      .spyOn(StreamableHTTPClientTransport.prototype, "finishAuth")
+      .mockResolvedValue(undefined);
     const first = manager.authenticate("remote", { timeout: 30_000 });
     void first.catch(() => undefined);
     await vi.waitFor(async () => {
@@ -179,13 +183,12 @@ describe("remote MCP transports", () => {
       expect(manager.inspectServer("remote")?.status).toBe("auth_required");
     });
 
-    let finishError: unknown;
     try {
-      await manager.finishAuthentication("remote", "controlled-code");
-    } catch (error) {
-      finishError = error;
+      await expect(manager.finishAuthentication("remote", "controlled-code")).resolves.toBeUndefined();
+      expect(finishAuth).toHaveBeenCalledWith("controlled-code");
+    } finally {
+      finishAuth.mockRestore();
     }
-    expect(finishError instanceof Error ? finishError.message : "").not.toContain("no pending OAuth flow");
 
     await manager.close();
     await expect(second).rejects.toThrow("MCP host closed during OAuth authentication");
