@@ -15,6 +15,7 @@
     "@noesis/domain": "workspace:*",
     "@noesis/evals": "workspace:*",
     "@noesis/learning": "workspace:*",
+    "@noesis/mcp": "workspace:*",
     "@noesis/intelligence": "workspace:*",
     "@noesis/policy": "workspace:*",
     "@noesis/runtime": "workspace:*",

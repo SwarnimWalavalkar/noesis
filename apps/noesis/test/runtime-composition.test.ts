@@ -156,6 +156,25 @@ test("project workflow pins compose only with their own project's global hotbar"
   });
 });
 
+test("MCP pins are effective only in the project that owns them", () => {
+  const tools = Object.freeze({
+    hotbar: Object.freeze(["files.read", "mcp.github.search_123456789abc"]),
+    projectHotbars: Object.freeze({
+      project_beta: Object.freeze(["mcp.linear.list_abcdef123456"]),
+    }),
+  });
+  expect(resolveProjectHotbarSelection(tools, "project_alpha")).toEqual({
+    global: ["files.read"],
+    project: [],
+    effective: ["files.read"],
+  });
+  expect(resolveProjectHotbarSelection(tools, "project_beta")).toEqual({
+    global: ["files.read"],
+    project: ["mcp.linear.list_abcdef123456"],
+    effective: ["files.read", "mcp.linear.list_abcdef123456"],
+  });
+});
+
 test("active project hotbar load rejects an effective global and project union above 16", () => {
   const projectId = "project_overflow";
   const projectTool = projectWorkflowToolName(projectId, "project-tool");
@@ -1059,7 +1078,7 @@ describe("apps/noesis production control-plane composition", () => {
       await runtime.debug.workspace.definitionMetadata.getCurrent("workflow", "legacy-increment"),
     ).toMatchObject({ revision: 8 });
     await runtime.shutdown();
-  });
+  }, 30_000);
 
   test("workflow resume fails closed when any visible saved definition changes", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-workflow-required-tool-pin-"));

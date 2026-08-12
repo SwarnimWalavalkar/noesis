@@ -44,12 +44,18 @@ export interface ToolExecutionContext {
   readonly sessionId: string;
   readonly turnId?: string;
   readonly signal: AbortSignal;
+  readonly emitUpdate?: (update: JsonValue) => void;
 }
 
 export interface ToolEffect {
   readonly effect: EffectClass;
   readonly resource: string;
   readonly estimatedCost: number;
+}
+
+export interface ToolReportedFailure {
+  readonly message: string;
+  readonly details?: JsonValue;
 }
 
 export interface ToolDefinition {
@@ -60,8 +66,18 @@ export interface ToolDefinition {
   readonly implementationDigest: string;
   readonly inputSchema: z.ZodType<unknown>;
   readonly outputSchema: z.ZodType<JsonValue>;
+  /** Optional protocol-owned validator used when native JSON Schema is the catalog authority. */
+  readonly parseInput?: (input: unknown) => unknown;
+  /** Optional protocol-owned validator used when native JSON Schema is the catalog authority. */
+  readonly parseOutput?: (output: unknown) => JsonValue;
+  /** Native protocol schema to publish in the frozen catalog when Zod is not the schema authority. */
+  readonly catalogInputSchema?: JsonValue;
+  /** Native protocol schema to publish in the frozen catalog when Zod is not the schema authority. */
+  readonly catalogOutputSchema?: JsonValue;
   readonly effect: (input: unknown, context: ToolExecutionContext) => ToolEffect;
   readonly execute: (input: unknown, context: ToolExecutionContext) => Promise<JsonValue>;
+  /** Classifies a protocol-valid result as an expected tool failure after its effect has settled. */
+  readonly reportedFailure?: (output: JsonValue) => ToolReportedFailure | undefined;
 }
 
 export interface ToolAuthoringDefinition<Input, Output extends JsonValue> {
@@ -74,6 +90,7 @@ export interface ToolAuthoringDefinition<Input, Output extends JsonValue> {
   readonly outputSchema: z.ZodType<Output>;
   readonly effect: (input: Input, context: ToolExecutionContext) => ToolEffect;
   readonly execute: (input: Input, context: ToolExecutionContext) => Promise<Output>;
+  readonly reportedFailure?: (output: Output) => ToolReportedFailure | undefined;
 }
 
 export function defineTool<Input, Output extends JsonValue>(
@@ -87,10 +104,12 @@ export function defineTool<Input, Output extends JsonValue>(
   const outputSchema = definition.outputSchema;
   const deriveEffect = definition.effect;
   const execute = definition.execute;
+  const reportedFailure = definition.reportedFailure;
   const implementationDigest = sha256(
     canonicalJson({
       effect: deriveEffect.toString(),
       execute: execute.toString(),
+      reportedFailure: reportedFailure?.toString() ?? null,
       identityMaterial: definition.identityMaterial ?? null,
     }),
   );
@@ -106,6 +125,7 @@ export function defineTool<Input, Output extends JsonValue>(
     // preventing Zod transforms from running once for effect derivation and again for execution.
     effect: (input: unknown, context: ToolExecutionContext) => deriveEffect(input as Input, context),
     execute: async (input: unknown, context: ToolExecutionContext) => await execute(input as Input, context),
+    ...(reportedFailure ? { reportedFailure: (output: JsonValue) => reportedFailure(output as Output) } : {}),
   });
 }
 
@@ -142,6 +162,7 @@ export interface ToolInvocationFailure {
   readonly ok: false;
   readonly code: ToolInvocationFailureCode;
   readonly message: string;
+  readonly details?: JsonValue;
 }
 
 export interface ToolInvocationSuccess {
@@ -222,6 +243,15 @@ function freezeDefinition(definition: ToolDefinition): FrozenDefinition {
     implementationDigest: definition.implementationDigest,
     inputSchema: definition.inputSchema,
     outputSchema: definition.outputSchema,
+    ...(definition.parseInput ? { parseInput: definition.parseInput } : {}),
+    ...(definition.parseOutput ? { parseOutput: definition.parseOutput } : {}),
+    ...(definition.reportedFailure ? { reportedFailure: definition.reportedFailure } : {}),
+    ...(definition.catalogInputSchema === undefined
+      ? {}
+      : { catalogInputSchema: deepFreezeJson(structuredClone(definition.catalogInputSchema)) }),
+    ...(definition.catalogOutputSchema === undefined
+      ? {}
+      : { catalogOutputSchema: deepFreezeJson(structuredClone(definition.catalogOutputSchema)) }),
     effect: definition.effect,
     execute: definition.execute,
   });
@@ -231,8 +261,8 @@ function freezeDefinition(definition: ToolDefinition): FrozenDefinition {
     description: capturedDefinition.description,
     visibility: capturedDefinition.visibility,
     implementationDigest: capturedDefinition.implementationDigest,
-    inputSchema: schemaJson(capturedDefinition.inputSchema),
-    outputSchema: schemaJson(capturedDefinition.outputSchema),
+    inputSchema: capturedDefinition.catalogInputSchema ?? schemaJson(capturedDefinition.inputSchema),
+    outputSchema: capturedDefinition.catalogOutputSchema ?? schemaJson(capturedDefinition.outputSchema),
   });
   const revisionId = `tool_${sha256(canonicalJson(identity))}`;
   return Object.freeze({
@@ -327,8 +357,12 @@ function nearestToolNames(
   );
 }
 
-function failure(code: ToolInvocationFailureCode, message: string): ToolInvocationFailure {
-  return Object.freeze({ ok: false, code, message });
+function failure(
+  code: ToolInvocationFailureCode,
+  message: string,
+  details?: JsonValue,
+): ToolInvocationFailure {
+  return Object.freeze({ ok: false, code, message, ...(details === undefined ? {} : { details }) });
 }
 
 function decisionFailure(
@@ -343,6 +377,12 @@ export interface CreateToolBrokerOptions {
   readonly permission: PermissionManifest;
   readonly recorder?: ToolInvocationRecorder;
   readonly now?: () => Date;
+  /** Post-effect storage seam. Runs only after AuthorityBoundary has settled the tool effect successfully. */
+  readonly materializeResult?: (
+    name: string,
+    value: JsonValue,
+    context: ToolExecutionContext,
+  ) => Promise<JsonValue>;
 }
 
 export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
@@ -404,13 +444,24 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
       );
     }
     if (invocationContext.signal.aborted) return failure("cancelled", "Execution was cancelled");
-    const parsedInput = entry.definition.inputSchema.safeParse(rawInput);
-    if (!parsedInput.success)
+    let parsedInput: unknown;
+    try {
+      parsedInput = entry.definition.parseInput
+        ? entry.definition.parseInput(rawInput)
+        : entry.definition.inputSchema.parse(rawInput);
+    } catch (error) {
+      const detail =
+        error instanceof z.ZodError
+          ? z.prettifyError(error)
+          : error instanceof Error
+            ? error.message
+            : String(error);
       return failure(
         "invalid_input",
-        `Invalid input for ${name}: ${z.prettifyError(parsedInput.error)} Inspect the exact input schema with noesis.describe("${name}").`,
+        `Invalid input for ${name}: ${detail} Inspect the exact input schema with noesis.describe("${name}").`,
       );
-    const input = toJsonValue(parsedInput.data);
+    }
+    const input = toJsonValue(parsedInput);
     const callId = invocationContext.callId ?? createId("tool_call");
     const logicalExecutionId = invocationContext.logicalExecutionId ?? invocationContext.executionId;
     const occurredAt = now().toISOString();
@@ -443,7 +494,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
     }
     let effect: ToolEffect;
     try {
-      effect = entry.definition.effect(parsedInput.data, context);
+      effect = entry.definition.effect(parsedInput, context);
     } catch (error) {
       const executionFailure = inspectEffectExecutionFailure(error);
       const result = failure(
@@ -481,24 +532,26 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
           throw createEffectExecutionFailure("cancelled", "Execution was cancelled");
         let rawOutput: JsonValue;
         try {
-          rawOutput = await entry.definition.execute(parsedInput.data, context);
+          rawOutput = await entry.definition.execute(parsedInput, context);
         } catch (error) {
           if (context.signal.aborted)
             throw createEffectExecutionFailure("cancelled", "Execution was cancelled");
           throw error;
         }
-        const parsedOutput = entry.definition.outputSchema.safeParse(rawOutput);
-        if (!parsedOutput.success)
-          throw createEffectExecutionFailure(
-            "invalid_output",
-            `Tool returned invalid output: ${z.prettifyError(parsedOutput.error)}`,
-          );
-        const output = JsonValueSchema.parse(parsedOutput.data);
-        if (Buffer.byteLength(JSON.stringify(output), "utf8") > MAX_TOOL_RESULT_BYTES)
-          throw createEffectExecutionFailure(
-            "result_too_large",
-            `Tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`,
-          );
+        let output: JsonValue;
+        try {
+          output = entry.definition.parseOutput
+            ? entry.definition.parseOutput(rawOutput)
+            : JsonValueSchema.parse(entry.definition.outputSchema.parse(rawOutput));
+        } catch (error) {
+          const detail =
+            error instanceof z.ZodError
+              ? z.prettifyError(error)
+              : error instanceof Error
+                ? error.message
+                : String(error);
+          throw createEffectExecutionFailure("invalid_output", `Tool returned invalid output: ${detail}`);
+        }
         return output;
       },
     });
@@ -522,18 +575,48 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         );
       return result;
     }
+    let completedValue = decision.value;
+    try {
+      completedValue = options.materializeResult
+        ? await options.materializeResult(name, decision.value, context)
+        : decision.value;
+    } catch (error) {
+      const message = `Tool effect completed, but its result could not be materialized: ${error instanceof Error ? error.message : String(error)}`;
+      if (!recordedIsTerminal)
+        await options.recorder?.record(
+          Object.freeze({ ...baseRecord, status: "failed" as const, completedAt, error: message }),
+        );
+      return failure("failed", message);
+    }
+    if (Buffer.byteLength(JSON.stringify(completedValue), "utf8") > MAX_TOOL_RESULT_BYTES)
+      return failure("result_too_large", `Tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`);
+    const reportedFailure = entry.definition.reportedFailure?.(decision.value);
+    if (reportedFailure) {
+      const details = reportedFailure.details ?? completedValue;
+      if (!recordedIsTerminal)
+        await options.recorder?.record(
+          Object.freeze({
+            ...baseRecord,
+            status: "failed" as const,
+            output: completedValue,
+            completedAt,
+            error: reportedFailure.message,
+          }),
+        );
+      return failure("failed", reportedFailure.message, details);
+    }
     if (!recordedIsTerminal)
       await options.recorder?.record(
         Object.freeze({
           ...baseRecord,
           status: "completed" as const,
-          output: decision.value,
+          output: completedValue,
           completedAt,
         }),
       );
     return Object.freeze({
       ok: true,
-      value: decision.value,
+      value: completedValue,
       callId,
       toolRevisionId: entry.descriptor.revisionId,
       replayed: decision.replayed,

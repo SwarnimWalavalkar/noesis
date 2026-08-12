@@ -37,6 +37,7 @@ Noesis currently includes:
 - search across previous sessions with source citations
 - direct tools for files, directories, shell commands, saved workflows, and session search
 - `execute` for combining tools with JavaScript
+- local and remote MCP servers with OAuth, project overrides, and TUI management
 - project scripts and durable workflows with immutable execution revisions
 - ambient reflection and temporary project strategies
 - experiments, evaluation, activation, feedback, and rollback for broader learned changes
@@ -84,6 +85,27 @@ pnpm start -- --continue
 ```
 
 Noesis stores local state in `~/.noesis/` by default.
+
+## MCP servers
+
+Use `/mcp` to add a local or remote server. The same screen lets you authenticate, enable or disable a server, reconnect, edit its settings, remove it, and inspect what it provides.
+
+Global servers live in `~/.noesis/mcp.json`. Project servers live in `./.noesis/mcp.json`. A project server replaces a global server with the same name while you work in that project.
+Project servers remain disabled until the workspace is trusted.
+
+```json
+{
+  "servers": {
+    "docs": {
+      "type": "remote",
+      "url": "https://mcp.example.com",
+      "oauth": true
+    }
+  }
+}
+```
+
+Connected MCP tools join the same tool catalog as built-in tools. The agent can call them through `execute`, add one to its direct tool set with `adapt`, or use one from a saved script or workflow.
 
 ## Documentation
 

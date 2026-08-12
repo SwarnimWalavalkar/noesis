@@ -13,6 +13,7 @@ import { isExclusiveSlashCommand, runSlashCommand, steerFeedback } from "./comma
 import { editTextInExternalEditor } from "./external-editor.ts";
 import { learningDiagnosticNotice, reconcileSettledTurnPresentation } from "./learning-presentation.ts";
 import { boundedInspectorText, streamingFrameDelay } from "./lifecycle-utils.ts";
+import { createTuiMcpOrchestration } from "./mcp.ts";
 import {
   createHeaderView,
   createHelpView,
@@ -51,6 +52,7 @@ export * from "./agent-event.ts";
 export * from "./commands.ts";
 export * from "./external-editor.ts";
 export * from "./lifecycle-utils.ts";
+export * from "./mcp.ts";
 export * from "./onboarding.ts";
 export * from "./rendering.ts";
 export * from "./runtime-port.ts";
@@ -127,6 +129,16 @@ export async function startNoesisTui(
     },
   );
   let inspectorHandle: OverlayHandle | undefined;
+  const mcp = createTuiMcpOrchestration({
+    runtime,
+    tui,
+    colorEnabled,
+    height: () => terminal.rows,
+    ...(options.mcpInteractionBridge ? { interactionBridge: options.mcpInteractionBridge } : {}),
+    ...(options.openUrl ? { openUrl: options.openUrl } : {}),
+    mutationsEnabled: () => view.state.interaction.phase === "idle",
+    reportUnavailable: (text) => view.dispatch({ type: "system-message", text }),
+  });
   const statusView = createStatusView(view, () => terminal.rows);
   const queuedInputsView = createQueuedInputsView(view, () => terminal.rows);
   const inputLabelView = createInputLabelView(colorEnabled, () => terminal.rows);
@@ -137,11 +149,7 @@ export async function startNoesisTui(
   let externalEditorActive = false;
   let turnGeneration = 0;
   let inspectorGeneration = 0;
-  interface ActiveTurnToken {
-    readonly generation: number;
-    readonly trailId: string;
-    readonly turnId: string;
-  }
+  type ActiveTurnToken = Readonly<{ generation: number; trailId: string; turnId: string }>;
   let activeTurnToken: ActiveTurnToken | undefined;
   let pendingStream: { readonly token: ActiveTurnToken; readonly text: string } | undefined;
   let streamRenderTimer: NodeJS.Timeout | undefined;
@@ -198,6 +206,7 @@ export async function startNoesisTui(
       activeTurnToken = undefined;
       inspectorHandle?.hide();
       inspectorHandle = undefined;
+      mcp.dispose();
       if (streamRenderTimer) clearTimeout(streamRenderTimer);
       streamRenderTimer = undefined;
       streamRenderTimerToken = undefined;
@@ -538,6 +547,9 @@ export async function startNoesisTui(
       }
       return undefined;
     }
+    // Focused overlays parse their own input. The editor's paste quarantine must not swallow
+    // Escape or reinterpret text while MCP management or elicitation owns keyboard focus.
+    if (mcp.ownsKeyboardFocus() && !matchesKey(data, "ctrl+c")) return undefined;
     if (editor.capturePotentialPasteInput(data)) return { consume: true };
     // Global shortcuts must not reinterpret controls that are still quarantined as paste.
     if (!editor.acceptsUnbracketedCommandInput()) return undefined;
@@ -645,6 +657,7 @@ export async function startNoesisTui(
           requestRender: () => {
             if (isCurrentSubmission()) tui.requestRender();
           },
+          openMcpManager: mcp.openManager,
         });
         if (exclusiveCommand) activeExclusiveCommand = commandWork;
         try {

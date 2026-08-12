@@ -56,6 +56,7 @@ export {
 } from "./frozen-session-tools.ts";
 export * from "./hotbar-tools.ts";
 export * from "./model-selection.ts";
+export * from "./mcp-sampling.ts";
 export * from "./pi-role-backend.ts";
 export * from "./role-context.ts";
 export * from "./role-runner.ts";

@@ -151,8 +151,16 @@ export function createPiHotbarTools(input: {
     input.prepared.catalog.tools.map((descriptor) => {
       const alias = aliases.get(descriptor.name);
       if (!alias) throw new Error(`Frozen tool catalog has no direct alias for ${descriptor.name}`);
-      const schema = z.fromJSONSchema(jsonSchema(descriptor.inputSchema));
-      const parameters = z.toJSONSchema(schema);
+      const parameters = jsonSchema(descriptor.inputSchema);
+      // Direct invocations get a local fast-fail when Zod understands the schema. The Broker is
+      // still authoritative and uses the source protocol's validator for schemas Zod cannot
+      // represent, so native MCP contracts are never rewritten or rejected merely for conversion.
+      let localInputSchema: z.ZodType<unknown> | undefined;
+      try {
+        localInputSchema = z.fromJSONSchema(parameters);
+      } catch {
+        localInputSchema = undefined;
+      }
       const tool: AgentTool<typeof parameters, PiHotbarToolDetails> = {
         name: alias,
         label: descriptor.label,
@@ -160,7 +168,9 @@ export function createPiHotbarTools(input: {
         parameters,
         executionMode: "sequential",
         execute: async (toolCallId, rawInput, toolSignal) => {
-          const parsed = JsonValueSchema.parse(schema.parse(rawInput));
+          const parsed = JsonValueSchema.parse(
+            localInputSchema ? localInputSchema.parse(rawInput) : rawInput,
+          );
           const controller = new AbortController();
           const abortTurn = (): void => controller.abort(input.signal.reason);
           const abortTool = (): void => controller.abort(toolSignal?.reason);
@@ -185,11 +195,17 @@ export function createPiHotbarTools(input: {
             let value: JsonValue;
             try {
               if (!invoke) throw new Error("Direct Broker invocation is unavailable");
-              value = await invoke(descriptor.name, parsed, controller.signal, {
-                executionId: `direct:${input.turnId}`,
-                logicalExecutionId: `${input.turnId}:${toolCallId}`,
-                callId,
-              });
+              value = await invoke(
+                descriptor.name,
+                parsed,
+                controller.signal,
+                {
+                  executionId: `direct:${input.turnId}`,
+                  logicalExecutionId: `${input.turnId}:${toolCallId}`,
+                  callId,
+                },
+                (update) => input.emit({ type: "progress", value: update }, eventCallId, true),
+              );
               input.emit(
                 {
                   type: "tool-end",

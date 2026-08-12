@@ -58,6 +58,7 @@ import {
   createDurableAutomaticLearningOrgan,
   createWorkspaceLearningCandidateManifestStore,
 } from "@noesis/learning";
+import { createMcpToolDefinitions, type McpHostManager } from "@noesis/mcp";
 import {
   type ActivationCandidateResolver,
   type CoordinatorPreflightPreparation,
@@ -111,6 +112,7 @@ import {
   createLocalWorkTools,
   createToolBroker,
   defineTool,
+  MAX_TOOL_RESULT_BYTES,
   type ToolBroker,
   type ToolDefinition,
   type ToolInvocationRecord,
@@ -129,6 +131,7 @@ import {
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
 import { loadLearningActivityForSession, loadLearningInspectionForSession } from "./learning-read-model.ts";
+import type { ApplicationMcpSamplingAuthorizer } from "./mcp-integration.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
@@ -278,15 +281,19 @@ export function resolveProjectHotbarSelection(
   projectId: string,
 ): ProjectHotbarSelection {
   const global = Object.freeze([
-    ...new Set(tools.hotbar.filter((toolName) => !isProjectWorkflowToolName(toolName))),
+    ...new Set(
+      tools.hotbar.filter((toolName) => !isProjectWorkflowToolName(toolName) && !toolName.startsWith("mcp.")),
+    ),
   ]);
   const project = Object.freeze([
     ...new Set(
       [
         ...(tools.projectHotbars[projectId] ?? []),
         // Adopt pins written before project overlays existed only in their exact project.
-        ...tools.hotbar,
-      ].filter((toolName) => isProjectWorkflowToolForProject(projectId, toolName)),
+        ...tools.hotbar.filter((toolName) => !toolName.startsWith("mcp.")),
+      ].filter(
+        (toolName) => isProjectWorkflowToolForProject(projectId, toolName) || toolName.startsWith("mcp."),
+      ),
     ),
   ]);
   const effective = Object.freeze([...new Set([...global, ...project])]);
@@ -745,6 +752,15 @@ export interface ApplicationRuntimeCompositionOptions {
     skills?: PiSkillLibrary,
   ) => NoesisAgentRuntime;
   readonly skills?: PiSkillLibrary;
+  readonly mcp?: Readonly<{
+    host: McpHostManager;
+    start: () => Promise<void>;
+    close: () => Promise<void>;
+    listMcpServers: NonNullable<NoesisTuiRuntime["listMcpServers"]>;
+    inspectMcpServer: NonNullable<NoesisTuiRuntime["inspectMcpServer"]>;
+    mutateMcp: NonNullable<NoesisTuiRuntime["mutateMcp"]>;
+    setSamplingAuthorizer: (authorizer: ApplicationMcpSamplingAuthorizer) => void;
+  }>;
   readonly createRoleRunner: (
     configurations: readonly RoleVariantConfiguration[],
   ) => RuntimePiAgentRoleRunner;
@@ -1508,6 +1524,45 @@ export async function createApplicationRuntimeComposition(
     }
   };
   const { authority, protectedRuntime } = createWorkspaceRuntimeInternals(workspace);
+  options.mcp?.setSamplingAuthorizer(async ({ serverName, request, signal, invocation, execute }) => {
+    if (!invocation.turnId) throw new Error("MCP sampling requires an admitted foreground turn identity");
+    const plan = await protectedRuntime.activations.getTurnPlan(invocation.sessionId, invocation.turnId);
+    if (!plan) throw new Error("MCP sampling could not resolve its admitted foreground turn");
+    if (
+      plan.provider !== invocation.route.provider ||
+      plan.model !== invocation.route.model ||
+      plan.thinkingLevel !== invocation.route.reasoning
+    )
+      throw new Error("MCP sampling route does not match its frozen foreground turn");
+    const requestValue = toJsonValue(request);
+    const requestDigest = sha256(
+      canonicalJson({
+        serverName,
+        request: requestValue,
+        sessionId: invocation.sessionId,
+        turnId: invocation.turnId,
+        callId: invocation.callId,
+        route: invocation.route,
+      }),
+    );
+    const decision = await authority.runForeground(
+      {
+        operationId: `operation_${sha256(`mcp-sampling:${invocation.callId}:${requestDigest}`)}`,
+        effect: "network",
+        resource: `mcp:${serverName}:sampling:${invocation.callId}`,
+        estimatedCost: 1,
+        idempotencyKey: `mcp-sampling:${invocation.callId}:${requestDigest}`,
+        requestDigest,
+        execute: async () => {
+          if (signal.aborted) throw new Error("MCP sampling was cancelled");
+          return toJsonValue(await execute());
+        },
+      },
+      plan.permissionSnapshot,
+    );
+    if (!decision.ok) throw new Error(`MCP sampling ${decision.code}: ${decision.reason}`);
+    return decision.value;
+  });
   await workspace.cutoverLegacyOperationalAuthority(
     options.config.home,
     Object.freeze({ actorId: "operational-cutover", kind: "system" as const }),
@@ -1738,6 +1793,16 @@ export async function createApplicationRuntimeComposition(
     await reconcileStoredScripts(workspace, project);
     await reconcileStoredWorkflows(workspace, project);
     const sessionDefinitions = await resolveFrozenSessionToolDefinitions(plan, sessionTools, signal);
+    await options.mcp?.host.refreshDiscovery();
+    const mcpTools = options.mcp
+      ? createMcpToolDefinitions(options.mcp.host, {
+          modelRoute: Object.freeze({
+            provider: plan.provider,
+            model: plan.model,
+            reasoning: plan.thinkingLevel,
+          }),
+        })
+      : Object.freeze([]);
     const [frozenScripts, frozenWorkflows] = await Promise.all([
       listStoredScripts(workspace, project),
       listStoredWorkflows(workspace, project),
@@ -2394,6 +2459,7 @@ export async function createApplicationRuntimeComposition(
         ...scriptTools,
         ...workflowTools,
         ...savedWorkflowTools,
+        ...mcpTools,
         ...sessionDefinitionsForBroker(sessionDefinitions, { workspace, history }),
       ]),
       authority,
@@ -2402,6 +2468,48 @@ export async function createApplicationRuntimeComposition(
         status: recordedToolInvocationStatus,
       }),
       permission: plan.permissionSnapshot,
+      materializeResult: async (toolName, result, context) => {
+        if (!toolName.startsWith("mcp.")) return result;
+        const bytes = encoder.encode(JSON.stringify(result));
+        if (bytes.length <= MAX_TOOL_RESULT_BYTES) return result;
+        const resultDigest = sha256(bytes);
+        const path = `mcp/${sha256(`${plan.turnId}:${toolName}:${resultDigest}`).slice(0, 32)}.json`;
+        const operationId = `operation_${sha256(`mcp-artifact:${context.callId}:${resultDigest}`)}`;
+        const decision = await authority.runForeground(
+          {
+            operationId,
+            effect: "write",
+            resource: `artifact:${path}`,
+            estimatedCost: 0,
+            idempotencyKey: `mcp-artifact:${context.callId}:${resultDigest}`,
+            requestDigest: sha256(canonicalJson({ path, resultDigest })),
+            execute: async () =>
+              toJsonValue(
+                await workspace.artifacts.writeArtifact({
+                  path,
+                  mediaType: "application/json",
+                  bytes,
+                  actor: Object.freeze({ actorId: "noesis-mcp", kind: "noesis" as const }),
+                  relationshipRefs: Object.freeze([foregroundEvidence(plan)]),
+                }),
+              ),
+          },
+          plan.permissionSnapshot,
+        );
+        if (!decision.ok)
+          throw new Error(`MCP result artifact was not stored: ${decision.code}: ${decision.reason}`);
+        const artifact = z.strictObject({ artifactId: z.string() }).passthrough().parse(decision.value);
+        return toJsonValue({
+          content: [
+            {
+              type: "text",
+              text: `MCP result was ${String(bytes.length)} bytes and is available as artifact ${artifact.artifactId}.`,
+            },
+          ],
+          artifact,
+          truncated: true,
+        });
+      },
     });
     const scriptAwareBroker: ToolBroker = Object.freeze({
       catalogId: broker.catalogId,
@@ -2855,6 +2963,17 @@ export async function createApplicationRuntimeComposition(
           }),
         ),
       ),
+      mcpServerSummaries: Object.freeze(
+        (options.mcp?.host.listServers() ?? [])
+          .filter((server) => server.status === "connected")
+          .map((server) => ({
+            name: server.name,
+            tools: server.capabilityCounts.tools,
+            prompts: server.capabilityCounts.prompts,
+            resources: server.capabilityCounts.resources,
+            resourceTemplates: server.capabilityCounts.resourceTemplates,
+          })),
+      ),
       catalog: Object.freeze({
         catalogId: broker.catalogId,
         catalogDigest: broker.catalogDigest,
@@ -2880,6 +2999,7 @@ export async function createApplicationRuntimeComposition(
           readonly logicalExecutionId: string;
           readonly callId: string;
         },
+        emitUpdate?: (update: JsonValue) => void,
       ) => {
         const result = await scriptAwareBroker.invoke(name, input, {
           executionId: identity.executionId,
@@ -2888,8 +3008,12 @@ export async function createApplicationRuntimeComposition(
           sessionId: plan.sessionId,
           turnId: plan.turnId,
           signal: invokeSignal,
+          ...(emitUpdate ? { emitUpdate } : {}),
         });
-        if (!result.ok) throw new Error(`${result.code}: ${result.message}`);
+        if (!result.ok)
+          throw new Error(
+            `${result.code}: ${result.message}${result.details === undefined ? "" : `\n${JSON.stringify(result.details)}`}`,
+          );
         return result.value;
       },
       execute: async (
@@ -3093,8 +3217,11 @@ export async function createApplicationRuntimeComposition(
       const available = new Set(catalog.tools.map((tool) => tool.name));
       if (input.action === "add_tool" && !available.has(input.tool))
         throw new Error(`Tool ${input.tool} is not available in this turn; inspect section 'tools' first`);
-      const projectScoped = isProjectWorkflowToolName(input.tool);
-      if (projectScoped && !isProjectWorkflowToolForProject(project.projectId, input.tool))
+      const projectScoped = isProjectWorkflowToolName(input.tool) || input.tool.startsWith("mcp.");
+      if (
+        isProjectWorkflowToolName(input.tool) &&
+        !isProjectWorkflowToolForProject(project.projectId, input.tool)
+      )
         throw new Error(`Workflow tool ${input.tool} does not belong to project ${project.projectId}`);
       const requestDigest = sha256(
         canonicalJson({
@@ -3300,6 +3427,7 @@ export async function createApplicationRuntimeComposition(
         "workflow-run:*",
         "skill:*",
         "noesis-history:*",
+        "mcp:*",
       ]),
       credentialRefs: Object.freeze([]),
     }),
@@ -4209,9 +4337,12 @@ export async function createApplicationRuntimeComposition(
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
     shutdownPromise ??= (async () => {
-      const stop = Promise.all([interactions.close(), controlPlane.stop(), codeExecution.shutdown()]).then(
-        () => undefined,
-      );
+      const stop = Promise.all([
+        interactions.close(),
+        controlPlane.stop(),
+        codeExecution.shutdown(),
+        options.mcp?.close() ?? Promise.resolve(),
+      ]).then(() => undefined);
       let graceTimer: NodeJS.Timeout | undefined;
       const settlement = await Promise.race<
         | { readonly status: "settled" }
@@ -4239,6 +4370,7 @@ export async function createApplicationRuntimeComposition(
     })();
     return shutdownPromise;
   };
+  await options.mcp?.start();
   return Object.freeze({
     home: options.config.home,
     agentName: agent.name,
@@ -4288,6 +4420,13 @@ export async function createApplicationRuntimeComposition(
     listLearningActivity,
     inspectLearning,
     waitForLearningActivity,
+    ...(options.mcp
+      ? {
+          listMcpServers: options.mcp.listMcpServers,
+          inspectMcpServer: options.mcp.inspectMcpServer,
+          mutateMcp: options.mcp.mutateMcp,
+        }
+      : {}),
     shutdown,
   });
 }

@@ -324,6 +324,25 @@ describe("Noesis config", () => {
     });
   });
 
+  test("persists MCP pins in the active project instead of the global hotbar", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-mcp-hotbar-"));
+    await initializeNoesisConfig(home);
+    await updateToolHotbar(home, {
+      projectId: "project_alpha",
+      projectToolNamespace: "workflow.1111111111111111.",
+      scope: "project",
+      action: "add",
+      tool: "mcp.github.search_123456789abc",
+      legacyGlobalProjectTools: [],
+      legacyActiveProjectTools: [],
+    });
+    const config = await resolveNoesisConfig({ home, env: {} });
+    expect(config.tools.hotbar).not.toContain("mcp.github.search_123456789abc");
+    expect(config.tools.projectHotbars).toEqual({
+      project_alpha: ["mcp.github.search_123456789abc"],
+    });
+  });
+
   test("serializes concurrent global and same-project hotbar deltas without lost updates", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-concurrent-hotbar-"));
     await initializeNoesisConfig(home);

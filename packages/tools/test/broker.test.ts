@@ -1,4 +1,4 @@
-import type { EffectClass, JsonValue } from "@noesis/domain";
+import { type EffectClass, type JsonValue, toJsonValue } from "@noesis/domain";
 import { type AuthorityBoundary, type EffectDecision, inspectEffectExecutionFailure } from "@noesis/policy";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -424,5 +424,57 @@ describe("tool broker", () => {
     });
     expect(Object.isFrozen(observedPermission?.effects)).toBe(true);
     expect(Object.isFrozen(broker.describe("test.captured")?.inputSchema)).toBe(true);
+  });
+
+  it("publishes a native JSON Schema without making Zod the catalog authority", () => {
+    const nativeInput = Object.freeze({
+      type: "object" as const,
+      properties: Object.freeze({ query: Object.freeze({ type: "string" as const }) }),
+      required: Object.freeze(["query"]),
+      additionalProperties: false,
+    });
+    const definition: ToolDefinition = Object.freeze({
+      ...echo(),
+      name: "mcp.docs.search",
+      catalogInputSchema: nativeInput,
+    });
+    const broker = createToolBroker({
+      definitions: [definition],
+      authority: foregroundAuthority(),
+      permission,
+    });
+
+    expect(broker.describe("mcp.docs.search")?.inputSchema).toEqual(nativeInput);
+    expect(Object.isFrozen(broker.describe("mcp.docs.search")?.inputSchema)).toBe(true);
+  });
+
+  it("settles a valid effect before reporting a protocol-owned tool failure", async () => {
+    const details = toJsonValue({
+      content: Object.freeze([Object.freeze({ type: "text", text: "remote failure" })]),
+      isError: true,
+    });
+    const definition = defineTool({
+      name: "test.reported-failure",
+      label: "Reported failure",
+      description: "Returns a protocol-valid failure result",
+      visibility: "codemode_only",
+      inputSchema: z.strictObject({}),
+      outputSchema: z.json(),
+      effect: () => ({ effect: "read", resource: "test:reported-failure", estimatedCost: 0 }),
+      execute: async () => details,
+      reportedFailure: (output) => ({ message: "remote tool failed", details: output }),
+    });
+    const broker = createToolBroker({
+      definitions: [definition],
+      authority: foregroundAuthority(),
+      permission,
+    });
+
+    await expect(broker.invoke("test.reported-failure", {}, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "failed",
+      message: "remote tool failed",
+      details,
+    });
   });
 });

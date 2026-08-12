@@ -164,7 +164,9 @@ function sdkActionInput(message: Extract<ChildMessage, { readonly type: "sdk-cal
 
 function invocationValue(result: ToolInvocationResult): JsonValue {
   if (result.ok) return result.value;
-  throw new Error(`${result.code}: ${result.message}`);
+  throw new Error(
+    `${result.code}: ${result.message}${result.details === undefined ? "" : `\n${JSON.stringify(result.details)}`}`,
+  );
 }
 
 async function terminateChild(child: ChildProcess, closed: Promise<void>): Promise<void> {
@@ -377,6 +379,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                         sessionId: request.sessionId,
                         ...(request.turnId ? { turnId: request.turnId } : {}),
                         signal: controller.signal,
+                        emitUpdate: (update) => notify({ type: "progress", executionId, value: update }),
                       }),
                     ),
             );

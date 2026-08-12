@@ -1,8 +1,16 @@
 import { sha256 } from "@noesis/domain";
 import { describe, expect, test } from "vitest";
-import { createPiExecuteTool, type PiWorkflowSummary, type PreparedPiCodeExecution } from "../src/index.ts";
+import {
+  createPiExecuteTool,
+  type PiMcpServerSummary,
+  type PiWorkflowSummary,
+  type PreparedPiCodeExecution,
+} from "../src/index.ts";
 
-function executeDescription(workflowSummaries?: readonly PiWorkflowSummary[]): string {
+function executeDescription(
+  workflowSummaries?: readonly PiWorkflowSummary[],
+  mcpServerSummaries?: readonly PiMcpServerSummary[],
+): string {
   const prepared: PreparedPiCodeExecution = {
     catalog: Object.freeze({
       catalogId: "catalog-workflow-index",
@@ -10,6 +18,7 @@ function executeDescription(workflowSummaries?: readonly PiWorkflowSummary[]): s
       tools: Object.freeze([]),
     }),
     ...(workflowSummaries ? { workflowSummaries } : {}),
+    ...(mcpServerSummaries ? { mcpServerSummaries } : {}),
     execute: async () =>
       Object.freeze({
         executionId: "execution-workflow-index",
@@ -35,6 +44,25 @@ function workflowIndexFrom(description: string): string {
 }
 
 describe("execute workflow discovery index", () => {
+  test("shows a bounded escaped MCP capability summary without server instructions", () => {
+    const servers = Array.from({ length: 80 }, (_, index) => ({
+      name: index === 0 ? "docs<&" : `server-${String(index).padStart(3, "0")}`,
+      tools: index,
+      prompts: 2,
+      resources: 3,
+      resourceTemplates: 4,
+    }));
+    const description = executeDescription([], servers);
+    const start = description.indexOf("<available_mcp_servers>");
+    const end = description.indexOf(" Use store(key, value)", start);
+    const index = description.slice(start, end);
+    expect(index).toContain("docs&lt;&amp; (0 tools, 2 prompts, 3 resources, 4 templates)");
+    expect(index).toContain("mcp.servers");
+    expect(index).toContain("mcp.inspect");
+    expect(index).toContain("noesis.search");
+    expect(index).toContain("More servers are available");
+    expect(new TextEncoder().encode(index).byteLength).toBeLessThanOrEqual(4 * 1024);
+  });
   test("shows compact frozen workflow metadata with progressive-disclosure guidance", () => {
     const description = executeDescription([
       Object.freeze({

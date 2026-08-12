@@ -19,54 +19,116 @@
     .muted { color: var(--muted); }
     li { margin: .55em 0; }
     .decision { padding-left: 18px; border-left: 3px solid var(--accent); }
+    pre { padding: 18px; overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
   </style>
 </head>
 <body><main>
-  <div class="tag">Design workshop · open</div>
-  <h1>MCP as one more tool source</h1>
-  <p class="lead">MCP should extend Noesis's frozen Tool Catalog. It should not create a second execution path beside the Broker.</p>
+  <div class="tag">Implementation design · revised</div>
+  <h1>MCP should just work</h1>
+  <p class="lead">Install a server, authenticate it when needed, and use everything it provides. Noesis should be a fully compatible MCP host with excellent discovery and TUI management—not a partial protocol adapter.</p>
 
-  <section><h2>Proposed first boundary</h2>
-    <p class="decision">A host-owned MCP connection manager reads declarative server definitions and projects discovered tools as namespaced Broker definitions such as <code>mcp.github.search_code</code>. Launch, connect, authenticate, discover, reconnect, and shutdown are protected, recorded effects rather than an execution path around the Broker.</p>
+  <section><h2>Product contract</h2>
+    <p class="decision"><code>/mcp</code> is the home for installing, authenticating, enabling, disabling, inspecting, reconnecting, and removing MCP servers. Once enabled, a server's capabilities are available to the model and to workflows.</p>
     <div class="grid">
-      <div class="card"><strong>Transports</strong><p class="muted">Start with stdio and Streamable HTTP.</p></div>
-      <div class="card"><strong>Surface</strong><p class="muted">Tools only. Defer prompts, resources, roots, sampling, and elicitation.</p></div>
-      <div class="card"><strong>Lifecycle</strong><p class="muted">The connection manager requests launch, connect, authenticate, discover, reload, reconcile, and shutdown through AuthorityBoundary and EffectGateway. Each is a separate durable operation.</p></div>
-      <div class="card"><strong>Invocation</strong><p class="muted">Only admitted MCP tool calls use ToolBroker. The execute SDK and hotbar invoke the same descriptor through the same frozen Broker, permissions, and durable call path.</p></div>
+      <div class="card"><strong>Compatibility</strong><p class="muted">Implement the complete MCP client surface supported by the official TypeScript SDK: tools, prompts, resources and templates, roots, sampling, elicitation, completions, subscriptions, logging, progress, cancellation, notifications, OAuth, and tasks.</p></div>
+      <div class="card"><strong>Transports</strong><p class="muted">Support local stdio and remote Streamable HTTP. Retain legacy SSE interoperability where the SDK can negotiate it.</p></div>
+      <div class="card"><strong>Configuration</strong><p class="muted">Read global servers from <code>~/.noesis/mcp.json</code> and project servers from <code>./.noesis/mcp.json</code>. Project entries override global entries with the same name.</p></div>
+      <div class="card"><strong>Authentication</strong><p class="muted">Implement the full MCP OAuth flow, including discovery, dynamic client registration where supported, browser callback, refresh, logout, and pre-registered client credentials.</p></div>
     </div>
-    <p>A project-local definition is inert until the user trusts its exact immutable normalized revision. The trust record binds the definition digest, transport, executable and arguments or remote URL, and credential references. Editing any bound field creates a new revision that is not trusted yet. Discovery produces a catalog snapshot before admission. Refresh and reconnect may change only a future turn's frozen catalog, never the catalog of a running turn.</p>
-    <p>Each lifecycle effect has a stable operation ID and idempotency key bound to the server, operation, trusted definition digest, and request identity. An incomplete effect is reconciled from durable state; it is never retried by assuming it failed.</p>
-    <p>A discovered tool's immutable revision identity binds the trusted server-definition digest, discovery-snapshot digest, canonical descriptor and schemas, transport and endpoint identity, and credential references. Credential values are resolved only at execution from the protected credential store or process environment. They never enter definitions, trust records, snapshots, catalog descriptors, transcripts, or TUI read models.</p>
-    <p>Server names, descriptions, schemas, errors, and result text are bounded and credential-redacted at the external boundary and remain untrusted data. They may describe Broker tools or appear in tool results, but they never become system instructions.</p>
   </section>
 
-  <section><h2>Failure and publication</h2><ul>
-    <li>Each server has an independent lifecycle state. A failure quarantines only that server and makes its new calls fail closed.</li>
-    <li>The last-known-good immutable discovery snapshot remains available for inspection and for already frozen turns.</li>
-    <li>A refresh validates the complete new snapshot before atomically publishing a replacement catalog for future turns. Partial discovery never changes a catalog.</li>
-    <li>An ambiguous launch, connection, or shutdown remains unresolved until reconciliation proves its outcome.</li>
-  </ul></section>
+  <section><h2>Simple architecture</h2>
+    <p>A host-owned MCP manager uses the official SDK to load the merged configuration, connect enabled servers, negotiate capabilities, and keep their live clients. Installing or enabling a server is the user's authorization to connect to it. There is no separate trust ceremony or digest approval flow.</p>
+    <p>MCP remains one capability source inside Noesis:</p>
+    <ul>
+      <li>Discovered tools become ordinary frozen Tool Catalog entries named <code>mcp.&lt;server&gt;.&lt;tool&gt;</code>.</li>
+      <li>The same Broker invocation path serves <code>execute</code>, direct hotbar tools, and workflow phases.</li>
+      <li>Prompts, resources, templates, and completions remain native MCP capabilities exposed through the same host manager and SDK.</li>
+      <li>Roots expose the active project by default. Sampling uses Noesis's current model routing. Elicitation opens an interactive form or URL flow in the TUI.</li>
+      <li>Progress, logs, cancellation, task state, and server requests appear in the normal live action stream and remain inspectable with the work they belong to.</li>
+      <li>Server instructions are surfaced as clearly delimited server-provided context. They can guide use of that server but do not replace Noesis's own instructions.</li>
+    </ul>
+  </section>
 
-  <section><h2>Decisions we need</h2><ol>
-    <li>Should server definitions live in <code>~/.noesis/config.json</code>, a dedicated editable <code>mcp.json</code>, or project files?</li>
-    <li>How should the user inspect and grant trust to an exact normalized definition revision before its bound process or URL is used?</li>
-    <li>Which credential forms ship first: environment references, bearer tokens, or full MCP OAuth?</li>
-    <li>How are arbitrary MCP JSON Schemas validated and adapted to the Broker's Zod boundary?</li>
-    <li>How are text, images, embedded resources, and large results mapped to JSON values or artifacts?</li>
-    <li>What effect class and resource identity should each discovered tool receive?</li>
-    <li>What triggers a between-turn catalog refresh: explicit reload, reconnect, or startup health checking?</li>
-  </ol></section>
+  <section><h2>Progressive discovery</h2>
+    <p class="decision">The model must be able to discover every enabled MCP capability without placing every schema in its context window.</p>
+    <div class="grid">
+      <div class="card"><strong>Compact index</strong><p class="muted">The always-visible execute context includes enabled server names, short descriptions, capability counts, and canonical namespaces.</p></div>
+      <div class="card"><strong>On demand</strong><p class="muted">The execute SDK can list and search tools, inspect one tool's full schema, list or fetch prompts, list or read resources, and inspect server capabilities before use.</p></div>
+      <div class="card"><strong>Direct use</strong><p class="muted">Any MCP tool may be pinned to the hotbar as a regular direct tool. Its full schema is disclosed only while pinned.</p></div>
+      <div class="card"><strong>Workflows</strong><p class="muted">Workflows reference canonical names such as <code>mcp.github.search_code</code> in <code>requiredTools</code> and invoke them through the same frozen Broker.</p></div>
+    </div>
+  </section>
 
-  <section><h2>Product surface</h2><ul>
-    <li><code>/mcp</code> renders a WorkspaceStore and SQLite-backed read model of trusted revisions, lifecycle operations, health, quarantine, discovery snapshots, tool count, and bounded last errors.</li>
-    <li>A server detail overlay lists discovered tools and their descriptions.</li>
-    <li>Tool calls flow through the normal transcript and run inspector.</li>
-    <li>One broken server does not prevent other servers or local tools from working.</li>
-    <li>Trust, reload, reconcile, and shutdown are application intents executed through AuthorityBoundary and EffectGateway. The TUI owns no MCP client or durable state.</li>
-  </ul></section>
+  <section><h2>Configuration</h2>
+    <pre><code>{
+  "servers": {
+    "github": {
+      "type": "remote",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "enabled": true,
+      "oauth": true
+    },
+    "filesystem": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."],
+      "enabled": true
+    }
+  }
+}</code></pre>
+    <ul>
+      <li>The global file contains personal servers available everywhere.</li>
+      <li>The project file adds or overrides servers for that project.</li>
+      <li>Project servers remain inactive until the workspace is trusted; global user-owned servers are unaffected.</li>
+      <li><code>/mcp</code> can write an installation to either scope. The files remain ordinary editable JSON.</li>
+      <li>OAuth tokens live in Noesis's credential store. Configuration stores only server settings, environment references, and optional OAuth client metadata—not access or refresh tokens.</li>
+      <li>Changes, explicit reload, startup, reconnect, enable or disable, and MCP <code>listChanged</code> notifications all refresh discovery. A running turn keeps its frozen tools; the refreshed catalog is used by the next turn.</li>
+    </ul>
+  </section>
 
-  <section><h2>Non-goals for the first build</h2>
-    <p class="muted">No automatic installation from untrusted content, no trust that survives a changed definition digest, no direct Pi MCP registry, no silent permission widening, no external server text in the system prompt, and no attempt to cover the entire MCP protocol at once.</p>
+  <section><h2>Schema and result handling</h2>
+    <p>Keep MCP JSON Schema as JSON Schema. Do not build a lossy JSON-Schema-to-Zod compiler. The protocol SDK validates MCP envelopes; the Broker accepts a JSON object at its runtime boundary and publishes the server's original input schema to the model. This follows OpenCode's practical approach of adapting native MCP schemas directly, while Hermes likewise registers discovered schemas without introducing a second type system.</p>
+    <p>Return the native MCP result shape: content blocks, structured content, resource links, and embedded resources. Text renders as text; images and other content remain typed blocks; large payloads use Noesis's existing artifact storage automatically. There is no MCP-specific result format.</p>
+  </section>
+
+  <section><h2>Names and execution identity</h2>
+    <ul>
+      <li>Tools use <code>mcp.&lt;server&gt;.&lt;tool&gt;</code>. Other capabilities use the same server namespace in the SDK and TUI.</li>
+      <li>The execution resource is <code>mcp:&lt;scope&gt;:&lt;server&gt;:&lt;capability&gt;</code>. Remote calls use the existing network effect; local stdio calls use the existing execute effect. No new MCP-specific effect classes are needed.</li>
+      <li>Frozen tool identity includes the server configuration, discovered schema, and tool name so resumed workflows execute the same capability they started with.</li>
+      <li>Reverse sampling is accepted only when it is bound to an admitted MCP invocation. It uses that turn's frozen model route and protected effect budget.</li>
+      <li>One failing server does not hide healthy servers or built-in tools. Reconnect and discovery retry independently.</li>
+    </ul>
+  </section>
+
+  <section><h2><code>/mcp</code> TUI</h2>
+    <p class="decision">Keep the UI centered on the user's actual jobs: install, authenticate, use, enable, disable, and remove.</p>
+    <ul>
+      <li>The main view lists installed global and project servers with enabled, connected, authentication-required, or failed status.</li>
+      <li><strong>Add server</strong> accepts a local command or remote URL and asks whether to save it globally or in the project.</li>
+      <li><strong>Authenticate</strong> opens the browser OAuth flow and returns to the server row when complete.</li>
+      <li>Server-requested URLs show their domain and full address first, and open only after explicit user acceptance.</li>
+      <li><strong>Enable/disable</strong>, <strong>reconnect</strong>, <strong>edit</strong>, and <strong>remove</strong> are actions on the selected server.</li>
+      <li>Opening a server enters a nested detail view for its tools, prompts, resources, templates, server instructions, connection details, and recent errors.</li>
+      <li>Opening a tool, prompt, or resource shows its full description and schema or metadata.</li>
+    </ul>
+  </section>
+
+  <section><h2>Complete compatibility checklist</h2>
+    <div class="grid">
+      <div class="card"><strong>Server capabilities</strong><p class="muted">Tools, prompts, resources, templates, completions, subscriptions, list-changed and resource-updated notifications, logging, progress, cancellation, and experimental tasks.</p></div>
+      <div class="card"><strong>Client capabilities</strong><p class="muted">Roots and roots-changed, model sampling, form and URL elicitation, multi-round input-required flows, and task-augmented requests.</p></div>
+      <div class="card"><strong>Remote auth</strong><p class="muted">Protected-resource discovery, authorization-server discovery, PKCE, browser callbacks, dynamic registration, pre-registered clients, token refresh, logout, and URL-bound credential lookup.</p></div>
+      <div class="card"><strong>Protocol behavior</strong><p class="muted">Capability negotiation, pagination, notifications, cancellation, timeouts, reconnect and resumption, progress tokens, structured output, and compatibility across supported protocol revisions.</p></div>
+    </div>
+  </section>
+
+  <section><h2>Reference lessons</h2>
+    <ul>
+      <li><strong>Hermes:</strong> simple namespaced discovery, long-lived connections, automatic reconnect, and a management UI are good product defaults.</li>
+      <li><strong>OpenCode:</strong> native JSON Schema adaptation, local and remote configuration, enable/disable, OAuth with dynamic registration, and native prompts/resources are the right compatibility baseline.</li>
+      <li><strong>Noesis:</strong> add progressive disclosure, full transcript visibility, hotbar pinning, and first-class workflow composition without inventing a second MCP execution system.</li>
+    </ul>
   </section>
 </main></body>
 </html>

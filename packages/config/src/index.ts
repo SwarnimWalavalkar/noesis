@@ -581,11 +581,13 @@ export async function updateToolHotbar(
     const projectHotbars = { ...(current.tools?.projectHotbars ?? {}) };
     const legacyGlobal = new Set(update.legacyGlobalProjectTools);
     const legacyActive = new Set(update.legacyActiveProjectTools);
-    const global = Object.freeze([...new Set(rawGlobal.filter((tool) => !legacyGlobal.has(tool)))]);
+    const global = Object.freeze([
+      ...new Set(rawGlobal.filter((tool) => !legacyGlobal.has(tool) && !tool.startsWith("mcp."))),
+    ]);
     const project = Object.freeze([
       ...new Set([
-        ...(projectHotbars[update.projectId] ?? []).filter((tool) =>
-          tool.startsWith(update.projectToolNamespace),
+        ...(projectHotbars[update.projectId] ?? []).filter(
+          (tool) => tool.startsWith(update.projectToolNamespace) || tool.startsWith("mcp."),
         ),
         ...rawGlobal.filter((tool) => legacyActive.has(tool)),
       ]),

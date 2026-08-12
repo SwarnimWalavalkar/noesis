@@ -1,0 +1,15 @@
+{
+  "name": "@noesis/mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@noesis/domain": "workspace:*",
+    "@noesis/tools": "workspace:*",
+    "zod": "4.4.3"
+  }
+}
