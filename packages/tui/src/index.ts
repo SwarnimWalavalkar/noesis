@@ -65,9 +65,8 @@ const INTERRUPT_FEEDBACK_MS = 20;
 const INSPECTOR_PAGE_ROWS = 10;
 
 type ShutdownSettlement =
-  | { readonly status: "settled" }
-  | { readonly status: "rejected"; readonly error: unknown }
-  | { readonly status: "timed-out" };
+  | { readonly status: "settled" | "timed-out" }
+  | { readonly status: "rejected"; readonly error: unknown };
 
 export async function startNoesisTui(
   runtime: NoesisTuiRuntime,
@@ -87,9 +86,6 @@ export async function startNoesisTui(
         })()
       : requestedSession;
   const tui = new TUI(terminal);
-  // The transcript grows without bound so history reaches native terminal scrollback. Clearing on
-  // shrink would emit an erase-scrollback sequence whenever a block collapses or a streamed
-  // message reconciles shorter, destroying that history.
   tui.setClearOnShrink(false);
   const root = new Container();
   const requestedProvider = options.provider ?? runtime.agentDefaults.provider;
@@ -206,7 +202,7 @@ export async function startNoesisTui(
       activeTurnToken = undefined;
       inspectorHandle?.hide();
       inspectorHandle = undefined;
-      mcp.dispose();
+      await mcp.dispose();
       if (streamRenderTimer) clearTimeout(streamRenderTimer);
       streamRenderTimer = undefined;
       streamRenderTimerToken = undefined;
@@ -250,8 +246,6 @@ export async function startNoesisTui(
           void abortAndSettle;
         }
       }
-      // Exclusive commands have no cancellation primitive. They remain shutdown-owned after the
-      // terminal is released so runtime shutdown cannot race an in-flight mutation.
       if (exclusiveCommand) {
         try {
           await exclusiveCommand;
@@ -303,7 +297,6 @@ export async function startNoesisTui(
     );
   };
 
-  /** Read-only keyboard navigation over transcript actions; the editor keeps input otherwise. */
   const handleTranscriptKey = (data: string): boolean => {
     const state = view.state;
     if (state.inspector) {
@@ -547,11 +540,14 @@ export async function startNoesisTui(
       }
       return undefined;
     }
-    // Focused overlays parse their own input. The editor's paste quarantine must not swallow
-    // Escape or reinterpret text while MCP management or elicitation owns keyboard focus.
-    if (mcp.ownsKeyboardFocus() && !matchesKey(data, "ctrl+c")) return undefined;
+    if (mcp.ownsKeyboardFocus()) {
+      if (matchesKey(data, "ctrl+c")) {
+        void shutdown();
+        return { consume: true };
+      }
+      return undefined;
+    }
     if (editor.capturePotentialPasteInput(data)) return { consume: true };
-    // Global shortcuts must not reinterpret controls that are still quarantined as paste.
     if (!editor.acceptsUnbracketedCommandInput()) return undefined;
     if (matchesKey(data, "ctrl+c")) {
       void shutdown();
@@ -721,78 +717,83 @@ export async function startNoesisTui(
     tui.requestRender();
   };
 
-  if (session.mode === "pick") {
-    const items = createSessionPickerItems(runtime.listTrailSummaries());
-    if (items.length === 0)
-      throw new Error(
-        `No saved sessions were found in ${runtime.home ?? "the configured Noesis home"}. Start a new session with noesis (without --resume).`,
+  try {
+    if (session.mode === "pick") {
+      const items = createSessionPickerItems(runtime.listTrailSummaries());
+      if (items.length === 0)
+        throw new Error(
+          `No saved sessions were found in ${runtime.home ?? "the configured Noesis home"}. Start a new session with noesis (without --resume).`,
+        );
+      const picker = createResponsiveSessionPicker(items, () => terminal.rows, selectTheme);
+      const selected = new Promise<string | undefined>((resolve) => {
+        let settled = false;
+        const finish = (trailId: string | undefined): void => {
+          if (settled) return;
+          settled = true;
+          resolve(trailId);
+        };
+        cancelPicker = () => finish(undefined);
+        picker.onSelect = (item) => finish(item.value);
+        picker.onCancel = () => {
+          finish(undefined);
+          void shutdown();
+        };
+      });
+      root.addChild(
+        createStaticLineView(
+          `${styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "NOESIS")}  ${styled(
+            colorEnabled,
+            ANSI.dim,
+            "resume a session",
+          )}`,
+          () => terminal.rows >= 2,
+        ),
       );
-    const picker = createResponsiveSessionPicker(items, () => terminal.rows, selectTheme);
-    const selected = new Promise<string | undefined>((resolve) => {
-      let settled = false;
-      const finish = (trailId: string | undefined): void => {
-        if (settled) return;
-        settled = true;
-        resolve(trailId);
-      };
-      cancelPicker = () => finish(undefined);
-      picker.onSelect = (item) => finish(item.value);
-      picker.onCancel = () => {
-        finish(undefined);
-        void shutdown();
-      };
-    });
-    root.addChild(
-      createStaticLineView(
-        `${styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "NOESIS")}  ${styled(
-          colorEnabled,
-          ANSI.dim,
-          "resume a session",
-        )}`,
-        () => terminal.rows >= 2,
-      ),
-    );
-    root.addChild(
-      createStaticLineView(
-        styled(colorEnabled, ANSI.dim, "↑/↓ navigate · Enter resume · Esc cancel"),
-        () => terminal.rows >= 3,
-      ),
-    );
-    root.addChild(picker);
-    tui.setFocus(picker);
-    tui.start();
-    const trailId = await selected;
-    if (!trailId) {
-      await shutdown();
-      await shutdownCompleted;
-      return;
-    }
-    try {
-      const trail = await resumableTrail(runtime, trailId);
+      root.addChild(
+        createStaticLineView(
+          styled(colorEnabled, ANSI.dim, "↑/↓ navigate · Enter resume · Esc cancel"),
+          () => terminal.rows >= 3,
+        ),
+      );
+      root.addChild(picker);
+      tui.setFocus(picker);
+      tui.start();
+      const trailId = await selected;
+      if (!trailId) {
+        await shutdown();
+        await shutdownCompleted;
+        return;
+      }
+      try {
+        const trail = await resumableTrail(runtime, trailId);
+        const [transcript, interaction] = await Promise.all([
+          loadTranscript(trail),
+          runtime.inspectInteraction(trail.trailId),
+        ]);
+        mountMain(trail, transcript, interaction);
+      } catch (error) {
+        await shutdown();
+        throw error;
+      }
+    } else {
+      const trail =
+        session.mode === "resume"
+          ? await resumableTrail(runtime, session.trailId)
+          : await runtime.startTrail({
+              title: "Noesis session",
+              provider: requestedProvider,
+              model: requestedModel,
+            });
       const [transcript, interaction] = await Promise.all([
         loadTranscript(trail),
         runtime.inspectInteraction(trail.trailId),
       ]);
       mountMain(trail, transcript, interaction);
-    } catch (error) {
-      await shutdown();
-      throw error;
+      tui.start();
     }
-  } else {
-    const trail =
-      session.mode === "resume"
-        ? await resumableTrail(runtime, session.trailId)
-        : await runtime.startTrail({
-            title: "Noesis session",
-            provider: requestedProvider,
-            model: requestedModel,
-          });
-    const [transcript, interaction] = await Promise.all([
-      loadTranscript(trail),
-      runtime.inspectInteraction(trail.trailId),
-    ]);
-    mountMain(trail, transcript, interaction);
-    tui.start();
+  } catch (error) {
+    await mcp.dispose();
+    throw error;
   }
   await shutdownCompleted;
 }

@@ -126,6 +126,10 @@ function isJsonObject(value: JsonValue): value is { readonly [key: string]: Json
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function assertJsonValue(value: unknown): asserts value is JsonValue {
+  JsonValueSchema.parse(value);
+}
+
 function jsonSchema(value: JsonValue): boolean | ZodCore.JSONSchema.JSONSchema {
   if (typeof value === "boolean") return value;
   if (isJsonObject(value)) return value;
@@ -168,9 +172,9 @@ export function createPiHotbarTools(input: {
         parameters,
         executionMode: "sequential",
         execute: async (toolCallId, rawInput, toolSignal) => {
-          const parsed = JsonValueSchema.parse(
-            localInputSchema ? localInputSchema.parse(rawInput) : rawInput,
-          );
+          assertJsonValue(rawInput);
+          if (localInputSchema) localInputSchema.parse(rawInput);
+          const inputValue = rawInput;
           const controller = new AbortController();
           const abortTurn = (): void => controller.abort(input.signal.reason);
           const abortTool = (): void => controller.abort(toolSignal?.reason);
@@ -187,7 +191,7 @@ export function createPiHotbarTools(input: {
                 callId: eventCallId,
                 name: descriptor.name,
                 callIndex: 0,
-                input: parsed,
+                input: inputValue,
               },
               undefined,
               true,
@@ -197,14 +201,25 @@ export function createPiHotbarTools(input: {
               if (!invoke) throw new Error("Direct Broker invocation is unavailable");
               value = await invoke(
                 descriptor.name,
-                parsed,
+                inputValue,
                 controller.signal,
                 {
                   executionId: `direct:${input.turnId}`,
                   logicalExecutionId: `${input.turnId}:${toolCallId}`,
                   callId,
                 },
-                (update) => input.emit({ type: "progress", value: update }, eventCallId, true),
+                (update) =>
+                  input.emit(
+                    {
+                      type: "progress",
+                      value: update,
+                      callId: eventCallId,
+                      name: descriptor.name,
+                      callIndex: 0,
+                    },
+                    undefined,
+                    true,
+                  ),
               );
               input.emit(
                 {

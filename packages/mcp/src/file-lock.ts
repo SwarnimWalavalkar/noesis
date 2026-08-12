@@ -24,7 +24,7 @@ function processIsAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return isCode(error, "EPERM");
+    return !isCode(error, "ESRCH");
   }
 }
 
@@ -90,13 +90,18 @@ async function removeStaleLock(path: string, staleAfter: number): Promise<void> 
   }
 }
 
-async function hasActiveReaper(path: string): Promise<boolean> {
+async function hasActiveReaper(path: string, staleAfter: number): Promise<boolean> {
+  const reaperPath = `${path}.reap`;
   try {
-    const metadata = await lstat(`${path}.reap`);
+    const metadata = await lstat(reaperPath);
     if (metadata.isSymbolicLink() || !metadata.isFile()) {
       throw new Error(`${path}.reap: MCP lock reaper path must be a regular file`);
     }
-    return true;
+    if (Date.now() - metadata.mtimeMs <= staleAfter) return true;
+    await unlink(reaperPath).catch((error: unknown) => {
+      if (!isCode(error, "ENOENT")) throw error;
+    });
+    return false;
   } catch (error) {
     if (isCode(error, "ENOENT")) return false;
     throw error;
@@ -122,7 +127,7 @@ export async function withMcpFileLock<T>(
   await mkdir(dirname(targetPath), { recursive: true });
 
   while (true) {
-    if (await hasActiveReaper(lockPath)) {
+    if (await hasActiveReaper(lockPath, staleAfter)) {
       if (Date.now() >= deadline) throw new Error(`${targetPath}: timed out waiting for MCP file lock`);
       await new Promise<void>((resolve) => setTimeout(resolve, LOCK_RETRY_DELAY));
       continue;

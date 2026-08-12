@@ -369,6 +369,15 @@ export function createPiAgentRuntime(
             timelineSequence: claimTimelineSequence(),
             ...(recordedByBroker ? { recordedByBroker: true } : {}),
           });
+        else if (event.type === "progress" && event.callId && event.name)
+          emit({
+            type: "tool-update",
+            actionId: event.callId,
+            ...(parentActionId ? { parentActionId } : {}),
+            name: event.name,
+            update: event.value,
+            ...(recordedByBroker ? { recordedByBroker: true } : {}),
+          });
         else if (event.type === "tool-end")
           emit({
             type: "tool-end",

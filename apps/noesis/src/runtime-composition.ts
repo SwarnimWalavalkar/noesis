@@ -1793,7 +1793,7 @@ export async function createApplicationRuntimeComposition(
     await reconcileStoredScripts(workspace, project);
     await reconcileStoredWorkflows(workspace, project);
     const sessionDefinitions = await resolveFrozenSessionToolDefinitions(plan, sessionTools, signal);
-    await options.mcp?.host.refreshDiscovery();
+    await options.mcp?.host.refreshDiscovery(signal);
     const mcpTools = options.mcp
       ? createMcpToolDefinitions(options.mcp.host, {
           modelRoute: Object.freeze({
@@ -3035,7 +3035,14 @@ export async function createApplicationRuntimeComposition(
           },
           undefined,
           (event) => {
-            if (event.type === "progress") emit({ type: "progress", value: event.value });
+            if (event.type === "progress")
+              emit({
+                type: "progress",
+                value: event.value,
+                ...(event.callId ? { callId: event.callId } : {}),
+                ...(event.name ? { name: event.name } : {}),
+                ...(event.callIndex === undefined ? {} : { callIndex: event.callIndex }),
+              });
             else if (event.type === "tool-start")
               emit({
                 type: "tool-start",
@@ -4370,7 +4377,19 @@ export async function createApplicationRuntimeComposition(
     })();
     return shutdownPromise;
   };
-  await options.mcp?.start();
+  try {
+    await options.mcp?.start();
+  } catch (error) {
+    try {
+      await shutdown();
+    } catch (shutdownError) {
+      throw new AggregateError(
+        [error, shutdownError],
+        "MCP startup failed and composed runtime cleanup also failed",
+      );
+    }
+    throw error;
+  }
   return Object.freeze({
     home: options.config.home,
     agentName: agent.name,

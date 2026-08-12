@@ -29,6 +29,7 @@ describe("MCP Broker definitions", () => {
         write: async () => undefined,
         update: async () => undefined,
         delete: async () => undefined,
+        deleteIf: async () => undefined,
       },
       handlers: {
         sample: async () => ({
@@ -61,6 +62,9 @@ describe("MCP Broker definitions", () => {
         content: [{ type: "text", text: "hello" }],
         structuredContent: { echoed: "hello" },
       });
+      expect(() => tool.parseOutput?.({ content: [{ type: "text", text: "missing" }] })).toThrow(
+        "declared an output schema but returned no structuredContent",
+      );
     } finally {
       await manager.close();
     }
@@ -85,6 +89,7 @@ describe("MCP Broker definitions", () => {
         write: async () => undefined,
         update: async () => undefined,
         delete: async () => undefined,
+        deleteIf: async () => undefined,
       },
       handlers: {
         sample: async () => ({

@@ -572,6 +572,11 @@ export async function updateToolHotbar(
   home: string,
   update: ToolHotbarDelta,
 ): Promise<CommittedToolHotbarSelection> {
+  if (update.scope === "global" && update.action === "add" && update.tool.startsWith("mcp."))
+    throw new NoesisConfigError(
+      noesisConfigPath(home),
+      "MCP tools are project-scoped and cannot be added to the global hotbar",
+    );
   return await withConfigWriter(home, async () => {
     const loaded = await readNoesisConfig(home);
     if (!loaded.ok) throw loaded.error;

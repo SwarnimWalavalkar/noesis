@@ -445,10 +445,12 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
     }
     if (invocationContext.signal.aborted) return failure("cancelled", "Execution was cancelled");
     let parsedInput: unknown;
+    let input: JsonValue;
     try {
       parsedInput = entry.definition.parseInput
         ? entry.definition.parseInput(rawInput)
         : entry.definition.inputSchema.parse(rawInput);
+      input = toJsonValue(parsedInput);
     } catch (error) {
       const detail =
         error instanceof z.ZodError
@@ -461,7 +463,6 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         `Invalid input for ${name}: ${detail} Inspect the exact input schema with noesis.describe("${name}").`,
       );
     }
-    const input = toJsonValue(parsedInput);
     const callId = invocationContext.callId ?? createId("tool_call");
     const logicalExecutionId = invocationContext.logicalExecutionId ?? invocationContext.executionId;
     const occurredAt = now().toISOString();
@@ -540,9 +541,11 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         }
         let output: JsonValue;
         try {
-          output = entry.definition.parseOutput
-            ? entry.definition.parseOutput(rawOutput)
-            : JsonValueSchema.parse(entry.definition.outputSchema.parse(rawOutput));
+          output = JsonValueSchema.parse(
+            entry.definition.parseOutput
+              ? entry.definition.parseOutput(rawOutput)
+              : entry.definition.outputSchema.parse(rawOutput),
+          );
         } catch (error) {
           const detail =
             error instanceof z.ZodError
@@ -588,8 +591,14 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         );
       return failure("failed", message);
     }
-    if (Buffer.byteLength(JSON.stringify(completedValue), "utf8") > MAX_TOOL_RESULT_BYTES)
-      return failure("result_too_large", `Tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`);
+    if (Buffer.byteLength(JSON.stringify(completedValue), "utf8") > MAX_TOOL_RESULT_BYTES) {
+      const message = `Tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`;
+      if (!recordedIsTerminal)
+        await options.recorder?.record(
+          Object.freeze({ ...baseRecord, status: "failed" as const, completedAt, error: message }),
+        );
+      return failure("result_too_large", message);
+    }
     const reportedFailure = entry.definition.reportedFailure?.(decision.value);
     if (reportedFailure) {
       const details = reportedFailure.details ?? completedValue;

@@ -60,6 +60,17 @@ export function parseMcpArguments(
   return { ok: true, value: Object.freeze([...decoded]) };
 }
 
+export function validateMcpRemoteUrl(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:")
+      return "Server URL must use http:// or https://.";
+    return undefined;
+  } catch {
+    return "Server URL must be a valid http:// or https:// URL.";
+  }
+}
+
 export function mcpToolItems(detail: TuiMcpServerDetail): readonly McpCapabilityItem[] {
   return detail.tools.map((tool) => ({
     id: tool.name,
@@ -149,7 +160,7 @@ export function mcpOAuthActionsAvailable(detail: TuiMcpServerDetail, mutationsEn
 }
 
 export function mcpLiveActionsAvailable(detail: TuiMcpServerDetail, mutationsEnabled: boolean): boolean {
-  return mutationsEnabled && !detail.shadowed;
+  return mutationsEnabled && !detail.shadowed && detail.enabled;
 }
 
 export function mcpManagerHint(input: {
@@ -161,7 +172,7 @@ export function mcpManagerHint(input: {
 }): string {
   if (input.busy)
     return input.cancellable
-      ? "Please wait · Esc cancel authentication"
+      ? "Please wait · Esc cancel operation"
       : "Please wait for the operation to finish";
   if (!input.mutationsEnabled) return "Read-only while the active turn finishes · Esc back";
   if (input.screenKind === "list")
@@ -169,7 +180,7 @@ export function mcpManagerHint(input: {
   if (input.screenKind === "server") {
     if (input.detail && mcpOAuthActionsAvailable(input.detail, true))
       return "↑/↓ select · Enter open · a auth · l logout · e enable/disable · r reconnect · d edit · x remove · Esc back";
-    return input.detail?.shadowed
+    return input.detail?.shadowed || input.detail?.enabled === false
       ? "↑/↓ select · Enter open · e enable/disable · d edit · x remove · Esc back"
       : "↑/↓ select · Enter open · e enable/disable · r reconnect · d edit · x remove · Esc back";
   }

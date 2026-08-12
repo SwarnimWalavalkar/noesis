@@ -213,4 +213,107 @@ describe("application MCP integration", () => {
     });
     await integration.close();
   });
+
+  test("rejects non-HTTP remote URLs for both add and edit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-remote-url-"));
+    temporaryDirectories.push(root);
+    const home = join(root, "home");
+    const projectDirectory = join(root, "project");
+    await Promise.all([mkdir(home, { recursive: true }), mkdir(projectDirectory, { recursive: true })]);
+    await writeFile(
+      join(home, "mcp.json"),
+      JSON.stringify({
+        servers: { remote: { type: "remote", url: "https://valid.example.test/mcp", enabled: false } },
+      }),
+    );
+    const integration = createApplicationMcpIntegration({
+      home,
+      projectDirectory,
+      sampling,
+      interactions: createTuiMcpInteractionBridge(),
+      openUrl: async () => undefined,
+      workspaceTrusted: true,
+    });
+
+    await expect(
+      integration.mutateMcp({
+        type: "add-remote",
+        scope: "project",
+        name: "added",
+        url: "file:///tmp/server.sock",
+        oauth: false,
+      }),
+    ).rejects.toThrow("must use http:// or https://");
+    await expect(
+      integration.mutateMcp({
+        type: "edit-remote",
+        scope: "global",
+        name: "remote",
+        url: "ftp://invalid.example.test/mcp",
+        oauth: false,
+      }),
+    ).rejects.toThrow("must use http:// or https://");
+    expect(JSON.parse(await readFile(join(home, "mcp.json"), "utf8"))).toMatchObject({
+      servers: { remote: { url: "https://valid.example.test/mcp" } },
+    });
+    await integration.close();
+  });
+
+  test("keeps error history scoped and rotates it when a server definition changes", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-error-history-"));
+    temporaryDirectories.push(root);
+    const home = join(root, "home");
+    const projectDirectory = join(root, "project");
+    await Promise.all([
+      mkdir(home, { recursive: true }),
+      mkdir(join(projectDirectory, ".noesis"), { recursive: true }),
+    ]);
+    await writeFile(
+      join(home, "mcp.json"),
+      JSON.stringify({ servers: { broken: { type: "local", command: "/missing-global-server" } } }),
+    );
+    const integration = createApplicationMcpIntegration({
+      home,
+      projectDirectory,
+      sampling,
+      interactions: createTuiMcpInteractionBridge(),
+      openUrl: async () => undefined,
+      workspaceTrusted: true,
+    });
+    await integration.start();
+    expect((await integration.inspectMcpServer("global", "broken"))?.recentErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringContaining("missing-global-server") }),
+      ]),
+    );
+
+    await integration.mutateMcp({
+      type: "add-local",
+      scope: "project",
+      name: "broken",
+      command: ["/missing-project-server"],
+    });
+    const projectErrors = (await integration.inspectMcpServer("project", "broken"))?.recentErrors ?? [];
+    expect(projectErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringContaining("missing-project-server") }),
+      ]),
+    );
+    expect(projectErrors.some((entry) => entry.message.includes("missing-global-server"))).toBe(false);
+
+    await integration.mutateMcp({
+      type: "edit-local",
+      scope: "project",
+      name: "broken",
+      command: ["/missing-replacement-server"],
+    });
+    const replacementErrors = (await integration.inspectMcpServer("project", "broken"))?.recentErrors ?? [];
+    expect(replacementErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: expect.stringContaining("missing-replacement-server") }),
+      ]),
+    );
+    expect(replacementErrors.some((entry) => entry.message.includes("missing-project-server"))).toBe(false);
+    await integration.close();
+  });
 });

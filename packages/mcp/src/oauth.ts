@@ -28,6 +28,10 @@ export interface McpOAuthCredentialStore {
     update: (current: McpOAuthCredential | undefined) => McpOAuthCredential,
   ) => Promise<void>;
   readonly delete: (key: string) => Promise<void>;
+  readonly deleteIf: (
+    key: string,
+    predicate: (current: McpOAuthCredential | undefined) => boolean,
+  ) => Promise<void>;
 }
 
 export interface McpOAuthRedirect {
@@ -64,6 +68,14 @@ async function updateCredential(
 }
 
 export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAuthClientProvider {
+  if (input.config?.clientSecretEnvironment) {
+    const secret = input.environment?.[input.config.clientSecretEnvironment];
+    if (!secret) {
+      throw new Error(
+        `MCP server ${input.serverName} requires environment variable ${input.config.clientSecretEnvironment} for its OAuth client secret`,
+      );
+    }
+  }
   const loadCredential = async (): Promise<McpOAuthCredential | undefined> => {
     const credential = await input.credentialStore.read(input.key);
     return credential?.serverUrl === input.serverUrl &&
@@ -81,8 +93,8 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
   const configuredClient = input.config?.clientId
     ? {
         client_id: input.config.clientId,
-        ...(input.config.clientSecretEnvironment && input.environment?.[input.config.clientSecretEnvironment]
-          ? { client_secret: input.environment[input.config.clientSecretEnvironment] }
+        ...(input.config.clientSecretEnvironment
+          ? { client_secret: input.environment?.[input.config.clientSecretEnvironment] }
           : {}),
       }
     : undefined;
@@ -91,8 +103,6 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
     redirectUrl: input.redirectUrl,
     clientMetadata: metadata,
     state: async () => {
-      const existing = (await loadCredential())?.state;
-      if (existing) return existing;
       const state = crypto.randomUUID();
       await updateCredential(
         input.credentialStore,
@@ -167,33 +177,40 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
     discoveryState: async () => (await loadCredential())?.discovery,
     invalidateCredentials: async (scope) => {
       if (scope === "all") {
-        await input.credentialStore.delete(input.key);
+        await input.credentialStore.deleteIf(
+          input.key,
+          (current) =>
+            current?.serverUrl === input.serverUrl && current.authIdentityDigest === input.authIdentityDigest,
+        );
         return;
       }
-      await updateCredential(
-        input.credentialStore,
-        input.key,
-        input.serverUrl,
-        input.authIdentityDigest,
-        (current) => {
-          if (scope === "client")
-            return {
-              serverUrl: current.serverUrl,
-              ...(current.authIdentityDigest ? { authIdentityDigest: current.authIdentityDigest } : {}),
-              ...(current.tokens ? { tokens: current.tokens } : {}),
-            };
-          if (scope === "tokens") {
-            const { tokens: _tokens, ...next } = current;
-            return next;
-          }
-          if (scope === "verifier") {
-            const { codeVerifier: _verifier, ...next } = current;
-            return next;
-          }
-          const { discovery: _discovery, ...next } = current;
+      await input.credentialStore.update(input.key, (stored) => {
+        if (stored?.serverUrl !== input.serverUrl || stored.authIdentityDigest !== input.authIdentityDigest) {
+          return (
+            stored ?? {
+              serverUrl: input.serverUrl,
+              authIdentityDigest: input.authIdentityDigest,
+            }
+          );
+        }
+        const current = stored;
+        if (scope === "client")
+          return {
+            serverUrl: current.serverUrl,
+            ...(current.authIdentityDigest ? { authIdentityDigest: current.authIdentityDigest } : {}),
+            ...(current.tokens ? { tokens: current.tokens } : {}),
+          };
+        if (scope === "tokens") {
+          const { tokens: _tokens, ...next } = current;
           return next;
-        },
-      );
+        }
+        if (scope === "verifier") {
+          const { codeVerifier: _verifier, ...next } = current;
+          return next;
+        }
+        const { discovery: _discovery, ...next } = current;
+        return next;
+      });
     },
   };
 }

@@ -19,6 +19,7 @@ import {
   type ProjectRef,
   sha256,
 } from "@noesis/domain";
+import { createMcpHostManager, type LoadedMcpConfig, type McpOAuthCredentialStore } from "@noesis/mcp";
 import {
   createHotbarToolAliases,
   createPiAgentRoleRunner,
@@ -283,6 +284,69 @@ async function writeLegacyCompletedTurn(
 }
 
 describe("apps/noesis production control-plane composition", () => {
+  test("shuts down composed resources when MCP startup rejects", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-mcp-start-failure-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const loadedMcpConfig: LoadedMcpConfig = Object.freeze({
+      global: Object.freeze({ servers: Object.freeze({}) }),
+      project: Object.freeze({ servers: Object.freeze({}) }),
+      servers: new Map(),
+      installed: Object.freeze([]),
+    });
+    const credentials: McpOAuthCredentialStore = Object.freeze({
+      read: async () => undefined,
+      write: async () => undefined,
+      update: async () => undefined,
+      delete: async () => undefined,
+      deleteIf: async () => undefined,
+    });
+    const host = createMcpHostManager({
+      home,
+      projectDirectory: home,
+      config: loadedMcpConfig,
+      credentials,
+      handlers: Object.freeze({
+        sample: async () => {
+          throw new Error("sampling is not expected");
+        },
+        elicit: async () => ({ action: "decline" as const }),
+        onOAuthRedirect: () => undefined,
+      }),
+    });
+    let closes = 0;
+    const mcp: NonNullable<ApplicationRuntimeCompositionOptions["mcp"]> = Object.freeze({
+      host,
+      start: async () => {
+        throw new Error("controlled MCP startup failure");
+      },
+      close: async () => {
+        closes += 1;
+        await host.close();
+      },
+      listMcpServers: async () => Object.freeze([]),
+      inspectMcpServer: async () => undefined,
+      mutateMcp: async () => Object.freeze({ message: "unused" }),
+      setSamplingAuthorizer: () => undefined,
+    });
+    const controlled = createControlledPiModels();
+
+    await expect(
+      createApplicationRuntimeComposition({
+        config,
+        mcp,
+        agent: createPiAgentRuntime(home, controlled.models),
+        createRoleRunner: (configurations) =>
+          createPiAgentRoleRunner(home, controlled.models, configurations),
+      }),
+    ).rejects.toThrow("controlled MCP startup failure");
+    expect(closes).toBe(1);
+  });
+
   test("saved definitions are immediate, project-local, and freeze first-class workflow tools", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-project-definitions-"));
     const firstProjectRoot = join(home, "host-project-one");

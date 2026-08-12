@@ -66,6 +66,7 @@ function createHarness(
     readonly servers?: readonly TuiMcpServerSummary[];
     readonly detail?: TuiMcpServerDetail;
     readonly mutationsEnabled?: () => boolean;
+    readonly list?: () => Promise<readonly TuiMcpServerSummary[]>;
     readonly mutate?: (
       intent: TuiMcpMutationIntent,
       signal?: AbortSignal,
@@ -77,7 +78,7 @@ function createHarness(
   const mutations: TuiMcpMutationIntent[] = [];
   const component = createMcpManagerOverlay({
     runtime: {
-      listMcpServers: async () => options.servers ?? Object.freeze([summary]),
+      listMcpServers: options.list ?? (async () => options.servers ?? Object.freeze([summary])),
       inspectMcpServer: async () => options.detail ?? detail,
       mutateMcp: async (intent, signal) => {
         mutations.push(intent);
@@ -108,6 +109,14 @@ function createHarness(
 }
 
 describe("MCP manager overlay", () => {
+  test("lets Escape close while initial discovery is still pending", async () => {
+    const harness = createHarness({ list: async () => await new Promise(() => undefined) });
+    expect(harness.output()).toContain("Refreshing MCP servers");
+    harness.component.handleInput?.(ESCAPE);
+    expect(harness.closes).toBe(1);
+    await harness.component.dispose();
+  });
+
   test("opens from /mcp as a focused overlay and returns to the editor", async () => {
     const agent: NoesisAgentRuntime = {
       name: "mcp-overlay-scripted",
@@ -280,11 +289,23 @@ describe("MCP manager overlay", () => {
     harness.component.handleInput?.(ENTER);
     await vi.waitFor(() => expect(harness.output()).toContain("MCP · github"));
     harness.component.handleInput?.("a");
-    await vi.waitFor(() => expect(harness.output()).toContain("Esc cancel authentication"));
+    await vi.waitFor(() => expect(harness.output()).toContain("Esc cancel operation"));
 
     harness.component.handleInput?.(ESCAPE);
     await vi.waitFor(() => expect(authenticationSignal?.aborted).toBe(true));
-    await vi.waitFor(() => expect(harness.output()).toContain("MCP authentication cancelled"));
+    await vi.waitFor(() => expect(harness.output()).toContain("MCP operation cancelled"));
+  });
+
+  test("hides reconnect for a disabled server", async () => {
+    const disabledSummary = Object.freeze({ ...summary, enabled: false, status: "disabled" as const });
+    const disabledDetail = Object.freeze({ ...detail, ...disabledSummary });
+    const harness = createHarness({ servers: Object.freeze([disabledSummary]), detail: disabledDetail });
+    await vi.waitFor(() => expect(harness.output()).toContain("github  global"));
+    harness.component.handleInput?.(ENTER);
+    await vi.waitFor(() => expect(harness.output()).toContain("MCP · github"));
+    expect(harness.output()).not.toContain("Reconnect");
+    harness.component.handleInput?.("r");
+    expect(harness.mutations).toEqual([]);
   });
 
   test("adds a project remote server through a guided form", async () => {
@@ -315,6 +336,57 @@ describe("MCP manager overlay", () => {
         oauth: true,
       }),
     );
+  });
+
+  test("rejects a remote server URL outside HTTP and HTTPS", async () => {
+    const harness = createHarness({ servers: Object.freeze([]) });
+    await vi.waitFor(() => expect(harness.output()).toContain("Add remote server"));
+    harness.component.handleInput?.("r");
+    harness.component.handleInput?.(ENTER);
+    for (const character of "linear") harness.component.handleInput?.(character);
+    harness.component.handleInput?.(ENTER);
+    harness.component.handleInput?.("\u0001");
+    harness.component.handleInput?.("\u000b");
+    for (const character of "ftp://mcp.linear.test") harness.component.handleInput?.(character);
+    harness.component.handleInput?.(ENTER);
+
+    expect(harness.output()).toContain("must use http:// or https://");
+    expect(harness.mutations).toEqual([]);
+  });
+
+  test("Escape never reports a committed non-auth mutation as cancelled and disposal awaits it", async () => {
+    let mutationSignal: AbortSignal | undefined;
+    let settleMutation: (() => void) | undefined;
+    const harness = createHarness({
+      mutate: async (_intent, signal) => {
+        mutationSignal = signal;
+        await new Promise<void>((resolve) => {
+          settleMutation = resolve;
+        });
+        return { message: "finished" };
+      },
+    });
+    await vi.waitFor(() => expect(harness.output()).toContain("github  global"));
+    harness.component.handleInput?.(ENTER);
+    await vi.waitFor(() => expect(harness.output()).toContain("MCP · github"));
+    harness.component.handleInput?.("e");
+    await vi.waitFor(() =>
+      expect(harness.mutations.some((intent) => intent.type === "set-enabled")).toBe(true),
+    );
+    expect(mutationSignal).toBeUndefined();
+    harness.component.handleInput?.(ESCAPE);
+    expect(harness.closes).toBe(1);
+    expect(harness.output()).not.toContain("cancel");
+
+    let disposed = false;
+    const disposal = harness.component.dispose().then(() => {
+      disposed = true;
+    });
+    expect(disposed).toBe(false);
+    settleMutation?.();
+    await disposal;
+    expect(disposed).toBe(true);
+    expect(harness.mutations.filter((intent) => intent.type === "set-enabled")).toHaveLength(1);
   });
 
   test("keeps the current OAuth mode selected while editing a remote server", async () => {
@@ -455,5 +527,22 @@ describe("MCP manager overlay", () => {
     for (let index = 0; index < 6; index += 1) harness.component.handleInput?.(DOWN);
     harness.component.handleInput?.(ENTER);
     expectSafeOutput();
+  });
+
+  test("sanitizes server-controlled values before placing them in an editable input", async () => {
+    const hostile = "https://example.test/\u001b]8;;https://attacker.test\u0007link";
+    const hostileDetail = Object.freeze({
+      ...detail,
+      config: Object.freeze({ type: "remote" as const, url: hostile, oauth: true }),
+    });
+    const harness = createHarness({ detail: hostileDetail });
+    await vi.waitFor(() => expect(harness.output()).toContain("github  global"));
+    harness.component.handleInput?.(ENTER);
+    await vi.waitFor(() => expect(harness.output()).toContain("MCP · github"));
+    harness.component.handleInput?.("d");
+
+    expect(harness.output()).toContain("attacker.test");
+    expect(harness.output()).not.toContain("\u001b]8;;https://attacker.test");
+    expect(harness.output()).not.toContain("attacker.test\u0007link");
   });
 });

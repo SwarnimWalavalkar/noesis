@@ -44,7 +44,11 @@ async function listen(
   return address.port;
 }
 
-async function managerFor(url: string, transport: "streamable_http" | "auto") {
+async function managerFor(
+  url: string,
+  transport: "streamable_http" | "auto",
+  oauth: false | Readonly<{ redirectUri: string }> = false,
+) {
   const root = await mkdtemp(join(tmpdir(), "noesis-mcp-remote-"));
   const home = join(root, "home");
   await writeMcpServer({
@@ -52,7 +56,7 @@ async function managerFor(url: string, transport: "streamable_http" | "auto") {
     projectDirectory: root,
     scope: "project",
     name: "remote",
-    config: { type: "remote", url, transport, oauth: false },
+    config: { type: "remote", url, transport, oauth },
   });
   return createMcpHostManager({
     home,
@@ -63,6 +67,7 @@ async function managerFor(url: string, transport: "streamable_http" | "auto") {
       write: async () => undefined,
       update: async () => undefined,
       delete: async () => undefined,
+      deleteIf: async () => undefined,
     },
     handlers: {
       sample: async () => ({ role: "assistant", model: "controlled", content: { type: "text", text: "ok" } }),
@@ -73,6 +78,32 @@ async function managerFor(url: string, transport: "streamable_http" | "auto") {
 }
 
 describe("remote MCP transports", () => {
+  test("observes callback rejection when the OAuth listener cannot bind", async () => {
+    const protocol = controlledServer();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => crypto.randomUUID(),
+    });
+    await protocol.connect(transport as never);
+    const serverPort = await listen((request, response) => {
+      if (request.url !== "/mcp") return void response.writeHead(404).end();
+      if (request.method === "POST")
+        void body(request).then(async (parsed) => await transport.handleRequest(request, response, parsed));
+      else void transport.handleRequest(request, response);
+    });
+    const occupiedPort = await listen((_request, response) => response.end());
+    const manager = await managerFor(`http://127.0.0.1:${String(serverPort)}/mcp`, "streamable_http", {
+      redirectUri: `http://127.0.0.1:${String(occupiedPort)}/oauth/callback`,
+    });
+    try {
+      await manager.start();
+      await expect(manager.authenticate("remote")).rejects.toMatchObject({ code: "EADDRINUSE" });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      await manager.close();
+      await protocol.close();
+    }
+  });
+
   test("connects and invokes through Streamable HTTP", async () => {
     const protocol = controlledServer();
     const transport = new StreamableHTTPServerTransport({

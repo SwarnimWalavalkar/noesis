@@ -162,13 +162,26 @@ export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCrede
         throw new Error(`${path}: refusing to replace unsafe MCP credential file`);
       }
       await rename(temporary, path);
+      const directoryHandle = await open(
+        dirname(path),
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+      try {
+        await directoryHandle.sync();
+      } finally {
+        await directoryHandle.close();
+      }
     } finally {
       await unlink(temporary).catch(() => undefined);
     }
   };
 
   const store: McpOAuthCredentialStore = {
-    read: (key: string) => enqueue(async () => (await readAll())[key]),
+    read: (key: string) =>
+      enqueue(async () => {
+        await secureDirectory();
+        return await withMcpFileLock(path, async () => (await readAll())[key]);
+      }),
     write: (key: string, credential: McpOAuthCredential) =>
       enqueue(async () => {
         await secureDirectory();
@@ -190,7 +203,18 @@ export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCrede
         await secureDirectory();
         await withMcpFileLock(path, async () => {
           const current = await readAll();
-          if (!(key in current)) return;
+          if (!Object.hasOwn(current, key)) return;
+          const next = { ...current };
+          delete next[key];
+          await persist(next);
+        });
+      }),
+    deleteIf: (key, predicate) =>
+      enqueue(async () => {
+        await secureDirectory();
+        await withMcpFileLock(path, async () => {
+          const current = await readAll();
+          if (!Object.hasOwn(current, key) || !predicate(current[key])) return;
           const next = { ...current };
           delete next[key];
           await persist(next);

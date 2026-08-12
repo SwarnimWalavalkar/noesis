@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { withMcpFileLock } from "./file-lock.ts";
@@ -159,7 +160,7 @@ export async function loadMcpConfig(input: {
         scope: "global" as const,
         sourcePath: globalPath,
         config,
-        shadowed: name in project.servers,
+        shadowed: Object.hasOwn(project.servers, name),
       }),
     ),
     ...Object.entries(project.servers).map(([name, config]) =>
@@ -240,6 +241,15 @@ async function writeMcpConfigIfUnchanged(
       return false;
     }
     await rename(temporaryPath, path);
+    const directoryHandle = await open(
+      dirname(path),
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    );
+    try {
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
     return true;
   } catch (error) {
     await unlink(temporaryPath).catch(() => undefined);
@@ -325,7 +335,7 @@ export async function setMcpServerEnabled(input: {
   const name = ServerNameSchema.parse(input.name);
   const path = pathForScope(input);
   await mutateMcpConfig(path, (current) => {
-    const server = current.servers[name];
+    const server = Object.hasOwn(current.servers, name) ? current.servers[name] : undefined;
     if (!server) throw createMcpConfigError(path, `server ${JSON.stringify(name)} does not exist`);
     return {
       servers: { ...current.servers, [name]: { ...server, enabled: input.enabled } },

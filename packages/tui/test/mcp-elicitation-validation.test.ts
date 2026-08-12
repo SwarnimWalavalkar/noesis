@@ -15,7 +15,7 @@ describe("MCP elicitation validation", () => {
     ).toContain("at most 3");
     for (const [format, valid, invalid] of [
       ["date", "2026-08-12", "2026-02-30"],
-      ["date-time", "2026-08-12T10:30:00Z", "2026-08-12 10:30"],
+      ["date-time", "2026-08-12T10:30:00Z", "2026-08-12T10:30Z"],
       ["email", "user@example.com", "user@example"],
       ["uri", "https://example.com/path", "not a uri"],
     ] as const) {
@@ -26,6 +26,23 @@ describe("MCP elicitation validation", () => {
         validateMcpTextField({ type: "text", name: "value", label: "Value", format }, invalid),
       ).toContain(`valid ${format}`);
     }
+    expect(
+      validateMcpTextField(
+        { type: "text", name: "value", label: "Value", format: "date-time" },
+        "2026-08-12T23:59:60+05:30",
+      ),
+    ).toBe(undefined);
+    for (const invalid of ["https://example.com/%zz", "https://example.com/a b", "//example.com"]) {
+      expect(
+        validateMcpTextField({ type: "text", name: "value", label: "Value", format: "uri" }, invalid),
+      ).toContain("valid uri");
+    }
+    expect(
+      validateMcpTextField(
+        { type: "text", name: "value", label: "Value", format: "uri" },
+        "urn:isbn:0451450523",
+      ),
+    ).toBe(undefined);
   });
 
   test("validates integer and numeric bounds", () => {

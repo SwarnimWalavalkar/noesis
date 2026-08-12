@@ -282,6 +282,7 @@ async function createRuntime(
   options: {
     readonly recoverInterruptedOperations: boolean;
     readonly workspaceTrusted: boolean;
+    readonly enableMcp: boolean;
   },
 ): Promise<
   Readonly<{
@@ -298,27 +299,29 @@ async function createRuntime(
     workspaceTrusted: options.workspaceTrusted,
   });
   const mcpInteractionBridge = createTuiMcpInteractionBridge();
-  const mcp = createApplicationMcpIntegration({
-    home: config.home,
-    projectDirectory: project.root,
-    sampling: createPiMcpSamplingPort({
-      models: services.models,
-      provider: config.agent.provider,
-      model: config.agent.model,
-      reasoning: config.agent.thinkingLevel,
-    }),
-    interactions: mcpInteractionBridge,
-    workspaceTrusted: options.workspaceTrusted,
-    openUrl: async (url) => {
-      openAuthUrl(url);
-    },
-  });
+  const mcp = options.enableMcp
+    ? createApplicationMcpIntegration({
+        home: config.home,
+        projectDirectory: project.root,
+        sampling: createPiMcpSamplingPort({
+          models: services.models,
+          provider: config.agent.provider,
+          model: config.agent.model,
+          reasoning: config.agent.thinkingLevel,
+        }),
+        interactions: mcpInteractionBridge,
+        workspaceTrusted: options.workspaceTrusted,
+        openUrl: async (url) => {
+          openAuthUrl(url);
+        },
+      })
+    : undefined;
   try {
     const runtime = await createApplicationRuntimeComposition({
       config,
       project,
       skills,
-      mcp,
+      ...(mcp ? { mcp } : {}),
       recoverInterruptedOperations: options.recoverInterruptedOperations,
       createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
         createPiAgentRuntime(project.root, services.models, {
@@ -332,7 +335,7 @@ async function createRuntime(
     });
     return Object.freeze({ runtime, mcpInteractionBridge });
   } catch (error) {
-    await mcp.close().catch(() => undefined);
+    await mcp?.close().catch(() => undefined);
     throw error;
   }
 }
@@ -554,6 +557,7 @@ async function main(): Promise<void> {
   const created = await createRuntime(config, {
     recoverInterruptedOperations: input.command === "tui",
     workspaceTrusted: input.workspaceTrusted,
+    enableMcp: input.command === "tui",
   });
   const runtime = created.runtime;
   try {

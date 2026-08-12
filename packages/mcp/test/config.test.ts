@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { describe, expect, test } from "vitest";
 import {
   globalMcpConfigPath,
@@ -128,7 +127,7 @@ describe("MCP configuration", () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-mcp-process-lock-"));
     const home = join(root, "home");
     const projectDirectory = join(root, "project");
-    const configModule = pathToFileURL(join(process.cwd(), "packages/mcp/src/config.ts")).href;
+    const configModule = new URL("../src/config.ts", import.meta.url).href;
     const runWriter = async (name: string): Promise<void> => {
       const script = [
         `import { writeMcpServer } from ${JSON.stringify(configModule)};`,
@@ -190,6 +189,57 @@ describe("MCP configuration", () => {
     });
 
     expect((await loadMcpConfig({ home, projectDirectory })).project.servers).toHaveProperty("recovered");
+  });
+
+  test("recovers a stale reaper marker left by a dead process", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-stale-reaper-"));
+    const home = join(root, "home");
+    const projectDirectory = join(root, "project");
+    const path = projectMcpConfigPath(projectDirectory);
+    const reaperPath = `${path}.lock.reap`;
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(reaperPath, "stale\n", { mode: 0o600 });
+    const old = new Date(Date.now() - 60_000);
+    await utimes(reaperPath, old, old);
+
+    await writeMcpServer({
+      home,
+      projectDirectory,
+      scope: "project",
+      name: "recovered",
+      config: { type: "local", command: "node" },
+    });
+
+    expect((await loadMcpConfig({ home, projectDirectory })).project.servers).toHaveProperty("recovered");
+  });
+
+  test("does not treat inherited object properties as configured servers", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-own-property-"));
+    const home = join(root, "home");
+    const projectDirectory = join(root, "project");
+
+    await writeMcpServer({
+      home,
+      projectDirectory,
+      scope: "global",
+      name: "constructor",
+      config: { type: "local", command: "node" },
+    });
+    expect(
+      (await loadMcpConfig({ home, projectDirectory })).installed.find(
+        (server) => server.name === "constructor",
+      )?.shadowed,
+    ).toBe(false);
+
+    await expect(
+      setMcpServerEnabled({
+        home,
+        projectDirectory,
+        scope: "project",
+        name: "constructor",
+        enabled: true,
+      }),
+    ).rejects.toThrow('server "constructor" does not exist');
   });
 
   test("retries a mutation when an external edit lands before the atomic replace", async () => {

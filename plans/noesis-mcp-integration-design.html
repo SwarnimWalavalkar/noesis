@@ -28,7 +28,7 @@
   <p class="lead">Install a server, authenticate it when needed, and use everything it provides. Noesis should be a fully compatible MCP host with excellent discovery and TUI management—not a partial protocol adapter.</p>
 
   <section><h2>Product contract</h2>
-    <p class="decision"><code>/mcp</code> is the home for installing, authenticating, enabling, disabling, inspecting, reconnecting, and removing MCP servers. Once enabled, a server's capabilities are available to the model and to workflows.</p>
+    <p class="decision"><code>/mcp</code> is the home for installing, authenticating, enabling, disabling, inspecting, reconnecting, and removing MCP servers. Once enabled, a server's capabilities are available to the model and to workflows; project servers also require a trusted workspace.</p>
     <div class="grid">
       <div class="card"><strong>Compatibility</strong><p class="muted">Implement the complete MCP client surface supported by the official TypeScript SDK: tools, prompts, resources and templates, roots, sampling, elicitation, completions, subscriptions, logging, progress, cancellation, notifications, OAuth, and tasks.</p></div>
       <div class="card"><strong>Transports</strong><p class="muted">Support local stdio and remote Streamable HTTP. Retain legacy SSE interoperability where the SDK can negotiate it.</p></div>
@@ -95,6 +95,7 @@
     <ul>
       <li>Tools use <code>mcp.&lt;server&gt;.&lt;tool&gt;</code>. Other capabilities use the same server namespace in the SDK and TUI.</li>
       <li>The execution resource is <code>mcp:&lt;scope&gt;:&lt;server&gt;:&lt;capability&gt;</code>. Remote calls use the existing network effect; local stdio calls use the existing execute effect. No new MCP-specific effect classes are needed.</li>
+      <li>MCP side effects use the existing <code>AuthorityBoundary</code> and <code>EffectGateway</code>. Lifecycle operations and reverse sampling use stable operation identities, durable reservations, and fail-closed reconciliation.</li>
       <li>Frozen tool identity includes the server configuration, discovered schema, and tool name so resumed workflows execute the same capability they started with.</li>
       <li>Reverse sampling is accepted only when it is bound to an admitted MCP invocation. It uses that turn's frozen model route and protected effect budget.</li>
       <li>One failing server does not hide healthy servers or built-in tools. Reconnect and discovery retry independently.</li>

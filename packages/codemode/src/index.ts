@@ -16,6 +16,7 @@ const DEFAULT_MAX_STORE_BYTES = 256 * 1024;
 const DEFAULT_MAX_STORE_ENTRIES = 256;
 const DEFAULT_MAX_FAILURE_MESSAGE_BYTES = 32 * 1024;
 const DEFAULT_MAX_FAILURE_STACK_BYTES = 96 * 1024;
+const DEFAULT_MAX_TOOL_ERROR_DETAILS_BYTES = 64 * 1024;
 const PENDING_SDK_ABORT_GRACE_MS = 500;
 
 const childMessageSchema = z.union([
@@ -62,7 +63,14 @@ export type CodeExecutionEvent =
   | { readonly type: "started"; readonly executionId: string }
   | { readonly type: "stdout"; readonly executionId: string; readonly text: string }
   | { readonly type: "stderr"; readonly executionId: string; readonly text: string }
-  | { readonly type: "progress"; readonly executionId: string; readonly value: JsonValue }
+  | {
+      readonly type: "progress";
+      readonly executionId: string;
+      readonly value: JsonValue;
+      readonly callId?: string;
+      readonly name?: string;
+      readonly callIndex?: number;
+    }
   | {
       readonly type: "tool-start";
       readonly executionId: string;
@@ -164,9 +172,14 @@ function sdkActionInput(message: Extract<ChildMessage, { readonly type: "sdk-cal
 
 function invocationValue(result: ToolInvocationResult): JsonValue {
   if (result.ok) return result.value;
-  throw new Error(
-    `${result.code}: ${result.message}${result.details === undefined ? "" : `\n${JSON.stringify(result.details)}`}`,
-  );
+  const serializedDetails = result.details === undefined ? undefined : JSON.stringify(result.details);
+  const boundedDetails =
+    serializedDetails === undefined
+      ? ""
+      : Buffer.byteLength(serializedDetails, "utf8") <= DEFAULT_MAX_TOOL_ERROR_DETAILS_BYTES
+        ? `\n${serializedDetails}`
+        : `\n[Tool error details omitted because they exceed ${String(DEFAULT_MAX_TOOL_ERROR_DETAILS_BYTES)} bytes]`;
+  throw new Error(`${result.code}: ${result.message}${boundedDetails}`);
 }
 
 async function terminateChild(child: ChildProcess, closed: Promise<void>): Promise<void> {
@@ -334,6 +347,16 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
             finishFailure(error instanceof Error ? error : new Error(String(error)));
           }
         };
+        const recordProgress = (value: JsonValue): void => {
+          const valueBytes = jsonBytes(value);
+          if (valueBytes > DEFAULT_MAX_PROGRESS_VALUE_BYTES)
+            throw new Error(
+              `Codemode progress value exceeds ${String(DEFAULT_MAX_PROGRESS_VALUE_BYTES)} bytes`,
+            );
+          progressBytes += valueBytes;
+          if (progressBytes > DEFAULT_MAX_PROGRESS_BYTES)
+            throw new Error(`Codemode progress exceeds ${String(DEFAULT_MAX_PROGRESS_BYTES)} bytes`);
+        };
         const handleSdkCall = async (
           message: Extract<ChildMessage, { readonly type: "sdk-call" }>,
         ): Promise<void> => {
@@ -379,7 +402,17 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                         sessionId: request.sessionId,
                         ...(request.turnId ? { turnId: request.turnId } : {}),
                         signal: controller.signal,
-                        emitUpdate: (update) => notify({ type: "progress", executionId, value: update }),
+                        emitUpdate: (update) => {
+                          recordProgress(update);
+                          notify({
+                            type: "progress",
+                            executionId,
+                            value: update,
+                            callId,
+                            name,
+                            callIndex,
+                          });
+                        },
                       }),
                     ),
             );
@@ -446,22 +479,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               pendingSdkCalls.add(pending);
               void pending.finally(() => pendingSdkCalls.delete(pending));
             } else if (message.type === "progress") {
-              const valueBytes = jsonBytes(message.value);
-              if (valueBytes > DEFAULT_MAX_PROGRESS_VALUE_BYTES) {
-                finishFailure(
-                  new Error(
-                    `Codemode progress value exceeds ${String(DEFAULT_MAX_PROGRESS_VALUE_BYTES)} bytes`,
-                  ),
-                );
-                return;
-              }
-              progressBytes += valueBytes;
-              if (progressBytes > DEFAULT_MAX_PROGRESS_BYTES) {
-                finishFailure(
-                  new Error(`Codemode progress exceeds ${String(DEFAULT_MAX_PROGRESS_BYTES)} bytes`),
-                );
-                return;
-              }
+              recordProgress(message.value);
               notify({ type: "progress", executionId, value: message.value });
             } else if (message.type === "result") {
               if (jsonBytes(message.value) > DEFAULT_MAX_RESULT_BYTES) {

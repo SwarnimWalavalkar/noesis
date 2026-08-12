@@ -292,6 +292,7 @@ describe("tool broker", () => {
 
   it("preserves cancelled, invalid-output, and result-too-large failures", async () => {
     const controller = new AbortController();
+    const records: ToolInvocationRecord[] = [];
     const cancelling = defineTool({
       name: "test.cancel",
       label: "Cancel",
@@ -329,6 +330,11 @@ describe("tool broker", () => {
       definitions: [cancelling, invalid, oversized],
       authority: foregroundAuthority(),
       permission,
+      recorder: Object.freeze({
+        record: async (record: ToolInvocationRecord) => {
+          records.push(record);
+        },
+      }),
     });
 
     await expect(
@@ -342,6 +348,12 @@ describe("tool broker", () => {
       ok: false,
       code: "result_too_large",
     });
+    expect(
+      records.filter((record) => record.toolName === "test.oversized").map((record) => record.status),
+    ).toEqual(["requested", "running", "failed"]);
+    expect(records.filter((record) => record.toolName === "test.oversized").at(-1)?.error).toContain(
+      "Tool result exceeds",
+    );
   });
 
   it("records an effect-derivation exception as a terminal failure", async () => {
@@ -375,6 +387,32 @@ describe("tool broker", () => {
     });
     expect(records.map((record) => record.status)).toEqual(["requested", "running", "failed"]);
     expect(records.at(-1)?.error).toBe("cannot derive resource");
+  });
+
+  it("reports non-JSON native parser values at the matching protocol boundary", async () => {
+    const invalidInput: ToolDefinition = {
+      ...echo(),
+      name: "test.invalid-native-input",
+      parseInput: () => ({ value: 1n }),
+    };
+    const invalidOutput: ToolDefinition = {
+      ...echo(),
+      name: "test.invalid-native-output",
+      parseOutput: () => null,
+    };
+    Reflect.set(invalidOutput, "parseOutput", () => undefined);
+    const broker = createToolBroker({
+      definitions: [invalidInput, invalidOutput],
+      authority: foregroundAuthority(),
+      permission,
+    });
+
+    await expect(
+      broker.invoke("test.invalid-native-input", { value: "ignored" }, invocationContext()),
+    ).resolves.toMatchObject({ ok: false, code: "invalid_input" });
+    await expect(
+      broker.invoke("test.invalid-native-output", { value: "valid" }, invocationContext()),
+    ).resolves.toMatchObject({ ok: false, code: "invalid_output" });
   });
 
   it("snapshots permissions and callable definitions against caller mutation", async () => {

@@ -13,6 +13,7 @@ const ENTER = "\r";
 const DOWN = "\u001b[B";
 const ESCAPE = "\u001b";
 const DECLINE = "\u0004";
+const INTERRUPT = "\u0003";
 
 describe("MCP TUI interaction bridge", () => {
   test("queues server elicitation before the TUI attaches and presents requests in order", async () => {
@@ -229,6 +230,13 @@ describe("MCP TUI interaction bridge", () => {
             { value: "normal", label: "Normal" },
             { value: "urgent", label: "Urgent" },
           ],
+          defaultValue: "urgent",
+        },
+        {
+          type: "boolean",
+          name: "notify",
+          label: "Notify watchers",
+          defaultValue: false,
         },
         {
           type: "multiselect",
@@ -248,7 +256,10 @@ describe("MCP TUI interaction bridge", () => {
     expect(terminal.output).not.toContain("top-secret");
     terminal.send(ENTER);
     await vi.waitFor(() => expect(terminal.output).toContain("Priority"));
-    terminal.send(DOWN);
+    expect(terminal.output).toContain("› Urgent");
+    terminal.send(ENTER);
+    await vi.waitFor(() => expect(terminal.output).toContain("Notify watchers"));
+    expect(terminal.output).toContain("› No");
     terminal.send(ENTER);
     await vi.waitFor(() => expect(terminal.output).toContain("Labels"));
     expect(terminal.output).toContain("[x] Source");
@@ -257,7 +268,12 @@ describe("MCP TUI interaction bridge", () => {
     terminal.send(ENTER);
     await expect(form).resolves.toEqual({
       action: "accept",
-      values: { token: "top-secret", priority: "urgent", labels: ["source", "issues"] },
+      values: {
+        token: "top-secret",
+        priority: "urgent",
+        notify: false,
+        labels: ["source", "issues"],
+      },
     });
 
     const url = bridge.handlers.elicitUrl({
@@ -356,6 +372,18 @@ describe("MCP TUI interaction bridge", () => {
     terminal.send(ESCAPE);
     await expect(form).resolves.toEqual({ action: "cancel" });
 
+    const defaulted = bridge.handlers.elicitForm({
+      serverName: "linear",
+      title: "Input",
+      message: "Input needed",
+      fields: [{ type: "text", name: "value", label: "Value", defaultValue: hostile }],
+    });
+    await vi.waitFor(() => expect(terminal.output).toContain("Input needed"));
+    expect(terminal.output).not.toContain("\u001b]8;;https://attacker.test");
+    expect(terminal.output).not.toContain(hostile);
+    terminal.send(ESCAPE);
+    await expect(defaulted).resolves.toEqual({ action: "cancel" });
+
     const url = bridge.handlers.elicitUrl({
       serverName: hostile,
       elicitationId: "hostile-url",
@@ -373,5 +401,93 @@ describe("MCP TUI interaction bridge", () => {
 
     terminal.type("/quit\n");
     await running;
+  });
+
+  test("disposes MCP interaction ownership when startup fails", async () => {
+    const agent: NoesisAgentRuntime = {
+      name: "mcp-startup-failure",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {
+        return { status: "consumed", timelineSequence: 1, consumedAt: new Date().toISOString() };
+      },
+      async abort() {},
+    };
+    const base = createInMemoryTestRuntime(agent);
+    const bridge = createTuiMcpInteractionBridge();
+    const pending = bridge.handlers.elicitForm({
+      serverName: "linear",
+      title: "Input",
+      message: "Input needed",
+      fields: [],
+    });
+
+    await expect(
+      startNoesisTui(
+        Object.freeze({
+          ...base,
+          startTrail: async () => {
+            throw new Error("startup failed");
+          },
+        }),
+        { mcpInteractionBridge: bridge },
+        createTestTerminal(),
+      ),
+    ).rejects.toThrow("startup failed");
+    await expect(pending).resolves.toEqual({ action: "cancel" });
+    await expect(
+      bridge.handlers.elicitForm({
+        serverName: "linear",
+        title: "Input",
+        message: "Input needed",
+        fields: [],
+      }),
+    ).resolves.toEqual({ action: "cancel" });
+  });
+
+  test("lets Ctrl+C shut down while MCP owns focus even during editor paste quarantine", async () => {
+    const agent: NoesisAgentRuntime = {
+      name: "mcp-focused-shutdown",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {
+        return { status: "consumed", timelineSequence: 1, consumedAt: new Date().toISOString() };
+      },
+      async abort() {},
+    };
+    const bridge = createTuiMcpInteractionBridge();
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(
+      createInMemoryTestRuntime(agent),
+      { mcpInteractionBridge: bridge },
+      terminal,
+    );
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    terminal.send("\u001b[200~unterminated paste");
+    const elicitation = bridge.handlers.elicitForm({
+      serverName: "linear",
+      title: "Input",
+      message: "Input needed",
+      fields: [{ type: "text", name: "value", label: "Value" }],
+    });
+    await vi.waitFor(() => expect(terminal.output).toContain("Input needed"));
+    terminal.send(INTERRUPT);
+
+    await running;
+    await expect(elicitation).resolves.toEqual({ action: "cancel" });
   });
 });

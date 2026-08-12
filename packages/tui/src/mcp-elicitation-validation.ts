@@ -16,13 +16,21 @@ function validDate(value: string): boolean {
 
 function validFormat(format: NonNullable<TextField["format"]>, value: string): boolean {
   if (format === "date") return validDate(value);
-  if (format === "date-time")
-    return (
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/u.test(value) &&
-      validDate(value.slice(0, 10)) &&
-      Number.isFinite(Date.parse(value))
+  if (format === "date-time") {
+    const match = /^\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/iu.exec(
+      value,
     );
+    if (!match || !validDate(value.slice(0, 10))) return false;
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    const second = Number(match[3]);
+    const offsetHour = match[4] === undefined ? 0 : Number(match[4]);
+    const offsetMinute = match[5] === undefined ? 0 : Number(match[5]);
+    return hour <= 23 && minute <= 59 && second <= 60 && offsetHour <= 23 && offsetMinute <= 59;
+  }
   if (format === "email") return /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value);
+  if (!/^[a-z][a-z0-9+.-]*:[\x21-\x7e]+$/iu.test(value)) return false;
+  if (/["<>\\^`{|}]/u.test(value) || /%(?![0-9a-f]{2})/iu.test(value)) return false;
   try {
     new URL(value);
     return true;

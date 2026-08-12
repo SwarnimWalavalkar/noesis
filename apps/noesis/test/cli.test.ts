@@ -356,6 +356,29 @@ describe("Noesis CLI grammar", () => {
     expect(Reflect.get(row ?? {}, "status")).toBe("running");
   });
 
+  test.each(["inspect", "rebuild"] as const)("%s does not start configured MCP servers", async (command) => {
+    const home = await mkdtemp(join(tmpdir(), `noesis-cli-${command}-no-mcp-`));
+    const marker = join(home, `${command}-mcp-started`);
+    expect((await runCli(["config", "init", "--home", home])).code).toBe(0);
+    await writeFile(
+      join(home, "mcp.json"),
+      JSON.stringify({
+        servers: {
+          marker: {
+            type: "local",
+            command: process.execPath,
+            args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "started")`],
+          },
+        },
+      }),
+    );
+
+    const result = await runCli([command, "--home", home]);
+
+    expect(result.code, result.output).toBe(0);
+    await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   test("continue on an empty configured home fails without creating a trail", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-cli-empty-continue-"));
     const result = await runCli([

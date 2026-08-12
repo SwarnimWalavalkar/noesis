@@ -300,6 +300,52 @@ describe("agent runtime factories", () => {
     await expect(array.execute("invalid-array-call", [1, 2, 3])).rejects.toThrow();
   });
 
+  test("validates hotbar input without applying JSON Schema defaults before Broker invocation", async () => {
+    const catalog: PiFrozenToolCatalog = Object.freeze({
+      catalogId: "catalog-hotbar-raw-input",
+      catalogDigest: sha256("catalog-hotbar-raw-input"),
+      tools: Object.freeze([
+        Object.freeze({
+          name: "test.defaults",
+          label: "Defaults",
+          description: "Exercise schema defaults",
+          revisionId: "test-defaults-v1",
+          inputSchema: Object.freeze({
+            type: "object",
+            properties: Object.freeze({
+              mode: Object.freeze({ type: "string", default: "mutated" }),
+            }),
+            additionalProperties: false,
+          }),
+          outputSchema: Object.freeze({ type: "object" }),
+        }),
+      ]),
+    });
+    const inputs: JsonValue[] = [];
+    const prepared: PreparedPiCodeExecution = Object.freeze({
+      catalog,
+      invoke: async (_name: string, input: JsonValue) => {
+        inputs.push(input);
+        return input;
+      },
+      execute: async () => Object.freeze({ executionId: "unused", value: null, calls: 0, durationMs: 0 }),
+      close: async () => undefined,
+    });
+    const [tool] = createPiHotbarTools({
+      prepared,
+      turnId: "turn-hotbar-raw-input",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+    });
+    if (!tool) throw new Error("Expected hotbar tool");
+    const rawInput = {};
+
+    await tool.execute("call-hotbar-raw-input", rawInput);
+
+    expect(inputs).toEqual([{}]);
+    expect(inputs[0]).toBe(rawInput);
+  });
+
   test("pins the saved-workflow adapter revision into workflow execution catalogs", () => {
     const tools = Object.freeze([Object.freeze({ name: "files.read", revisionId: "tool-read-v1" })]);
 
@@ -930,13 +976,21 @@ describe("agent runtime factories", () => {
     });
     const invocations: { readonly name: string; readonly input: JsonValue }[] = [];
     const codeExecution: PiCodeExecutionAdapter = Object.freeze({
-      prepare: async () =>
-        Object.freeze({
+      prepare: async () => {
+        const invoke: NonNullable<PreparedPiCodeExecution["invoke"]> = async (
+          name,
+          input,
+          _signal,
+          _identity,
+          emitUpdate,
+        ) => {
+          invocations.push(Object.freeze({ name, input }));
+          emitUpdate?.({ message: "Writing note" });
+          return Object.freeze({ written: true });
+        };
+        return Object.freeze({
           catalog,
-          invoke: async (name: string, input: JsonValue) => {
-            invocations.push(Object.freeze({ name, input }));
-            return Object.freeze({ written: true });
-          },
+          invoke,
           execute: async () => {
             return Object.freeze({
               executionId: "unused-execution-hotbar",
@@ -946,7 +1000,8 @@ describe("agent runtime factories", () => {
             });
           },
           close: async () => undefined,
-        }),
+        });
+      },
       shutdown: async () => undefined,
     });
     let step = 0;
@@ -1008,6 +1063,13 @@ describe("agent runtime factories", () => {
     expect(events.flatMap((event) => (event.type === "assistant-message" ? [event.text] : []))).toEqual([
       "Hotbar write completed.",
     ]);
+    expect(events).toContainEqual({
+      type: "tool-update",
+      actionId: "direct:write-hotbar",
+      name: "files.write",
+      update: { message: "Writing note" },
+      recordedByBroker: true,
+    });
   });
 
   test("ignores unavailable persisted hotbar entries without blocking the turn", async () => {
@@ -1271,7 +1333,13 @@ describe("agent runtime factories", () => {
       prepare: async () => {
         const execute: PreparedPiCodeExecution["execute"] = async (_source, _timeoutMs, _signal, emit) => {
           emit({ type: "started", executionId: "execution-actions" });
-          emit({ type: "progress", value: { message: "Starting shell" } });
+          emit({
+            type: "progress",
+            value: { message: "Starting shell" },
+            callId: "tool_call_nested-visible",
+            name: "shell.run",
+            callIndex: 0,
+          });
           emit({
             type: "tool-start",
             callId: "tool_call_nested-visible",
@@ -1348,6 +1416,13 @@ describe("agent runtime factories", () => {
       name: "shell.run",
       isError: false,
       result: { stdout: "/workspace" },
+    });
+    expect(events).toContainEqual({
+      type: "tool-update",
+      actionId: "tool_call_nested-visible",
+      parentActionId: "call-execute-visible",
+      name: "shell.run",
+      update: { message: "Starting shell" },
     });
     expect(
       events.some(

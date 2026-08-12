@@ -344,6 +344,21 @@ function createFormOverlay(
   let settled = false;
 
   const field = (): TuiMcpFormField | undefined => request.fields[fieldIndex];
+  const resetFieldSelection = (): void => {
+    const current = field();
+    choiceIndex =
+      current?.type === "boolean"
+        ? current.defaultValue === false
+          ? 1
+          : 0
+        : current?.type === "select" && current.defaultValue !== undefined
+          ? Math.max(
+              0,
+              current.choices.findIndex((choice) => choice.value === current.defaultValue),
+            )
+          : 0;
+    multiSelected = new Set(current?.type === "multiselect" ? current.defaultValue : []);
+  };
   const createInput = (): void => {
     const current = field();
     if (
@@ -358,7 +373,7 @@ function createFormOverlay(
     const next = new Input();
     next.focused = true;
     const initial = current.defaultValue === undefined ? "" : String(current.defaultValue);
-    next.setValue(safeTerminalText(initial));
+    next.setValue(safeInteractionScalar(initial));
     if (initial) next.handleInput("\u0005");
     next.onSubmit = (value) => acceptValue(value);
     input = next;
@@ -372,9 +387,7 @@ function createFormOverlay(
 
   const advance = (): void => {
     fieldIndex += 1;
-    choiceIndex = 0;
-    const next = field();
-    multiSelected = new Set(next?.type === "multiselect" ? next.defaultValue : []);
+    resetFieldSelection();
     error = undefined;
     if (fieldIndex >= request.fields.length) {
       finish({ action: "accept", values: Object.freeze({ ...values }) });
@@ -455,8 +468,7 @@ function createFormOverlay(
     advance();
   };
 
-  const initial = field();
-  if (initial?.type === "multiselect") multiSelected = new Set(initial.defaultValue);
+  resetFieldSelection();
   createInput();
 
   return {

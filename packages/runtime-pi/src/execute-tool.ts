@@ -35,7 +35,13 @@ export interface PiMcpServerSummary {
 
 export type PiCodeExecutionEvent =
   | { readonly type: "started"; readonly executionId: string }
-  | { readonly type: "progress"; readonly value: JsonValue }
+  | {
+      readonly type: "progress";
+      readonly value: JsonValue;
+      readonly callId?: string;
+      readonly name?: string;
+      readonly callIndex?: number;
+    }
   | {
       readonly type: "tool-start";
       readonly callId: string;

@@ -343,6 +343,53 @@ describe("Noesis config", () => {
     });
   });
 
+  test("rejects MCP tools in the global hotbar", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-global-mcp-hotbar-"));
+    await initializeNoesisConfig(home);
+
+    await expect(
+      updateToolHotbar(home, {
+        projectId: "project_alpha",
+        projectToolNamespace: "workflow.1111111111111111.",
+        scope: "global",
+        action: "add",
+        tool: "mcp.github.search_123456789abc",
+        legacyGlobalProjectTools: [],
+        legacyActiveProjectTools: [],
+      }),
+    ).rejects.toThrow("MCP tools are project-scoped");
+
+    expect((await resolveNoesisConfig({ home, env: {} })).tools.hotbar).not.toContain(
+      "mcp.github.search_123456789abc",
+    );
+  });
+
+  test("allows removing a legacy MCP tool from the global hotbar", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-remove-global-mcp-hotbar-"));
+    await writeFile(
+      noesisConfigPath(home),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        tools: { hotbar: ["files.read", "mcp.github.search_123456789abc"] },
+      }),
+    );
+
+    await updateToolHotbar(home, {
+      projectId: "project_alpha",
+      projectToolNamespace: "workflow.1111111111111111.",
+      scope: "global",
+      action: "remove",
+      tool: "mcp.github.search_123456789abc",
+      legacyGlobalProjectTools: [],
+      legacyActiveProjectTools: [],
+    });
+
+    expect((await resolveNoesisConfig({ home, env: {} })).tools.hotbar).not.toContain(
+      "mcp.github.search_123456789abc",
+    );
+  });
+
   test("serializes concurrent global and same-project hotbar deltas without lost updates", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-concurrent-hotbar-"));
     await initializeNoesisConfig(home);

@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { describe, expect, test } from "vitest";
 import {
+  adaptMcpSamplingRequest,
   createPiMcpSamplingPort,
   isPiMcpSamplingError,
   PI_MCP_CONTINUITY_META_KEY,
@@ -77,6 +78,79 @@ async function expectSamplingError(promise: Promise<unknown>, code: PiMcpSamplin
 }
 
 describe("Pi MCP sampling adapter", () => {
+  test("validates unknown protocol requests before invoking the sampling port", () => {
+    let called = false;
+
+    expect(() =>
+      adaptMcpSamplingRequest(
+        Object.freeze({
+          sample: async () => {
+            called = true;
+            return Object.freeze({
+              model: "unused",
+              role: "assistant" as const,
+              content: Object.freeze({ type: "text" as const, text: "unused" }),
+            });
+          },
+        }),
+        { params: { messages: "not-an-array", maxTokens: 32 } },
+      ),
+    ).toThrow();
+    expect(called).toBe(false);
+  });
+
+  test("accepts the SDK sampling/createMessage request envelope", async () => {
+    const { port } = testSamplingPort("enveloped response");
+
+    await expect(
+      adaptMcpSamplingRequest(port, {
+        method: "sampling/createMessage",
+        params: {
+          messages: [{ role: "user", content: { type: "text", text: "hello" } }],
+          maxTokens: 32,
+        },
+      }),
+    ).resolves.toMatchObject({
+      role: "assistant",
+      content: { type: "text", text: "enveloped response" },
+    });
+  });
+
+  test("accepts SDK-valid omitted tool-result content and integer maxTokens", async () => {
+    const { contexts, port } = testSamplingPort("normalized response");
+
+    await expect(
+      adaptMcpSamplingRequest(port, {
+        method: "sampling/createMessage",
+        params: {
+          messages: [
+            {
+              role: "assistant",
+              content: { type: "tool_use", id: "call-empty", name: "lookup", input: {} },
+            },
+            {
+              role: "user",
+              content: { type: "tool_result", toolUseId: "call-empty" },
+            },
+          ],
+          maxTokens: 0,
+        },
+      }),
+    ).resolves.toMatchObject({ role: "assistant" });
+    expect(contexts[0]?.messages).toMatchObject([
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call-empty", name: "lookup", arguments: {} }],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call-empty",
+        toolName: "lookup",
+        content: [],
+      },
+    ]);
+  });
+
   test("maps text and image input, request options, and rich text plus tool-use output", async () => {
     const { contexts, streamOptions, port } = testSamplingPort([
       fauxText("inspect this"),
@@ -181,6 +255,66 @@ describe("Pi MCP sampling adapter", () => {
       },
       { role: "user", content: [{ type: "text", text: "summarize" }] },
     ]);
+  });
+
+  test("rejects a tool result that precedes its matching tool use", async () => {
+    const { port } = testSamplingPort("unused");
+
+    await expectSamplingError(
+      port.sample(
+        request({
+          messages: [
+            {
+              role: "user",
+              content: {
+                type: "tool_result",
+                toolUseId: "call-future",
+                content: [{ type: "text", text: "not valid yet" }],
+              },
+            },
+            {
+              role: "assistant",
+              content: { type: "tool_use", id: "call-future", name: "lookup", input: {} },
+            },
+          ],
+        }),
+      ),
+      "invalid_request",
+    );
+  });
+
+  test("rejects reusing one tool use for multiple tool results", async () => {
+    const { port } = testSamplingPort("unused");
+
+    await expectSamplingError(
+      port.sample(
+        request({
+          messages: [
+            {
+              role: "assistant",
+              content: { type: "tool_use", id: "call-once", name: "lookup", input: {} },
+            },
+            {
+              role: "user",
+              content: {
+                type: "tool_result",
+                toolUseId: "call-once",
+                content: [{ type: "text", text: "first" }],
+              },
+            },
+            {
+              role: "user",
+              content: {
+                type: "tool_result",
+                toolUseId: "call-once",
+                content: [{ type: "text", text: "second" }],
+              },
+            },
+          ],
+        }),
+      ),
+      "invalid_request",
+    );
   });
 
   test("round-trips provider continuity signatures through namespaced MCP metadata", async () => {

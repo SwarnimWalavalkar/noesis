@@ -89,13 +89,12 @@ export function createMcpToolDefinitions(
         },
         parseOutput: (value: unknown): JsonValue => {
           const protocolResult = toJsonValue(value);
-          if (
-            outputValidator &&
-            typeof value === "object" &&
-            value !== null &&
-            "structuredContent" in value
-          ) {
-            const result = outputValidator(value.structuredContent);
+          if (outputValidator && typeof value === "object" && value !== null) {
+            if (Reflect.get(value, "isError") !== true && !("structuredContent" in value)) {
+              throw new Error("MCP tool declared an output schema but returned no structuredContent");
+            }
+            if (!("structuredContent" in value)) return protocolResult;
+            const result = outputValidator(Reflect.get(value, "structuredContent"));
             if (!result.valid) throw new Error(result.errorMessage);
           }
           return protocolResult;

@@ -166,6 +166,106 @@ export interface PiMcpSamplingRequest {
   readonly params: PiMcpSamplingRequestParams;
 }
 
+const UnknownRecordSchema = z.record(z.string(), z.unknown());
+const SamplingTextContentSchema = z.looseObject({
+  type: z.literal("text"),
+  text: z.string(),
+  annotations: UnknownRecordSchema.optional(),
+  _meta: UnknownRecordSchema.optional(),
+});
+const SamplingImageContentSchema = z.looseObject({
+  type: z.literal("image"),
+  data: z.string(),
+  mimeType: z.string(),
+  annotations: UnknownRecordSchema.optional(),
+  _meta: UnknownRecordSchema.optional(),
+});
+const SamplingAudioContentSchema = z.looseObject({
+  type: z.literal("audio"),
+  data: z.string(),
+  mimeType: z.string(),
+  annotations: UnknownRecordSchema.optional(),
+  _meta: UnknownRecordSchema.optional(),
+});
+const SamplingResourceLinkContentSchema = z.looseObject({
+  type: z.literal("resource_link"),
+  uri: z.string(),
+  name: z.string(),
+});
+const SamplingEmbeddedResourceContentSchema = z.looseObject({
+  type: z.literal("resource"),
+  resource: UnknownRecordSchema,
+});
+const SamplingToolUseContentSchema = z.looseObject({
+  type: z.literal("tool_use"),
+  id: z.string().min(1),
+  name: z.string().min(1),
+  input: UnknownRecordSchema,
+  _meta: UnknownRecordSchema.optional(),
+});
+const SamplingToolResultContentSchema = z.looseObject({
+  type: z.literal("tool_result"),
+  toolUseId: z.string().min(1),
+  content: z
+    .array(
+      z.union([
+        SamplingTextContentSchema,
+        SamplingImageContentSchema,
+        SamplingAudioContentSchema,
+        SamplingResourceLinkContentSchema,
+        SamplingEmbeddedResourceContentSchema,
+      ]),
+    )
+    .default([]),
+  structuredContent: UnknownRecordSchema.optional(),
+  isError: z.boolean().optional(),
+  _meta: UnknownRecordSchema.optional(),
+});
+const SamplingContentSchema = z.union([
+  SamplingTextContentSchema,
+  SamplingImageContentSchema,
+  SamplingAudioContentSchema,
+  SamplingToolUseContentSchema,
+  SamplingToolResultContentSchema,
+]);
+const UntrustedPiMcpSamplingRequestSchema = z.strictObject({
+  method: z.literal("sampling/createMessage"),
+  params: z.looseObject({
+    messages: z.array(
+      z.looseObject({
+        role: z.enum(["user", "assistant"]),
+        content: z.union([SamplingContentSchema, z.array(SamplingContentSchema)]),
+        _meta: UnknownRecordSchema.optional(),
+      }),
+    ),
+    modelPreferences: UnknownRecordSchema.optional(),
+    systemPrompt: z.string().optional(),
+    includeContext: z.enum(["none", "thisServer", "allServers"]).optional(),
+    temperature: z.number().optional(),
+    maxTokens: z.number().int(),
+    stopSequences: z.array(z.string()).optional(),
+    metadata: UnknownRecordSchema.optional(),
+    tools: z
+      .array(
+        z.looseObject({
+          name: z.string().min(1),
+          description: z.string().optional(),
+          inputSchema: UnknownRecordSchema,
+        }),
+      )
+      .optional(),
+    toolChoice: z.looseObject({ mode: z.enum(["auto", "required", "none"]).optional() }).optional(),
+    task: z
+      .looseObject({ ttl: z.number().nullable().optional(), pollInterval: z.number().optional() })
+      .optional(),
+    _meta: UnknownRecordSchema.optional(),
+  }),
+});
+const PiMcpSamplingRequestSchema = z.preprocess(
+  (value) => UntrustedPiMcpSamplingRequestSchema.parse(value),
+  z.custom<PiMcpSamplingRequest>(() => true),
+);
+
 export interface PiMcpSamplingResult {
   readonly model: string;
   readonly role: "assistant";
@@ -201,7 +301,7 @@ export function adaptMcpSamplingRequest(
     readonly reasoning: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   }>,
 ): Promise<unknown> {
-  return port.sample(request as PiMcpSamplingRequest, {
+  return port.sample(PiMcpSamplingRequestSchema.parse(request), {
     ...(signal ? { signal } : {}),
     ...(route ? { route } : {}),
   });
@@ -378,7 +478,7 @@ function toolResultBlocks(
 
 function priorUserMessages(
   message: PiMcpSamplingMessage,
-  toolNames: ReadonlyMap<string, string>,
+  toolNames: Map<string, string>,
   model: Model<Api>,
   timestamp: number,
 ): readonly Message[] {
@@ -405,6 +505,7 @@ function priorUserMessages(
         "invalid_request",
         `MCP tool result ${block.toolUseId} has no preceding tool-use block`,
       );
+    toolNames.delete(block.toolUseId);
     const meta = validatedMcpMeta(block._meta);
     const toolResult: ToolResultMessage & McpMetadataCarrier = Object.freeze({
       role: "toolResult",
@@ -423,21 +524,25 @@ function priorUserMessages(
 
 function piMessages(request: PiMcpSamplingRequest, model: Model<Api>): readonly Message[] {
   const toolNames = new Map<string, string>();
-  for (const message of request.params.messages) {
-    if (message.role !== "assistant") continue;
+  const seenToolIds = new Set<string>();
+  const baseTimestamp = Date.now() - request.params.messages.length;
+  const messages: Message[] = [];
+  for (const [index, message] of request.params.messages.entries()) {
+    const timestamp = baseTimestamp + index;
+    if (message.role === "user") {
+      messages.push(...priorUserMessages(message, toolNames, model, timestamp));
+      continue;
+    }
+    messages.push(priorAssistantMessage(message, model, timestamp));
     for (const block of blocks(message.content)) {
-      if (block.type === "tool_use") toolNames.set(block.id, block.name);
+      if (block.type !== "tool_use") continue;
+      if (seenToolIds.has(block.id))
+        throw createPiMcpSamplingError("invalid_request", `MCP sampling reused tool-use id ${block.id}`);
+      seenToolIds.add(block.id);
+      toolNames.set(block.id, block.name);
     }
   }
-  const baseTimestamp = Date.now() - request.params.messages.length;
-  return Object.freeze(
-    request.params.messages.flatMap((message, index) => {
-      const timestamp = baseTimestamp + index;
-      return message.role === "assistant"
-        ? [priorAssistantMessage(message, model, timestamp)]
-        : priorUserMessages(message, toolNames, model, timestamp);
-    }),
-  );
+  return Object.freeze(messages);
 }
 
 function piTools(request: PiMcpSamplingRequest): readonly Tool[] | undefined {

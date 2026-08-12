@@ -16,6 +16,7 @@ import {
   parseMcpArguments,
   safeMcpLines,
   safeMcpScalar,
+  validateMcpRemoteUrl,
 } from "./mcp-manager-model.ts";
 import type {
   NoesisTuiRuntime,
@@ -38,7 +39,7 @@ import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 const PAGE_STEP = 8;
 
 export interface McpManagerOverlay extends Component {
-  readonly dispose: () => void;
+  readonly dispose: () => Promise<void>;
   readonly refresh: () => Promise<void>;
 }
 
@@ -61,7 +62,8 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
   let scroll = 0;
   let busy = "Loading MCP servers…";
   let notice: string | undefined;
-  let mutationController: AbortController | undefined;
+  let activeMutation: { readonly controller?: AbortController; readonly promise: Promise<void> } | undefined;
+  let disposePromise: Promise<void> | undefined;
 
   const render = (): void => {
     if (!disposed) options.requestRender();
@@ -127,30 +129,33 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     }
     const request = ++generation;
     const controller = intent.type === "authenticate" ? new AbortController() : undefined;
-    mutationController = controller;
     busy = `${intent.type.replaceAll("-", " ")}…`;
     notice = undefined;
     render();
-    try {
-      const result: TuiMcpMutationResult = await runtime.mutateMcp(intent, controller?.signal);
-      if (disposed || generation !== request) return;
-      notice = result.browserUrl ? `${result.message}\n${result.browserUrl}` : result.message;
-      servers = Object.freeze([...(await runtime.listMcpServers())]);
-      if (disposed || generation !== request) return;
-      busy = "";
-      if (target) {
-        const detail = await runtime.inspectMcpServer(target.scope, target.name);
+    const promise = (async (): Promise<void> => {
+      try {
+        const result: TuiMcpMutationResult = await runtime.mutateMcp(intent, controller?.signal);
         if (disposed || generation !== request) return;
-        if (detail) moveTo({ kind: "server", detail });
-        else moveTo({ kind: "list" });
-      } else {
-        moveTo({ kind: "list" });
+        notice = result.browserUrl ? `${result.message}\n${result.browserUrl}` : result.message;
+        servers = Object.freeze([...(await runtime.listMcpServers())]);
+        if (disposed || generation !== request) return;
+        busy = "";
+        if (target) {
+          const detail = await runtime.inspectMcpServer(target.scope, target.name);
+          if (disposed || generation !== request) return;
+          if (detail) moveTo({ kind: "server", detail });
+          else moveTo({ kind: "list" });
+        } else {
+          moveTo({ kind: "list" });
+        }
+      } catch (error) {
+        if (!disposed && generation === request) reportError(error);
+      } finally {
+        if (activeMutation?.controller === controller) activeMutation = undefined;
       }
-    } catch (error) {
-      if (!disposed && generation === request) reportError(error);
-    } finally {
-      if (mutationController === controller) mutationController = undefined;
-    }
+    })();
+    activeMutation = { ...(controller ? { controller } : {}), promise };
+    await promise;
   };
 
   const input = (
@@ -162,7 +167,7 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
   ): void => {
     const field = new Input();
     field.focused = true;
-    field.setValue(initial);
+    field.setValue(safeMcpScalar(initial));
     if (initial) field.handleInput("\u0005");
     field.onSubmit = submit;
     field.onEscape = () => moveTo(back);
@@ -244,8 +249,9 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
           if (!name) return;
           input("Add remote server", "Streamable HTTP URL", "https://", back, (rawUrl) => {
             const url = rawUrl.trim();
-            if (!url) {
-              notice = "Server URL cannot be empty.";
+            const urlError = validateMcpRemoteUrl(url);
+            if (urlError) {
+              notice = urlError;
               render();
               return;
             }
@@ -312,8 +318,9 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     const remoteConfig = detail.config;
     input("Edit remote server", "Streamable HTTP URL", remoteConfig.url, back, (rawUrl) => {
       const url = rawUrl.trim();
-      if (!url) {
-        notice = "Server URL cannot be empty.";
+      const urlError = validateMcpRemoteUrl(url);
+      if (urlError) {
+        notice = urlError;
         render();
         return;
       }
@@ -714,25 +721,35 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       ...(screen.kind === "server" ? { detail: screen.detail } : {}),
       mutationsEnabled: options.mutationsEnabled(),
       busy: Boolean(busy),
-      cancellable: Boolean(mutationController),
+      cancellable: Boolean(activeMutation?.controller),
     });
   };
 
   const component: McpManagerOverlay = {
     dispose() {
-      disposed = true;
-      generation += 1;
-      mutationController?.abort(new Error("MCP management closed"));
-      mutationController = undefined;
+      disposePromise ??= (async () => {
+        disposed = true;
+        generation += 1;
+        const mutation = activeMutation;
+        mutation?.controller?.abort(new Error("MCP management closed"));
+        await mutation?.promise.catch(() => undefined);
+        if (activeMutation === mutation) activeMutation = undefined;
+      })();
+      return disposePromise;
     },
     refresh,
     invalidate() {},
     handleInput(data) {
       if (busy) {
-        if (mutationController && matchesKey(data, "escape")) {
-          busy = "Cancelling authentication…";
-          mutationController.abort(new Error("MCP authentication cancelled"));
-          render();
+        if (matchesKey(data, "escape")) {
+          const controller = activeMutation?.controller;
+          if (controller) {
+            busy = "Cancelling MCP operation…";
+            controller.abort(new Error("MCP operation cancelled"));
+            render();
+          } else {
+            options.close();
+          }
         }
         return;
       }

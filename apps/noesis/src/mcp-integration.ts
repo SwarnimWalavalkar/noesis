@@ -17,6 +17,7 @@ import {
   type McpInvocationContext,
 } from "@noesis/mcp";
 import { adaptMcpSamplingRequest, type PiMcpSamplingPort } from "@noesis/runtime-pi";
+import { canonicalJson } from "@noesis/domain";
 import type {
   NoesisTuiRuntime,
   TuiMcpFormField,
@@ -209,6 +210,13 @@ function tuiConfig(
       };
 }
 
+function validatedRemoteUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "http:" && url.protocol !== "https:")
+    throw new Error("MCP remote server URL must use http:// or https://");
+  return url.href;
+}
+
 export function createApplicationMcpIntegration(input: {
   readonly home: string;
   readonly projectDirectory: string;
@@ -218,20 +226,42 @@ export function createApplicationMcpIntegration(input: {
   readonly workspaceTrusted: boolean;
 }): ApplicationMcpIntegration {
   let configPromise = loadMcpConfig(input);
+  let eventConfig: LoadedMcpConfig | undefined;
   let host: McpHostManager;
   let samplingAuthorizer: ApplicationMcpSamplingAuthorizer | undefined;
-  const recentErrors = new Map<string, TuiMcpRecentError[]>();
+  const recentErrors = new Map<
+    string,
+    { readonly identity: string; readonly entries: readonly TuiMcpRecentError[] }
+  >();
+  const scopedServerKey = (scope: "global" | "project", name: string): string => `${scope}:${name}`;
+  const serverIdentity = (server: LoadedMcpConfig["installed"][number]): string =>
+    canonicalJson({
+      scope: server.scope,
+      name: server.name,
+      sourcePath: server.sourcePath,
+      config: server.config,
+    });
   const rememberEventError = (serverName: string, operation: string, message: string): void => {
-    const previous = recentErrors.get(serverName) ?? [];
-    recentErrors.set(
-      serverName,
-      [
-        ...previous,
+    const effective = eventConfig?.servers.get(serverName);
+    if (!effective) return;
+    const key = scopedServerKey(effective.scope, serverName);
+    const identity = canonicalJson({
+      scope: effective.scope,
+      name: effective.name,
+      sourcePath: effective.sourcePath,
+      config: effective.config,
+    });
+    const previous = recentErrors.get(key);
+    recentErrors.set(key, {
+      identity,
+      entries: [
+        ...(previous?.identity === identity ? previous.entries : []),
         { message: message.slice(0, 2_000), occurredAt: new Date().toISOString(), operation },
       ].slice(-20),
-    );
+    });
   };
   const hostPromise = configPromise.then((config) => {
+    eventConfig = config;
     host = createMcpHostManager({
       home: input.home,
       projectDirectory: input.projectDirectory,
@@ -287,7 +317,13 @@ export function createApplicationMcpIntegration(input: {
   const currentHost = async (): Promise<McpHostManager> => await hostPromise;
   const reload = async (): Promise<void> => {
     configPromise = loadMcpConfig(input);
-    await (await currentHost()).reload(hostConfig(await configPromise, input.workspaceTrusted));
+    const config = await configPromise;
+    eventConfig = config;
+    for (const [key, history] of recentErrors) {
+      const installed = config.installed.find((server) => scopedServerKey(server.scope, server.name) === key);
+      if (!installed || history.identity !== serverIdentity(installed)) recentErrors.delete(key);
+    }
+    await (await currentHost()).reload(hostConfig(config, input.workspaceTrusted));
   };
   const listMcpServers: ApplicationMcpIntegration["listMcpServers"] = async () => {
     const [config, manager] = await Promise.all([configPromise, currentHost()]);
@@ -384,9 +420,15 @@ export function createApplicationMcpIntegration(input: {
           message: diagnostic.message,
           operation: diagnostic.toolName ? `${diagnostic.code}:${diagnostic.toolName}` : diagnostic.code,
         })),
-        ...(recentErrors.get(name) ?? []),
+        ...(recentErrors.get(scopedServerKey(scope, name))?.identity === serverIdentity(installed)
+          ? (recentErrors.get(scopedServerKey(scope, name))?.entries ?? [])
+          : []),
         ...(summary.lastError &&
-        !(recentErrors.get(name) ?? []).some((entry) => entry.message === summary.lastError)
+        !(
+          recentErrors.get(scopedServerKey(scope, name))?.identity === serverIdentity(installed)
+            ? (recentErrors.get(scopedServerKey(scope, name))?.entries ?? [])
+            : []
+        ).some((entry) => entry.message === summary.lastError)
           ? [{ message: summary.lastError }]
           : []),
       ]),
@@ -410,9 +452,10 @@ export function createApplicationMcpIntegration(input: {
         (effective.config.type !== "remote" || effective.config.oauth === false)
       )
         throw new Error(`MCP server ${intent.name} does not use OAuth`);
-      if (intent.type === "authenticate")
+      if (intent.type === "authenticate") {
+        signal?.throwIfAborted();
         await manager.authenticate(intent.name, signal ? { signal } : undefined);
-      else if (intent.type === "logout") await manager.logout(intent.name);
+      } else if (intent.type === "logout") await manager.logout(intent.name);
       else await manager.reconnect(intent.name);
       return {
         message: `${intent.type === "authenticate" ? "Authenticated" : intent.type === "logout" ? "Logged out of" : "Reconnected"} ${intent.name}.`,
@@ -447,6 +490,7 @@ export function createApplicationMcpIntegration(input: {
         }),
       });
     } else if (intent.type === "add-remote" || intent.type === "edit-remote") {
+      const url = validatedRemoteUrl(intent.url);
       const existing = (await configPromise).installed.find(
         (entry) => entry.scope === intent.scope && entry.name === intent.name,
       )?.config;
@@ -464,7 +508,7 @@ export function createApplicationMcpIntegration(input: {
         config: {
           ...(intent.type === "edit-remote" && existing?.type === "remote" ? existing : {}),
           type: "remote",
-          url: intent.url,
+          url,
           oauth,
         },
       });

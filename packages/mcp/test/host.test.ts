@@ -14,9 +14,44 @@ const emptyCredentials = (): McpOAuthCredentialStore => ({
   write: async () => undefined,
   update: async () => undefined,
   delete: async () => undefined,
+  deleteIf: async () => undefined,
 });
 
 describe("MCP host", () => {
+  test("rejects an already-aborted OAuth request before opening a callback listener", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-auth-aborted-"));
+    const home = join(root, "home");
+    await writeMcpServer({
+      home,
+      projectDirectory: root,
+      scope: "project",
+      name: "remote",
+      config: { type: "remote", url: "https://example.test/mcp", oauth: true },
+    });
+    const manager = createMcpHostManager({
+      home,
+      projectDirectory: root,
+      config: await loadMcpConfig({ home, projectDirectory: root }),
+      credentials: emptyCredentials(),
+      handlers: {
+        sample: async () => ({
+          role: "assistant",
+          model: "controlled",
+          stopReason: "endTurn",
+          content: { type: "text", text: "ok" },
+        }),
+        elicit: async () => ({ action: "decline" }),
+        onOAuthRedirect: () => undefined,
+      },
+    });
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled before authentication"));
+    await expect(manager.authenticate("remote", { signal: controller.signal })).rejects.toThrow(
+      "cancelled before authentication",
+    );
+    await manager.close();
+  });
+
   test("closing during an in-flight connection leaves no installed client or stdio child", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-mcp-close-race-"));
     const home = join(root, "home");
@@ -117,6 +152,11 @@ describe("MCP host", () => {
     });
     try {
       await manager.start();
+      const discoveryController = new AbortController();
+      discoveryController.abort(new Error("cancelled discovery"));
+      await expect(manager.refreshDiscovery(discoveryController.signal)).rejects.toThrow(
+        "cancelled discovery",
+      );
       const detail = manager.inspectServer("controlled");
       expect(detail?.status).toBe("connected");
       expect(detail?.tools.map((tool) => tool.name)).toEqual([
@@ -278,6 +318,7 @@ describe("MCP host", () => {
       await manager.start();
       expect(manager.inspectServer("delayed")?.status).toBe("failed");
       await writeFile(delayedFixture, `await import(${JSON.stringify(pathToFileURL(fixture).href)});\n`);
+      await manager.reconnect("delayed");
       await vi.waitFor(() => expect(manager.inspectServer("delayed")?.status).toBe("connected"), {
         timeout: 10_000,
       });
@@ -318,6 +359,7 @@ describe("MCP host", () => {
       await manager.reload(await loadMcpConfig({ home, projectDirectory: root }));
       expect(manager.inspectServer("delayed")?.status).toBe("failed");
       await writeFile(delayedFixture, `await import(${JSON.stringify(pathToFileURL(fixture).href)});\n`);
+      await manager.reconnect("delayed");
       await vi.waitFor(() => expect(manager.inspectServer("delayed")?.status).toBe("connected"), {
         timeout: 10_000,
       });

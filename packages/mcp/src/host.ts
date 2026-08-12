@@ -315,7 +315,7 @@ export interface McpHostManager {
     options?: Readonly<{ signal?: AbortSignal; timeout?: number }>,
   ) => Promise<void>;
   readonly reload: (config: LoadedMcpConfig) => Promise<void>;
-  readonly refreshDiscovery: () => Promise<void>;
+  readonly refreshDiscovery: (signal?: AbortSignal) => Promise<void>;
   readonly finishAuthentication: (name: string, authorizationCode: string) => Promise<void>;
   readonly logout: (name: string) => Promise<void>;
   readonly listTools: (serverName?: string) => readonly Readonly<{
@@ -551,12 +551,12 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     return Object.freeze(admitted);
   };
 
-  const refreshCatalog = async (connection: Connection): Promise<void> => {
+  const refreshCatalog = async (connection: Connection, signal?: AbortSignal): Promise<void> => {
     const client: Client | undefined = connection.client;
     if (!client) return;
     const timeout = connection.server.config.timeout ?? DEFAULT_TIMEOUT;
     const capabilities = client.getServerCapabilities();
-    const options = { timeout };
+    const options = requestOptions(signal, timeout);
     const [tools, prompts, resources, resourceTemplates] = await Promise.all([
       capabilities?.tools
         ? paginated(async (cursor) => {
@@ -586,6 +586,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
           })
         : [],
     ]);
+    if (signal?.aborted) throw signal.reason ?? new Error("MCP discovery refresh was cancelled");
     const admittedTools = admissibleTools(connection, tools);
     connection.discoveryCatalog = canonicalDiscoveryCatalog({
       tools,
@@ -1057,12 +1058,14 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     );
   };
 
-  const refreshDiscovery = async (): Promise<void> => {
+  const refreshDiscovery = async (signal?: AbortSignal): Promise<void> => {
+    if (signal?.aborted) throw signal.reason ?? new Error("MCP discovery refresh was cancelled");
     await Promise.all(
       [...connections.values()]
         .filter((connection) => connection.status === "connected" && connection.dirty)
         .map(async (connection) => {
-          await refreshCatalog(connection).catch(async (error: unknown) => {
+          await refreshCatalog(connection, signal).catch(async (error: unknown) => {
+            if (signal?.aborted) throw signal.reason ?? error;
             connection.lastError = error instanceof Error ? error.message : String(error);
             connection.dirty = true;
             await emit(connection.server.name, "catalog_changed", {
@@ -1086,6 +1089,9 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
   };
 
   const authenticate: McpHostManager["authenticate"] = async (name, options) => {
+    if (options?.signal?.aborted) {
+      throw options.signal.reason ?? new Error("MCP OAuth was cancelled");
+    }
     const server = activeConfig.servers.get(name);
     if (!server || server.config.type !== "remote") {
       throw new Error(`MCP server ${JSON.stringify(name)} is not a configured remote server`);
@@ -1153,12 +1159,20 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
           listener.close();
           reject(options?.signal?.reason ?? new Error("MCP OAuth was cancelled"));
         };
+        if (options?.signal?.aborted) {
+          abortCallback();
+          return;
+        }
         options?.signal?.addEventListener("abort", abortCallback, { once: true });
         callbackTimer = setTimeout(() => {
           listener.close();
           reject(new Error(`MCP OAuth callback timed out after ${String(timeout)}ms`));
         }, timeout).unref();
       });
+      // The callback can outlive the listen attempt or become unnecessary when reconnect succeeds
+      // without OAuth. Observe its rejection unconditionally while preserving rejection for awaits.
+      void callback.catch(() => undefined);
+      if (options?.signal?.aborted) await callback;
       await new Promise<void>((resolve, reject) => {
         listener.once("listening", resolve);
         listener.once("error", reject);

@@ -6,7 +6,7 @@ import type { NoesisTuiRuntime } from "./runtime-port.ts";
 export interface TuiMcpOrchestration {
   readonly openManager: () => void;
   readonly ownsKeyboardFocus: () => boolean;
-  readonly dispose: () => void;
+  readonly dispose: () => Promise<void>;
 }
 
 export function createTuiMcpOrchestration(options: {
@@ -22,6 +22,7 @@ export function createTuiMcpOrchestration(options: {
   let managerHandle: OverlayHandle | undefined;
   let managerOverlay: McpManagerOverlay | undefined;
   let interactionActive = false;
+  let disposePromise: Promise<void> | undefined;
 
   const detachInteraction = options.interactionBridge?.attach(
     createTuiMcpInteractionPresenter({
@@ -35,12 +36,13 @@ export function createTuiMcpOrchestration(options: {
     }),
   );
 
-  const closeManager = (): void => {
-    managerOverlay?.dispose();
+  const closeManager = async (): Promise<void> => {
+    const overlay = managerOverlay;
     managerOverlay = undefined;
     managerHandle?.hide();
     managerHandle = undefined;
     options.tui.requestRender();
+    await overlay?.dispose();
   };
 
   return Object.freeze({
@@ -61,7 +63,7 @@ export function createTuiMcpOrchestration(options: {
         height: options.height,
         mutationsEnabled: options.mutationsEnabled,
         requestRender: () => options.tui.requestRender(),
-        close: closeManager,
+        close: () => void closeManager(),
       });
       managerHandle = options.tui.showOverlay(managerOverlay, {
         anchor: "center",
@@ -72,9 +74,12 @@ export function createTuiMcpOrchestration(options: {
     },
     ownsKeyboardFocus: () => Boolean(managerHandle?.isFocused() || interactionActive),
     dispose() {
-      closeManager();
-      detachInteraction?.();
-      options.interactionBridge?.shutdown();
+      disposePromise ??= (async () => {
+        await closeManager();
+        detachInteraction?.();
+        options.interactionBridge?.shutdown();
+      })();
+      return disposePromise;
     },
   });
 }
