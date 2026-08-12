@@ -5,6 +5,7 @@ import {
   defineTool,
   type ToolInvocationRecord,
   type ToolInvocationRecorder,
+  type ToolInvocationResult,
 } from "@noesis/tools";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -39,10 +40,9 @@ function runtime(
     readonly recorder?: ToolInvocationRecorder;
     readonly beforeDouble?: () => Promise<void>;
     readonly doubleProgress?: JsonValue;
-    readonly doubleFailureDetails?: JsonValue;
+    readonly overrideInvocationResult?: ToolInvocationResult;
   } = {},
 ) {
-  const doubleFailureDetails = options.doubleFailureDetails;
   const broker = createToolBroker({
     authority: authority(),
     permission: Object.freeze({
@@ -64,19 +64,15 @@ function runtime(
           if (options.doubleProgress !== undefined) context.emitUpdate?.(options.doubleProgress);
           return { value: value * 2 };
         },
-        ...(doubleFailureDetails === undefined
-          ? {}
-          : {
-              reportedFailure: () => ({
-                message: "remote tool failed",
-                details: doubleFailureDetails,
-              }),
-            }),
       }),
     ],
     ...(options.recorder ? { recorder: options.recorder } : {}),
   });
-  const code = createCodeModeRuntime({ cwd: process.cwd(), broker });
+  const overrideInvocationResult = options.overrideInvocationResult;
+  const effectiveBroker = overrideInvocationResult
+    ? Object.freeze({ ...broker, invoke: async () => overrideInvocationResult })
+    : broker;
+  const code = createCodeModeRuntime({ cwd: process.cwd(), broker: effectiveBroker });
   runtimes.add(code);
   return code;
 }
@@ -531,20 +527,27 @@ describe("codemode runtime", () => {
   it("bounds Broker failure details before returning them to the child", async () => {
     const events: CodeExecutionEvent[] = [];
     await expect(
-      runtime({ doubleFailureDetails: { payload: "x".repeat(300 * 1024) } }).execute(
+      runtime({
+        overrideInvocationResult: {
+          ok: false,
+          code: "failed",
+          message: "remote tool failed",
+          details: { payload: "x".repeat(20 * 1024 * 1024) },
+        },
+      }).execute(
         {
           source: "return await tools.math.double({ value: 1 });",
           sessionId: "broker-error-details-limit",
         },
         (event) => events.push(event),
       ),
-    ).rejects.toThrow("Tool error details omitted");
+    ).rejects.toThrow("remote tool failed");
     const failedCall = events.find(
       (event): event is Extract<CodeExecutionEvent, { readonly type: "tool-end" }> =>
         event.type === "tool-end" && !event.ok,
     );
-    expect(failedCall?.error).toContain("Tool error details omitted");
-    expect(Buffer.byteLength(failedCall?.error ?? "", "utf8")).toBeLessThan(2 * 1024);
+    expect(failedCall?.error).toContain("remote tool failed");
+    expect(Buffer.byteLength(failedCall?.error ?? "", "utf8")).toBeLessThanOrEqual(64 * 1024);
   });
 
   it("does not leak a child when an event observer throws", async () => {

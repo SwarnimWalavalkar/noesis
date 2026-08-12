@@ -515,4 +515,36 @@ describe("tool broker", () => {
       details,
     });
   });
+
+  it("reports the bounded materialized result instead of original failure details", async () => {
+    const original = toJsonValue({
+      isError: true,
+      content: [{ type: "text", text: "x".repeat(300 * 1024) }],
+    });
+    const materialized = toJsonValue({ truncated: true, artifact: { artifactId: "artifact-1" } });
+    const definition = defineTool({
+      name: "test.materialized-failure",
+      label: "Materialized failure",
+      description: "Returns a large protocol failure",
+      visibility: "codemode_only",
+      inputSchema: z.strictObject({}),
+      outputSchema: z.json(),
+      effect: () => ({ effect: "read", resource: "test:materialized-failure", estimatedCost: 0 }),
+      execute: async () => original,
+      reportedFailure: () => ({ message: "remote tool failed", details: original }),
+    });
+    const broker = createToolBroker({
+      definitions: [definition],
+      authority: foregroundAuthority(),
+      permission,
+      materializeResult: async () => materialized,
+    });
+
+    await expect(broker.invoke("test.materialized-failure", {}, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "failed",
+      message: "remote tool failed",
+      details: materialized,
+    });
+  });
 });

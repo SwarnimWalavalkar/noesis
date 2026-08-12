@@ -239,6 +239,18 @@ describe("MCP TUI interaction bridge", () => {
           defaultValue: false,
         },
         {
+          type: "select",
+          name: "assignee",
+          label: "Assignee",
+          choices: [{ value: "ada", label: "Ada" }],
+        },
+        {
+          type: "select",
+          name: "empty",
+          label: "Empty optional choice",
+          choices: [],
+        },
+        {
           type: "multiselect",
           name: "labels",
           label: "Labels",
@@ -246,7 +258,8 @@ describe("MCP TUI interaction bridge", () => {
             { value: "source", label: "Source" },
             { value: "issues", label: "Issues" },
           ],
-          defaultValue: ["source"],
+          defaultValue: ["source", "missing"],
+          minItems: 2,
         },
       ],
     });
@@ -261,8 +274,15 @@ describe("MCP TUI interaction bridge", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("Notify watchers"));
     expect(terminal.output).toContain("› No");
     terminal.send(ENTER);
+    await vi.waitFor(() => expect(terminal.output).toContain("Assignee"));
+    expect(terminal.output).toContain("› Skip");
+    terminal.send(ENTER);
+    await vi.waitFor(() => expect(terminal.output).toContain("Empty optional choice"));
+    terminal.send(ENTER);
     await vi.waitFor(() => expect(terminal.output).toContain("Labels"));
     expect(terminal.output).toContain("[x] Source");
+    terminal.send(ENTER);
+    await vi.waitFor(() => expect(terminal.output).toContain("requires at least 2 choices"));
     terminal.send(DOWN);
     terminal.send(" ");
     terminal.send(ENTER);

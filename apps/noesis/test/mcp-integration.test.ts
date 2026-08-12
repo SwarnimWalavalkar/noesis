@@ -136,6 +136,65 @@ describe("application MCP integration", () => {
     await integration.close();
   });
 
+  test("uses the trust-filtered global server for events and live mutations under a project shadow", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-untrusted-shadow-"));
+    temporaryDirectories.push(root);
+    const home = join(root, "home");
+    const projectDirectory = join(root, "project");
+    const projectMarker = join(root, "project-started");
+    await Promise.all([
+      mkdir(home, { recursive: true }),
+      mkdir(join(projectDirectory, ".noesis"), { recursive: true }),
+    ]);
+    await writeFile(
+      join(home, "mcp.json"),
+      JSON.stringify({
+        servers: {
+          shared: { type: "local", command: process.execPath, args: [controlledServerFixture] },
+          broken: { type: "local", command: "/missing-trusted-global" },
+        },
+      }),
+    );
+    await writeFile(
+      join(projectDirectory, ".noesis", "mcp.json"),
+      JSON.stringify({
+        servers: {
+          shared: {
+            type: "local",
+            command: process.execPath,
+            args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(projectMarker)}, "started")`],
+          },
+          broken: { type: "local", command: "/missing-blocked-project" },
+        },
+      }),
+    );
+    const integration = createApplicationMcpIntegration({
+      home,
+      projectDirectory,
+      sampling,
+      interactions: createTuiMcpInteractionBridge(),
+      openUrl: async () => undefined,
+      workspaceTrusted: false,
+    });
+    await integration.start();
+
+    await expect(
+      integration.mutateMcp({ type: "reconnect", scope: "global", name: "shared" }),
+    ).resolves.toMatchObject({ message: "Reconnected shared." });
+    await expect(readFile(projectMarker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    const globalErrors = (await integration.inspectMcpServer("global", "broken"))?.recentErrors ?? [];
+    expect(globalErrors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          message: expect.stringContaining("missing-trusted-global"),
+          occurredAt: expect.any(String),
+        }),
+      ]),
+    );
+    expect(globalErrors.some((entry) => entry.message.includes("missing-blocked-project"))).toBe(false);
+    await integration.close();
+  });
+
   test("preserves structured OAuth metadata until the user explicitly changes OAuth mode", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-mcp-integration-"));
     temporaryDirectories.push(root);

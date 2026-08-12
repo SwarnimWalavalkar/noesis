@@ -375,7 +375,7 @@ export function createPiAgentRuntime(
             actionId: event.callId,
             ...(parentActionId ? { parentActionId } : {}),
             name: event.name,
-            update: event.value,
+            update: toAgentActionPayload(event.value),
             ...(recordedByBroker ? { recordedByBroker: true } : {}),
           });
         else if (event.type === "tool-end")

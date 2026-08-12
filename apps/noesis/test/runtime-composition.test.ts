@@ -157,7 +157,7 @@ test("project workflow pins compose only with their own project's global hotbar"
   });
 });
 
-test("MCP pins are effective only in the project that owns them", () => {
+test("legacy global MCP pins are adopted by the active project alongside project-owned pins", () => {
   const tools = Object.freeze({
     hotbar: Object.freeze(["files.read", "mcp.github.search_123456789abc"]),
     projectHotbars: Object.freeze({
@@ -166,13 +166,13 @@ test("MCP pins are effective only in the project that owns them", () => {
   });
   expect(resolveProjectHotbarSelection(tools, "project_alpha")).toEqual({
     global: ["files.read"],
-    project: [],
-    effective: ["files.read"],
+    project: ["mcp.github.search_123456789abc"],
+    effective: ["files.read", "mcp.github.search_123456789abc"],
   });
   expect(resolveProjectHotbarSelection(tools, "project_beta")).toEqual({
     global: ["files.read"],
-    project: ["mcp.linear.list_abcdef123456"],
-    effective: ["files.read", "mcp.linear.list_abcdef123456"],
+    project: ["mcp.linear.list_abcdef123456", "mcp.github.search_123456789abc"],
+    effective: ["files.read", "mcp.linear.list_abcdef123456", "mcp.github.search_123456789abc"],
   });
 });
 

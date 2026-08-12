@@ -17,6 +17,10 @@ const DEFAULT_MAX_STORE_ENTRIES = 256;
 const DEFAULT_MAX_FAILURE_MESSAGE_BYTES = 32 * 1024;
 const DEFAULT_MAX_FAILURE_STACK_BYTES = 96 * 1024;
 const DEFAULT_MAX_TOOL_ERROR_DETAILS_BYTES = 64 * 1024;
+const DEFAULT_MAX_TOOL_ERROR_DETAIL_CHARACTERS = 10 * 1024;
+const DEFAULT_MAX_TOOL_ERROR_DETAIL_DEPTH = 6;
+const DEFAULT_MAX_TOOL_ERROR_DETAIL_ITEMS = 50;
+const DEFAULT_MAX_TOOL_ERROR_DETAIL_NODES = 200;
 const PENDING_SDK_ABORT_GRACE_MS = 500;
 
 const childMessageSchema = z.union([
@@ -170,9 +174,56 @@ function sdkActionInput(message: Extract<ChildMessage, { readonly type: "sdk-cal
   return message.input;
 }
 
+function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
+  return Array.isArray(value);
+}
+
 function invocationValue(result: ToolInvocationResult): JsonValue {
   if (result.ok) return result.value;
-  const serializedDetails = result.details === undefined ? undefined : JSON.stringify(result.details);
+  const boundedDetailValue = (value: JsonValue): JsonValue => {
+    let remainingCharacters = DEFAULT_MAX_TOOL_ERROR_DETAIL_CHARACTERS;
+    let remainingNodes = DEFAULT_MAX_TOOL_ERROR_DETAIL_NODES;
+    const visit = (current: JsonValue, depth: number): JsonValue => {
+      if (remainingNodes <= 0) return "[detail limit reached]";
+      remainingNodes -= 1;
+      if (typeof current === "string") {
+        const selected = current.slice(0, Math.max(0, remainingCharacters));
+        remainingCharacters -= selected.length;
+        return selected.length === current.length ? selected : `${selected}…`;
+      }
+      if (current === null || typeof current !== "object") return current;
+      if (depth >= DEFAULT_MAX_TOOL_ERROR_DETAIL_DEPTH) return "[maximum depth reached]";
+      if (isJsonArray(current)) {
+        const normalized: JsonValue[] = [];
+        for (const item of current.slice(0, DEFAULT_MAX_TOOL_ERROR_DETAIL_ITEMS)) {
+          if (remainingCharacters <= 0) break;
+          normalized.push(visit(item, depth + 1));
+        }
+        if (normalized.length < current.length)
+          normalized.push(`[${String(current.length - normalized.length)} more items]`);
+        return normalized;
+      }
+      const normalized: Record<string, JsonValue> = {};
+      let visited = 0;
+      let truncated = false;
+      for (const key in current) {
+        if (!Object.hasOwn(current, key)) continue;
+        if (visited >= DEFAULT_MAX_TOOL_ERROR_DETAIL_ITEMS || remainingCharacters <= 0) {
+          truncated = true;
+          break;
+        }
+        const boundedKey = key.slice(0, Math.max(0, remainingCharacters));
+        remainingCharacters -= boundedKey.length;
+        normalized[boundedKey] = visit(current[key] ?? null, depth + 1);
+        visited += 1;
+      }
+      if (truncated) normalized["…"] = "[more properties]";
+      return normalized;
+    };
+    return visit(value, 0);
+  };
+  const serializedDetails =
+    result.details === undefined ? undefined : JSON.stringify(boundedDetailValue(result.details));
   const boundedDetails =
     serializedDetails === undefined
       ? ""

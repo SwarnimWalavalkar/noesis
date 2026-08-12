@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { withMcpFileLock } from "./file-lock.ts";
@@ -233,7 +233,13 @@ async function writeMcpConfigIfUnchanged(
   await mkdir(dirname(path), { recursive: true });
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporaryPath, `${JSON.stringify(parsed, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    const handle = await open(temporaryPath, "wx", 0o600);
+    try {
+      await handle.writeFile(`${JSON.stringify(parsed, null, 2)}\n`);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     // Let file watchers and editors finish any write that was already in flight before the CAS check.
     await new Promise<void>((resolve) => setImmediate(resolve));
     if ((await readRawConfig(path)) !== expectedRaw) {

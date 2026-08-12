@@ -71,6 +71,20 @@ export function validateMcpRemoteUrl(value: string): string | undefined {
   }
 }
 
+export async function waitForMcpMutationSettlement(
+  mutation: Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    mutation,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+}
+
 export function mcpToolItems(detail: TuiMcpServerDetail): readonly McpCapabilityItem[] {
   return detail.tools.map((tool) => ({
     id: tool.name,

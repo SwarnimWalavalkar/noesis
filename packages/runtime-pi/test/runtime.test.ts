@@ -1341,6 +1341,13 @@ describe("agent runtime factories", () => {
             callIndex: 0,
           });
           emit({
+            type: "progress",
+            value: { message: "x".repeat(500_000) },
+            callId: "tool_call_nested-visible",
+            name: "shell.run",
+            callIndex: 0,
+          });
+          emit({
             type: "tool-start",
             callId: "tool_call_nested-visible",
             name: "shell.run",
@@ -1424,6 +1431,17 @@ describe("agent runtime factories", () => {
       name: "shell.run",
       update: { message: "Starting shell" },
     });
+    const boundedNestedProgress = events.find(
+      (event): event is Extract<AgentRuntimeEvent, { readonly type: "tool-update" }> =>
+        event.type === "tool-update" &&
+        event.actionId === "tool_call_nested-visible" &&
+        typeof event.update === "object" &&
+        event.update !== null &&
+        Reflect.get(event.update, "truncated") === true,
+    );
+    expect(
+      new TextEncoder().encode(JSON.stringify(boundedNestedProgress?.update)).byteLength,
+    ).toBeLessThanOrEqual(256 * 1024);
     expect(
       events.some(
         (event) =>

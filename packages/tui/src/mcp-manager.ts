@@ -17,6 +17,7 @@ import {
   safeMcpLines,
   safeMcpScalar,
   validateMcpRemoteUrl,
+  waitForMcpMutationSettlement,
 } from "./mcp-manager-model.ts";
 import type {
   NoesisTuiRuntime,
@@ -50,6 +51,7 @@ export interface CreateMcpManagerOverlayOptions {
   readonly mutationsEnabled: () => boolean;
   readonly requestRender: () => void;
   readonly close: () => void;
+  readonly mutationDisposeGraceMs?: number;
 }
 
 export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions): McpManagerOverlay {
@@ -137,8 +139,9 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
         const result: TuiMcpMutationResult = await runtime.mutateMcp(intent, controller?.signal);
         if (disposed || generation !== request) return;
         notice = result.browserUrl ? `${result.message}\n${result.browserUrl}` : result.message;
-        servers = Object.freeze([...(await runtime.listMcpServers())]);
+        const nextServers = await runtime.listMcpServers();
         if (disposed || generation !== request) return;
+        servers = Object.freeze([...nextServers]);
         busy = "";
         if (target) {
           const detail = await runtime.inspectMcpServer(target.scope, target.name);
@@ -732,7 +735,8 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
         generation += 1;
         const mutation = activeMutation;
         mutation?.controller?.abort(new Error("MCP management closed"));
-        await mutation?.promise.catch(() => undefined);
+        const settlement = mutation?.promise.catch(() => undefined);
+        if (settlement) await waitForMcpMutationSettlement(settlement, options.mutationDisposeGraceMs ?? 250);
         if (activeMutation === mutation) activeMutation = undefined;
       })();
       return disposePromise;

@@ -353,6 +353,57 @@ describe("MCP host", () => {
     }
   });
 
+  test("revalidates a frozen tool after waiting in the invocation queue", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-queued-identity-"));
+    const home = join(root, "home");
+    await writeMcpServer({
+      home,
+      projectDirectory: root,
+      scope: "project",
+      name: "controlled",
+      config: { type: "local", command: process.execPath, args: [fixture] },
+    });
+    const manager = createMcpHostManager({
+      home,
+      projectDirectory: root,
+      config: await loadMcpConfig({ home, projectDirectory: root }),
+      credentials: emptyCredentials(),
+      handlers: {
+        sample: async () => ({
+          role: "assistant",
+          model: "controlled",
+          stopReason: "endTurn",
+          content: { type: "text", text: "ok" },
+        }),
+        elicit: async () => ({ action: "decline" }),
+        onOAuthRedirect: () => undefined,
+      },
+    });
+    try {
+      await manager.start();
+      const frozen = manager.listTools().find((tool) => tool.definition.name === "echo/tool");
+      if (!frozen) throw new Error("Expected controlled echo tool");
+      const slow = manager.callTool("mcp.controlled.slow", {}).catch(() => undefined);
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      const queued = manager.callTool(
+        frozen.canonicalName,
+        { value: "queued" },
+        {
+          expectedIdentityDigest: frozen.identityDigest,
+        },
+      );
+      const queuedRejection = expect(queued).rejects.toThrow(
+        /changed after this turn|connection changed while its call was queued/u,
+      );
+      await manager.reconnect("controlled");
+
+      await queuedRejection;
+      await slow;
+    } finally {
+      await manager.close();
+    }
+  });
+
   test("retries enabled startup failures until the server becomes available", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-mcp-start-retry-"));
     const home = join(root, "home");

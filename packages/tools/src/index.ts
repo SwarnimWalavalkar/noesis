@@ -601,7 +601,6 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
     }
     const reportedFailure = entry.definition.reportedFailure?.(decision.value);
     if (reportedFailure) {
-      const details = reportedFailure.details ?? completedValue;
       if (!recordedIsTerminal)
         await options.recorder?.record(
           Object.freeze({
@@ -612,7 +611,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
             error: reportedFailure.message,
           }),
         );
-      return failure("failed", reportedFailure.message, details);
+      return failure("failed", reportedFailure.message, completedValue);
     }
     if (!recordedIsTerminal)
       await options.recorder?.record(

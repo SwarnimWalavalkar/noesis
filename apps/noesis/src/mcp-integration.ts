@@ -261,11 +261,12 @@ export function createApplicationMcpIntegration(input: {
     });
   };
   const hostPromise = configPromise.then((config) => {
-    eventConfig = config;
+    const activeConfig = hostConfig(config, input.workspaceTrusted);
+    eventConfig = activeConfig;
     host = createMcpHostManager({
       home: input.home,
       projectDirectory: input.projectDirectory,
-      config: hostConfig(config, input.workspaceTrusted),
+      config: activeConfig,
       credentials: createSecureMcpOAuthCredentialStore(mcpCredentialPath(input.home)),
       handlers: {
         sample: async (serverName, request, signal, invocation) => {
@@ -318,12 +319,13 @@ export function createApplicationMcpIntegration(input: {
   const reload = async (): Promise<void> => {
     configPromise = loadMcpConfig(input);
     const config = await configPromise;
-    eventConfig = config;
+    const activeConfig = hostConfig(config, input.workspaceTrusted);
+    eventConfig = activeConfig;
     for (const [key, history] of recentErrors) {
       const installed = config.installed.find((server) => scopedServerKey(server.scope, server.name) === key);
       if (!installed || history.identity !== serverIdentity(installed)) recentErrors.delete(key);
     }
-    await (await currentHost()).reload(hostConfig(config, input.workspaceTrusted));
+    await (await currentHost()).reload(activeConfig);
   };
   const listMcpServers: ApplicationMcpIntegration["listMcpServers"] = async () => {
     const [config, manager] = await Promise.all([configPromise, currentHost()]);
@@ -444,7 +446,7 @@ export function createApplicationMcpIntegration(input: {
     if (intent.type === "authenticate" || intent.type === "logout" || intent.type === "reconnect") {
       if (intent.scope === "project" && !input.workspaceTrusted)
         throw new Error("Project MCP servers require a trusted workspace");
-      const effective = (await configPromise).servers.get(intent.name);
+      const effective = hostConfig(await configPromise, input.workspaceTrusted).servers.get(intent.name);
       if (!effective || effective.scope !== intent.scope)
         throw new Error(`MCP server ${intent.scope}/${intent.name} is shadowed or not installed`);
       if (

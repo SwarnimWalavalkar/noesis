@@ -390,6 +390,41 @@ describe("Noesis config", () => {
     );
   });
 
+  test("migrates a legacy global MCP pin into the active project overlay", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-migrate-global-mcp-hotbar-"));
+    const legacyMcp = "mcp.github.search_123456789abc";
+    await writeFile(
+      noesisConfigPath(home),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        tools: { hotbar: ["files.read", legacyMcp] },
+      }),
+    );
+
+    const committed = await updateToolHotbar(home, {
+      projectId: "project_alpha",
+      projectToolNamespace: "workflow.1111111111111111.",
+      scope: "project",
+      action: "add",
+      tool: "mcp.linear.list_abcdef123456",
+      legacyGlobalProjectTools: [legacyMcp],
+      legacyActiveProjectTools: [legacyMcp],
+    });
+
+    expect(committed).toEqual({
+      global: ["files.read"],
+      project: [legacyMcp, "mcp.linear.list_abcdef123456"],
+      effective: ["files.read", legacyMcp, "mcp.linear.list_abcdef123456"],
+    });
+    expect((await resolveNoesisConfig({ home, env: {} })).tools).toMatchObject({
+      hotbar: ["files.read"],
+      projectHotbars: {
+        project_alpha: [legacyMcp, "mcp.linear.list_abcdef123456"],
+      },
+    });
+  });
+
   test("serializes concurrent global and same-project hotbar deltas without lost updates", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-concurrent-hotbar-"));
     await initializeNoesisConfig(home);

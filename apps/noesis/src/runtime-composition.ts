@@ -289,8 +289,8 @@ export function resolveProjectHotbarSelection(
     ...new Set(
       [
         ...(tools.projectHotbars[projectId] ?? []),
-        // Adopt pins written before project overlays existed only in their exact project.
-        ...tools.hotbar.filter((toolName) => !toolName.startsWith("mcp.")),
+        // Adopt legacy project-specific workflow pins and pre-overlay MCP pins into this project.
+        ...tools.hotbar,
       ].filter(
         (toolName) => isProjectWorkflowToolForProject(projectId, toolName) || toolName.startsWith("mcp."),
       ),
@@ -1494,11 +1494,14 @@ export async function createApplicationRuntimeComposition(
   const agentDefaults = options.config.agent;
   const project = options.project ?? (await resolveActiveProject(process.cwd()));
   const legacyGlobalProjectTools = Object.freeze(
-    options.config.tools.hotbar.filter(isProjectWorkflowToolName),
+    options.config.tools.hotbar.filter(
+      (toolName) => isProjectWorkflowToolName(toolName) || toolName.startsWith("mcp."),
+    ),
   );
   const legacyActiveProjectTools = Object.freeze(
-    legacyGlobalProjectTools.filter((toolName) =>
-      isProjectWorkflowToolForProject(project.projectId, toolName),
+    legacyGlobalProjectTools.filter(
+      (toolName) =>
+        toolName.startsWith("mcp.") || isProjectWorkflowToolForProject(project.projectId, toolName),
     ),
   );
   const configuredHotbar = resolveProjectHotbarSelection(options.config.tools, project.projectId);

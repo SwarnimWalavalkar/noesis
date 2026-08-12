@@ -676,6 +676,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     connection.transport = undefined;
     connection.taskStore?.cleanup();
     connection.taskStore = undefined;
+    connection.taskInvocations.clear();
     connection.catalog = EMPTY_CATALOG;
     connection.discoveryCatalog = canonicalDiscoveryCatalog(EMPTY_CATALOG);
     connection.dirty = false;
@@ -994,6 +995,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         connection.transport = transport;
         connection.taskStore = taskStore;
         previousTaskStore?.cleanup();
+        if (previousClient) connection.taskInvocations.clear();
         await previousClient?.close().catch(() => undefined);
         await previousTransport?.close().catch(() => undefined);
         if (!isCurrent() || connection.client !== client) {
@@ -1213,7 +1215,12 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
               return consumedCredential;
             })
             .then(() => {
-              if (!acceptedState) throw new Error("MCP OAuth callback state did not match");
+              if (!acceptedState) {
+                response
+                  .writeHead(400)
+                  .end("Authentication state did not match. Try the current OAuth flow.");
+                return;
+              }
               if (error) throw new Error(`MCP OAuth failed: ${error}`);
               if (!code) throw new Error("MCP OAuth callback did not include an authorization code");
               response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -1221,12 +1228,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
                 "<!doctype html><title>Noesis MCP connected</title><h1>Authentication successful</h1><p>You can close this window and return to Noesis.</p>",
               );
               resolve(code);
+              listener.close();
             })
             .catch((cause: unknown) => {
               response.writeHead(400).end("Authentication failed. Return to Noesis for details.");
               reject(cause);
-            })
-            .finally(() => listener.close());
+              listener.close();
+            });
         });
         listener.on("error", reject);
         abortCallback = (): void => {
@@ -1292,7 +1300,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     const rawNames = entries.map(({ connection, definition }) => {
       const segment =
         definition.name
-          .toLocaleLowerCase()
+          .toLowerCase()
           .replaceAll(/[^a-z0-9_-]+/gu, "_")
           .replaceAll(/^_+|_+$/gu, "") || "tool";
       const normalizedChanged = segment !== definition.name;
@@ -1387,12 +1395,17 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       ...(options?.task ? { task: options.task } : {}),
     };
     const definition = connection.catalog.tools.find((tool) => tool.name === target.toolName);
-    if (options?.expectedIdentityDigest) {
-      const current = listTools(target.serverName).find((tool) => tool.canonicalName === canonicalName);
-      if (current?.identityDigest !== options.expectedIdentityDigest)
-        throw new Error(`MCP tool ${canonicalName} changed after this turn's catalog was frozen`);
-    }
     return await withInvocation(connection, options?.invocation, options?.signal, async () => {
+      if (connection.intentionalClose || connections.get(target.serverName) !== connection)
+        throw new Error(`MCP tool ${canonicalName} connection changed while its call was queued`);
+      if (options?.expectedIdentityDigest) {
+        const current = listTools(target.serverName).find((tool) => tool.canonicalName === canonicalName);
+        if (current?.identityDigest !== options.expectedIdentityDigest)
+          throw new Error(`MCP tool ${canonicalName} changed after this turn's catalog was frozen`);
+      }
+      const live = requireClient(target.serverName);
+      if (live.connection !== connection || live.client !== client)
+        throw new Error(`MCP tool ${canonicalName} connection changed while its call was queued`);
       if (definition?.execution?.taskSupport === "required" || options?.task) {
         for await (const message of client.experimental.tasks.callToolStream(
           request,
@@ -1441,12 +1454,17 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       const target = canonicalToolNames().get(canonicalName);
       if (!target) throw new Error(`Unknown MCP tool ${JSON.stringify(canonicalName)}`);
       const { connection, client } = requireClient(target.serverName);
-      if (options.expectedIdentityDigest) {
-        const current = listTools(target.serverName).find((tool) => tool.canonicalName === canonicalName);
-        if (current?.identityDigest !== options.expectedIdentityDigest)
-          throw new Error(`MCP tool ${canonicalName} changed after this turn's catalog was frozen`);
-      }
       return await withInvocation(connection, options.invocation, options.signal, async () => {
+        if (connection.intentionalClose || connections.get(target.serverName) !== connection)
+          throw new Error(`MCP tool ${canonicalName} connection changed while its call was queued`);
+        if (options.expectedIdentityDigest) {
+          const current = listTools(target.serverName).find((tool) => tool.canonicalName === canonicalName);
+          if (current?.identityDigest !== options.expectedIdentityDigest)
+            throw new Error(`MCP tool ${canonicalName} changed after this turn's catalog was frozen`);
+        }
+        const live = requireClient(target.serverName);
+        if (live.connection !== connection || live.client !== client)
+          throw new Error(`MCP tool ${canonicalName} connection changed while its call was queued`);
         for await (const message of client.experimental.tasks.callToolStream(
           { name: target.toolName, arguments: { ...args } },
           undefined,

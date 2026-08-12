@@ -67,6 +67,7 @@ function createHarness(
     readonly detail?: TuiMcpServerDetail;
     readonly mutationsEnabled?: () => boolean;
     readonly list?: () => Promise<readonly TuiMcpServerSummary[]>;
+    readonly mutationDisposeGraceMs?: number;
     readonly mutate?: (
       intent: TuiMcpMutationIntent,
       signal?: AbortSignal,
@@ -94,6 +95,9 @@ function createHarness(
     close: () => {
       closes += 1;
     },
+    ...(options.mutationDisposeGraceMs === undefined
+      ? {}
+      : { mutationDisposeGraceMs: options.mutationDisposeGraceMs }),
   });
   return {
     component,
@@ -387,6 +391,57 @@ describe("MCP manager overlay", () => {
     await disposal;
     expect(disposed).toBe(true);
     expect(harness.mutations.filter((intent) => intent.type === "set-enabled")).toHaveLength(1);
+  });
+
+  test("bounds disposal while a non-cancellable reconnect remains host-owned", async () => {
+    let mutationSignal: AbortSignal | undefined;
+    const harness = createHarness({
+      mutationDisposeGraceMs: 5,
+      mutate: async (_intent, signal) => {
+        mutationSignal = signal;
+        return await new Promise(() => undefined);
+      },
+    });
+    await vi.waitFor(() => expect(harness.output()).toContain("github  global"));
+    harness.component.handleInput?.(ENTER);
+    await vi.waitFor(() => expect(harness.output()).toContain("MCP · github"));
+    harness.component.handleInput?.("r");
+    await vi.waitFor(() =>
+      expect(harness.mutations.some((intent) => intent.type === "reconnect")).toBe(true),
+    );
+    expect(mutationSignal).toBeUndefined();
+
+    await expect(harness.component.dispose()).resolves.toBeUndefined();
+    expect(harness.output()).not.toContain("cancel");
+  });
+
+  test("does not assign a stale post-mutation server list after a newer refresh", async () => {
+    const refreshed = Object.freeze({ ...summary, name: "refreshed" });
+    let calls = 0;
+    let resolveStale: ((servers: readonly TuiMcpServerSummary[]) => void) | undefined;
+    const harness = createHarness({
+      list: async () => {
+        calls += 1;
+        if (calls === 1) return Object.freeze([summary]);
+        if (calls === 2)
+          return await new Promise<readonly TuiMcpServerSummary[]>((resolve) => {
+            resolveStale = resolve;
+          });
+        return Object.freeze([refreshed]);
+      },
+    });
+    await vi.waitFor(() => expect(harness.output()).toContain("github  global"));
+    harness.component.handleInput?.(ENTER);
+    await vi.waitFor(() => expect(harness.output()).toContain("MCP · github"));
+    harness.component.handleInput?.("e");
+    await vi.waitFor(() => expect(calls).toBe(2));
+    await harness.component.refresh();
+    resolveStale?.(Object.freeze([summary]));
+    await vi.waitFor(() => expect(harness.output()).not.toContain("Refreshing MCP servers"));
+    harness.component.handleInput?.(ESCAPE);
+
+    expect(harness.output()).toContain("refreshed  global");
+    expect(harness.output()).not.toContain("github  global");
   });
 
   test("keeps the current OAuth mode selected while editing a remote server", async () => {

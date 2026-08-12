@@ -352,12 +352,14 @@ function createFormOverlay(
           ? 1
           : 0
         : current?.type === "select" && current.defaultValue !== undefined
-          ? Math.max(
-              0,
-              current.choices.findIndex((choice) => choice.value === current.defaultValue),
-            )
-          : 0;
-    multiSelected = new Set(current?.type === "multiselect" ? current.defaultValue : []);
+          ? current.choices.findIndex((choice) => choice.value === current.defaultValue)
+          : current?.type === "select" && !current.required
+            ? -1
+            : 0;
+    const choices = new Set(current?.type === "multiselect" ? current.choices.map(({ value }) => value) : []);
+    multiSelected = new Set(
+      current?.type === "multiselect" ? current.defaultValue?.filter((value) => choices.has(value)) : [],
+    );
   };
   const createInput = (): void => {
     const current = field();
@@ -409,8 +411,16 @@ function createFormOverlay(
       return;
     }
     if (current.type === "select") {
+      if (choiceIndex < 0 && !current.required) {
+        advance();
+        return;
+      }
       const selected = current.choices[choiceIndex];
       if (!selected) {
+        if (!current.required) {
+          advance();
+          return;
+        }
         error = "This field has no available choices.";
         options.requestRender();
         return;
@@ -480,9 +490,10 @@ function createFormOverlay(
       const current = field();
       if (!current) return acceptValue();
       if (current.type === "boolean" || current.type === "select" || current.type === "multiselect") {
-        const count = current.type === "boolean" ? 2 : current.choices.length;
-        if (matchesKey(data, "up")) choiceIndex = Math.max(0, choiceIndex - 1);
-        else if (matchesKey(data, "down")) choiceIndex = Math.min(Math.max(0, count - 1), choiceIndex + 1);
+        const first = current.type === "select" && !current.required ? -1 : 0;
+        const last = current.type === "boolean" ? 1 : Math.max(first, current.choices.length - 1);
+        if (matchesKey(data, "up")) choiceIndex = Math.max(first, choiceIndex - 1);
+        else if (matchesKey(data, "down")) choiceIndex = Math.min(last, choiceIndex + 1);
         else if (current.type === "multiselect" && matchesKey(data, "space")) {
           const selected = current.choices[choiceIndex];
           if (!selected) return;
@@ -507,14 +518,19 @@ function createFormOverlay(
       const choices =
         current?.type === "boolean"
           ? ["Yes", "No"]
-          : current?.type === "select" || current?.type === "multiselect"
-            ? current.choices.map((choice) => safeInteractionScalar(choice.label))
-            : [];
+          : current?.type === "select"
+            ? [
+                ...(!current.required ? ["Skip"] : []),
+                ...current.choices.map((choice) => safeInteractionScalar(choice.label)),
+              ]
+            : current?.type === "multiselect"
+              ? current.choices.map((choice) => safeInteractionScalar(choice.label))
+              : [];
       const control =
         choices.length > 0
           ? choices.map(
               (choice, index) =>
-                `${styled(options.colorEnabled, index === choiceIndex ? `${ANSI.bold}${ANSI.cyan}` : ANSI.dim, index === choiceIndex ? "›" : " ")} ${
+                `${styled(options.colorEnabled, index === choiceIndex + (current?.type === "select" && !current.required ? 1 : 0) ? `${ANSI.bold}${ANSI.cyan}` : ANSI.dim, index === choiceIndex + (current?.type === "select" && !current.required ? 1 : 0) ? "›" : " ")} ${
                   current?.type === "multiselect"
                     ? `${multiSelected.has(current.choices[index]?.value ?? "") ? "[x]" : "[ ]"} ${choice}`
                     : choice
