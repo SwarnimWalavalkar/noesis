@@ -12,7 +12,7 @@ import { z } from "zod";
 const taskStore = new InMemoryTaskStore();
 const subscriptions = new Set();
 const startupMarker = process.env.CONTROLLED_STARTUP_MARKER;
-if (startupMarker) writeFileSync(startupMarker, `${String(process.pid)}\n`);
+if (startupMarker) writeFileSync(startupMarker, `${String(process.pid)}\n`, { flag: "a" });
 const startupDelay = Number(process.env.CONTROLLED_STARTUP_DELAY ?? "0");
 if (Number.isFinite(startupDelay) && startupDelay > 0) {
   await new Promise((resolve) => setTimeout(resolve, startupDelay));

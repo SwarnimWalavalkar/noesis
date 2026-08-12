@@ -412,6 +412,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
   let activeConfig = input.config;
   let closing = false;
   const connections = new Map<string, Connection>();
+  const connectionGenerations = new Map<string, number>();
   const connectionAttempts = new Set<ConnectionAttempt>();
   const inFlightConnects = new Set<Promise<void>>();
   const pendingOAuthTransports = new Map<string, RemoteTransport>();
@@ -551,9 +552,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     return Object.freeze(admitted);
   };
 
-  const refreshCatalog = async (connection: Connection, signal?: AbortSignal): Promise<void> => {
+  const refreshCatalog = async (
+    connection: Connection,
+    signal?: AbortSignal,
+    canCommit: () => boolean = () => true,
+  ): Promise<boolean> => {
     const client: Client | undefined = connection.client;
-    if (!client) return;
+    if (!client) return false;
     const timeout = connection.server.config.timeout ?? DEFAULT_TIMEOUT;
     const capabilities = client.getServerCapabilities();
     const options = requestOptions(signal, timeout);
@@ -587,6 +592,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         : [],
     ]);
     if (signal?.aborted) throw signal.reason ?? new Error("MCP discovery refresh was cancelled");
+    if (!canCommit()) return false;
     const admittedTools = admissibleTools(connection, tools);
     connection.discoveryCatalog = canonicalDiscoveryCatalog({
       tools,
@@ -607,6 +613,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       resources: resources.length,
       resourceTemplates: resourceTemplates.length,
     });
+    return true;
   };
 
   const restoreResourceSubscriptions = async (connection: Connection): Promise<void> => {
@@ -690,9 +697,16 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
 
   const createClient = (
     connection: Connection,
+    generation: number,
   ): Readonly<{ client: Client; taskStore: InMemoryTaskStore }> => {
     const taskStore = new InMemoryTaskStore();
     const markDirty = (): void => {
+      if (
+        connectionGenerations.get(connection.server.name) !== generation ||
+        connections.get(connection.server.name) !== connection ||
+        connection.client !== client
+      )
+        return;
       connection.dirty = true;
       void emit(connection.server.name, "catalog_changed", { dirty: true });
     };
@@ -721,6 +735,12 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     );
     let lastTransportError: Error | undefined;
     client.onerror = (error) => {
+      if (
+        connectionGenerations.get(connection.server.name) !== generation ||
+        connections.get(connection.server.name) !== connection ||
+        connection.client !== client
+      )
+        return;
       lastTransportError = error;
       connection.lastError = error.message;
       void emit(connection.server.name, "connection", {
@@ -735,9 +755,21 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       roots: [{ uri: pathToFileURL(input.projectDirectory).href, name: input.projectDirectory }],
     }));
     client.setRequestHandler(CreateMessageRequestSchema, async (request, extra) => {
-      const invocation =
-        connection.activeInvocation ??
-        (extra.taskId ? connection.taskInvocations.get(extra.taskId) : undefined);
+      if (
+        connectionGenerations.get(connection.server.name) !== generation ||
+        connections.get(connection.server.name) !== connection ||
+        connection.client !== client
+      )
+        throw new Error(`MCP server ${connection.server.name} connection is no longer active`);
+      // Task control deliberately bypasses the foreground request queue so cancel/result polling
+      // cannot deadlock behind a long-running task. Reverse requests bind only to the originating
+      // task invocation; falling back to an unrelated foreground call would widen authority.
+      const invocation = extra.taskId
+        ? connection.taskInvocations.get(extra.taskId)
+        : connection.activeInvocation;
+      if (extra.taskId && !invocation) {
+        throw new Error(`MCP task ${extra.taskId} cannot sample without an originating Noesis invocation`);
+      }
       const result = await input.handlers.sample(connection.server.name, request, extra.signal, invocation);
       if (request.params.task && extra.taskStore) {
         const task = await extra.taskStore.createTask(
@@ -749,9 +781,18 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       return result;
     });
     client.setRequestHandler(ElicitRequestSchema, async (request, extra) => {
-      const invocation =
-        connection.activeInvocation ??
-        (extra.taskId ? connection.taskInvocations.get(extra.taskId) : undefined);
+      if (
+        connectionGenerations.get(connection.server.name) !== generation ||
+        connections.get(connection.server.name) !== connection ||
+        connection.client !== client
+      )
+        throw new Error(`MCP server ${connection.server.name} connection is no longer active`);
+      const invocation = extra.taskId
+        ? connection.taskInvocations.get(extra.taskId)
+        : connection.activeInvocation;
+      if (extra.taskId && !invocation) {
+        throw new Error(`MCP task ${extra.taskId} cannot elicit without an originating Noesis invocation`);
+      }
       const result = await input.handlers.elicit(connection.server.name, request, extra.signal, invocation);
       if (request.params.task && extra.taskStore) {
         const task = await extra.taskStore.createTask(
@@ -828,7 +869,17 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
 
   async function connect(server: ScopedMcpServer): Promise<void> {
     if (closing) return;
-    const operation = performConnect(server);
+    const generation = (connectionGenerations.get(server.name) ?? 0) + 1;
+    connectionGenerations.set(server.name, generation);
+    const operation = performConnect(server, generation).catch(async (error: unknown) => {
+      if (closing || connectionGenerations.get(server.name) !== generation) return;
+      const connection = connections.get(server.name);
+      if (!connection || connection.intentionalClose) return;
+      connection.status = "failed";
+      connection.lastError = error instanceof Error ? error.message : String(error);
+      await emit(server.name, "connection", { status: "failed", error: connection.lastError });
+      scheduleReconnect(connection);
+    });
     inFlightConnects.add(operation);
     try {
       await operation;
@@ -851,7 +902,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     attempt.taskStore.cleanup();
   };
 
-  async function performConnect(server: ScopedMcpServer): Promise<void> {
+  async function performConnect(server: ScopedMcpServer, generation: number): Promise<void> {
     if (closing) return;
     const connection: Connection = connections.get(server.name) ?? {
       server,
@@ -873,6 +924,12 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     };
     if (closing) return;
     connections.set(server.name, connection);
+    const isCurrent = (): boolean =>
+      !closing &&
+      !connection.intentionalClose &&
+      connectionGenerations.get(server.name) === generation &&
+      connections.get(connection.server.name) === connection;
+    if (!isCurrent()) return;
     if (server.config.enabled === false) {
       connection.status = "disabled";
       return;
@@ -920,24 +977,32 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     }
     let lastError: unknown;
     for (const transport of transports) {
-      const { client, taskStore } = createClient(connection);
+      if (!isCurrent()) return;
+      const { client, taskStore } = createClient(connection, generation);
       const attempt: ConnectionAttempt = { connection, client, transport, taskStore };
       connectionAttempts.add(attempt);
-      const isCurrent = (): boolean =>
-        !closing && !connection.intentionalClose && connections.get(connection.server.name) === connection;
       try {
         await client.connect(transport as Transport, { timeout: server.config.timeout ?? DEFAULT_TIMEOUT });
         if (!isCurrent()) {
           await closeConnectionAttempt(attempt);
           return;
         }
+        const previousClient = connection.client;
+        const previousTransport = connection.transport;
+        const previousTaskStore = connection.taskStore;
         connection.client = client;
         connection.transport = transport;
-        connection.taskStore?.cleanup();
         connection.taskStore = taskStore;
-        connection.status = "connected";
-        await refreshCatalog(connection);
+        previousTaskStore?.cleanup();
+        await previousClient?.close().catch(() => undefined);
+        await previousTransport?.close().catch(() => undefined);
         if (!isCurrent() || connection.client !== client) {
+          await closeConnectionAttempt(attempt);
+          return;
+        }
+        connection.status = "connected";
+        const refreshed = await refreshCatalog(connection, undefined, isCurrent);
+        if (!refreshed || !isCurrent() || connection.client !== client) {
           await closeConnectionAttempt(attempt);
           return;
         }
@@ -966,6 +1031,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         if (error instanceof UnauthorizedError && server.config.type === "remote") {
           connectionAttempts.delete(attempt);
           await replacePendingOAuthTransport(server.name, transport as RemoteTransport);
+          if (!isCurrent()) {
+            if (pendingOAuthTransports.get(server.name) === transport) {
+              pendingOAuthTransports.delete(server.name);
+              await transport.close().catch(() => undefined);
+            }
+            return;
+          }
           connection.status = "auth_required";
           connection.lastError = error.message;
           await emit(server.name, "connection", { status: "auth_required" });
@@ -974,6 +1046,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         await closeConnectionAttempt(attempt);
       }
     }
+    if (!isCurrent()) return;
     connection.status = "failed";
     connection.lastError =
       lastError instanceof Error ? lastError.message : String(lastError ?? "connection failed");
@@ -986,6 +1059,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     await closePendingOAuthTransport(name);
     if (!connection) return;
     connection.intentionalClose = true;
+    connectionGenerations.set(name, (connectionGenerations.get(name) ?? 0) + 1);
     if (connection.reconnectTimer) clearTimeout(connection.reconnectTimer);
     connection.reconnectTimer = undefined;
     await Promise.all(
@@ -1467,6 +1541,8 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       );
     },
     listTasks: async (serverName, cursor, signal, invocation) => {
+      // These controls must remain concurrent with a running task. Task-specific reverse requests
+      // resolve through taskInvocations in the client handlers instead of the foreground queue.
       void invocation;
       const { client } = requireClient(serverName);
       return await client.experimental.tasks.listTasks(cursor, signal ? { signal } : undefined);

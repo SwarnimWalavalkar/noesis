@@ -18,6 +18,72 @@ const emptyCredentials = (): McpOAuthCredentialStore => ({
 });
 
 describe("MCP host", () => {
+  test("only the latest overlapping start attempt can publish a connection", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-overlapping-connect-"));
+    const home = join(root, "home");
+    const marker = join(root, "started.pids");
+    await writeMcpServer({
+      home,
+      projectDirectory: root,
+      scope: "project",
+      name: "controlled",
+      config: {
+        type: "local",
+        command: process.execPath,
+        args: [fixture],
+        timeout: 5_000,
+        environment: {
+          CONTROLLED_STARTUP_DELAY: "NOESIS_MCP_STARTUP_DELAY",
+          CONTROLLED_STARTUP_MARKER: "NOESIS_MCP_STARTUP_MARKER",
+        },
+      },
+    });
+    const statuses: string[] = [];
+    const manager = createMcpHostManager({
+      home,
+      projectDirectory: root,
+      config: await loadMcpConfig({ home, projectDirectory: root }),
+      credentials: emptyCredentials(),
+      environment: {
+        NOESIS_MCP_STARTUP_DELAY: "250",
+        NOESIS_MCP_STARTUP_MARKER: marker,
+      },
+      handlers: {
+        sample: async () => ({
+          role: "assistant",
+          model: "controlled",
+          stopReason: "endTurn",
+          content: { type: "text", text: "ok" },
+        }),
+        elicit: async () => ({ action: "decline" }),
+        onOAuthRedirect: () => undefined,
+        onEvent: (event) => {
+          const status =
+            typeof event.payload === "object" && event.payload !== null
+              ? Reflect.get(event.payload, "status")
+              : undefined;
+          if (event.type === "connection" && typeof status === "string") statuses.push(status);
+        },
+      },
+    });
+
+    const first = manager.start();
+    await vi.waitFor(async () => expect((await readFile(marker, "utf8")).trim()).toMatch(/^\d+$/u));
+    const second = manager.start();
+    await Promise.all([first, second]);
+    const childPids = (await readFile(marker, "utf8")).trim().split("\n").map(Number);
+    expect(childPids).toHaveLength(2);
+    expect(statuses.filter((status) => status === "connected")).toHaveLength(1);
+    expect(manager.inspectServer("controlled")?.status).toBe("connected");
+    expect((await manager.callTool("mcp.controlled.environment", {})).content[0]).toMatchObject({
+      type: "text",
+      text: "missing",
+    });
+    await vi.waitFor(() => expect(() => process.kill(childPids[0] ?? 0, 0)).toThrow());
+    expect(() => process.kill(childPids[1] ?? 0, 0)).not.toThrow();
+    await manager.close();
+  });
+
   test("rejects an already-aborted OAuth request before opening a callback listener", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-mcp-auth-aborted-"));
     const home = join(root, "home");
@@ -280,7 +346,7 @@ describe("MCP host", () => {
     try {
       await manager.start();
       expect(manager.inspectServer("healthy")?.status).toBe("connected");
-      expect(manager.inspectServer("broken")?.status).toBe("failed");
+      await vi.waitFor(() => expect(manager.inspectServer("broken")?.status).toBe("failed"));
       expect(manager.listTools("healthy").length).toBeGreaterThan(0);
     } finally {
       await manager.close();
