@@ -42,7 +42,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { canonicalJson, type JsonValue, sha256, toJsonValue } from "@noesis/domain";
+import { canonicalJson, createId, type JsonValue, sha256, toJsonValue } from "@noesis/domain";
 import type { LoadedMcpConfig, McpRemoteServerConfig, ScopedMcpServer } from "./config.ts";
 import { createMcpOAuthProvider, type McpOAuthCredentialStore, type McpOAuthRedirect } from "./oauth.ts";
 
@@ -120,6 +120,7 @@ export interface McpInvocationContext {
 
 export interface McpHostHandlers {
   readonly connect?: (input: {
+    readonly operationId: string;
     readonly serverName: string;
     readonly scope: "global" | "project";
     readonly transport: "stdio" | "streamable_http" | "sse";
@@ -198,8 +199,14 @@ interface Connection {
   requestQueue: Promise<void>;
   reconnectAttempts: number;
   reconnectTimer: NodeJS.Timeout | undefined;
+  recovery: ConnectionRecovery | undefined;
   intentionalClose: boolean;
   diagnostics: McpDiagnostic[];
+}
+
+interface ConnectionRecovery {
+  readonly recoveryId: string;
+  attempt: number;
 }
 
 interface ConnectionAttempt {
@@ -676,11 +683,16 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       return;
     const delay = AUTO_RECONNECT_DELAYS[connection.reconnectAttempts];
     if (delay === undefined) return;
+    const recovery = connection.recovery ?? {
+      recoveryId: createId("mcp-connect-recovery"),
+      attempt: 0,
+    };
+    connection.recovery = recovery;
     connection.reconnectAttempts += 1;
     connection.reconnectTimer = setTimeout(() => {
       connection.reconnectTimer = undefined;
       if (closing || connections.get(connection.server.name) !== connection) return;
-      void connect(connection.server).catch(async (error: unknown) => {
+      void connect(connection.server, recovery).catch(async (error: unknown) => {
         if (connections.get(connection.server.name) !== connection) return;
         connection.status = "failed";
         connection.lastError = error instanceof Error ? error.message : String(error);
@@ -898,18 +910,27 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     return [streamable, sse];
   };
 
-  async function connect(server: ScopedMcpServer): Promise<void> {
+  async function connect(
+    server: ScopedMcpServer,
+    recovery: ConnectionRecovery = {
+      recoveryId: createId("mcp-connect-recovery"),
+      attempt: 0,
+    },
+  ): Promise<void> {
     if (closing) return;
     const generation = (connectionGenerations.get(server.name) ?? 0) + 1;
     connectionGenerations.set(server.name, generation);
-    const operation = performConnect(server, generation).catch(async (error: unknown) => {
+    const operation = performConnect(server, generation, recovery).catch(async (error: unknown) => {
       if (closing || connectionGenerations.get(server.name) !== generation) return;
       const connection = connections.get(server.name);
       if (!connection || connection.intentionalClose) return;
       connection.status = "failed";
       connection.lastError = error instanceof Error ? error.message : String(error);
       await emit(server.name, "connection", { status: "failed", error: connection.lastError });
-      if (connectionLifecycleFailureRetryable(error) !== false) scheduleReconnect(connection);
+      if (connectionLifecycleFailureRetryable(error) !== false) {
+        recovery.attempt += 1;
+        scheduleReconnect(connection);
+      }
     });
     inFlightConnects.add(operation);
     try {
@@ -933,7 +954,11 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     attempt.taskStore.cleanup();
   };
 
-  async function performConnect(server: ScopedMcpServer, generation: number): Promise<void> {
+  async function performConnect(
+    server: ScopedMcpServer,
+    generation: number,
+    recovery: ConnectionRecovery,
+  ): Promise<void> {
     if (closing) return;
     const connection: Connection = connections.get(server.name) ?? {
       server,
@@ -950,11 +975,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       requestQueue: Promise.resolve(),
       reconnectAttempts: 0,
       reconnectTimer: undefined,
+      recovery,
       intentionalClose: false,
       diagnostics: [],
     };
     if (closing) return;
     connections.set(server.name, connection);
+    connection.recovery = recovery;
     const isCurrent = (): boolean =>
       !closing &&
       !connection.intentionalClose &&
@@ -1019,6 +1046,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
           });
         if (input.handlers.connect) {
           await input.handlers.connect({
+            operationId: `${recovery.recoveryId}:attempt:${String(recovery.attempt)}:transport:${
+              transport instanceof StdioClientTransport
+                ? "stdio"
+                : transport instanceof SSEClientTransport
+                  ? "sse"
+                  : "streamable_http"
+            }`,
             serverName: server.name,
             scope: server.scope,
             transport:
@@ -1060,6 +1094,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
           return;
         }
         connection.reconnectAttempts = 0;
+        connection.recovery = undefined;
         if (connection.reconnectTimer) clearTimeout(connection.reconnectTimer);
         connection.reconnectTimer = undefined;
         await emit(server.name, "connection", { status: "connected" });
@@ -1100,7 +1135,10 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     connection.lastError =
       lastError instanceof Error ? lastError.message : String(lastError ?? "connection failed");
     await emit(server.name, "connection", { status: "failed", error: connection.lastError });
-    if (connectionLifecycleFailureRetryable(lastError) !== false) scheduleReconnect(connection);
+    if (connectionLifecycleFailureRetryable(lastError) !== false) {
+      recovery.attempt += 1;
+      scheduleReconnect(connection);
+    }
   }
 
   const disconnect = async (name: string): Promise<void> => {

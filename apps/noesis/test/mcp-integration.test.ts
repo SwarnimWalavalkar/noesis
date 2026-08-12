@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PiMcpSamplingPort } from "@noesis/runtime-pi";
 import { createTuiMcpInteractionBridge } from "@noesis/tui";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { createApplicationMcpIntegration } from "../src/mcp-integration.ts";
 
 const temporaryDirectories: string[] = [];
@@ -73,6 +73,76 @@ describe("application MCP integration", () => {
     await new Promise((resolve) => setTimeout(resolve, 150));
     await expect(readFile(marker, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     await integration.close();
+  });
+
+  test("keeps one recovery identity across known retries and stops after uncertain settlement", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-stable-lifecycle-"));
+    temporaryDirectories.push(root);
+    const retryHome = join(root, "retry-home");
+    const retryProject = join(root, "retry-project");
+    await Promise.all([mkdir(retryHome, { recursive: true }), mkdir(retryProject, { recursive: true })]);
+    await writeFile(
+      join(retryHome, "mcp.json"),
+      JSON.stringify({ servers: { broken: { type: "local", command: "/missing-mcp-server" } } }),
+    );
+    const retryOperations: string[] = [];
+    const retrying = createApplicationMcpIntegration({
+      home: retryHome,
+      projectDirectory: retryProject,
+      sampling,
+      interactions: createTuiMcpInteractionBridge(),
+      openUrl: async () => undefined,
+      workspaceTrusted: true,
+    });
+    retrying.setLifecycleAuthorizer(async ({ operationId, execute }) => {
+      retryOperations.push(operationId);
+      return await execute();
+    });
+    await retrying.start();
+    await vi.waitFor(() => expect(retryOperations.length).toBeGreaterThanOrEqual(2));
+    const [initialOperation, retriedOperation] = retryOperations;
+    expect(initialOperation).toContain(":attempt:0:transport:stdio");
+    expect(retriedOperation).toContain(":attempt:1:transport:stdio");
+    expect(initialOperation?.split(":attempt:")[0]).toBe(retriedOperation?.split(":attempt:")[0]);
+    await retrying.close();
+
+    const uncertainHome = join(root, "uncertain-home");
+    const uncertainProject = join(root, "uncertain-project");
+    await Promise.all([
+      mkdir(uncertainHome, { recursive: true }),
+      mkdir(uncertainProject, { recursive: true }),
+    ]);
+    await writeFile(
+      join(uncertainHome, "mcp.json"),
+      JSON.stringify({
+        servers: {
+          controlled: { type: "local", command: process.execPath, args: [controlledServerFixture] },
+        },
+      }),
+    );
+    const uncertainOperations: string[] = [];
+    const uncertain = createApplicationMcpIntegration({
+      home: uncertainHome,
+      projectDirectory: uncertainProject,
+      sampling,
+      interactions: createTuiMcpInteractionBridge(),
+      openUrl: async () => undefined,
+      workspaceTrusted: true,
+    });
+    uncertain.setLifecycleAuthorizer(async ({ operationId, execute }) => {
+      uncertainOperations.push(operationId);
+      await execute();
+      throw new Error("controlled authority settlement uncertainty");
+    });
+    await uncertain.start();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(uncertainOperations).toHaveLength(1);
+    expect(uncertain.host.inspectServer("controlled")).toMatchObject({
+      status: "failed",
+      lastError: "controlled authority settlement uncertainty",
+    });
+    await uncertain.close();
   });
 
   test("does not write MCP configuration when lifecycle authority denies the operation", async () => {

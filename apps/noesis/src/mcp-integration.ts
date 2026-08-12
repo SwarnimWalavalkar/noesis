@@ -244,6 +244,7 @@ export function createApplicationMcpIntegration(input: {
   let lifecycleAuthorizer: ApplicationMcpLifecycleAuthorizer | undefined;
   const authorizeLifecycle = async (input: {
     readonly operation: string;
+    readonly operationId?: string;
     readonly effect: "write" | "execute" | "network";
     readonly resource: string;
     readonly request: JsonValue;
@@ -251,7 +252,7 @@ export function createApplicationMcpIntegration(input: {
   }): Promise<JsonValue> => {
     if (!lifecycleAuthorizer) throw new Error("MCP lifecycle authority is not available");
     return await lifecycleAuthorizer({
-      operationId: createId(`mcp-${input.operation}`),
+      operationId: input.operationId ?? createId(`mcp-${input.operation}`),
       effect: input.effect,
       resource: input.resource,
       request: input.request,
@@ -324,18 +325,17 @@ export function createApplicationMcpIntegration(input: {
         createSecureMcpOAuthCredentialStore(mcpCredentialPath(input.home)),
       ),
       handlers: {
-        connect: async ({ serverName, scope, transport, execute }) => {
-          let effectStarted = false;
+        connect: async ({ operationId, serverName, scope, transport, execute }) => {
           let effectFailed = false;
           let effectFailure: unknown;
           try {
             await authorizeLifecycle({
               operation: "connect",
+              operationId,
               effect: transport === "stdio" ? "execute" : "network",
               resource: `server:${scope}:${serverName}:connection`,
               request: toJsonValue({ serverName, scope, transport }),
               execute: async () => {
-                effectStarted = true;
                 try {
                   await execute();
                 } catch (error) {
@@ -350,7 +350,7 @@ export function createApplicationMcpIntegration(input: {
             if (effectFailed) throw effectFailure;
             throw createMcpConnectionLifecycleFailure(
               error instanceof Error ? error.message : String(error),
-              effectStarted,
+              false,
             );
           }
         },
@@ -523,6 +523,7 @@ export function createApplicationMcpIntegration(input: {
     return Object.freeze(detail);
   };
   const mutateMcp: ApplicationMcpIntegration["mutateMcp"] = async (intent, signal) => {
+    const intentOperationId = createId(`mcp-${intent.type}`);
     const manager = await currentHost();
     if (intent.type === "reload") {
       await reload();
@@ -543,6 +544,7 @@ export function createApplicationMcpIntegration(input: {
         signal?.throwIfAborted();
         await authorizeLifecycle({
           operation: "authenticate",
+          operationId: intentOperationId,
           effect: "network",
           resource: `server:${intent.scope}:${intent.name}:authentication`,
           request: toJsonValue(intent),
@@ -554,6 +556,7 @@ export function createApplicationMcpIntegration(input: {
       } else if (intent.type === "logout")
         await authorizeLifecycle({
           operation: "logout",
+          operationId: intentOperationId,
           effect: "write",
           resource: `server:${intent.scope}:${intent.name}:authentication`,
           request: toJsonValue(intent),
@@ -565,6 +568,7 @@ export function createApplicationMcpIntegration(input: {
       else
         await authorizeLifecycle({
           operation: "reconnect",
+          operationId: intentOperationId,
           effect: effective.config.type === "local" ? "execute" : "network",
           resource: `server:${intent.scope}:${intent.name}:connection`,
           request: toJsonValue(intent),
@@ -580,6 +584,7 @@ export function createApplicationMcpIntegration(input: {
     if (intent.type === "remove") {
       await authorizeLifecycle({
         operation: "config-remove",
+        operationId: intentOperationId,
         effect: "write",
         resource: `config:${intent.scope}:${intent.name}`,
         request: toJsonValue(intent),
@@ -591,6 +596,7 @@ export function createApplicationMcpIntegration(input: {
     } else if (intent.type === "set-enabled") {
       await authorizeLifecycle({
         operation: "config-set-enabled",
+        operationId: intentOperationId,
         effect: "write",
         resource: `config:${intent.scope}:${intent.name}`,
         request: toJsonValue(intent),
@@ -610,6 +616,7 @@ export function createApplicationMcpIntegration(input: {
       )?.config;
       await authorizeLifecycle({
         operation: "config-write-local",
+        operationId: intentOperationId,
         effect: "write",
         resource: `config:${intent.scope}:${intent.name}`,
         request: toJsonValue(intent),
@@ -646,6 +653,7 @@ export function createApplicationMcpIntegration(input: {
           : intent.oauth;
       await authorizeLifecycle({
         operation: "config-write-remote",
+        operationId: intentOperationId,
         effect: "write",
         resource: `config:${intent.scope}:${intent.name}`,
         request: toJsonValue(intent),

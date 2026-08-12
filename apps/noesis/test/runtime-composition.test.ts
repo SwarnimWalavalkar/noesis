@@ -330,12 +330,9 @@ describe("apps/noesis production control-plane composition", () => {
       }),
     });
     let closes = 0;
-    let lifecycleEffectRuns = 0;
-    let runLifecycle: (() => Promise<void>) | undefined;
     const mcp: NonNullable<ApplicationRuntimeCompositionOptions["mcp"]> = Object.freeze({
       host,
       start: async () => {
-        await runLifecycle?.();
         throw new Error("controlled MCP startup failure");
       },
       close: async () => {
@@ -346,22 +343,7 @@ describe("apps/noesis production control-plane composition", () => {
       inspectMcpServer: async () => undefined,
       mutateMcp: async () => Object.freeze({ message: "unused" }),
       setSamplingAuthorizer: () => undefined,
-      setLifecycleAuthorizer: (authorizer) => {
-        runLifecycle = async () => {
-          const request = {
-            operationId: "mcp-controlled-lifecycle",
-            effect: "execute" as const,
-            resource: "server:project:controlled:connection",
-            request: null,
-            execute: async () => {
-              lifecycleEffectRuns += 1;
-              return null;
-            },
-          };
-          await authorizer(request);
-          await authorizer(request);
-        };
-      },
+      setLifecycleAuthorizer: () => undefined,
     });
     const controlled = createControlledPiModels();
 
@@ -375,7 +357,6 @@ describe("apps/noesis production control-plane composition", () => {
       }),
     ).rejects.toThrow("controlled MCP startup failure");
     expect(closes).toBe(1);
-    expect(lifecycleEffectRuns).toBe(1);
   });
 
   test("saved definitions are immediate, project-local, and freeze first-class workflow tools", async () => {
