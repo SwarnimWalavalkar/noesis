@@ -63,7 +63,7 @@ describe("MCP host", () => {
     await second.close();
 
     expect(new Set(transports)).toEqual(new Set(["streamable_http", "sse"]));
-    expect(new Set(identities)).toHaveLength(1);
+    expect(new Set(identities).size).toBe(1);
     expect(identities[0]).toMatch(/^[a-f0-9]{64}$/u);
   });
 

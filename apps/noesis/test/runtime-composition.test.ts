@@ -11,6 +11,7 @@ import {
 } from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
 import {
+  ArtifactFileRefSchema,
   canonicalJson,
   EvidenceRevisionRefSchema,
   eventChecksum,
@@ -362,9 +363,10 @@ describe("apps/noesis production control-plane composition", () => {
     expect(closes).toBe(1);
   });
 
-  test("persists only a bounded MCP result projection and replays its authorized artifact", async () => {
+  test("stages an oversized MCP artifact before primary settlement and replays it after restart", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-mcp-large-result-"));
     const projectRoot = join(home, "project");
+    const executionMarker = join(home, "large-result-calls");
     roots.push(home);
     await mkdir(projectRoot, { recursive: true });
     const fixture = join(import.meta.dirname, "../../../packages/mcp/test/fixtures/server.mjs");
@@ -375,7 +377,7 @@ describe("apps/noesis production control-plane composition", () => {
           controlled: {
             type: "local",
             command: process.execPath,
-            args: [fixture, "--large-result-bytes=307200"],
+            args: [fixture, "--large-result-bytes=307200", `--large-result-marker=${executionMarker}`],
           },
         },
       }),
@@ -390,98 +392,150 @@ describe("apps/noesis production control-plane composition", () => {
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
     const project: ProjectRef = Object.freeze({ projectId: "project_mcp_large", root: projectRoot });
-    const interaction = createTuiMcpInteractionBridge();
-    const mcp = createApplicationMcpIntegration({
-      home,
-      projectDirectory: projectRoot,
-      sampling: Object.freeze({
-        sample: async () => {
-          throw new Error("Sampling is not expected");
-        },
-      }),
-      interactions: interaction,
-      openUrl: async () => undefined,
-      workspaceTrusted: true,
-    });
     const returned: JsonValue[] = [];
     const controlled = createControlledPiModels();
-    const runtime = await createApplicationRuntimeComposition({
-      config,
-      project,
-      mcp,
-      createAgent: (_sessionTools, codeExecution) =>
-        Object.freeze({
-          name: "mcp-large-result-agent",
-          run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
-            const plan = request.frozenTurnPlan;
-            if (!plan) throw new Error("Expected a frozen plan");
-            emit({ type: "status", status: "started" });
-            const controller = new AbortController();
-            const prepared = await codeExecution.prepare(plan, controller.signal);
-            try {
-              const tool = prepared.catalog.tools.find((entry) =>
-                entry.name.startsWith("mcp.controlled.large-result"),
-              );
-              if (!tool || !prepared.invoke) throw new Error("Expected the controlled large MCP tool");
-              const identity = Object.freeze({
-                executionId: `direct:${plan.turnId}`,
-                logicalExecutionId: `${plan.turnId}:large-result`,
-                callId: `${plan.turnId}:direct:large-result`,
-              });
-              returned.push(await prepared.invoke(tool.name, {}, controller.signal, identity));
-              returned.push(await prepared.invoke(tool.name, {}, controller.signal, identity));
-              emit({ type: "status", status: "completed" });
-              return Object.freeze({
-                outcome: "completed" as const,
-                stopReason: "stop" as const,
-                text: "MCP large result materialized twice.",
-                provider: request.provider,
-                model: request.model,
-              });
-            } finally {
-              await prepared.close();
-            }
+    const compose = async () => {
+      const mcp = createApplicationMcpIntegration({
+        home,
+        projectDirectory: projectRoot,
+        sampling: Object.freeze({
+          sample: async () => {
+            throw new Error("Sampling is not expected");
           },
-          steer: async () =>
-            Object.freeze({ status: "not-consumed" as const, reason: "not-running" as const }),
-          abort: async () => undefined,
         }),
-      createRoleRunner: (configurations) =>
-        createPiAgentRoleRunner(projectRoot, controlled.models, configurations),
-    });
-
-    try {
-      const trail = await runtime.startTrail({ title: "Large MCP result" });
-      await runtime.debug.runTurn(trail.trailId, "Call the large MCP tool.");
-      expect(returned).toHaveLength(2);
-      expect(returned[0]).toEqual(returned[1]);
-      expect(returned[0]).toMatchObject({
-        truncated: true,
-        artifact: { artifactId: expect.any(String) },
+        interactions: createTuiMcpInteractionBridge(),
+        openUrl: async () => undefined,
+        workspaceTrusted: true,
       });
-
-      const database = new DatabaseSync(runtime.debug.workspace.unsafeDatabasePathForTesting);
+      return await createApplicationRuntimeComposition({
+        config,
+        project,
+        mcp,
+        createAgent: (_sessionTools, codeExecution) =>
+          Object.freeze({
+            name: "mcp-large-result-agent",
+            run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+              const plan = request.frozenTurnPlan;
+              if (!plan) throw new Error("Expected a frozen plan");
+              emit({ type: "status", status: "started" });
+              const controller = new AbortController();
+              const prepared = await codeExecution.prepare(plan, controller.signal);
+              try {
+                const tool = prepared.catalog.tools.find((entry) =>
+                  entry.name.startsWith("mcp.controlled.large-result"),
+                );
+                if (!tool || !prepared.invoke) throw new Error("Expected the controlled large MCP tool");
+                returned.push(
+                  await prepared.invoke(tool.name, {}, controller.signal, {
+                    executionId: `direct:${plan.turnId}`,
+                    logicalExecutionId: "mcp-large-result-restart",
+                    callId: "mcp-large-result-restart-call",
+                  }),
+                );
+                emit({ type: "status", status: "completed" });
+                return Object.freeze({
+                  outcome: "completed" as const,
+                  stopReason: "stop" as const,
+                  text: "MCP large result materialized.",
+                  provider: request.provider,
+                  model: request.model,
+                });
+              } finally {
+                await prepared.close();
+              }
+            },
+            steer: async () =>
+              Object.freeze({ status: "not-consumed" as const, reason: "not-running" as const }),
+            abort: async () => undefined,
+          }),
+        createRoleRunner: (configurations) =>
+          createPiAgentRoleRunner(projectRoot, controlled.models, configurations),
+      });
+    };
+    const invokeOnce = async (title: string): Promise<void> => {
+      const runtime = await compose();
       try {
-        const toolOperation = database
-          .prepare(
-            `SELECT result_json FROM authority_operations
-             WHERE resource LIKE 'mcp:%:tool:large-result'`,
-          )
-          .get();
-        const resultJson = toolOperation?.["result_json"];
-        if (typeof resultJson !== "string") throw new Error("Expected a durable MCP tool operation");
+        const trail = await runtime.startTrail({ title });
+        await runtime.debug.runTurn(trail.trailId, "Call the large MCP tool.");
+      } finally {
+        await runtime.shutdown();
+      }
+    };
+
+    await invokeOnce("Large MCP result before restart");
+    expect(returned).toHaveLength(1);
+    expect(returned[0]).toMatchObject({
+      truncated: true,
+      artifact: { artifactId: expect.any(String) },
+    });
+    expect(await readFile(executionMarker, "utf8")).toBe("called\n");
+
+    const workspace = await createWorkspaceStore(home);
+    try {
+      const database = new DatabaseSync(workspace.unsafeDatabasePathForTesting);
+      try {
+        const toolOperation = z
+          .strictObject({
+            operation_id: z.string(),
+            idempotency_key: z.string(),
+            effect: z.enum(["read", "write", "execute", "network", "promote", "schedule"]),
+            resource: z.string(),
+            request_digest: z.string(),
+            estimated_cost: z.number(),
+            result_json: z.string(),
+          })
+          .parse(
+            database
+              .prepare(
+                `SELECT operation_id, idempotency_key, effect, resource, request_digest,
+                        estimated_cost, result_json
+                 FROM authority_operations
+                 WHERE resource LIKE 'mcp:%:tool:large-result'`,
+              )
+              .get(),
+          );
+        const resultJson = toolOperation.result_json;
         expect(Buffer.byteLength(resultJson, "utf8")).toBeLessThan(256 * 1024);
-        expect(JSON.parse(resultJson)).toMatchObject({
-          _noesisResult: "mcp-oversized-v1",
-          resultDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
-          byteLength: expect.any(Number),
-        });
+        const durableResult = z
+          .strictObject({
+            content: z.array(z.unknown()),
+            artifact: ArtifactFileRefSchema,
+            truncated: z.literal(true),
+            isError: z.literal(true).optional(),
+          })
+          .parse(JSON.parse(resultJson));
+        expect((await workspace.reads.readArtifact(durableResult.artifact)).byteLength).toBeGreaterThan(
+          307_200,
+        );
         expect(resultJson).not.toContain("x".repeat(1_024));
+
+        let replayExecutions = 0;
+        const replay = await createWorkspaceRuntimeInternals(workspace).authority.runForeground(
+          {
+            operationId: toolOperation.operation_id,
+            effect: toolOperation.effect,
+            resource: toolOperation.resource,
+            estimatedCost: toolOperation.estimated_cost,
+            idempotencyKey: toolOperation.idempotency_key,
+            requestDigest: toolOperation.request_digest,
+            execute: async () => {
+              replayExecutions += 1;
+              return null;
+            },
+          },
+          {
+            effects: [toolOperation.effect],
+            resourcePatterns: [toolOperation.resource],
+            credentialRefs: [],
+          },
+        );
+        expect(replay).toEqual({ ok: true, value: durableResult, replayed: true });
+        expect(replayExecutions).toBe(0);
         expect(
           database
             .prepare(
               `SELECT COUNT(*) AS count FROM authority_operations
-               WHERE idempotency_key LIKE 'mcp-artifact:%' AND status = 'completed'`,
+             WHERE idempotency_key LIKE 'mcp-artifact:%' AND status = 'completed'`,
             )
             .get(),
         ).toMatchObject({ count: 1 });
@@ -490,7 +544,7 @@ describe("apps/noesis production control-plane composition", () => {
         database.close();
       }
     } finally {
-      await runtime.shutdown();
+      workspace.close();
     }
   });
 

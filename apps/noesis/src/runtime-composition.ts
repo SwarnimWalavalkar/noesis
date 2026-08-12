@@ -138,12 +138,6 @@ import type {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
-const McpOversizedResultProjectionSchema = z.strictObject({
-  _noesisResult: z.literal("mcp-oversized-v1"),
-  resultDigest: z.string().regex(/^[a-f0-9]{64}$/u),
-  byteLength: z.number().int().positive(),
-  isError: z.literal(true).optional(),
-});
 const SHUTDOWN_GRACE_MS = 250;
 const REFLECTION_BARRIER_MS = 1_500;
 const HISTORY_RERANK_MIN_EXCERPT_CHARACTERS = 32;
@@ -2508,38 +2502,11 @@ export async function createApplicationRuntimeComposition(
         status: recordedToolInvocationStatus,
       }),
       permission: plan.permissionSnapshot,
-      projectResultForPersistence: (toolName, result) => {
-        if (!toolName.startsWith("mcp.")) return result;
+      prepareResultForPersistence: async (toolName, result, context) => {
+        if (!toolName.startsWith("mcp.")) return undefined;
         const bytes = encoder.encode(JSON.stringify(result));
         if (bytes.length <= MAX_TOOL_RESULT_BYTES) return result;
         const resultDigest = sha256(bytes);
-        return toJsonValue({
-          _noesisResult: "mcp-oversized-v1",
-          ...(typeof result === "object" && result !== null && Reflect.get(result, "isError") === true
-            ? { isError: true }
-            : {}),
-          resultDigest,
-          byteLength: bytes.length,
-        });
-      },
-      materializeResult: async (toolName, result, context) => {
-        if (!toolName.startsWith("mcp.")) return result;
-        const projection = McpOversizedResultProjectionSchema.safeParse(result);
-        let bytes: Uint8Array | undefined;
-        let resultDigest: string;
-        let byteLength: number;
-        if (projection.success) {
-          resultDigest = projection.data.resultDigest;
-          byteLength = projection.data.byteLength;
-        } else {
-          bytes = encoder.encode(JSON.stringify(result));
-          if (bytes.length <= MAX_TOOL_RESULT_BYTES) return result;
-          resultDigest = sha256(bytes);
-          byteLength = bytes.length;
-        }
-        const isError = projection.success
-          ? projection.data.isError === true
-          : typeof result === "object" && result !== null && Reflect.get(result, "isError") === true;
         const path = `mcp/${sha256(`${plan.turnId}:${toolName}:${resultDigest}`).slice(0, 32)}.json`;
         const operationId = `operation_${sha256(`mcp-artifact:${context.callId}:${resultDigest}`)}`;
         const decision = await authority.runForeground(
@@ -2550,12 +2517,8 @@ export async function createApplicationRuntimeComposition(
             estimatedCost: 0,
             idempotencyKey: `mcp-artifact:${context.callId}:${resultDigest}`,
             requestDigest: sha256(canonicalJson({ path, resultDigest })),
-            execute: async () => {
-              if (!bytes)
-                throw new Error(
-                  `MCP result ${resultDigest} was settled without durable payload bytes and has no completed artifact`,
-                );
-              return toJsonValue(
+            execute: async () =>
+              toJsonValue(
                 await workspace.artifacts.writeArtifact({
                   path,
                   mediaType: "application/json",
@@ -2563,8 +2526,7 @@ export async function createApplicationRuntimeComposition(
                   actor: Object.freeze({ actorId: "noesis-mcp", kind: "noesis" as const }),
                   relationshipRefs: Object.freeze([foregroundEvidence(plan)]),
                 }),
-              );
-            },
+              ),
           },
           plan.permissionSnapshot,
         );
@@ -2575,10 +2537,12 @@ export async function createApplicationRuntimeComposition(
           content: [
             {
               type: "text",
-              text: `MCP result was ${String(byteLength)} bytes and is available as artifact ${artifact.artifactId}.`,
+              text: `MCP result was ${String(bytes.length)} bytes and is available as artifact ${artifact.artifactId}.`,
             },
           ],
-          ...(isError ? { isError: true } : {}),
+          ...(typeof result === "object" && result !== null && Reflect.get(result, "isError") === true
+            ? { isError: true }
+            : {}),
           artifact,
           truncated: true,
         });

@@ -378,21 +378,16 @@ export interface CreateToolBrokerOptions {
   readonly recorder?: ToolInvocationRecorder;
   readonly now?: () => Date;
   /**
-   * Pure projection stored as the durable effect result. On a fresh execution, post-effect
-   * materialization still receives the validated original value after the authority settles.
-   * Replays receive this projection because the original value is intentionally not durable.
+   * Produces the bounded value committed as the primary effect result. It runs after tool output
+   * validation and before primary authority settlement. Any I/O it performs must cross its own
+   * authority operation so recoverable storage settles before the original bytes are discarded.
+   * Returning undefined leaves the validated result unchanged.
    */
-  readonly projectResultForPersistence?: (
+  readonly prepareResultForPersistence?: (
     name: string,
     value: JsonValue,
     context: ToolExecutionContext,
-  ) => JsonValue;
-  /** Post-effect storage seam. Runs only after AuthorityBoundary has settled the tool effect successfully. */
-  readonly materializeResult?: (
-    name: string,
-    value: JsonValue,
-    context: ToolExecutionContext,
-  ) => Promise<JsonValue>;
+  ) => Promise<JsonValue | undefined>;
 }
 
 export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
@@ -531,7 +526,6 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         effect,
       }),
     );
-    let freshResult: { readonly value: JsonValue } | undefined;
     const request: Omit<EffectRequest<JsonValue>, "principal"> = Object.freeze({
       operationId: `operation_${sha256(`${callId}:${requestDigest}`)}`,
       effect: effect.effect,
@@ -566,10 +560,18 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
                 : String(error);
           throw createEffectExecutionFailure("invalid_output", `Tool returned invalid output: ${detail}`);
         }
-        freshResult = Object.freeze({ value: output });
-        if (!options.projectResultForPersistence) return output;
+        if (!options.prepareResultForPersistence) return output;
+        let prepared: JsonValue | undefined;
         try {
-          const projected = JsonValueSchema.parse(options.projectResultForPersistence(name, output, context));
+          prepared = await options.prepareResultForPersistence(name, output, context);
+        } catch (error) {
+          throw new Error(
+            `Tool result persistence preparation failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        if (prepared === undefined) return output;
+        try {
+          const projected = JsonValueSchema.parse(prepared);
           if (Buffer.byteLength(JSON.stringify(projected), "utf8") > MAX_TOOL_RESULT_BYTES)
             throw new Error(`Durable tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`);
           return projected;
@@ -607,20 +609,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         );
       return result;
     }
-    const materializationInput = decision.replayed ? decision.value : (freshResult?.value ?? decision.value);
-    let completedValue = materializationInput;
-    try {
-      completedValue = options.materializeResult
-        ? await options.materializeResult(name, materializationInput, context)
-        : materializationInput;
-    } catch (error) {
-      const message = `Tool effect completed, but its result could not be materialized: ${error instanceof Error ? error.message : String(error)}`;
-      if (!recordedIsTerminal)
-        await options.recorder?.record(
-          Object.freeze({ ...baseRecord, status: "failed" as const, completedAt, error: message }),
-        );
-      return failure("failed", message);
-    }
+    const completedValue = decision.value;
     if (Buffer.byteLength(JSON.stringify(completedValue), "utf8") > MAX_TOOL_RESULT_BYTES) {
       const message = `Tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`;
       if (!recordedIsTerminal)
@@ -629,7 +618,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         );
       return failure("result_too_large", message);
     }
-    const reportedFailure = entry.definition.reportedFailure?.(materializationInput);
+    const reportedFailure = entry.definition.reportedFailure?.(completedValue);
     if (reportedFailure) {
       if (!recordedIsTerminal)
         await options.recorder?.record(

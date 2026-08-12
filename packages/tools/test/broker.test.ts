@@ -486,20 +486,18 @@ describe("tool broker", () => {
     expect(Object.isFrozen(broker.describe("mcp.docs.search")?.inputSchema)).toBe(true);
   });
 
-  it("persists a bounded projection before materializing the fresh effect result", async () => {
+  it("prepares recoverable storage before settling the bounded primary result", async () => {
     const original = toJsonValue({ content: [{ type: "text", text: "x".repeat(300 * 1024) }] });
-    const projection = toJsonValue({ content: [], truncated: true, byteLength: 300 * 1024 });
     const materialized = toJsonValue({ artifact: { artifactId: "artifact-1" }, truncated: true });
     const sequence: string[] = [];
     let persisted: JsonValue | undefined;
-    let materializationInput: JsonValue | undefined;
     const authority: Pick<AuthorityBoundary, "runForeground"> = Object.freeze({
       runForeground: async <T extends JsonValue>(
         request: Parameters<AuthorityBoundary["runForeground"]>[0],
       ): Promise<EffectDecision<T>> => {
         const value = (await request.execute(receiptFor(request))) as T;
         persisted = value;
-        sequence.push("effect-settled");
+        sequence.push("primary-settled");
         return Object.freeze({ ok: true, value, replayed: false });
       },
     });
@@ -517,14 +515,9 @@ describe("tool broker", () => {
       definitions: [definition],
       authority,
       permission,
-      projectResultForPersistence: (_name, value) => {
+      prepareResultForPersistence: async (_name, value) => {
         expect(value).toEqual(original);
-        sequence.push("projected");
-        return projection;
-      },
-      materializeResult: async (_name, value) => {
-        materializationInput = value;
-        sequence.push("materialized");
+        sequence.push("artifact-settled");
         return materialized;
       },
     });
@@ -533,9 +526,8 @@ describe("tool broker", () => {
       ok: true,
       value: materialized,
     });
-    expect(persisted).toEqual(projection);
-    expect(materializationInput).toEqual(original);
-    expect(sequence).toEqual(["projected", "effect-settled", "materialized"]);
+    expect(persisted).toEqual(materialized);
+    expect(sequence).toEqual(["artifact-settled", "primary-settled"]);
   });
 
   it("settles a valid effect before reporting a protocol-owned tool failure", async () => {
@@ -573,8 +565,11 @@ describe("tool broker", () => {
       isError: true,
       content: [{ type: "text", text: "x".repeat(300 * 1024) }],
     });
-    const projection = toJsonValue({ isError: true, truncated: true, resultDigest: "a".repeat(64) });
-    const materialized = toJsonValue({ truncated: true, artifact: { artifactId: "artifact-1" } });
+    const materialized = toJsonValue({
+      isError: true,
+      truncated: true,
+      artifact: { artifactId: "artifact-1" },
+    });
     let durableResult: JsonValue | undefined;
     let executions = 0;
     const definition = defineTool({
@@ -608,8 +603,7 @@ describe("tool broker", () => {
       definitions: [definition],
       authority,
       permission,
-      projectResultForPersistence: () => projection,
-      materializeResult: async () => materialized,
+      prepareResultForPersistence: async () => materialized,
     });
 
     const context = Object.freeze({ ...invocationContext(), callId: "materialized-failure-call" });
@@ -620,7 +614,7 @@ describe("tool broker", () => {
         message: "remote tool failed",
         details: materialized,
       });
-    expect(durableResult).toEqual(projection);
+    expect(durableResult).toEqual(materialized);
     expect(executions).toBe(1);
   });
 });

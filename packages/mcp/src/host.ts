@@ -449,6 +449,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
   const pendingOAuthTransports = new Map<string, RemoteTransport>();
   const resourceSubscriptions = new Map<string, ResourceSubscriptions>();
   const interactiveAuthentication = new Set<string>();
+  const activeAuthentications = new Set<
+    Readonly<{ controller: AbortController; settled: Promise<void>; settle: () => void }>
+  >();
+  const latestAuthenticationByServer = new Map<
+    string,
+    Readonly<{ controller: AbortController; settled: Promise<void>; settle: () => void }>
+  >();
   const credentialKey = (server: ScopedMcpServer): string =>
     server.scope === "global"
       ? `global:${server.name}`
@@ -1162,6 +1169,11 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
 
   const close = async (): Promise<void> => {
     closing = true;
+    const authentications = [...activeAuthentications];
+    for (const authentication of authentications) {
+      authentication.controller.abort(new Error("MCP host closed during OAuth authentication"));
+    }
+    await Promise.all(authentications.map(async (authentication) => await authentication.settled));
     await Promise.all([...connections.keys()].map(disconnect));
     await Promise.all([...connectionAttempts].map(closeConnectionAttempt));
     await Promise.allSettled([...inFlightConnects]);
@@ -1248,6 +1260,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
   };
 
   const authenticate: McpHostManager["authenticate"] = async (name, options) => {
+    if (closing) throw new Error("MCP host is closed");
     if (options?.signal?.aborted) {
       throw options.signal.reason ?? new Error("MCP OAuth was cancelled");
     }
@@ -1270,6 +1283,25 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     const callbackHost = redirectUrl.hostname === "[::1]" ? "::1" : redirectUrl.hostname;
     const port = redirectUrl.port ? Number(redirectUrl.port) : 80;
     const timeout = options?.timeout ?? 120_000;
+    const authenticationController = new AbortController();
+    let settleAuthentication: (() => void) | undefined;
+    const settled = new Promise<void>((resolve) => {
+      settleAuthentication = resolve;
+    });
+    const authentication = Object.freeze({
+      controller: authenticationController,
+      settled,
+      settle: (): void => settleAuthentication?.(),
+    });
+    const cancelAuthentication = (): void => {
+      authenticationController.abort(options?.signal?.reason ?? new Error("MCP OAuth was cancelled"));
+    };
+    options?.signal?.addEventListener("abort", cancelAuthentication, { once: true });
+    latestAuthenticationByServer
+      .get(name)
+      ?.controller.abort(new Error(`MCP OAuth authentication for ${name} was replaced`));
+    activeAuthentications.add(authentication);
+    latestAuthenticationByServer.set(name, authentication);
     interactiveAuthentication.add(name);
     try {
       let callbackTimer: NodeJS.Timeout | undefined;
@@ -1323,13 +1355,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         listener.on("error", reject);
         abortCallback = (): void => {
           listener.close();
-          reject(options?.signal?.reason ?? new Error("MCP OAuth was cancelled"));
+          reject(authenticationController.signal.reason ?? new Error("MCP OAuth was cancelled"));
         };
-        if (options?.signal?.aborted) {
+        if (authenticationController.signal.aborted) {
           abortCallback();
           return;
         }
-        options?.signal?.addEventListener("abort", abortCallback, { once: true });
+        authenticationController.signal.addEventListener("abort", abortCallback, { once: true });
         callbackTimer = setTimeout(() => {
           listener.close();
           reject(new Error(`MCP OAuth callback timed out after ${String(timeout)}ms`));
@@ -1338,7 +1370,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       // The callback can outlive the listen attempt or become unnecessary when reconnect succeeds
       // without OAuth. Observe its rejection unconditionally while preserving rejection for awaits.
       void callback.catch(() => undefined);
-      if (options?.signal?.aborted) await callback;
+      if (authenticationController.signal.aborted) await callback;
       await new Promise<void>((resolve, reject) => {
         listener.once("listening", resolve);
         listener.once("error", reject);
@@ -1354,10 +1386,16 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         await finishAuthentication(name, code);
       } finally {
         if (callbackTimer) clearTimeout(callbackTimer);
-        if (abortCallback) options?.signal?.removeEventListener("abort", abortCallback);
+        if (abortCallback) authenticationController.signal.removeEventListener("abort", abortCallback);
         listener.close();
       }
     } finally {
+      options?.signal?.removeEventListener("abort", cancelAuthentication);
+      authentication.settle();
+      activeAuthentications.delete(authentication);
+      if (latestAuthenticationByServer.get(name) === authentication) {
+        latestAuthenticationByServer.delete(name);
+      }
       interactiveAuthentication.delete(name);
       await closePendingOAuthTransport(name);
     }

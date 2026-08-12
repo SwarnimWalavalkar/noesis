@@ -2,12 +2,14 @@ import { mkdtemp } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { loadMcpConfig, writeMcpServer } from "../src/config.ts";
 import { createMcpHostManager } from "../src/host.ts";
+import type { McpOAuthCredential } from "../src/oauth.ts";
 
 const listeners: ReturnType<typeof createServer>[] = [];
 afterEach(
@@ -44,10 +46,38 @@ async function listen(
   return address.port;
 }
 
+async function availableIpv6Port(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "::1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Expected IPv6 TCP test listener");
+  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  return address.port;
+}
+
+async function availablePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Expected TCP test listener");
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return address.port;
+}
+
 async function managerFor(
   url: string,
   transport: "streamable_http" | "auto",
   oauth: false | Readonly<{ redirectUri: string }> = false,
+  credentials: Parameters<typeof createMcpHostManager>[0]["credentials"] = {
+    read: async () => undefined,
+    write: async () => undefined,
+    update: async () => undefined,
+    delete: async () => undefined,
+    deleteIf: async () => undefined,
+  },
 ) {
   const root = await mkdtemp(join(tmpdir(), "noesis-mcp-remote-"));
   const home = join(root, "home");
@@ -62,13 +92,7 @@ async function managerFor(
     home,
     projectDirectory: root,
     config: await loadMcpConfig({ home, projectDirectory: root }),
-    credentials: {
-      read: async () => undefined,
-      write: async () => undefined,
-      update: async () => undefined,
-      delete: async () => undefined,
-      deleteIf: async () => undefined,
-    },
+    credentials,
     handlers: {
       sample: async () => ({ role: "assistant", model: "controlled", content: { type: "text", text: "ok" } }),
       elicit: async () => ({ action: "decline" }),
@@ -78,7 +102,77 @@ async function managerFor(
 }
 
 describe("remote MCP transports", () => {
-  test("accepts an IPv6 loopback OAuth callback redirect", async () => {
+  test("closes and awaits an active OAuth callback listener during host shutdown", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-oauth-shutdown-"));
+    const home = join(root, "home");
+    const callbackPort = await availablePort();
+    await writeMcpServer({
+      home,
+      projectDirectory: root,
+      scope: "project",
+      name: "remote",
+      config: {
+        type: "remote",
+        url: "https://example.test/mcp",
+        transport: "streamable_http",
+        oauth: { redirectUri: `http://127.0.0.1:${String(callbackPort)}/oauth/callback` },
+      },
+    });
+    let authRequired: (() => void) | undefined;
+    const authRequiredEvent = new Promise<void>((resolve) => {
+      authRequired = resolve;
+    });
+    const manager = createMcpHostManager({
+      home,
+      projectDirectory: root,
+      config: await loadMcpConfig({ home, projectDirectory: root }),
+      credentials: {
+        read: async () => undefined,
+        write: async () => undefined,
+        update: async () => undefined,
+        delete: async () => undefined,
+        deleteIf: async () => undefined,
+      },
+      handlers: {
+        connect: async () => {
+          throw new UnauthorizedError("authentication required");
+        },
+        sample: async () => ({
+          role: "assistant",
+          model: "controlled",
+          content: { type: "text", text: "ok" },
+        }),
+        elicit: async () => ({ action: "decline" }),
+        onOAuthRedirect: () => undefined,
+        onEvent: (event) => {
+          if (
+            event.type === "connection" &&
+            typeof event.payload === "object" &&
+            event.payload !== null &&
+            Reflect.get(event.payload, "status") === "auth_required"
+          )
+            authRequired?.();
+        },
+      },
+    });
+
+    const authentication = manager.authenticate("remote", { timeout: 30_000 });
+    void authentication.catch(() => undefined);
+    await authRequiredEvent;
+    await manager.close();
+    await expect(authentication).rejects.toThrow("MCP host closed during OAuth authentication");
+
+    const rebound = createServer((_request, response) => response.end());
+    listeners.push(rebound);
+    await expect(
+      new Promise<void>((resolve, reject) => {
+        rebound.once("error", reject);
+        rebound.listen(callbackPort, "127.0.0.1", resolve);
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("serves an accepted OAuth callback over IPv6 loopback", async () => {
     const protocol = controlledServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
@@ -87,14 +181,50 @@ describe("remote MCP transports", () => {
     const serverPort = await listen((request, response) => {
       if (request.url !== "/mcp") return void response.writeHead(404).end();
       if (request.method === "POST")
-        void body(request).then(async (parsed) => await transport.handleRequest(request, response, parsed));
+        void body(request).then(async (parsed) => {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          await transport.handleRequest(request, response, parsed);
+        });
       else void transport.handleRequest(request, response);
     });
-    const manager = await managerFor(`http://127.0.0.1:${String(serverPort)}/mcp`, "streamable_http", {
-      redirectUri: "http://[::1]:0/oauth/callback",
-    });
+    const callbackPort = await availableIpv6Port();
+    let credential: McpOAuthCredential | undefined = {
+      serverUrl: `http://127.0.0.1:${String(serverPort)}/mcp`,
+      state: "controlled-state",
+    };
+    const manager = await managerFor(
+      `http://127.0.0.1:${String(serverPort)}/mcp`,
+      "streamable_http",
+      {
+        redirectUri: `http://[::1]:${String(callbackPort)}/oauth/callback`,
+      },
+      {
+        read: async () => credential,
+        write: async (_key, next) => {
+          credential = next;
+        },
+        update: async (_key, update) => {
+          credential = update(credential);
+        },
+        delete: async () => {
+          credential = undefined;
+        },
+        deleteIf: async (_key, predicate) => {
+          if (predicate(credential)) credential = undefined;
+        },
+      },
+    );
     try {
-      await expect(manager.authenticate("remote")).resolves.toBeUndefined();
+      const authentication = manager.authenticate("remote");
+      let callback: Response | undefined;
+      await vi.waitFor(async () => {
+        callback = await fetch(
+          `http://[::1]:${String(callbackPort)}/oauth/callback?code=controlled-code&state=controlled-state`,
+        );
+        expect(callback.status).toBe(200);
+      });
+      expect(await callback?.text()).toContain("Authentication successful");
+      await expect(authentication).resolves.toBeUndefined();
     } finally {
       await manager.close();
       await protocol.close();

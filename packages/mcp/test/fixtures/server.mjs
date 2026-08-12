@@ -55,11 +55,18 @@ server.registerTool("failing", { description: "Return a structured MCP tool fail
 }));
 
 const largeResultArgument = process.argv.find((argument) => argument.startsWith("--large-result-bytes="));
+const largeResultMarkerArgument = process.argv.find((argument) =>
+  argument.startsWith("--large-result-marker="),
+);
 if (largeResultArgument) {
   const largeResultBytes = Number(largeResultArgument.slice("--large-result-bytes=".length));
-  server.registerTool("large-result", { description: "Return a controlled oversized result" }, async () => ({
-    content: [{ type: "text", text: "x".repeat(largeResultBytes) }],
-  }));
+  server.registerTool("large-result", { description: "Return a controlled oversized result" }, async () => {
+    if (largeResultMarkerArgument)
+      writeFileSync(largeResultMarkerArgument.slice("--large-result-marker=".length), "called\n", {
+        flag: "a",
+      });
+    return { content: [{ type: "text", text: "x".repeat(largeResultBytes) }] };
+  });
 }
 
 server.registerTool(
