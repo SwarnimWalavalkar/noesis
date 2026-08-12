@@ -32,6 +32,27 @@ function createTestMcpIntegration(
 }
 
 describe("application MCP integration", () => {
+  test("preserves an eagerly observed host initialization failure for a delayed consumer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-host-initialization-"));
+    temporaryDirectories.push(root);
+    const home = join(root, "home");
+    const projectDirectory = join(root, "project");
+    await Promise.all([mkdir(home, { recursive: true }), mkdir(projectDirectory, { recursive: true })]);
+    await writeFile(join(home, "mcp.json"), "{ invalid json");
+
+    const integration = createApplicationMcpIntegration({
+      home,
+      projectDirectory,
+      sampling,
+      interactions: createTuiMcpInteractionBridge(),
+      openUrl: async () => undefined,
+      workspaceTrusted: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await expect(integration.start()).rejects.toThrow();
+  });
+
   test("fails closed before launching a server when lifecycle authority is unavailable", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-mcp-lifecycle-authority-"));
     temporaryDirectories.push(root);
@@ -85,7 +106,7 @@ describe("application MCP integration", () => {
       join(retryHome, "mcp.json"),
       JSON.stringify({ servers: { broken: { type: "local", command: "/missing-mcp-server" } } }),
     );
-    const retryOperations: string[] = [];
+    const retryIdentities: string[] = [];
     const retrying = createApplicationMcpIntegration({
       home: retryHome,
       projectDirectory: retryProject,
@@ -94,16 +115,14 @@ describe("application MCP integration", () => {
       openUrl: async () => undefined,
       workspaceTrusted: true,
     });
-    retrying.setLifecycleAuthorizer(async ({ operationId, execute }) => {
-      retryOperations.push(operationId);
+    retrying.setLifecycleAuthorizer(async ({ connectionIdentity, execute }) => {
+      if (!connectionIdentity) throw new Error("Expected a connection identity");
+      retryIdentities.push(connectionIdentity);
       return await execute();
     });
     await retrying.start();
-    await vi.waitFor(() => expect(retryOperations.length).toBeGreaterThanOrEqual(2));
-    const [initialOperation, retriedOperation] = retryOperations;
-    expect(initialOperation).toContain(":attempt:0:transport:stdio");
-    expect(retriedOperation).toContain(":attempt:1:transport:stdio");
-    expect(initialOperation?.split(":attempt:")[0]).toBe(retriedOperation?.split(":attempt:")[0]);
+    await vi.waitFor(() => expect(retryIdentities.length).toBeGreaterThanOrEqual(2));
+    expect(new Set(retryIdentities).size).toBe(1);
     await retrying.close();
 
     const uncertainHome = join(root, "uncertain-home");
@@ -120,7 +139,7 @@ describe("application MCP integration", () => {
         },
       }),
     );
-    const uncertainOperations: string[] = [];
+    const uncertainIdentities: string[] = [];
     const uncertain = createApplicationMcpIntegration({
       home: uncertainHome,
       projectDirectory: uncertainProject,
@@ -129,15 +148,16 @@ describe("application MCP integration", () => {
       openUrl: async () => undefined,
       workspaceTrusted: true,
     });
-    uncertain.setLifecycleAuthorizer(async ({ operationId, execute }) => {
-      uncertainOperations.push(operationId);
+    uncertain.setLifecycleAuthorizer(async ({ connectionIdentity, execute }) => {
+      if (!connectionIdentity) throw new Error("Expected a connection identity");
+      uncertainIdentities.push(connectionIdentity);
       await execute();
       throw new Error("controlled authority settlement uncertainty");
     });
     await uncertain.start();
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    expect(uncertainOperations).toHaveLength(1);
+    expect(uncertainIdentities).toHaveLength(1);
     expect(uncertain.host.inspectServer("controlled")).toMatchObject({
       status: "failed",
       lastError: "controlled authority settlement uncertainty",

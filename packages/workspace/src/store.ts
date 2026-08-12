@@ -82,6 +82,7 @@ import {
 import { createProtectedFeedbackStore } from "./feedback-store.ts";
 import { importLegacyWorkspace } from "./importer.ts";
 import { createDurableJobStore } from "./jobs.ts";
+import { createMcpConnectionCycleAllocator } from "./mcp-connection-cycles.ts";
 import { createProtectedWorkingAdjustmentStore } from "./working-adjustments.ts";
 import {
   initializeWorkspaceDirectories,
@@ -306,6 +307,7 @@ export async function createWorkspaceStore(
   const database = await openWorkspaceDatabase(paths, now);
   const db = database.connection;
   const authority = createWorkspaceAuthorityBoundary(database, now);
+  const mcpConnectionCycles = createMcpConnectionCycleAllocator(database, now);
   const runtimeOwnerId = options.recoverInterruptedOperations
     ? (options.runtimeOwnerId ?? createId("runtime_owner"))
     : undefined;
@@ -1494,6 +1496,7 @@ export async function createWorkspaceStore(
       workspace,
       Object.freeze({
         authority,
+        mcpConnectionCycles,
         protectedRuntime: createProtectedWorkspaceRuntime({
           workspaceRoot: paths.root,
           authority,

@@ -50,13 +50,18 @@ export type ApplicationMcpSamplingAuthorizer = (input: {
   readonly execute: () => Promise<unknown>;
 }) => Promise<unknown>;
 
-export type ApplicationMcpLifecycleAuthorizer = (input: {
-  readonly operationId: string;
-  readonly effect: "write" | "execute" | "network";
-  readonly resource: string;
-  readonly request: JsonValue;
-  readonly execute: () => Promise<JsonValue>;
-}) => Promise<JsonValue>;
+type ApplicationMcpLifecycleIdentity =
+  | { readonly operationId: string; readonly connectionIdentity?: never }
+  | { readonly operationId?: never; readonly connectionIdentity: string };
+
+export type ApplicationMcpLifecycleAuthorizer = (
+  input: ApplicationMcpLifecycleIdentity & {
+    readonly effect: "write" | "execute" | "network";
+    readonly resource: string;
+    readonly request: JsonValue;
+    readonly execute: () => Promise<JsonValue>;
+  },
+) => Promise<JsonValue>;
 
 function hostConfig(config: LoadedMcpConfig, workspaceTrusted: boolean): LoadedMcpConfig {
   if (workspaceTrusted) return config;
@@ -245,14 +250,18 @@ export function createApplicationMcpIntegration(input: {
   const authorizeLifecycle = async (input: {
     readonly operation: string;
     readonly operationId?: string;
+    readonly connectionIdentity?: string;
     readonly effect: "write" | "execute" | "network";
     readonly resource: string;
     readonly request: JsonValue;
     readonly execute: () => Promise<JsonValue>;
   }): Promise<JsonValue> => {
     if (!lifecycleAuthorizer) throw new Error("MCP lifecycle authority is not available");
+    const identity: ApplicationMcpLifecycleIdentity = input.connectionIdentity
+      ? { connectionIdentity: input.connectionIdentity }
+      : { operationId: input.operationId ?? createId(`mcp-${input.operation}`) };
     return await lifecycleAuthorizer({
-      operationId: input.operationId ?? createId(`mcp-${input.operation}`),
+      ...identity,
       effect: input.effect,
       resource: input.resource,
       request: input.request,
@@ -325,16 +334,16 @@ export function createApplicationMcpIntegration(input: {
         createSecureMcpOAuthCredentialStore(mcpCredentialPath(input.home)),
       ),
       handlers: {
-        connect: async ({ operationId, serverName, scope, transport, execute }) => {
+        connect: async ({ connectionIdentity, serverName, scope, transport, execute }) => {
           let effectFailed = false;
           let effectFailure: unknown;
           try {
             await authorizeLifecycle({
               operation: "connect",
-              operationId,
+              connectionIdentity,
               effect: transport === "stdio" ? "execute" : "network",
               resource: `server:${scope}:${serverName}:connection`,
-              request: toJsonValue({ serverName, scope, transport }),
+              request: toJsonValue({ connectionIdentity, serverName, scope }),
               execute: async () => {
                 try {
                   await execute();
@@ -400,6 +409,9 @@ export function createApplicationMcpIntegration(input: {
     });
     return host;
   });
+  // Configuration starts loading eagerly so the host is ready for the runtime. Observe an early
+  // rejection immediately while retaining the original promise for every later consumer.
+  void hostPromise.catch(() => undefined);
   const currentHost = async (): Promise<McpHostManager> => await hostPromise;
   const reload = async (): Promise<void> => {
     configPromise = loadMcpConfig(input);

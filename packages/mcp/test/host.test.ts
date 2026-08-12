@@ -18,6 +18,95 @@ const emptyCredentials = (): McpOAuthCredentialStore => ({
 });
 
 describe("MCP host", () => {
+  test("keeps connection identity stable across transports, retries, and host restarts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-connect-identity-"));
+    const home = join(root, "home");
+    await writeMcpServer({
+      home,
+      projectDirectory: root,
+      scope: "project",
+      name: "controlled",
+      config: { type: "remote", url: "https://example.test/mcp" },
+    });
+    const config = await loadMcpConfig({ home, projectDirectory: root });
+    const identities: string[] = [];
+    const transports: string[] = [];
+    const createManager = () =>
+      createMcpHostManager({
+        home,
+        projectDirectory: root,
+        config,
+        credentials: emptyCredentials(),
+        handlers: {
+          connect: async ({ connectionIdentity, transport }) => {
+            identities.push(connectionIdentity);
+            transports.push(transport);
+            throw new Error("controlled retryable connection failure");
+          },
+          sample: async () => {
+            throw new Error("sampling is not expected");
+          },
+          elicit: async () => ({ action: "decline" }),
+          onOAuthRedirect: () => undefined,
+        },
+      });
+
+    const first = createManager();
+    await first.start();
+    await vi.waitFor(() => expect(identities.length).toBeGreaterThanOrEqual(4), { timeout: 5_000 });
+    await first.close();
+    const beforeRestart = identities.length;
+
+    const second = createManager();
+    await second.start();
+    await vi.waitFor(() => expect(identities.length).toBeGreaterThan(beforeRestart));
+    await second.close();
+
+    expect(new Set(transports)).toEqual(new Set(["streamable_http", "sse"]));
+    expect(new Set(identities)).toHaveLength(1);
+    expect(identities[0]).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  test("bounds reconnect attempts when connection failure events are rejected", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-event-failure-"));
+    const home = join(root, "home");
+    await writeMcpServer({
+      home,
+      projectDirectory: root,
+      scope: "project",
+      name: "broken",
+      config: { type: "local", command: "/definitely/missing/noesis-mcp" },
+    });
+    let attempts = 0;
+    const manager = createMcpHostManager({
+      home,
+      projectDirectory: root,
+      config: await loadMcpConfig({ home, projectDirectory: root }),
+      credentials: emptyCredentials(),
+      handlers: {
+        connect: async ({ execute }) => {
+          attempts += 1;
+          await execute();
+        },
+        sample: async () => {
+          throw new Error("sampling is not expected");
+        },
+        elicit: async () => ({ action: "decline" }),
+        onOAuthRedirect: () => undefined,
+        onEvent: async () => {
+          throw new Error("controlled event sink failure");
+        },
+      },
+    });
+
+    await manager.start();
+    await vi.waitFor(() => expect(attempts).toBe(4), { timeout: 5_000 });
+    await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    expect(attempts).toBe(4);
+    expect(manager.inspectServer("broken")?.status).toBe("failed");
+    await manager.close();
+  });
+
   test("does not retry a connection attempt rejected before its lifecycle effect begins", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-mcp-denied-connect-"));
     const home = join(root, "home");

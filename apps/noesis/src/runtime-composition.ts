@@ -1530,8 +1530,13 @@ export async function createApplicationRuntimeComposition(
       if (savedDefinitionMutationTails.get(key) === tail) savedDefinitionMutationTails.delete(key);
     }
   };
-  const { authority, protectedRuntime } = createWorkspaceRuntimeInternals(workspace);
-  options.mcp?.setLifecycleAuthorizer(async ({ operationId, effect, resource, request, execute }) => {
+  const { authority, mcpConnectionCycles, protectedRuntime } = createWorkspaceRuntimeInternals(workspace);
+  options.mcp?.setLifecycleAuthorizer(async (input) => {
+    const { effect, resource, request, execute } = input;
+    const operationId =
+      "connectionIdentity" in input
+        ? await mcpConnectionCycles.claim(input.connectionIdentity)
+        : input.operationId;
     const protectedResource = `mcp:${project.projectId}:${resource}`;
     const requestDigest = sha256(canonicalJson({ operationId, resource: protectedResource, request }));
     const decision = await authority.runForeground(

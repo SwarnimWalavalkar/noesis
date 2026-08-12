@@ -2,7 +2,13 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
-import type { CapabilityRevisionRef, FileRevisionRef, JsonValue, WorkingAdjustment } from "@noesis/domain";
+import {
+  type CapabilityRevisionRef,
+  type FileRevisionRef,
+  type JsonValue,
+  sha256,
+  type WorkingAdjustment,
+} from "@noesis/domain";
 import {
   type AuthorityBoundary,
   type AuthorityReceipt,
@@ -181,6 +187,81 @@ async function captureReceipt(
 }
 
 describe("protected workspace runtime", () => {
+  test("allocates MCP connection cycles durably and advances only after terminal authority state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-mcp-connection-cycles-"));
+    roots.push(root);
+    const connectionIdentity = sha256("controlled MCP connection");
+    const firstWorkspace = await createWorkspaceStore(root);
+    const firstOperationId =
+      await createWorkspaceRuntimeInternals(firstWorkspace).mcpConnectionCycles.claim(connectionIdentity);
+    firstWorkspace.close();
+
+    const workspace = await createWorkspaceStore(root);
+    stores.push(workspace);
+    const internals = createWorkspaceRuntimeInternals(workspace);
+    await expect(internals.mcpConnectionCycles.claim(connectionIdentity)).resolves.toBe(firstOperationId);
+
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let release: (() => void) | undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const resource = `mcp:project:server:${connectionIdentity}:connection`;
+    const requestDigest = sha256("controlled connection request");
+    const running = internals.authority.runForeground(
+      {
+        operationId: firstOperationId,
+        effect: "execute",
+        resource,
+        estimatedCost: 1,
+        idempotencyKey: `mcp-lifecycle:${firstOperationId}`,
+        requestDigest,
+        execute: async () => {
+          markStarted?.();
+          await blocked;
+          return null;
+        },
+      },
+      Object.freeze({
+        effects: Object.freeze(["execute"]),
+        resourcePatterns: Object.freeze([resource]),
+        credentialRefs: Object.freeze([]),
+      }),
+    );
+    await started;
+    await expect(internals.mcpConnectionCycles.claim(connectionIdentity)).resolves.toBe(firstOperationId);
+    release?.();
+    await expect(running).resolves.toMatchObject({ ok: true });
+
+    const secondOperationId = await internals.mcpConnectionCycles.claim(connectionIdentity);
+    expect(secondOperationId).not.toBe(firstOperationId);
+    const failed = await internals.authority.runForeground(
+      {
+        operationId: secondOperationId,
+        effect: "execute",
+        resource,
+        estimatedCost: 1,
+        idempotencyKey: `mcp-lifecycle:${secondOperationId}`,
+        requestDigest,
+        execute: async () => {
+          throw new Error("controlled connection failure");
+        },
+      },
+      Object.freeze({
+        effects: Object.freeze(["execute"]),
+        resourcePatterns: Object.freeze([resource]),
+        credentialRefs: Object.freeze([]),
+      }),
+    );
+    expect(failed).toMatchObject({ ok: false, code: "failed" });
+    await expect(internals.mcpConnectionCycles.claim(connectionIdentity)).resolves.not.toBe(
+      secondOperationId,
+    );
+  });
+
   test("checks cancellation inside protected adjustment authority before store mutation", async () => {
     const mutations = mutableWorkingAdjustments();
     const runtime = await runtimeWithWorkingAdjustments(mutations.store);
