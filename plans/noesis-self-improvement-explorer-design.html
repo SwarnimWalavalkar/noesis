@@ -36,7 +36,7 @@
     <div class="grid">
       <div class="card"><strong>List</strong><p class="muted">Chronology, short title, applicability, current state, kind, latest outcome, and origin.</p></div>
       <div class="card"><strong>Detail</strong><p class="muted">Observation, intended future use, applicability, origin, evidence, exact revision, evaluation, activation, feedback, and current status.</p></div>
-      <div class="card"><strong>Raw view</strong><p class="muted">Exact job IDs and stored records remain reachable for debugging without dominating the normal view.</p></div>
+      <div class="card"><strong>Raw view</strong><p class="muted">Authorized resolvers expose exact IDs and bounded, sensitivity-redacted stored records. Missing authority, provenance, or access fails closed instead of showing guessed or unredacted data.</p></div>
     </div>
   </section>
 
@@ -45,20 +45,35 @@
     <li>Should project strategies and durable capability revisions share one list but different detail templates?</li>
     <li>Do we show only material changes, while keeping <code>no_change</code> and routine jobs under diagnostics?</li>
     <li>After the inspect-only version, which protected action should ship first: unapply a project strategy, contest a lesson, or revert a durable revision?</li>
-    <li>Should <code>/learning</code> open this browser or remain a terse textual summary?</li>
+    <li>Should filters and diagnostics stay in the overlay or receive their own command arguments?</li>
     <li>How should the TUI explain a change whose evaluation is still running without pinning transient status into the transcript?</li>
   </ol></section>
 
-  <section><h2>Interaction sketch</h2><pre><code>CHANGES · current project
+  <section><h2>Interaction sketch</h2>
+    <p><code>/changes</code> opens the list. <code>/change &lt;id&gt;</code> opens one exact change. <code>/learning pause|resume</code> remains the control surface for ambient learning and is not repurposed as a browser.</p>
+    <pre><code>CHANGES · current project
 
   active       Review claims against observable state
   evaluating   Prefer narrow research questions before broad plans
-  reverted     Use a fixed checklist for architecture reviews
 
-↑/↓ select · enter inspect · f filter · esc close</code></pre></section>
+↑/↓ select · enter inspect · f filter · esc close</code></pre>
+    <p class="muted">A secondary history filter shows settled, superseded, and reverted changes that no longer apply here.</p>
+  </section>
 
   <section><h2>Read-model boundary</h2>
     <p class="muted">The application composes one read model across authoritative adjustments, experiments, revisions, evaluation, activation, and feedback. It derives origin project through exact links to the source adjustment or source turn's frozen <code>ProjectRef</code>. Applicability remains a separate field from experiment or capability scope. The read model creates no second durable Change authority. The TUI renders it and owns no durable state. Missing links remain visible as incomplete data rather than being guessed from activity history.</p>
+    <ul>
+      <li>Adjustment content comes from immutable working-adjustment rows; whether it is current comes from the active project binding.</li>
+      <li>Hypothesis, experiment state, source adjustment, and final outcome come from the authoritative experiment row.</li>
+      <li>Candidate material comes from immutable capability and file revisions. Evaluation evidence comes from trial, report, and evaluation rows.</li>
+      <li>Currently served durable behavior comes from activation state. Feedback comes from authoritative signals and outcomes.</li>
+      <li>Origin comes from the source adjustment or frozen source-turn <code>ProjectRef</code>. Coordinator jobs supply diagnostic progress only.</li>
+      <li>Current state and outcomes are never reconstructed from activity chronology, notices, or job history.</li>
+    </ul>
+  </section>
+
+  <section><h2>Future protected actions</h2>
+    <p class="muted">A later unapply, contest, or revert control emits an application intent with the exact target revision and expected current state. AuthorityBoundary and EffectGateway validate and execute it as a durable operation. The overlay never writes operational tables, mints authority, or treats an optimistic UI update as completion.</p>
   </section>
 </main></body>
 </html>

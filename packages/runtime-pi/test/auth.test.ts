@@ -13,7 +13,6 @@ import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { describe, expect, test } from "vitest";
 import {
-  assertPiModelSelection,
   credentialFileMode,
   createPiAgentRuntime,
   createPiAgentRoleRunner,
@@ -22,6 +21,7 @@ import {
   createDefaultRoleContextPolicy,
   createSecurePiCredentialStore,
   piAuthPath,
+  preparePiModelSelection,
 } from "../src/index.ts";
 
 const emptyAuthContext = {
@@ -48,14 +48,44 @@ describe("Pi authentication", () => {
     const services = createPiModelServices(home, { authContext: emptyAuthContext });
 
     expect(() =>
-      assertPiModelSelection(services.models, { provider: "opencode", model: "kimi-k2.6" }),
+      preparePiModelSelection(services.models, { provider: "opencode", model: "kimi-k2.6" }),
     ).not.toThrow();
     expect(() =>
-      assertPiModelSelection(services.models, { provider: "opencode", model: "gpt-5.6-sol" }),
-    ).toThrow("Choose a matching model with --model");
-    expect(() => assertPiModelSelection(services.models, { provider: "missing", model: "anything" })).toThrow(
-      "Supported providers: anthropic, openai-codex, opencode, openrouter",
-    );
+      preparePiModelSelection(services.models, { provider: "opencode", model: "gpt-5.6-sol" }),
+    ).toThrow("belongs to openai-codex, not provider opencode");
+    expect(() =>
+      preparePiModelSelection(services.models, { provider: "missing", model: "anything" }),
+    ).toThrow("Supported providers: anthropic, openai-codex, opencode, openrouter");
+  });
+
+  test("prepares a custom model from its selected provider's Pi metadata", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-custom-model-"));
+    const services = createPiModelServices(home, { authContext: emptyAuthContext });
+
+    preparePiModelSelection(services.models, {
+      provider: "openrouter",
+      model: "research-lab/future-model",
+    });
+
+    const custom = services.models.getModel("openrouter", "research-lab/future-model");
+    expect(custom).toMatchObject({
+      provider: "openrouter",
+      id: "research-lab/future-model",
+      name: "research-lab/future-model",
+    });
+  });
+
+  test("rejects unknown OpenCode models instead of guessing across its mixed API transports", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-opencode-unknown-"));
+    const services = createPiModelServices(home, { authContext: emptyAuthContext });
+
+    expect(() =>
+      preparePiModelSelection(services.models, {
+        provider: "opencode",
+        model: "future-unknown-model",
+      }),
+    ).toThrow("Model future-unknown-model is not available from provider opencode");
+    expect(services.models.getModel("opencode", "future-unknown-model")).toBeUndefined();
   });
 
   test("persists mocked OAuth login and refresh through Pi's credential-store contract", async () => {

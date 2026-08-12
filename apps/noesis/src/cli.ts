@@ -12,12 +12,12 @@ import {
   updateNoesisConfig,
 } from "@noesis/config";
 import {
-  assertPiModelSelection,
   createPiAgentRoleRunner,
   createPiAgentRuntime,
   createPiModelServices,
   createPiSkillLibrary,
   NOESIS_PROVIDER_IDS,
+  preparePiModelSelection,
   type PiAuthOperations,
 } from "@noesis/runtime-pi";
 import {
@@ -282,7 +282,7 @@ async function createRuntime(
   },
 ): Promise<ApplicationRuntime> {
   const services = createPiModelServices(config.home);
-  assertPiModelSelection(services.models, config.agent);
+  preparePiModelSelection(services.models, config.agent);
   const project = await resolveActiveProject(process.cwd());
   const skills = createPiSkillLibrary({
     cwd: project.root,
@@ -359,7 +359,7 @@ async function runOnboarding(input: CliInput): Promise<void> {
         prompts: promptsFromSurface(surface),
         auth: services.auth,
         authCallbacks: surfaceAuthCallbacks(surface),
-        validateModelSelection: (selection) => assertPiModelSelection(services.models, selection),
+        validateModelSelection: (selection) => preparePiModelSelection(services.models, selection),
       }),
     {
       subtitle: "first-launch setup",
@@ -415,13 +415,13 @@ async function runConfig(input: CliInput): Promise<void> {
     return;
   }
   if (action === "set") {
-    if (input.overrides.provider !== undefined || input.overrides.model !== undefined) {
+    if (Object.values(input.overrides).some((value) => value !== undefined)) {
       const current = await resolveNoesisConfig({ home: input.home, env: {} });
       const selection = {
         provider: input.overrides.provider ?? current.agent.provider,
         model: input.overrides.model ?? current.agent.model,
       };
-      assertPiModelSelection(createPiModelServices(input.home).models, selection);
+      preparePiModelSelection(createPiModelServices(input.home).models, selection);
     }
     console.log(JSON.stringify(await updateNoesisConfig(input.home, input.overrides), null, 2));
     return;

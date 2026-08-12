@@ -3940,9 +3940,7 @@ export async function createApplicationRuntimeComposition(
     getTrail(trailId);
     return await interactions.inspect(trailId);
   };
-  const compact: NoesisRuntime["compact"] = async (trailId) => {
-    const trail = getTrail(trailId);
-    if (trail.status === "running") throw new Error("Cannot compact a running trail");
+  const compact: NoesisRuntime["compact"] = async (_trailId) => {
     throw new Error("Session compaction is not implemented yet. No conversation data was changed.");
   };
   const listSkills: NonNullable<NoesisTuiRuntime["listSkills"]> = async () => {

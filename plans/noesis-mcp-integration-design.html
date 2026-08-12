@@ -31,11 +31,21 @@
     <div class="grid">
       <div class="card"><strong>Transports</strong><p class="muted">Start with stdio and Streamable HTTP.</p></div>
       <div class="card"><strong>Surface</strong><p class="muted">Tools only. Defer prompts, resources, roots, sampling, and elicitation.</p></div>
-      <div class="card"><strong>Execution</strong><p class="muted">Connection lifecycle and tool calls use the existing AuthorityBoundary, EffectGateway, ToolBroker, durable records, TUI rows, execute SDK, and hotbar.</p></div>
+      <div class="card"><strong>Lifecycle</strong><p class="muted">The connection manager requests launch, connect, authenticate, discover, reload, reconcile, and shutdown through AuthorityBoundary and EffectGateway. Each is a separate durable operation.</p></div>
+      <div class="card"><strong>Invocation</strong><p class="muted">Only admitted MCP tool calls use ToolBroker. The execute SDK and hotbar invoke the same descriptor through the same frozen Broker, permissions, and durable call path.</p></div>
     </div>
     <p>A project-local definition is inert until the user trusts its exact immutable normalized revision. The trust record binds the definition digest, transport, executable and arguments or remote URL, and credential references. Editing any bound field creates a new revision that is not trusted yet. Discovery produces a catalog snapshot before admission. Refresh and reconnect may change only a future turn's frozen catalog, never the catalog of a running turn.</p>
-    <p>Server names, descriptions, schemas, errors, and result text are bounded at the external boundary and remain untrusted data. They may describe Broker tools or appear in tool results, but they never become system instructions.</p>
+    <p>Each lifecycle effect has a stable operation ID and idempotency key bound to the server, operation, trusted definition digest, and request identity. An incomplete effect is reconciled from durable state; it is never retried by assuming it failed.</p>
+    <p>A discovered tool's immutable revision identity binds the trusted server-definition digest, discovery-snapshot digest, canonical descriptor and schemas, transport and endpoint identity, and credential references. Credential values are resolved only at execution from the protected credential store or process environment. They never enter definitions, trust records, snapshots, catalog descriptors, transcripts, or TUI read models.</p>
+    <p>Server names, descriptions, schemas, errors, and result text are bounded and credential-redacted at the external boundary and remain untrusted data. They may describe Broker tools or appear in tool results, but they never become system instructions.</p>
   </section>
+
+  <section><h2>Failure and publication</h2><ul>
+    <li>Each server has an independent lifecycle state. A failure quarantines only that server and makes its new calls fail closed.</li>
+    <li>The last-known-good immutable discovery snapshot remains available for inspection and for already frozen turns.</li>
+    <li>A refresh validates the complete new snapshot before atomically publishing a replacement catalog for future turns. Partial discovery never changes a catalog.</li>
+    <li>An ambiguous launch, connection, or shutdown remains unresolved until reconciliation proves its outcome.</li>
+  </ul></section>
 
   <section><h2>Decisions we need</h2><ol>
     <li>Should server definitions live in <code>~/.noesis/config.json</code>, a dedicated editable <code>mcp.json</code>, or project files?</li>
@@ -48,11 +58,11 @@
   </ol></section>
 
   <section><h2>Product surface</h2><ul>
-    <li><code>/mcp</code> lists servers, transport, health, tool count, and last error.</li>
+    <li><code>/mcp</code> renders a WorkspaceStore and SQLite-backed read model of trusted revisions, lifecycle operations, health, quarantine, discovery snapshots, tool count, and bounded last errors.</li>
     <li>A server detail overlay lists discovered tools and their descriptions.</li>
     <li>Tool calls flow through the normal transcript and run inspector.</li>
     <li>One broken server does not prevent other servers or local tools from working.</li>
-    <li>Shutdown closes clients and child processes deterministically.</li>
+    <li>Trust, reload, reconcile, and shutdown are application intents executed through AuthorityBoundary and EffectGateway. The TUI owns no MCP client or durable state.</li>
   </ul></section>
 
   <section><h2>Non-goals for the first build</h2>

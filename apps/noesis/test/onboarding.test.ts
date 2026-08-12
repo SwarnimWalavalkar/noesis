@@ -2,7 +2,13 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import type { NoesisAuthLoginCallbacks, PiAuthOperations, PiAuthStatus } from "@noesis/runtime-pi";
+import {
+  createPiModelServices,
+  type NoesisAuthLoginCallbacks,
+  type PiAuthOperations,
+  type PiAuthStatus,
+  preparePiModelSelection,
+} from "@noesis/runtime-pi";
 import {
   OnboardingCancelledError,
   type OnboardingChoice,
@@ -131,20 +137,21 @@ describe("first-launch onboarding", () => {
 
   test("uses existing OpenRouter environment auth without requesting or persisting a key", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-onboarding-openrouter-"));
-    const prompts = createScriptedPrompts(["openrouter", "low"], ["anthropic/claude-sonnet-4"], [true]);
+    const prompts = createScriptedPrompts(["openrouter", "low"], ["research-lab/future-model"], [true]);
     const auth = createFakeAuth({ provider: "openrouter", configured: true, source: "environment" });
+    const models = createPiModelServices(home).models;
 
     const result = await runFirstLaunchOnboarding({
       home,
       prompts,
       auth,
       authCallbacks,
-      validateModelSelection: acceptModelSelection,
+      validateModelSelection: (selection) => preparePiModelSelection(models, selection),
     });
 
     expect(result.config.agent).toEqual({
       provider: "openrouter",
-      model: "anthropic/claude-sonnet-4",
+      model: "research-lab/future-model",
       thinkingLevel: "low",
     });
     expect(auth.log).toEqual(["status:openrouter"]);

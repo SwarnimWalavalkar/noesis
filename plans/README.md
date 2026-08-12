@@ -14,12 +14,9 @@ The core work described by these plans has shipped. Their preimplementation gap 
 - [Compounding partnership product loop](compounding-partnership-product-loop.html)
 - [Tools, codemode, scripts, and workflows](noesis-tools-codemode-workflows-plan.html)
 - [Project level self evaluation](noesis-self-evolving-harness-architecture-plan.md)
+- [Bounded improvements delivery plan](noesis-bounded-improvements-delivery-plan.md)
 
 Keep future plans in this directory. Add their status here when they are created, completed, superseded, or abandoned.
-
-## Active delivery
-
-- [Bounded improvements delivery plan](noesis-bounded-improvements-delivery-plan.md)
 
 ## Open design workshops
 
