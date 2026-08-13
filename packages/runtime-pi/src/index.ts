@@ -518,7 +518,7 @@ export function createPiAgentRuntime(
         const estimateTokens = (text: string): number => Math.max(1, Math.ceil(text.length / 4));
         const estimatedRequestTokens =
           estimateTokens(completeSystemPrompt) +
-          estimateTokens(request.prompt) +
+          estimateTokens(explicitSkill?.prompt ?? request.prompt) +
           estimateTokens(activeToolMaterial) +
           history.reduce((total, message) => total + estimateTokens(message.content), 0);
         if (estimatedRequestTokens > plan.requestTokenBudget)

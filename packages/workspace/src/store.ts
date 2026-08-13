@@ -1872,16 +1872,24 @@ function createOperationalRepositories(
         const expectedFirstRetainedMessageId = expectedContextMessageIds[sourceMessageIds.length];
         if (checkpoint.firstRetainedMessageId !== expectedFirstRetainedMessageId)
           throw new Error("Context checkpoint retained tail must immediately follow its covered sources");
-        for (const messageId of expectedContextMessageIds) {
-          const expectedMessage = db
-            .prepare("SELECT session_id FROM messages WHERE message_id = ?")
-            .get(messageId);
-          if (
-            expectedMessage === undefined ||
-            requiredString(expectedMessage, "session_id") !== checkpoint.sessionId
+        const messagePlaceholders = expectedContextMessageIds.map(() => "?").join(", ");
+        const expectedMessages = new Map(
+          db
+            .prepare(
+              `SELECT message_id, session_id, content
+               FROM messages
+               WHERE message_id IN (${messagePlaceholders})`,
+            )
+            .all(...expectedContextMessageIds)
+            .map((row) => [requiredString(row, "message_id"), row] as const),
+        );
+        if (
+          expectedMessages.size !== expectedContextMessageIds.length ||
+          [...expectedMessages.values()].some(
+            (message) => requiredString(message, "session_id") !== checkpoint.sessionId,
           )
-            throw new Error(`Expected context message ${messageId} is missing from the checkpoint session`);
-        }
+        )
+          throw new Error("Expected context contains a message missing from the checkpoint session");
         const existing = db
           .prepare("SELECT * FROM context_checkpoints WHERE checkpoint_id = ?")
           .get(checkpoint.checkpointId);
@@ -1891,21 +1899,12 @@ function createOperationalRepositories(
             throw new Error(`Context checkpoint identity collision: ${checkpoint.checkpointId}`);
         } else {
           for (const source of checkpoint.sources) {
-            const message = db
-              .prepare("SELECT session_id, content FROM messages WHERE message_id = ?")
-              .get(source.messageId);
-            if (
-              message === undefined ||
-              requiredString(message, "session_id") !== checkpoint.sessionId ||
-              sha256(requiredString(message, "content")) !== source.contentDigest
-            )
+            const message = expectedMessages.get(source.messageId);
+            if (message === undefined || sha256(requiredString(message, "content")) !== source.contentDigest)
               throw new Error(`Context checkpoint source ${source.messageId} is missing or changed`);
           }
           if (checkpoint.firstRetainedMessageId !== undefined) {
-            const retained = db
-              .prepare("SELECT session_id FROM messages WHERE message_id = ?")
-              .get(checkpoint.firstRetainedMessageId);
-            if (retained === undefined || requiredString(retained, "session_id") !== checkpoint.sessionId)
+            if (expectedMessages.get(checkpoint.firstRetainedMessageId) === undefined)
               throw new Error(
                 `Context checkpoint retained message ${checkpoint.firstRetainedMessageId} is missing`,
               );

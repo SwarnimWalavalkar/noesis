@@ -97,8 +97,9 @@ const admitAndSettleSourceTurn = async (
   });
 };
 
-const seedWorkspaceThroughMigration32 = async (
+const seedWorkspaceThroughMigration = async (
   root: string,
+  maximumVersion: number,
 ): Promise<{ readonly databasePath: string; readonly database: DatabaseSync }> => {
   await mkdir(join(root, "database"), { recursive: true });
   const databasePath = join(root, "database", "noesis.sqlite");
@@ -106,7 +107,7 @@ const seedWorkspaceThroughMigration32 = async (
   const migrationNames = (await readdir(new URL("../migrations/", import.meta.url)))
     .filter((name) => /^\d{3}_.+\.sql$/u.test(name))
     .sort()
-    .filter((name) => Number(name.slice(0, 3)) <= 32);
+    .filter((name) => Number(name.slice(0, 3)) <= maximumVersion);
   for (const name of migrationNames) {
     const version = Number(name.slice(0, 3));
     database.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
@@ -116,6 +117,11 @@ const seedWorkspaceThroughMigration32 = async (
   }
   return Object.freeze({ databasePath, database });
 };
+
+const seedWorkspaceThroughMigration32 = async (
+  root: string,
+): Promise<{ readonly databasePath: string; readonly database: DatabaseSync }> =>
+  seedWorkspaceThroughMigration(root, 32);
 
 const seedLegacyWorkflowDependencyRun = (
   database: DatabaseSync,
@@ -358,6 +364,11 @@ describe("WorkspaceStore", () => {
         .prepare("UPDATE context_checkpoints SET first_retained_message_id = ? WHERE checkpoint_id = ?")
         .run("context-message-other", checkpoint.checkpointId),
     ).toThrow("context checkpoint references must belong to its session");
+    expect(() =>
+      integrityDatabase
+        .prepare("UPDATE context_checkpoints SET session_id = ? WHERE checkpoint_id = ?")
+        .run("session-context-other", checkpoint.checkpointId),
+    ).toThrow("context checkpoint session is immutable");
     integrityDatabase.close();
     store.close();
 
@@ -366,6 +377,89 @@ describe("WorkspaceStore", () => {
       checkpoint,
     );
     reopened.close();
+  });
+
+  test("rejects dangling checkpoint references when upgrading an applied migration 36 workspace", async () => {
+    const root = await temporary("context-checkpoint-dangling-upgrade");
+    const { databasePath, database } = await seedWorkspaceThroughMigration(root, 36);
+    database
+      .prepare(
+        `INSERT INTO sessions(
+          session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "session-context-dangling",
+        "Dangling context",
+        "idle",
+        "controlled",
+        "controlled",
+        "pi",
+        "2026-08-13T00:00:00.000Z",
+        "2026-08-13T00:00:00.000Z",
+        "{}",
+      );
+    database
+      .prepare(
+        `INSERT INTO messages(
+          message_id, session_id, role, content, sensitivity, created_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "context-message-dangling",
+        "session-context-dangling",
+        "user",
+        "This source is removed by a corrupted legacy workspace.",
+        "normal",
+        "2026-08-13T00:00:00.000Z",
+        "{}",
+      );
+    const source = Object.freeze({
+      messageId: "context-message-dangling",
+      contentDigest: sha256("This source is removed by a corrupted legacy workspace."),
+    });
+    database
+      .prepare(
+        `INSERT INTO context_checkpoints(
+          checkpoint_id, session_id, summary, summary_digest, source_digest,
+          last_covered_message_id, token_budget, estimated_summary_tokens, sensitivity,
+          provider, model, thinking_level, usage_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "context-checkpoint-dangling",
+        "session-context-dangling",
+        "Legacy summary.",
+        sha256("Legacy summary."),
+        sha256(canonicalJson(Object.freeze([source]))),
+        source.messageId,
+        160_000,
+        4,
+        "normal",
+        "controlled",
+        "controlled",
+        "off",
+        canonicalJson({ inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCost: 0 }),
+        "2026-08-13T00:00:01.000Z",
+      );
+    database
+      .prepare(
+        `INSERT INTO context_checkpoint_sources(checkpoint_id, ordinal, message_id, content_digest)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run("context-checkpoint-dangling", 0, source.messageId, source.contentDigest);
+    database.exec("PRAGMA foreign_keys = OFF");
+    database.prepare("DELETE FROM messages WHERE message_id = ?").run(source.messageId);
+    database.close();
+
+    await expect(createWorkspaceStore(root)).rejects.toThrow(
+      "Workspace migration 037_context_checkpoint_session_immutability.sql failed",
+    );
+    const inspection = new DatabaseSync(databasePath, { readOnly: true });
+    expect(inspection.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
+      version: 36,
+    });
+    inspection.close();
   });
 
   test("never re-indexes history retrieval tool calls as derived evidence", async () => {
@@ -1599,7 +1693,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 36 });
+    ).toEqual({ version: 37 });
     inspection.close();
   });
 
@@ -2316,7 +2410,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(36);
+    expect(versions.at(-1)).toBe(37);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

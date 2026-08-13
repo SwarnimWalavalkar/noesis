@@ -587,6 +587,66 @@ describe("agent runtime factories", () => {
     expect(snapshotReads).toBe(0);
   });
 
+  test("budgets the expanded explicit skill prompt before model inference", async () => {
+    const base = frozenPlan();
+    const { canonicalDigest: _digest, ...baseUnsigned } = base;
+    const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 1_000 });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const skillContent = "Apply the complete procedure. ".repeat(400);
+    const skill = Object.freeze({
+      name: "large-procedure",
+      description: "A procedure larger than the admitted request budget",
+      content: skillContent,
+      filePath: "/skills/large-procedure/SKILL.md",
+      contentDigest: sha256(skillContent),
+      disableModelInvocation: false,
+    });
+    const snapshot = Object.freeze({ skills: Object.freeze([skill]), diagnostics: Object.freeze([]) });
+    const controlled = createControlledPiModels();
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      skills: {
+        snapshot: async () => snapshot,
+        pinSnapshot: async () => snapshot,
+        claimPinnedSnapshot: (key) => (key === plan.planId ? snapshot : undefined),
+        discardPinnedSnapshot: () => undefined,
+        install: async () => undefined,
+        remove: async () => false,
+        update: async () => undefined,
+        configured: () => Object.freeze([]),
+      },
+      requirePinnedSkillSnapshot: true,
+      codeExecution: controlledCodeExecution(
+        {
+          resolve: async (received) =>
+            Object.freeze({
+              planId: received.planId,
+              canonicalDigest: received.canonicalDigest,
+              consumedMaterials: frozenPlanMaterialUses(received),
+              definitions: definitions("budgeted-skill"),
+            }),
+        },
+        "budgeted-skill",
+      ),
+    });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "/large-procedure follow it",
+          activeCapabilities: [],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow("complete request exceeds its token budget");
+    expect(controlled.provider.state.callCount).toBe(0);
+  });
+
   test("leaves unknown slash prompts untouched", async () => {
     const prompt = "/not-installed preserve this exact text";
     const controlled = createControlledPiModels({
