@@ -3156,7 +3156,15 @@ export async function createApplicationRuntimeComposition(
     return await running;
   };
   const hotbar: PiSelfToolAdapter["hotbar"] = async () => hotbarToolNames;
-  const inspectSelf: PiSelfToolAdapter["inspect"] = async ({ section, plan, request, catalog }) => {
+  const inspectSelf: PiSelfToolAdapter["inspect"] = async ({
+    section,
+    tool,
+    cursor,
+    limit,
+    plan,
+    request,
+    catalog,
+  }) => {
     const [memory, experiments] = await Promise.all([
       section === "overview" || section === "memory" ? criteria.list() : undefined,
       section === "overview" || section === "experiments"
@@ -3178,22 +3186,73 @@ export async function createApplicationRuntimeComposition(
     if (section === "memory") return toJsonValue(memory?.ok ? memory.value : Object.freeze([]));
     if (section === "experiments") return toJsonValue(experiments ?? Object.freeze([]));
     if (section === "tools") {
+      const pageCursor = cursor ?? 0;
+      const pageLimit = limit ?? 12;
       const aliases = catalog ? createHotbarToolAliases(catalog) : undefined;
       const reconciled = catalog
         ? reconcileHotbarTools(catalog, hotbarToolNames)
         : Object.freeze({ active: Object.freeze([]), unavailable: hotbarToolNames });
+      const sortedTools = [...(catalog?.tools ?? [])].sort((left, right) =>
+        left.name.localeCompare(right.name),
+      );
+      if (tool) {
+        const descriptor = sortedTools.find((candidate) => candidate.name === tool);
+        if (!descriptor) throw new Error(`Tool ${tool} is not available in this frozen turn`);
+        const complete = {
+          catalogId: catalog?.catalogId,
+          catalogDigest: catalog?.catalogDigest,
+          tool: descriptor,
+          alias: aliases?.get(tool) ?? hotbarToolAlias(tool),
+          direct: reconciled.active.includes(tool),
+          permissions: plan.permissionSnapshot,
+        };
+        const serialized = canonicalJson(complete);
+        if (new TextEncoder().encode(serialized).byteLength <= 56 * 1024) return toJsonValue(complete);
+        return toJsonValue({
+          catalogId: catalog?.catalogId,
+          catalogDigest: catalog?.catalogDigest,
+          tool: {
+            name: descriptor.name,
+            label: descriptor.label,
+            description: descriptor.description,
+            revisionId: descriptor.revisionId,
+            inputSchemaDigest: sha256(canonicalJson(descriptor.inputSchema)),
+            outputSchemaDigest: sha256(canonicalJson(descriptor.outputSchema)),
+            schemasOmitted: true,
+          },
+          alias: aliases?.get(tool) ?? hotbarToolAlias(tool),
+          direct: reconciled.active.includes(tool),
+          instructions: `Use execute with noesis.describe(${JSON.stringify(tool)}) to inspect the complete schema through the bounded Broker result path.`,
+        });
+      }
+      const page = sortedTools.slice(pageCursor, pageCursor + pageLimit);
       return toJsonValue({
-        ...(catalog ?? {}),
+        catalogId: catalog?.catalogId,
+        catalogDigest: catalog?.catalogDigest,
+        total: sortedTools.length,
+        cursor: pageCursor,
+        limit: pageLimit,
+        nextCursor: pageCursor + page.length < sortedTools.length ? pageCursor + page.length : null,
+        tools: page.map((descriptor) => ({
+          name: descriptor.name,
+          label: descriptor.label,
+          description: descriptor.description,
+          revisionId: descriptor.revisionId,
+          alias: aliases?.get(descriptor.name) ?? hotbarToolAlias(descriptor.name),
+          direct: reconciled.active.includes(descriptor.name),
+        })),
         hotbar: hotbarToolNames.map((name) => ({
           name,
           alias: aliases?.get(name) ?? hotbarToolAlias(name),
           available: aliases?.has(name) ?? false,
         })),
         unavailableHotbar: reconciled.unavailable,
-        permissions: plan.permissionSnapshot,
-        frozenToolMaterials: plan.selectedCapabilities.flatMap((selection) => selection.tools),
+        instructions:
+          "Pass tool with one canonical name to inspect its complete descriptor and schemas. Pass nextCursor as cursor to continue this exact frozen catalog.",
       });
     }
+    if (tool !== undefined || cursor !== undefined || limit !== undefined)
+      throw new Error("tool, cursor, and limit are only valid when section is 'tools'");
     return toJsonValue({
       planId: plan.planId,
       sessionId: plan.sessionId,

@@ -7,6 +7,9 @@ import type { PiFrozenToolCatalog } from "./execute-tool.ts";
 const MAX_DIRECT_TOOL_RESULT_BYTES = 64 * 1024;
 const inspectInput = z.strictObject({
   section: z.enum(["overview", "context", "capabilities", "memory", "experiments", "tools"]).optional(),
+  tool: z.string().trim().min(1).max(128).optional(),
+  cursor: z.number().int().nonnegative().optional(),
+  limit: z.number().int().min(1).max(25).optional(),
 });
 const rememberInput = z.strictObject({
   memory: z.string().trim().min(1).max(8_192),
@@ -32,6 +35,9 @@ export interface PiSelfToolAdapter {
   }) => Promise<readonly string[]>;
   readonly inspect: (input: {
     readonly section: z.infer<typeof inspectInput>["section"];
+    readonly tool: z.infer<typeof inspectInput>["tool"];
+    readonly cursor: z.infer<typeof inspectInput>["cursor"];
+    readonly limit: z.infer<typeof inspectInput>["limit"];
     readonly plan: FrozenTurnPlan;
     readonly request: AgentRuntimeRequest;
     readonly catalog?: PiFrozenToolCatalog;
@@ -113,12 +119,15 @@ export function createPiSelfTools(input: {
       name: "inspect_self",
       label: "Inspect self",
       description:
-        "Inspect Noesis's active context, capabilities, memory, experiments, or executable tool surface. Use section 'tools' to see the exact frozen tool names, descriptions, revisions, and input/output schemas available to execute in this turn.",
+        "Inspect Noesis's active context, capabilities, memory, experiments, or executable tool surface. Section 'tools' returns a bounded page of the exact frozen tool names and descriptors; pass tool with one canonical name to inspect its complete descriptor and schemas.",
       schema: inspectInput,
       signal: input.signal,
-      execute: async ({ section = "overview" }, signal) =>
+      execute: async ({ section = "overview", tool, cursor, limit }, signal) =>
         await input.adapter.inspect({
           section,
+          tool,
+          cursor,
+          limit,
           plan: input.plan,
           request: input.request,
           signal,

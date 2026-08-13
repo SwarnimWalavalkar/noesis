@@ -149,12 +149,12 @@ export const MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS = 4_000_000;
 export const MAX_FROZEN_CONTEXT_CHECKPOINT_SUMMARY_CHARACTERS = 32_000;
 
 /**
- * Provider-independent upper bound used before a request reaches a tokenizer-owning provider.
- * Byte-backed subword tokenizers cannot produce more text tokens than the input has UTF-8 bytes;
- * provider message and tool framing is reserved separately at the execution boundary.
+ * Provider-independent token estimate used when a provider has not reported usage yet.
+ * BPE tokenizers average roughly four UTF-8 bytes per token. Provider-owned usage replaces
+ * this estimate at the execution boundary as soon as a successful response is available.
  */
 export function estimateInputTokens(text: string): number {
-  return Math.max(1, new TextEncoder().encode(text).byteLength);
+  return Math.max(1, Math.ceil(new TextEncoder().encode(text).byteLength / 4));
 }
 
 /** The complete SQLite-authoritative input to one foreground execution. */

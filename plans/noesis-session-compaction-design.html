@@ -39,7 +39,7 @@
     <table>
       <thead><tr><th>Agent</th><th>Keep</th><th>Leave behind</th></tr></thead>
       <tbody>
-        <tr><td>Pi coding agent</td><td>Append a summary checkpoint, retain a recent raw tail, update the prior summary on repeated compaction, and support manual and automatic triggers.</td><td>Mid-turn splitting in the first release. Noesis can compact only complete replay-eligible turns.</td></tr>
+        <tr><td>Pi coding agent</td><td>Append a summary checkpoint, retain a recent raw tail, update the prior summary on repeated compaction, support manual and automatic triggers, and combine provider-reported usage with a portable estimate for trailing messages.</td><td>Semantic mid-turn summarization in the first release. Noesis compacts only complete replay-eligible turns, while a separate request projection bounds older tool results inside an active turn.</td></tr>
         <tr><td>Hermes</td><td>Use a structured continuation summary, bound serialized tool output, label the summary as reference context, and fail without changing history when summarization cannot complete safely.</td><td>Dual compression layers, session rotation, active-message rewriting, plugin compression engines, and fallback paths that discard messages.</td></tr>
       </tbody>
     </table>
@@ -73,6 +73,7 @@
       <li><code>outputReserve</code> comes from the resolved model's maximum output allowance. If the route cannot leave a positive input budget, model selection fails before a turn or compaction starts.</li>
       <li>When a smaller model clamps the configured budget, Noesis reports the effective value instead of silently claiming the configured value was used.</li>
       <li>The budget is one product setting. Noesis first reserves room for non-history request material, then uses the remainder for the checkpoint summary and recent raw tail. These internal allocations are not more user-facing knobs.</li>
+      <li>After a successful model response, its reported context usage is authoritative. Before provider usage exists, Noesis estimates roughly one token per four UTF-8 bytes. The estimate is deliberately provider-neutral; an OpenAI-specific tokenizer such as <code>tiktoken</code> would not give one sound answer for Anthropic, OpenCode, OpenRouter, and future routes.</li>
       <li>The summary may use at most one quarter of the history allocation, capped at 8000 tokens.</li>
       <li>Selection walks backward over complete turns until the raw-tail allocation is full. It never keeps a partial turn merely to fill the budget.</li>
     </ul>
@@ -94,6 +95,7 @@
       <li>Automatic compaction runs before a future turn when eligible history would otherwise be omitted by the configured token budget.</li>
       <li>Only one compaction may update a session at a time. A concurrent or stale attempt loses the active-binding compare-and-swap and leaves the winning checkpoint intact.</li>
       <li>The successful TUI confirmation is simply <strong>Context compacted</strong>. Failure messages state that context was not changed.</li>
+      <li>If an active tool-heavy turn would exceed the complete-request budget, Noesis first projects older tool results into bounded references containing their tool identity, digest, byte count, and preview. This changes only the next model request. Full tool results remain durable and inspectable.</li>
       <li>The first release does not add an automatic overflow retry. If the provider still rejects an admitted turn for context length, the turn fails truthfully and the user can retry after compaction.</li>
     </ul>
   </section>
@@ -120,7 +122,7 @@ resolveSessionContext(sessionId, modelRoute)</code></pre>
   </section>
 
   <section><h2>Deferred</h2><ul>
-    <li>Mid-turn or tool-pair splitting.</li>
+    <li>Semantic mid-turn or tool-pair summarization beyond bounded request-only tool-result projection.</li>
     <li>Multiple compression engines or provider-specific compaction settings.</li>
     <li>A dedicated checkpoint browser or approval flow.</li>
     <li>Automatic retry of a provider-rejected foreground turn.</li>
@@ -133,6 +135,7 @@ resolveSessionContext(sessionId, modelRoute)</code></pre>
     <li>Only future model context changes.</li>
     <li>The checkpoint and retained raw tail fit the effective token budget, which is strictly below the selected model's context window.</li>
     <li>The default and configured token budgets resolve consistently through <code>config.json</code>, startup, manual compaction, automatic compaction, and turn planning.</li>
+    <li>Provider-reported usage and the pre-response portable estimate use one token unit, and a budget failure reports the fixed, message, reported, trailing, and projected components.</li>
     <li>Only complete replay-eligible turns can move behind a checkpoint.</li>
     <li>Every checkpoint can be inspected. Replacement changes only the active binding and never edits an earlier checkpoint.</li>
     <li>No summary can widen permissions or instruction priority.</li>

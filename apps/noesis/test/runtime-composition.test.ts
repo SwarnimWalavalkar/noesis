@@ -340,7 +340,7 @@ describe("apps/noesis production control-plane composition", () => {
         const text = request.prompt.includes("short manual")
           ? "short answer"
           : history.length === 0
-            ? "assistant-history-".repeat(1_600)
+            ? "assistant-history-".repeat(6_000)
             : "continued from checkpoint";
         const createdAt = new Date().toISOString();
         emit({
@@ -402,7 +402,7 @@ describe("apps/noesis production control-plane composition", () => {
     ).resolves.toMatchObject({ sources: expect.arrayContaining([expect.objectContaining({})]) });
 
     const trail = await runtime.startTrail({ title: "Context compaction" });
-    const firstInput = "user-history-".repeat(1_200);
+    const firstInput = "user-history-".repeat(5_000);
     await runtime.debug.runTurn(trail.trailId, firstInput);
 
     await runtime.compact(trail.trailId);
@@ -421,7 +421,7 @@ describe("apps/noesis production control-plane composition", () => {
         expect.objectContaining({
           kind: "message",
           role: "assistant",
-          text: "assistant-history-".repeat(1_600),
+          text: "assistant-history-".repeat(6_000),
         }),
       ]),
     );
@@ -3665,6 +3665,85 @@ describe("apps/noesis production control-plane composition", () => {
         error: expect.stringMatching(/backend_failure|malformed/iu),
       },
     });
+    await runtime.shutdown();
+  });
+
+  test("pages the frozen self tool catalog and inspects one exact descriptor without overflowing", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-bounded-self-tools-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const pageSchema = z.object({
+      total: z.number().int().positive(),
+      nextCursor: z.number().int().positive().nullable(),
+      tools: z
+        .array(z.object({ name: z.string().min(1) }))
+        .min(1)
+        .max(5),
+    });
+    const detailSchema = z.object({
+      tool: z.object({
+        name: z.string().min(1),
+        inputSchema: z.unknown(),
+        outputSchema: z.unknown(),
+      }),
+    });
+    let step = 0;
+    let selectedTool = "";
+    const controlled = createControlledPiModels({
+      respond: (input) => {
+        if (input.systemPrompt.includes("role:")) return researchLoopControlledResponse(input);
+        const resultMessage = [...input.context.messages]
+          .reverse()
+          .find((message) => message.role === "toolResult");
+        if (step === 0) {
+          step = 1;
+          return controlledToolCallResponse("inspect_self", { section: "tools", limit: 5 }, "inspect-page");
+        }
+        if (!resultMessage || resultMessage.role !== "toolResult")
+          throw new Error("Expected the inspect_self tool result");
+        const text = resultMessage.content
+          .flatMap((block) => (block.type === "text" ? [block.text] : []))
+          .join("");
+        if (step === 1) {
+          const page = pageSchema.parse(JSON.parse(text));
+          expect(new TextEncoder().encode(text).byteLength).toBeLessThan(64 * 1024);
+          expect(page.total).toBeGreaterThan(page.tools.length);
+          expect(page.nextCursor).toBe(5);
+          selectedTool = page.tools[0]?.name ?? "";
+          step = 2;
+          return controlledToolCallResponse(
+            "inspect_self",
+            { section: "tools", tool: selectedTool },
+            "inspect-detail",
+          );
+        }
+        const detail = detailSchema.parse(JSON.parse(text));
+        expect(detail.tool.name).toBe(selectedTool);
+        step = 3;
+        return "The bounded tool catalog remains fully inspectable.";
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({ variants: configurations, respond: scriptedHistoryRerankResponse }),
+    });
+
+    const trail = await runtime.startTrail({ title: "Bounded self inspection" });
+    const result = await runtime.debug.runTurn(trail.trailId, "Inspect the frozen tool catalog.");
+
+    expect(result.output).toBe("The bounded tool catalog remains fully inspectable.");
+    expect(step).toBe(3);
+    const transcript = await runtime.getTranscript(trail.trailId);
+    expect(
+      transcript.filter((entry) => entry.kind === "action" && entry.name === "inspect_self"),
+    ).toMatchObject([{ status: "completed" }, { status: "completed" }]);
     await runtime.shutdown();
   });
 

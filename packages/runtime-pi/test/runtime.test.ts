@@ -1147,7 +1147,7 @@ describe("agent runtime factories", () => {
         Object.freeze({
           name: "files.large-schema",
           label: "Large schema",
-          description: "Schema material ".repeat(1_500),
+          description: "Schema material ".repeat(4_000),
           revisionId: "files-large-schema-v1",
           inputSchema: Object.freeze({ type: "object" }),
           outputSchema: Object.freeze({ type: "object" }),
