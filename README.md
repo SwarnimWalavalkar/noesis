@@ -42,6 +42,7 @@ Noesis currently includes:
 - project scripts and durable workflows with immutable execution revisions
 - ambient reflection and temporary project strategies
 - experiments, evaluation, activation, feedback, and rollback for broader learned changes
+- an interactive `/learning` audit ledger for inspecting every self-improvement primitive and its evidence
 - SQLite storage for operational state, with ordinary files for editable definitions and artifacts.
 
 Noesis is an early research preview. Its interfaces and internal design will change as we use it.

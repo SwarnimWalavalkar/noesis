@@ -84,7 +84,6 @@ import { createProtectedFeedbackStore } from "./feedback-store.ts";
 import { importLegacyWorkspace } from "./importer.ts";
 import { createDurableJobStore } from "./jobs.ts";
 import { createMcpConnectionCycleAllocator } from "./mcp-connection-cycles.ts";
-import { createProtectedWorkingAdjustmentStore } from "./working-adjustments.ts";
 import {
   initializeWorkspaceDirectories,
   pathInside,
@@ -115,6 +114,7 @@ import type {
   WorkflowRunRecord,
   WorkspacePaths,
 } from "./types.ts";
+import { createProtectedWorkingAdjustmentStore } from "./working-adjustments.ts";
 
 export interface WorkspaceStoreOptions {
   readonly now?: () => string;
@@ -4162,6 +4162,30 @@ function createResearchRepositories(
         decodeFeedbackSignal(
           db.prepare("SELECT data_json FROM feedback_signals WHERE signal_id = ?").get(signalId),
         ),
+      listFeedbackSignals: async (
+        request: Parameters<
+          NonNullable<NoesisWorkspaceStore["research"]["feedbackSignals"]["listFeedbackSignals"]>
+        >[0],
+      ) => {
+        if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 1_000)
+          throw new Error("Feedback signal list limit must be an integer between 1 and 1000");
+        const rows = request.experimentId
+          ? db
+              .prepare(
+                "SELECT data_json FROM feedback_signals WHERE experiment_id = ? ORDER BY created_at DESC, signal_id LIMIT ?",
+              )
+              .all(request.experimentId, request.limit)
+          : db
+              .prepare("SELECT data_json FROM feedback_signals ORDER BY created_at DESC, signal_id LIMIT ?")
+              .all(request.limit);
+        return Object.freeze(
+          rows.map((row) => {
+            const signal = decodeFeedbackSignal(row);
+            if (!signal) throw new Error("Feedback signal row is missing canonical data");
+            return signal;
+          }),
+        );
+      },
       recordFeedbackSignal: async (signal: FeedbackSignal) => {
         const value = FeedbackSignalSchema.parse(signal);
         const encoded = JSON.stringify(value);

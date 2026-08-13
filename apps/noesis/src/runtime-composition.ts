@@ -142,6 +142,7 @@ import {
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
 import { loadLearningActivityForSession, loadLearningInspectionForSession } from "./learning-read-model.ts";
+import { loadLearningAuditSnapshot } from "./learning-audit-read-model.ts";
 import type {
   ApplicationMcpLifecycleAuthorizer,
   ApplicationMcpSamplingAuthorizer,
@@ -4782,6 +4783,20 @@ export async function createApplicationRuntimeComposition(
       workingAdjustments: workspace.workingAdjustments,
       outcomes: workspace.operational.outcomes,
     });
+  const inspectLearningAudit: NonNullable<NoesisTuiRuntime["inspectLearningAudit"]> = async (sessionId) =>
+    await loadLearningAuditSnapshot(
+      {
+        workspace,
+        criteria,
+        activations: protectedRuntime.activations,
+        feedback: protectedRuntime.feedback,
+        continuousFeedback: feedback,
+        resolveRevision,
+        resolveCapability: (capabilityId) => registry.getCapability(capabilityId),
+        projectId: project.projectId,
+      },
+      sessionId,
+    );
   const waitForLearningActivity: NonNullable<NoesisTuiRuntime["waitForLearningActivity"]> = async (
     sessionId,
     jobId,
@@ -4974,6 +4989,7 @@ export async function createApplicationRuntimeComposition(
     inspectExecution,
     listLearningActivity,
     inspectLearning,
+    inspectLearningAudit,
     waitForLearningActivity,
     ...(options.mcp
       ? {

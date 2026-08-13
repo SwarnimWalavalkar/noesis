@@ -18,6 +18,7 @@ export interface SlashCommandContext {
   readonly prepareTrailSelection?: (trailId: string) => Promise<void>;
   readonly requestRender: () => void;
   readonly openMcpManager?: () => void;
+  readonly openLearningAudit?: () => void;
 }
 
 export const HELP_LINES = [
@@ -362,6 +363,10 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
   }
 
   if (command === "/learning") {
+    if (context.openLearningAudit) {
+      context.openLearningAudit();
+      return true;
+    }
     if (!runtime.inspectLearning && !runtime.listLearningActivity) {
       publishInspector("Learning activity inspection is unavailable in this runtime.");
       return true;

@@ -3,10 +3,10 @@ import type {
   ArtifactFileRef,
   DatabaseRowRef,
   DatabaseTable,
+  EvaluationRecord,
   EvidenceKind,
   EvidenceRef,
   EvidenceRevisionRef,
-  EvaluationRecord,
   Experiment,
   ExperimentTrial,
   FeedbackSignal,
@@ -258,12 +258,20 @@ export interface EvaluationStorePort {
 
 export interface FeedbackSignalStorePort {
   readonly getFeedbackSignal: (signalId: string) => Promise<FeedbackSignal | undefined>;
+  readonly listFeedbackSignals?: (request: {
+    readonly experimentId?: string;
+    readonly limit: number;
+  }) => Promise<readonly FeedbackSignal[]>;
   readonly recordFeedbackSignal: (signal: FeedbackSignal) => Promise<DatabaseRowRef<"feedback_signals">>;
 }
 
 export interface WorkingAdjustmentReadPort {
   readonly get: (adjustmentId: string) => Promise<WorkingAdjustment | undefined>;
   readonly getActive: (projectId: string) => Promise<WorkingAdjustment | undefined>;
+  readonly list?: (request: {
+    readonly projectId?: string;
+    readonly limit: number;
+  }) => Promise<readonly WorkingAdjustment[]>;
   readonly listSettledEvidence: (request: {
     readonly projectId: string;
     readonly adjustmentId: string;

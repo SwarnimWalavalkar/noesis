@@ -82,6 +82,8 @@ Each lasting change has a history that the user can inspect. It connects:
 
 The main interaction remains conversational. A user can ask, "Why did you work with me instead of doing it?", "What have you learned about this project?", "Why did you use this ability?", or "Undo that change." Commands and detailed views can offer precise inspection, but they are not the only way to use the system.
 
+`/learning` opens an interactive audit ledger built with the same terminal primitives as the rest of Noesis. It exposes memories, reflections including `no_change`, working adjustments, experiments, immutable revisions, evaluation, activation, feedback, outcomes, lineage, and background jobs. Each record keeps its exact identity, evidence, typed relationships, and a bounded sensitivity-aware raw projection. The interface is a read model; it does not become another authority for learning state.
+
 Challenging a lesson does not erase history. Noesis records the correction and may narrow or retire the current revision. It keeps the evidence behind the earlier behavior. A revert restores the prior complete version instead of rebuilding it from files that may have changed.
 
 Generated reflection cannot approve a broader change. Generated code may publish a project script or workflow with its current permissions. Evaluation, permissions, workspace integrity, activation, and rollback remain in protected code.
