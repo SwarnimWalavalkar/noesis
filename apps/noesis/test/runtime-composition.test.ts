@@ -299,6 +299,133 @@ async function writeLegacyCompletedTurn(
 }
 
 describe("apps/noesis production control-plane composition", () => {
+  test("compacts durable history into a frozen checkpoint while preserving the complete transcript", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-context-compaction-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      context: Object.freeze({ tokenBudget: 600 }),
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const histories: NonNullable<AgentRuntimeRequest["history"]>[] = [];
+    const agent: NoesisAgentRuntime = Object.freeze({
+      name: "controlled-compaction-agent",
+      run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+        histories.push(Object.freeze([...(request.history ?? [])]));
+        emit({ type: "status", status: "started" });
+        const text =
+          (request.history?.length ?? 0) === 0
+            ? "assistant-history-".repeat(100)
+            : "continued from checkpoint";
+        const createdAt = new Date().toISOString();
+        emit({
+          type: "assistant-message",
+          text,
+          timelineSequence: 1,
+          createdAt,
+        });
+        emit({ type: "status", status: "completed" });
+        return Object.freeze({
+          outcome: "completed" as const,
+          stopReason: "stop" as const,
+          text,
+          assistantMessages: Object.freeze([Object.freeze({ text, timelineSequence: 1, createdAt })]),
+          provider: request.provider,
+          model: request.model,
+        });
+      },
+      steer: async () => Object.freeze({ status: "not-consumed" as const, reason: "not-running" as const }),
+      abort: async () => undefined,
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      agent,
+      resolveModelContext: () => Object.freeze({ contextWindow: 1_000, maxOutputTokens: 100 }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: (request) =>
+            request.systemPrompt.includes("role: session_compactor")
+              ? Object.freeze({
+                  text: JSON.stringify({
+                    goal: "Continue the established session task.",
+                    constraints: [],
+                    completedWork: ["The first turn completed."],
+                    currentState: "Ready for the next request.",
+                    decisions: [],
+                    blockers: [],
+                    nextSteps: [],
+                    criticalReferences: [],
+                  }),
+                  usage: Object.freeze({
+                    inputTokens: 400,
+                    outputTokens: 80,
+                    totalTokens: 480,
+                    estimatedCost: 0,
+                  }),
+                })
+              : Object.freeze({
+                  text: '{"observation":{"kind":"other","reason":"No learning."},"decision":"no_change","reason":"No change."}',
+                }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Context compaction" });
+    const firstInput = "user-history-".repeat(120);
+    await runtime.debug.runTurn(trail.trailId, firstInput);
+
+    await runtime.compact(trail.trailId);
+
+    const checkpoint = await runtime.debug.workspace.operational.contextCheckpoints.getActive(trail.trailId);
+    expect(checkpoint).toMatchObject({
+      tokenBudget: 600,
+      provider: CONTROLLED_PI_PROVIDER,
+      model: CONTROLLED_PI_MODEL,
+    });
+    expect(checkpoint).not.toHaveProperty("previousCheckpointId");
+    expect(checkpoint?.sources).toHaveLength(2);
+    const transcript = await runtime.getTranscript(trail.trailId);
+    expect(transcript).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "message", role: "user", text: firstInput }),
+        expect.objectContaining({
+          kind: "message",
+          role: "assistant",
+          text: "assistant-history-".repeat(100),
+        }),
+      ]),
+    );
+
+    const second = await runtime.debug.runTurn(trail.trailId, "Continue after compaction.");
+    expect(second.frozenTurnPlan).toMatchObject({
+      contextCheckpoint: { checkpointId: checkpoint?.checkpointId },
+      contextTokenBudget: 600,
+      conversationHistory: [],
+    });
+    expect(histories[1]).toEqual([
+      expect.objectContaining({ role: "assistant", content: expect.stringContaining("CONTEXT CHECKPOINT") }),
+    ]);
+
+    const automaticTrail = await runtime.startTrail({ title: "Automatic context compaction" });
+    await runtime.debug.runTurn(automaticTrail.trailId, firstInput);
+    const automaticTurn = await runtime.debug.runTurn(
+      automaticTrail.trailId,
+      "Continue after automatic compaction.",
+    );
+    expect(automaticTurn.frozenTurnPlan?.contextCheckpoint?.checkpointId).toBe(
+      (await runtime.debug.workspace.operational.contextCheckpoints.getActive(automaticTrail.trailId))
+        ?.checkpointId,
+    );
+    expect(histories[3]).toEqual([
+      expect.objectContaining({ role: "assistant", content: expect.stringContaining("CONTEXT CHECKPOINT") }),
+    ]);
+    await runtime.shutdown();
+  });
+
   test("shuts down composed resources when MCP startup rejects", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-mcp-start-failure-"));
     roots.push(home);
@@ -2323,10 +2450,10 @@ describe("apps/noesis production control-plane composition", () => {
     await runtime.debug.runTurn(trail.trailId, oversized);
     await runtime.debug.runTurn(trail.trailId, "inspect bounded history");
     const boundedRequest = requests.at(-1);
-    expect(boundedRequest?.history?.some((message) => message.content.includes(oversized))).toBe(false);
+    expect(boundedRequest?.history?.some((message) => message.content.includes(oversized))).toBe(true);
     expect(
       boundedRequest?.frozenTurnPlan?.conversationHistory?.some((entry) => entry.content.includes(oversized)),
-    ).toBe(false);
+    ).toBe(true);
     await runtime.shutdown();
   });
 
@@ -2740,7 +2867,7 @@ describe("apps/noesis production control-plane composition", () => {
         },
       ],
     });
-    expect(await runtime.debug.workspace.definitionMetadata.listCurrent("runtime_role")).toHaveLength(9);
+    expect(await runtime.debug.workspace.definitionMetadata.listCurrent("runtime_role")).toHaveLength(10);
     expect(JSON.stringify(seenConfigurations)).not.toMatch(
       /protectedActivations|protectedFeedback|authorityBoundary|restorationHandle/iu,
     );

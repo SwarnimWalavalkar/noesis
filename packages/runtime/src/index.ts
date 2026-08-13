@@ -28,6 +28,7 @@ export * from "./turn-settlement.ts";
 export * from "./transcript.ts";
 export * from "./turn-interaction.ts";
 export * from "./scheduled-execution.ts";
+export * from "./session-compaction.ts";
 
 export interface RuntimeTranscriptMessage {
   readonly kind: "message";
@@ -147,5 +148,5 @@ export interface NoesisRuntime {
     options?: InteractionDispatchOptions,
   ) => Promise<InteractionDispatchResult>;
   readonly inspectInteraction: (trailId: string) => Promise<InteractionSnapshot>;
-  readonly compact: (trailId: string) => Promise<void>;
+  readonly compact: (trailId: string, focus?: string) => Promise<void>;
 }

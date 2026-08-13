@@ -81,6 +81,7 @@ describe("Noesis config", () => {
       vetoes: "respect",
     });
     expect(resolved.experiments).toEqual({ maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 });
+    expect(resolved.context).toEqual({ tokenBudget: 160_000 });
     expect(resolved.tools.hotbar).toEqual([
       "files.read",
       "files.list",
@@ -89,6 +90,22 @@ describe("Noesis config", () => {
       "history.search_sessions",
     ]);
     expect(await readFile(noesisConfigPath(home), "utf8")).toBe(legacy);
+  });
+
+  test("uses a 160k context budget by default and accepts an explicit token budget", async () => {
+    const defaultsHome = await mkdtemp(join(tmpdir(), "noesis-config-context-default-"));
+    const configuredHome = await mkdtemp(join(tmpdir(), "noesis-config-context-explicit-"));
+    await writeFile(
+      noesisConfigPath(configuredHome),
+      JSON.stringify({ schemaVersion: 1, agent: {}, context: { tokenBudget: 96_000 } }),
+    );
+
+    expect((await resolveNoesisConfig({ home: defaultsHome, env: {} })).context).toEqual({
+      tokenBudget: 160_000,
+    });
+    expect((await resolveNoesisConfig({ home: configuredHome, env: {} })).context).toEqual({
+      tokenBudget: 96_000,
+    });
   });
 
   test("defaults workflow and session search tools without changing explicit persisted choices", async () => {
@@ -202,6 +219,7 @@ describe("Noesis config", () => {
         pins: "respect",
         vetoes: "respect",
       },
+      context: { tokenBudget: 160_000 },
       experiments: { maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 },
       tools: {
         hotbar: ["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"],

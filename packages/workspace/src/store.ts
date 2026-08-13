@@ -7,6 +7,7 @@ import {
   type ActorRef,
   type ArtifactFileRef,
   ArtifactFileRefSchema,
+  canonicalJson,
   type DatabaseRowRef,
   type DatabaseTable,
   type DataSensitivity,
@@ -96,6 +97,7 @@ import type {
   CanonicalSearchSource,
   ClassifyOutcomeRequest,
   CodeExecutionRecord,
+  ContextCheckpointRecord,
   MessageRecord,
   NoesisWorkspaceStore,
   OperationalCutoverReport,
@@ -1750,6 +1752,188 @@ function createOperationalRepositories(
 ): NoesisWorkspaceStore["operational"] {
   const db = database.connection;
   const systemActor: ActorRef = { actorId: "workspace-store", kind: "system" };
+  const checkpointUsageSchema = z.strictObject({
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    totalTokens: z.number().int().nonnegative(),
+    estimatedCost: z.number().nonnegative(),
+  });
+  const decodeContextCheckpoint = (row: unknown): ContextCheckpointRecord => {
+    const checkpointId = requiredString(row, "checkpoint_id");
+    const previousCheckpointId = optionalString(row, "previous_checkpoint_id");
+    const firstRetainedMessageId = optionalString(row, "first_retained_message_id");
+    const sources = db
+      .prepare(
+        `SELECT message_id, content_digest
+         FROM context_checkpoint_sources
+         WHERE checkpoint_id = ?
+         ORDER BY ordinal ASC`,
+      )
+      .all(checkpointId)
+      .map((source) =>
+        Object.freeze({
+          messageId: requiredString(source, "message_id"),
+          contentDigest: requiredString(source, "content_digest"),
+        }),
+      );
+    return Object.freeze({
+      checkpointId,
+      sessionId: requiredString(row, "session_id"),
+      ...(previousCheckpointId === undefined ? {} : { previousCheckpointId }),
+      summary: requiredString(row, "summary"),
+      summaryDigest: requiredString(row, "summary_digest"),
+      sourceDigest: requiredString(row, "source_digest"),
+      sources: Object.freeze(sources),
+      ...(firstRetainedMessageId === undefined ? {} : { firstRetainedMessageId }),
+      lastCoveredMessageId: requiredString(row, "last_covered_message_id"),
+      tokenBudget: z.number().int().positive().parse(requiredNumber(row, "token_budget")),
+      estimatedSummaryTokens: z
+        .number()
+        .int()
+        .positive()
+        .parse(requiredNumber(row, "estimated_summary_tokens")),
+      sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
+      provider: requiredString(row, "provider"),
+      model: requiredString(row, "model"),
+      thinkingLevel: z
+        .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+        .parse(requiredString(row, "thinking_level")),
+      usage: Object.freeze(checkpointUsageSchema.parse(parseJson(requiredString(row, "usage_json")))),
+      createdAt: requiredString(row, "created_at"),
+    });
+  };
+  const getContextCheckpoint = async (checkpointId: string): Promise<ContextCheckpointRecord | undefined> => {
+    const row = db.prepare("SELECT * FROM context_checkpoints WHERE checkpoint_id = ?").get(checkpointId);
+    return row === undefined ? undefined : decodeContextCheckpoint(row);
+  };
+  const getActiveContextCheckpoint = async (
+    sessionId: string,
+  ): Promise<ContextCheckpointRecord | undefined> => {
+    const row = db
+      .prepare(
+        `SELECT checkpoint.*
+         FROM session_context_state AS state
+         JOIN context_checkpoints AS checkpoint
+           ON checkpoint.checkpoint_id = state.active_checkpoint_id
+         WHERE state.session_id = ?`,
+      )
+      .get(sessionId);
+    return row === undefined ? undefined : decodeContextCheckpoint(row);
+  };
+  const activateContextCheckpoint: NoesisWorkspaceStore["operational"]["contextCheckpoints"]["activate"] =
+    async ({ checkpoint, expectedActiveCheckpointId }) =>
+      database.transaction(() => {
+        z.string().min(1).parse(checkpoint.checkpointId);
+        z.string().min(1).parse(checkpoint.sessionId);
+        z.string().min(1).max(32_000).parse(checkpoint.summary);
+        z.string()
+          .regex(/^[a-f0-9]{64}$/u)
+          .parse(checkpoint.summaryDigest);
+        z.string()
+          .regex(/^[a-f0-9]{64}$/u)
+          .parse(checkpoint.sourceDigest);
+        z.number().int().positive().max(1_000_000).parse(checkpoint.tokenBudget);
+        z.number().int().positive().parse(checkpoint.estimatedSummaryTokens);
+        SensitivitySchema.parse(checkpoint.sensitivity);
+        checkpointUsageSchema.parse(checkpoint.usage);
+        if (checkpoint.sources.length === 0)
+          throw new Error("A context checkpoint must cover at least one message");
+        if (checkpoint.lastCoveredMessageId !== checkpoint.sources.at(-1)?.messageId)
+          throw new Error("A context checkpoint's last covered message must be its final source");
+        if (sha256(checkpoint.summary) !== checkpoint.summaryDigest)
+          throw new Error(`Context checkpoint ${checkpoint.checkpointId} failed summary digest verification`);
+        if (sha256(canonicalJson(checkpoint.sources)) !== checkpoint.sourceDigest)
+          throw new Error(`Context checkpoint ${checkpoint.checkpointId} failed source digest verification`);
+        if (checkpoint.previousCheckpointId !== expectedActiveCheckpointId)
+          throw new Error("A context checkpoint must extend the expected active checkpoint");
+        if (db.prepare("SELECT 1 FROM sessions WHERE session_id = ?").get(checkpoint.sessionId) === undefined)
+          throw new Error(`Unknown context checkpoint session ${checkpoint.sessionId}`);
+        const activeRow = db
+          .prepare("SELECT active_checkpoint_id FROM session_context_state WHERE session_id = ?")
+          .get(checkpoint.sessionId);
+        const activeCheckpointId =
+          activeRow === undefined ? undefined : requiredString(activeRow, "active_checkpoint_id");
+        if (activeCheckpointId !== expectedActiveCheckpointId)
+          return Object.freeze({
+            status: "conflict" as const,
+            ...(activeCheckpointId === undefined ? {} : { activeCheckpointId }),
+          });
+        const existing = db
+          .prepare("SELECT * FROM context_checkpoints WHERE checkpoint_id = ?")
+          .get(checkpoint.checkpointId);
+        if (existing !== undefined) {
+          const decoded = decodeContextCheckpoint(existing);
+          if (!isDeepStrictEqual(decoded, checkpoint))
+            throw new Error(`Context checkpoint identity collision: ${checkpoint.checkpointId}`);
+        } else {
+          for (const source of checkpoint.sources) {
+            const message = db
+              .prepare("SELECT session_id, content FROM messages WHERE message_id = ?")
+              .get(source.messageId);
+            if (
+              message === undefined ||
+              requiredString(message, "session_id") !== checkpoint.sessionId ||
+              sha256(requiredString(message, "content")) !== source.contentDigest
+            )
+              throw new Error(`Context checkpoint source ${source.messageId} is missing or changed`);
+          }
+          if (checkpoint.firstRetainedMessageId !== undefined) {
+            const retained = db
+              .prepare("SELECT session_id FROM messages WHERE message_id = ?")
+              .get(checkpoint.firstRetainedMessageId);
+            if (retained === undefined || requiredString(retained, "session_id") !== checkpoint.sessionId)
+              throw new Error(
+                `Context checkpoint retained message ${checkpoint.firstRetainedMessageId} is missing`,
+              );
+          }
+          db.prepare(
+            `INSERT INTO context_checkpoints(
+              checkpoint_id, session_id, previous_checkpoint_id, summary, summary_digest,
+              source_digest, first_retained_message_id, last_covered_message_id, token_budget,
+              estimated_summary_tokens, sensitivity, provider, model, thinking_level, usage_json,
+              created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).run(
+            checkpoint.checkpointId,
+            checkpoint.sessionId,
+            checkpoint.previousCheckpointId ?? null,
+            checkpoint.summary,
+            checkpoint.summaryDigest,
+            checkpoint.sourceDigest,
+            checkpoint.firstRetainedMessageId ?? null,
+            checkpoint.lastCoveredMessageId,
+            checkpoint.tokenBudget,
+            checkpoint.estimatedSummaryTokens,
+            checkpoint.sensitivity,
+            checkpoint.provider,
+            checkpoint.model,
+            checkpoint.thinkingLevel,
+            canonicalJson(checkpoint.usage),
+            checkpoint.createdAt,
+          );
+          const insertSource = db.prepare(
+            `INSERT INTO context_checkpoint_sources(checkpoint_id, ordinal, message_id, content_digest)
+             VALUES (?, ?, ?, ?)`,
+          );
+          for (const [ordinal, source] of checkpoint.sources.entries())
+            insertSource.run(checkpoint.checkpointId, ordinal, source.messageId, source.contentDigest);
+        }
+        db.prepare(
+          `INSERT INTO session_context_state(session_id, active_checkpoint_id, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(session_id) DO UPDATE SET
+             active_checkpoint_id = excluded.active_checkpoint_id,
+             updated_at = excluded.updated_at`,
+        ).run(checkpoint.sessionId, checkpoint.checkpointId, checkpoint.createdAt);
+        recordActivity(
+          systemActor,
+          "context_checkpoint.activated",
+          "context_checkpoint",
+          checkpoint.checkpointId,
+          checkpoint.sources,
+        );
+        return Object.freeze({ status: "activated" as const, checkpoint });
+      });
   const registerTurnTimelineEntry = (
     turnId: string,
     timelineSequence: number,
@@ -3156,6 +3340,11 @@ function createOperationalRepositories(
   };
 
   return Object.freeze({
+    contextCheckpoints: Object.freeze({
+      get: getContextCheckpoint,
+      getActive: getActiveContextCheckpoint,
+      activate: activateContextCheckpoint,
+    }),
     foregroundTurns: Object.freeze({
       get: async (turnId: string) => {
         const row = db.prepare("SELECT * FROM foreground_turns WHERE turn_id = ?").get(turnId);

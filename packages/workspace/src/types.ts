@@ -58,6 +58,40 @@ export interface MessageRecord {
   readonly timelineSequence?: number;
 }
 
+export interface ContextCheckpointSource {
+  readonly messageId: string;
+  readonly contentDigest: string;
+}
+
+export interface ContextCheckpointRecord {
+  readonly checkpointId: string;
+  readonly sessionId: string;
+  readonly previousCheckpointId?: string;
+  readonly summary: string;
+  readonly summaryDigest: string;
+  readonly sourceDigest: string;
+  readonly sources: readonly ContextCheckpointSource[];
+  readonly firstRetainedMessageId?: string;
+  readonly lastCoveredMessageId: string;
+  readonly tokenBudget: number;
+  readonly estimatedSummaryTokens: number;
+  readonly sensitivity: Sensitivity;
+  readonly provider: string;
+  readonly model: string;
+  readonly thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  readonly usage: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly totalTokens: number;
+    readonly estimatedCost: number;
+  };
+  readonly createdAt: string;
+}
+
+export type ContextCheckpointActivationResult =
+  | { readonly status: "activated"; readonly checkpoint: ContextCheckpointRecord }
+  | { readonly status: "conflict"; readonly activeCheckpointId?: string };
+
 export type UserIntentMode = "turn" | "steer";
 export type UserIntentStatus = "pending" | "held" | "dispatching" | "unresolved" | "delivered" | "withdrawn";
 export type UserIntentSteerOrigin = "explicit" | "queued";
@@ -534,6 +568,14 @@ export interface SearchConfiguration {
 }
 
 export interface OperationalRepositories {
+  readonly contextCheckpoints: {
+    readonly get: (checkpointId: string) => Promise<ContextCheckpointRecord | undefined>;
+    readonly getActive: (sessionId: string) => Promise<ContextCheckpointRecord | undefined>;
+    readonly activate: (request: {
+      readonly checkpoint: ContextCheckpointRecord;
+      readonly expectedActiveCheckpointId?: string;
+    }) => Promise<ContextCheckpointActivationResult>;
+  };
   readonly foregroundTurns: {
     readonly get: (turnId: string) => Promise<
       | {

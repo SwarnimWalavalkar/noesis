@@ -114,11 +114,20 @@ function historyForRequest(
   plan: FrozenTurnPlan | undefined,
 ): NonNullable<AgentRuntimeRequest["history"]> {
   if (!plan) return Object.freeze([...(request.history ?? [])]);
-  const frozen = Object.freeze(
-    (plan.conversationHistory ?? []).map(({ role, content, createdAt }) =>
+  const frozen = Object.freeze([
+    ...(plan.contextCheckpoint
+      ? [
+          Object.freeze({
+            role: "assistant" as const,
+            content: plan.contextCheckpoint.summary,
+            createdAt: plan.contextCheckpoint.createdAt,
+          }),
+        ]
+      : []),
+    ...(plan.conversationHistory ?? []).map(({ role, content, createdAt }) =>
       Object.freeze({ role, content, createdAt }),
     ),
-  );
+  ]);
   if (request.history !== undefined) {
     const matches =
       request.history.length === frozen.length &&

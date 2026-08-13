@@ -34,6 +34,7 @@ Noesis currently includes:
 
 - a local terminal interface with streaming responses and visible tool activity
 - new, continued, and interactively resumed sessions
+- durable session compaction with a complete original transcript
 - search across previous sessions with source citations
 - direct tools for files, directories, shell commands, saved workflows, and session search
 - `execute` for combining tools with JavaScript
@@ -85,6 +86,22 @@ pnpm start -- --continue
 ```
 
 Noesis stores local state in `~/.noesis/` by default.
+
+Use `/compact` to summarize older completed turns while keeping recent turns raw. The original transcript remains intact for resume and search. Noesis also compacts automatically before a future turn would exceed its history budget.
+
+The default history budget is 160,000 tokens. Override it in `~/.noesis/config.json` when a smaller model or a different working style calls for another limit:
+
+```json
+{
+  "schemaVersion": 1,
+  "agent": {},
+  "context": {
+    "tokenBudget": 160000
+  }
+}
+```
+
+Noesis caps the effective budget below the selected model's context window and reserves that model's maximum output allowance.
 
 ## MCP servers
 

@@ -61,6 +61,8 @@ import {
 import { createMcpToolDefinitions, type McpHostManager } from "@noesis/mcp";
 import {
   type ActivationCandidateResolver,
+  buildContextCheckpointRecord,
+  compactionSensitivity,
   type CoordinatorPreflightPreparation,
   compareTrailRecency,
   createAtomicActivationController,
@@ -70,13 +72,16 @@ import {
   createTurnIntelligencePlanner,
   createTurnInteractionController,
   createTurnSettlement,
+  DEFAULT_CONTEXT_TOKEN_BUDGET,
+  estimateContextTokens,
   type ExperimentOutcomeJudge,
   type ExperimentOutcomeProposal,
   loadRuntimeTranscript,
-  MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS,
-  MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES,
-  MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
   type NoesisRuntime,
+  prepareCompactionWindow,
+  renderContextCheckpointSummary,
+  resolveContextTokenBudget,
+  resolvedSessionContext,
   type RunTurnOptions,
   type RuntimeControlPlane,
   type RuntimeCoordinator,
@@ -85,6 +90,8 @@ import {
   type TrailSummary,
   type TurnCapabilityRoutingRequest,
   type TurnResult,
+  serializeCompactionWindow,
+  type SessionContextMessage,
 } from "@noesis/runtime";
 import {
   createHotbarToolAliases,
@@ -161,6 +168,7 @@ export async function waitForReflectionBarrier(
 }
 const roleNames = [
   "capability_router",
+  "session_compactor",
   "history_reranker",
   "reflector",
   "revision_author",
@@ -202,6 +210,30 @@ const OutcomeProposalSchema = z.strictObject({
   proposal: z.enum(["keep", "revise", "revert"]),
   citedObservationIds: z.array(z.string().min(1)).min(1),
   summary: z.string().min(1),
+});
+
+const ContextCheckpointSummarySchema = z.strictObject({
+  goal: z.string().min(1).max(4_096),
+  constraints: z.array(z.string().min(1).max(2_048)).max(32),
+  completedWork: z.array(z.string().min(1).max(2_048)).max(64),
+  currentState: z.string().min(1).max(4_096),
+  decisions: z.array(z.string().min(1).max(2_048)).max(64),
+  blockers: z.array(z.string().min(1).max(2_048)).max(32),
+  nextSteps: z.array(z.string().min(1).max(2_048)).max(32),
+  criticalReferences: z.array(z.string().min(1).max(2_048)).max(64),
+});
+const ContextCompactionInferenceResultSchema = z.strictObject({
+  summary: z.string().min(1).max(32_000),
+  usage: z.strictObject({
+    inputTokens: z.number().int().nonnegative(),
+    outputTokens: z.number().int().nonnegative(),
+    totalTokens: z.number().int().nonnegative(),
+    estimatedCost: z.number().nonnegative(),
+  }),
+});
+const ContextCheckpointActivationSchema = z.strictObject({
+  status: z.enum(["activated", "conflict"]),
+  activeCheckpointId: z.string().min(1).optional(),
 });
 
 const ScriptManifestSchema = z.strictObject({
@@ -769,6 +801,10 @@ export interface ApplicationRuntimeCompositionOptions {
   readonly createRoleRunner: (
     configurations: readonly RoleVariantConfiguration[],
   ) => RuntimePiAgentRoleRunner;
+  readonly resolveModelContext?: (
+    provider: string,
+    model: string,
+  ) => Readonly<{ contextWindow: number; maxOutputTokens: number }>;
 }
 
 export async function resolveActiveProject(root: string): Promise<ProjectRef> {
@@ -1142,47 +1178,6 @@ async function replayEligibleHistoryMessages(workspace: NoesisWorkspaceStore, se
   );
 }
 
-const MAX_REPLAY_HISTORY_TURN_GROUPS = 8;
-
-/** Keep only complete recent conversational turns; never begin replay with an orphan steer or reply. */
-function boundedReplayHistoryMessages(
-  messages: readonly MessageRecord[],
-  maxMessages = MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES,
-): readonly MessageRecord[] {
-  const groups: MessageRecord[][] = [];
-  let current: MessageRecord[] | undefined;
-  for (const message of messages) {
-    const startsTurn = message.role === "user" && replayHistoryKind(message) === "turn";
-    if (startsTurn) {
-      current = [message];
-      groups.push(current);
-    } else if (current) {
-      current.push(message);
-    }
-  }
-
-  const selected: MessageRecord[][] = [];
-  let selectedCount = 0;
-  let selectedCharacters = 0;
-  for (let index = groups.length - 1; index >= 0; index -= 1) {
-    const group = groups[index];
-    if (!group) continue;
-    if (selected.length >= MAX_REPLAY_HISTORY_TURN_GROUPS) break;
-    const groupCharacters = group.reduce((total, message) => total + message.content.length, 0);
-    if (
-      group.length > maxMessages ||
-      selectedCount + group.length > maxMessages ||
-      group.some((message) => message.content.length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS) ||
-      selectedCharacters + groupCharacters > MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS
-    )
-      continue;
-    selected.unshift(group);
-    selectedCount += group.length;
-    selectedCharacters += groupCharacters;
-  }
-  return Object.freeze(selected.flat());
-}
-
 function roleKind(name: RoleName): Exclude<RoleName, "outcome_judge"> {
   return name === "outcome_judge" ? "judge_critic" : name;
 }
@@ -1243,9 +1238,11 @@ async function roleConfigurations(
         systemPrompt: rolePrompt(name),
         contextPolicy: createRestrictedRoleContextPolicy(role, {
           policyId: `noesis-${name}-bounded-v1`,
-          maxMessages: name === "capability_router" ? 24 : 12,
-          maxCharactersPerMessage: name === "capability_router" ? 16_000 : 12_000,
-          maxTotalCharacters: name === "capability_router" ? 64_000 : 48_000,
+          maxMessages: name === "session_compactor" ? 1 : name === "capability_router" ? 24 : 12,
+          maxCharactersPerMessage:
+            name === "session_compactor" ? 4_000_000 : name === "capability_router" ? 16_000 : 12_000,
+          maxTotalCharacters:
+            name === "session_compactor" ? 4_000_000 : name === "capability_router" ? 64_000 : 48_000,
           maxEvidenceRefs: 64,
           maxTools: 0,
           includeCapabilityRevisions: role !== "judge_critic",
@@ -1264,6 +1261,7 @@ async function roleConfigurations(
   };
   return Object.freeze({
     capability_router: requireRole("capability_router"),
+    session_compactor: requireRole("session_compactor"),
     history_reranker: requireRole("history_reranker"),
     reflector: requireRole("reflector"),
     revision_author: requireRole("revision_author"),
@@ -3405,6 +3403,31 @@ export async function createApplicationRuntimeComposition(
         })
       : Object.freeze({ kind: "unknown_legacy" as const });
   };
+  const basePermissionManifest = Object.freeze({
+    effects: Object.freeze(["read", "write", "execute", "network"] as const),
+    resourcePatterns: Object.freeze([
+      `file:${project.root}/*`,
+      `directory:${project.root}`,
+      `directory:${project.root}/*`,
+      `search:${project.root}`,
+      `search:${project.root}/*`,
+      "shell:*",
+      "url:http://*",
+      "url:https://*",
+      "artifact:*",
+      "scripts:*",
+      "script:*",
+      "workflows:*",
+      "workflow:*",
+      "workflow-runs:*",
+      "workflow-run:*",
+      "skill:*",
+      "noesis-history:*",
+      "mcp:*",
+      `session-compaction:${project.projectId}:*`,
+    ]),
+    credentialRefs: Object.freeze([]),
+  });
   const turnPlanner = createTurnIntelligencePlanner({
     workspace,
     protectedRuntime,
@@ -3455,30 +3478,7 @@ export async function createApplicationRuntimeComposition(
         });
       },
     }),
-    basePermissionManifest: Object.freeze({
-      effects: Object.freeze(["read", "write", "execute", "network"]),
-      resourcePatterns: Object.freeze([
-        `file:${project.root}/*`,
-        `directory:${project.root}`,
-        `directory:${project.root}/*`,
-        `search:${project.root}`,
-        `search:${project.root}/*`,
-        "shell:*",
-        "url:http://*",
-        "url:https://*",
-        "artifact:*",
-        "scripts:*",
-        "script:*",
-        "workflows:*",
-        "workflow:*",
-        "workflow-runs:*",
-        "workflow-run:*",
-        "skill:*",
-        "noesis-history:*",
-        "mcp:*",
-      ]),
-      credentialRefs: Object.freeze([]),
-    }),
+    basePermissionManifest,
     capabilities: Object.freeze({
       resolveCapability: async (capabilityId: string) => registry.getCapability(capabilityId),
       resolveRevision,
@@ -3755,6 +3755,191 @@ export async function createApplicationRuntimeComposition(
     return fork;
   };
 
+  const compactionTails = new Map<string, Promise<void>>();
+  const activeCompactions = new Map<string, AbortController>();
+  const effectiveContextBudget = (trail: TrailState): number => {
+    const configuredTokenBudget = options.config.context.tokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET;
+    const limits =
+      options.resolveModelContext?.(trail.provider, trail.model) ??
+      Object.freeze({
+        contextWindow: configuredTokenBudget + 1,
+        maxOutputTokens: 1,
+      });
+    return resolveContextTokenBudget(configuredTokenBudget, limits);
+  };
+  const contextMessages = (messages: readonly MessageRecord[]): readonly SessionContextMessage[] =>
+    Object.freeze(
+      messages.map((message) =>
+        Object.freeze({
+          messageId: message.messageId,
+          role: message.role === "user" ? ("user" as const) : ("assistant" as const),
+          content: message.content,
+          createdAt: message.createdAt,
+          sensitivity: message.sensitivity,
+          startsTurn: message.role === "user" && replayHistoryKind(message) === "turn",
+        }),
+      ),
+    );
+  const compactSession = async (
+    trail: TrailState,
+    mode: "manual" | "automatic",
+    focus?: string,
+  ): Promise<void> => {
+    const tokenBudget = effectiveContextBudget(trail);
+    const controller = new AbortController();
+    activeCompactions.set(trail.trailId, controller);
+    try {
+      let compacted = false;
+      for (let iteration = 0; iteration < 32; iteration += 1) {
+        controller.signal.throwIfAborted();
+        const [messages, checkpoint] = await Promise.all([
+          replayEligibleHistoryMessages(workspace, trail.trailId).then(contextMessages),
+          workspace.operational.contextCheckpoints.getActive(trail.trailId),
+        ]);
+        const current = resolvedSessionContext(messages, checkpoint, tokenBudget);
+        if (!current.exceedsBudget) {
+          if (mode === "manual" && !compacted) throw new Error("There is not enough context to compact.");
+          return;
+        }
+        const window = prepareCompactionWindow(messages, checkpoint, tokenBudget);
+        if (!window)
+          throw new Error("The eligible conversation cannot be compacted without dropping context.");
+        const sourceDigest = sha256(
+          canonicalJson(
+            window.sourceMessages.map((message) =>
+              Object.freeze({ messageId: message.messageId, contentDigest: sha256(message.content) }),
+            ),
+          ),
+        );
+        const checkpointId = `context_checkpoint_${sha256(
+          canonicalJson({
+            sessionId: trail.trailId,
+            previousCheckpointId: checkpoint?.checkpointId ?? null,
+            sourceDigest,
+            focus: focus?.trim() || null,
+            provider: trail.provider,
+            model: trail.model,
+            thinkingLevel: agentDefaults.thinkingLevel,
+            tokenBudget,
+          }),
+        ).slice(0, 32)}`;
+        const inferenceOperationId = `operation_${sha256(`context-compaction-inference:${checkpointId}`)}`;
+        const compactorConfiguration = Object.freeze({
+          ...roles.session_compactor,
+          provider: trail.provider,
+          model: trail.model,
+          reasoning: agentDefaults.thinkingLevel,
+        });
+        const compactor = createStructuredInferencePort({
+          runner: options.createRoleRunner(Object.freeze([compactorConfiguration])),
+          maxRepairAttempts: 1,
+        });
+        const inferenceRequest = serializeCompactionWindow(window, focus);
+        const inferenceRequestDigest = sha256(inferenceRequest);
+        const inferenceDecision = await authority.runForeground(
+          {
+            operationId: inferenceOperationId,
+            effect: "network",
+            resource: `session-compaction:${project.projectId}:${trail.trailId}:model`,
+            estimatedCost: 1,
+            idempotencyKey: `context-compaction-inference:${checkpointId}`,
+            requestDigest: inferenceRequestDigest,
+            execute: async () => {
+              const result = await compactor.run(
+                {
+                  runId: inferenceOperationId,
+                  role: "session_compactor",
+                  variant: compactorConfiguration.variant,
+                  messages: Object.freeze([
+                    Object.freeze({
+                      role: "user" as const,
+                      name: "compaction_input",
+                      content: inferenceRequest,
+                    }),
+                  ]),
+                  evidenceRefs: Object.freeze([]),
+                  availableTools: Object.freeze([]),
+                  signal: controller.signal,
+                },
+                ContextCheckpointSummarySchema,
+              );
+              const summary = renderContextCheckpointSummary(result.value);
+              if (estimateContextTokens(summary) > window.summaryTokenLimit)
+                throw new Error("The context checkpoint summary exceeds its token allowance.");
+              return toJsonValue({ summary, usage: result.trace.usage });
+            },
+          },
+          basePermissionManifest,
+        );
+        if (!inferenceDecision.ok)
+          throw new Error(`Context compaction ${inferenceDecision.code}: ${inferenceDecision.reason}`);
+        const inferenceResult = ContextCompactionInferenceResultSchema.parse(inferenceDecision.value);
+        const record = buildContextCheckpointRecord({
+          checkpointId,
+          sessionId: trail.trailId,
+          window,
+          summary: inferenceResult.summary,
+          sensitivity: compactionSensitivity(checkpoint?.sensitivity, window.sourceMessages),
+          provider: trail.provider,
+          model: trail.model,
+          thinkingLevel: agentDefaults.thinkingLevel,
+          usage: inferenceResult.usage,
+          createdAt: new Date().toISOString(),
+        });
+        const activationOperationId = `operation_${sha256(`context-checkpoint-activation:${checkpointId}`)}`;
+        const activationDecision = await authority.runForeground(
+          {
+            operationId: activationOperationId,
+            effect: "write",
+            resource: `session-compaction:${project.projectId}:${trail.trailId}:checkpoint`,
+            estimatedCost: 1,
+            idempotencyKey: `context-checkpoint-activation:${checkpointId}`,
+            requestDigest: sha256(canonicalJson(record)),
+            execute: async () => {
+              const result = await workspace.operational.contextCheckpoints.activate({
+                checkpoint: record,
+                ...(checkpoint ? { expectedActiveCheckpointId: checkpoint.checkpointId } : {}),
+              });
+              return toJsonValue(
+                result.status === "activated"
+                  ? { status: result.status }
+                  : {
+                      status: result.status,
+                      ...(result.activeCheckpointId ? { activeCheckpointId: result.activeCheckpointId } : {}),
+                    },
+              );
+            },
+          },
+          basePermissionManifest,
+        );
+        if (!activationDecision.ok)
+          throw new Error(`Context checkpoint ${activationDecision.code}: ${activationDecision.reason}`);
+        const activation = ContextCheckpointActivationSchema.parse(activationDecision.value);
+        if (activation.status === "conflict") continue;
+        compacted = true;
+      }
+      throw new Error("Context compaction did not converge within its bounded checkpoint sequence.");
+    } finally {
+      if (activeCompactions.get(trail.trailId) === controller) activeCompactions.delete(trail.trailId);
+    }
+  };
+  const serializeCompaction = async (
+    trail: TrailState,
+    mode: "manual" | "automatic",
+    focus?: string,
+  ): Promise<void> => {
+    const prior = compactionTails.get(trail.trailId) ?? Promise.resolve();
+    const running = prior.catch(() => undefined).then(async () => await compactSession(trail, mode, focus));
+    compactionTails.set(
+      trail.trailId,
+      running.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    await running;
+  };
+
   const executeTurn = async (
     trailId: string,
     input: string,
@@ -3772,10 +3957,25 @@ export async function createApplicationRuntimeComposition(
       throw new Error(
         `Trail ${trailId} is pinned to runtime ${trail.runtime}; active runtime is ${agent.name}.`,
       );
+    await serializeCompaction(trail, "automatic");
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
     const thinkingLevel = runOptions?.thinkingLevel ?? agentDefaults.thinkingLevel;
-    const historyMessages = boundedReplayHistoryMessages(
-      await replayEligibleHistoryMessages(workspace, trailId),
+    const allHistoryMessages = await replayEligibleHistoryMessages(workspace, trailId);
+    const activeCheckpoint = await workspace.operational.contextCheckpoints.getActive(trailId);
+    const tokenBudget = effectiveContextBudget(trail);
+    const resolvedContext = resolvedSessionContext(
+      contextMessages(allHistoryMessages),
+      activeCheckpoint,
+      tokenBudget,
+    );
+    if (resolvedContext.exceedsBudget) throw new Error("Context remains over budget after compaction.");
+    const historyById = new Map(allHistoryMessages.map((message) => [message.messageId, message]));
+    const historyMessages = Object.freeze(
+      resolvedContext.messages.map((message) => {
+        const durable = historyById.get(message.messageId);
+        if (!durable) throw new Error(`Context message ${message.messageId} is missing`);
+        return durable;
+      }),
     );
     const priorConversation = Object.freeze(
       historyMessages.map((message) =>
@@ -3796,6 +3996,8 @@ export async function createApplicationRuntimeComposition(
         model: running.model,
         thinkingLevel,
         priorHistory: priorConversation,
+        ...(activeCheckpoint ? { contextCheckpointId: activeCheckpoint.checkpointId } : {}),
+        contextTokenBudget: tokenBudget,
         baseSystemPrompt: [
           "Follow the user's instructions, use tools when useful, and finish the work.",
           "Before asking the user to repeat relevant prior work, search previous sessions when it could help.",
@@ -3812,6 +4014,17 @@ export async function createApplicationRuntimeComposition(
           provenance: Object.freeze([plan.planId]),
           priority: 100,
         }),
+        ...(plan.contextCheckpoint
+          ? [
+              Object.freeze({
+                id: `${turnId}:checkpoint`,
+                kind: "trail" as const,
+                content: plan.contextCheckpoint.summary,
+                provenance: Object.freeze([plan.contextCheckpoint.checkpointId]),
+                priority: 80,
+              }),
+            ]
+          : []),
         ...historyMessages.map((message, index) =>
           Object.freeze({
             id: `${turnId}:history:${index}`,
@@ -3835,8 +4048,8 @@ export async function createApplicationRuntimeComposition(
         ),
       );
       const context = compileContext(contextFragments, usedCapabilities, {
-        maxTokens: 8_000,
-        maxFragmentTokens: 2_000,
+        maxTokens: tokenBudget,
+        maxFragmentTokens: tokenBudget,
       });
       try {
         const settledTurn = await settlement.run({
@@ -3984,13 +4197,20 @@ export async function createApplicationRuntimeComposition(
                     thinkingLevel: plan.thinkingLevel,
                     systemPrompt: plan.renderedSystemPrompt,
                     prompt: input,
-                    ...(plan.conversationHistory
-                      ? {
-                          history: plan.conversationHistory.map(({ role, content, createdAt }) =>
-                            Object.freeze({ role, content, createdAt }),
-                          ),
-                        }
-                      : {}),
+                    history: Object.freeze([
+                      ...(plan.contextCheckpoint
+                        ? [
+                            Object.freeze({
+                              role: "assistant" as const,
+                              content: plan.contextCheckpoint.summary,
+                              createdAt: plan.contextCheckpoint.createdAt,
+                            }),
+                          ]
+                        : []),
+                      ...(plan.conversationHistory ?? []).map(({ role, content, createdAt }) =>
+                        Object.freeze({ role, content, createdAt }),
+                      ),
+                    ]),
                     activeCapabilities: plan.selectedCapabilities.map((selection) => ({
                       name: selection.name,
                       version: plan.activationRevision,
@@ -4105,6 +4325,7 @@ export async function createApplicationRuntimeComposition(
       await refreshMessageCount(sessionId);
     },
     interrupt: async (sessionId) => {
+      activeCompactions.get(sessionId)?.abort(new Error("Context compaction interrupted"));
       await agent.abort(sessionId);
     },
   });
@@ -4116,8 +4337,10 @@ export async function createApplicationRuntimeComposition(
     getTrail(trailId);
     return await interactions.inspect(trailId);
   };
-  const compact: NoesisRuntime["compact"] = async (_trailId) => {
-    throw new Error("Session compaction is not implemented yet. No conversation data was changed.");
+  const compact: NoesisRuntime["compact"] = async (trailId, focus) => {
+    const trail = getTrail(trailId);
+    if (trail.status === "running") throw new Error("Cannot compact while the session is running.");
+    await serializeCompaction(trail, "manual", focus);
   };
   const listSkills: NonNullable<NoesisTuiRuntime["listSkills"]> = async () => {
     if (!options.skills) return Object.freeze([]);

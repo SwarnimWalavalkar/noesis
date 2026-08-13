@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { type FrozenTurnPlan, frozenTurnPlanDigest } from "@noesis/agent-types";
 import {
   type CapabilityRevisionRef,
+  canonicalJson,
   type Experiment,
   type ExperimentTrial,
   effectOperationFingerprint,
@@ -238,6 +239,76 @@ describe("WorkspaceStore", () => {
     );
     expect(indexed?.body).toContain('"hits":2');
     store.close();
+  });
+
+  test("atomically activates immutable context checkpoints and preserves raw transcript rows", async () => {
+    const root = await temporary("context-checkpoints");
+    const store = await createWorkspaceStore(root);
+    await store.operational.sessions.put(session("session-context"));
+    const messages = [
+      Object.freeze({
+        messageId: "context-message-1",
+        sessionId: "session-context",
+        role: "user" as const,
+        content: "Please keep the exact raw request.",
+        sensitivity: "normal" as const,
+        createdAt: "2026-08-13T00:00:00.000Z",
+        metadata: Object.freeze({}),
+      }),
+      Object.freeze({
+        messageId: "context-message-2",
+        sessionId: "session-context",
+        role: "assistant" as const,
+        content: "The exact raw answer remains authoritative.",
+        sensitivity: "private" as const,
+        createdAt: "2026-08-13T00:00:01.000Z",
+        metadata: Object.freeze({}),
+      }),
+    ];
+    for (const message of messages) await store.operational.messages.put(message);
+    const sources = Object.freeze(
+      messages.map((message) =>
+        Object.freeze({ messageId: message.messageId, contentDigest: sha256(message.content) }),
+      ),
+    );
+    const checkpoint = Object.freeze({
+      checkpointId: "context-checkpoint-1",
+      sessionId: "session-context",
+      summary: "A bounded continuation summary.",
+      summaryDigest: sha256("A bounded continuation summary."),
+      sourceDigest: sha256(canonicalJson(sources)),
+      sources,
+      lastCoveredMessageId: "context-message-2",
+      tokenBudget: 160_000,
+      estimatedSummaryTokens: 8,
+      sensitivity: "private" as const,
+      provider: "controlled",
+      model: "controlled",
+      thinkingLevel: "off" as const,
+      usage: Object.freeze({ inputTokens: 10, outputTokens: 8, totalTokens: 18, estimatedCost: 0 }),
+      createdAt: "2026-08-13T00:00:02.000Z",
+    });
+
+    await expect(store.operational.contextCheckpoints.activate({ checkpoint })).resolves.toMatchObject({
+      status: "activated",
+      checkpoint: { checkpointId: checkpoint.checkpointId },
+    });
+    await expect(
+      store.operational.contextCheckpoints.activate({
+        checkpoint: Object.freeze({ ...checkpoint, checkpointId: "context-checkpoint-conflict" }),
+      }),
+    ).resolves.toEqual({ status: "conflict", activeCheckpointId: checkpoint.checkpointId });
+    expect(await store.operational.contextCheckpoints.get("context-checkpoint-conflict")).toBeUndefined();
+    expect(
+      (await store.operational.messages.listForSession("session-context")).map(({ content }) => content),
+    ).toEqual(messages.map(({ content }) => content));
+    store.close();
+
+    const reopened = await createWorkspaceStore(root);
+    await expect(reopened.operational.contextCheckpoints.getActive("session-context")).resolves.toEqual(
+      checkpoint,
+    );
+    reopened.close();
   });
 
   test("never re-indexes history retrieval tool calls as derived evidence", async () => {
@@ -1471,7 +1542,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 34 });
+    ).toEqual({ version: 35 });
     inspection.close();
   });
 
@@ -2188,7 +2259,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(34);
+    expect(versions.at(-1)).toBe(35);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

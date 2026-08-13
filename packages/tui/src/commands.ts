@@ -95,7 +95,12 @@ function learningActivityLine(activity: TuiLearningActivitySummary): string {
 /** Commands that change the active trail or its context must not overlap another submission. */
 export function isExclusiveSlashCommand(text: string): boolean {
   const command = text.trim();
-  return command === "/compact" || command === "/fork" || command.startsWith("/model ");
+  return (
+    command === "/compact" ||
+    command.startsWith("/compact ") ||
+    command === "/fork" ||
+    command.startsWith("/model ")
+  );
 }
 
 export function steerFeedback(result: TuiInteractionResult, explicit: boolean): string | undefined {
@@ -379,12 +384,13 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (command === "/compact") {
+  if (command === "/compact" || command.startsWith("/compact ")) {
     dispatch({ type: "execution-changed", execution: "compacting" });
     requestRender();
-    await runtime.compact(trailId);
+    const focus = command === "/compact" ? undefined : command.slice("/compact ".length).trim();
+    await runtime.compact(trailId, focus || undefined);
     dispatch({ type: "compacted" });
-    dispatch({ type: "system-message", text: "Trail compacted." });
+    dispatch({ type: "system-message", text: "Context compacted" });
     requestRender();
     return true;
   }

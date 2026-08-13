@@ -393,6 +393,7 @@ describe("Noesis TUI lifecycle", () => {
       releaseCompact = resolve;
     });
     let compactStarted = false;
+    let compactFocus: string | undefined;
     const prompts: string[] = [];
     const base = await createRuntime({
       name: "command-serialization-scripted",
@@ -411,8 +412,9 @@ describe("Noesis TUI lifecycle", () => {
     });
     const runtime = Object.freeze({
       ...base,
-      compact: async () => {
+      compact: async (_trailId: string, focus?: string) => {
         compactStarted = true;
+        compactFocus = focus;
         await compactGate;
       },
     });
@@ -420,14 +422,15 @@ describe("Noesis TUI lifecycle", () => {
     const running = startNoesisTui(runtime, {}, terminal);
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
-    terminal.type("/compact\r");
+    terminal.type("/compact preserve the debugging decisions\r");
     await vi.waitFor(() => expect(compactStarted).toBe(true));
+    expect(compactFocus).toBe("preserve the debugging decisions");
     terminal.type("do not overlap\r");
     await vi.waitFor(() => expect(terminal.output).toContain("A command is active."));
     expect(prompts).toEqual([]);
 
     releaseCompact?.();
-    await vi.waitFor(() => expect(terminal.output).toContain("Trail compacted."));
+    await vi.waitFor(() => expect(terminal.output).toContain("Context compacted"));
     terminal.type("after compact\r");
     await vi.waitFor(() => expect(terminal.output).toContain("reply:after compact"));
     expect(prompts).toEqual(["after compact"]);
@@ -543,7 +546,7 @@ describe("Noesis TUI lifecycle", () => {
     releaseCompact?.();
     await running;
     expect(compactFinished).toBe(true);
-    expect(terminal.output).not.toContain("Trail compacted.");
+    expect(terminal.output).not.toContain("Context compacted");
     expect(terminal.stops).toBe(1);
   });
 

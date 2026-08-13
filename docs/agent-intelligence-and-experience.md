@@ -26,6 +26,10 @@ Noesis preserves instruction levels:
 
 Conversation history must never be copied into the system prompt. Each turn records the exact bounded messages it received, with references to the source and content digests. A lower-priority instruction loses only when it conflicts with a higher-priority one. Noesis should not use hierarchy to ignore a compatible user request. This follows [The Instruction Hierarchy](https://arxiv.org/pdf/2404.13208).
 
+Long sessions use durable context checkpoints. The original transcript remains unchanged and continues to power resume, inspection, and search. Future turns receive an explicitly labelled continuation summary plus a recent tail of complete raw turns. The frozen turn plan pins the exact checkpoint and message rows it used.
+
+The default history budget is 160,000 tokens and is configurable as `context.tokenBudget` in `config.json`. Noesis caps it below the selected model's context window after reserving that model's maximum output allowance. `/compact [optional focus]` creates a checkpoint manually; Noesis also compacts before a future turn when eligible history exceeds the effective budget. A failed or cancelled compaction leaves the active context unchanged.
+
 ## Model judgment
 
 Use a capable model when a decision depends on meaning. Do not use keywords or regular expressions to decide whether a message is a correction, preference, learning request, change of intent, or useful adaptation.

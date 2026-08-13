@@ -332,6 +332,14 @@ async function createRuntime(
         }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(project.root, services.models, configurations),
+      resolveModelContext: (provider, model) => {
+        const selected = services.models.getModel(provider, model);
+        if (!selected) throw new Error(`Unknown Pi model ${provider}/${model}`);
+        return Object.freeze({
+          contextWindow: selected.contextWindow,
+          maxOutputTokens: selected.maxTokens,
+        });
+      },
     });
     return Object.freeze({ runtime, mcpInteractionBridge });
   } catch (error) {
