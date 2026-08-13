@@ -1476,6 +1476,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
             abortCallback = undefined;
           }
           await reconnect(name);
+          if (
+            closing ||
+            latestAuthenticationByServer.get(name) !== authentication ||
+            connections.get(name)?.status !== "connected"
+          ) {
+            throw new Error(`MCP server ${name} did not complete OAuth reconnect`);
+          }
           authorization.complete(true);
         } catch (error) {
           authorization.complete(false);

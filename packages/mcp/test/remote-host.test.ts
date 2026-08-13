@@ -274,6 +274,45 @@ describe("remote MCP transports", () => {
     }
   });
 
+  test("fails an accepted callback when the host closes during the committed reconnect", async () => {
+    const callbackPort = await availablePort();
+    const reconnect = Promise.withResolvers<void>();
+    let connectionAttempts = 0;
+    const manager = await unauthorizedOAuthManager(callbackPort, async () => {
+      connectionAttempts += 1;
+      if (connectionAttempts === 1) throw new UnauthorizedError("authentication required");
+      await reconnect.promise;
+    });
+    const finishAuth = vi
+      .spyOn(StreamableHTTPClientTransport.prototype, "finishAuth")
+      .mockResolvedValue(undefined);
+    const authentication = manager.authenticate("remote", { timeout: 30_000 });
+    void authentication.catch(() => undefined);
+    try {
+      await vi.waitFor(async () => {
+        expect((await fetch(`http://127.0.0.1:${String(callbackPort)}/not-the-callback`)).status).toBe(404);
+      });
+      const callback = fetch(
+        `http://127.0.0.1:${String(callbackPort)}/oauth/callback?code=controlled-code&state=controlled-state`,
+      );
+      await vi.waitFor(() => expect(connectionAttempts).toBe(2));
+
+      const closing = manager.close();
+      reconnect.resolve();
+
+      const response = await callback;
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain("Authentication failed");
+      await expect(authentication).rejects.toThrow("did not complete OAuth reconnect");
+      await closing;
+      expect(manager.inspectServer("remote")).toBeUndefined();
+    } finally {
+      reconnect.resolve();
+      finishAuth.mockRestore();
+      await manager.close();
+    }
+  });
+
   test("serves an accepted OAuth callback over IPv6 loopback", async () => {
     const protocol = controlledServer();
     const transport = new StreamableHTTPServerTransport({
