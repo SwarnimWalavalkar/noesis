@@ -63,6 +63,7 @@ import {
   type ActivationCandidateResolver,
   buildContextCheckpointRecord,
   compactionSensitivity,
+  contextCheckpointActivationRequestDigest,
   type CoordinatorPreflightPreparation,
   compareTrailRecency,
   createAtomicActivationController,
@@ -3936,7 +3937,7 @@ export async function createApplicationRuntimeComposition(
             resource: `session-compaction:${project.projectId}:${trail.trailId}:checkpoint`,
             estimatedCost: 1,
             idempotencyKey: `context-checkpoint-activation:${checkpointId}`,
-            requestDigest: sha256(canonicalJson(record)),
+            requestDigest: contextCheckpointActivationRequestDigest(record),
             execute: async () => {
               controller.signal.throwIfAborted();
               const result = await workspace.operational.contextCheckpoints.activate({
@@ -4112,7 +4113,7 @@ export async function createApplicationRuntimeComposition(
       );
       const context = compileContext(contextFragments, usedCapabilities, {
         maxTokens: contextTokenBudget,
-        maxFragmentTokens: contextTokenBudget,
+        maxFragmentTokens: Math.max(1, Math.floor(contextTokenBudget / 2)),
       });
       try {
         const settledTurn = await settlement.run({
@@ -4260,20 +4261,6 @@ export async function createApplicationRuntimeComposition(
                     thinkingLevel: plan.thinkingLevel,
                     systemPrompt: plan.renderedSystemPrompt,
                     prompt: input,
-                    history: Object.freeze([
-                      ...(plan.contextCheckpoint
-                        ? [
-                            Object.freeze({
-                              role: "assistant" as const,
-                              content: plan.contextCheckpoint.summary,
-                              createdAt: plan.contextCheckpoint.createdAt,
-                            }),
-                          ]
-                        : []),
-                      ...(plan.conversationHistory ?? []).map(({ role, content, createdAt }) =>
-                        Object.freeze({ role, content, createdAt }),
-                      ),
-                    ]),
                     activeCapabilities: plan.selectedCapabilities.map((selection) => ({
                       name: selection.name,
                       version: plan.activationRevision,

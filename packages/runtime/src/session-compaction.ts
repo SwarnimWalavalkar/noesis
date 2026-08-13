@@ -97,13 +97,17 @@ function turnGroups(
   messages: readonly SessionContextMessage[],
 ): readonly (readonly SessionContextMessage[])[] {
   const groups: SessionContextMessage[][] = [];
+  const leading: SessionContextMessage[] = [];
   let current: SessionContextMessage[] | undefined;
   for (const message of messages) {
     if (message.startsTurn) {
-      current = [message];
+      current = [...leading, message];
+      leading.length = 0;
       groups.push(current);
     } else if (current) {
       current.push(message);
+    } else {
+      leading.push(message);
     }
   }
   return Object.freeze(groups.map((group) => Object.freeze(group)));
@@ -358,4 +362,24 @@ export function buildContextCheckpointRecord(input: {
     usage: Object.freeze({ ...input.usage }),
     createdAt: input.createdAt,
   });
+}
+
+export function contextCheckpointActivationRequestDigest(record: ContextCheckpointRecord): string {
+  return sha256(
+    canonicalJson({
+      checkpointId: record.checkpointId,
+      sessionId: record.sessionId,
+      previousCheckpointId: record.previousCheckpointId ?? null,
+      summaryDigest: record.summaryDigest,
+      sourceDigest: record.sourceDigest,
+      firstRetainedMessageId: record.firstRetainedMessageId ?? null,
+      lastCoveredMessageId: record.lastCoveredMessageId,
+      tokenBudget: record.tokenBudget,
+      estimatedSummaryTokens: record.estimatedSummaryTokens,
+      sensitivity: record.sensitivity,
+      provider: record.provider,
+      model: record.model,
+      thinkingLevel: record.thinkingLevel,
+    }),
+  );
 }

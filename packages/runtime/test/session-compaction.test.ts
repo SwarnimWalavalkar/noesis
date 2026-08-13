@@ -1,5 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
+  buildContextCheckpointRecord,
+  contextCheckpointActivationRequestDigest,
   estimateContextTokens,
   prepareCompactionWindow,
   resolveContextTokenBudget,
@@ -60,6 +62,23 @@ describe("session compaction", () => {
     expect(window?.sourceMessages.map(({ messageId }) => messageId)).toEqual(["1", "2"]);
     expect(window?.retainedMessages.map(({ messageId }) => messageId)).toEqual(["3", "4", "5", "6"]);
     expect(window?.sourceMessages[0]?.startsTurn).toBe(true);
+  });
+
+  test("includes leading steering messages in the oldest complete turn", () => {
+    const messages = Object.freeze([
+      message("0", "leading steer", false, "user"),
+      message("1", "first request", true),
+      message("2", "first response", false),
+      message("3", "recent request", true),
+      message("4", "recent response", false),
+    ]);
+
+    const window = prepareCompactionWindow(messages, undefined, 10, {
+      compactorInputTokenBudget: 1_000,
+    });
+
+    expect(window?.sourceMessages.map(({ messageId }) => messageId)).toEqual(["0", "1", "2"]);
+    expect(window?.retainedMessages.map(({ messageId }) => messageId)).toEqual(["3", "4"]);
   });
 
   test("resolves repeated compaction from the prior retained boundary without reusing old sources", () => {
@@ -138,5 +157,39 @@ describe("session compaction", () => {
     expect(() =>
       prepareCompactionWindow(messages, undefined, 10, { compactorInputTokenBudget: 1_000 }),
     ).toThrow("oldest complete turn exceeds");
+  });
+
+  test("keeps checkpoint activation identity stable across runtime metadata", () => {
+    const messages = Object.freeze([
+      message("1", "old request", true),
+      message("2", "old response", false),
+      message("3", "recent request", true),
+      message("4", "recent response", false),
+    ]);
+    const window = prepareCompactionWindow(messages, undefined, 10, {
+      compactorInputTokenBudget: 1_000,
+    });
+    if (!window) throw new Error("Expected a compaction window");
+    const base = buildContextCheckpointRecord({
+      checkpointId: "checkpoint-1",
+      sessionId: "session-1",
+      window,
+      summary: "stable summary",
+      sensitivity: "normal",
+      provider: "controlled",
+      model: "controlled",
+      thinkingLevel: "off",
+      usage: Object.freeze({ inputTokens: 1, outputTokens: 2, totalTokens: 3, estimatedCost: 0 }),
+      createdAt: "2026-08-13T00:00:00.000Z",
+    });
+    const retried = Object.freeze({
+      ...base,
+      usage: Object.freeze({ inputTokens: 4, outputTokens: 5, totalTokens: 9, estimatedCost: 1 }),
+      createdAt: "2026-08-13T00:01:00.000Z",
+    });
+
+    expect(contextCheckpointActivationRequestDigest(retried)).toBe(
+      contextCheckpointActivationRequestDigest(base),
+    );
   });
 });

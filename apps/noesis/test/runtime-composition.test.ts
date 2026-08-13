@@ -59,6 +59,24 @@ import { researchLoopControlledResponse } from "./support/research-loop-controll
 
 const roots: string[] = [];
 
+function frozenHistoryForRequest(request: AgentRuntimeRequest): NonNullable<AgentRuntimeRequest["history"]> {
+  if (!request.frozenTurnPlan) return Object.freeze([...(request.history ?? [])]);
+  return Object.freeze([
+    ...(request.frozenTurnPlan.contextCheckpoint
+      ? [
+          Object.freeze({
+            role: "assistant" as const,
+            content: request.frozenTurnPlan.contextCheckpoint.summary,
+            createdAt: request.frozenTurnPlan.contextCheckpoint.createdAt,
+          }),
+        ]
+      : []),
+    ...(request.frozenTurnPlan.conversationHistory ?? []).map(({ role, content, createdAt }) =>
+      Object.freeze({ role, content, createdAt }),
+    ),
+  ]);
+}
+
 function scriptedHistoryRerankResponse(request: RoleBackendRequest): { readonly text: string } {
   const response = researchLoopControlledResponse({
     systemPrompt: request.systemPrompt,
@@ -316,11 +334,12 @@ describe("apps/noesis production control-plane composition", () => {
     const agent: NoesisAgentRuntime = Object.freeze({
       name: "controlled-compaction-agent",
       run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
-        histories.push(Object.freeze([...(request.history ?? [])]));
+        const history = frozenHistoryForRequest(request);
+        histories.push(history);
         emit({ type: "status", status: "started" });
         const text = request.prompt.includes("short manual")
           ? "short answer"
-          : (request.history?.length ?? 0) === 0
+          : history.length === 0
             ? "assistant-history-".repeat(1_600)
             : "continued from checkpoint";
         const createdAt = new Date().toISOString();
@@ -2575,7 +2594,7 @@ describe("apps/noesis production control-plane composition", () => {
     await runtime.debug.runTurn(trail.trailId, "inspect history");
 
     const inspectionRequest = requests.at(-1);
-    const history = inspectionRequest?.history ?? [];
+    const history = inspectionRequest ? frozenHistoryForRequest(inspectionRequest) : [];
     expect(history.map(({ role, content }) => ({ role, content }))).toEqual([
       { role: "user", content: "accepted input" },
       { role: "assistant", content: "reply:accepted input" },
@@ -2611,7 +2630,11 @@ describe("apps/noesis production control-plane composition", () => {
     await runtime.debug.runTurn(trail.trailId, oversized);
     await runtime.debug.runTurn(trail.trailId, "inspect bounded history");
     const boundedRequest = requests.at(-1);
-    expect(boundedRequest?.history?.some((message) => message.content.includes(oversized))).toBe(true);
+    expect(
+      boundedRequest
+        ? frozenHistoryForRequest(boundedRequest).some((message) => message.content.includes(oversized))
+        : false,
+    ).toBe(true);
     expect(
       boundedRequest?.frozenTurnPlan?.conversationHistory?.some((entry) => entry.content.includes(oversized)),
     ).toBe(true);
@@ -2765,7 +2788,7 @@ describe("apps/noesis production control-plane composition", () => {
     await first.debug.runTurn(source.trailId, "source-only future input");
     await first.debug.runTurn(fork.trailId, "immediate fork input");
     const immediateRequest = firstRequests.find((request) => request.prompt === "immediate fork input");
-    const immediateHistory = immediateRequest?.history ?? [];
+    const immediateHistory = immediateRequest ? frozenHistoryForRequest(immediateRequest) : [];
     expect(immediateHistory.map((message) => message.content)).toEqual(expectedInheritedText);
     expect(immediateRequest?.systemPrompt).not.toContain("accepted source input");
     expect(immediateHistory.map((message) => message.content)).not.toContain("failed source input");
@@ -2820,7 +2843,8 @@ describe("apps/noesis production control-plane composition", () => {
     ).toEqual(inheritedMessageIds);
     await reopened.resumeTrail(fork.trailId);
     await reopened.debug.runTurn(fork.trailId, "restarted fork input");
-    const restartedHistory = reopenedRequests.at(-1)?.history ?? [];
+    const restartedRequest = reopenedRequests.at(-1);
+    const restartedHistory = restartedRequest ? frozenHistoryForRequest(restartedRequest) : [];
     expect(restartedHistory.map((message) => message.content)).toContain("delivered source steer");
     expect(restartedHistory.map((message) => message.content)).toContain("immediate fork input");
     expect(restartedHistory.map((message) => message.content)).toContain("reply:immediate fork input");
