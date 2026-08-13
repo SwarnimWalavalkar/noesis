@@ -53,38 +53,13 @@ function shortIdentity(value: string): string {
   return safe.length <= 42 ? safe : `${safe.slice(0, 19)}…${safe.slice(-18)}`;
 }
 
-function statusGlyph(status: string): string {
-  const normalized = status.toLowerCase();
-  if (normalized.includes("active") || normalized === "current" || normalized.includes("keep")) return "◆";
-  if (
-    normalized.includes("failed") ||
-    normalized.includes("block") ||
-    normalized.includes("revert") ||
-    normalized.includes("regression")
-  )
-    return "×";
-  if (
-    normalized.includes("running") ||
-    normalized.includes("observing") ||
-    normalized.includes("queued") ||
-    normalized.includes("pending") ||
-    normalized.includes("authoring") ||
-    normalized.includes("preflight")
-  )
-    return "●";
-  if (normalized.includes("no change") || normalized.includes("no_change") || normalized === "inactive")
-    return "—";
-  return "✓";
-}
-
-function statusColor(status: string): string {
-  const glyph = statusGlyph(status);
-  if (glyph === "×") return ANSI.red;
-  if (glyph === "●") return ANSI.yellow;
-  if (glyph === "◆") return ANSI.cyan;
-  if (glyph === "—") return ANSI.dim;
-  return ANSI.green;
-}
+const TONE_PRESENTATION = Object.freeze({
+  neutral: Object.freeze({ glyph: "—", color: ANSI.dim }),
+  positive: Object.freeze({ glyph: "✓", color: ANSI.green }),
+  active: Object.freeze({ glyph: "◆", color: ANSI.cyan }),
+  pending: Object.freeze({ glyph: "●", color: ANSI.yellow }),
+  negative: Object.freeze({ glyph: "×", color: ANSI.red }),
+});
 
 function pad(line: string, width: number): string {
   return `${line}${" ".repeat(Math.max(0, width - visibleWidth(line)))}`;
@@ -93,9 +68,16 @@ function pad(line: string, width: number): string {
 function groupCounts(snapshot: TuiLearningAuditSnapshot): string {
   const counts = new Map<TuiLearningPrimitiveGroup, number>();
   for (const item of snapshot.primitives) counts.set(item.group, (counts.get(item.group) ?? 0) + 1);
-  return ["changes", "evaluation", "feedback", "reflection", "activation", "memory", "operations"]
-    .map((group) => `${group} ${String(counts.get(group as TuiLearningPrimitiveGroup) ?? 0)}`)
-    .join(" · ");
+  const groups: readonly TuiLearningPrimitiveGroup[] = [
+    "changes",
+    "evaluation",
+    "feedback",
+    "reflection",
+    "activation",
+    "memory",
+    "operations",
+  ];
+  return groups.map((group) => `${group} ${String(counts.get(group) ?? 0)}`).join(" · ");
 }
 
 function filterLabel(filter: AuditFilter): string {
@@ -129,7 +111,8 @@ function listViewport(
       selected ? `${ANSI.bold}${ANSI.cyan}` : ANSI.dim,
       selected ? "›" : " ",
     );
-    const glyph = styled(colorEnabled, statusColor(record.status), statusGlyph(record.status));
+    const presentation = TONE_PRESENTATION[record.tone];
+    const glyph = styled(colorEnabled, presentation.color, presentation.glyph);
     const title = styled(colorEnabled, selected ? ANSI.bold : "", safeScalar(record.title));
     const identity = styled(colorEnabled, ANSI.dim, `${record.kind} · ${shortIdentity(record.id)}`);
     const context = [
@@ -189,7 +172,7 @@ function detailDocument(
       ...highlightCode(safeTerminalText(record.rawJson), "json", colorEnabled),
     ];
   return [
-    `${styled(colorEnabled, statusColor(record.status), statusGlyph(record.status))} ${styled(
+    `${styled(colorEnabled, TONE_PRESENTATION[record.tone].color, TONE_PRESENTATION[record.tone].glyph)} ${styled(
       colorEnabled,
       ANSI.bold,
       safeTerminalText(record.title),

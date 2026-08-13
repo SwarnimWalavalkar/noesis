@@ -48,11 +48,12 @@ interface LearningAuditSource {
   readonly now?: () => Date;
 }
 
-interface PrimitiveInput extends Omit<TuiLearningPrimitive, "evidence" | "relations" | "rawJson"> {
+interface PrimitiveInput extends Omit<TuiLearningPrimitive, "evidence" | "relations" | "rawJson" | "tone"> {
   readonly evidence?: readonly EvidenceRef[];
   readonly relations?: readonly TuiLearningRelation[];
   readonly raw: unknown;
   readonly sensitivity?: "normal" | "private" | "secret";
+  readonly tone?: TuiLearningPrimitive["tone"];
 }
 
 function nativeId(kind: TuiLearningPrimitiveKind, id: string): string {
@@ -93,6 +94,7 @@ function boundedRawJson(value: unknown, sensitivity: "normal" | "private" | "sec
 function primitive(input: PrimitiveInput): TuiLearningPrimitive {
   return Object.freeze({
     ...input,
+    tone: input.tone ?? "neutral",
     evidence: Object.freeze((input.evidence ?? []).map(evidenceIdentity)),
     relations: Object.freeze((input.relations ?? []).filter(defined)),
     rawJson: boundedRawJson(input.raw, input.sensitivity),
@@ -137,6 +139,12 @@ function jobSessionId(job: DurableJobRecord): string | undefined {
   return stringField(job.payload, "sourceSessionId");
 }
 
+function reflectionTurnId(job: DurableJobRecord): string | undefined {
+  if (job.kind !== "runtime.reflect_turn" || typeof job.payload !== "object" || job.payload === null)
+    return undefined;
+  return stringField(Reflect.get(job.payload, "turn"), "turnId");
+}
+
 function jobSensitivity(job: DurableJobRecord): "normal" | "private" | "secret" {
   if (job.kind !== "runtime.reflect_turn" || typeof job.payload !== "object" || job.payload === null)
     return "normal";
@@ -176,6 +184,14 @@ function jobPrimitive(job: DurableJobRecord): TuiLearningPrimitive {
     kind,
     group,
     status: stringField(job.result, "status") ?? job.status,
+    tone:
+      job.status === "failed" || job.status === "budget_exhausted" || job.status === "cancelled"
+        ? "negative"
+        : job.status === "running" || job.status === "scheduled"
+          ? "pending"
+          : stringField(job.result, "status") === "no_change"
+            ? "neutral"
+            : "positive",
     title: isReflection ? reflectionTitle(job) : job.kind.replace("runtime.", "").replaceAll("_", " "),
     summary: jobSummary(job),
     occurredAt: job.updatedAt,
@@ -224,19 +240,103 @@ export async function loadLearningAuditSnapshot(
   source: LearningAuditSource,
   sessionId: string,
 ): Promise<TuiLearningAuditSnapshot> {
-  const [jobs, experiments, adjustments, criteriaResult, activation, activationOperations, feedbackSignals] =
+  const listAdjustments = source.workspace.workingAdjustments.list;
+  if (!listAdjustments) throw new Error("Working adjustment listing is unavailable");
+  const [allJobs, allExperiments, adjustments, criteriaResult, activation, allActivationOperations] =
     await Promise.all([
       listAllJobs(source.workspace),
       source.workspace.research.experiments.listExperiments({ limit: AUDIT_LIMIT }),
-      source.workspace.workingAdjustments.list?.({ limit: AUDIT_LIMIT }) ?? Promise.resolve([]),
+      listAdjustments({ projectId: source.projectId, limit: AUDIT_LIMIT }),
       source.criteria.list(),
       source.activations.current(),
       source.activations.listOperations(AUDIT_LIMIT),
-      source.workspace.research.feedbackSignals.listFeedbackSignals?.({ limit: AUDIT_LIMIT }) ??
-        Promise.resolve([]),
     ]);
   if (!criteriaResult.ok) throw new Error(criteriaResult.error.message);
+  const projectSessionIds = new Set(
+    allJobs
+      .filter((job) => jobProjectId(job) === source.projectId)
+      .map(jobSessionId)
+      .filter(defined),
+  );
+  const adjustmentIds = new Set(adjustments.map((adjustment) => adjustment.adjustmentId));
+  const projectJobExperimentIds = new Set(
+    allJobs
+      .filter(
+        (job) =>
+          jobProjectId(job) === source.projectId ||
+          (jobSessionId(job) !== undefined && projectSessionIds.has(jobSessionId(job) ?? "")),
+      )
+      .map(jobExperimentId)
+      .filter(defined),
+  );
+  const experimentIds = new Set(
+    allExperiments
+      .filter(
+        (experiment) =>
+          projectJobExperimentIds.has(experiment.experimentId) ||
+          (experiment.sourceAdjustmentId !== undefined && adjustmentIds.has(experiment.sourceAdjustmentId)),
+      )
+      .map((experiment) => experiment.experimentId),
+  );
+  let addedExperiment = true;
+  while (addedExperiment) {
+    addedExperiment = false;
+    for (const experiment of allExperiments) {
+      if (experimentIds.has(experiment.experimentId)) continue;
+      if (
+        allExperiments.some(
+          (candidate) =>
+            experimentIds.has(candidate.experimentId) &&
+            candidate.followUpExperimentId === experiment.experimentId,
+        )
+      ) {
+        experimentIds.add(experiment.experimentId);
+        addedExperiment = true;
+      }
+    }
+  }
+  const experiments = allExperiments.filter((experiment) => experimentIds.has(experiment.experimentId));
+  const jobs = allJobs.filter((job) => {
+    const jobProject = jobProjectId(job);
+    const jobSession = jobSessionId(job);
+    const experimentId = jobExperimentId(job);
+    return (
+      jobProject === source.projectId ||
+      (jobSession !== undefined && projectSessionIds.has(jobSession)) ||
+      (experimentId !== undefined && experimentIds.has(experimentId))
+    );
+  });
+  const activationOperations = allActivationOperations.filter((operation) =>
+    experimentIds.has(operation.binding.experimentId),
+  );
+  const feedbackSignals = source.workspace.research.feedbackSignals.listFeedbackSignals
+    ? [
+        ...new Map(
+          (
+            await Promise.all(
+              experiments.map(
+                async (experiment) =>
+                  (await source.workspace.research.feedbackSignals.listFeedbackSignals?.({
+                    experimentId: experiment.experimentId,
+                    limit: AUDIT_LIMIT,
+                  })) ?? [],
+              ),
+            )
+          )
+            .flat()
+            .map((signal) => [signal.signalId, signal] as const),
+        ).values(),
+      ]
+    : [];
   const activeAdjustment = await source.workspace.workingAdjustments.getActive(source.projectId);
+  const reflectionByTurnId = new Map(
+    jobs
+      .map((job) => {
+        const turnId = reflectionTurnId(job);
+        return turnId ? ([turnId, job.jobId] as const) : undefined;
+      })
+      .filter(defined),
+  );
   const primitives: TuiLearningPrimitive[] = jobs.map(jobPrimitive);
 
   for (const criterion of criteriaResult.value) {
@@ -247,12 +347,11 @@ export async function loadLearningAuditSnapshot(
         kind: "criterion",
         group: "memory",
         status: `${definition.status}${definition.pinned ? " · pinned" : ""}`,
+        tone: definition.status === "active" ? "active" : "neutral",
         title: definition.criterionId,
         summary: definition.evaluatorInstruction,
         evidence: definition.evidenceRefs,
-        relations: [
-          relation("revision", "capability_revision", criterion.metadata.definitionRevision.revisionId),
-        ].filter(defined),
+        relations: [],
         raw: criterion,
       }),
     );
@@ -266,11 +365,14 @@ export async function loadLearningAuditSnapshot(
         kind: "working_adjustment",
         group: "changes",
         status: active ? "active" : "inactive",
+        tone: active ? "active" : "neutral",
         title: "Project working adjustment",
         summary: adjustment.strategy,
         projectId: adjustment.scope.projectId,
         evidence: adjustment.evidenceRefs,
-        relations: [relation("source turn", "reflection", adjustment.createdFromTurnId)].filter(defined),
+        relations: [
+          relation("source reflection", "reflection", reflectionByTurnId.get(adjustment.createdFromTurnId)),
+        ].filter(defined),
         raw: adjustment,
       }),
     );
@@ -290,6 +392,14 @@ export async function loadLearningAuditSnapshot(
         kind: "experiment",
         group: "changes",
         status: experiment.status === "completed" ? `completed · ${experiment.outcome}` : experiment.status,
+        tone:
+          experiment.status !== "completed"
+            ? "pending"
+            : experiment.outcome === "keep"
+              ? "positive"
+              : experiment.outcome === "revert"
+                ? "negative"
+                : "neutral",
         title: experiment.hypothesis,
         summary: `Scope: ${experiment.scope}`,
         ...(occurredAt ? { occurredAt } : {}),
@@ -350,6 +460,8 @@ export async function loadLearningAuditSnapshot(
           kind: "trial",
           group: "evaluation",
           status: `${trial.status} · ${trial.arm}`,
+          tone:
+            trial.status === "completed" ? "positive" : trial.status === "failed" ? "negative" : "pending",
           title: `${trial.arm} trial`,
           summary: `${trial.comparisonGroupId} · ${trial.variant.variantId}`,
           experimentId: experiment.experimentId,
@@ -369,6 +481,12 @@ export async function loadLearningAuditSnapshot(
           kind: "evaluation",
           group: "evaluation",
           status: evaluation.status,
+          tone:
+            evaluation.status === "completed"
+              ? "positive"
+              : evaluation.status === "failed"
+                ? "negative"
+                : "pending",
           title: "Evaluation",
           summary: `${String(evaluation.trialIds.length)} trials`,
           experimentId: experiment.experimentId,
@@ -389,6 +507,7 @@ export async function loadLearningAuditSnapshot(
           kind: "preflight_report",
           group: "evaluation",
           status: report.decision,
+          tone: report.decision === "pass" ? "positive" : "negative",
           title: "Preflight report",
           summary: report.comparison.summary,
           experimentId: experiment.experimentId,
@@ -411,6 +530,13 @@ export async function loadLearningAuditSnapshot(
           status: observation.hardRegression
             ? "hard regression"
             : (observation.userDecision ?? observation.precedence),
+          tone: observation.hardRegression
+            ? "negative"
+            : observation.userDecision === "keep"
+              ? "positive"
+              : observation.userDecision === "revert"
+                ? "negative"
+                : "neutral",
           title: "Live experiment observation",
           summary: `${observation.metrics.failed ? "failed" : "served"} · activation r${String(observation.activationRevision)}`,
           occurredAt: observation.createdAt,
@@ -432,6 +558,7 @@ export async function loadLearningAuditSnapshot(
           kind: "outcome_research",
           group: "feedback",
           status: run.proposal ? `${run.status} · ${run.proposal}` : run.status,
+          tone: run.status === "completed" ? "positive" : run.status === "failed" ? "negative" : "pending",
           title: "Outcome research",
           summary: run.failureMessage ?? `${String(run.citedObservationIds.length)} cited observations`,
           occurredAt: run.updatedAt,
@@ -451,6 +578,8 @@ export async function loadLearningAuditSnapshot(
           kind: "experiment_outcome",
           group: "feedback",
           status: outcome.decision,
+          tone:
+            outcome.decision === "keep" ? "positive" : outcome.decision === "revert" ? "negative" : "neutral",
           title: `Experiment outcome · ${outcome.decision}`,
           summary: outcome.strategyId,
           occurredAt: outcome.committedAt,
@@ -517,6 +646,12 @@ export async function loadLearningAuditSnapshot(
         kind: "activation",
         group: "activation",
         status: operation.status,
+        tone:
+          operation.status === "committed" || operation.status === "approved"
+            ? "positive"
+            : operation.status === "blocked" || operation.status === "rejected"
+              ? "negative"
+              : "pending",
         title: `Activation · ${operation.decision.replaceAll("_", " ")}`,
         summary: `${operation.binding.candidateRevision.capabilityId}@${operation.binding.candidateRevision.capabilityRevisionId}`,
         occurredAt: operation.updatedAt,
@@ -545,6 +680,12 @@ export async function loadLearningAuditSnapshot(
             kind: "approval",
             group: "activation",
             status: approval.status,
+            tone:
+              approval.status === "approved"
+                ? "positive"
+                : approval.status === "rejected"
+                  ? "negative"
+                  : "pending",
             title: "Activation approval",
             summary: approval.decisionActor ?? "Awaiting a protected decision",
             occurredAt: approval.decidedAt ?? approval.requestedAt,
@@ -562,6 +703,7 @@ export async function loadLearningAuditSnapshot(
         kind: "activation",
         group: "activation",
         status: "current",
+        tone: "active",
         title: `Current activation r${String(activation.revision)}`,
         summary: `${String(Object.keys(activation.activeCapabilityRevisions).length)} active capabilities`,
         occurredAt: activation.createdAt,

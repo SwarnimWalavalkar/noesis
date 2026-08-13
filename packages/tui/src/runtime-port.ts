@@ -188,6 +188,7 @@ export interface TuiLearningPrimitive {
   readonly kind: TuiLearningPrimitiveKind;
   readonly group: TuiLearningPrimitiveGroup;
   readonly status: string;
+  readonly tone: "neutral" | "positive" | "active" | "pending" | "negative";
   readonly title: string;
   readonly summary: string;
   readonly occurredAt?: string;

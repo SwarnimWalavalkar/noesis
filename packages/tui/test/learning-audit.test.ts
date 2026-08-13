@@ -18,6 +18,7 @@ function record(
 ): TuiLearningPrimitive {
   return Object.freeze({
     status: "recorded",
+    tone: "neutral",
     summary: "Inspectable learning evidence",
     evidence: Object.freeze([]),
     relations: Object.freeze([]),
