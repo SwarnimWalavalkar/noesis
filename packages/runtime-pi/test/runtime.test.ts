@@ -643,7 +643,10 @@ describe("agent runtime factories", () => {
         },
         () => undefined,
       ),
-    ).rejects.toThrow("complete request exceeds its token budget");
+    ).resolves.toMatchObject({
+      outcome: "failed",
+      error: expect.stringContaining("complete request exceeds its token budget"),
+    });
     expect(controlled.provider.state.callCount).toBe(0);
   });
 
@@ -1130,6 +1133,85 @@ describe("agent runtime factories", () => {
       update: { message: "Writing note" },
       recordedByBroker: true,
     });
+  });
+
+  test("rechecks the complete request budget after same-turn hotbar activation", async () => {
+    const base = frozenPlan();
+    const { canonicalDigest: _digest, ...baseUnsigned } = base;
+    const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 12_000 });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const catalog: PiFrozenToolCatalog = Object.freeze({
+      catalogId: "catalog-oversized-hotbar-tool",
+      catalogDigest: sha256("catalog-oversized-hotbar-tool"),
+      tools: Object.freeze([
+        Object.freeze({
+          name: "files.large-schema",
+          label: "Large schema",
+          description: "Schema material ".repeat(1_500),
+          revisionId: "files-large-schema-v1",
+          inputSchema: Object.freeze({ type: "object" }),
+          outputSchema: Object.freeze({ type: "object" }),
+        }),
+      ]),
+    });
+    const codeExecution: PiCodeExecutionAdapter = Object.freeze({
+      prepare: async () =>
+        Object.freeze({
+          catalog,
+          invoke: async () => null,
+          execute: async () =>
+            Object.freeze({
+              executionId: "unused-oversized-hotbar-tool",
+              value: null,
+              calls: 0,
+              durationMs: 1,
+            }),
+          close: async () => undefined,
+        }),
+      shutdown: async () => undefined,
+    });
+    const controlled = createControlledPiModels({
+      respond: () =>
+        fauxAssistantMessage(
+          fauxToolCall(
+            "adapt",
+            { action: "add_tool", tool: "files.large-schema" },
+            { id: "adapt-large-schema" },
+          ),
+          { stopReason: "toolUse" },
+        ),
+    });
+    const selfTools: PiSelfToolAdapter = {
+      hotbar: async () => Object.freeze([]),
+      inspect: async () => null,
+      remember: async () => null,
+      adapt: async (input) => {
+        if (input.action !== "add_tool") throw new Error("Expected add_tool");
+        await input.applyHotbar([input.tool]);
+        return toJsonValue({ status: "hotbar_updated", hotbar: [input.tool] });
+      },
+    };
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "Activate the large schema.",
+          activeCapabilities: [],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({
+      outcome: "failed",
+      error: expect.stringContaining("complete request exceeds its token budget"),
+    });
+    expect(controlled.provider.state.callCount).toBe(1);
   });
 
   test("ignores unavailable persisted hotbar entries without blocking the turn", async () => {
@@ -1863,7 +1945,10 @@ describe("agent runtime factories", () => {
         },
         () => undefined,
       ),
-    ).rejects.toThrow("complete request exceeds its token budget");
+    ).resolves.toMatchObject({
+      outcome: "failed",
+      error: expect.stringContaining("complete request exceeds its token budget"),
+    });
     expect(controlled.provider.state.callCount).toBe(0);
   });
 
@@ -1902,7 +1987,10 @@ describe("agent runtime factories", () => {
         },
         () => undefined,
       ),
-    ).rejects.toThrow("complete request exceeds its token budget");
+    ).resolves.toMatchObject({
+      outcome: "failed",
+      error: expect.stringContaining("complete request exceeds its token budget"),
+    });
     expect(controlled.provider.state.callCount).toBe(0);
   });
 });

@@ -505,28 +505,6 @@ export function createPiAgentRuntime(
       const initialActiveToolNames = activeNames(initialHotbar);
       const skillsSystemPrompt = formatSkillsForSystemPrompt(piSkills);
       const completeSystemPrompt = [request.systemPrompt, skillsSystemPrompt].filter(Boolean).join("\n\n");
-      if (plan?.requestTokenBudget !== undefined) {
-        const activeNameSet = new Set(initialActiveToolNames);
-        const activeTools = agentTools.filter((tool) => activeNameSet.has(tool.name));
-        const activeToolMaterial = JSON.stringify(
-          activeTools.map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.parameters,
-          })),
-        );
-        const estimatedRequestTokens =
-          64 +
-          estimateInputTokens(completeSystemPrompt) +
-          estimateInputTokens(explicitSkill?.prompt ?? request.prompt) +
-          estimateInputTokens(activeToolMaterial) +
-          activeTools.length * 16 +
-          history.reduce((total, message) => total + 8 + estimateInputTokens(message.content), 0);
-        if (estimatedRequestTokens > plan.requestTokenBudget)
-          throw new Error(
-            `Frozen turn plan ${plan.planId} complete request exceeds its token budget before model invocation`,
-          );
-      }
       harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),
         session,
@@ -540,6 +518,35 @@ export function createPiAgentRuntime(
         },
         systemPrompt: completeSystemPrompt,
       });
+      const requestBudget =
+        plan?.requestTokenBudget === undefined
+          ? undefined
+          : Object.freeze({ planId: plan.planId, tokens: plan.requestTokenBudget });
+      const unsubscribeBudgetGuard =
+        requestBudget === undefined
+          ? () => undefined
+          : harness.on("context", ({ messages }) => {
+              const activeTools = harness.getActiveTools();
+              const activeToolMaterial = JSON.stringify(
+                activeTools.map((tool) => ({
+                  name: tool.name,
+                  description: tool.description,
+                  parameters: tool.parameters,
+                })),
+              );
+              const estimatedRequestTokens =
+                64 +
+                estimateInputTokens(completeSystemPrompt) +
+                estimateInputTokens(JSON.stringify(messages)) +
+                estimateInputTokens(activeToolMaterial) +
+                activeTools.length * 16 +
+                messages.length * 8;
+              if (estimatedRequestTokens > requestBudget.tokens)
+                throw new Error(
+                  `Frozen turn plan ${requestBudget.planId} complete request exceeds its token budget before model invocation`,
+                );
+              return undefined;
+            });
       const historyBaseTimestamp = Date.now() - history.length;
       for (const [index, message] of history.entries()) {
         if (message.role === "assistant" && message.content.length === 0) continue;
@@ -680,6 +687,7 @@ export function createPiAgentRuntime(
         execution.acceptsSteering = false;
         execution.controller.signal.removeEventListener("abort", abortHarness);
         unsubscribe();
+        unsubscribeBudgetGuard();
         await abortPromise;
         settlePendingSteers(
           execution,
