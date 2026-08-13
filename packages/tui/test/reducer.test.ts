@@ -24,6 +24,7 @@ describe("Noesis TUI reducer", () => {
     expect(executionForInteractionPhase("aborting", "running")).toBe("thinking");
     expect(executionForInteractionPhase("tool", "running")).toBeUndefined();
     expect(executionForInteractionPhase("error", "idle")).toBeUndefined();
+    expect(executionForInteractionPhase("compacting", "idle")).toBeUndefined();
     expect(executionForInteractionPhase("streaming", "interrupting")).toBe("aborting");
   });
 
@@ -321,6 +322,21 @@ describe("Noesis TUI reducer", () => {
     expect(createStatusFields(state, createTuiLayout(90, 28))).toContain("q 1 paused");
     expect(helpHint(state)).toContain("/queue resume");
     expect(helpHint(state)).not.toContain("/steer promote newest");
+  });
+
+  test("shows command-owned queued work as waiting for compaction", () => {
+    const queued = reduceTui(initialTuiState("fake"), {
+      type: "interaction-changed",
+      interaction: {
+        phase: "idle",
+        queuePaused: true,
+        queuedInputs: [{ queueId: "q1", text: "after compact", createdAt: "2026-07-31T10:00:00.000Z" }],
+      },
+    });
+    const state = reduceTui(queued, { type: "execution-changed", execution: "compacting" });
+
+    expect(helpHint(state)).toBe("enter queue · waiting for compaction · alt+↑ edit newest");
+    expect(helpHint(state)).not.toContain("/queue resume");
   });
 
   test("maps lifecycle actions to supported execution states", () => {

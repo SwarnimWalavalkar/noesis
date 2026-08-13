@@ -518,6 +518,8 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(compactStarted).toBe(true));
     expect(compactFocus).toBe("preserve the debugging decisions");
     await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 2 · paused"));
+    await vi.waitFor(() => expect(terminal.output).toContain("waiting for compaction"));
+    expect(terminal.output).not.toContain("/queue resume");
     expect(terminal.output).not.toContain("Message queued.");
     const trailId = runtime.listTrails()[0]?.trailId;
     if (!trailId) throw new Error("Expected an active trail");

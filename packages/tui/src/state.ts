@@ -105,7 +105,7 @@ export function executionForInteractionPhase(
   phase: TuiInteractionView["phase"],
 ): ExecutionState | undefined {
   if (phase === "interrupting") return "aborting";
-  if (phase === "idle" && current !== "error") return "idle";
+  if (phase === "idle" && current !== "error" && current !== "compacting") return "idle";
   if (phase === "running" && (current === "idle" || current === "aborting")) return "thinking";
   return undefined;
 }

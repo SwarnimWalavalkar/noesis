@@ -127,6 +127,8 @@ export function helpHint(state: NoesisTuiState): string {
   if (state.actionCursor) return "↑/↓ select · space expand · enter inspect · esc leave · ctrl+c quit";
   if (state.interaction.phase !== "idle")
     return "enter queue · /steer redirect · alt+↑ edit newest · esc interrupt";
+  if (state.execution === "compacting" && state.interaction.queuedInputs.length > 0)
+    return "enter queue · waiting for compaction · alt+↑ edit newest";
   if (state.interaction.queuePaused && state.interaction.queuedInputs.length > 0)
     return "/queue resume · alt+↑ edit newest";
   return "? help · ctrl+o inspect runs · ctrl+c quit";
