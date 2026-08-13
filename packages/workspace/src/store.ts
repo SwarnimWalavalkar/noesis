@@ -1760,6 +1760,11 @@ function createOperationalRepositories(
   });
   const decodeContextCheckpoint = (row: unknown): ContextCheckpointRecord => {
     const checkpointId = requiredString(row, "checkpoint_id");
+    if (
+      db.prepare("SELECT 1 FROM context_checkpoint_seals WHERE checkpoint_id = ?").get(checkpointId) ===
+      undefined
+    )
+      throw new Error(`Context checkpoint ${checkpointId} is not sealed`);
     const previousCheckpointId = optionalString(row, "previous_checkpoint_id");
     const firstRetainedMessageId = optionalString(row, "first_retained_message_id");
     const sourceRows = db
@@ -1963,6 +1968,10 @@ function createOperationalRepositories(
           );
           for (const [ordinal, source] of checkpoint.sources.entries())
             insertSource.run(checkpoint.checkpointId, ordinal, source.messageId, source.contentDigest);
+          db.prepare("INSERT INTO context_checkpoint_seals(checkpoint_id, sealed_at) VALUES (?, ?)").run(
+            checkpoint.checkpointId,
+            checkpoint.createdAt,
+          );
         }
         db.prepare(
           `INSERT INTO session_context_state(session_id, active_checkpoint_id, updated_at)

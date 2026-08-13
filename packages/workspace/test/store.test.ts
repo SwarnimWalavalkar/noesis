@@ -341,6 +341,43 @@ describe("WorkspaceStore", () => {
     expect(
       (await store.operational.messages.listForSession("session-context")).map(({ content }) => content),
     ).toEqual(messages.map(({ content }) => content));
+    const successorMessage = Object.freeze({
+      messageId: "context-message-successor",
+      sessionId: "session-context",
+      role: "user" as const,
+      content: "A later turn is covered by a successor checkpoint.",
+      sensitivity: "normal" as const,
+      createdAt: "2026-08-13T00:00:03.000Z",
+      metadata: Object.freeze({}),
+    });
+    await store.operational.messages.put(successorMessage);
+    const successorSources = Object.freeze([
+      Object.freeze({
+        messageId: successorMessage.messageId,
+        contentDigest: sha256(successorMessage.content),
+      }),
+    ]);
+    const successor = Object.freeze({
+      ...checkpoint,
+      checkpointId: "context-checkpoint-2",
+      previousCheckpointId: checkpoint.checkpointId,
+      summary: "The continuation now includes the later turn.",
+      summaryDigest: sha256("The continuation now includes the later turn."),
+      sourceDigest: sha256(canonicalJson(successorSources)),
+      sources: successorSources,
+      lastCoveredMessageId: successorMessage.messageId,
+      estimatedSummaryTokens: 11,
+      sensitivity: "normal" as const,
+      usage: Object.freeze({ inputTokens: 9, outputTokens: 11, totalTokens: 20, estimatedCost: 0 }),
+      createdAt: "2026-08-13T00:00:04.000Z",
+    });
+    await expect(
+      store.operational.contextCheckpoints.activate({
+        checkpoint: successor,
+        expectedActiveCheckpointId: checkpoint.checkpointId,
+        expectedContextMessageIds: Object.freeze([successorMessage.messageId]),
+      }),
+    ).resolves.toMatchObject({ status: "activated" });
     await store.operational.sessions.put(session("session-context-other"));
     await store.operational.messages.put({
       messageId: "context-message-other",
@@ -348,7 +385,7 @@ describe("WorkspaceStore", () => {
       role: "user",
       content: "Other session context.",
       sensitivity: "normal",
-      createdAt: "2026-08-13T00:00:03.000Z",
+      createdAt: "2026-08-13T00:00:05.000Z",
       metadata: Object.freeze({}),
     });
     const integrityDatabase = new DatabaseSync(store.unsafeDatabasePathForTesting);
@@ -357,7 +394,7 @@ describe("WorkspaceStore", () => {
         .prepare(
           "INSERT INTO session_context_state(session_id, active_checkpoint_id, updated_at) VALUES (?, ?, ?)",
         )
-        .run("session-context-other", checkpoint.checkpointId, "2026-08-13T00:00:04.000Z"),
+        .run("session-context-other", checkpoint.checkpointId, "2026-08-13T00:00:06.000Z"),
     ).toThrow("active context checkpoint must belong to its session");
     expect(() =>
       integrityDatabase
@@ -409,7 +446,7 @@ describe("WorkspaceStore", () => {
         "user",
         "This later message must not mutate checkpoint provenance.",
         "normal",
-        "2026-08-13T00:00:05.000Z",
+        "2026-08-13T00:00:07.000Z",
         "{}",
       );
     expect(() =>
@@ -424,13 +461,16 @@ describe("WorkspaceStore", () => {
           "context-message-appended",
           sha256("This later message must not mutate checkpoint provenance."),
         ),
-    ).toThrow("active context checkpoint sources are immutable");
+    ).toThrow("sealed context checkpoint sources are immutable");
     integrityDatabase.close();
     store.close();
 
     const reopened = await createWorkspaceStore(root);
-    await expect(reopened.operational.contextCheckpoints.getActive("session-context")).resolves.toEqual(
+    await expect(reopened.operational.contextCheckpoints.get(checkpoint.checkpointId)).resolves.toEqual(
       checkpoint,
+    );
+    await expect(reopened.operational.contextCheckpoints.getActive("session-context")).resolves.toEqual(
+      successor,
     );
     reopened.close();
   });
@@ -1806,7 +1846,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 39 });
+    ).toEqual({ version: 40 });
     inspection.close();
   });
 
@@ -2523,7 +2563,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(39);
+    expect(versions.at(-1)).toBe(40);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
