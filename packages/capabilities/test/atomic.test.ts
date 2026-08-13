@@ -310,6 +310,7 @@ describe("atomic capability registry", () => {
       },
       feedbackSignals: {
         getFeedbackSignal: async () => undefined,
+        listFeedbackSignals: async () => [],
         recordFeedbackSignal: async (value) => row("feedback_signals", value.signalId),
       },
     };

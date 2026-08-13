@@ -258,7 +258,7 @@ export interface EvaluationStorePort {
 
 export interface FeedbackSignalStorePort {
   readonly getFeedbackSignal: (signalId: string) => Promise<FeedbackSignal | undefined>;
-  readonly listFeedbackSignals?: (request: {
+  readonly listFeedbackSignals: (request: {
     readonly experimentId?: string;
     readonly limit: number;
   }) => Promise<readonly FeedbackSignal[]>;

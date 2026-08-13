@@ -119,6 +119,16 @@ function createFakeResearchState(): ResearchStatePort {
     }),
     feedbackSignals: Object.freeze({
       getFeedbackSignal: async (signalId: string) => feedbackSignals.get(signalId),
+      listFeedbackSignals: async (
+        request: Parameters<ResearchStatePort["feedbackSignals"]["listFeedbackSignals"]>[0],
+      ) =>
+        Object.freeze(
+          [...feedbackSignals.values()]
+            .filter(
+              (signal) => request.experimentId === undefined || signal.experimentId === request.experimentId,
+            )
+            .slice(0, request.limit),
+        ),
       recordFeedbackSignal: async (signal: FeedbackSignal) => {
         feedbackSignals.set(signal.signalId, signal);
         return row("feedback_signals", signal.signalId);

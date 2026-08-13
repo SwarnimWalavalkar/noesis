@@ -93,7 +93,6 @@ describe("learning audit read model", () => {
           strength: 0.6,
           novelty: 0.4,
           sensitivity: project.projectId === "project-a" ? ("private" as const) : ("normal" as const),
-          experimentId: `experiment-${project.projectId}`,
         }),
       );
     }

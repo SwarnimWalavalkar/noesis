@@ -245,15 +245,23 @@ export async function loadLearningAuditSnapshot(
   source: LearningAuditSource,
   sessionId: string,
 ): Promise<TuiLearningAuditSnapshot> {
-  const [allJobs, allExperiments, adjustments, criteriaResult, activation, allActivationOperations] =
-    await Promise.all([
-      listAllJobs(source.workspace),
-      source.workspace.research.experiments.listExperiments({ limit: AUDIT_LIMIT }),
-      source.workspace.workingAdjustments.list({ projectId: source.projectId, limit: AUDIT_LIMIT }),
-      source.criteria.list(),
-      source.activations.current(),
-      source.activations.listOperations(AUDIT_LIMIT),
-    ]);
+  const [
+    allJobs,
+    allExperiments,
+    adjustments,
+    criteriaResult,
+    activation,
+    allActivationOperations,
+    allFeedbackSignals,
+  ] = await Promise.all([
+    listAllJobs(source.workspace),
+    source.workspace.research.experiments.listExperiments({ limit: AUDIT_LIMIT }),
+    source.workspace.workingAdjustments.list({ projectId: source.projectId, limit: AUDIT_LIMIT }),
+    source.criteria.list(),
+    source.activations.current(),
+    source.activations.listOperations(AUDIT_LIMIT),
+    source.workspace.research.feedbackSignals.listFeedbackSignals({ limit: AUDIT_LIMIT }),
+  ]);
   if (!criteriaResult.ok) throw new Error(criteriaResult.error.message);
   const projectSessionIds = new Set(
     allJobs
@@ -281,22 +289,17 @@ export async function loadLearningAuditSnapshot(
       )
       .map((experiment) => experiment.experimentId),
   );
-  let addedExperiment = true;
-  while (addedExperiment) {
-    addedExperiment = false;
-    for (const experiment of allExperiments) {
-      if (experimentIds.has(experiment.experimentId)) continue;
-      if (
-        allExperiments.some(
-          (candidate) =>
-            experimentIds.has(candidate.experimentId) &&
-            candidate.followUpExperimentId === experiment.experimentId,
-        )
-      ) {
-        experimentIds.add(experiment.experimentId);
-        addedExperiment = true;
-      }
-    }
+  const followUpByExperimentId = new Map(
+    allExperiments
+      .filter((experiment) => experiment.followUpExperimentId !== undefined)
+      .map((experiment) => [experiment.experimentId, experiment.followUpExperimentId] as const),
+  );
+  const lineageQueue = [...experimentIds];
+  for (let index = 0; index < lineageQueue.length; index += 1) {
+    const followUpExperimentId = followUpByExperimentId.get(lineageQueue[index] ?? "");
+    if (followUpExperimentId === undefined || experimentIds.has(followUpExperimentId)) continue;
+    experimentIds.add(followUpExperimentId);
+    lineageQueue.push(followUpExperimentId);
   }
   const experiments = allExperiments.filter((experiment) => experimentIds.has(experiment.experimentId));
   const jobs = allJobs.filter((job) => {
@@ -312,25 +315,30 @@ export async function loadLearningAuditSnapshot(
   const activationOperations = allActivationOperations.filter((operation) =>
     experimentIds.has(operation.binding.experimentId),
   );
-  const feedbackSignals = source.workspace.research.feedbackSignals.listFeedbackSignals
-    ? [
-        ...new Map(
-          (
-            await Promise.all(
-              experiments.map(
-                async (experiment) =>
-                  (await source.workspace.research.feedbackSignals.listFeedbackSignals?.({
-                    experimentId: experiment.experimentId,
-                    limit: AUDIT_LIMIT,
-                  })) ?? [],
-              ),
-            )
-          )
-            .flat()
-            .map((signal) => [signal.signalId, signal] as const),
-        ).values(),
-      ]
-    : [];
+  const referencedFeedbackSignalIds = new Set(
+    experiments.flatMap((experiment) => experiment.feedbackSignalIds),
+  );
+  const listedFeedbackSignalsById = new Map(
+    allFeedbackSignals.map((signal) => [signal.signalId, signal] as const),
+  );
+  const referencedFeedbackSignals = (
+    await Promise.all(
+      [...referencedFeedbackSignalIds]
+        .filter((signalId) => !listedFeedbackSignalsById.has(signalId))
+        .map((signalId) => source.workspace.research.feedbackSignals.getFeedbackSignal(signalId)),
+    )
+  ).filter(defined);
+  const feedbackSignals = [
+    ...new Map(
+      [...allFeedbackSignals, ...referencedFeedbackSignals]
+        .filter(
+          (signal) =>
+            (signal.experimentId !== undefined && experimentIds.has(signal.experimentId)) ||
+            referencedFeedbackSignalIds.has(signal.signalId),
+        )
+        .map((signal) => [signal.signalId, signal] as const),
+    ).values(),
+  ];
   const activeAdjustment = await source.workspace.workingAdjustments.getActive(source.projectId);
   const reflectionByTurnId = new Map(
     jobs
