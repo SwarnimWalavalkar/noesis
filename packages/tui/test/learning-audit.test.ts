@@ -106,6 +106,10 @@ describe("learning audit overlay", () => {
     );
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
+    terminal.type("  /learning\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("Controlled completion for:   /learning"));
+    expect(terminal.output).not.toContain("LEARNING · audit ledger");
+
     terminal.type("/learning\r");
     await vi.waitFor(() => expect(terminal.output).toContain("LEARNING · audit ledger"));
     expect(terminal.output).toContain("Reflection · no change");

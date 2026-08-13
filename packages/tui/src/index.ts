@@ -12,6 +12,7 @@ import { tuiActionForAgentEvent } from "./agent-event.ts";
 import {
   exclusiveSlashCommandScope,
   isExclusiveSlashCommand,
+  isSlashCommandSubmission,
   runSlashCommand,
   steerFeedback,
 } from "./commands.ts";
@@ -67,9 +68,7 @@ export * from "./runtime-port.ts";
 export * from "./safe-editor.ts";
 export * from "./session-picker.ts";
 export * from "./state.ts";
-const SHUTDOWN_GRACE_MS = 250;
-const INTERRUPT_FEEDBACK_MS = 20;
-const INSPECTOR_PAGE_ROWS = 10;
+const [SHUTDOWN_GRACE_MS, INTERRUPT_FEEDBACK_MS, INSPECTOR_PAGE_ROWS] = [250, 20, 10];
 export async function startNoesisTui(
   runtime: NoesisTuiRuntime,
   options: TuiStartOptions = {},
@@ -632,7 +631,7 @@ export async function startNoesisTui(
         return;
       }
       let handled = false;
-      if (normalizedInput === "?" || normalizedInput.startsWith("/")) {
+      if (isSlashCommandSubmission(text)) {
         const commandWork = runSlashCommand(normalizedInput, {
           runtime,
           trailId: submittedTrailId,

@@ -121,6 +121,13 @@ export function steerFeedback(result: TuiInteractionResult, explicit: boolean): 
   return explicit ? "No active turn is available to steer." : "No queued message is available to promote.";
 }
 
+export function isSlashCommandSubmission(text: string): boolean {
+  const command = text.trim();
+  return (
+    command === "?" || (command.startsWith("/") && (command !== "/learning" || text === text.trimStart()))
+  );
+}
+
 /**
  * Handles read-only inspection and session commands. Turn control (`/quit`, `/abort`) stays with
  * the session loop because it owns shutdown and the active turn.
@@ -128,7 +135,6 @@ export function steerFeedback(result: TuiInteractionResult, explicit: boolean): 
 export async function runSlashCommand(text: string, context: SlashCommandContext): Promise<boolean> {
   const { runtime, trailId, publishInspector, dispatch, requestRender } = context;
   const command = text.trim();
-  if (command === "/learning" && text !== text.trimStart()) return false;
 
   if (command === "?" || command === "/help") {
     dispatch({ type: "system-message", text: HELP_LINES.join("\n") });

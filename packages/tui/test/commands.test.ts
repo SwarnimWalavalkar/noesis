@@ -4,6 +4,7 @@ import {
   exclusiveSlashCommandScope,
   INSPECTOR_PREVIEW_CHARACTERS,
   isExclusiveSlashCommand,
+  isSlashCommandSubmission,
   type NoesisTuiAction,
   runSlashCommand,
   steerFeedback,
@@ -32,6 +33,12 @@ const agent: NoesisAgentRuntime = {
 };
 
 describe("Noesis slash commands", () => {
+  test("routes learning only from column zero", () => {
+    expect(isSlashCommandSubmission("/learning")).toBe(true);
+    expect(isSlashCommandSubmission("  /learning")).toBe(false);
+    expect(isSlashCommandSubmission("  /script reusable-research")).toBe(true);
+  });
+
   test("opens learning through the interactive audit surface", async () => {
     let opened = 0;
     const handled = await runSlashCommand("/learning", {
@@ -47,23 +54,6 @@ describe("Noesis slash commands", () => {
 
     expect(handled).toBe(true);
     expect(opened).toBe(1);
-  });
-
-  test("keeps indented slash text as a prompt instead of opening learning", async () => {
-    let opened = 0;
-    const handled = await runSlashCommand("  /learning", {
-      runtime: createInMemoryTestRuntime(agent),
-      trailId: "trail-learning",
-      publishInspector: () => undefined,
-      dispatch: () => undefined,
-      requestRender: () => undefined,
-      openLearningAudit: () => {
-        opened += 1;
-      },
-    });
-
-    expect(handled).toBe(false);
-    expect(opened).toBe(0);
   });
 
   test("opens MCP management through the interactive surface and explains unsupported runtimes", async () => {
