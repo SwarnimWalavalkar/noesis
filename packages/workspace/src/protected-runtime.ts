@@ -23,6 +23,7 @@ import type {
   WorkingAdjustmentUnapplyResult,
 } from "./types.ts";
 import { isWorkingAdjustmentAdmissionConflictError } from "./types.ts";
+import type { McpConnectionCycleAllocator } from "./mcp-connection-cycles.ts";
 
 type ActivationMutation = Pick<
   ProtectedActivationStore,
@@ -87,6 +88,7 @@ export interface ProtectedWorkspaceRuntime {
 
 export interface WorkspaceRuntimeInternals {
   readonly authority: AuthorityBoundary;
+  readonly mcpConnectionCycles: McpConnectionCycleAllocator;
   readonly protectedRuntime: ProtectedWorkspaceRuntime;
 }
 

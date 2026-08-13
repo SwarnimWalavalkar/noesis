@@ -112,6 +112,10 @@ export const NOESIS_SLASH_COMMANDS = [
     description: "Inspect ambient reflection and learning activity",
   },
   {
+    name: "mcp",
+    description: "Manage MCP servers and inspect their capabilities",
+  },
+  {
     name: "fork",
     description: "Fork the current session",
   },

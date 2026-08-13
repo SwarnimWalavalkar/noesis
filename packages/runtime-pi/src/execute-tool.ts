@@ -25,9 +25,23 @@ export interface PiWorkflowSummary {
   readonly toolName: string;
 }
 
+export interface PiMcpServerSummary {
+  readonly name: string;
+  readonly tools: number;
+  readonly prompts: number;
+  readonly resources: number;
+  readonly resourceTemplates: number;
+}
+
 export type PiCodeExecutionEvent =
   | { readonly type: "started"; readonly executionId: string }
-  | { readonly type: "progress"; readonly value: JsonValue }
+  | {
+      readonly type: "progress";
+      readonly value: JsonValue;
+      readonly callId?: string;
+      readonly name?: string;
+      readonly callIndex?: number;
+    }
   | {
       readonly type: "tool-start";
       readonly callId: string;
@@ -61,6 +75,7 @@ export interface PiFrozenToolCatalog {
 export interface PreparedPiCodeExecution {
   readonly catalog: PiFrozenToolCatalog;
   readonly workflowSummaries?: readonly PiWorkflowSummary[];
+  readonly mcpServerSummaries?: readonly PiMcpServerSummary[];
   readonly invoke?: (
     name: string,
     input: JsonValue,
@@ -70,6 +85,7 @@ export interface PreparedPiCodeExecution {
       readonly logicalExecutionId: string;
       readonly callId: string;
     },
+    emitUpdate?: (update: JsonValue) => void,
   ) => Promise<JsonValue>;
   readonly execute: (
     source: string,
@@ -180,6 +196,22 @@ function workflowIndex(summaries: readonly PiWorkflowSummary[] | undefined): str
   return render([], true);
 }
 
+function mcpIndex(summaries: readonly PiMcpServerSummary[] | undefined): string | undefined {
+  if (!summaries || summaries.length === 0) return undefined;
+  const entries = summaries
+    .slice(0, 32)
+    .map(
+      (server) =>
+        `${escapeXmlBounded(server.name, 96)} (${String(server.tools)} tools, ${String(server.prompts)} prompts, ${String(server.resources)} resources, ${String(server.resourceTemplates)} templates)`,
+    );
+  while (entries.length > 0) {
+    const value = `<available_mcp_servers>${entries.join("; ")}</available_mcp_servers> Use mcp.servers and mcp.inspect for details, and noesis.search to find exact MCP tool contracts.${summaries.length > entries.length ? " More servers are available through mcp.servers." : ""}`;
+    if (new TextEncoder().encode(value).byteLength <= 4 * 1024) return value;
+    entries.pop();
+  }
+  return "MCP servers are available. Use mcp.servers, mcp.inspect, and noesis.search for progressive discovery.";
+}
+
 export function createPiExecuteTool(input: {
   readonly prepared: PreparedPiCodeExecution;
   readonly turnId: string;
@@ -187,6 +219,7 @@ export function createPiExecuteTool(input: {
   readonly emit: (event: PiCodeExecutionEvent, parentToolCallId: string) => void;
 }): AgentTool<typeof executeParametersJsonSchema, PiExecuteToolDetails> {
   const availableWorkflows = workflowIndex(input.prepared.workflowSummaries);
+  const availableMcp = mcpIndex(input.prepared.mcpServerSummaries);
   const tool: AgentTool<typeof executeParametersJsonSchema, PiExecuteToolDetails> = {
     name: "execute",
     label: "Execute JavaScript",
@@ -197,6 +230,7 @@ export function createPiExecuteTool(input: {
       "emit(value) and notify(value) show progress to the user but do not return that value to you; use return for the final result that should enter conversation context.",
       "When the user asks you to create a reusable capability, or a reusable project-local program would materially help the current work, implement it immediately as a script with scripts.save, or as a workflow with workflows.save when it needs durable phases. Do not defer executable project-local work to reflection or evaluation. Verify a new script immediately with scripts.run in the same execution and return the save receipt, verification, and reuse instructions.",
       ...(availableWorkflows ? [availableWorkflows] : []),
+      ...(availableMcp ? [availableMcp] : []),
       "Use store(key, value)/load(key) for codemode-session scratch state.",
     ].join(" "),
     parameters: executeParametersJsonSchema,

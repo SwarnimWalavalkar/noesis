@@ -11,14 +11,17 @@ import {
 } from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
 import {
+  ArtifactFileRefSchema,
   canonicalJson,
   EvidenceRevisionRefSchema,
   eventChecksum,
   type FileRevisionRef,
+  type JsonValue,
   type LedgerEvent,
   type ProjectRef,
   sha256,
 } from "@noesis/domain";
+import { createMcpHostManager, type LoadedMcpConfig, type McpOAuthCredentialStore } from "@noesis/mcp";
 import {
   createHotbarToolAliases,
   createPiAgentRoleRunner,
@@ -32,6 +35,7 @@ import {
   projectWorkflowToolName,
   type RoleBackendRequest,
 } from "@noesis/runtime-pi";
+import { createTuiMcpInteractionBridge } from "@noesis/tui";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { z } from "zod";
@@ -43,7 +47,7 @@ import {
 } from "../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 import { createScriptedAgentRoleRunner } from "../../../packages/runtime-pi/test/support/scripted-role-runner.ts";
 import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src/protected-runtime.ts";
-import { researchLoopControlledResponse } from "./support/research-loop-controlled-response.ts";
+import { createApplicationMcpIntegration } from "../src/mcp-integration.ts";
 import {
   type ApplicationRuntimeCompositionOptions,
   createApplicationRuntimeComposition,
@@ -51,6 +55,7 @@ import {
   resolveProjectHotbarSelection,
   waitForReflectionBarrier,
 } from "../src/runtime-composition.ts";
+import { researchLoopControlledResponse } from "./support/research-loop-controlled-response.ts";
 
 const roots: string[] = [];
 
@@ -154,6 +159,36 @@ test("project workflow pins compose only with their own project's global hotbar"
     project: [betaTool],
     effective: ["files.read", "workflows.run", betaTool],
   });
+});
+
+test("legacy global MCP pins stay inactive while explicit project pins stay isolated", () => {
+  const tools = Object.freeze({
+    hotbar: Object.freeze(["files.read", "mcp.github.search_123456789abc"]),
+    projectHotbars: Object.freeze({
+      project_beta: Object.freeze(["mcp.linear.list_abcdef123456"]),
+    }),
+  });
+  expect(resolveProjectHotbarSelection(tools, "project_alpha")).toEqual({
+    global: ["files.read"],
+    project: [],
+    effective: ["files.read"],
+  });
+  expect(resolveProjectHotbarSelection(tools, "project_beta")).toEqual({
+    global: ["files.read"],
+    project: ["mcp.linear.list_abcdef123456"],
+    effective: ["files.read", "mcp.linear.list_abcdef123456"],
+  });
+});
+
+test("an explicitly migrated MCP pin activates only in its owning project", () => {
+  const legacyMcp = "mcp.github.search_123456789abc";
+  const tools = Object.freeze({
+    hotbar: Object.freeze(["files.read"]),
+    projectHotbars: Object.freeze({ project_alpha: Object.freeze([legacyMcp]) }),
+  });
+
+  expect(resolveProjectHotbarSelection(tools, "project_alpha").effective).toEqual(["files.read", legacyMcp]);
+  expect(resolveProjectHotbarSelection(tools, "project_beta").effective).toEqual(["files.read"]);
 });
 
 test("active project hotbar load rejects an effective global and project union above 16", () => {
@@ -264,6 +299,255 @@ async function writeLegacyCompletedTurn(
 }
 
 describe("apps/noesis production control-plane composition", () => {
+  test("shuts down composed resources when MCP startup rejects", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-mcp-start-failure-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const loadedMcpConfig: LoadedMcpConfig = Object.freeze({
+      global: Object.freeze({ servers: Object.freeze({}) }),
+      project: Object.freeze({ servers: Object.freeze({}) }),
+      servers: new Map(),
+      installed: Object.freeze([]),
+    });
+    const credentials: McpOAuthCredentialStore = Object.freeze({
+      read: async () => undefined,
+      write: async () => undefined,
+      update: async () => undefined,
+      delete: async () => undefined,
+      deleteIf: async () => undefined,
+    });
+    const host = createMcpHostManager({
+      home,
+      projectDirectory: home,
+      config: loadedMcpConfig,
+      credentials,
+      handlers: Object.freeze({
+        sample: async () => {
+          throw new Error("sampling is not expected");
+        },
+        elicit: async () => ({ action: "decline" as const }),
+        onOAuthRedirect: () => undefined,
+      }),
+    });
+    let closes = 0;
+    const mcp: NonNullable<ApplicationRuntimeCompositionOptions["mcp"]> = Object.freeze({
+      host,
+      start: async () => {
+        throw new Error("controlled MCP startup failure");
+      },
+      close: async () => {
+        closes += 1;
+        await host.close();
+      },
+      listMcpServers: async () => Object.freeze([]),
+      inspectMcpServer: async () => undefined,
+      mutateMcp: async () => Object.freeze({ message: "unused" }),
+      setSamplingAuthorizer: () => undefined,
+      setLifecycleAuthorizer: () => undefined,
+    });
+    const controlled = createControlledPiModels();
+
+    await expect(
+      createApplicationRuntimeComposition({
+        config,
+        mcp,
+        agent: createPiAgentRuntime(home, controlled.models),
+        createRoleRunner: (configurations) =>
+          createPiAgentRoleRunner(home, controlled.models, configurations),
+      }),
+    ).rejects.toThrow("controlled MCP startup failure");
+    expect(closes).toBe(1);
+  });
+
+  test("stages an oversized MCP artifact before primary settlement and replays it after restart", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-mcp-large-result-"));
+    const projectRoot = join(home, "project");
+    const executionMarker = join(home, "large-result-calls");
+    roots.push(home);
+    await mkdir(projectRoot, { recursive: true });
+    const fixture = join(import.meta.dirname, "../../../packages/mcp/test/fixtures/server.mjs");
+    await writeFile(
+      join(home, "mcp.json"),
+      JSON.stringify({
+        servers: {
+          controlled: {
+            type: "local",
+            command: process.execPath,
+            args: [fixture, "--large-result-bytes=307200", `--large-result-marker=${executionMarker}`],
+          },
+        },
+      }),
+    );
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const project: ProjectRef = Object.freeze({ projectId: "project_mcp_large", root: projectRoot });
+    const returned: JsonValue[] = [];
+    const controlled = createControlledPiModels();
+    const compose = async () => {
+      const mcp = createApplicationMcpIntegration({
+        home,
+        projectDirectory: projectRoot,
+        sampling: Object.freeze({
+          sample: async () => {
+            throw new Error("Sampling is not expected");
+          },
+        }),
+        interactions: createTuiMcpInteractionBridge(),
+        openUrl: async () => undefined,
+        workspaceTrusted: true,
+      });
+      return await createApplicationRuntimeComposition({
+        config,
+        project,
+        mcp,
+        createAgent: (_sessionTools, codeExecution) =>
+          Object.freeze({
+            name: "mcp-large-result-agent",
+            run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
+              const plan = request.frozenTurnPlan;
+              if (!plan) throw new Error("Expected a frozen plan");
+              emit({ type: "status", status: "started" });
+              const controller = new AbortController();
+              const prepared = await codeExecution.prepare(plan, controller.signal);
+              try {
+                const tool = prepared.catalog.tools.find((entry) =>
+                  entry.name.startsWith("mcp.controlled.large-result"),
+                );
+                if (!tool || !prepared.invoke) throw new Error("Expected the controlled large MCP tool");
+                returned.push(
+                  await prepared.invoke(tool.name, {}, controller.signal, {
+                    executionId: `direct:${plan.turnId}`,
+                    logicalExecutionId: "mcp-large-result-restart",
+                    callId: "mcp-large-result-restart-call",
+                  }),
+                );
+                emit({ type: "status", status: "completed" });
+                return Object.freeze({
+                  outcome: "completed" as const,
+                  stopReason: "stop" as const,
+                  text: "MCP large result materialized.",
+                  provider: request.provider,
+                  model: request.model,
+                });
+              } finally {
+                await prepared.close();
+              }
+            },
+            steer: async () =>
+              Object.freeze({ status: "not-consumed" as const, reason: "not-running" as const }),
+            abort: async () => undefined,
+          }),
+        createRoleRunner: (configurations) =>
+          createPiAgentRoleRunner(projectRoot, controlled.models, configurations),
+      });
+    };
+    const invokeOnce = async (title: string): Promise<void> => {
+      const runtime = await compose();
+      try {
+        const trail = await runtime.startTrail({ title });
+        await runtime.debug.runTurn(trail.trailId, "Call the large MCP tool.");
+      } finally {
+        await runtime.shutdown();
+      }
+    };
+
+    await invokeOnce("Large MCP result before restart");
+    expect(returned).toHaveLength(1);
+    expect(returned[0]).toMatchObject({
+      truncated: true,
+      artifact: { artifactId: expect.any(String) },
+    });
+    expect(await readFile(executionMarker, "utf8")).toBe("called\n");
+
+    const workspace = await createWorkspaceStore(home);
+    try {
+      const database = new DatabaseSync(workspace.unsafeDatabasePathForTesting);
+      try {
+        const toolOperation = z
+          .strictObject({
+            operation_id: z.string(),
+            idempotency_key: z.string(),
+            effect: z.enum(["read", "write", "execute", "network", "promote", "schedule"]),
+            resource: z.string(),
+            request_digest: z.string(),
+            estimated_cost: z.number(),
+            result_json: z.string(),
+          })
+          .parse(
+            database
+              .prepare(
+                `SELECT operation_id, idempotency_key, effect, resource, request_digest,
+                        estimated_cost, result_json
+                 FROM authority_operations
+                 WHERE resource LIKE 'mcp:%:tool:large-result'`,
+              )
+              .get(),
+          );
+        const resultJson = toolOperation.result_json;
+        expect(Buffer.byteLength(resultJson, "utf8")).toBeLessThan(256 * 1024);
+        const durableResult = z
+          .strictObject({
+            content: z.array(z.unknown()),
+            artifact: ArtifactFileRefSchema,
+            truncated: z.literal(true),
+            isError: z.literal(true).optional(),
+          })
+          .parse(JSON.parse(resultJson));
+        expect((await workspace.reads.readArtifact(durableResult.artifact)).byteLength).toBeGreaterThan(
+          307_200,
+        );
+        expect(resultJson).not.toContain("x".repeat(1_024));
+
+        let replayExecutions = 0;
+        const replay = await createWorkspaceRuntimeInternals(workspace).authority.runForeground(
+          {
+            operationId: toolOperation.operation_id,
+            effect: toolOperation.effect,
+            resource: toolOperation.resource,
+            estimatedCost: toolOperation.estimated_cost,
+            idempotencyKey: toolOperation.idempotency_key,
+            requestDigest: toolOperation.request_digest,
+            execute: async () => {
+              replayExecutions += 1;
+              return null;
+            },
+          },
+          {
+            effects: [toolOperation.effect],
+            resourcePatterns: [toolOperation.resource],
+            credentialRefs: [],
+          },
+        );
+        expect(replay).toEqual({ ok: true, value: durableResult, replayed: true });
+        expect(replayExecutions).toBe(0);
+        expect(
+          database
+            .prepare(
+              `SELECT COUNT(*) AS count FROM authority_operations
+             WHERE idempotency_key LIKE 'mcp-artifact:%' AND status = 'completed'`,
+            )
+            .get(),
+        ).toMatchObject({ count: 1 });
+        expect(database.prepare("SELECT COUNT(*) AS count FROM artifacts").get()).toMatchObject({ count: 1 });
+      } finally {
+        database.close();
+      }
+    } finally {
+      workspace.close();
+    }
+  });
+
   test("saved definitions are immediate, project-local, and freeze first-class workflow tools", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-project-definitions-"));
     const firstProjectRoot = join(home, "host-project-one");
@@ -1059,7 +1343,7 @@ describe("apps/noesis production control-plane composition", () => {
       await runtime.debug.workspace.definitionMetadata.getCurrent("workflow", "legacy-increment"),
     ).toMatchObject({ revision: 8 });
     await runtime.shutdown();
-  });
+  }, 30_000);
 
   test("workflow resume fails closed when any visible saved definition changes", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-workflow-required-tool-pin-"));

@@ -150,6 +150,143 @@ export interface TuiLearningInspection {
   readonly currentWorkingAdjustment?: TuiWorkingAdjustmentState;
 }
 
+export type TuiMcpScope = "global" | "project";
+export type TuiMcpServerStatus =
+  | "disabled"
+  | "connecting"
+  | "connected"
+  | "auth_required"
+  | "failed"
+  | "overridden";
+
+export interface TuiMcpCapabilityCounts {
+  readonly tools: number;
+  readonly prompts: number;
+  readonly resources: number;
+  readonly resourceTemplates: number;
+}
+
+export interface TuiMcpServerSummary {
+  readonly name: string;
+  readonly scope: TuiMcpScope;
+  readonly sourcePath: string;
+  readonly enabled: boolean;
+  readonly type: "local" | "remote";
+  readonly status: TuiMcpServerStatus;
+  readonly capabilityCounts: TuiMcpCapabilityCounts;
+  /** True when this row is hidden by a project entry with the same name. */
+  readonly shadowed?: boolean;
+  readonly lastError?: string;
+}
+
+export interface TuiMcpToolDetail {
+  readonly name: string;
+  readonly description?: string;
+  readonly inputSchema: unknown;
+  readonly outputSchema?: unknown;
+}
+
+export interface TuiMcpPromptDetail {
+  readonly name: string;
+  readonly description?: string;
+  readonly arguments?: readonly {
+    readonly name: string;
+    readonly description?: string;
+    readonly required?: boolean;
+  }[];
+}
+
+export interface TuiMcpResourceDetail {
+  readonly uri: string;
+  readonly name?: string;
+  readonly description?: string;
+  readonly mimeType?: string;
+}
+
+export interface TuiMcpResourceTemplateDetail {
+  readonly uriTemplate: string;
+  readonly name?: string;
+  readonly description?: string;
+  readonly mimeType?: string;
+}
+
+export interface TuiMcpRecentError {
+  readonly message: string;
+  readonly occurredAt?: string;
+  readonly operation?: string;
+}
+
+export type TuiMcpServerConfig =
+  | {
+      readonly type: "local";
+      readonly command: readonly string[];
+      readonly cwd?: string;
+      readonly environmentReferences?: Readonly<Record<string, string>>;
+    }
+  | {
+      readonly type: "remote";
+      readonly url: string;
+      readonly oauth: boolean;
+      readonly headers?: Readonly<Record<string, string>>;
+    };
+
+export interface TuiMcpServerDetail extends TuiMcpServerSummary {
+  readonly config: TuiMcpServerConfig;
+  readonly instructions?: string;
+  readonly negotiatedCapabilities: readonly string[];
+  readonly tools: readonly TuiMcpToolDetail[];
+  readonly prompts: readonly TuiMcpPromptDetail[];
+  readonly resources: readonly TuiMcpResourceDetail[];
+  readonly resourceTemplates: readonly TuiMcpResourceTemplateDetail[];
+  readonly recentErrors: readonly TuiMcpRecentError[];
+}
+
+export type TuiMcpMutationIntent =
+  | {
+      readonly type: "add-local";
+      readonly scope: TuiMcpScope;
+      readonly name: string;
+      readonly command: readonly string[];
+    }
+  | {
+      readonly type: "add-remote";
+      readonly scope: TuiMcpScope;
+      readonly name: string;
+      readonly url: string;
+      readonly oauth: boolean;
+    }
+  | {
+      readonly type: "edit-local";
+      readonly scope: TuiMcpScope;
+      readonly name: string;
+      readonly command: readonly string[];
+    }
+  | {
+      readonly type: "edit-remote";
+      readonly scope: TuiMcpScope;
+      readonly name: string;
+      readonly url: string;
+      readonly oauth: boolean;
+    }
+  | {
+      readonly type: "authenticate" | "logout" | "reconnect" | "remove";
+      readonly scope: TuiMcpScope;
+      readonly name: string;
+    }
+  | {
+      readonly type: "set-enabled";
+      readonly scope: TuiMcpScope;
+      readonly name: string;
+      readonly enabled: boolean;
+    }
+  | { readonly type: "reload" };
+
+export interface TuiMcpMutationResult {
+  readonly message: string;
+  /** The runtime may already open this URL; the TUI still renders it as a copyable fallback. */
+  readonly browserUrl?: string;
+}
+
 export type NoesisTuiRuntime = Pick<
   NoesisRuntime,
   | "agentDefaults"
@@ -182,4 +319,7 @@ export type NoesisTuiRuntime = Pick<
     sessionId: string,
     jobId: string,
   ) => Promise<TuiLearningActivitySummary | undefined>;
+  readonly listMcpServers?: () => Promise<readonly TuiMcpServerSummary[]>;
+  readonly inspectMcpServer?: (scope: TuiMcpScope, name: string) => Promise<TuiMcpServerDetail | undefined>;
+  readonly mutateMcp?: (intent: TuiMcpMutationIntent, signal?: AbortSignal) => Promise<TuiMcpMutationResult>;
 };

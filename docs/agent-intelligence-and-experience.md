@@ -72,6 +72,19 @@ The change is available on the next model step in the same turn. Noesis saves it
 
 New project programs are created through `execute` with `scripts.save` or `workflows.save`. They do not enter a proposal queue. Reflection may later use their results as evidence for a broader change.
 
+## MCP servers
+
+Noesis can connect to local MCP servers over standard input and output. It can connect to remote servers over Streamable HTTP or SSE. Remote servers may use MCP OAuth. OAuth tokens stay in the protected credential store.
+
+Global server definitions live in `~/.noesis/mcp.json`. Project definitions live in `./.noesis/mcp.json`. A project definition replaces a global definition with the same name while that project is active. Both files remain ordinary JSON that the user can inspect and edit.
+Project definitions do not connect or launch commands until the workspace is trusted.
+
+The `/mcp` screen manages both files. The user can add a server, authenticate, enable or disable it, reconnect, edit its settings, or remove it. The screen also shows connection errors and the server's tools, prompts, resources, resource templates, and instructions.
+
+MCP tools enter the same frozen Tool Catalog and Broker as built-in tools. Their names use the form `mcp.<server>.<tool>`. The model can discover and call them through `execute`. It can add a frequently used MCP tool to its direct tool set with `adapt`. Project scripts and workflows can call the same catalog entry. None of these paths creates a second permission or execution system.
+
+The MCP host supports prompts, resources, resource templates, completion, resource subscriptions, logging, progress, and task operations. It gives servers the active project as their root. It also handles server requests for model sampling and user input. Sampling is accepted only while bound to an admitted MCP invocation and uses that turn's frozen model route and protected effect budget. Form and browser requests appear inside the TUI, and a browser URL opens only after the user accepts it. Shutdown cancels any request that is still waiting.
+
 ## Project programs
 
 When the current work produces a reusable program, Noesis may save and publish a project script or workflow without waiting for reflection or evaluation. The program is available at once through its generic runner. It uses the same frozen Tool Catalog, Broker, and permissions as other tool calls.

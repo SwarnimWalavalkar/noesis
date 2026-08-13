@@ -5,6 +5,7 @@ import {
   defineTool,
   type ToolInvocationRecord,
   type ToolInvocationRecorder,
+  type ToolInvocationResult,
 } from "@noesis/tools";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -35,7 +36,12 @@ function authority(): Pick<AuthorityBoundary, "runForeground"> {
 }
 
 function runtime(
-  options: { readonly recorder?: ToolInvocationRecorder; readonly beforeDouble?: () => Promise<void> } = {},
+  options: {
+    readonly recorder?: ToolInvocationRecorder;
+    readonly beforeDouble?: () => Promise<void>;
+    readonly doubleProgress?: JsonValue;
+    readonly overrideInvocationResult?: ToolInvocationResult;
+  } = {},
 ) {
   const broker = createToolBroker({
     authority: authority(),
@@ -53,15 +59,20 @@ function runtime(
         inputSchema: z.strictObject({ value: z.number() }),
         outputSchema: z.strictObject({ value: z.number() }),
         effect: () => ({ effect: "read", resource: "math:double", estimatedCost: 0 }),
-        execute: async ({ value }) => {
+        execute: async ({ value }, context) => {
           await options.beforeDouble?.();
+          if (options.doubleProgress !== undefined) context.emitUpdate?.(options.doubleProgress);
           return { value: value * 2 };
         },
       }),
     ],
     ...(options.recorder ? { recorder: options.recorder } : {}),
   });
-  const code = createCodeModeRuntime({ cwd: process.cwd(), broker });
+  const overrideInvocationResult = options.overrideInvocationResult;
+  const effectiveBroker = overrideInvocationResult
+    ? Object.freeze({ ...broker, invoke: async () => overrideInvocationResult })
+    : broker;
+  const code = createCodeModeRuntime({ cwd: process.cwd(), broker: effectiveBroker });
   runtimes.add(code);
   return code;
 }
@@ -147,6 +158,31 @@ describe("codemode runtime", () => {
     );
     expect(result.value).toEqual({ joined: "a/b" });
     expect(events).toEqual([{ base: "noesis" }]);
+  });
+
+  it("binds Broker progress to the exact nested tool call", async () => {
+    const events: CodeExecutionEvent[] = [];
+    const result = await runtime({ doubleProgress: { message: "Halfway" } }).execute(
+      {
+        source: "return await tools.math.double({ value: 4 });",
+        sessionId: "session-broker-progress",
+      },
+      (event) => events.push(event),
+    );
+    const started = events.find(
+      (event): event is Extract<CodeExecutionEvent, { readonly type: "tool-start" }> =>
+        event.type === "tool-start",
+    );
+    if (!started) throw new Error("Expected nested tool start");
+
+    expect(events).toContainEqual({
+      type: "progress",
+      executionId: result.executionId,
+      value: { message: "Halfway" },
+      callId: started.callId,
+      name: "math.double",
+      callIndex: started.callIndex,
+    });
   });
 
   it("persists store values across executions in the same session only", async () => {
@@ -466,6 +502,52 @@ describe("codemode runtime", () => {
         sessionId: "session-2",
       }),
     ).rejects.toThrow("Codemode progress exceeds");
+  });
+
+  it("applies progress limits to Broker-emitted updates", async () => {
+    await expect(
+      runtime({ doubleProgress: "x".repeat(65 * 1024) }).execute({
+        source: "return await tools.math.double({ value: 1 });",
+        sessionId: "broker-progress-value-limit",
+      }),
+    ).rejects.toThrow("Codemode progress value exceeds");
+
+    await expect(
+      runtime({ doubleProgress: "x".repeat(60 * 1024) }).execute({
+        source: `
+          for (let index = 0; index < 5; index += 1)
+            await tools.math.double({ value: index });
+          return null;
+        `,
+        sessionId: "broker-progress-aggregate-limit",
+      }),
+    ).rejects.toThrow("Codemode progress exceeds");
+  });
+
+  it("bounds Broker failure details before returning them to the child", async () => {
+    const events: CodeExecutionEvent[] = [];
+    await expect(
+      runtime({
+        overrideInvocationResult: {
+          ok: false,
+          code: "failed",
+          message: "remote tool failed",
+          details: { payload: "x".repeat(20 * 1024 * 1024) },
+        },
+      }).execute(
+        {
+          source: "return await tools.math.double({ value: 1 });",
+          sessionId: "broker-error-details-limit",
+        },
+        (event) => events.push(event),
+      ),
+    ).rejects.toThrow("remote tool failed");
+    const failedCall = events.find(
+      (event): event is Extract<CodeExecutionEvent, { readonly type: "tool-end" }> =>
+        event.type === "tool-end" && !event.ok,
+    );
+    expect(failedCall?.error).toContain("remote tool failed");
+    expect(Buffer.byteLength(failedCall?.error ?? "", "utf8")).toBeLessThanOrEqual(64 * 1024);
   });
 
   it("does not leak a child when an event observer throws", async () => {

@@ -15,11 +15,13 @@ export interface SlashCommandContext {
   readonly publishInspector: (message: string) => void;
   readonly dispatch: (action: NoesisTuiAction) => void;
   readonly requestRender: () => void;
+  readonly openMcpManager?: () => void;
 }
 
 export const HELP_LINES = [
   "/model provider/model · /context · /capabilities",
   "/skills · /scripts · /workflows · /runs · /learning",
+  "/mcp manages servers, authentication, and discovered capabilities",
   "/skill NAME inspects · /skill:NAME [instructions] invokes command-name collisions",
   "/script NAME · /workflow NAME · /run ID",
   "/fork · /compact · /steer [MESSAGE] · /queue resume",
@@ -123,6 +125,15 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
       pane: command === "/context" ? "context" : "capabilities",
     });
     requestRender();
+    return true;
+  }
+
+  if (command === "/mcp") {
+    if (!context.openMcpManager) {
+      publishInspector("MCP management is unavailable in this runtime.");
+      return true;
+    }
+    context.openMcpManager();
     return true;
   }
 

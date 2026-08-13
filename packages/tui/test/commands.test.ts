@@ -31,6 +31,33 @@ const agent: NoesisAgentRuntime = {
 };
 
 describe("Noesis slash commands", () => {
+  test("opens MCP management through the interactive surface and explains unsupported runtimes", async () => {
+    let opened = 0;
+    const published: string[] = [];
+    const runtime = createInMemoryTestRuntime(agent);
+    const context = {
+      runtime,
+      trailId: "trail-mcp",
+      publishInspector: (message: string) => published.push(message),
+      dispatch: () => undefined,
+      requestRender: () => undefined,
+    };
+
+    await expect(
+      runSlashCommand("/mcp", {
+        ...context,
+        openMcpManager: () => {
+          opened += 1;
+        },
+      }),
+    ).resolves.toBe(true);
+    expect(opened).toBe(1);
+    expect(published).toEqual([]);
+
+    await expect(runSlashCommand("/mcp", context)).resolves.toBe(true);
+    expect(published).toEqual(["MCP management is unavailable in this runtime."]);
+  });
+
   test("documents how to invoke skills whose names collide with built-in commands", async () => {
     const dispatched: NoesisTuiAction[] = [];
 

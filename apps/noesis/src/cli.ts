@@ -14,6 +14,7 @@ import {
 import {
   createPiAgentRoleRunner,
   createPiAgentRuntime,
+  createPiMcpSamplingPort,
   createPiModelServices,
   createPiSkillLibrary,
   NOESIS_PROVIDER_IDS,
@@ -22,6 +23,7 @@ import {
 } from "@noesis/runtime-pi";
 import {
   OnboardingInterruptedError,
+  createTuiMcpInteractionBridge,
   type OnboardingSurface,
   runNoesisOnboardingTui,
   startNoesisTui,
@@ -35,6 +37,7 @@ import {
   createApplicationRuntimeComposition,
   resolveActiveProject,
 } from "./runtime-composition.ts";
+import { createApplicationMcpIntegration } from "./mcp-integration.ts";
 
 interface CliInput {
   readonly args: readonly string[];
@@ -279,8 +282,14 @@ async function createRuntime(
   options: {
     readonly recoverInterruptedOperations: boolean;
     readonly workspaceTrusted: boolean;
+    readonly enableMcp: boolean;
   },
-): Promise<ApplicationRuntime> {
+): Promise<
+  Readonly<{
+    runtime: ApplicationRuntime;
+    mcpInteractionBridge: ReturnType<typeof createTuiMcpInteractionBridge>;
+  }>
+> {
   const services = createPiModelServices(config.home);
   preparePiModelSelection(services.models, config.agent);
   const project = await resolveActiveProject(process.cwd());
@@ -289,21 +298,46 @@ async function createRuntime(
     agentDirectory: join(config.home, "agent"),
     workspaceTrusted: options.workspaceTrusted,
   });
-  return await createApplicationRuntimeComposition({
-    config,
-    project,
-    skills,
-    recoverInterruptedOperations: options.recoverInterruptedOperations,
-    createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
-      createPiAgentRuntime(project.root, services.models, {
-        codeExecution,
-        selfTools,
-        requirePinnedSkillSnapshot: true,
-        ...(skillLibrary ? { skills: skillLibrary } : {}),
-      }),
-    createRoleRunner: (configurations) =>
-      createPiAgentRoleRunner(project.root, services.models, configurations),
-  });
+  const mcpInteractionBridge = createTuiMcpInteractionBridge();
+  const mcp = options.enableMcp
+    ? createApplicationMcpIntegration({
+        home: config.home,
+        projectDirectory: project.root,
+        sampling: createPiMcpSamplingPort({
+          models: services.models,
+          provider: config.agent.provider,
+          model: config.agent.model,
+          reasoning: config.agent.thinkingLevel,
+        }),
+        interactions: mcpInteractionBridge,
+        workspaceTrusted: options.workspaceTrusted,
+        openUrl: async (url) => {
+          openAuthUrl(url);
+        },
+      })
+    : undefined;
+  try {
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      project,
+      skills,
+      ...(mcp ? { mcp } : {}),
+      recoverInterruptedOperations: options.recoverInterruptedOperations,
+      createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
+        createPiAgentRuntime(project.root, services.models, {
+          codeExecution,
+          selfTools,
+          requirePinnedSkillSnapshot: true,
+          ...(skillLibrary ? { skills: skillLibrary } : {}),
+        }),
+      createRoleRunner: (configurations) =>
+        createPiAgentRoleRunner(project.root, services.models, configurations),
+    });
+    return Object.freeze({ runtime, mcpInteractionBridge });
+  } catch (error) {
+    await mcp?.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 const openAuthUrl = createBrowserUrlOpener({
@@ -520,10 +554,12 @@ async function main(): Promise<void> {
     home: input.home,
     cli: input.overrides,
   });
-  const runtime = await createRuntime(config, {
+  const created = await createRuntime(config, {
     recoverInterruptedOperations: input.command === "tui",
     workspaceTrusted: input.workspaceTrusted,
+    enableMcp: input.command === "tui",
   });
+  const runtime = created.runtime;
   try {
     if (input.command === "rebuild") {
       const documents = await runtime.debug.workspace.search.rebuildDocuments();
@@ -544,6 +580,10 @@ async function main(): Promise<void> {
         provider: config.agent.provider,
         model: config.agent.model,
         thinkingLevel: config.agent.thinkingLevel,
+        mcpInteractionBridge: created.mcpInteractionBridge,
+        openUrl: async (url) => {
+          openAuthUrl(url);
+        },
         session: input.session,
       });
     else

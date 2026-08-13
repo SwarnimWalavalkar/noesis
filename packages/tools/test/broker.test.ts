@@ -1,4 +1,4 @@
-import type { EffectClass, JsonValue } from "@noesis/domain";
+import { type EffectClass, type JsonValue, toJsonValue } from "@noesis/domain";
 import { type AuthorityBoundary, type EffectDecision, inspectEffectExecutionFailure } from "@noesis/policy";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -292,6 +292,7 @@ describe("tool broker", () => {
 
   it("preserves cancelled, invalid-output, and result-too-large failures", async () => {
     const controller = new AbortController();
+    const records: ToolInvocationRecord[] = [];
     const cancelling = defineTool({
       name: "test.cancel",
       label: "Cancel",
@@ -329,6 +330,11 @@ describe("tool broker", () => {
       definitions: [cancelling, invalid, oversized],
       authority: foregroundAuthority(),
       permission,
+      recorder: Object.freeze({
+        record: async (record: ToolInvocationRecord) => {
+          records.push(record);
+        },
+      }),
     });
 
     await expect(
@@ -342,6 +348,12 @@ describe("tool broker", () => {
       ok: false,
       code: "result_too_large",
     });
+    expect(
+      records.filter((record) => record.toolName === "test.oversized").map((record) => record.status),
+    ).toEqual(["requested", "running", "failed"]);
+    expect(records.filter((record) => record.toolName === "test.oversized").at(-1)?.error).toContain(
+      "Tool result exceeds",
+    );
   });
 
   it("records an effect-derivation exception as a terminal failure", async () => {
@@ -375,6 +387,32 @@ describe("tool broker", () => {
     });
     expect(records.map((record) => record.status)).toEqual(["requested", "running", "failed"]);
     expect(records.at(-1)?.error).toBe("cannot derive resource");
+  });
+
+  it("reports non-JSON native parser values at the matching protocol boundary", async () => {
+    const invalidInput: ToolDefinition = {
+      ...echo(),
+      name: "test.invalid-native-input",
+      parseInput: () => ({ value: 1n }),
+    };
+    const invalidOutput: ToolDefinition = {
+      ...echo(),
+      name: "test.invalid-native-output",
+      parseOutput: () => null,
+    };
+    Reflect.set(invalidOutput, "parseOutput", () => undefined);
+    const broker = createToolBroker({
+      definitions: [invalidInput, invalidOutput],
+      authority: foregroundAuthority(),
+      permission,
+    });
+
+    await expect(
+      broker.invoke("test.invalid-native-input", { value: "ignored" }, invocationContext()),
+    ).resolves.toMatchObject({ ok: false, code: "invalid_input" });
+    await expect(
+      broker.invoke("test.invalid-native-output", { value: "valid" }, invocationContext()),
+    ).resolves.toMatchObject({ ok: false, code: "invalid_output" });
   });
 
   it("snapshots permissions and callable definitions against caller mutation", async () => {
@@ -424,5 +462,211 @@ describe("tool broker", () => {
     });
     expect(Object.isFrozen(observedPermission?.effects)).toBe(true);
     expect(Object.isFrozen(broker.describe("test.captured")?.inputSchema)).toBe(true);
+  });
+
+  it("publishes a native JSON Schema without making Zod the catalog authority", () => {
+    const nativeInput = Object.freeze({
+      type: "object" as const,
+      properties: Object.freeze({ query: Object.freeze({ type: "string" as const }) }),
+      required: Object.freeze(["query"]),
+      additionalProperties: false,
+    });
+    const definition: ToolDefinition = Object.freeze({
+      ...echo(),
+      name: "mcp.docs.search",
+      catalogInputSchema: nativeInput,
+    });
+    const broker = createToolBroker({
+      definitions: [definition],
+      authority: foregroundAuthority(),
+      permission,
+    });
+
+    expect(broker.describe("mcp.docs.search")?.inputSchema).toEqual(nativeInput);
+    expect(Object.isFrozen(broker.describe("mcp.docs.search")?.inputSchema)).toBe(true);
+  });
+
+  it("prepares recoverable storage before settling the bounded primary result", async () => {
+    const original = toJsonValue({ content: [{ type: "text", text: "x".repeat(300 * 1024) }] });
+    const materialized = toJsonValue({ artifact: { artifactId: "artifact-1" }, truncated: true });
+    const sequence: string[] = [];
+    let persisted: JsonValue | undefined;
+    const authority: Pick<AuthorityBoundary, "runForeground"> = Object.freeze({
+      runForeground: async <T extends JsonValue>(
+        request: Parameters<AuthorityBoundary["runForeground"]>[0],
+      ): Promise<EffectDecision<T>> => {
+        const value = (await request.execute(receiptFor(request))) as T;
+        persisted = value;
+        sequence.push("primary-settled");
+        return Object.freeze({ ok: true, value, replayed: false });
+      },
+    });
+    const definition = defineTool({
+      name: "test.projected-result",
+      label: "Projected result",
+      description: "Returns an oversized result",
+      visibility: "codemode_only",
+      inputSchema: z.strictObject({}),
+      outputSchema: z.json(),
+      effect: () => ({ effect: "read", resource: "test:projected-result", estimatedCost: 0 }),
+      execute: async () => original,
+    });
+    const broker = createToolBroker({
+      definitions: [definition],
+      authority,
+      permission,
+      prepareResultForPersistence: async (_name, value) => {
+        expect(value).toEqual(original);
+        sequence.push("artifact-settled");
+        return materialized;
+      },
+    });
+
+    await expect(broker.invoke("test.projected-result", {}, invocationContext())).resolves.toMatchObject({
+      ok: true,
+      value: materialized,
+    });
+    expect(persisted).toEqual(materialized);
+    expect(sequence).toEqual(["artifact-settled", "primary-settled"]);
+  });
+
+  it("never hands an oversized unprepared result to durable authority persistence", async () => {
+    const persisted: JsonValue[] = [];
+    const authority: Pick<AuthorityBoundary, "runForeground"> = Object.freeze({
+      runForeground: async <T extends JsonValue>(
+        request: Parameters<AuthorityBoundary["runForeground"]>[0],
+      ): Promise<EffectDecision<T>> => {
+        try {
+          const value = (await request.execute(receiptFor(request))) as T;
+          persisted.push(value);
+          return Object.freeze({ ok: true, value, replayed: false });
+        } catch (error) {
+          const failure = inspectEffectExecutionFailure(error);
+          return Object.freeze({
+            ok: false,
+            code: failure?.code ?? ("failed" as const),
+            reason: failure?.message ?? (error instanceof Error ? error.message : String(error)),
+          });
+        }
+      },
+    });
+    const resultTool = (name: string, result: string): ToolDefinition =>
+      defineTool({
+        name,
+        label: name,
+        description: `Return ${name}`,
+        visibility: "codemode_only",
+        inputSchema: z.strictObject({}),
+        outputSchema: z.string(),
+        effect: () => ({ effect: "read", resource: name, estimatedCost: 0 }),
+        execute: async () => result,
+      });
+    const broker = createToolBroker({
+      definitions: [
+        resultTool("test.unprepared-small", "small"),
+        resultTool("test.unprepared-large", "x".repeat(300 * 1024)),
+      ],
+      authority,
+      permission,
+      prepareResultForPersistence: async () => undefined,
+    });
+
+    await expect(broker.invoke("test.unprepared-large", {}, invocationContext())).resolves.toMatchObject({
+      ok: false,
+      code: "result_too_large",
+    });
+    await expect(broker.invoke("test.unprepared-small", {}, invocationContext())).resolves.toMatchObject({
+      ok: true,
+      value: "small",
+    });
+    expect(persisted).toEqual(["small"]);
+  });
+
+  it("settles a valid effect before reporting a protocol-owned tool failure", async () => {
+    const details = toJsonValue({
+      content: Object.freeze([Object.freeze({ type: "text", text: "remote failure" })]),
+      isError: true,
+    });
+    const definition = defineTool({
+      name: "test.reported-failure",
+      label: "Reported failure",
+      description: "Returns a protocol-valid failure result",
+      visibility: "codemode_only",
+      inputSchema: z.strictObject({}),
+      outputSchema: z.json(),
+      effect: () => ({ effect: "read", resource: "test:reported-failure", estimatedCost: 0 }),
+      execute: async () => details,
+      reportedFailure: (output) => ({ message: "remote tool failed", details: output }),
+    });
+    const broker = createToolBroker({
+      definitions: [definition],
+      authority: foregroundAuthority(),
+      permission,
+    });
+
+    await expect(broker.invoke("test.reported-failure", {}, invocationContext())).resolves.toEqual({
+      ok: false,
+      code: "failed",
+      message: "remote tool failed",
+      details,
+    });
+  });
+
+  it("reports the bounded materialized result instead of original failure details", async () => {
+    const original = toJsonValue({
+      isError: true,
+      content: [{ type: "text", text: "x".repeat(300 * 1024) }],
+    });
+    const materialized = toJsonValue({
+      isError: true,
+      truncated: true,
+      artifact: { artifactId: "artifact-1" },
+    });
+    let durableResult: JsonValue | undefined;
+    let executions = 0;
+    const definition = defineTool({
+      name: "test.materialized-failure",
+      label: "Materialized failure",
+      description: "Returns a large protocol failure",
+      visibility: "codemode_only",
+      inputSchema: z.strictObject({}),
+      outputSchema: z.json(),
+      effect: () => ({ effect: "read", resource: "test:materialized-failure", estimatedCost: 0 }),
+      execute: async () => {
+        executions += 1;
+        return original;
+      },
+      reportedFailure: (output) =>
+        typeof output === "object" && output !== null && Reflect.get(output, "isError") === true
+          ? { message: "remote tool failed", details: output }
+          : undefined,
+    });
+    const authority: Pick<AuthorityBoundary, "runForeground"> = Object.freeze({
+      runForeground: async <T extends JsonValue>(
+        request: Parameters<AuthorityBoundary["runForeground"]>[0],
+      ): Promise<EffectDecision<T>> => {
+        if (durableResult !== undefined)
+          return Object.freeze({ ok: true, value: durableResult as T, replayed: true });
+        durableResult = await request.execute(receiptFor(request));
+        return Object.freeze({ ok: true, value: durableResult as T, replayed: false });
+      },
+    });
+    const broker = createToolBroker({
+      definitions: [definition],
+      authority,
+      permission,
+      prepareResultForPersistence: async () => materialized,
+    });
+
+    const context = Object.freeze({ ...invocationContext(), callId: "materialized-failure-call" });
+    for (let invocation = 0; invocation < 2; invocation += 1)
+      await expect(broker.invoke("test.materialized-failure", {}, context)).resolves.toEqual({
+        ok: false,
+        code: "failed",
+        message: "remote tool failed",
+        details: materialized,
+      });
+    expect(durableResult).toEqual(materialized);
+    expect(executions).toBe(1);
   });
 });
