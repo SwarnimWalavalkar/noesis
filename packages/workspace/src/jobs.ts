@@ -189,6 +189,7 @@ export function createDurableJobStore(
     if (request.kind !== undefined && request.kinds !== undefined)
       throw new Error("Durable job list accepts either kind or kinds, not both");
     if (request.status) JobStatusSchema.parse(request.status);
+    const newestFirst = request.order === "newest";
     const clauses: string[] = [];
     const values: Array<string | number> = [];
     if (request.status) {
@@ -268,7 +269,11 @@ export function createDurableJobStore(
     if (request.after) {
       z.string().datetime().parse(request.after.createdAt);
       z.string().min(1).parse(request.after.jobId);
-      clauses.push("(created_at > ? OR (created_at = ? AND job_id > ?))");
+      clauses.push(
+        newestFirst
+          ? "(created_at < ? OR (created_at = ? AND job_id < ?))"
+          : "(created_at > ? OR (created_at = ? AND job_id > ?))",
+      );
       values.push(request.after.createdAt, request.after.createdAt, request.after.jobId);
     }
     const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
@@ -276,8 +281,9 @@ export function createDurableJobStore(
       request.statuses !== undefined || request.kinds !== undefined
         ? " INDEXED BY jobs_created_status_kind"
         : "";
+    const order = newestFirst ? "created_at DESC, job_id DESC" : "created_at, job_id";
     return db
-      .prepare(`SELECT * FROM jobs${orderedScanIndex}${where} ORDER BY created_at, job_id LIMIT ?`)
+      .prepare(`SELECT * FROM jobs${orderedScanIndex}${where} ORDER BY ${order} LIMIT ?`)
       .all(...values, limit)
       .map(decodeDurableJob);
   };

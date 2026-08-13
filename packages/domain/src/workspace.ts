@@ -399,6 +399,8 @@ export interface DurableJobListRequest {
   readonly kinds?: readonly string[];
   readonly limit?: number;
   readonly after?: DurableJobListCursor;
+  /** Stable authoritative order. Defaults to oldest for scheduler compatibility. */
+  readonly order?: "oldest" | "newest";
   /** Exact reflection-session selector over the authoritative JSON payload. */
   readonly payloadSessionId?: string;
   /** Exact source-session selector for authoring and preflight payloads. */

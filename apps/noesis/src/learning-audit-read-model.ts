@@ -115,6 +115,7 @@ async function listProjectReflectionJobs(
   return await workspace.jobs.list({
     kind: "runtime.reflect_turn",
     payloadProjectId: projectId,
+    order: "newest",
     limit: AUDIT_LIMIT,
   });
 }
@@ -128,7 +129,9 @@ async function listExperimentJobs(
     chunks.push(experimentIds.slice(index, index + 250));
   const jobs = (
     await Promise.all(
-      chunks.map((payloadExperimentIds) => workspace.jobs.list({ payloadExperimentIds, limit: AUDIT_LIMIT })),
+      chunks.map((payloadExperimentIds) =>
+        workspace.jobs.list({ payloadExperimentIds, order: "newest", limit: AUDIT_LIMIT }),
+      ),
     )
   ).flat();
   return Object.freeze(
@@ -151,7 +154,7 @@ async function listSourceSessionJobs(
   const jobs = (
     await Promise.all(
       chunks.map((payloadSourceSessionIds) =>
-        workspace.jobs.list({ payloadSourceSessionIds, limit: AUDIT_LIMIT }),
+        workspace.jobs.list({ payloadSourceSessionIds, order: "newest", limit: AUDIT_LIMIT }),
       ),
     )
   ).flat();

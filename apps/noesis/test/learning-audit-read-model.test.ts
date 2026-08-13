@@ -35,6 +35,28 @@ describe("learning audit read model", () => {
         budget: 0,
       });
     }
+    for (let index = 0; index < 1_001; index += 1) {
+      const jobId = `old-project-a-reflection-${String(index).padStart(4, "0")}`;
+      await workspace.jobs.enqueue({
+        jobId,
+        kind: "runtime.reflect_turn",
+        payload: Object.freeze({
+          turn: Object.freeze({
+            project: projects[0],
+            sessionId: "session-old-project-a",
+            turnId: `turn-old-project-a-${String(index)}`,
+            sensitivity: "normal",
+          }),
+        }),
+        payloadRefs: Object.freeze([]),
+        operationId: `operation-${jobId}`,
+        idempotencyKey: `idempotency-${jobId}`,
+        notBefore: new Date(Date.UTC(2026, 7, 13, 1, 0, 0, index)).toISOString(),
+        maxAttempts: 1,
+        estimatedCost: 0,
+        budget: 0,
+      });
+    }
     for (const project of projects) {
       const sessionId = `session-${project.projectId}`;
       await workspace.operational.sessions.put({

@@ -1854,7 +1854,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 41 });
+    ).toEqual({ version: 42 });
     inspection.close();
   });
 
@@ -2571,7 +2571,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(41);
+    expect(versions.at(-1)).toBe(42);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
@@ -2851,6 +2851,18 @@ describe("WorkspaceStore", () => {
     });
     expect(final.records.map(({ jobId }) => jobId)).toEqual(["job-c"]);
     expect(final.exhausted).toBe(true);
+
+    const newest = await store.jobs.listPage({ kind: "fixture.job", order: "newest", limit: 2 });
+    expect(newest.records.map(({ jobId }) => jobId)).toEqual(["job-c", "job-b"]);
+    expect(newest.exhausted).toBe(false);
+    const older = await store.jobs.listPage({
+      kind: "fixture.job",
+      order: "newest",
+      limit: 2,
+      ...(newest.nextCursor ? { after: newest.nextCursor } : {}),
+    });
+    expect(older.records.map(({ jobId }) => jobId)).toEqual(["job-a"]);
+    expect(older.exhausted).toBe(true);
     store.close();
   });
 
