@@ -327,7 +327,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const config = Object.freeze({
       ...resolved,
-      context: Object.freeze({ tokenBudget: 12_000 }),
+      context: Object.freeze({ tokenBudget: 50_000 }),
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
     const histories: NonNullable<AgentRuntimeRequest["history"]>[] = [];
@@ -365,7 +365,7 @@ describe("apps/noesis production control-plane composition", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       agent,
-      resolveModelContext: () => Object.freeze({ contextWindow: 25_000, maxOutputTokens: 1_000 }),
+      resolveModelContext: () => Object.freeze({ contextWindow: 60_000, maxOutputTokens: 1_000 }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -433,7 +433,7 @@ describe("apps/noesis production control-plane composition", () => {
       contextTokenBudget: expect.any(Number),
       conversationHistory: [],
     });
-    expect(second.frozenTurnPlan?.contextTokenBudget).toBeLessThan(checkpoint?.tokenBudget ?? 0);
+    expect(second.frozenTurnPlan?.contextTokenBudget).toBeLessThanOrEqual(checkpoint?.tokenBudget ?? 0);
     expect(secondHistory).toEqual([
       expect.objectContaining({ role: "assistant", content: expect.stringContaining("CONTEXT CHECKPOINT") }),
     ]);

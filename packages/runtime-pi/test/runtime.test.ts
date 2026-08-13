@@ -1201,6 +1201,79 @@ describe("agent runtime factories", () => {
     ).resolves.toMatchObject({ text: "Stale preference reconciled.", outcome: "completed" });
   });
 
+  test("does not charge inactive catalog tools against the request budget", async () => {
+    const base = frozenPlan();
+    const { canonicalDigest: _digest, ...baseUnsigned } = base;
+    const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 12_000 });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const catalog: PiFrozenToolCatalog = Object.freeze({
+      catalogId: "catalog-many-inactive-tools",
+      catalogDigest: sha256("catalog-many-inactive-tools"),
+      tools: Object.freeze(
+        Array.from({ length: 1_000 }, (_, index) =>
+          Object.freeze({
+            name: `inactive.tool-${index}`,
+            label: `Inactive tool ${index}`,
+            description: "A frozen catalog tool that is not active in this turn.",
+            revisionId: `inactive-tool-${index}-v1`,
+            inputSchema: Object.freeze({ type: "object" }),
+            outputSchema: Object.freeze({ type: "object" }),
+          }),
+        ),
+      ),
+    });
+    const codeExecution: PiCodeExecutionAdapter = Object.freeze({
+      prepare: async () =>
+        Object.freeze({
+          catalog,
+          invoke: async () => null,
+          execute: async () =>
+            Object.freeze({
+              executionId: "unused-many-inactive-tools",
+              value: null,
+              calls: 0,
+              durationMs: 1,
+            }),
+          close: async () => undefined,
+        }),
+      shutdown: async () => undefined,
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context }) => {
+        expect(context.tools?.map((tool) => tool.name)).toEqual([
+          "inspect_self",
+          "remember",
+          "adapt",
+          "execute",
+        ]);
+        return "Only active tools were budgeted.";
+      },
+    });
+    const selfTools: PiSelfToolAdapter = Object.freeze({
+      hotbar: async () => Object.freeze([]),
+      inspect: async () => null,
+      remember: async () => null,
+      adapt: async () => null,
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "Use only the active tools.",
+          activeCapabilities: [],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({ text: "Only active tools were budgeted.", outcome: "completed" });
+  });
+
   test("checks authentication before loading skills or preparing codemode", async () => {
     const controlled = createControlledPiModels();
     const plan = frozenPlan();

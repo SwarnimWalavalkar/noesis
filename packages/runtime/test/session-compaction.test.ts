@@ -41,13 +41,14 @@ describe("session compaction", () => {
 
   test("reserves non-history request capacity inside the configured context budget", () => {
     expect(resolveHistoryTokenBudget(160_000, ["system", "current input"])).toBe(128_000);
-    expect(resolveHistoryTokenBudget(10_000, ["x".repeat(12_000)])).toBe(1_904);
+    expect(resolveHistoryTokenBudget(10_000, ["x".repeat(4_000)])).toBe(1_904);
     expect(() => resolveHistoryTokenBudget(100, ["x".repeat(400)])).toThrow("no room");
   });
 
   test("estimates token-dense UTF-8 input conservatively", () => {
-    expect(estimateContextTokens("a".repeat(12))).toBe(4);
-    expect(estimateContextTokens("你好世界")).toBe(4);
+    expect(estimateContextTokens("a".repeat(12))).toBe(12);
+    expect(estimateContextTokens("你好世界")).toBe(12);
+    expect(estimateContextTokens("2 + 2 = 4")).toBe(9);
   });
 
   test("compacts only complete oldest turns and retains a complete recent raw tail", () => {
@@ -60,7 +61,7 @@ describe("session compaction", () => {
       message("6", "f".repeat(48), false),
     ]);
 
-    const window = prepareCompactionWindow(messages, undefined, 95, {
+    const window = prepareCompactionWindow(messages, undefined, 270, {
       compactorInputTokenBudget: 1_000,
     });
 
@@ -78,7 +79,7 @@ describe("session compaction", () => {
       message("4", "recent response", false),
     ]);
 
-    const window = prepareCompactionWindow(messages, undefined, 16, {
+    const window = prepareCompactionWindow(messages, undefined, 40, {
       compactorInputTokenBudget: 1_000,
     });
 
@@ -107,7 +108,7 @@ describe("session compaction", () => {
       ]),
       firstRetainedMessageId: "3",
       lastCoveredMessageId: "2",
-      tokenBudget: 8,
+      tokenBudget: 40,
       estimatedSummaryTokens: estimateContextTokens("prior summary"),
       sensitivity: "normal" as const,
       provider: "controlled",
@@ -117,8 +118,8 @@ describe("session compaction", () => {
       createdAt: "2026-08-13T00:00:00.000Z",
     });
 
-    const current = resolvedSessionContext(messages, checkpoint, 16);
-    const window = prepareCompactionWindow(messages, checkpoint, 16, {
+    const current = resolvedSessionContext(messages, checkpoint, 40);
+    const window = prepareCompactionWindow(messages, checkpoint, 40, {
       compactorInputTokenBudget: 1_000,
     });
 
@@ -167,8 +168,8 @@ describe("session compaction", () => {
       message("3", "next", true),
       message("4", "next-answer", false),
     ]);
-    const window = prepareCompactionWindow(messages, undefined, 10, {
-      compactorInputTokenBudget: 40_000,
+    const window = prepareCompactionWindow(messages, undefined, 20, {
+      compactorInputTokenBudget: 100_000,
     });
     if (!window) throw new Error("Expected a compaction window");
 

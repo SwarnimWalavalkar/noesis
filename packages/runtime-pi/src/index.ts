@@ -507,21 +507,20 @@ export function createPiAgentRuntime(
       const completeSystemPrompt = [request.systemPrompt, skillsSystemPrompt].filter(Boolean).join("\n\n");
       if (plan?.requestTokenBudget !== undefined) {
         const activeNameSet = new Set(initialActiveToolNames);
+        const activeTools = agentTools.filter((tool) => activeNameSet.has(tool.name));
         const activeToolMaterial = JSON.stringify(
-          agentTools
-            .filter((tool) => activeNameSet.has(tool.name))
-            .map((tool) => ({
-              name: tool.name,
-              description: tool.description,
-              parameters: tool.parameters,
-            })),
+          activeTools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.parameters,
+          })),
         );
         const estimatedRequestTokens =
           64 +
           estimateInputTokens(completeSystemPrompt) +
           estimateInputTokens(explicitSkill?.prompt ?? request.prompt) +
           estimateInputTokens(activeToolMaterial) +
-          agentTools.length * 16 +
+          activeTools.length * 16 +
           history.reduce((total, message) => total + 8 + estimateInputTokens(message.content), 0);
         if (estimatedRequestTokens > plan.requestTokenBudget)
           throw new Error(
