@@ -1762,21 +1762,23 @@ function createOperationalRepositories(
     const checkpointId = requiredString(row, "checkpoint_id");
     const previousCheckpointId = optionalString(row, "previous_checkpoint_id");
     const firstRetainedMessageId = optionalString(row, "first_retained_message_id");
-    const sources = db
+    const sourceRows = db
       .prepare(
-        `SELECT message_id, content_digest
-         FROM context_checkpoint_sources
-         WHERE checkpoint_id = ?
-         ORDER BY ordinal ASC`,
+        `SELECT source.ordinal, source.message_id, source.content_digest,
+                message.session_id AS message_session_id, message.content AS message_content
+         FROM context_checkpoint_sources AS source
+         LEFT JOIN messages AS message ON message.message_id = source.message_id
+         WHERE source.checkpoint_id = ?
+         ORDER BY source.ordinal ASC`,
       )
-      .all(checkpointId)
-      .map((source) =>
-        Object.freeze({
-          messageId: requiredString(source, "message_id"),
-          contentDigest: requiredString(source, "content_digest"),
-        }),
-      );
-    return Object.freeze({
+      .all(checkpointId);
+    const sources = sourceRows.map((source) =>
+      Object.freeze({
+        messageId: requiredString(source, "message_id"),
+        contentDigest: requiredString(source, "content_digest"),
+      }),
+    );
+    const checkpoint = Object.freeze({
       checkpointId,
       sessionId: requiredString(row, "session_id"),
       ...(previousCheckpointId === undefined ? {} : { previousCheckpointId }),
@@ -1801,6 +1803,24 @@ function createOperationalRepositories(
       usage: Object.freeze(checkpointUsageSchema.parse(parseJson(requiredString(row, "usage_json")))),
       createdAt: requiredString(row, "created_at"),
     });
+    if (sources.length === 0) throw new Error(`Context checkpoint ${checkpointId} has no source provenance`);
+    if (sha256(checkpoint.summary) !== checkpoint.summaryDigest)
+      throw new Error(`Context checkpoint ${checkpointId} failed summary digest verification`);
+    if (sha256(canonicalJson(checkpoint.sources)) !== checkpoint.sourceDigest)
+      throw new Error(`Context checkpoint ${checkpointId} failed source digest verification`);
+    if (checkpoint.lastCoveredMessageId !== checkpoint.sources.at(-1)?.messageId)
+      throw new Error(`Context checkpoint ${checkpointId} has an invalid covered-message boundary`);
+    for (const [ordinal, source] of sourceRows.entries()) {
+      const messageId = requiredString(source, "message_id");
+      if (requiredNumber(source, "ordinal") !== ordinal)
+        throw new Error(`Context checkpoint ${checkpointId} has non-contiguous source provenance`);
+      if (
+        requiredString(source, "message_session_id") !== checkpoint.sessionId ||
+        sha256(requiredString(source, "message_content")) !== requiredString(source, "content_digest")
+      )
+        throw new Error(`Context checkpoint ${checkpointId} source ${messageId} failed verification`);
+    }
+    return checkpoint;
   };
   const getContextCheckpoint = async (checkpointId: string): Promise<ContextCheckpointRecord | undefined> => {
     const row = db.prepare("SELECT * FROM context_checkpoints WHERE checkpoint_id = ?").get(checkpointId);

@@ -363,12 +363,32 @@ describe("WorkspaceStore", () => {
       integrityDatabase
         .prepare("UPDATE context_checkpoints SET first_retained_message_id = ? WHERE checkpoint_id = ?")
         .run("context-message-other", checkpoint.checkpointId),
-    ).toThrow("context checkpoint references must belong to its session");
+    ).toThrow("context checkpoint is immutable");
     expect(() =>
       integrityDatabase
         .prepare("UPDATE context_checkpoints SET session_id = ? WHERE checkpoint_id = ?")
         .run("session-context-other", checkpoint.checkpointId),
-    ).toThrow("context checkpoint session is immutable");
+    ).toThrow("context checkpoint is immutable");
+    expect(() =>
+      integrityDatabase
+        .prepare("UPDATE context_checkpoints SET summary = ? WHERE checkpoint_id = ?")
+        .run("Mutated summary.", checkpoint.checkpointId),
+    ).toThrow("context checkpoint is immutable");
+    expect(() =>
+      integrityDatabase
+        .prepare("UPDATE context_checkpoint_sources SET content_digest = ? WHERE checkpoint_id = ?")
+        .run(sha256("mutated"), checkpoint.checkpointId),
+    ).toThrow("context checkpoint source is immutable");
+    expect(() =>
+      integrityDatabase
+        .prepare("DELETE FROM context_checkpoint_sources WHERE checkpoint_id = ?")
+        .run(checkpoint.checkpointId),
+    ).toThrow("context checkpoint source is immutable");
+    expect(() =>
+      integrityDatabase
+        .prepare("DELETE FROM context_checkpoints WHERE checkpoint_id = ?")
+        .run(checkpoint.checkpointId),
+    ).toThrow("context checkpoint is immutable");
     integrityDatabase.close();
     store.close();
 
@@ -1693,7 +1713,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 37 });
+    ).toEqual({ version: 38 });
     inspection.close();
   });
 
@@ -2410,7 +2430,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(37);
+    expect(versions.at(-1)).toBe(38);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
