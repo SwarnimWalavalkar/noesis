@@ -14,6 +14,8 @@ export interface SlashCommandContext {
   /** Publishes bounded read-only output, dropping results from superseded submissions. */
   readonly publishInspector: (message: string) => void;
   readonly dispatch: (action: NoesisTuiAction) => void;
+  /** Completes durable queued-intent handoff before a new session becomes visible. */
+  readonly prepareTrailSelection?: (trailId: string) => Promise<void>;
   readonly requestRender: () => void;
   readonly openMcpManager?: () => void;
 }
@@ -101,6 +103,14 @@ export function isExclusiveSlashCommand(text: string): boolean {
     command === "/fork" ||
     command.startsWith("/model ")
   );
+}
+
+export function exclusiveSlashCommandScope(
+  text: string,
+): "current-session" | "resulting-session" | undefined {
+  const command = text.trim();
+  if (command === "/compact" || command.startsWith("/compact ")) return "current-session";
+  return isExclusiveSlashCommand(command) ? "resulting-session" : undefined;
 }
 
 export function steerFeedback(result: TuiInteractionResult, explicit: boolean): string | undefined {
@@ -398,6 +408,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
   if (command === "/fork") {
     const trail = await runtime.forkTrail(trailId);
     const transcript = await runtime.getTranscript(trail.trailId);
+    await context.prepareTrailSelection?.(trail.trailId);
     dispatch({ type: "trail-selected", trail });
     dispatch({ type: "transcript-hydrated", trailId: trail.trailId, transcript });
     requestRender();
@@ -410,13 +421,15 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     if (separator <= 0 || separator === selection.length - 1) {
       dispatch({ type: "failed", error: "Use /model provider/model" });
     } else {
+      const trail = await runtime.startTrail({
+        title: `Model ${selection}`,
+        provider: selection.slice(0, separator),
+        model: selection.slice(separator + 1),
+      });
+      await context.prepareTrailSelection?.(trail.trailId);
       dispatch({
         type: "trail-selected",
-        trail: await runtime.startTrail({
-          title: `Model ${selection}`,
-          provider: selection.slice(0, separator),
-          model: selection.slice(separator + 1),
-        }),
+        trail,
       });
     }
     requestRender();

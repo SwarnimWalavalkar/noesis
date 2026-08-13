@@ -2216,6 +2216,106 @@ function createOperationalRepositories(
       if (inserted === undefined) throw new Error(`User intent ${intentId} disappeared after enqueue`);
       return inserted;
     });
+  const reroutePendingUserIntents = async (
+    request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["reroutePending"]>[0],
+  ): Promise<readonly UserIntentRecord[]> =>
+    database.transaction(() => {
+      const sourceSessionId = z.string().min(1).parse(request.sourceSessionId);
+      const destinationSessionId = z.string().min(1).parse(request.destinationSessionId);
+      if (sourceSessionId === destinationSessionId)
+        throw new Error("Pending user intents can only be rerouted into a different session");
+      const reroutedAt = z.string().min(1).parse(request.reroutedAt);
+      if (db.prepare("SELECT 1 FROM sessions WHERE session_id = ?").get(destinationSessionId) === undefined)
+        throw new Error(`Destination session ${destinationSessionId} does not exist`);
+      const sourceIds = new Set<string>();
+      const destinationIds = new Set<string>();
+      const pairs = request.intents.map((item) => {
+        const sourceIntentId = z.string().min(1).parse(item.sourceIntentId);
+        const destinationIntentId = z.string().min(1).parse(item.destinationIntentId);
+        if (sourceIds.has(sourceIntentId)) throw new Error(`Duplicate source intent ${sourceIntentId}`);
+        if (destinationIds.has(destinationIntentId))
+          throw new Error(`Duplicate destination intent ${destinationIntentId}`);
+        sourceIds.add(sourceIntentId);
+        destinationIds.add(destinationIntentId);
+        const source = getUserIntent(sourceIntentId, sourceSessionId);
+        if (source === undefined) throw new Error(`Source user intent ${sourceIntentId} does not exist`);
+        return { source, destinationIntentId };
+      });
+      pairs.sort((left, right) => left.source.queueSequence - right.source.queueSequence);
+      let nextSequence = requiredNumber(
+        db
+          .prepare(
+            `SELECT COALESCE(MAX(queue_sequence), 0) + 1 AS next_sequence
+             FROM user_intents
+             WHERE session_id = ?`,
+          )
+          .get(destinationSessionId),
+        "next_sequence",
+      );
+      const rerouted: UserIntentRecord[] = [];
+      for (const { source, destinationIntentId } of pairs) {
+        const existing = getUserIntent(destinationIntentId, destinationSessionId);
+        if (existing !== undefined) {
+          if (
+            source.status !== "withdrawn" ||
+            existing.status !== "pending" ||
+            existing.contentDigest !== source.contentDigest ||
+            existing.createdAt !== source.createdAt
+          )
+            throw new Error(
+              `Destination user intent ${destinationIntentId} already exists with a different reroute identity`,
+            );
+          rerouted.push(existing);
+          nextSequence = Math.max(nextSequence, existing.queueSequence + 1);
+          continue;
+        }
+        const collision = db
+          .prepare("SELECT session_id FROM user_intents WHERE intent_id = ?")
+          .get(destinationIntentId);
+        if (collision !== undefined)
+          throw new Error(
+            `Destination user intent ${destinationIntentId} already belongs to another session`,
+          );
+        if (source.status !== "pending" || source.deliveryMode !== "turn" || source.text === undefined)
+          throw new Error(`Source user intent ${source.intentId} is no longer pending`);
+        const withdrawn = db
+          .prepare(
+            `UPDATE user_intents
+             SET status = 'withdrawn', withdrawn_at = ?, updated_at = ?
+             WHERE intent_id = ? AND session_id = ? AND status = 'pending' AND delivery_mode = 'turn'`,
+          )
+          .run(reroutedAt, reroutedAt, source.intentId, sourceSessionId);
+        if (Number(withdrawn.changes) !== 1)
+          throw new Error(`Source user intent ${source.intentId} changed during reroute`);
+        db.prepare(
+          `INSERT INTO user_intents(
+            intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
+            queued_behind_turn_id, target_turn_id, created_at, updated_at,
+            promoted_at, delivered_at, unresolved_at, withdrawn_at, attempt_count
+          ) VALUES (?, ?, ?, ?, 'turn', 'pending', ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`,
+        ).run(
+          destinationIntentId,
+          destinationSessionId,
+          source.text,
+          source.contentDigest,
+          nextSequence,
+          source.createdAt,
+          reroutedAt,
+        );
+        recordActivity(systemActor, "user_intent.rerouted_from", "user_intent", source.intentId, [
+          { destinationSessionId, destinationIntentId },
+        ]);
+        recordActivity(systemActor, "user_intent.rerouted_to", "user_intent", destinationIntentId, [
+          { sourceSessionId, sourceIntentId: source.intentId },
+        ]);
+        const inserted = getUserIntent(destinationIntentId, destinationSessionId);
+        if (inserted === undefined)
+          throw new Error(`Destination user intent ${destinationIntentId} disappeared after reroute`);
+        rerouted.push(inserted);
+        nextSequence += 1;
+      }
+      return Object.freeze(rerouted);
+    });
   const enqueueAndPromoteUserIntentToSteer = async (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["enqueueAndPromoteToSteer"]>[0],
   ): Promise<UserIntentRecord | undefined> =>
@@ -3496,6 +3596,7 @@ function createOperationalRepositories(
     }),
     userIntents: Object.freeze({
       enqueue: enqueueUserIntent,
+      reroutePending: reroutePendingUserIntents,
       enqueueAndPromoteToSteer: enqueueAndPromoteUserIntentToSteer,
       holdExplicitSteer: holdExplicitUserIntentSteer,
       holdNewestPendingToSteer: holdNewestPendingUserIntentToSteer,

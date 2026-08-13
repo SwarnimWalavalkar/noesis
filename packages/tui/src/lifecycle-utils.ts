@@ -1,5 +1,9 @@
 import { safeTerminalText } from "./theme.ts";
 
+export type ShutdownSettlement =
+  | { readonly status: "settled" | "timed-out" }
+  | { readonly status: "rejected"; readonly error: unknown };
+
 export const INSPECTOR_PREVIEW_CHARACTERS = 24_000;
 const INSPECTOR_PAGE_HEADER_RESERVE = 160;
 

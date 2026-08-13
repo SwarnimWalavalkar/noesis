@@ -618,6 +618,19 @@ export interface OperationalRepositories {
       readonly createdAt: string;
     }) => Promise<UserIntentRecord>;
     /**
+     * Atomically withdraws pending source intents and recreates them in destination FIFO order.
+     * The source rows remain immutable provenance for the session-changing command handoff.
+     */
+    readonly reroutePending: (request: {
+      readonly sourceSessionId: string;
+      readonly destinationSessionId: string;
+      readonly intents: readonly {
+        readonly sourceIntentId: string;
+        readonly destinationIntentId: string;
+      }[];
+      readonly reroutedAt: string;
+    }) => Promise<readonly UserIntentRecord[]>;
+    /**
      * Atomically creates a turn intent and promotes it into a steer bound to a
      * running foreground turn. Returns undefined without inserting when the
      * target turn cannot be bound.

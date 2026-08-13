@@ -3466,6 +3466,68 @@ describe("WorkspaceStore", () => {
     store.close();
   });
 
+  test("atomically reroutes pending intents across sessions while retaining source provenance", async () => {
+    const root = await temporary("reroute-user-intents");
+    const store = await createWorkspaceStore(root);
+    await store.operational.sessions.put(session("session-reroute-source"));
+    await store.operational.sessions.put(session("session-reroute-destination"));
+    await store.operational.userIntents.enqueue({
+      intentId: "intent-reroute-first",
+      sessionId: "session-reroute-source",
+      text: "first",
+      createdAt: "2026-01-01T00:01:00.000Z",
+    });
+    await store.operational.userIntents.enqueue({
+      intentId: "intent-reroute-second",
+      sessionId: "session-reroute-source",
+      text: "second",
+      createdAt: "2026-01-01T00:02:00.000Z",
+    });
+
+    const request = {
+      sourceSessionId: "session-reroute-source",
+      destinationSessionId: "session-reroute-destination",
+      intents: [
+        { sourceIntentId: "intent-reroute-first", destinationIntentId: "intent-rerouted-first" },
+        { sourceIntentId: "intent-reroute-second", destinationIntentId: "intent-rerouted-second" },
+      ],
+      reroutedAt: "2026-01-01T00:03:00.000Z",
+    } as const;
+    await expect(store.operational.userIntents.reroutePending(request)).resolves.toMatchObject([
+      { intentId: "intent-rerouted-first", text: "first", status: "pending", queueSequence: 1 },
+      { intentId: "intent-rerouted-second", text: "second", status: "pending", queueSequence: 2 },
+    ]);
+    await expect(store.operational.userIntents.reroutePending(request)).resolves.toMatchObject([
+      { intentId: "intent-rerouted-first", text: "first", status: "pending" },
+      { intentId: "intent-rerouted-second", text: "second", status: "pending" },
+    ]);
+    expect(await store.operational.userIntents.listPending("session-reroute-source")).toEqual([]);
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    expect(
+      database
+        .prepare(
+          `SELECT intent_id, status, withdrawn_at
+           FROM user_intents
+           WHERE session_id = ?
+           ORDER BY queue_sequence`,
+        )
+        .all("session-reroute-source"),
+    ).toEqual([
+      {
+        intent_id: "intent-reroute-first",
+        status: "withdrawn",
+        withdrawn_at: "2026-01-01T00:03:00.000Z",
+      },
+      {
+        intent_id: "intent-reroute-second",
+        status: "withdrawn",
+        withdrawn_at: "2026-01-01T00:03:00.000Z",
+      },
+    ]);
+    database.close();
+    store.close();
+  });
+
   test("atomically enqueues and promotes an explicit steer with idempotent identity", async () => {
     const root = await temporary("atomic-explicit-steer");
     const store = await createWorkspaceStore(root);

@@ -9,12 +9,17 @@ import {
 import type { RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
 import { executionIdOf } from "./action-summary.ts";
 import { tuiActionForAgentEvent } from "./agent-event.ts";
-import { isExclusiveSlashCommand, runSlashCommand, steerFeedback } from "./commands.ts";
+import {
+  exclusiveSlashCommandScope,
+  isExclusiveSlashCommand,
+  runSlashCommand,
+  steerFeedback,
+} from "./commands.ts";
+import { createExclusiveCommandBarrier, type ExclusiveCommandBarrier } from "./exclusive-command-barrier.ts";
 import { editTextInExternalEditor } from "./external-editor.ts";
 import { learningDiagnosticNotice, reconcileSettledTurnPresentation } from "./learning-presentation.ts";
-import { boundedInspectorText } from "./lifecycle-utils.ts";
+import { boundedInspectorText, type ShutdownSettlement } from "./lifecycle-utils.ts";
 import { createTuiMcpOrchestration } from "./mcp.ts";
-import { createPromptSubmissionQueue } from "./prompt-submission-queue.ts";
 import {
   createHeaderView,
   createHelpView,
@@ -65,10 +70,6 @@ export * from "./state.ts";
 const SHUTDOWN_GRACE_MS = 250;
 const INTERRUPT_FEEDBACK_MS = 20;
 const INSPECTOR_PAGE_ROWS = 10;
-
-type ShutdownSettlement =
-  | { readonly status: "settled" | "timed-out" }
-  | { readonly status: "rejected"; readonly error: unknown };
 
 export async function startNoesisTui(
   runtime: NoesisTuiRuntime,
@@ -143,7 +144,7 @@ export async function startNoesisTui(
   const helpView = createHelpView(view, () => terminal.rows);
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
   enrichEditorSkills(editor, runtime.listSkills, () => phase !== "stopped");
-  const promptSubmissionQueue = createPromptSubmissionQueue();
+  let exclusiveCommands: ExclusiveCommandBarrier | undefined;
   let externalEditorActive = false;
   let turnGeneration = 0;
   let inspectorGeneration = 0;
@@ -189,7 +190,6 @@ export async function startNoesisTui(
       inspectorHandle = undefined;
       await mcp.dispose();
       streamDeltas.clear();
-      promptSubmissionQueue.clear();
       editor.disableSubmit = true;
       editor.onSubmit = (): void => undefined;
       removeExitInputListener();
@@ -202,7 +202,7 @@ export async function startNoesisTui(
         }
       }
       const trailId = view.state.trailId;
-      const exclusiveCommand = promptSubmissionQueue.activeWork();
+      const exclusiveCommand = exclusiveCommands?.activeWork();
       let shutdownFailure: { readonly error: unknown } | undefined;
       if (trailId && view.state.interaction.phase !== "idle") {
         const abortAndSettle = runtime
@@ -212,9 +212,6 @@ export async function startNoesisTui(
             (error: unknown) => ({ status: "rejected", error }),
           );
         let graceTimer: NodeJS.Timeout | undefined;
-        // Terminal ownership is already released. Give a cooperative runtime a brief chance to
-        // settle, then detach the abortable turn: a broken runtime must not keep the CLI lifecycle
-        // pending forever.
         const settlement = await Promise.race<ShutdownSettlement>([
           abortAndSettle,
           new Promise<ShutdownSettlement>((resolve) => {
@@ -225,7 +222,6 @@ export async function startNoesisTui(
         if (graceTimer) clearTimeout(graceTimer);
         if (settlement.status === "rejected") shutdownFailure = { error: settlement.error };
         if (settlement.status === "timed-out") {
-          // The detached turn may still settle later; the mapped promise observes its rejection.
           void abortAndSettle;
         }
       }
@@ -429,9 +425,10 @@ export async function startNoesisTui(
     tui.requestRender();
   };
 
-  const interact = async (command: TuiInteractionCommand): Promise<TuiInteractionResult> => {
-    const trailId = view.state.trailId;
-    if (!trailId) throw new Error("No active session is available for this interaction.");
+  const interactWithSession = async (
+    trailId: string,
+    command: TuiInteractionCommand,
+  ): Promise<TuiInteractionResult> => {
     const result = await runtime.interact(trailId, command, {
       onEvent: onInteractionEvent,
       ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
@@ -439,6 +436,17 @@ export async function startNoesisTui(
     applyInteractionSnapshot(result.snapshot);
     return result;
   };
+  const interact = async (command: TuiInteractionCommand): Promise<TuiInteractionResult> => {
+    const trailId = view.state.trailId;
+    if (!trailId) throw new Error("No active session is available for this interaction.");
+    return await interactWithSession(trailId, command);
+  };
+  exclusiveCommands = createExclusiveCommandBarrier({
+    currentSessionId: () => view.state.trailId,
+    canDeliver: () => phase === "main",
+    interact: interactWithSession,
+    onPromptFailure: reportFailure,
+  });
 
   const interruptActiveTurn = async (): Promise<TuiInteractionResult> => {
     const visibleTurnId = view.state.interaction.active?.turnId;
@@ -560,16 +568,15 @@ export async function startNoesisTui(
       void shutdown();
       return;
     }
-    const submissionGate = promptSubmissionQueue.gate(text);
-    if (submissionGate !== "ready") {
-      view.dispatch({
-        type: "system-message",
-        text:
-          submissionGate === "queued"
-            ? "Message queued."
-            : "A command is active. Wait for it to finish before submitting another command.",
-      });
-      tui.requestRender();
+    const routed = exclusiveCommands?.routeSubmission(text) ?? "idle";
+    if (routed !== "idle") {
+      if (routed === "blocked") {
+        view.dispatch({
+          type: "system-message",
+          text: "A command is active. Wait for it to finish before submitting another command.",
+        });
+        tui.requestRender();
+      }
       return;
     }
     inspectorGeneration += 1;
@@ -586,8 +593,8 @@ export async function startNoesisTui(
       });
       tui.requestRender();
     };
-    const exclusiveSubmission = isExclusiveSlashCommand(normalizedInput);
-    const submissionWork = (async () => {
+    const exclusiveScope = exclusiveSlashCommandScope(normalizedInput);
+    const performSubmission = async (): Promise<void> => {
       if (normalizedInput === "/abort") {
         const result = await interruptActiveTurn();
         if (result.effect === "idle") view.dispatch({ type: "system-message", text: "No turn is active." });
@@ -632,6 +639,7 @@ export async function startNoesisTui(
           runtime,
           trailId: submittedTrailId,
           publishInspector,
+          prepareTrailSelection: async (trailId) => await exclusiveCommands?.prepareDestination(trailId),
           dispatch: (action) => {
             if (!isCurrentSubmission()) return;
             view.dispatch(action);
@@ -664,18 +672,18 @@ export async function startNoesisTui(
       }
 
       await interact({ type: "submit", text });
-    })();
+    };
     const reportSubmissionFailure = (error: unknown): void => {
       if (isCurrentSubmission()) reportFailure(error);
     };
-    if (exclusiveSubmission)
-      promptSubmissionQueue.runExclusive(submissionWork, {
-        canDrain: () => phase === "main",
-        submit: async (queuedText) => interact({ type: "submit", text: queuedText }).then(() => undefined),
+    if (exclusiveScope)
+      exclusiveCommands?.start({
+        sourceSessionId: submittedTrailId,
+        scope: exclusiveScope,
+        execute: performSubmission,
         onCommandFailure: reportSubmissionFailure,
-        onPromptFailure: reportFailure,
       });
-    else void submissionWork.catch(reportSubmissionFailure);
+    else void performSubmission().catch(reportSubmissionFailure);
   };
   tui.addChild(root);
   const loadTranscript = (trail: TrailState) => runtime.getTranscript(trail.trailId);

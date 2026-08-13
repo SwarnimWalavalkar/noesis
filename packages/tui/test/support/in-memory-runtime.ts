@@ -7,11 +7,11 @@ import {
   type InteractionDispatchResult,
   type InteractionPendingIntent,
   type InteractionSnapshot,
-  SESSION_PICKER_LIMIT,
   type NoesisRuntime,
   type RunTurnOptions,
   type RuntimeTranscriptAction,
   type RuntimeTranscriptEntry,
+  SESSION_PICKER_LIMIT,
   type TrailState,
   type TrailSummary,
   type TurnResult,
@@ -240,7 +240,7 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     getStored(trailId);
     const created: TestInteractionState = {
       phase: "idle",
-      queuePaused: false,
+      queuePaused: true,
       pending: [],
     };
     interactions.set(trailId, created);
@@ -403,7 +403,8 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     let effect: InteractionDispatchResult["effect"] = "idle";
     let restoredText: string | undefined;
     let intentId: string | undefined;
-    if (command.type === "submit") {
+    let queueWasHeld: boolean | undefined;
+    if (command.type === "submit" || command.type === "enqueue") {
       interactionSequence += 1;
       intentId = `${trailId}:intent:${String(interactionSequence)}`;
       state.pending.push(
@@ -415,10 +416,29 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
           createdAt: timestamp(),
         }),
       );
-      state.queuePaused = false;
+      if (command.type === "submit") state.queuePaused = false;
       effect = "queued";
       emitInteractionState(trailId, state);
-      scheduleInteractionDrain(trailId, state);
+      if (command.type === "submit") scheduleInteractionDrain(trailId, state);
+    } else if (command.type === "reroute-pending") {
+      const source = interactionState(command.sourceSessionId);
+      const selected = source.pending.filter((intent) => command.intentIds.includes(intent.intentId));
+      if (selected.length !== command.intentIds.length)
+        throw new Error("A source intent is no longer pending");
+      source.pending.splice(
+        0,
+        source.pending.length,
+        ...source.pending.filter((intent) => !command.intentIds.includes(intent.intentId)),
+      );
+      for (const intent of selected) {
+        interactionSequence += 1;
+        state.pending.push(
+          Object.freeze({ ...intent, intentId: `${trailId}:intent:${String(interactionSequence)}` }),
+        );
+      }
+      effect = "rerouted";
+      emitInteractionState(command.sourceSessionId, source);
+      emitInteractionState(trailId, state);
     } else if (command.type === "steer" && state.active) {
       const queued = command.text === undefined ? state.pending.pop() : undefined;
       const text = command.text ?? queued?.text;
@@ -460,6 +480,7 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
       emitInteractionState(trailId, state);
       scheduleInteractionDrain(trailId, state);
     } else if (command.type === "pause-queue") {
+      queueWasHeld = state.queuePaused && state.pending.length > 0;
       state.queuePaused = true;
       emitInteractionState(trailId, state);
     } else if (command.type === "interrupt" && state.active && command.turnId === state.active.turnId) {
@@ -474,6 +495,7 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
       snapshot: interactionSnapshot(trailId, state),
       ...(restoredText === undefined ? {} : { restoredText }),
       ...(intentId === undefined ? {} : { intentId }),
+      ...(queueWasHeld === undefined ? {} : { queueWasHeld }),
     });
   };
 

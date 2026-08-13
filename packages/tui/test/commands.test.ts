@@ -1,6 +1,7 @@
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
 import { describe, expect, test } from "vitest";
 import {
+  exclusiveSlashCommandScope,
   INSPECTOR_PREVIEW_CHARACTERS,
   isExclusiveSlashCommand,
   type NoesisTuiAction,
@@ -93,6 +94,10 @@ describe("Noesis slash commands", () => {
     expect(isExclusiveSlashCommand("\t/model provider/model ")).toBe(true);
     expect(isExclusiveSlashCommand("/runs")).toBe(false);
     expect(isExclusiveSlashCommand("/script reusable-research")).toBe(false);
+    expect(exclusiveSlashCommandScope(" /compact keep decisions ")).toBe("current-session");
+    expect(exclusiveSlashCommandScope("/fork")).toBe("resulting-session");
+    expect(exclusiveSlashCommandScope("/model provider/model")).toBe("resulting-session");
+    expect(exclusiveSlashCommandScope("/runs")).toBeUndefined();
   });
 
   test("normalizes surrounding whitespace before matching and parsing arguments", async () => {

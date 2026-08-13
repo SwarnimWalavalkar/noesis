@@ -46,6 +46,26 @@ function createIntentStore(): TurnInteractionIntentStore & {
         updatedAt: request.createdAt,
         attemptCount: 0,
       }),
+    reroutePending: async ({ sourceSessionId, destinationSessionId, intents, reroutedAt }) => {
+      const rerouted: UserIntentRecord[] = [];
+      for (const { sourceIntentId, destinationIntentId } of intents) {
+        const source = records.get(sourceIntentId);
+        if (source?.sessionId !== sourceSessionId || source.status !== "pending" || source.text === undefined)
+          throw new Error(`Source intent ${sourceIntentId} is not pending`);
+        update({ ...source, status: "withdrawn", withdrawnAt: reroutedAt, updatedAt: reroutedAt });
+        rerouted.push(
+          update({
+            ...source,
+            intentId: destinationIntentId,
+            sessionId: destinationSessionId,
+            status: "pending",
+            queueSequence: records.size + 1,
+            updatedAt: reroutedAt,
+          }),
+        );
+      }
+      return Object.freeze(rerouted);
+    },
     listPending: async (sessionId) => Object.freeze(pending(sessionId)),
     listHeld: async (sessionId) =>
       Object.freeze(
@@ -322,6 +342,87 @@ function deferred<T>(): {
 }
 
 describe("TurnInteractionController", () => {
+  test("durably enqueues without resuming delivery until the existing queue is released", async () => {
+    const intents = createIntentStore();
+    const scheduler = createScheduler();
+    const requests: string[] = [];
+    let id = 0;
+    const controller = createTurnInteractionController({
+      intents,
+      createIntentId: () => `intent-${String(++id)}`,
+      createTurnId: () => `turn-${String(++id)}`,
+      now: () => timestamp(++id),
+      schedule: scheduler.schedule,
+      runTurn: async ({ text, onReady }) => {
+        onReady();
+        requests.push(text);
+        return { outcome: "completed" };
+      },
+      steer: async () => consumedSteer(),
+      recordSteerDelivery: async () => undefined,
+      interrupt: async () => undefined,
+    });
+
+    await controller.dispatch("session-1", { type: "enqueue", text: "first" });
+    await controller.dispatch("session-1", { type: "enqueue", text: "second" });
+
+    expect(scheduler.size()).toBe(0);
+    await expect(controller.inspect("session-1")).resolves.toMatchObject({
+      queuePaused: true,
+      pending: [{ text: "first" }, { text: "second" }],
+    });
+    await controller.dispatch("session-1", { type: "resume-queue" });
+    expect(scheduler.size()).toBe(1);
+    scheduler.flushOne();
+    await waitUntil(() => requests.length === 2);
+    expect(requests).toEqual(["first", "second"]);
+    await controller.close();
+  });
+
+  test("atomically reroutes exact queued intents into a destination without starting delivery", async () => {
+    const intents = createIntentStore();
+    let id = 0;
+    const controller = createTurnInteractionController({
+      intents,
+      createIntentId: () => `intent-${String(++id)}`,
+      createTurnId: () => `turn-${String(++id)}`,
+      now: () => timestamp(++id),
+      runTurn: async ({ onReady }) => {
+        onReady();
+        return { outcome: "completed" };
+      },
+      steer: async () => consumedSteer(),
+      recordSteerDelivery: async () => undefined,
+      interrupt: async () => undefined,
+    });
+    const first = await controller.dispatch("source", { type: "enqueue", text: "first" });
+    const second = await controller.dispatch("source", { type: "enqueue", text: "second" });
+    if (!first.intentId || !second.intentId) throw new Error("Expected durable intent identities");
+
+    await expect(
+      controller.dispatch("destination", {
+        type: "reroute-pending",
+        sourceSessionId: "source",
+        intentIds: [first.intentId, second.intentId],
+      }),
+    ).resolves.toMatchObject({
+      effect: "rerouted",
+      snapshot: {
+        sessionId: "destination",
+        queuePaused: true,
+        pending: [{ text: "first" }, { text: "second" }],
+      },
+    });
+    await expect(controller.inspect("source")).resolves.toMatchObject({ pending: [] });
+    expect(
+      intents
+        .records()
+        .filter((record) => record.sessionId === "source")
+        .map((record) => record.status),
+    ).toEqual(["withdrawn", "withdrawn"]);
+    await controller.close();
+  });
+
   test("returns after enqueue and keeps one replaceable observer for later background events", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();

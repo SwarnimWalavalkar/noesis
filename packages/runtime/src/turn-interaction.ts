@@ -3,6 +3,12 @@ import type { UserIntentRecord } from "@noesis/workspace";
 
 export type InteractionCommand =
   | { readonly type: "submit"; readonly text: string }
+  | { readonly type: "enqueue"; readonly text: string }
+  | {
+      readonly type: "reroute-pending";
+      readonly sourceSessionId: string;
+      readonly intentIds: readonly string[];
+    }
   | { readonly type: "steer"; readonly text?: string }
   | { readonly type: "restore-newest" }
   | { readonly type: "resume-queue" }
@@ -79,10 +85,19 @@ export interface InteractionDispatchOptions {
 }
 
 export interface InteractionDispatchResult {
-  readonly effect: "queued" | "steered" | "unresolved" | "restored" | "resumed" | "interrupted" | "idle";
+  readonly effect:
+    | "queued"
+    | "rerouted"
+    | "steered"
+    | "unresolved"
+    | "restored"
+    | "resumed"
+    | "interrupted"
+    | "idle";
   readonly snapshot: InteractionSnapshot;
   readonly intentId?: string;
   readonly restoredText?: string;
+  readonly queueWasHeld?: boolean;
 }
 
 export interface TurnInteractionIntentStore {
@@ -93,6 +108,15 @@ export interface TurnInteractionIntentStore {
     readonly queuedBehindTurnId?: string;
     readonly createdAt: string;
   }) => Promise<UserIntentRecord>;
+  readonly reroutePending: (request: {
+    readonly sourceSessionId: string;
+    readonly destinationSessionId: string;
+    readonly intents: readonly {
+      readonly sourceIntentId: string;
+      readonly destinationIntentId: string;
+    }[];
+    readonly reroutedAt: string;
+  }) => Promise<readonly UserIntentRecord[]>;
   readonly listPending: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
   readonly listHeld: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
   readonly listUnresolved: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
@@ -622,7 +646,7 @@ export function createTurnInteractionController(
       | { readonly settlement: Promise<InteractionDispatchResult> };
     const serialized = await serialize<SerializedDispatch>(state, async () => {
       await ensureRecovered(sessionId, state);
-      if (command.type === "submit") {
+      if (command.type === "submit" || command.type === "enqueue") {
         if (!command.text) throw new Error("Cannot queue an empty message");
         const intent = await options.intents.enqueue({
           intentId: options.createIntentId(),
@@ -630,14 +654,32 @@ export function createTurnInteractionController(
           text: command.text,
           createdAt: now(),
         });
-        state.queuePaused = false;
-        delete state.drainFailure;
-        state.resumeGeneration += 1;
+        if (command.type === "submit") {
+          state.queuePaused = false;
+          delete state.drainFailure;
+          state.resumeGeneration += 1;
+        }
         const current = await snapshot(sessionId, state);
-        scheduleDrain(sessionId, state, dispatchOptions.thinkingLevel);
+        if (command.type === "submit") scheduleDrain(sessionId, state, dispatchOptions.thinkingLevel);
         return Object.freeze({
           result: Object.freeze({ effect: "queued" as const, intentId: intent.intentId, snapshot: current }),
         });
+      }
+      if (command.type === "reroute-pending") {
+        if (command.sourceSessionId === sessionId)
+          throw new Error("Pending intents can only be rerouted into a different session");
+        const intents = command.intentIds.map((sourceIntentId) =>
+          Object.freeze({ sourceIntentId, destinationIntentId: options.createIntentId() }),
+        );
+        await options.intents.reroutePending({
+          sourceSessionId: command.sourceSessionId,
+          destinationSessionId: sessionId,
+          intents,
+          reroutedAt: now(),
+        });
+        const current = await snapshot(sessionId, state);
+        notify(state, { type: "state", snapshot: current });
+        return Object.freeze({ result: Object.freeze({ effect: "rerouted" as const, snapshot: current }) });
       }
       if (command.type === "resume-queue") {
         state.queuePaused = false;
@@ -649,13 +691,16 @@ export function createTurnInteractionController(
         return Object.freeze({ result: Object.freeze({ effect: "resumed" as const, snapshot: current }) });
       }
       if (command.type === "pause-queue") {
+        const queueWasHeld = state.queuePaused && (await snapshot(sessionId, state)).pending.length > 0;
         state.queuePaused = true;
         state.cancellationGeneration += 1;
         state.cancelScheduled?.();
         delete state.cancelScheduled;
         const current = await snapshot(sessionId, state);
         notify(state, { type: "state", snapshot: current });
-        return Object.freeze({ result: Object.freeze({ effect: "idle" as const, snapshot: current }) });
+        return Object.freeze({
+          result: Object.freeze({ effect: "idle" as const, snapshot: current, queueWasHeld }),
+        });
       }
       if (command.type === "restore-newest") {
         const available = (await snapshot(sessionId, state)).pending;

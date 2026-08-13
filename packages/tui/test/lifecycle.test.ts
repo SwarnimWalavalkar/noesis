@@ -193,10 +193,12 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
-  test("renders a forked trail when the trail-switching command settles", async () => {
+  test("routes prompts submitted during a fork into the resulting session queue", async () => {
+    const prompts: string[] = [];
     const base = await createRuntime({
       name: "fork-render-scripted",
       async run(request) {
+        prompts.push(request.prompt);
         return {
           text: request.prompt,
           provider: request.provider,
@@ -228,8 +230,96 @@ describe("Noesis TUI lifecycle", () => {
 
     terminal.type("/fork\r");
     await vi.waitFor(() => expect(forkStarted).toBe(true));
+    const sourceTrailId = base.listTrails()[0]?.trailId;
+    if (!sourceTrailId) throw new Error("Expected a source trail");
+    terminal.type("continue in the fork\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1 · paused"));
+    await expect(base.inspectInteraction(sourceTrailId)).resolves.toMatchObject({
+      queuePaused: true,
+      pending: [expect.objectContaining({ text: "continue in the fork" })],
+    });
     releaseFork?.();
     await vi.waitFor(() => expect(terminal.output).toContain("test-provider/forked"));
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts).toEqual(["continue in the fork"]);
+    const destination = base
+      .listTrails()
+      .find((trail) => trail.turns.some((turn) => turn.input === "continue in the fork"));
+    expect(destination?.trailId).toBeDefined();
+    expect(destination?.trailId).not.toBe(sourceTrailId);
+
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("keeps the durable destination queue visible while post-selection hydration is blocked", async () => {
+    const prompts: { trailId: string; prompt: string }[] = [];
+    const base = await createRuntime({
+      name: "fork-hydration-failure-scripted",
+      async run(request) {
+        prompts.push({ trailId: request.trailId, prompt: request.prompt });
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const forkGate = Promise.withResolvers<void>();
+    const hydrationGate = Promise.withResolvers<void>();
+    let forkStarted = false;
+    let destinationTranscriptReads = 0;
+    const runtime = Object.freeze({
+      ...base,
+      forkTrail: async (trailId: string) => {
+        forkStarted = true;
+        await forkGate.promise;
+        const forked = await base.forkTrail(trailId);
+        return Object.freeze({ ...forked, model: "selected-fork" });
+      },
+      getTranscript: async (trailId: string) => {
+        const trail = base.getTrail(trailId);
+        if (trail.parentTrailId !== undefined) {
+          destinationTranscriptReads += 1;
+          if (destinationTranscriptReads === 2) await hydrationGate.promise;
+        }
+        return await base.getTranscript(trailId);
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    const sourceTrailId = base.listTrails()[0]?.trailId;
+    if (!sourceTrailId) throw new Error("Expected a source trail");
+
+    terminal.type("/fork\r");
+    await vi.waitFor(() => expect(forkStarted).toBe(true));
+    terminal.type("queued before selection\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1 · paused"));
+    forkGate.resolve();
+    await vi.waitFor(() => expect(terminal.output).toContain("test-provider/selected-fork"));
+    await vi.waitFor(() => expect(destinationTranscriptReads).toBe(2));
+    terminal.type("queued after selection\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 2 · paused"));
+    const destination = base.listTrails().find((trail) => trail.parentTrailId === sourceTrailId);
+    if (!destination) throw new Error("Expected a selected fork");
+    await expect(base.inspectInteraction(destination.trailId)).resolves.toMatchObject({
+      queuePaused: true,
+      pending: [
+        expect.objectContaining({ text: "queued before selection" }),
+        expect.objectContaining({ text: "queued after selection" }),
+      ],
+    });
+    hydrationGate.resolve();
+    await vi.waitFor(() => expect(prompts).toHaveLength(2));
+    expect(prompts).toEqual([
+      { trailId: destination.trailId, prompt: "queued before selection" },
+      { trailId: destination.trailId, prompt: "queued after selection" },
+    ]);
 
     terminal.type("/quit\n");
     await running;
@@ -423,11 +513,20 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("/compact preserve the debugging decisions\r");
-    await vi.waitFor(() => expect(compactStarted).toBe(true));
-    expect(compactFocus).toBe("preserve the debugging decisions");
     terminal.type("first queued prompt\r");
     terminal.type("second queued prompt\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("Message queued."));
+    await vi.waitFor(() => expect(compactStarted).toBe(true));
+    expect(compactFocus).toBe("preserve the debugging decisions");
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 2 · paused"));
+    expect(terminal.output).not.toContain("Message queued.");
+    const trailId = runtime.listTrails()[0]?.trailId;
+    if (!trailId) throw new Error("Expected an active trail");
+    await vi.waitFor(async () =>
+      expect((await runtime.inspectInteraction(trailId)).pending.map((intent) => intent.text)).toEqual([
+        "first queued prompt",
+        "second queued prompt",
+      ]),
+    );
     terminal.type("/fork\r");
     await vi.waitFor(() => expect(terminal.output).toContain("A command is active."));
     expect(prompts).toEqual([]);
@@ -436,6 +535,54 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(prompts).toEqual(["first queued prompt", "second queued prompt"]));
     await vi.waitFor(() => expect(terminal.output).toContain("reply:second queued prompt"));
 
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("preserves an explicitly paused durable queue across compaction", async () => {
+    const compactGate = Promise.withResolvers<void>();
+    const prompts: string[] = [];
+    const base = await createRuntime({
+      name: "paused-command-queue-scripted",
+      async run(request) {
+        prompts.push(request.prompt);
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const trail = await base.startTrail({ title: "paused queue" });
+    await base.interact(trail.trailId, { type: "enqueue", text: "already paused" });
+    const runtime = Object.freeze({
+      ...base,
+      compact: async () => compactGate.promise,
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(
+      runtime,
+      { session: { mode: "resume", trailId: trail.trailId } },
+      terminal,
+    );
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1 · paused"));
+
+    terminal.type("/compact\r");
+    terminal.type("queued during compact\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 2 · paused"));
+    compactGate.resolve();
+    await vi.waitFor(() => expect(terminal.output).toContain("Context compacted"));
+    await vi.waitFor(async () =>
+      expect((await runtime.inspectInteraction(trail.trailId)).pending).toHaveLength(2),
+    );
+    expect(prompts).toEqual([]);
+
+    terminal.type("/queue resume\r");
+    await vi.waitFor(() => expect(prompts).toEqual(["already paused", "queued during compact"]));
     terminal.type("/quit\n");
     await running;
   });
@@ -538,6 +685,10 @@ describe("Noesis TUI lifecycle", () => {
 
     terminal.type("/compact\r");
     await vi.waitFor(() => expect(compactStarted).toBe(true));
+    terminal.type("survive shutdown\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1 · paused"));
+    const trailId = runtime.listTrails()[0]?.trailId;
+    if (!trailId) throw new Error("Expected an active trail");
     terminal.type(exitInput);
     await vi.waitFor(() => expect(terminal.stops).toBe(1));
     expect(shutdownCompleted).toBe(false);
@@ -549,6 +700,10 @@ describe("Noesis TUI lifecycle", () => {
     expect(compactFinished).toBe(true);
     expect(terminal.output).not.toContain("Context compacted");
     expect(terminal.stops).toBe(1);
+    await expect(runtime.inspectInteraction(trailId)).resolves.toMatchObject({
+      queuePaused: true,
+      pending: [expect.objectContaining({ text: "survive shutdown" })],
+    });
   });
 
   test("queues prompts submitted during a turn and drains them in FIFO order", async () => {
