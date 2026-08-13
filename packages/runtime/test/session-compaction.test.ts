@@ -41,8 +41,13 @@ describe("session compaction", () => {
 
   test("reserves non-history request capacity inside the configured context budget", () => {
     expect(resolveHistoryTokenBudget(160_000, ["system", "current input"])).toBe(128_000);
-    expect(resolveHistoryTokenBudget(10_000, ["x".repeat(20_000)])).toBe(904);
+    expect(resolveHistoryTokenBudget(10_000, ["x".repeat(12_000)])).toBe(1_904);
     expect(() => resolveHistoryTokenBudget(100, ["x".repeat(400)])).toThrow("no room");
+  });
+
+  test("estimates token-dense UTF-8 input conservatively", () => {
+    expect(estimateContextTokens("a".repeat(12))).toBe(4);
+    expect(estimateContextTokens("你好世界")).toBe(4);
   });
 
   test("compacts only complete oldest turns and retains a complete recent raw tail", () => {
@@ -55,7 +60,7 @@ describe("session compaction", () => {
       message("6", "f".repeat(48), false),
     ]);
 
-    const window = prepareCompactionWindow(messages, undefined, 64, {
+    const window = prepareCompactionWindow(messages, undefined, 95, {
       compactorInputTokenBudget: 1_000,
     });
 
@@ -73,7 +78,7 @@ describe("session compaction", () => {
       message("4", "recent response", false),
     ]);
 
-    const window = prepareCompactionWindow(messages, undefined, 10, {
+    const window = prepareCompactionWindow(messages, undefined, 16, {
       compactorInputTokenBudget: 1_000,
     });
 
@@ -112,8 +117,8 @@ describe("session compaction", () => {
       createdAt: "2026-08-13T00:00:00.000Z",
     });
 
-    const current = resolvedSessionContext(messages, checkpoint, 8);
-    const window = prepareCompactionWindow(messages, checkpoint, 8, {
+    const current = resolvedSessionContext(messages, checkpoint, 16);
+    const window = prepareCompactionWindow(messages, checkpoint, 16, {
       compactorInputTokenBudget: 1_000,
     });
 
@@ -137,6 +142,21 @@ describe("session compaction", () => {
 
     expect(window?.sourceMessages.map(({ messageId }) => messageId)).toEqual(["1", "2"]);
     expect(window?.retainedMessages.map(({ messageId }) => messageId)).toEqual(["3", "4"]);
+  });
+
+  test("manual compaction covers a single completed turn below the automatic threshold", () => {
+    const messages = Object.freeze([
+      message("1", "only request", true),
+      message("2", "only response", false),
+    ]);
+
+    const window = prepareCompactionWindow(messages, undefined, 10_000, {
+      force: true,
+      compactorInputTokenBudget: 20_000,
+    });
+
+    expect(window?.sourceMessages.map(({ messageId }) => messageId)).toEqual(["1", "2"]);
+    expect(window?.retainedMessages).toEqual([]);
   });
 
   test("covers only complete bytes supplied to the compactor and retains the exact remaining suffix", () => {

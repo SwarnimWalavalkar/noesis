@@ -1,17 +1,18 @@
 import { AgentHarness, formatSkillsForSystemPrompt, type Skill } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { AssistantMessage, MutableModels, UserMessage } from "@earendil-works/pi-ai";
-import type {
-  AgentAssistantMessageBoundary,
-  AgentContextUsage,
-  AgentRuntimeEvent,
-  AgentRuntimeRequest,
-  AgentRuntimeResult,
-  AgentSteerResult,
-  FrozenTurnPlan,
-  NoesisAgentRuntime,
+import {
+  estimateInputTokens,
+  type AgentAssistantMessageBoundary,
+  type AgentContextUsage,
+  type AgentRuntimeEvent,
+  type AgentRuntimeRequest,
+  type AgentRuntimeResult,
+  type AgentSteerResult,
+  type FrozenTurnPlan,
+  type NoesisAgentRuntime,
+  validateFrozenTurnPlan,
 } from "@noesis/agent-types";
-import { validateFrozenTurnPlan } from "@noesis/agent-types";
 import { toAgentActionPayload } from "./action-payload.ts";
 import {
   createPiExecuteTool,
@@ -515,12 +516,13 @@ export function createPiAgentRuntime(
               parameters: tool.parameters,
             })),
         );
-        const estimateTokens = (text: string): number => Math.max(1, Math.ceil(text.length / 4));
         const estimatedRequestTokens =
-          estimateTokens(completeSystemPrompt) +
-          estimateTokens(explicitSkill?.prompt ?? request.prompt) +
-          estimateTokens(activeToolMaterial) +
-          history.reduce((total, message) => total + estimateTokens(message.content), 0);
+          64 +
+          estimateInputTokens(completeSystemPrompt) +
+          estimateInputTokens(explicitSkill?.prompt ?? request.prompt) +
+          estimateInputTokens(activeToolMaterial) +
+          agentTools.length * 16 +
+          history.reduce((total, message) => total + 8 + estimateInputTokens(message.content), 0);
         if (estimatedRequestTokens > plan.requestTokenBudget)
           throw new Error(
             `Frozen turn plan ${plan.planId} complete request exceeds its token budget before model invocation`,

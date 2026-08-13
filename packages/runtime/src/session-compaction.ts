@@ -1,6 +1,7 @@
 import {
   type AgentThinkingLevel,
   type AgentUsage,
+  estimateInputTokens,
   MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS,
   MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES,
   MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
@@ -56,7 +57,7 @@ export interface ContextCheckpointSummary {
 }
 
 export function estimateContextTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
+  return estimateInputTokens(text);
 }
 
 export function resolveContextTokenBudget(configured: number, limits: ModelContextLimits): number {

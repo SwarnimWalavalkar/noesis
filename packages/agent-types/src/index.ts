@@ -148,6 +148,14 @@ export const MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS = 96_000;
 export const MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS = 4_000_000;
 export const MAX_FROZEN_CONTEXT_CHECKPOINT_SUMMARY_CHARACTERS = 32_000;
 
+/**
+ * Conservative provider-independent estimate used before a request reaches a tokenizer-owning provider.
+ * Three UTF-8 bytes per token leaves headroom for multilingual text, code, and serialized schemas.
+ */
+export function estimateInputTokens(text: string): number {
+  return Math.max(1, Math.ceil(new TextEncoder().encode(text).byteLength / 3));
+}
+
 /** The complete SQLite-authoritative input to one foreground execution. */
 export interface FrozenTurnPlan {
   readonly schemaVersion: 1;
@@ -357,11 +365,9 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
   }
   if (plan.contextTokenBudget !== undefined) {
     const estimatedContextTokens =
-      (plan.contextCheckpoint === undefined
-        ? 0
-        : Math.max(1, Math.ceil(plan.contextCheckpoint.summary.length / 4))) +
+      (plan.contextCheckpoint === undefined ? 0 : estimateInputTokens(plan.contextCheckpoint.summary)) +
       (plan.conversationHistory ?? []).reduce(
-        (total, entry) => total + Math.max(1, Math.ceil(entry.content.length / 4)),
+        (total, entry) => total + estimateInputTokens(entry.content),
         0,
       );
     if (estimatedContextTokens > plan.contextTokenBudget)
