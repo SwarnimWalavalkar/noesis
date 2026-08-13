@@ -2866,6 +2866,43 @@ describe("WorkspaceStore", () => {
     store.close();
   });
 
+  test("uses the project expression index for newest reflection scans", async () => {
+    const root = await temporary("job-project-index");
+    const store = await createWorkspaceStore(root);
+    await store.jobs.enqueue({
+      jobId: "project-reflection-indexed",
+      kind: "runtime.reflect_turn",
+      payload: Object.freeze({
+        turn: Object.freeze({
+          project: Object.freeze({ projectId: "project-indexed", root: "/workspace/indexed" }),
+          sessionId: "session-indexed",
+          turnId: "turn-indexed",
+          sensitivity: "normal",
+        }),
+      }),
+      payloadRefs: Object.freeze([]),
+      operationId: "operation:project-reflection-indexed",
+      idempotencyKey: "idempotency:project-reflection-indexed",
+      notBefore: "2026-07-26T00:00:00.000Z",
+      maxAttempts: 1,
+      estimatedCost: 0,
+      budget: 0,
+    });
+    store.close();
+
+    const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    const plan = database
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT * FROM jobs
+         WHERE kind = ? AND json_extract(payload_json, '$.turn.project.projectId') = ?
+         ORDER BY created_at DESC, job_id DESC LIMIT ?`,
+      )
+      .all("runtime.reflect_turn", "project-indexed", 1)
+      .map((row) => String(Reflect.get(row, "detail")));
+    expect(plan.join("\n")).toContain("jobs_reflection_project_created");
+    database.close();
+  });
+
   test("keeps recursive job observations isolated to their source session", async () => {
     const store = await createWorkspaceStore(await temporary("job-observation-session-isolation"));
     await store.operational.sessions.put(session("session-observation-a"));
