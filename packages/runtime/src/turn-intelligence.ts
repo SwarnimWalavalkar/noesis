@@ -44,6 +44,7 @@ export interface TurnPlanningRequest {
   readonly priorHistory?: readonly TurnRoutingHistoryMessage[];
   readonly contextCheckpointId?: string;
   readonly contextTokenBudget?: number;
+  readonly requestTokenBudget?: number;
   readonly retrievalCitations?: readonly EvidenceRef[];
 }
 
@@ -409,6 +410,7 @@ export function createTurnIntelligencePlanner(
       conversationHistory,
       ...(contextCheckpoint ? { contextCheckpoint } : {}),
       ...(request.contextTokenBudget === undefined ? {} : { contextTokenBudget: request.contextTokenBudget }),
+      ...(request.requestTokenBudget === undefined ? {} : { requestTokenBudget: request.requestTokenBudget }),
       renderedSystemPrompt: [request.baseSystemPrompt.trim(), ...promptLayers, workingAdjustmentEnvelope]
         .filter((layer): layer is string => Boolean(layer))
         .join("\n\n"),

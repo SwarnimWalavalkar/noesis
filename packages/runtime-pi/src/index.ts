@@ -500,20 +500,44 @@ export function createPiAgentRuntime(
           result: explicitSkill.actionEvidence,
         });
       }
+      const agentTools = executeTool ? [...selfTools, executeTool, ...hotbarTools] : [...selfTools];
+      const initialActiveToolNames = activeNames(initialHotbar);
+      const skillsSystemPrompt = formatSkillsForSystemPrompt(piSkills);
+      const completeSystemPrompt = [request.systemPrompt, skillsSystemPrompt].filter(Boolean).join("\n\n");
+      if (plan?.requestTokenBudget !== undefined) {
+        const activeNameSet = new Set(initialActiveToolNames);
+        const activeToolMaterial = JSON.stringify(
+          agentTools
+            .filter((tool) => activeNameSet.has(tool.name))
+            .map((tool) => ({
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.parameters,
+            })),
+        );
+        const estimateTokens = (text: string): number => Math.max(1, Math.ceil(text.length / 4));
+        const estimatedRequestTokens =
+          estimateTokens(completeSystemPrompt) +
+          estimateTokens(request.prompt) +
+          estimateTokens(activeToolMaterial) +
+          history.reduce((total, message) => total + estimateTokens(message.content), 0);
+        if (estimatedRequestTokens > plan.requestTokenBudget)
+          throw new Error(
+            `Frozen turn plan ${plan.planId} complete request exceeds its token budget before model invocation`,
+          );
+      }
       harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),
         session,
         models,
         model,
-        tools: executeTool ? [...selfTools, executeTool, ...hotbarTools] : [...selfTools],
-        activeToolNames: activeNames(initialHotbar),
+        tools: agentTools,
+        activeToolNames: initialActiveToolNames,
         thinkingLevel: request.thinkingLevel,
         resources: {
           skills: piSkills,
         },
-        systemPrompt: [request.systemPrompt, formatSkillsForSystemPrompt(piSkills)]
-          .filter(Boolean)
-          .join("\n\n"),
+        systemPrompt: completeSystemPrompt,
       });
       const historyBaseTimestamp = Date.now() - history.length;
       for (const [index, message] of history.entries()) {

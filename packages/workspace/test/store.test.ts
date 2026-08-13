@@ -289,19 +289,76 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-08-13T00:00:02.000Z",
     });
 
-    await expect(store.operational.contextCheckpoints.activate({ checkpoint })).resolves.toMatchObject({
+    const expectedContextMessageIds = Object.freeze(messages.map((message) => message.messageId));
+    const first = sources[0];
+    if (!first) throw new Error("Expected a checkpoint source fixture");
+    const firstSource = Object.freeze([first]);
+    await expect(
+      store.operational.contextCheckpoints.activate({
+        checkpoint: Object.freeze({
+          ...checkpoint,
+          checkpointId: "context-checkpoint-skips-tail",
+          sources: firstSource,
+          sourceDigest: sha256(canonicalJson(firstSource)),
+          lastCoveredMessageId: first.messageId,
+        }),
+        expectedContextMessageIds,
+      }),
+    ).rejects.toThrow("retained tail must immediately follow");
+    const duplicateSources = Object.freeze([first, first]);
+    await expect(
+      store.operational.contextCheckpoints.activate({
+        checkpoint: Object.freeze({
+          ...checkpoint,
+          checkpointId: "context-checkpoint-duplicate-source",
+          sources: duplicateSources,
+          sourceDigest: sha256(canonicalJson(duplicateSources)),
+          lastCoveredMessageId: first.messageId,
+        }),
+        expectedContextMessageIds,
+      }),
+    ).rejects.toThrow("cannot repeat a source message");
+
+    await expect(
+      store.operational.contextCheckpoints.activate({ checkpoint, expectedContextMessageIds }),
+    ).resolves.toMatchObject({
       status: "activated",
       checkpoint: { checkpointId: checkpoint.checkpointId },
     });
     await expect(
       store.operational.contextCheckpoints.activate({
         checkpoint: Object.freeze({ ...checkpoint, checkpointId: "context-checkpoint-conflict" }),
+        expectedContextMessageIds,
       }),
     ).resolves.toEqual({ status: "conflict", activeCheckpointId: checkpoint.checkpointId });
     expect(await store.operational.contextCheckpoints.get("context-checkpoint-conflict")).toBeUndefined();
     expect(
       (await store.operational.messages.listForSession("session-context")).map(({ content }) => content),
     ).toEqual(messages.map(({ content }) => content));
+    await store.operational.sessions.put(session("session-context-other"));
+    await store.operational.messages.put({
+      messageId: "context-message-other",
+      sessionId: "session-context-other",
+      role: "user",
+      content: "Other session context.",
+      sensitivity: "normal",
+      createdAt: "2026-08-13T00:00:03.000Z",
+      metadata: Object.freeze({}),
+    });
+    const integrityDatabase = new DatabaseSync(store.unsafeDatabasePathForTesting);
+    expect(() =>
+      integrityDatabase
+        .prepare(
+          "INSERT INTO session_context_state(session_id, active_checkpoint_id, updated_at) VALUES (?, ?, ?)",
+        )
+        .run("session-context-other", checkpoint.checkpointId, "2026-08-13T00:00:04.000Z"),
+    ).toThrow("active context checkpoint must belong to its session");
+    expect(() =>
+      integrityDatabase
+        .prepare("UPDATE context_checkpoints SET first_retained_message_id = ? WHERE checkpoint_id = ?")
+        .run("context-message-other", checkpoint.checkpointId),
+    ).toThrow("context checkpoint references must belong to its session");
+    integrityDatabase.close();
     store.close();
 
     const reopened = await createWorkspaceStore(root);
@@ -1542,7 +1599,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 35 });
+    ).toEqual({ version: 36 });
     inspection.close();
   });
 
@@ -2259,7 +2316,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(35);
+    expect(versions.at(-1)).toBe(36);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

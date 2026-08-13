@@ -10,8 +10,9 @@ import type { ContextCheckpointRecord, Sensitivity } from "@noesis/workspace";
 
 export const DEFAULT_CONTEXT_TOKEN_BUDGET = 160_000;
 export const MAX_COMPACTION_SUMMARY_TOKENS = 8_000;
+export const DEFAULT_NON_HISTORY_CONTEXT_RESERVE_TOKENS = 32_768;
+export const DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS = 4_096;
 const SUMMARY_INPUT_RESERVE_TOKENS = 4_096;
-const MAX_SERIALIZED_MESSAGE_CHARACTERS = 24_000;
 
 export interface SessionContextMessage {
   readonly messageId: string;
@@ -35,6 +36,14 @@ export interface CompactionWindow {
   readonly summaryTokenLimit: number;
 }
 
+export interface CompactionWindowOptions {
+  /** Manual compaction creates one checkpoint even when the current context is below its limit. */
+  readonly force?: boolean;
+  /** Input capacity of the compactor route after its output allowance has been reserved. */
+  readonly compactorInputTokenBudget?: number;
+  readonly instructions?: string;
+}
+
 export interface ContextCheckpointSummary {
   readonly goal: string;
   readonly constraints: readonly string[];
@@ -55,11 +64,33 @@ export function resolveContextTokenBudget(configured: number, limits: ModelConte
     throw new Error("Context token budget must be a positive integer");
   if (!Number.isSafeInteger(limits.contextWindow) || limits.contextWindow <= 1)
     throw new Error("The selected model has no usable context window");
-  const outputReserve = Math.max(1, Math.floor(limits.maxOutputTokens));
+  if (!Number.isSafeInteger(limits.maxOutputTokens) || limits.maxOutputTokens <= 0)
+    throw new Error("The selected model has no usable output token allowance");
+  const outputReserve = limits.maxOutputTokens;
   const available = limits.contextWindow - outputReserve;
   if (available <= 0)
     throw new Error("The selected model leaves no input context after reserving output tokens");
   return Math.min(configured, available);
+}
+
+export function resolveHistoryTokenBudget(
+  contextTokenBudget: number,
+  requiredRequestText: readonly string[],
+): number {
+  if (!Number.isSafeInteger(contextTokenBudget) || contextTokenBudget <= 0)
+    throw new Error("Context token budget must be a positive integer");
+  const knownRequestTokens = requiredRequestText.reduce(
+    (total, text) => total + estimateContextTokens(text),
+    0,
+  );
+  const defaultReserve = Math.min(
+    DEFAULT_NON_HISTORY_CONTEXT_RESERVE_TOKENS,
+    Math.max(1, Math.floor(contextTokenBudget / 5)),
+  );
+  const reserve = Math.max(defaultReserve, knownRequestTokens + DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS);
+  if (reserve >= contextTokenBudget)
+    throw new Error("The current request leaves no room for conversation history within the context budget");
+  return contextTokenBudget - reserve;
 }
 
 function turnGroups(
@@ -132,9 +163,10 @@ export function prepareCompactionWindow(
   messages: readonly SessionContextMessage[],
   checkpoint: ContextCheckpointRecord | undefined,
   tokenBudget: number,
+  options: CompactionWindowOptions = {},
 ): CompactionWindow | undefined {
   const current = resolvedSessionContext(messages, checkpoint, tokenBudget);
-  if (!current.exceedsBudget) return undefined;
+  if (!current.exceedsBudget && options.force !== true) return undefined;
   const groups = turnGroups(current.messages);
   if (groups.length === 0) return undefined;
   const summaryTokenLimit = Math.max(1, Math.min(MAX_COMPACTION_SUMMARY_TOKENS, Math.floor(tokenBudget / 4)));
@@ -160,23 +192,44 @@ export function prepareCompactionWindow(
     retainedCharacters += groupCharacters;
     retainedStart = index;
   }
+  if (options.force === true && retainedStart === 0) retainedStart = Math.max(1, groups.length - 2);
   const groupsNeedingSummary = groups.slice(0, retainedStart);
   if (groupsNeedingSummary.length === 0) return undefined;
   const previousSummaryTokens = checkpoint ? estimateContextTokens(checkpoint.summary) : 0;
-  const inputBudget = Math.max(1, tokenBudget - previousSummaryTokens - SUMMARY_INPUT_RESERVE_TOKENS);
+  const compactorInputTokenBudget = options.compactorInputTokenBudget ?? tokenBudget;
+  if (!Number.isSafeInteger(compactorInputTokenBudget) || compactorInputTokenBudget <= 0)
+    throw new Error("Compactor input token budget must be a positive integer");
+  const serializationReserve = Math.min(
+    SUMMARY_INPUT_RESERVE_TOKENS,
+    Math.max(1, Math.floor(compactorInputTokenBudget / 5)),
+  );
+  const inputBudget = compactorInputTokenBudget - previousSummaryTokens - serializationReserve;
+  if (inputBudget <= 0) throw new Error("The prior checkpoint leaves no room for lossless compaction input");
   const selectedGroups: (readonly SessionContextMessage[])[] = [];
   let selectedTokens = 0;
   for (const group of groupsNeedingSummary) {
     const groupTokens = group.reduce((total, message) => total + estimateContextTokens(message.content), 0);
-    if (selectedGroups.length > 0 && selectedTokens + groupTokens > inputBudget) break;
+    if (selectedTokens + groupTokens > inputBudget) break;
+    const candidateSources = Object.freeze([...selectedGroups, group].flat());
+    const candidateWindow: CompactionWindow = Object.freeze({
+      ...(checkpoint ? { previousCheckpoint: checkpoint } : {}),
+      sourceMessages: candidateSources,
+      retainedMessages: Object.freeze(current.messages.slice(candidateSources.length)),
+      tokenBudget,
+      summaryTokenLimit,
+    });
+    if (
+      estimateContextTokens(serializeCompactionWindow(candidateWindow, options.instructions)) >
+      compactorInputTokenBudget - serializationReserve
+    )
+      break;
     selectedGroups.push(group);
     selectedTokens += groupTokens;
   }
   const sourceMessages = Object.freeze(selectedGroups.flat());
-  if (sourceMessages.length === 0) return undefined;
-  const sourceIds = new Set(sourceMessages.map((message) => message.messageId));
-  const retainedIndex = current.messages.findIndex((message) => !sourceIds.has(message.messageId));
-  const retainedMessages = Object.freeze(retainedIndex < 0 ? [] : current.messages.slice(retainedIndex));
+  if (sourceMessages.length === 0)
+    throw new Error("The oldest complete turn exceeds the compactor's lossless input budget");
+  const retainedMessages = Object.freeze(current.messages.slice(sourceMessages.length));
   return Object.freeze({
     ...(checkpoint ? { previousCheckpoint: checkpoint } : {}),
     sourceMessages,
@@ -184,13 +237,6 @@ export function prepareCompactionWindow(
     tokenBudget,
     summaryTokenLimit,
   });
-}
-
-function boundedContent(content: string): string {
-  if (content.length <= MAX_SERIALIZED_MESSAGE_CHARACTERS) return content;
-  const head = Math.floor(MAX_SERIALIZED_MESSAGE_CHARACTERS * 0.7);
-  const tail = MAX_SERIALIZED_MESSAGE_CHARACTERS - head;
-  return `${content.slice(0, head)}\n[...content omitted for compaction...]\n${content.slice(-tail)}`;
 }
 
 export function serializeCompactionWindow(window: CompactionWindow, instructions?: string): string {
@@ -201,7 +247,7 @@ export function serializeCompactionWindow(window: CompactionWindow, instructions
     previousCheckpoint: window.previousCheckpoint?.summary ?? null,
     conversation: window.sourceMessages.map((message) => ({
       role: message.role,
-      content: boundedContent(message.content),
+      content: message.content,
       createdAt: message.createdAt,
     })),
     requiredSections: [

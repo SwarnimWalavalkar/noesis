@@ -333,6 +333,7 @@ async function createRuntime(
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(project.root, services.models, configurations),
       resolveModelContext: (provider, model) => {
+        preparePiModelSelection(services.models, Object.freeze({ provider, model }));
         const selected = services.models.getModel(provider, model);
         if (!selected) throw new Error(`Unknown Pi model ${provider}/${model}`);
         return Object.freeze({

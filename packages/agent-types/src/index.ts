@@ -167,6 +167,8 @@ export interface FrozenTurnPlan {
   readonly contextCheckpoint?: FrozenContextCheckpoint;
   /** Estimated-token budget shared by the checkpoint summary and raw history tail. */
   readonly contextTokenBudget?: number;
+  /** Estimated-token ceiling for the complete provider request, including tools and current input. */
+  readonly requestTokenBudget?: number;
   readonly renderedSystemPrompt: string;
   readonly provider: string;
   readonly model: string;
@@ -255,6 +257,7 @@ export const FrozenTurnPlanSchema = z.strictObject({
   conversationHistory: z.array(FrozenConversationHistoryEntrySchema).optional(),
   contextCheckpoint: FrozenContextCheckpointSchema.optional(),
   contextTokenBudget: z.number().int().positive().max(1_000_000).optional(),
+  requestTokenBudget: z.number().int().positive().max(1_000_000).optional(),
   renderedSystemPrompt: z.string().min(1),
   provider: z.string().min(1),
   model: z.string().min(1),
@@ -285,6 +288,7 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     conversationHistory,
     contextCheckpoint,
     contextTokenBudget,
+    requestTokenBudget,
     project,
     workingAdjustmentId,
     routing,
@@ -298,6 +302,7 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
       ? {}
       : { contextCheckpoint: Object.freeze({ ...contextCheckpoint }) }),
     ...(contextTokenBudget === undefined ? {} : { contextTokenBudget }),
+    ...(requestTokenBudget === undefined ? {} : { requestTokenBudget }),
     ...(project === undefined ? {} : { project: Object.freeze({ ...project }) }),
     ...(workingAdjustmentId === undefined ? {} : { workingAdjustmentId }),
     routing: Object.freeze({
@@ -351,12 +356,23 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
       throw new Error(`Frozen turn plan ${plan.planId} context checkpoint failed summary verification`);
   }
   if (plan.contextTokenBudget !== undefined) {
-    const estimatedContextTokens = Math.ceil(
-      ((plan.contextCheckpoint?.summary.length ?? 0) + historyCharacters) / 4,
-    );
+    const estimatedContextTokens =
+      (plan.contextCheckpoint === undefined
+        ? 0
+        : Math.max(1, Math.ceil(plan.contextCheckpoint.summary.length / 4))) +
+      (plan.conversationHistory ?? []).reduce(
+        (total, entry) => total + Math.max(1, Math.ceil(entry.content.length / 4)),
+        0,
+      );
     if (estimatedContextTokens > plan.contextTokenBudget)
       throw new Error(`Frozen turn plan ${plan.planId} exceeds its context token budget`);
   }
+  if (
+    plan.contextTokenBudget !== undefined &&
+    plan.requestTokenBudget !== undefined &&
+    plan.contextTokenBudget >= plan.requestTokenBudget
+  )
+    throw new Error(`Frozen turn plan ${plan.planId} does not reserve non-history request capacity`);
   const narrowSelections = plan.selectedCapabilities.filter(
     (selection) => selection.baseline.kind !== "genesis",
   );

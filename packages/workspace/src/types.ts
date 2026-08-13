@@ -574,6 +574,8 @@ export interface OperationalRepositories {
     readonly activate: (request: {
       readonly checkpoint: ContextCheckpointRecord;
       readonly expectedActiveCheckpointId?: string;
+      /** Exact replay-eligible context used to choose the covered prefix and retained suffix. */
+      readonly expectedContextMessageIds: readonly string[];
     }) => Promise<ContextCheckpointActivationResult>;
   };
   readonly foregroundTurns: {

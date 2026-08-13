@@ -24,7 +24,7 @@ export const HELP_LINES = [
   "/mcp manages servers, authentication, and discovered capabilities",
   "/skill NAME inspects · /skill:NAME [instructions] invokes command-name collisions",
   "/script NAME · /workflow NAME · /run ID",
-  "/fork · /compact · /steer [MESSAGE] · /queue resume",
+  "/fork · /compact [FOCUS] · /steer [MESSAGE] · /queue resume",
   "enter queues during work · alt+↑ edits newest queued · esc interrupts",
   "shift+enter newline · ctrl+g external editor",
   "ctrl+o inspect runs · space expand · enter open the run inspector",

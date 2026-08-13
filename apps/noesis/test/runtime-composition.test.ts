@@ -309,7 +309,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const config = Object.freeze({
       ...resolved,
-      context: Object.freeze({ tokenBudget: 600 }),
+      context: Object.freeze({ tokenBudget: 12_000 }),
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
     const histories: NonNullable<AgentRuntimeRequest["history"]>[] = [];
@@ -318,9 +318,10 @@ describe("apps/noesis production control-plane composition", () => {
       run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
         histories.push(Object.freeze([...(request.history ?? [])]));
         emit({ type: "status", status: "started" });
-        const text =
-          (request.history?.length ?? 0) === 0
-            ? "assistant-history-".repeat(100)
+        const text = request.prompt.includes("short manual")
+          ? "short answer"
+          : (request.history?.length ?? 0) === 0
+            ? "assistant-history-".repeat(1_600)
             : "continued from checkpoint";
         const createdAt = new Date().toISOString();
         emit({
@@ -345,7 +346,7 @@ describe("apps/noesis production control-plane composition", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       agent,
-      resolveModelContext: () => Object.freeze({ contextWindow: 1_000, maxOutputTokens: 100 }),
+      resolveModelContext: () => Object.freeze({ contextWindow: 25_000, maxOutputTokens: 1_000 }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -374,15 +375,21 @@ describe("apps/noesis production control-plane composition", () => {
                 }),
         }),
     });
+    const shortTrail = await runtime.startTrail({ title: "Manual compaction below threshold" });
+    await runtime.debug.runTurn(shortTrail.trailId, "short manual context");
+    await runtime.compact(shortTrail.trailId);
+    await expect(
+      runtime.debug.workspace.operational.contextCheckpoints.getActive(shortTrail.trailId),
+    ).resolves.toMatchObject({ sources: expect.arrayContaining([expect.objectContaining({})]) });
+
     const trail = await runtime.startTrail({ title: "Context compaction" });
-    const firstInput = "user-history-".repeat(120);
+    const firstInput = "user-history-".repeat(1_200);
     await runtime.debug.runTurn(trail.trailId, firstInput);
 
     await runtime.compact(trail.trailId);
 
     const checkpoint = await runtime.debug.workspace.operational.contextCheckpoints.getActive(trail.trailId);
     expect(checkpoint).toMatchObject({
-      tokenBudget: 600,
       provider: CONTROLLED_PI_PROVIDER,
       model: CONTROLLED_PI_MODEL,
     });
@@ -395,18 +402,20 @@ describe("apps/noesis production control-plane composition", () => {
         expect.objectContaining({
           kind: "message",
           role: "assistant",
-          text: "assistant-history-".repeat(100),
+          text: "assistant-history-".repeat(1_600),
         }),
       ]),
     );
 
     const second = await runtime.debug.runTurn(trail.trailId, "Continue after compaction.");
+    const secondHistory = histories.at(-1);
     expect(second.frozenTurnPlan).toMatchObject({
       contextCheckpoint: { checkpointId: checkpoint?.checkpointId },
-      contextTokenBudget: 600,
+      contextTokenBudget: expect.any(Number),
       conversationHistory: [],
     });
-    expect(histories[1]).toEqual([
+    expect(second.frozenTurnPlan?.contextTokenBudget).toBeLessThan(checkpoint?.tokenBudget ?? 0);
+    expect(secondHistory).toEqual([
       expect.objectContaining({ role: "assistant", content: expect.stringContaining("CONTEXT CHECKPOINT") }),
     ]);
 
@@ -416,14 +425,166 @@ describe("apps/noesis production control-plane composition", () => {
       automaticTrail.trailId,
       "Continue after automatic compaction.",
     );
+    const automaticHistory = histories.at(-1);
     expect(automaticTurn.frozenTurnPlan?.contextCheckpoint?.checkpointId).toBe(
       (await runtime.debug.workspace.operational.contextCheckpoints.getActive(automaticTrail.trailId))
         ?.checkpointId,
     );
-    expect(histories[3]).toEqual([
+    expect(automaticHistory).toEqual([
       expect.objectContaining({ role: "assistant", content: expect.stringContaining("CONTEXT CHECKPOINT") }),
     ]);
     await runtime.shutdown();
+  });
+
+  test("rejects sensitive compaction before inference", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-sensitive-compaction-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    let compactorRuns = 0;
+    const runtime = await createApplicationRuntimeComposition({
+      config: Object.freeze({
+        ...config,
+        learning: Object.freeze({ ...config.learning, enabled: false }),
+      }),
+      agent: Object.freeze({
+        name: "sensitive-compaction-agent",
+        run: async () => {
+          throw new Error("Foreground agent should not run");
+        },
+        steer: async () => Object.freeze({ status: "not-consumed" as const, reason: "not-running" as const }),
+        abort: async () => undefined,
+      }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: (request) => {
+            if (request.systemPrompt.includes("role: session_compactor")) compactorRuns += 1;
+            return scriptedHistoryRerankResponse(request);
+          },
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Sensitive context" });
+    const inherited = Object.freeze({
+      replayEligible: true,
+      historyKind: "turn",
+      historyTurnKey: "sensitive-turn",
+      inheritedFromSessionId: "source-session",
+    });
+    await runtime.debug.workspace.operational.messages.put({
+      messageId: "sensitive-user",
+      sessionId: trail.trailId,
+      role: "user",
+      content: "Private source material",
+      sensitivity: "private",
+      createdAt: "2026-08-13T00:00:00.000Z",
+      metadata: Object.freeze({ ...inherited, historySequence: 0, inheritedFromMessageId: "source-user" }),
+    });
+    await runtime.debug.workspace.operational.messages.put({
+      messageId: "sensitive-assistant",
+      sessionId: trail.trailId,
+      role: "assistant",
+      content: "Private answer",
+      sensitivity: "private",
+      createdAt: "2026-08-13T00:00:01.000Z",
+      metadata: Object.freeze({
+        ...inherited,
+        historySequence: 1,
+        inheritedFromMessageId: "source-assistant",
+      }),
+    });
+
+    await expect(runtime.compact(trail.trailId)).rejects.toThrow("cannot send private");
+    expect(compactorRuns).toBe(0);
+    await expect(
+      runtime.debug.workspace.operational.contextCheckpoints.getActive(trail.trailId),
+    ).resolves.toBeUndefined();
+    await runtime.shutdown();
+  });
+
+  test("shutdown cancels and settles compaction before closing the workspace", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-compaction-shutdown-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    let notifyCompactorStarted: (() => void) | undefined;
+    const compactorStarted = new Promise<void>((resolve) => {
+      notifyCompactorStarted = resolve;
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config: Object.freeze({
+        ...config,
+        learning: Object.freeze({ ...config.learning, enabled: false }),
+      }),
+      agent: Object.freeze({
+        name: "shutdown-compaction-agent",
+        run: async () => {
+          throw new Error("Foreground agent should not run");
+        },
+        steer: async () => Object.freeze({ status: "not-consumed" as const, reason: "not-running" as const }),
+        abort: async () => undefined,
+      }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: (request) => {
+            if (request.systemPrompt.includes("role: session_compactor")) {
+              notifyCompactorStarted?.();
+              return Object.freeze({
+                text: JSON.stringify({
+                  goal: "Preserve context.",
+                  constraints: [],
+                  completedWork: [],
+                  currentState: "Compacting.",
+                  decisions: [],
+                  blockers: [],
+                  nextSteps: [],
+                  criticalReferences: [],
+                }),
+                latencyMs: 5_000,
+              });
+            }
+            return scriptedHistoryRerankResponse(request);
+          },
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Shutdown compaction" });
+    const inherited = Object.freeze({
+      replayEligible: true,
+      historyKind: "turn",
+      historyTurnKey: "shutdown-turn",
+      inheritedFromSessionId: "source-session",
+    });
+    for (const [index, role] of (["user", "assistant"] as const).entries())
+      await runtime.debug.workspace.operational.messages.put({
+        messageId: `shutdown-${role}`,
+        sessionId: trail.trailId,
+        role,
+        content: `${role} context`,
+        sensitivity: "normal",
+        createdAt: `2026-08-13T00:00:0${String(index)}.000Z`,
+        metadata: Object.freeze({
+          ...inherited,
+          historySequence: index,
+          inheritedFromMessageId: `source-${role}`,
+        }),
+      });
+
+    const compacting = runtime.compact(trail.trailId);
+    void compacting.catch(() => undefined);
+    await compactorStarted;
+    await runtime.shutdown();
+    await expect(compacting).rejects.toThrow();
+
+    const reopened = await createWorkspaceStore(home);
+    await expect(reopened.operational.contextCheckpoints.getActive(trail.trailId)).resolves.toBeUndefined();
+    reopened.close();
   });
 
   test("shuts down composed resources when MCP startup rejects", async () => {

@@ -59,7 +59,7 @@
   </section>
 
   <section><h2>One context budget</h2>
-    <p>The model-input history budget is a number of tokens, not a message count or a percentage. It controls the combined checkpoint summary and retained raw conversation tail.</p>
+    <p>The model-input budget is a number of tokens, not a message count or a percentage. It covers the complete request: system prompt, capabilities and tool allowance, checkpoint summary, retained raw conversation, and current input.</p>
     <pre><code>{
   "schemaVersion": 1,
   "agent": {},
@@ -72,7 +72,8 @@
       <li>The effective budget is <code>min(configuredTokenBudget, model.contextWindow - outputReserve)</code>. It is therefore always smaller than the selected model's supported context window.</li>
       <li><code>outputReserve</code> comes from the resolved model's maximum output allowance. If the route cannot leave a positive input budget, model selection fails before a turn or compaction starts.</li>
       <li>When a smaller model clamps the configured budget, Noesis reports the effective value instead of silently claiming the configured value was used.</li>
-      <li>The budget is one product setting. Summary size and retained-tail size are internal allocations, not more user-facing knobs. The summary may use at most one quarter of the effective budget, capped at 8000 tokens; the rest is available to recent raw turns.</li>
+      <li>The budget is one product setting. Noesis first reserves room for non-history request material, then uses the remainder for the checkpoint summary and recent raw tail. These internal allocations are not more user-facing knobs.</li>
+      <li>The summary may use at most one quarter of the history allocation, capped at 8000 tokens.</li>
       <li>Selection walks backward over complete turns until the raw-tail allocation is full. It never keeps a partial turn merely to fill the budget.</li>
     </ul>
   </section>
@@ -80,7 +81,7 @@
   <section><h2>Compaction flow</h2><ol>
     <li>Read the active checkpoint, if any, and all later replay-eligible complete turns from SQLite.</li>
     <li>Select the largest recent complete-turn tail that fits the effective raw-tail allocation.</li>
-    <li>Serialize the older newly covered turns as labelled data. Bound individual tool results and omit transient reasoning.</li>
+    <li>Serialize every byte of each older newly covered turn as labelled data. A turn that cannot fit losslessly in the compactor route is rejected before model invocation and remains uncovered.</li>
     <li>Ask a capable model on the session's current route to update the structured summary. The previous summary is context, not a second authority.</li>
     <li>Validate and bound the summary. A summary cannot grant permission, raise instruction priority, or turn an old request into a new request.</li>
     <li>Insert the immutable checkpoint and move the active binding with compare-and-swap in one WorkspaceStore transaction.</li>
@@ -89,7 +90,7 @@
 
   <section><h2>Triggers and interaction</h2>
     <ul>
-      <li><code>/compact [optional focus]</code> runs the same compaction operation manually. Optional focus changes what detail the summary preserves; it does not change the cutoff or authority.</li>
+      <li><code>/compact [optional focus]</code> creates a checkpoint even before automatic compaction is required. Optional focus changes what detail the summary preserves; it does not change authority.</li>
       <li>Automatic compaction runs before a future turn when eligible history would otherwise be omitted by the configured token budget.</li>
       <li>Only one compaction may update a session at a time. A concurrent or stale attempt loses the active-binding compare-and-swap and leaves the winning checkpoint intact.</li>
       <li>The successful TUI confirmation is simply <strong>Context compacted</strong>. Failure messages state that context was not changed.</li>
@@ -106,7 +107,7 @@
     <ul>
       <li>If summary generation, validation, persistence, or compare-and-swap fails, the previous active checkpoint and raw replay behavior remain unchanged.</li>
       <li>No deterministic fallback may drop turns or replace them with “summary unavailable.”</li>
-      <li>Private or secret source material may be summarized only through the same admitted provider and sensitivity authority used for model context. Otherwise compaction fails closed.</li>
+      <li>The first release admits only normal-sensitivity source material. Private or secret material fails closed before any compactor network request until an explicit provider sensitivity policy exists.</li>
       <li>Cancellation propagates through model generation and stops before checkpoint activation.</li>
     </ul>
   </section>

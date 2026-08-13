@@ -28,7 +28,7 @@ Conversation history must never be copied into the system prompt. Each turn reco
 
 Long sessions use durable context checkpoints. The original transcript remains unchanged and continues to power resume, inspection, and search. Future turns receive an explicitly labelled continuation summary plus a recent tail of complete raw turns. The frozen turn plan pins the exact checkpoint and message rows it used.
 
-The default history budget is 160,000 tokens and is configurable as `context.tokenBudget` in `config.json`. Noesis caps it below the selected model's context window after reserving that model's maximum output allowance. `/compact [optional focus]` creates a checkpoint manually; Noesis also compacts before a future turn when eligible history exceeds the effective budget. A failed or cancelled compaction leaves the active context unchanged.
+The default context budget is 160,000 tokens and is configurable as `context.tokenBudget` in `config.json`. It covers the complete model request, including non-history material. Noesis caps it below the selected model's context window after reserving that model's maximum output allowance, then reserves room for the system prompt, current input, capabilities, and tools before allocating the remainder to history. `/compact [optional focus]` creates a checkpoint manually; Noesis also compacts before a future turn when eligible history exceeds that allocation. A failed or cancelled compaction leaves the active context unchanged.
 
 ## Model judgment
 

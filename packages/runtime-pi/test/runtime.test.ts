@@ -1694,4 +1694,43 @@ describe("agent runtime factories", () => {
     );
     expect(controlled.provider.state.callCount).toBe(0);
   });
+
+  test("rejects a complete request that exceeds its frozen budget before model invocation", async () => {
+    const controlled = createControlledPiModels();
+    const base = frozenPlan();
+    const { canonicalDigest: _digest, ...baseUnsigned } = base;
+    const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 8 });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      codeExecution: controlledCodeExecution(
+        {
+          resolve: async (received) =>
+            Object.freeze({
+              planId: received.planId,
+              canonicalDigest: received.canonicalDigest,
+              consumedMaterials: frozenPlanMaterialUses(received),
+              definitions: definitions("budgeted"),
+            }),
+        },
+        "budgeted",
+      ),
+    });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "A current request that cannot fit.",
+          activeCapabilities: [{ name: "Grounded", version: 1 }],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow("complete request exceeds its token budget");
+    expect(controlled.provider.state.callCount).toBe(0);
+  });
 });

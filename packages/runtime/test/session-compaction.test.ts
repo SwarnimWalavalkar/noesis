@@ -3,7 +3,9 @@ import {
   estimateContextTokens,
   prepareCompactionWindow,
   resolveContextTokenBudget,
+  resolveHistoryTokenBudget,
   resolvedSessionContext,
+  serializeCompactionWindow,
   type SessionContextMessage,
 } from "../src/session-compaction.ts";
 
@@ -30,6 +32,15 @@ describe("session compaction", () => {
     expect(resolveContextTokenBudget(160_000, { contextWindow: 128_000, maxOutputTokens: 8_000 })).toBe(
       120_000,
     );
+    expect(() =>
+      resolveContextTokenBudget(160_000, { contextWindow: 200_000, maxOutputTokens: Number.NaN }),
+    ).toThrow("no usable output token allowance");
+  });
+
+  test("reserves non-history request capacity inside the configured context budget", () => {
+    expect(resolveHistoryTokenBudget(160_000, ["system", "current input"])).toBe(128_000);
+    expect(resolveHistoryTokenBudget(10_000, ["x".repeat(20_000)])).toBe(904);
+    expect(() => resolveHistoryTokenBudget(100, ["x".repeat(400)])).toThrow("no room");
   });
 
   test("compacts only complete oldest turns and retains a complete recent raw tail", () => {
@@ -42,7 +53,9 @@ describe("session compaction", () => {
       message("6", "f".repeat(48), false),
     ]);
 
-    const window = prepareCompactionWindow(messages, undefined, 64);
+    const window = prepareCompactionWindow(messages, undefined, 64, {
+      compactorInputTokenBudget: 1_000,
+    });
 
     expect(window?.sourceMessages.map(({ messageId }) => messageId)).toEqual(["1", "2"]);
     expect(window?.retainedMessages.map(({ messageId }) => messageId)).toEqual(["3", "4", "5", "6"]);
@@ -81,10 +94,49 @@ describe("session compaction", () => {
     });
 
     const current = resolvedSessionContext(messages, checkpoint, 8);
-    const window = prepareCompactionWindow(messages, checkpoint, 8);
+    const window = prepareCompactionWindow(messages, checkpoint, 8, {
+      compactorInputTokenBudget: 1_000,
+    });
 
     expect(current.messages.map(({ messageId }) => messageId)).toEqual(["3", "4", "5", "6"]);
     expect(window?.sourceMessages.map(({ messageId }) => messageId)).toEqual(["3", "4"]);
     expect(window?.previousCheckpoint?.checkpointId).toBe("checkpoint-1");
+  });
+
+  test("manual compaction covers an oldest complete turn below the automatic threshold", () => {
+    const messages = Object.freeze([
+      message("1", "old-user", true),
+      message("2", "old-assistant", false),
+      message("3", "recent-user", true),
+      message("4", "recent-assistant", false),
+    ]);
+
+    const window = prepareCompactionWindow(messages, undefined, 10_000, {
+      force: true,
+      compactorInputTokenBudget: 20_000,
+    });
+
+    expect(window?.sourceMessages.map(({ messageId }) => messageId)).toEqual(["1", "2"]);
+    expect(window?.retainedMessages.map(({ messageId }) => messageId)).toEqual(["3", "4"]);
+  });
+
+  test("covers only complete bytes supplied to the compactor and retains the exact remaining suffix", () => {
+    const largeContent = `${"head".repeat(8_000)}middle-marker${"tail".repeat(8_000)}`;
+    const messages = Object.freeze([
+      message("1", largeContent, true),
+      message("2", "answer", false),
+      message("3", "next", true),
+      message("4", "next-answer", false),
+    ]);
+    const window = prepareCompactionWindow(messages, undefined, 10, {
+      compactorInputTokenBudget: 40_000,
+    });
+    if (!window) throw new Error("Expected a compaction window");
+
+    expect(serializeCompactionWindow(window)).toContain("middle-marker");
+    expect(window.retainedMessages.map(({ messageId }) => messageId)).toEqual(["3", "4"]);
+    expect(() =>
+      prepareCompactionWindow(messages, undefined, 10, { compactorInputTokenBudget: 1_000 }),
+    ).toThrow("oldest complete turn exceeds");
   });
 });

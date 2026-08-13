@@ -1821,7 +1821,7 @@ function createOperationalRepositories(
     return row === undefined ? undefined : decodeContextCheckpoint(row);
   };
   const activateContextCheckpoint: NoesisWorkspaceStore["operational"]["contextCheckpoints"]["activate"] =
-    async ({ checkpoint, expectedActiveCheckpointId }) =>
+    async ({ checkpoint, expectedActiveCheckpointId, expectedContextMessageIds }) =>
       database.transaction(() => {
         z.string().min(1).parse(checkpoint.checkpointId);
         z.string().min(1).parse(checkpoint.sessionId);
@@ -1838,6 +1838,9 @@ function createOperationalRepositories(
         checkpointUsageSchema.parse(checkpoint.usage);
         if (checkpoint.sources.length === 0)
           throw new Error("A context checkpoint must cover at least one message");
+        const sourceMessageIds = checkpoint.sources.map((source) => source.messageId);
+        if (new Set(sourceMessageIds).size !== sourceMessageIds.length)
+          throw new Error("A context checkpoint cannot repeat a source message");
         if (checkpoint.lastCoveredMessageId !== checkpoint.sources.at(-1)?.messageId)
           throw new Error("A context checkpoint's last covered message must be its final source");
         if (sha256(checkpoint.summary) !== checkpoint.summaryDigest)
@@ -1858,6 +1861,27 @@ function createOperationalRepositories(
             status: "conflict" as const,
             ...(activeCheckpointId === undefined ? {} : { activeCheckpointId }),
           });
+        if (new Set(expectedContextMessageIds).size !== expectedContextMessageIds.length)
+          throw new Error("Expected context cannot repeat a message");
+        if (sourceMessageIds.length > expectedContextMessageIds.length)
+          throw new Error("Context checkpoint sources exceed the expected context");
+        for (const [ordinal, sourceMessageId] of sourceMessageIds.entries()) {
+          if (expectedContextMessageIds[ordinal] !== sourceMessageId)
+            throw new Error("Context checkpoint sources must be an exact prefix of the expected context");
+        }
+        const expectedFirstRetainedMessageId = expectedContextMessageIds[sourceMessageIds.length];
+        if (checkpoint.firstRetainedMessageId !== expectedFirstRetainedMessageId)
+          throw new Error("Context checkpoint retained tail must immediately follow its covered sources");
+        for (const messageId of expectedContextMessageIds) {
+          const expectedMessage = db
+            .prepare("SELECT session_id FROM messages WHERE message_id = ?")
+            .get(messageId);
+          if (
+            expectedMessage === undefined ||
+            requiredString(expectedMessage, "session_id") !== checkpoint.sessionId
+          )
+            throw new Error(`Expected context message ${messageId} is missing from the checkpoint session`);
+        }
         const existing = db
           .prepare("SELECT * FROM context_checkpoints WHERE checkpoint_id = ?")
           .get(checkpoint.checkpointId);
