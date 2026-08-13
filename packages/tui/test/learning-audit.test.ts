@@ -1,5 +1,10 @@
-import type { NoesisAgentRuntime } from "@noesis/agent-types";
+import { createPiAgentRuntime } from "@noesis/runtime-pi";
 import { describe, expect, test, vi } from "vitest";
+import {
+  CONTROLLED_PI_MODEL,
+  CONTROLLED_PI_PROVIDER,
+  createControlledPiModels,
+} from "../../runtime-pi/test/support/controlled-pi-models.ts";
 import {
   createLearningAuditOverlay,
   startNoesisTui,
@@ -87,28 +92,18 @@ function createHarness() {
 
 describe("learning audit overlay", () => {
   test("opens from /learning as a focused Pi TUI overlay", async () => {
-    const agent: NoesisAgentRuntime = {
-      name: "learning-audit-scripted",
-      async run(request) {
-        return {
-          text: request.prompt,
-          provider: request.provider,
-          model: request.model,
-          outcome: "completed",
-          stopReason: "stop",
-        };
-      },
-      async steer() {
-        return { status: "consumed", timelineSequence: 1, consumedAt: new Date().toISOString() };
-      },
-      async abort() {},
-    };
+    const controlled = createControlledPiModels();
+    const agent = createPiAgentRuntime(process.cwd(), controlled.models);
     const runtime = Object.freeze({
       ...createInMemoryTestRuntime(agent),
       inspectLearningAudit: async () => snapshot,
     });
     const terminal = createTestTerminal();
-    const running = startNoesisTui(runtime, {}, terminal);
+    const running = startNoesisTui(
+      runtime,
+      { provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL },
+      terminal,
+    );
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("/learning\r");

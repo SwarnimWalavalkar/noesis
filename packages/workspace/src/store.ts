@@ -1455,11 +1455,7 @@ export async function createWorkspaceStore(
     workingAdjustments: Object.freeze({
       get: protectedWorkingAdjustments.get,
       getActive: protectedWorkingAdjustments.getActive,
-      list: async (request: { readonly projectId?: string; readonly limit: number }) => {
-        const list = protectedWorkingAdjustments.list;
-        if (!list) throw new Error("Working adjustment listing is unavailable");
-        return await list(request);
-      },
+      list: protectedWorkingAdjustments.list,
       listSettledEvidence: protectedWorkingAdjustments.listSettledEvidence,
     }),
     declaredAuthority: declaredAuthorityFor,

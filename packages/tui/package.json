@@ -12,6 +12,7 @@
     "@noesis/runtime": "workspace:*"
   },
   "devDependencies": {
-    "@noesis/agent-types": "workspace:*"
+    "@noesis/agent-types": "workspace:*",
+    "@noesis/runtime-pi": "workspace:*"
   }
 }

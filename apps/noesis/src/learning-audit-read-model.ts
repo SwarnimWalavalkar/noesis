@@ -92,12 +92,13 @@ function boundedRawJson(value: unknown, sensitivity: "normal" | "private" | "sec
 }
 
 function primitive(input: PrimitiveInput): TuiLearningPrimitive {
+  const { raw, sensitivity, ...record } = input;
   return Object.freeze({
-    ...input,
+    ...record,
     tone: input.tone ?? "neutral",
     evidence: Object.freeze((input.evidence ?? []).map(evidenceIdentity)),
     relations: Object.freeze((input.relations ?? []).filter(defined)),
-    rawJson: boundedRawJson(input.raw, input.sensitivity),
+    rawJson: boundedRawJson(raw, sensitivity),
   });
 }
 
@@ -110,13 +111,17 @@ function stringField(value: unknown, key: string): string | undefined {
 async function listAllJobs(workspace: NoesisWorkspaceStore): Promise<readonly DurableJobRecord[]> {
   const jobs: DurableJobRecord[] = [];
   let after: DurableJobListCursor | undefined;
-  while (true) {
-    const page = await workspace.jobs.listPage({ limit: AUDIT_LIMIT, ...(after ? { after } : {}) });
+  while (jobs.length < AUDIT_LIMIT) {
+    const page = await workspace.jobs.listPage({
+      limit: AUDIT_LIMIT - jobs.length,
+      ...(after ? { after } : {}),
+    });
     jobs.push(...page.records);
-    if (page.exhausted) return Object.freeze(jobs);
+    if (page.exhausted || jobs.length === AUDIT_LIMIT) return Object.freeze(jobs);
     if (!page.nextCursor) throw new Error("Learning audit job page is missing its cursor");
     after = page.nextCursor;
   }
+  return Object.freeze(jobs);
 }
 
 function jobExperimentId(job: DurableJobRecord): string | undefined {
@@ -240,13 +245,11 @@ export async function loadLearningAuditSnapshot(
   source: LearningAuditSource,
   sessionId: string,
 ): Promise<TuiLearningAuditSnapshot> {
-  const listAdjustments = source.workspace.workingAdjustments.list;
-  if (!listAdjustments) throw new Error("Working adjustment listing is unavailable");
   const [allJobs, allExperiments, adjustments, criteriaResult, activation, allActivationOperations] =
     await Promise.all([
       listAllJobs(source.workspace),
       source.workspace.research.experiments.listExperiments({ limit: AUDIT_LIMIT }),
-      listAdjustments({ projectId: source.projectId, limit: AUDIT_LIMIT }),
+      source.workspace.workingAdjustments.list({ projectId: source.projectId, limit: AUDIT_LIMIT }),
       source.criteria.list(),
       source.activations.current(),
       source.activations.listOperations(AUDIT_LIMIT),

@@ -128,6 +128,7 @@ export function steerFeedback(result: TuiInteractionResult, explicit: boolean): 
 export async function runSlashCommand(text: string, context: SlashCommandContext): Promise<boolean> {
   const { runtime, trailId, publishInspector, dispatch, requestRender } = context;
   const command = text.trim();
+  if (command === "/learning" && text !== text.trimStart()) return false;
 
   if (command === "?" || command === "/help") {
     dispatch({ type: "system-message", text: HELP_LINES.join("\n") });

@@ -68,6 +68,7 @@ function mutableWorkingAdjustments(): {
   const store: ProtectedWorkingAdjustmentStore = Object.freeze({
     get: async (adjustmentId: string) => records.get(adjustmentId),
     getActive: async (projectId: string) => activeByProject.get(projectId),
+    list: async () => Object.freeze([...records.values()]),
     listSettledEvidence: async () => Object.freeze([]),
     apply: async (request: Parameters<ProtectedWorkingAdjustmentStore["apply"]>[0]) => {
       applyCalls += 1;

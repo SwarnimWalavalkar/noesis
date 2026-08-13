@@ -8,6 +8,7 @@ import {
   type EffectDecision,
 } from "@noesis/policy";
 import { z } from "zod";
+import type { McpConnectionCycleAllocator } from "./mcp-connection-cycles.ts";
 import type {
   ClassifyExperimentObservationsRequest,
   CommitExperimentOutcomeRequest,
@@ -23,7 +24,6 @@ import type {
   WorkingAdjustmentUnapplyResult,
 } from "./types.ts";
 import { isWorkingAdjustmentAdmissionConflictError } from "./types.ts";
-import type { McpConnectionCycleAllocator } from "./mcp-connection-cycles.ts";
 
 type ActivationMutation = Pick<
   ProtectedActivationStore,
@@ -527,6 +527,7 @@ export function createProtectedWorkspaceRuntime(
     ...({
       get: options.workingAdjustments.get,
       getActive: options.workingAdjustments.getActive,
+      list: options.workingAdjustments.list,
       listSettledEvidence: options.workingAdjustments.listSettledEvidence,
     } satisfies WorkingAdjustmentInspection),
     apply: async (request: Parameters<ProtectedWorkingAdjustmentStore["apply"]>[0]) => {

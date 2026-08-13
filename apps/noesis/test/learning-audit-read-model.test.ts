@@ -92,7 +92,7 @@ describe("learning audit read model", () => {
           evidenceRefs: Object.freeze([evidence]),
           strength: 0.6,
           novelty: 0.4,
-          sensitivity: "normal" as const,
+          sensitivity: project.projectId === "project-a" ? ("private" as const) : ("normal" as const),
           experimentId: `experiment-${project.projectId}`,
         }),
       );
@@ -130,6 +130,12 @@ describe("learning audit read model", () => {
     expect(ids).toContain("experiment:experiment-project-a");
     expect(ids).toContain("feedback_signal:signal-project-a");
     expect(ids.some((id) => id.includes("project-b"))).toBe(false);
+    const privateSignal = snapshot.primitives.find(
+      (primitive) => primitive.id === "feedback_signal:signal-project-a",
+    );
+    expect(privateSignal?.rawJson).toContain('"redacted":true');
+    expect(Object.hasOwn(privateSignal ?? {}, "raw")).toBe(false);
+    expect(Object.hasOwn(privateSignal ?? {}, "sensitivity")).toBe(false);
     workspace.close();
   });
 });

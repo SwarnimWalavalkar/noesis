@@ -268,7 +268,7 @@ export interface FeedbackSignalStorePort {
 export interface WorkingAdjustmentReadPort {
   readonly get: (adjustmentId: string) => Promise<WorkingAdjustment | undefined>;
   readonly getActive: (projectId: string) => Promise<WorkingAdjustment | undefined>;
-  readonly list?: (request: {
+  readonly list: (request: {
     readonly projectId?: string;
     readonly limit: number;
   }) => Promise<readonly WorkingAdjustment[]>;

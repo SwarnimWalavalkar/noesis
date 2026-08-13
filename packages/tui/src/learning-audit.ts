@@ -116,7 +116,7 @@ function listViewport(
     const title = styled(colorEnabled, selected ? ANSI.bold : "", safeScalar(record.title));
     const identity = styled(colorEnabled, ANSI.dim, `${record.kind} · ${shortIdentity(record.id)}`);
     const context = [
-      record.status.replaceAll("_", " "),
+      safeScalar(record.status).replaceAll("_", " "),
       record.projectId ? `project ${shortIdentity(record.projectId)}` : undefined,
       record.experimentId ? `experiment ${shortIdentity(record.experimentId)}` : undefined,
       timestamp(record.occurredAt),
