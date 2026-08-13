@@ -230,6 +230,42 @@ describe("remote MCP transports", () => {
     }
   });
 
+  test("fails an accepted callback when authentication is cancelled during token exchange", async () => {
+    const callbackPort = await availablePort();
+    const manager = await unauthorizedOAuthManager(callbackPort);
+    const finish = Promise.withResolvers<void>();
+    const finishAuth = vi
+      .spyOn(StreamableHTTPClientTransport.prototype, "finishAuth")
+      .mockReturnValue(finish.promise);
+    const controller = new AbortController();
+    const authentication = manager.authenticate("remote", {
+      timeout: 30_000,
+      signal: controller.signal,
+    });
+    void authentication.catch(() => undefined);
+    try {
+      await vi.waitFor(async () => {
+        expect((await fetch(`http://127.0.0.1:${String(callbackPort)}/not-the-callback`)).status).toBe(404);
+      });
+      const callback = fetch(
+        `http://127.0.0.1:${String(callbackPort)}/oauth/callback?code=controlled-code&state=controlled-state`,
+      );
+      await vi.waitFor(() => expect(finishAuth).toHaveBeenCalledWith("controlled-code"));
+
+      controller.abort(new Error("controlled cancellation"));
+
+      const response = await callback;
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain("Authentication failed");
+      finish.resolve();
+      await expect(authentication).rejects.toThrow("controlled cancellation");
+    } finally {
+      finish.resolve();
+      finishAuth.mockRestore();
+      await manager.close();
+    }
+  });
+
   test("serves an accepted OAuth callback over IPv6 loopback", async () => {
     const protocol = controlledServer();
     const transport = new StreamableHTTPServerTransport({

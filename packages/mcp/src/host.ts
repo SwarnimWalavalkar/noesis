@@ -1400,6 +1400,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         });
         listener.on("error", reject);
         abortCallback = (): void => {
+          callbackAuthorization?.complete(false);
           listener.close();
           reject(authenticationController.signal.reason ?? new Error("MCP OAuth was cancelled"));
         };
@@ -1456,7 +1457,9 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
           throw new Error(`MCP server ${name} could not start OAuth authentication (${status ?? "missing"})`);
         const authorization = await callback;
         try {
+          authenticationController.signal.throwIfAborted();
           await finishAuthenticationFor(name, authorization.code, authentication);
+          authenticationController.signal.throwIfAborted();
           authorization.complete(true);
         } catch (error) {
           authorization.complete(false);
