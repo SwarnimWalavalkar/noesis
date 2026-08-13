@@ -1261,7 +1261,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     );
   };
 
-  const finishAuthenticationFor = async (
+  const exchangeAuthenticationCodeFor = async (
     name: string,
     authorizationCode: string,
     owner?: ActiveAuthentication,
@@ -1278,6 +1278,14 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     if (owner && latestAuthenticationByServer.get(name) !== owner) {
       throw new Error(`MCP OAuth authentication for ${name} was replaced`);
     }
+    owner?.controller.signal.throwIfAborted();
+  };
+  const finishAuthenticationFor = async (
+    name: string,
+    authorizationCode: string,
+    owner?: ActiveAuthentication,
+  ): Promise<void> => {
+    await exchangeAuthenticationCodeFor(name, authorizationCode, owner);
     await reconnect(name);
   };
   const finishAuthentication = async (name: string, authorizationCode: string): Promise<void> =>
@@ -1458,8 +1466,16 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         const authorization = await callback;
         try {
           authenticationController.signal.throwIfAborted();
-          await finishAuthenticationFor(name, authorization.code, authentication);
-          authenticationController.signal.throwIfAborted();
+          await exchangeAuthenticationCodeFor(name, authorization.code, authentication);
+          if (callbackTimer) {
+            clearTimeout(callbackTimer);
+            callbackTimer = undefined;
+          }
+          if (abortCallback) {
+            authenticationController.signal.removeEventListener("abort", abortCallback);
+            abortCallback = undefined;
+          }
+          await reconnect(name);
           authorization.complete(true);
         } catch (error) {
           authorization.complete(false);

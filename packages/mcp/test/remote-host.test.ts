@@ -102,7 +102,7 @@ async function managerFor(
   });
 }
 
-async function unauthorizedOAuthManager(callbackPort: number) {
+async function unauthorizedOAuthManager(callbackPort: number, connect?: () => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), "noesis-mcp-oauth-lifecycle-"));
   const home = join(root, "home");
   await writeMcpServer({
@@ -141,9 +141,11 @@ async function unauthorizedOAuthManager(callbackPort: number) {
       },
     },
     handlers: {
-      connect: async () => {
-        throw new UnauthorizedError("authentication required");
-      },
+      connect:
+        connect ??
+        (async () => {
+          throw new UnauthorizedError("authentication required");
+        }),
       sample: async () => ({
         role: "assistant",
         model: "controlled",
@@ -232,7 +234,11 @@ describe("remote MCP transports", () => {
 
   test("fails an accepted callback when authentication is cancelled during token exchange", async () => {
     const callbackPort = await availablePort();
-    const manager = await unauthorizedOAuthManager(callbackPort);
+    let connectionAttempts = 0;
+    const manager = await unauthorizedOAuthManager(callbackPort, async () => {
+      connectionAttempts += 1;
+      if (connectionAttempts === 1) throw new UnauthorizedError("authentication required");
+    });
     const finish = Promise.withResolvers<void>();
     const finishAuth = vi
       .spyOn(StreamableHTTPClientTransport.prototype, "finishAuth")
@@ -259,6 +265,8 @@ describe("remote MCP transports", () => {
       expect(await response.text()).toContain("Authentication failed");
       finish.resolve();
       await expect(authentication).rejects.toThrow("controlled cancellation");
+      expect(connectionAttempts).toBe(1);
+      expect(manager.inspectServer("remote")?.status).not.toBe("connected");
     } finally {
       finish.resolve();
       finishAuth.mockRestore();
