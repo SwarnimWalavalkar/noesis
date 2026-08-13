@@ -2,6 +2,7 @@ import {
   type AgentThinkingLevel,
   type FrozenBaselineRef,
   type FrozenCapabilitySelection,
+  type FrozenContextCheckpoint,
   type FrozenRevisionMaterial,
   type FrozenTurnPlan,
   frozenTurnPlanDigest,
@@ -41,7 +42,36 @@ export interface TurnPlanningRequest {
   readonly thinkingLevel: AgentThinkingLevel;
   readonly baseSystemPrompt: string;
   readonly priorHistory?: readonly TurnRoutingHistoryMessage[];
+  readonly contextCheckpointId?: string;
+  readonly contextTokenBudget?: number;
+  readonly requestTokenBudget?: number;
   readonly retrievalCitations?: readonly EvidenceRef[];
+}
+
+async function freezeContextCheckpoint(
+  workspace: NoesisWorkspaceStore,
+  sessionId: string,
+  checkpointId: string | undefined,
+): Promise<FrozenContextCheckpoint | undefined> {
+  if (checkpointId === undefined) return undefined;
+  const checkpoint = await workspace.operational.contextCheckpoints.get(checkpointId);
+  if (!checkpoint || checkpoint.sessionId !== sessionId)
+    throw new Error(`Context checkpoint ${checkpointId} does not belong to session ${sessionId}`);
+  if (sha256(checkpoint.summary) !== checkpoint.summaryDigest)
+    throw new Error(`Context checkpoint ${checkpointId} failed summary verification`);
+  return Object.freeze({
+    checkpointId,
+    checkpointRef: Object.freeze({
+      kind: "database_row" as const,
+      table: "context_checkpoints" as const,
+      rowId: checkpointId,
+    }),
+    summary: checkpoint.summary,
+    summaryDigest: checkpoint.summaryDigest,
+    sourceDigest: checkpoint.sourceDigest,
+    sensitivity: checkpoint.sensitivity,
+    createdAt: checkpoint.createdAt,
+  });
 }
 
 export interface TurnIntelligencePlanner {
@@ -237,11 +267,10 @@ export function createTurnIntelligencePlanner(
       throw new Error(
         `Active working adjustment ${workingAdjustment.adjustmentId} does not match the host-derived project`,
       );
-    const conversationHistory = await freezeConversationHistory(
-      options.workspace,
-      request.sessionId,
-      request.priorHistory ?? [],
-    );
+    const [conversationHistory, contextCheckpoint] = await Promise.all([
+      freezeConversationHistory(options.workspace, request.sessionId, request.priorHistory ?? []),
+      freezeContextCheckpoint(options.workspace, request.sessionId, request.contextCheckpointId),
+    ]);
     const resolved: {
       readonly reference: CapabilityRevisionRef;
       readonly capability: Capability;
@@ -275,11 +304,21 @@ export function createTurnIntelligencePlanner(
             sessionId: request.sessionId,
             turnId: request.turnId,
             userInput: request.userInput,
-            priorConversation: Object.freeze(
-              conversationHistory.map(({ messageId, role, content, createdAt }) =>
+            priorConversation: Object.freeze([
+              ...(contextCheckpoint
+                ? [
+                    Object.freeze({
+                      messageId: `context-checkpoint:${contextCheckpoint.checkpointId}`,
+                      role: "assistant" as const,
+                      content: contextCheckpoint.summary,
+                      createdAt: contextCheckpoint.createdAt,
+                    }),
+                  ]
+                : []),
+              ...conversationHistory.map(({ messageId, role, content, createdAt }) =>
                 Object.freeze({ messageId, role, content, createdAt }),
               ),
-            ),
+            ]),
             candidates: Object.freeze(
               candidates.map(({ capability }) =>
                 Object.freeze({
@@ -369,6 +408,9 @@ export function createTurnIntelligencePlanner(
       activationRevision: activation.revision,
       selectedCapabilities: Object.freeze(selections),
       conversationHistory,
+      ...(contextCheckpoint ? { contextCheckpoint } : {}),
+      ...(request.contextTokenBudget === undefined ? {} : { contextTokenBudget: request.contextTokenBudget }),
+      ...(request.requestTokenBudget === undefined ? {} : { requestTokenBudget: request.requestTokenBudget }),
       renderedSystemPrompt: [request.baseSystemPrompt.trim(), ...promptLayers, workingAdjustmentEnvelope]
         .filter((layer): layer is string => Boolean(layer))
         .join("\n\n"),

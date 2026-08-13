@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { type FrozenTurnPlan, frozenTurnPlanDigest } from "@noesis/agent-types";
 import {
   type CapabilityRevisionRef,
+  canonicalJson,
   type Experiment,
   type ExperimentTrial,
   effectOperationFingerprint,
@@ -96,8 +97,9 @@ const admitAndSettleSourceTurn = async (
   });
 };
 
-const seedWorkspaceThroughMigration32 = async (
+const seedWorkspaceThroughMigration = async (
   root: string,
+  maximumVersion: number,
 ): Promise<{ readonly databasePath: string; readonly database: DatabaseSync }> => {
   await mkdir(join(root, "database"), { recursive: true });
   const databasePath = join(root, "database", "noesis.sqlite");
@@ -105,7 +107,7 @@ const seedWorkspaceThroughMigration32 = async (
   const migrationNames = (await readdir(new URL("../migrations/", import.meta.url)))
     .filter((name) => /^\d{3}_.+\.sql$/u.test(name))
     .sort()
-    .filter((name) => Number(name.slice(0, 3)) <= 32);
+    .filter((name) => Number(name.slice(0, 3)) <= maximumVersion);
   for (const name of migrationNames) {
     const version = Number(name.slice(0, 3));
     database.exec(await readFile(new URL(`../migrations/${name}`, import.meta.url), "utf8"));
@@ -115,6 +117,11 @@ const seedWorkspaceThroughMigration32 = async (
   }
   return Object.freeze({ databasePath, database });
 };
+
+const seedWorkspaceThroughMigration32 = async (
+  root: string,
+): Promise<{ readonly databasePath: string; readonly database: DatabaseSync }> =>
+  seedWorkspaceThroughMigration(root, 32);
 
 const seedLegacyWorkflowDependencyRun = (
   database: DatabaseSync,
@@ -237,6 +244,382 @@ describe("WorkspaceStore", () => {
         document.source.rowId === running.toolCallId,
     );
     expect(indexed?.body).toContain('"hits":2');
+    store.close();
+  });
+
+  test("atomically activates immutable context checkpoints and preserves raw transcript rows", async () => {
+    const root = await temporary("context-checkpoints");
+    const store = await createWorkspaceStore(root);
+    await store.operational.sessions.put(session("session-context"));
+    const messages = [
+      Object.freeze({
+        messageId: "context-message-1",
+        sessionId: "session-context",
+        role: "user" as const,
+        content: "Please keep the exact raw request.",
+        sensitivity: "normal" as const,
+        createdAt: "2026-08-13T00:00:00.000Z",
+        metadata: Object.freeze({}),
+      }),
+      Object.freeze({
+        messageId: "context-message-2",
+        sessionId: "session-context",
+        role: "assistant" as const,
+        content: "The exact raw answer remains authoritative.",
+        sensitivity: "private" as const,
+        createdAt: "2026-08-13T00:00:01.000Z",
+        metadata: Object.freeze({}),
+      }),
+    ];
+    for (const message of messages) await store.operational.messages.put(message);
+    const sources = Object.freeze(
+      messages.map((message) =>
+        Object.freeze({ messageId: message.messageId, contentDigest: sha256(message.content) }),
+      ),
+    );
+    const checkpoint = Object.freeze({
+      checkpointId: "context-checkpoint-1",
+      sessionId: "session-context",
+      summary: "A bounded continuation summary.",
+      summaryDigest: sha256("A bounded continuation summary."),
+      sourceDigest: sha256(canonicalJson(sources)),
+      sources,
+      lastCoveredMessageId: "context-message-2",
+      tokenBudget: 160_000,
+      estimatedSummaryTokens: 8,
+      sensitivity: "private" as const,
+      provider: "controlled",
+      model: "controlled",
+      thinkingLevel: "off" as const,
+      usage: Object.freeze({ inputTokens: 10, outputTokens: 8, totalTokens: 18, estimatedCost: 0 }),
+      createdAt: "2026-08-13T00:00:02.000Z",
+    });
+
+    const expectedContextMessageIds = Object.freeze(messages.map((message) => message.messageId));
+    const first = sources[0];
+    if (!first) throw new Error("Expected a checkpoint source fixture");
+    const firstSource = Object.freeze([first]);
+    await expect(
+      store.operational.contextCheckpoints.activate({
+        checkpoint: Object.freeze({
+          ...checkpoint,
+          checkpointId: "context-checkpoint-skips-tail",
+          sources: firstSource,
+          sourceDigest: sha256(canonicalJson(firstSource)),
+          lastCoveredMessageId: first.messageId,
+        }),
+        expectedContextMessageIds,
+      }),
+    ).rejects.toThrow("retained tail must immediately follow");
+    const duplicateSources = Object.freeze([first, first]);
+    await expect(
+      store.operational.contextCheckpoints.activate({
+        checkpoint: Object.freeze({
+          ...checkpoint,
+          checkpointId: "context-checkpoint-duplicate-source",
+          sources: duplicateSources,
+          sourceDigest: sha256(canonicalJson(duplicateSources)),
+          lastCoveredMessageId: first.messageId,
+        }),
+        expectedContextMessageIds,
+      }),
+    ).rejects.toThrow("cannot repeat a source message");
+
+    await expect(
+      store.operational.contextCheckpoints.activate({ checkpoint, expectedContextMessageIds }),
+    ).resolves.toMatchObject({
+      status: "activated",
+      checkpoint: { checkpointId: checkpoint.checkpointId },
+    });
+    await expect(
+      store.operational.contextCheckpoints.activate({
+        checkpoint: Object.freeze({ ...checkpoint, checkpointId: "context-checkpoint-conflict" }),
+        expectedContextMessageIds,
+      }),
+    ).resolves.toEqual({ status: "conflict", activeCheckpointId: checkpoint.checkpointId });
+    expect(await store.operational.contextCheckpoints.get("context-checkpoint-conflict")).toBeUndefined();
+    expect(
+      (await store.operational.messages.listForSession("session-context")).map(({ content }) => content),
+    ).toEqual(messages.map(({ content }) => content));
+    const successorMessage = Object.freeze({
+      messageId: "context-message-successor",
+      sessionId: "session-context",
+      role: "user" as const,
+      content: "A later turn is covered by a successor checkpoint.",
+      sensitivity: "normal" as const,
+      createdAt: "2026-08-13T00:00:03.000Z",
+      metadata: Object.freeze({}),
+    });
+    await store.operational.messages.put(successorMessage);
+    const successorSources = Object.freeze([
+      Object.freeze({
+        messageId: successorMessage.messageId,
+        contentDigest: sha256(successorMessage.content),
+      }),
+    ]);
+    const successor = Object.freeze({
+      ...checkpoint,
+      checkpointId: "context-checkpoint-2",
+      previousCheckpointId: checkpoint.checkpointId,
+      summary: "The continuation now includes the later turn.",
+      summaryDigest: sha256("The continuation now includes the later turn."),
+      sourceDigest: sha256(canonicalJson(successorSources)),
+      sources: successorSources,
+      lastCoveredMessageId: successorMessage.messageId,
+      estimatedSummaryTokens: 11,
+      sensitivity: "normal" as const,
+      usage: Object.freeze({ inputTokens: 9, outputTokens: 11, totalTokens: 20, estimatedCost: 0 }),
+      createdAt: "2026-08-13T00:00:04.000Z",
+    });
+    await expect(
+      store.operational.contextCheckpoints.activate({
+        checkpoint: successor,
+        expectedActiveCheckpointId: checkpoint.checkpointId,
+        expectedContextMessageIds: Object.freeze([successorMessage.messageId]),
+      }),
+    ).resolves.toMatchObject({ status: "activated" });
+    await store.operational.sessions.put(session("session-context-other"));
+    await store.operational.messages.put({
+      messageId: "context-message-other",
+      sessionId: "session-context-other",
+      role: "user",
+      content: "Other session context.",
+      sensitivity: "normal",
+      createdAt: "2026-08-13T00:00:05.000Z",
+      metadata: Object.freeze({}),
+    });
+    const integrityDatabase = new DatabaseSync(store.unsafeDatabasePathForTesting);
+    expect(() =>
+      integrityDatabase
+        .prepare(
+          "INSERT INTO session_context_state(session_id, active_checkpoint_id, updated_at) VALUES (?, ?, ?)",
+        )
+        .run("session-context-other", checkpoint.checkpointId, "2026-08-13T00:00:06.000Z"),
+    ).toThrow("active context checkpoint must belong to its session");
+    expect(() =>
+      integrityDatabase
+        .prepare("UPDATE context_checkpoints SET first_retained_message_id = ? WHERE checkpoint_id = ?")
+        .run("context-message-other", checkpoint.checkpointId),
+    ).toThrow("context checkpoint is immutable");
+    expect(() =>
+      integrityDatabase
+        .prepare("UPDATE context_checkpoints SET session_id = ? WHERE checkpoint_id = ?")
+        .run("session-context-other", checkpoint.checkpointId),
+    ).toThrow("context checkpoint is immutable");
+    expect(() =>
+      integrityDatabase
+        .prepare("UPDATE context_checkpoints SET summary = ? WHERE checkpoint_id = ?")
+        .run("Mutated summary.", checkpoint.checkpointId),
+    ).toThrow("context checkpoint is immutable");
+    expect(() =>
+      integrityDatabase
+        .prepare("UPDATE context_checkpoint_sources SET content_digest = ? WHERE checkpoint_id = ?")
+        .run(sha256("mutated"), checkpoint.checkpointId),
+    ).toThrow("context checkpoint source is immutable");
+    expect(() =>
+      integrityDatabase
+        .prepare("DELETE FROM context_checkpoint_sources WHERE checkpoint_id = ?")
+        .run(checkpoint.checkpointId),
+    ).toThrow("context checkpoint source is immutable");
+    expect(() =>
+      integrityDatabase
+        .prepare("DELETE FROM context_checkpoints WHERE checkpoint_id = ?")
+        .run(checkpoint.checkpointId),
+    ).toThrow("context checkpoint is immutable");
+    expect(() =>
+      integrityDatabase
+        .prepare(
+          `INSERT OR REPLACE INTO context_checkpoints
+           SELECT * FROM context_checkpoints WHERE checkpoint_id = ?`,
+        )
+        .run(checkpoint.checkpointId),
+    ).toThrow("context checkpoint identity already exists");
+    expect(() =>
+      integrityDatabase
+        .prepare(
+          `INSERT OR REPLACE INTO context_checkpoint_seals(checkpoint_id, sealed_at)
+           VALUES (?, ?)`,
+        )
+        .run(checkpoint.checkpointId, "2026-08-13T00:00:07.000Z"),
+    ).toThrow("context checkpoint seal identity already exists");
+    integrityDatabase
+      .prepare(
+        `INSERT INTO messages(
+          message_id, session_id, role, content, sensitivity, created_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "context-message-appended",
+        "session-context",
+        "user",
+        "This later message must not mutate checkpoint provenance.",
+        "normal",
+        "2026-08-13T00:00:07.000Z",
+        "{}",
+      );
+    expect(() =>
+      integrityDatabase
+        .prepare(
+          `INSERT INTO context_checkpoint_sources(checkpoint_id, ordinal, message_id, content_digest)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(
+          checkpoint.checkpointId,
+          checkpoint.sources.length,
+          "context-message-appended",
+          sha256("This later message must not mutate checkpoint provenance."),
+        ),
+    ).toThrow("sealed context checkpoint sources are immutable");
+    integrityDatabase.close();
+    store.close();
+
+    const reopened = await createWorkspaceStore(root);
+    await expect(reopened.operational.contextCheckpoints.get(checkpoint.checkpointId)).resolves.toEqual(
+      checkpoint,
+    );
+    await expect(reopened.operational.contextCheckpoints.getActive("session-context")).resolves.toEqual(
+      successor,
+    );
+    reopened.close();
+  });
+
+  test("rejects dangling checkpoint references when upgrading an applied migration 36 workspace", async () => {
+    const root = await temporary("context-checkpoint-dangling-upgrade");
+    const { databasePath, database } = await seedWorkspaceThroughMigration(root, 36);
+    database
+      .prepare(
+        `INSERT INTO sessions(
+          session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "session-context-dangling",
+        "Dangling context",
+        "idle",
+        "controlled",
+        "controlled",
+        "pi",
+        "2026-08-13T00:00:00.000Z",
+        "2026-08-13T00:00:00.000Z",
+        "{}",
+      );
+    database
+      .prepare(
+        `INSERT INTO messages(
+          message_id, session_id, role, content, sensitivity, created_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "context-message-dangling",
+        "session-context-dangling",
+        "user",
+        "This source is removed by a corrupted legacy workspace.",
+        "normal",
+        "2026-08-13T00:00:00.000Z",
+        "{}",
+      );
+    const source = Object.freeze({
+      messageId: "context-message-dangling",
+      contentDigest: sha256("This source is removed by a corrupted legacy workspace."),
+    });
+    database
+      .prepare(
+        `INSERT INTO context_checkpoints(
+          checkpoint_id, session_id, summary, summary_digest, source_digest,
+          last_covered_message_id, token_budget, estimated_summary_tokens, sensitivity,
+          provider, model, thinking_level, usage_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "context-checkpoint-dangling",
+        "session-context-dangling",
+        "Legacy summary.",
+        sha256("Legacy summary."),
+        sha256(canonicalJson(Object.freeze([source]))),
+        source.messageId,
+        160_000,
+        4,
+        "normal",
+        "controlled",
+        "controlled",
+        "off",
+        canonicalJson({ inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCost: 0 }),
+        "2026-08-13T00:00:01.000Z",
+      );
+    database
+      .prepare(
+        `INSERT INTO context_checkpoint_sources(checkpoint_id, ordinal, message_id, content_digest)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run("context-checkpoint-dangling", 0, source.messageId, source.contentDigest);
+    database.exec("PRAGMA foreign_keys = OFF");
+    database.prepare("DELETE FROM messages WHERE message_id = ?").run(source.messageId);
+    database.close();
+
+    await expect(createWorkspaceStore(root)).rejects.toThrow(
+      "Workspace migration 037_context_checkpoint_session_immutability.sql failed",
+    );
+    const inspection = new DatabaseSync(databasePath, { readOnly: true });
+    expect(inspection.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
+      version: 36,
+    });
+    inspection.close();
+  });
+
+  test("activates a checkpoint when expected context spans multiple SQLite parameter chunks", async () => {
+    const store = await createWorkspaceStore(await temporary("context-checkpoint-chunked-context"));
+    await store.operational.sessions.put(session("session-context-chunked"));
+    const expectedContextMessageIds: string[] = [];
+    for (let index = 0; index < 501; index += 1) {
+      const messageId = `context-chunked-${String(index).padStart(3, "0")}`;
+      expectedContextMessageIds.push(messageId);
+      await store.operational.messages.put({
+        messageId,
+        sessionId: "session-context-chunked",
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: `Chunked context message ${String(index)}`,
+        sensitivity: "normal",
+        createdAt: `2026-08-13T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+        metadata: Object.freeze({}),
+      });
+    }
+    const firstMessageId = expectedContextMessageIds[0];
+    const firstRetainedMessageId = expectedContextMessageIds[1];
+    if (!firstMessageId || !firstRetainedMessageId) throw new Error("Expected chunked context fixtures");
+    const sources = Object.freeze([
+      Object.freeze({
+        messageId: firstMessageId,
+        contentDigest: sha256("Chunked context message 0"),
+      }),
+    ]);
+    const checkpoint = Object.freeze({
+      checkpointId: "context-checkpoint-chunked",
+      sessionId: "session-context-chunked",
+      summary: "The oldest chunked context message was summarized.",
+      summaryDigest: sha256("The oldest chunked context message was summarized."),
+      sourceDigest: sha256(canonicalJson(sources)),
+      sources,
+      firstRetainedMessageId,
+      lastCoveredMessageId: firstMessageId,
+      tokenBudget: 160_000,
+      estimatedSummaryTokens: 12,
+      sensitivity: "normal" as const,
+      provider: "controlled",
+      model: "controlled",
+      thinkingLevel: "off" as const,
+      usage: Object.freeze({ inputTokens: 10, outputTokens: 12, totalTokens: 22, estimatedCost: 0 }),
+      createdAt: "2026-08-13T09:00:00.000Z",
+    });
+
+    await expect(
+      store.operational.contextCheckpoints.activate({
+        checkpoint,
+        expectedContextMessageIds: Object.freeze(expectedContextMessageIds),
+      }),
+    ).resolves.toMatchObject({ status: "activated" });
+    await expect(store.operational.contextCheckpoints.getActive("session-context-chunked")).resolves.toEqual(
+      checkpoint,
+    );
     store.close();
   });
 
@@ -1471,7 +1854,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 34 });
+    ).toEqual({ version: 41 });
     inspection.close();
   });
 
@@ -2188,7 +2571,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(34);
+    expect(versions.at(-1)).toBe(41);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

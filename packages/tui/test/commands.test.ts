@@ -88,6 +88,7 @@ describe("Noesis slash commands", () => {
 
   test("classifies normalized state-mutating commands as exclusive", () => {
     expect(isExclusiveSlashCommand("  /compact \n")).toBe(true);
+    expect(isExclusiveSlashCommand("/compact preserve exact errors")).toBe(true);
     expect(isExclusiveSlashCommand("/fork")).toBe(true);
     expect(isExclusiveSlashCommand("\t/model provider/model ")).toBe(true);
     expect(isExclusiveSlashCommand("/runs")).toBe(false);

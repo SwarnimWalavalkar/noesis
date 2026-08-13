@@ -29,6 +29,8 @@ The user's words take priority. Phrases such as "just do it," "think this throug
 
 The approach can change during a session. A build can expose something the user needs to learn. Reflection can turn into execution. An open discussion can end with a concrete task. Noesis should preserve why the change happened.
 
+Long sessions may compact older completed turns into a continuation checkpoint while keeping recent turns raw. Compaction never deletes or rewrites the visible transcript. Resume and search still use the complete original conversation; only future model context becomes smaller.
+
 ## Selective learning
 
 ### A contract for lasting learning

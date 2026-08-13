@@ -1,17 +1,18 @@
 import { AgentHarness, formatSkillsForSystemPrompt, type Skill } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { AssistantMessage, MutableModels, UserMessage } from "@earendil-works/pi-ai";
-import type {
-  AgentAssistantMessageBoundary,
-  AgentContextUsage,
-  AgentRuntimeEvent,
-  AgentRuntimeRequest,
-  AgentRuntimeResult,
-  AgentSteerResult,
-  FrozenTurnPlan,
-  NoesisAgentRuntime,
+import {
+  estimateInputTokens,
+  type AgentAssistantMessageBoundary,
+  type AgentContextUsage,
+  type AgentRuntimeEvent,
+  type AgentRuntimeRequest,
+  type AgentRuntimeResult,
+  type AgentSteerResult,
+  type FrozenTurnPlan,
+  type NoesisAgentRuntime,
+  validateFrozenTurnPlan,
 } from "@noesis/agent-types";
-import { validateFrozenTurnPlan } from "@noesis/agent-types";
 import { toAgentActionPayload } from "./action-payload.ts";
 import {
   createPiExecuteTool,
@@ -114,11 +115,20 @@ function historyForRequest(
   plan: FrozenTurnPlan | undefined,
 ): NonNullable<AgentRuntimeRequest["history"]> {
   if (!plan) return Object.freeze([...(request.history ?? [])]);
-  const frozen = Object.freeze(
-    (plan.conversationHistory ?? []).map(({ role, content, createdAt }) =>
+  const frozen = Object.freeze([
+    ...(plan.contextCheckpoint
+      ? [
+          Object.freeze({
+            role: "assistant" as const,
+            content: plan.contextCheckpoint.summary,
+            createdAt: plan.contextCheckpoint.createdAt,
+          }),
+        ]
+      : []),
+    ...(plan.conversationHistory ?? []).map(({ role, content, createdAt }) =>
       Object.freeze({ role, content, createdAt }),
     ),
-  );
+  ]);
   if (request.history !== undefined) {
     const matches =
       request.history.length === frozen.length &&
@@ -491,21 +501,52 @@ export function createPiAgentRuntime(
           result: explicitSkill.actionEvidence,
         });
       }
+      const agentTools = executeTool ? [...selfTools, executeTool, ...hotbarTools] : [...selfTools];
+      const initialActiveToolNames = activeNames(initialHotbar);
+      const skillsSystemPrompt = formatSkillsForSystemPrompt(piSkills);
+      const completeSystemPrompt = [request.systemPrompt, skillsSystemPrompt].filter(Boolean).join("\n\n");
       harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),
         session,
         models,
         model,
-        tools: executeTool ? [...selfTools, executeTool, ...hotbarTools] : [...selfTools],
-        activeToolNames: activeNames(initialHotbar),
+        tools: agentTools,
+        activeToolNames: initialActiveToolNames,
         thinkingLevel: request.thinkingLevel,
         resources: {
           skills: piSkills,
         },
-        systemPrompt: [request.systemPrompt, formatSkillsForSystemPrompt(piSkills)]
-          .filter(Boolean)
-          .join("\n\n"),
+        systemPrompt: completeSystemPrompt,
       });
+      const requestBudget =
+        plan?.requestTokenBudget === undefined
+          ? undefined
+          : Object.freeze({ planId: plan.planId, tokens: plan.requestTokenBudget });
+      const unsubscribeBudgetGuard =
+        requestBudget === undefined
+          ? () => undefined
+          : harness.on("context", ({ messages }) => {
+              const activeTools = harness.getActiveTools();
+              const activeToolMaterial = JSON.stringify(
+                activeTools.map((tool) => ({
+                  name: tool.name,
+                  description: tool.description,
+                  parameters: tool.parameters,
+                })),
+              );
+              const estimatedRequestTokens =
+                64 +
+                estimateInputTokens(completeSystemPrompt) +
+                estimateInputTokens(JSON.stringify(messages)) +
+                estimateInputTokens(activeToolMaterial) +
+                activeTools.length * 16 +
+                messages.length * 8;
+              if (estimatedRequestTokens > requestBudget.tokens)
+                throw new Error(
+                  `Frozen turn plan ${requestBudget.planId} complete request exceeds its token budget before model invocation`,
+                );
+              return undefined;
+            });
       const historyBaseTimestamp = Date.now() - history.length;
       for (const [index, message] of history.entries()) {
         if (message.role === "assistant" && message.content.length === 0) continue;
@@ -646,6 +687,7 @@ export function createPiAgentRuntime(
         execution.acceptsSteering = false;
         execution.controller.signal.removeEventListener("abort", abortHarness);
         unsubscribe();
+        unsubscribeBudgetGuard();
         await abortPromise;
         settlePendingSteers(
           execution,

@@ -587,6 +587,69 @@ describe("agent runtime factories", () => {
     expect(snapshotReads).toBe(0);
   });
 
+  test("budgets the expanded explicit skill prompt before model inference", async () => {
+    const base = frozenPlan();
+    const { canonicalDigest: _digest, ...baseUnsigned } = base;
+    const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 1_000 });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const skillContent = "Apply the complete procedure. ".repeat(400);
+    const skill = Object.freeze({
+      name: "large-procedure",
+      description: "A procedure larger than the admitted request budget",
+      content: skillContent,
+      filePath: "/skills/large-procedure/SKILL.md",
+      contentDigest: sha256(skillContent),
+      disableModelInvocation: false,
+    });
+    const snapshot = Object.freeze({ skills: Object.freeze([skill]), diagnostics: Object.freeze([]) });
+    const controlled = createControlledPiModels();
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      skills: {
+        snapshot: async () => snapshot,
+        pinSnapshot: async () => snapshot,
+        claimPinnedSnapshot: (key) => (key === plan.planId ? snapshot : undefined),
+        discardPinnedSnapshot: () => undefined,
+        install: async () => undefined,
+        remove: async () => false,
+        update: async () => undefined,
+        configured: () => Object.freeze([]),
+      },
+      requirePinnedSkillSnapshot: true,
+      codeExecution: controlledCodeExecution(
+        {
+          resolve: async (received) =>
+            Object.freeze({
+              planId: received.planId,
+              canonicalDigest: received.canonicalDigest,
+              consumedMaterials: frozenPlanMaterialUses(received),
+              definitions: definitions("budgeted-skill"),
+            }),
+        },
+        "budgeted-skill",
+      ),
+    });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "/large-procedure follow it",
+          activeCapabilities: [],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({
+      outcome: "failed",
+      error: expect.stringContaining("complete request exceeds its token budget"),
+    });
+    expect(controlled.provider.state.callCount).toBe(0);
+  });
+
   test("leaves unknown slash prompts untouched", async () => {
     const prompt = "/not-installed preserve this exact text";
     const controlled = createControlledPiModels({
@@ -1072,6 +1135,85 @@ describe("agent runtime factories", () => {
     });
   });
 
+  test("rechecks the complete request budget after same-turn hotbar activation", async () => {
+    const base = frozenPlan();
+    const { canonicalDigest: _digest, ...baseUnsigned } = base;
+    const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 12_000 });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const catalog: PiFrozenToolCatalog = Object.freeze({
+      catalogId: "catalog-oversized-hotbar-tool",
+      catalogDigest: sha256("catalog-oversized-hotbar-tool"),
+      tools: Object.freeze([
+        Object.freeze({
+          name: "files.large-schema",
+          label: "Large schema",
+          description: "Schema material ".repeat(1_500),
+          revisionId: "files-large-schema-v1",
+          inputSchema: Object.freeze({ type: "object" }),
+          outputSchema: Object.freeze({ type: "object" }),
+        }),
+      ]),
+    });
+    const codeExecution: PiCodeExecutionAdapter = Object.freeze({
+      prepare: async () =>
+        Object.freeze({
+          catalog,
+          invoke: async () => null,
+          execute: async () =>
+            Object.freeze({
+              executionId: "unused-oversized-hotbar-tool",
+              value: null,
+              calls: 0,
+              durationMs: 1,
+            }),
+          close: async () => undefined,
+        }),
+      shutdown: async () => undefined,
+    });
+    const controlled = createControlledPiModels({
+      respond: () =>
+        fauxAssistantMessage(
+          fauxToolCall(
+            "adapt",
+            { action: "add_tool", tool: "files.large-schema" },
+            { id: "adapt-large-schema" },
+          ),
+          { stopReason: "toolUse" },
+        ),
+    });
+    const selfTools: PiSelfToolAdapter = {
+      hotbar: async () => Object.freeze([]),
+      inspect: async () => null,
+      remember: async () => null,
+      adapt: async (input) => {
+        if (input.action !== "add_tool") throw new Error("Expected add_tool");
+        await input.applyHotbar([input.tool]);
+        return toJsonValue({ status: "hotbar_updated", hotbar: [input.tool] });
+      },
+    };
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "Activate the large schema.",
+          activeCapabilities: [],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({
+      outcome: "failed",
+      error: expect.stringContaining("complete request exceeds its token budget"),
+    });
+    expect(controlled.provider.state.callCount).toBe(1);
+  });
+
   test("ignores unavailable persisted hotbar entries without blocking the turn", async () => {
     const plan = frozenPlan();
     const catalog: PiFrozenToolCatalog = Object.freeze({
@@ -1139,6 +1281,79 @@ describe("agent runtime factories", () => {
         () => undefined,
       ),
     ).resolves.toMatchObject({ text: "Stale preference reconciled.", outcome: "completed" });
+  });
+
+  test("does not charge inactive catalog tools against the request budget", async () => {
+    const base = frozenPlan();
+    const { canonicalDigest: _digest, ...baseUnsigned } = base;
+    const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 12_000 });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const catalog: PiFrozenToolCatalog = Object.freeze({
+      catalogId: "catalog-many-inactive-tools",
+      catalogDigest: sha256("catalog-many-inactive-tools"),
+      tools: Object.freeze(
+        Array.from({ length: 1_000 }, (_, index) =>
+          Object.freeze({
+            name: `inactive.tool-${index}`,
+            label: `Inactive tool ${index}`,
+            description: "A frozen catalog tool that is not active in this turn.",
+            revisionId: `inactive-tool-${index}-v1`,
+            inputSchema: Object.freeze({ type: "object" }),
+            outputSchema: Object.freeze({ type: "object" }),
+          }),
+        ),
+      ),
+    });
+    const codeExecution: PiCodeExecutionAdapter = Object.freeze({
+      prepare: async () =>
+        Object.freeze({
+          catalog,
+          invoke: async () => null,
+          execute: async () =>
+            Object.freeze({
+              executionId: "unused-many-inactive-tools",
+              value: null,
+              calls: 0,
+              durationMs: 1,
+            }),
+          close: async () => undefined,
+        }),
+      shutdown: async () => undefined,
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context }) => {
+        expect(context.tools?.map((tool) => tool.name)).toEqual([
+          "inspect_self",
+          "remember",
+          "adapt",
+          "execute",
+        ]);
+        return "Only active tools were budgeted.";
+      },
+    });
+    const selfTools: PiSelfToolAdapter = Object.freeze({
+      hotbar: async () => Object.freeze([]),
+      inspect: async () => null,
+      remember: async () => null,
+      adapt: async () => null,
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "Use only the active tools.",
+          activeCapabilities: [],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({ text: "Only active tools were budgeted.", outcome: "completed" });
   });
 
   test("checks authentication before loading skills or preparing codemode", async () => {
@@ -1692,6 +1907,90 @@ describe("agent runtime factories", () => {
     await expect(runtime.run({ ...request, frozenTurnPlan: plan }, () => undefined)).rejects.toThrow(
       "left frozen material unsupported",
     );
+    expect(controlled.provider.state.callCount).toBe(0);
+  });
+
+  test("rejects a complete request that exceeds its frozen budget before model invocation", async () => {
+    const controlled = createControlledPiModels();
+    const base = frozenPlan();
+    const { canonicalDigest: _digest, ...baseUnsigned } = base;
+    const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 8 });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      codeExecution: controlledCodeExecution(
+        {
+          resolve: async (received) =>
+            Object.freeze({
+              planId: received.planId,
+              canonicalDigest: received.canonicalDigest,
+              consumedMaterials: frozenPlanMaterialUses(received),
+              definitions: definitions("budgeted"),
+            }),
+        },
+        "budgeted",
+      ),
+    });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "A current request that cannot fit.",
+          activeCapabilities: [{ name: "Grounded", version: 1 }],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({
+      outcome: "failed",
+      error: expect.stringContaining("complete request exceeds its token budget"),
+    });
+    expect(controlled.provider.state.callCount).toBe(0);
+  });
+
+  test("rejects token-dense multilingual input before model invocation", async () => {
+    const controlled = createControlledPiModels();
+    const base = frozenPlan();
+    const { canonicalDigest: _digest, ...baseUnsigned } = base;
+    const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 600 });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      codeExecution: controlledCodeExecution(
+        {
+          resolve: async (received) =>
+            Object.freeze({
+              planId: received.planId,
+              canonicalDigest: received.canonicalDigest,
+              consumedMaterials: frozenPlanMaterialUses(received),
+              definitions: definitions("token-dense"),
+            }),
+        },
+        "token-dense",
+      ),
+    });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "界".repeat(1_000),
+          activeCapabilities: [{ name: "Grounded", version: 1 }],
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({
+      outcome: "failed",
+      error: expect.stringContaining("complete request exceeds its token budget"),
+    });
     expect(controlled.provider.state.callCount).toBe(0);
   });
 });

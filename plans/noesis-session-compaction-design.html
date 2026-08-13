@@ -17,49 +17,127 @@
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
     .card { padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
     .muted { color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    pre { overflow-x: auto; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: #0c0e12; }
     li { margin: .55em 0; }
     .decision { padding-left: 18px; border-left: 3px solid var(--accent); }
   </style>
 </head>
 <body><main>
-  <div class="tag">Design workshop · open</div>
+  <div class="tag">Implementation design · decided</div>
   <h1>Durable session compaction</h1>
   <p class="lead">Compaction should reduce future model context without deleting, rewriting, or hiding the real conversation.</p>
 
-  <section><h2>What exists now</h2><div class="grid">
+  <section><h2>Starting point</h2><div class="grid">
     <div class="card"><strong>Complete durable transcript</strong><p class="muted">SQLite owns messages, tool calls, code runs, and their chronology. Resume rebuilds this full view.</p></div>
-    <div class="card"><strong>Bounded turn context</strong><p class="muted">Each turn creates a fresh Pi harness and admits only a recent bounded set of complete conversation turns.</p></div>
-    <div class="card"><strong>A misleading command</strong><p class="muted"><code>/compact</code> exists, but the production runtime has no durable compaction state.</p></div>
+    <div class="card"><strong>Bounded turn context</strong><p class="muted">Each turn creates a fresh Pi harness, so compaction belongs in durable context selection rather than Pi's ephemeral session.</p></div>
+    <div class="card"><strong>An unfinished command</strong><p class="muted"><code>/compact</code> existed in the TUI before the production runtime had durable compaction state.</p></div>
   </div></section>
 
-  <section><h2>Smallest coherent model</h2>
-    <p class="decision">Append immutable context checkpoints and keep one active-checkpoint binding per session. A checkpoint preserves the useful meaning of older covered work so new work can fit; it does not promise full-fidelity replay inside model context. Its summary and retained raw tail remain subject to the existing hard per-fragment and total context bounds.</p>
+  <section><h2>Reference implementations</h2>
+    <table>
+      <thead><tr><th>Agent</th><th>Keep</th><th>Leave behind</th></tr></thead>
+      <tbody>
+        <tr><td>Pi coding agent</td><td>Append a summary checkpoint, retain a recent raw tail, update the prior summary on repeated compaction, and support manual and automatic triggers.</td><td>Mid-turn splitting in the first release. Noesis can compact only complete replay-eligible turns.</td></tr>
+        <tr><td>Hermes</td><td>Use a structured continuation summary, bound serialized tool output, label the summary as reference context, and fail without changing history when summarization cannot complete safely.</td><td>Dual compression layers, session rotation, active-message rewriting, plugin compression engines, and fallback paths that discard messages.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section><h2>Decisions</h2>
+    <p class="decision">Append immutable context checkpoints and keep one active-checkpoint binding per session. A checkpoint preserves the useful meaning of older covered work so new work can fit; it does not promise full-fidelity replay inside model context.</p>
     <ul>
       <li>Raw transcript rows remain untouched and searchable.</li>
-      <li>Each checkpoint has its own identity and digest, a model-written summary, exact covered message or turn references and digests, sensitivity, model configuration, usage, and creation time.</li>
+      <li>Compaction operates only on complete replay-eligible turn groups. It never splits a turn or includes running, aborted, failed, or partial work.</li>
+      <li>Each checkpoint has its own identity and digest, a model-written summary, its previous checkpoint ID, exact newly covered message references and their aggregate digest, the first retained raw turn, sensitivity, model route, usage, and creation time.</li>
       <li>A future turn freezes the exact checkpoint ID, digest, summary material, and recent raw-tail references into its <code>FrozenTurnPlan</code>.</li>
-      <li>Repeated compaction writes a new checkpoint from the prior checkpoint plus new eligible work. It never edits the earlier row.</li>
+      <li>Repeated compaction writes a new checkpoint from the prior summary plus newly covered eligible work. It never edits an earlier checkpoint or repeats the full cumulative reference list.</li>
       <li>After summary generation, checkpoint insertion and compare-and-swap of the active binding happen in one SQLite transaction. A failed or stale write changes neither.</li>
       <li>Old frozen plans continue to cite the exact immutable checkpoint and raw context they used.</li>
     </ul>
   </section>
 
-  <section><h2>Questions to settle together</h2><ol>
-    <li>Should the first version be manual only, automatic only near context pressure, or both?</li>
-    <li>Where may a cutoff fall around steering, partial turns, and tool calls?</li>
-    <li>Should private and secret content require a provider-specific replay grant before summarization?</li>
-    <li>How much recent raw context must always survive beside the summary?</li>
-    <li>What should the TUI show: checkpoint age, coverage, token reduction, and an inspect action?</li>
-    <li>Should an overflowed turn compact and retry automatically, or ask the user to rerun?</li>
+  <section><h2>One context budget</h2>
+    <p>The model-input budget is a number of tokens, not a message count or a percentage. It covers the complete request: system prompt, capabilities and tool allowance, checkpoint summary, retained raw conversation, and current input.</p>
+    <pre><code>{
+  "schemaVersion": 1,
+  "agent": {},
+  "context": {
+    "tokenBudget": 160000
+  }
+}</code></pre>
+    <ul>
+      <li><code>context.tokenBudget</code> is a positive integer. The built-in default is <code>160000</code> tokens.</li>
+      <li>The effective budget is <code>min(configuredTokenBudget, model.contextWindow - outputReserve)</code>. It is therefore always smaller than the selected model's supported context window.</li>
+      <li><code>outputReserve</code> comes from the resolved model's maximum output allowance. If the route cannot leave a positive input budget, model selection fails before a turn or compaction starts.</li>
+      <li>When a smaller model clamps the configured budget, Noesis reports the effective value instead of silently claiming the configured value was used.</li>
+      <li>The budget is one product setting. Noesis first reserves room for non-history request material, then uses the remainder for the checkpoint summary and recent raw tail. These internal allocations are not more user-facing knobs.</li>
+      <li>The summary may use at most one quarter of the history allocation, capped at 8000 tokens.</li>
+      <li>Selection walks backward over complete turns until the raw-tail allocation is full. It never keeps a partial turn merely to fill the budget.</li>
+    </ul>
+  </section>
+
+  <section><h2>Compaction flow</h2><ol>
+    <li>Read the active checkpoint, if any, and all later replay-eligible complete turns from SQLite.</li>
+    <li>Select the largest recent complete-turn tail that fits the effective raw-tail allocation.</li>
+    <li>Serialize every byte of each older newly covered turn as labelled data. A turn that cannot fit losslessly in the compactor route is rejected before model invocation and remains uncovered.</li>
+    <li>Ask a capable model on the session's current route to update the structured summary. The previous summary is context, not a second authority.</li>
+    <li>Validate and bound the summary. A summary cannot grant permission, raise instruction priority, or turn an old request into a new request.</li>
+    <li>Insert the immutable checkpoint and move the active binding with compare-and-swap in one WorkspaceStore transaction.</li>
+    <li>Future turns receive system context, the labelled checkpoint summary, the exact retained raw tail, and the current user input. Resume and history search continue to use the untouched transcript.</li>
   </ol></section>
+
+  <section><h2>Triggers and interaction</h2>
+    <ul>
+      <li><code>/compact [optional focus]</code> creates a checkpoint even before automatic compaction is required. Optional focus changes what detail the summary preserves; it does not change authority.</li>
+      <li>Automatic compaction runs before a future turn when eligible history would otherwise be omitted by the configured token budget.</li>
+      <li>Only one compaction may update a session at a time. A concurrent or stale attempt loses the active-binding compare-and-swap and leaves the winning checkpoint intact.</li>
+      <li>The successful TUI confirmation is simply <strong>Context compacted</strong>. Failure messages state that context was not changed.</li>
+      <li>The first release does not add an automatic overflow retry. If the provider still rejects an admitted turn for context length, the turn fails truthfully and the user can retry after compaction.</li>
+    </ul>
+  </section>
+
+  <section><h2>Summary contract</h2>
+    <p>The summary is a continuation handoff with bounded sections: goal, constraints and preferences, completed work, current state, key decisions, blockers, next steps, and critical references such as exact files, symbols, commands, and errors.</p>
+    <p class="muted">It is inserted as explicitly labelled reference context. The latest raw user message remains the only current request. Retrieved text, tool output, and prior user instructions inside the summary remain data at their original authority and sensitivity.</p>
+  </section>
+
+  <section><h2>Failure semantics</h2>
+    <ul>
+      <li>If summary generation, validation, persistence, or compare-and-swap fails, the previous active checkpoint and raw replay behavior remain unchanged.</li>
+      <li>No deterministic fallback may drop turns or replace them with “summary unavailable.”</li>
+      <li>The first release admits only normal-sensitivity source material. Private or secret material fails closed before any compactor network request until an explicit provider sensitivity policy exists.</li>
+      <li>Cancellation propagates through model generation and stops before checkpoint activation.</li>
+    </ul>
+  </section>
+
+  <section><h2>Ownership and interface</h2>
+    <p><code>WorkspaceStore</code> owns checkpoint rows and the active binding. Runtime owns eligible-turn selection and frozen context. The app composition owns the capable-model call, authority, and usage recording.</p>
+    <pre><code>compactSession(sessionId, { reason, instructions, signal })
+resolveSessionContext(sessionId, modelRoute)</code></pre>
+    <p class="muted">These are conceptual interfaces. Persistence mechanics, compare-and-swap, summary validation, and budget allocation stay behind the modules that own them.</p>
+  </section>
+
+  <section><h2>Deferred</h2><ul>
+    <li>Mid-turn or tool-pair splitting.</li>
+    <li>Multiple compression engines or provider-specific compaction settings.</li>
+    <li>A dedicated checkpoint browser or approval flow.</li>
+    <li>Automatic retry of a provider-rejected foreground turn.</li>
+    <li>Compaction that deletes, archives, or changes the visible transcript.</li>
+  </ul></section>
 
   <section><h2>Acceptance boundary</h2><ul>
     <li>Resume still renders the complete original transcript.</li>
     <li>Search still cites original authoritative rows.</li>
     <li>Only future model context changes.</li>
-    <li>The checkpoint and retained raw tail always fit the same hard context limits as an uncompacted turn plan.</li>
+    <li>The checkpoint and retained raw tail fit the effective token budget, which is strictly below the selected model's context window.</li>
+    <li>The default and configured token budgets resolve consistently through <code>config.json</code>, startup, manual compaction, automatic compaction, and turn planning.</li>
+    <li>Only complete replay-eligible turns can move behind a checkpoint.</li>
     <li>Every checkpoint can be inspected. Replacement changes only the active binding and never edits an earlier checkpoint.</li>
     <li>No summary can widen permissions or instruction priority.</li>
+    <li>A failed or cancelled compaction preserves the previous context selection exactly.</li>
+    <li>Repeated compaction consumes the previous immutable checkpoint plus newly covered work without quadratic provenance growth.</li>
   </ul></section>
 </main></body>
 </html>

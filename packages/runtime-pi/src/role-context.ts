@@ -9,6 +9,7 @@ const DEFAULT_EVIDENCE_REFS = 64;
 
 const isolatedRoleMessageNames = {
   capability_router: ["turn", "prior_conversation"],
+  session_compactor: ["compaction_input"],
   history_reranker: ["candidates"],
   signal_interpreter: ["turn", "related_history"],
   reflector: [
@@ -29,11 +30,12 @@ const isolatedRoleMessageNames = {
 
 export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPolicy {
   const foreground = role === "foreground";
+  const compactor = role === "session_compactor";
   return Object.freeze({
     policyId: foreground ? "foreground-bounded-v1" : `${role}-isolated-v1`,
-    maxMessages: DEFAULT_MAX_MESSAGES,
-    maxCharactersPerMessage: DEFAULT_MESSAGE_CHARACTERS,
-    maxTotalCharacters: DEFAULT_TOTAL_CHARACTERS,
+    maxMessages: compactor ? 1 : DEFAULT_MAX_MESSAGES,
+    maxCharactersPerMessage: compactor ? 4_000_000 : DEFAULT_MESSAGE_CHARACTERS,
+    maxTotalCharacters: compactor ? 4_000_000 : DEFAULT_TOTAL_CHARACTERS,
     maxEvidenceRefs: DEFAULT_EVIDENCE_REFS,
     maxTools: foreground ? 32 : 0,
     ...(foreground ? {} : { allowedMessageNames: isolatedRoleMessageNames[role] }),

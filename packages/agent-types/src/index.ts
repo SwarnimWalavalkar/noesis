@@ -22,6 +22,7 @@ import { z } from "zod";
 export type AgentRole =
   | "foreground"
   | "capability_router"
+  | "session_compactor"
   | "history_reranker"
   | "signal_interpreter"
   | "reflector"
@@ -128,9 +129,33 @@ export interface FrozenConversationHistoryEntry {
   readonly contentDigest: string;
 }
 
-export const MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES = 16;
-export const MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS = 12_000;
-export const MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS = 48_000;
+export interface FrozenContextCheckpoint {
+  readonly checkpointId: string;
+  readonly checkpointRef: {
+    readonly kind: "database_row";
+    readonly table: "context_checkpoints";
+    readonly rowId: string;
+  };
+  readonly summary: string;
+  readonly summaryDigest: string;
+  readonly sourceDigest: string;
+  readonly sensitivity: "normal" | "private" | "secret";
+  readonly createdAt: string;
+}
+
+export const MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES = 512;
+export const MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS = 96_000;
+export const MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS = 4_000_000;
+export const MAX_FROZEN_CONTEXT_CHECKPOINT_SUMMARY_CHARACTERS = 32_000;
+
+/**
+ * Provider-independent upper bound used before a request reaches a tokenizer-owning provider.
+ * Byte-backed subword tokenizers cannot produce more text tokens than the input has UTF-8 bytes;
+ * provider message and tool framing is reserved separately at the execution boundary.
+ */
+export function estimateInputTokens(text: string): number {
+  return Math.max(1, new TextEncoder().encode(text).byteLength);
+}
 
 /** The complete SQLite-authoritative input to one foreground execution. */
 export interface FrozenTurnPlan {
@@ -147,6 +172,12 @@ export interface FrozenTurnPlan {
   readonly selectedCapabilities: readonly FrozenCapabilitySelection[];
   /** Exact bounded SQLite-authoritative history served to this turn. Absent only on legacy plans. */
   readonly conversationHistory?: readonly FrozenConversationHistoryEntry[];
+  /** Immutable summary checkpoint served before the exact raw history tail. */
+  readonly contextCheckpoint?: FrozenContextCheckpoint;
+  /** Estimated-token budget shared by the checkpoint summary and raw history tail. */
+  readonly contextTokenBudget?: number;
+  /** Estimated-token ceiling for the complete provider request, including tools and current input. */
+  readonly requestTokenBudget?: number;
   readonly renderedSystemPrompt: string;
   readonly provider: string;
   readonly model: string;
@@ -208,6 +239,19 @@ const FrozenConversationHistoryEntrySchema = z.strictObject({
   createdAt: z.string().min(1),
   contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
 });
+const FrozenContextCheckpointSchema = z.strictObject({
+  checkpointId: z.string().min(1),
+  checkpointRef: z.strictObject({
+    kind: z.literal("database_row"),
+    table: z.literal("context_checkpoints"),
+    rowId: z.string().min(1),
+  }),
+  summary: z.string().min(1).max(MAX_FROZEN_CONTEXT_CHECKPOINT_SUMMARY_CHARACTERS),
+  summaryDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+  sourceDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+  sensitivity: z.enum(["normal", "private", "secret"]),
+  createdAt: z.string().min(1),
+});
 
 export const FrozenTurnPlanSchema = z.strictObject({
   schemaVersion: z.literal(1),
@@ -220,6 +264,9 @@ export const FrozenTurnPlanSchema = z.strictObject({
   activationRevision: z.number().int().positive(),
   selectedCapabilities: z.array(FrozenCapabilitySelectionSchema),
   conversationHistory: z.array(FrozenConversationHistoryEntrySchema).optional(),
+  contextCheckpoint: FrozenContextCheckpointSchema.optional(),
+  contextTokenBudget: z.number().int().positive().max(1_000_000).optional(),
+  requestTokenBudget: z.number().int().positive().max(1_000_000).optional(),
   renderedSystemPrompt: z.string().min(1),
   provider: z.string().min(1),
   model: z.string().min(1),
@@ -246,11 +293,25 @@ export function frozenTurnPlanDigest(plan: Omit<FrozenTurnPlan, "canonicalDigest
 
 export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
   const decoded = FrozenTurnPlanSchema.parse(value);
-  const { conversationHistory, project, workingAdjustmentId, routing, ...base } = decoded;
+  const {
+    conversationHistory,
+    contextCheckpoint,
+    contextTokenBudget,
+    requestTokenBudget,
+    project,
+    workingAdjustmentId,
+    routing,
+    ...base
+  } = decoded;
   const { learningAttribution, ...routingBase } = routing;
   const plan = Object.freeze({
     ...base,
     ...(conversationHistory === undefined ? {} : { conversationHistory }),
+    ...(contextCheckpoint === undefined
+      ? {}
+      : { contextCheckpoint: Object.freeze({ ...contextCheckpoint }) }),
+    ...(contextTokenBudget === undefined ? {} : { contextTokenBudget }),
+    ...(requestTokenBudget === undefined ? {} : { requestTokenBudget }),
     ...(project === undefined ? {} : { project: Object.freeze({ ...project }) }),
     ...(workingAdjustmentId === undefined ? {} : { workingAdjustmentId }),
     routing: Object.freeze({
@@ -295,6 +356,30 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
       throw new Error(`Frozen turn plan ${plan.planId} repeats history message ${entry.messageId}`);
     historyMessageIds.add(entry.messageId);
   }
+  if (plan.contextCheckpoint !== undefined) {
+    if (plan.contextTokenBudget === undefined)
+      throw new Error(`Frozen turn plan ${plan.planId} pins a context checkpoint without a token budget`);
+    if (plan.contextCheckpoint.checkpointRef.rowId !== plan.contextCheckpoint.checkpointId)
+      throw new Error(`Frozen turn plan ${plan.planId} has a mismatched context checkpoint reference`);
+    if (sha256(plan.contextCheckpoint.summary) !== plan.contextCheckpoint.summaryDigest)
+      throw new Error(`Frozen turn plan ${plan.planId} context checkpoint failed summary verification`);
+  }
+  if (plan.contextTokenBudget !== undefined) {
+    const estimatedContextTokens =
+      (plan.contextCheckpoint === undefined ? 0 : estimateInputTokens(plan.contextCheckpoint.summary)) +
+      (plan.conversationHistory ?? []).reduce(
+        (total, entry) => total + estimateInputTokens(entry.content),
+        0,
+      );
+    if (estimatedContextTokens > plan.contextTokenBudget)
+      throw new Error(`Frozen turn plan ${plan.planId} exceeds its context token budget`);
+  }
+  if (
+    plan.contextTokenBudget !== undefined &&
+    plan.requestTokenBudget !== undefined &&
+    plan.contextTokenBudget >= plan.requestTokenBudget
+  )
+    throw new Error(`Frozen turn plan ${plan.planId} does not reserve non-history request capacity`);
   const narrowSelections = plan.selectedCapabilities.filter(
     (selection) => selection.baseline.kind !== "genesis",
   );

@@ -27,6 +27,11 @@ export const LearningConfigSchema = z.strictObject({
 });
 export type LearningConfig = Readonly<z.infer<typeof LearningConfigSchema>>;
 
+export const ContextConfigSchema = z.strictObject({
+  tokenBudget: z.number().int().positive().max(1_000_000).optional(),
+});
+export type ContextConfig = Readonly<z.infer<typeof ContextConfigSchema>>;
+
 export const AutonomyRiskLevelSchema = z.enum(["off", "low", "medium", "high"]);
 export type AutonomyRiskLevel = z.infer<typeof AutonomyRiskLevelSchema>;
 
@@ -71,6 +76,7 @@ export const NoesisConfigSchema = z.strictObject({
   schemaVersion: z.literal(NOESIS_CONFIG_SCHEMA_VERSION),
   agent: AgentConfigSchema,
   learning: LearningConfigSchema.optional(),
+  context: ContextConfigSchema.optional(),
   autonomy: AutonomyConfigSchema.optional(),
   experiments: ExperimentDefaultsSchema.optional(),
   tools: ToolConfigSchema.optional(),
@@ -91,6 +97,7 @@ export interface ResolvedNoesisConfig {
   readonly configPath: string;
   readonly agent: ResolvedAgentConfig;
   readonly learning: Required<LearningConfig>;
+  readonly context: Required<ContextConfig>;
   readonly autonomy: Required<AutonomyConfig>;
   readonly experiments: Required<ExperimentDefaults>;
   readonly tools: ResolvedToolConfig;
@@ -105,6 +112,7 @@ export interface ConfigOverrides {
 
 export interface UserControlConfigPatch {
   readonly learning?: LearningConfig;
+  readonly context?: ContextConfig;
   readonly autonomy?: AutonomyConfig;
   readonly experiments?: ExperimentDefaults;
   readonly tools?: ToolConfig;
@@ -138,6 +146,10 @@ export const BUILT_IN_LEARNING_DEFAULTS: Required<LearningConfig> = {
   backgroundBudget: 1,
 };
 
+export const BUILT_IN_CONTEXT_DEFAULTS: Required<ContextConfig> = {
+  tokenBudget: 160_000,
+};
+
 export const BUILT_IN_AUTONOMY_DEFAULTS: Required<AutonomyConfig> = {
   riskLevel: "low",
   approval: "authority_expansion",
@@ -166,6 +178,7 @@ export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
   schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
   agent: { ...BUILT_IN_AGENT_DEFAULTS },
   learning: { ...BUILT_IN_LEARNING_DEFAULTS },
+  context: { ...BUILT_IN_CONTEXT_DEFAULTS },
   autonomy: { ...BUILT_IN_AUTONOMY_DEFAULTS },
   experiments: { ...BUILT_IN_EXPERIMENT_DEFAULTS },
   tools: { hotbar: [...BUILT_IN_TOOL_DEFAULTS.hotbar] },
@@ -288,6 +301,7 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
   const env = input.env ?? process.env;
   const file = loaded.value.config?.agent ?? {};
   const learning = loaded.value.config?.learning ?? {};
+  const context = loaded.value.config?.context ?? {};
   const autonomy = loaded.value.config?.autonomy ?? {};
   const experiments = loaded.value.config?.experiments ?? {};
   const tools = loaded.value.config?.tools ?? {};
@@ -310,6 +324,9 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
       enabled: learning.enabled ?? BUILT_IN_LEARNING_DEFAULTS.enabled,
       notifications: learning.notifications ?? BUILT_IN_LEARNING_DEFAULTS.notifications,
       backgroundBudget: learning.backgroundBudget ?? BUILT_IN_LEARNING_DEFAULTS.backgroundBudget,
+    },
+    context: {
+      tokenBudget: context.tokenBudget ?? BUILT_IN_CONTEXT_DEFAULTS.tokenBudget,
     },
     autonomy: {
       riskLevel: autonomy.riskLevel ?? BUILT_IN_AUTONOMY_DEFAULTS.riskLevel,
@@ -477,13 +494,14 @@ export async function updateUserControlConfig(
 ): Promise<NoesisConfig> {
   if (
     patch.learning === undefined &&
+    patch.context === undefined &&
     patch.autonomy === undefined &&
     patch.experiments === undefined &&
     patch.tools === undefined
   ) {
     throw new NoesisConfigError(
       noesisConfigPath(home),
-      "user control update requires learning, autonomy, experiment, or tool preferences",
+      "user control update requires context, learning, autonomy, experiment, or tool preferences",
     );
   }
   return await withConfigWriter(home, async () => {
@@ -494,6 +512,7 @@ export async function updateUserControlConfig(
     const candidate: NoesisConfig = {
       ...current,
       ...(patch.learning ? { learning: { ...current.learning, ...patch.learning } } : {}),
+      ...(patch.context ? { context: { ...current.context, ...patch.context } } : {}),
       ...(patch.autonomy ? { autonomy: { ...current.autonomy, ...patch.autonomy } } : {}),
       ...(patch.experiments ? { experiments: { ...current.experiments, ...patch.experiments } } : {}),
       ...(patch.tools ? { tools: { ...current.tools, ...patch.tools } } : {}),
