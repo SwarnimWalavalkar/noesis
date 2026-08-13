@@ -1892,17 +1892,20 @@ function createOperationalRepositories(
         const expectedFirstRetainedMessageId = expectedContextMessageIds[sourceMessageIds.length];
         if (checkpoint.firstRetainedMessageId !== expectedFirstRetainedMessageId)
           throw new Error("Context checkpoint retained tail must immediately follow its covered sources");
-        const messagePlaceholders = expectedContextMessageIds.map(() => "?").join(", ");
-        const expectedMessages = new Map(
-          db
+        const expectedMessages = new Map<string, unknown>();
+        const expectedMessageChunkSize = 500;
+        for (let start = 0; start < expectedContextMessageIds.length; start += expectedMessageChunkSize) {
+          const chunk = expectedContextMessageIds.slice(start, start + expectedMessageChunkSize);
+          const messagePlaceholders = chunk.map(() => "?").join(", ");
+          for (const row of db
             .prepare(
               `SELECT message_id, session_id, content
                FROM messages
                WHERE message_id IN (${messagePlaceholders})`,
             )
-            .all(...expectedContextMessageIds)
-            .map((row) => [requiredString(row, "message_id"), row] as const),
-        );
+            .all(...chunk))
+            expectedMessages.set(requiredString(row, "message_id"), row);
+        }
         if (
           expectedMessages.size !== expectedContextMessageIds.length ||
           [...expectedMessages.values()].some(

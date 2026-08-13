@@ -389,6 +389,42 @@ describe("WorkspaceStore", () => {
         .prepare("DELETE FROM context_checkpoints WHERE checkpoint_id = ?")
         .run(checkpoint.checkpointId),
     ).toThrow("context checkpoint is immutable");
+    expect(() =>
+      integrityDatabase
+        .prepare(
+          `INSERT OR REPLACE INTO context_checkpoints
+           SELECT * FROM context_checkpoints WHERE checkpoint_id = ?`,
+        )
+        .run(checkpoint.checkpointId),
+    ).toThrow("context checkpoint identity already exists");
+    integrityDatabase
+      .prepare(
+        `INSERT INTO messages(
+          message_id, session_id, role, content, sensitivity, created_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "context-message-appended",
+        "session-context",
+        "user",
+        "This later message must not mutate checkpoint provenance.",
+        "normal",
+        "2026-08-13T00:00:05.000Z",
+        "{}",
+      );
+    expect(() =>
+      integrityDatabase
+        .prepare(
+          `INSERT INTO context_checkpoint_sources(checkpoint_id, ordinal, message_id, content_digest)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(
+          checkpoint.checkpointId,
+          checkpoint.sources.length,
+          "context-message-appended",
+          sha256("This later message must not mutate checkpoint provenance."),
+        ),
+    ).toThrow("active context checkpoint sources are immutable");
     integrityDatabase.close();
     store.close();
 
@@ -480,6 +516,63 @@ describe("WorkspaceStore", () => {
       version: 36,
     });
     inspection.close();
+  });
+
+  test("activates a checkpoint when expected context spans multiple SQLite parameter chunks", async () => {
+    const store = await createWorkspaceStore(await temporary("context-checkpoint-chunked-context"));
+    await store.operational.sessions.put(session("session-context-chunked"));
+    const expectedContextMessageIds: string[] = [];
+    for (let index = 0; index < 501; index += 1) {
+      const messageId = `context-chunked-${String(index).padStart(3, "0")}`;
+      expectedContextMessageIds.push(messageId);
+      await store.operational.messages.put({
+        messageId,
+        sessionId: "session-context-chunked",
+        role: index % 2 === 0 ? "user" : "assistant",
+        content: `Chunked context message ${String(index)}`,
+        sensitivity: "normal",
+        createdAt: `2026-08-13T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+        metadata: Object.freeze({}),
+      });
+    }
+    const firstMessageId = expectedContextMessageIds[0];
+    const firstRetainedMessageId = expectedContextMessageIds[1];
+    if (!firstMessageId || !firstRetainedMessageId) throw new Error("Expected chunked context fixtures");
+    const sources = Object.freeze([
+      Object.freeze({
+        messageId: firstMessageId,
+        contentDigest: sha256("Chunked context message 0"),
+      }),
+    ]);
+    const checkpoint = Object.freeze({
+      checkpointId: "context-checkpoint-chunked",
+      sessionId: "session-context-chunked",
+      summary: "The oldest chunked context message was summarized.",
+      summaryDigest: sha256("The oldest chunked context message was summarized."),
+      sourceDigest: sha256(canonicalJson(sources)),
+      sources,
+      firstRetainedMessageId,
+      lastCoveredMessageId: firstMessageId,
+      tokenBudget: 160_000,
+      estimatedSummaryTokens: 12,
+      sensitivity: "normal" as const,
+      provider: "controlled",
+      model: "controlled",
+      thinkingLevel: "off" as const,
+      usage: Object.freeze({ inputTokens: 10, outputTokens: 12, totalTokens: 22, estimatedCost: 0 }),
+      createdAt: "2026-08-13T09:00:00.000Z",
+    });
+
+    await expect(
+      store.operational.contextCheckpoints.activate({
+        checkpoint,
+        expectedContextMessageIds: Object.freeze(expectedContextMessageIds),
+      }),
+    ).resolves.toMatchObject({ status: "activated" });
+    await expect(store.operational.contextCheckpoints.getActive("session-context-chunked")).resolves.toEqual(
+      checkpoint,
+    );
+    store.close();
   });
 
   test("never re-indexes history retrieval tool calls as derived evidence", async () => {
@@ -1713,7 +1806,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 38 });
+    ).toEqual({ version: 39 });
     inspection.close();
   });
 
@@ -2430,7 +2523,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(38);
+    expect(versions.at(-1)).toBe(39);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
