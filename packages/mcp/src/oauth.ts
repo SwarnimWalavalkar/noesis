@@ -94,11 +94,12 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
         typeof clientInformation.token_endpoint_auth_method === "string")
     )
       return credential;
+    const legacyClientAuthMethod = clientInformation.client_secret ? "client_secret_basic" : "none";
     return {
       ...credential,
       clientInformation: {
         ...clientInformation,
-        token_endpoint_auth_method: defaultClientAuthMethod,
+        token_endpoint_auth_method: legacyClientAuthMethod,
       },
     };
   };

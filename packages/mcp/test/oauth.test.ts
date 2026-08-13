@@ -82,7 +82,7 @@ describe("MCP OAuth", () => {
     await store.write("global:server", {
       serverUrl: "https://server.example/mcp",
       authIdentityDigest: "auth-v1",
-      clientInformation: { client_id: "client", client_secret: "incidental-secret" },
+      clientInformation: { client_id: "client" },
     });
     const provider = createMcpOAuthProvider({
       key: "global:server",
@@ -98,10 +98,39 @@ describe("MCP OAuth", () => {
     if (!clientInformation) throw new Error("Expected stored OAuth client information");
     expect(clientInformation).toMatchObject({
       client_id: "client",
-      client_secret: "incidental-secret",
       token_endpoint_auth_method: "none",
     });
     expect(selectClientAuthMethod(clientInformation, ["client_secret_basic", "none"])).toBe("none");
+  });
+
+  test("preserves the OAuth default for legacy confidential client registrations", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-mcp-oauth-legacy-confidential-client-"));
+    const store = createSecureMcpOAuthCredentialStore(mcpCredentialPath(home));
+    await store.write("global:server", {
+      serverUrl: "https://server.example/mcp",
+      authIdentityDigest: "auth-v1",
+      clientInformation: { client_id: "client", client_secret: "secret" },
+    });
+    const provider = createMcpOAuthProvider({
+      key: "global:server",
+      serverName: "server",
+      serverUrl: "https://server.example/mcp",
+      authIdentityDigest: "auth-v1",
+      redirectUrl: "http://127.0.0.1:1456/oauth/callback",
+      credentialStore: store,
+      onRedirect: () => undefined,
+    });
+
+    const clientInformation = await provider.clientInformation();
+    if (!clientInformation) throw new Error("Expected stored OAuth client information");
+    expect(clientInformation).toMatchObject({
+      client_id: "client",
+      client_secret: "secret",
+      token_endpoint_auth_method: "client_secret_basic",
+    });
+    expect(selectClientAuthMethod(clientInformation, ["none", "client_secret_basic"])).toBe(
+      "client_secret_basic",
+    );
   });
 
   test("fails fast when a configured OAuth client secret environment variable is missing", () => {
