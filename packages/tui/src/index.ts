@@ -12,8 +12,9 @@ import { tuiActionForAgentEvent } from "./agent-event.ts";
 import { isExclusiveSlashCommand, runSlashCommand, steerFeedback } from "./commands.ts";
 import { editTextInExternalEditor } from "./external-editor.ts";
 import { learningDiagnosticNotice, reconcileSettledTurnPresentation } from "./learning-presentation.ts";
-import { boundedInspectorText, streamingFrameDelay } from "./lifecycle-utils.ts";
+import { boundedInspectorText } from "./lifecycle-utils.ts";
 import { createTuiMcpOrchestration } from "./mcp.ts";
+import { createPromptSubmissionQueue } from "./prompt-submission-queue.ts";
 import {
   createHeaderView,
   createHelpView,
@@ -45,6 +46,7 @@ import {
   interactionViewFromSnapshot,
   timelineActions,
 } from "./state.ts";
+import { createStreamDeltaBuffer } from "./stream-delta-buffer.ts";
 import { ANSI, safeTerminalText, shouldUseColor, styled } from "./theme.ts";
 
 export * from "./action-summary.ts";
@@ -141,47 +143,30 @@ export async function startNoesisTui(
   const helpView = createHelpView(view, () => terminal.rows);
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
   enrichEditorSkills(editor, runtime.listSkills, () => phase !== "stopped");
-  let activeExclusiveCommand: Promise<boolean> | undefined;
+  const promptSubmissionQueue = createPromptSubmissionQueue();
   let externalEditorActive = false;
   let turnGeneration = 0;
   let inspectorGeneration = 0;
   type ActiveTurnToken = Readonly<{ generation: number; trailId: string; turnId: string }>;
   let activeTurnToken: ActiveTurnToken | undefined;
-  let pendingStream: { readonly token: ActiveTurnToken; readonly text: string } | undefined;
-  let streamRenderTimer: NodeJS.Timeout | undefined;
-  let streamRenderTimerToken: ActiveTurnToken | undefined;
   const isCurrentTurn = (token: ActiveTurnToken): boolean =>
     phase === "main" &&
     activeTurnToken === token &&
     token.generation === turnGeneration &&
     view.state.trailId === token.trailId;
-  const flushStreamDelta = (token: ActiveTurnToken): void => {
-    if (streamRenderTimer && streamRenderTimerToken !== token) return;
-    if (streamRenderTimer) clearTimeout(streamRenderTimer);
-    streamRenderTimer = undefined;
-    streamRenderTimerToken = undefined;
-    if (!isCurrentTurn(token) || pendingStream?.token !== token || !pendingStream.text) return;
-    const text = pendingStream.text;
-    pendingStream = undefined;
-    view.dispatch({ type: "stream-delta", text });
-    tui.requestRender();
-  };
-  const queueStreamDelta = (token: ActiveTurnToken, text: string): void => {
-    if (!isCurrentTurn(token) || !text) return;
-    pendingStream = {
-      token,
-      text: `${pendingStream?.token === token ? pendingStream.text : ""}${text}`,
-    };
-    if (streamRenderTimer) return;
-    const currentEntry = view.state.timeline.at(-1);
-    const activeCharacters =
-      currentEntry?.kind === "message" && currentEntry.role === "assistant" ? currentEntry.text.length : 0;
-    streamRenderTimer = setTimeout(
-      () => flushStreamDelta(token),
-      streamingFrameDelay(activeCharacters, pendingStream.text.length),
-    );
-    streamRenderTimerToken = token;
-  };
+  const streamDeltas = createStreamDeltaBuffer<ActiveTurnToken>({
+    isCurrent: isCurrentTurn,
+    activeCharacters: () => {
+      const currentEntry = view.state.timeline.at(-1);
+      return currentEntry?.kind === "message" && currentEntry.role === "assistant"
+        ? currentEntry.text.length
+        : 0;
+    },
+    publish: (text) => {
+      view.dispatch({ type: "stream-delta", text });
+      tui.requestRender();
+    },
+  });
   let removeExitInputListener = (): void => undefined;
   let terminalStopped = false;
   let cancelPicker: (() => void) | undefined;
@@ -203,10 +188,8 @@ export async function startNoesisTui(
       inspectorHandle?.hide();
       inspectorHandle = undefined;
       await mcp.dispose();
-      if (streamRenderTimer) clearTimeout(streamRenderTimer);
-      streamRenderTimer = undefined;
-      streamRenderTimerToken = undefined;
-      pendingStream = undefined;
+      streamDeltas.clear();
+      promptSubmissionQueue.clear();
       editor.disableSubmit = true;
       editor.onSubmit = (): void => undefined;
       removeExitInputListener();
@@ -219,7 +202,7 @@ export async function startNoesisTui(
         }
       }
       const trailId = view.state.trailId;
-      const exclusiveCommand = activeExclusiveCommand;
+      const exclusiveCommand = promptSubmissionQueue.activeWork();
       let shutdownFailure: { readonly error: unknown } | undefined;
       if (trailId && view.state.interaction.phase !== "idle") {
         const abortAndSettle = runtime
@@ -408,7 +391,7 @@ export async function startNoesisTui(
       return;
     }
     if (interactionEvent.type === "steer-delivered") {
-      if (activeTurnToken) flushStreamDelta(activeTurnToken);
+      if (activeTurnToken) streamDeltas.flush(activeTurnToken);
       view.dispatch({ type: "steer-delivered", text: interactionEvent.text });
       tui.requestRender();
       return;
@@ -416,7 +399,7 @@ export async function startNoesisTui(
     if (interactionEvent.type === "turn-settled") {
       const token = activeTurnToken;
       if (token?.turnId === interactionEvent.turnId) {
-        flushStreamDelta(token);
+        streamDeltas.flush(token);
         activeTurnToken = undefined;
       }
       if (interactionEvent.outcome === "aborted") {
@@ -437,10 +420,10 @@ export async function startNoesisTui(
     if (!token || token.turnId !== interactionEvent.turnId || !isCurrentTurn(token)) return;
     const event = interactionEvent.event;
     if (event.type === "delta") {
-      queueStreamDelta(token, event.text);
+      streamDeltas.queue(token, event.text);
       return;
     }
-    flushStreamDelta(token);
+    streamDeltas.flush(token);
     const action = tuiActionForAgentEvent(event);
     if (action) view.dispatch(action);
     tui.requestRender();
@@ -577,10 +560,14 @@ export async function startNoesisTui(
       void shutdown();
       return;
     }
-    if (activeExclusiveCommand) {
+    const submissionGate = promptSubmissionQueue.gate(text);
+    if (submissionGate !== "ready") {
       view.dispatch({
         type: "system-message",
-        text: "A command is active. Wait for it to finish before submitting another command or prompt.",
+        text:
+          submissionGate === "queued"
+            ? "Message queued."
+            : "A command is active. Wait for it to finish before submitting another command.",
       });
       tui.requestRender();
       return;
@@ -599,7 +586,8 @@ export async function startNoesisTui(
       });
       tui.requestRender();
     };
-    void (async () => {
+    const exclusiveSubmission = isExclusiveSlashCommand(normalizedInput);
+    const submissionWork = (async () => {
       if (normalizedInput === "/abort") {
         const result = await interruptActiveTurn();
         if (result.effect === "idle") view.dispatch({ type: "system-message", text: "No turn is active." });
@@ -640,7 +628,6 @@ export async function startNoesisTui(
       }
       let handled = false;
       if (normalizedInput === "?" || normalizedInput.startsWith("/")) {
-        const exclusiveCommand = isExclusiveSlashCommand(normalizedInput);
         const commandWork = runSlashCommand(normalizedInput, {
           runtime,
           trailId: submittedTrailId,
@@ -655,12 +642,7 @@ export async function startNoesisTui(
           },
           openMcpManager: mcp.openManager,
         });
-        if (exclusiveCommand) activeExclusiveCommand = commandWork;
-        try {
-          handled = await commandWork;
-        } finally {
-          if (activeExclusiveCommand === commandWork) activeExclusiveCommand = undefined;
-        }
+        handled = await commandWork;
       }
       if (handled) {
         const selectedTrailId = ownedTrailId;
@@ -682,10 +664,18 @@ export async function startNoesisTui(
       }
 
       await interact({ type: "submit", text });
-    })().catch((error: unknown) => {
-      if (!isCurrentSubmission()) return;
-      reportFailure(error);
-    });
+    })();
+    const reportSubmissionFailure = (error: unknown): void => {
+      if (isCurrentSubmission()) reportFailure(error);
+    };
+    if (exclusiveSubmission)
+      promptSubmissionQueue.runExclusive(submissionWork, {
+        canDrain: () => phase === "main",
+        submit: async (queuedText) => interact({ type: "submit", text: queuedText }).then(() => undefined),
+        onCommandFailure: reportSubmissionFailure,
+        onPromptFailure: reportFailure,
+      });
+    else void submissionWork.catch(reportSubmissionFailure);
   };
   tui.addChild(root);
   const loadTranscript = (trail: TrailState) => runtime.getTranscript(trail.trailId);

@@ -25,7 +25,7 @@ export const HELP_LINES = [
   "/skill NAME inspects · /skill:NAME [instructions] invokes command-name collisions",
   "/script NAME · /workflow NAME · /run ID",
   "/fork · /compact [FOCUS] · /steer [MESSAGE] · /queue resume",
-  "enter queues during work · alt+↑ edits newest queued · esc interrupts",
+  "enter queues behind active turns and commands · alt+↑ edits newest queued · esc interrupts",
   "shift+enter newline · ctrl+g external editor",
   "ctrl+o inspect runs · space expand · enter open the run inspector",
   "/quit · learning, experiments, activation, and revert run ambiently",

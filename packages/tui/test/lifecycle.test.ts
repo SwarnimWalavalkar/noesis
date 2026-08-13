@@ -387,7 +387,7 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
-  test("serializes slash commands with prompts and other commands", async () => {
+  test("queues prompts behind an exclusive command and drains them in FIFO order", async () => {
     let releaseCompact: (() => void) | undefined;
     const compactGate = new Promise<void>((resolve) => {
       releaseCompact = resolve;
@@ -425,15 +425,16 @@ describe("Noesis TUI lifecycle", () => {
     terminal.type("/compact preserve the debugging decisions\r");
     await vi.waitFor(() => expect(compactStarted).toBe(true));
     expect(compactFocus).toBe("preserve the debugging decisions");
-    terminal.type("do not overlap\r");
+    terminal.type("first queued prompt\r");
+    terminal.type("second queued prompt\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("Message queued."));
+    terminal.type("/fork\r");
     await vi.waitFor(() => expect(terminal.output).toContain("A command is active."));
     expect(prompts).toEqual([]);
 
     releaseCompact?.();
-    await vi.waitFor(() => expect(terminal.output).toContain("Context compacted"));
-    terminal.type("after compact\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("reply:after compact"));
-    expect(prompts).toEqual(["after compact"]);
+    await vi.waitFor(() => expect(prompts).toEqual(["first queued prompt", "second queued prompt"]));
+    await vi.waitFor(() => expect(terminal.output).toContain("reply:second queued prompt"));
 
     terminal.type("/quit\n");
     await running;

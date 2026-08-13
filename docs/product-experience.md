@@ -31,6 +31,8 @@ The approach can change during a session. A build can expose something the user 
 
 Long sessions may compact older completed turns into a continuation checkpoint while keeping recent turns raw. Compaction never deletes or rewrites the visible transcript. Resume and search still use the complete original conversation; only future model context becomes smaller.
 
+Prompts submitted while a turn or session-changing command is active are queued and delivered in order. Commands that change the session remain serialized so later prompts always reach the resulting session.
+
 ## Selective learning
 
 ### A contract for lasting learning
