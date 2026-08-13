@@ -276,7 +276,14 @@ describe("atomic capability registry", () => {
           experiment?.experimentId === experimentId ? experiment : undefined,
         listExperiments: async (request) => {
           const current = experiment;
-          if (!current || (request.status !== undefined && current.status !== request.status)) return [];
+          if (
+            !current ||
+            (request.status !== undefined && current.status !== request.status) ||
+            (request.sourceAdjustmentIds !== undefined &&
+              (current.sourceAdjustmentId === undefined ||
+                !request.sourceAdjustmentIds.includes(current.sourceAdjustmentId)))
+          )
+            return [];
           return [current].slice(0, request.limit);
         },
         putExperiment: async (value) => row("experiments", value.experimentId),

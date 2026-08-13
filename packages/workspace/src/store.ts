@@ -3970,11 +3970,26 @@ function createResearchRepositories(
       ) => {
         if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 1_000)
           throw new Error("Experiment list limit must be an integer between 1 and 1000");
-        const rows = request.status
-          ? db
-              .prepare("SELECT data_json FROM experiments WHERE status = ? ORDER BY experiment_id LIMIT ?")
-              .all(request.status, request.limit)
-          : db.prepare("SELECT data_json FROM experiments ORDER BY experiment_id LIMIT ?").all(request.limit);
+        const clauses: string[] = [];
+        const values: Array<string | number> = [];
+        if (request.status !== undefined) {
+          clauses.push("status = ?");
+          values.push(request.status);
+        }
+        if (request.sourceAdjustmentIds !== undefined) {
+          const adjustmentIds = z.array(z.string().min(1)).max(1_000).parse(request.sourceAdjustmentIds);
+          if (adjustmentIds.length === 0) clauses.push("0");
+          else {
+            clauses.push(
+              `json_extract(data_json, '$.sourceAdjustmentId') IN (${adjustmentIds.map(() => "?").join(", ")})`,
+            );
+            values.push(...adjustmentIds);
+          }
+        }
+        const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
+        const rows = db
+          .prepare(`SELECT data_json FROM experiments${where} ORDER BY experiment_id LIMIT ?`)
+          .all(...values, request.limit);
         return rows.map((row) => {
           const experiment = decodeExperiment(row);
           if (!experiment) throw new Error("Experiment row is missing canonical data");

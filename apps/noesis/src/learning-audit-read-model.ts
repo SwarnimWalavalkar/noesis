@@ -3,9 +3,9 @@ import {
   type CapabilityRevision,
   type CapabilityRevisionRef,
   canonicalJson,
-  type DurableJobListCursor,
   type DurableJobRecord,
   type EvidenceRef,
+  type Experiment,
   sha256,
   toJsonValue,
 } from "@noesis/domain";
@@ -108,20 +108,89 @@ function stringField(value: unknown, key: string): string | undefined {
   return typeof field === "string" && field.length > 0 ? field : undefined;
 }
 
-async function listAllJobs(workspace: NoesisWorkspaceStore): Promise<readonly DurableJobRecord[]> {
-  const jobs: DurableJobRecord[] = [];
-  let after: DurableJobListCursor | undefined;
-  while (jobs.length < AUDIT_LIMIT) {
-    const page = await workspace.jobs.listPage({
-      limit: AUDIT_LIMIT - jobs.length,
-      ...(after ? { after } : {}),
-    });
-    jobs.push(...page.records);
-    if (page.exhausted || jobs.length === AUDIT_LIMIT) return Object.freeze(jobs);
-    if (!page.nextCursor) throw new Error("Learning audit job page is missing its cursor");
-    after = page.nextCursor;
+async function listProjectReflectionJobs(
+  workspace: NoesisWorkspaceStore,
+  projectId: string,
+): Promise<readonly DurableJobRecord[]> {
+  return await workspace.jobs.list({
+    kind: "runtime.reflect_turn",
+    payloadProjectId: projectId,
+    limit: AUDIT_LIMIT,
+  });
+}
+
+async function listExperimentJobs(
+  workspace: NoesisWorkspaceStore,
+  experimentIds: readonly string[],
+): Promise<readonly DurableJobRecord[]> {
+  const chunks: string[][] = [];
+  for (let index = 0; index < experimentIds.length; index += 250)
+    chunks.push(experimentIds.slice(index, index + 250));
+  const jobs = (
+    await Promise.all(
+      chunks.map((payloadExperimentIds) => workspace.jobs.list({ payloadExperimentIds, limit: AUDIT_LIMIT })),
+    )
+  ).flat();
+  return Object.freeze(
+    [...new Map(jobs.map((job) => [job.jobId, job] as const)).values()]
+      .sort(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) || right.jobId.localeCompare(left.jobId),
+      )
+      .slice(0, AUDIT_LIMIT),
+  );
+}
+
+async function listSourceSessionJobs(
+  workspace: NoesisWorkspaceStore,
+  sessionIds: readonly string[],
+): Promise<readonly DurableJobRecord[]> {
+  const chunks: string[][] = [];
+  for (let index = 0; index < sessionIds.length; index += 250)
+    chunks.push(sessionIds.slice(index, index + 250));
+  const jobs = (
+    await Promise.all(
+      chunks.map((payloadSourceSessionIds) =>
+        workspace.jobs.list({ payloadSourceSessionIds, limit: AUDIT_LIMIT }),
+      ),
+    )
+  ).flat();
+  return Object.freeze([...new Map(jobs.map((job) => [job.jobId, job] as const)).values()]);
+}
+
+async function resolveProjectExperiments(
+  workspace: NoesisWorkspaceStore,
+  originJobs: readonly DurableJobRecord[],
+  adjustments: Awaited<ReturnType<NoesisWorkspaceStore["workingAdjustments"]["list"]>>,
+): Promise<readonly Experiment[]> {
+  const adjustmentIds = adjustments.map((adjustment) => adjustment.adjustmentId);
+  const adjustmentExperiments =
+    adjustmentIds.length === 0
+      ? []
+      : await workspace.research.experiments.listExperiments({
+          sourceAdjustmentIds: adjustmentIds,
+          limit: AUDIT_LIMIT,
+        });
+  const knownById = new Map(
+    adjustmentExperiments.map((experiment) => [experiment.experimentId, experiment] as const),
+  );
+  const queue = [
+    ...new Set([
+      ...originJobs.map(jobExperimentId).filter(defined),
+      ...adjustmentExperiments.map((experiment) => experiment.experimentId),
+    ]),
+  ];
+  const selected = new Map<string, Experiment>();
+  for (let index = 0; index < queue.length && selected.size < AUDIT_LIMIT; index += 1) {
+    const experimentId = queue[index];
+    if (experimentId === undefined || selected.has(experimentId)) continue;
+    const experiment =
+      knownById.get(experimentId) ?? (await workspace.research.experiments.getExperiment(experimentId));
+    if (experiment === undefined) continue;
+    selected.set(experimentId, experiment);
+    if (experiment.followUpExperimentId !== undefined) queue.push(experiment.followUpExperimentId);
   }
-  return Object.freeze(jobs);
+  return Object.freeze([...selected.values()]);
 }
 
 function jobExperimentId(job: DurableJobRecord): string | undefined {
@@ -246,16 +315,14 @@ export async function loadLearningAuditSnapshot(
   sessionId: string,
 ): Promise<TuiLearningAuditSnapshot> {
   const [
-    allJobs,
-    allExperiments,
+    reflectionJobs,
     adjustments,
     criteriaResult,
     activation,
     allActivationOperations,
     allFeedbackSignals,
   ] = await Promise.all([
-    listAllJobs(source.workspace),
-    source.workspace.research.experiments.listExperiments({ limit: AUDIT_LIMIT }),
+    listProjectReflectionJobs(source.workspace, source.projectId),
     source.workspace.workingAdjustments.list({ projectId: source.projectId, limit: AUDIT_LIMIT }),
     source.criteria.list(),
     source.activations.current(),
@@ -263,55 +330,20 @@ export async function loadLearningAuditSnapshot(
     source.workspace.research.feedbackSignals.listFeedbackSignals({ limit: AUDIT_LIMIT }),
   ]);
   if (!criteriaResult.ok) throw new Error(criteriaResult.error.message);
-  const projectSessionIds = new Set(
-    allJobs
-      .filter((job) => jobProjectId(job) === source.projectId)
-      .map(jobSessionId)
-      .filter(defined),
-  );
-  const adjustmentIds = new Set(adjustments.map((adjustment) => adjustment.adjustmentId));
-  const projectJobExperimentIds = new Set(
-    allJobs
-      .filter(
-        (job) =>
-          jobProjectId(job) === source.projectId ||
-          (jobSessionId(job) !== undefined && projectSessionIds.has(jobSessionId(job) ?? "")),
+  const projectSessionIds = [...new Set(reflectionJobs.map(jobSessionId).filter(defined))];
+  const sourceSessionJobs = await listSourceSessionJobs(source.workspace, projectSessionIds);
+  const originJobs = [...reflectionJobs, ...sourceSessionJobs];
+  const experiments = await resolveProjectExperiments(source.workspace, originJobs, adjustments);
+  const experimentIds = new Set(experiments.map((experiment) => experiment.experimentId));
+  const experimentJobs = await listExperimentJobs(source.workspace, [...experimentIds]);
+  const jobs = Object.freeze(
+    [...new Map([...originJobs, ...experimentJobs].map((job) => [job.jobId, job] as const)).values()]
+      .sort(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) || right.jobId.localeCompare(left.jobId),
       )
-      .map(jobExperimentId)
-      .filter(defined),
+      .slice(0, AUDIT_LIMIT),
   );
-  const experimentIds = new Set(
-    allExperiments
-      .filter(
-        (experiment) =>
-          projectJobExperimentIds.has(experiment.experimentId) ||
-          (experiment.sourceAdjustmentId !== undefined && adjustmentIds.has(experiment.sourceAdjustmentId)),
-      )
-      .map((experiment) => experiment.experimentId),
-  );
-  const followUpByExperimentId = new Map(
-    allExperiments
-      .filter((experiment) => experiment.followUpExperimentId !== undefined)
-      .map((experiment) => [experiment.experimentId, experiment.followUpExperimentId] as const),
-  );
-  const lineageQueue = [...experimentIds];
-  for (let index = 0; index < lineageQueue.length; index += 1) {
-    const followUpExperimentId = followUpByExperimentId.get(lineageQueue[index] ?? "");
-    if (followUpExperimentId === undefined || experimentIds.has(followUpExperimentId)) continue;
-    experimentIds.add(followUpExperimentId);
-    lineageQueue.push(followUpExperimentId);
-  }
-  const experiments = allExperiments.filter((experiment) => experimentIds.has(experiment.experimentId));
-  const jobs = allJobs.filter((job) => {
-    const jobProject = jobProjectId(job);
-    const jobSession = jobSessionId(job);
-    const experimentId = jobExperimentId(job);
-    return (
-      jobProject === source.projectId ||
-      (jobSession !== undefined && projectSessionIds.has(jobSession)) ||
-      (experimentId !== undefined && experimentIds.has(experimentId))
-    );
-  });
   const activationOperations = allActivationOperations.filter((operation) =>
     experimentIds.has(operation.binding.experimentId),
   );

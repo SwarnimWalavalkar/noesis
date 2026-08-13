@@ -220,6 +220,21 @@ export function createDurableJobStore(
       clauses.push("json_extract(payload_json, '$.turn.sessionId') = ?");
       values.push(request.payloadSessionId);
     }
+    if (request.payloadSourceSessionIds !== undefined) {
+      const sessionIds = z.array(z.string().min(1)).max(250).parse(request.payloadSourceSessionIds);
+      if (sessionIds.length === 0) clauses.push("0");
+      else {
+        clauses.push(
+          `json_extract(payload_json, '$.sourceSessionId') IN (${sessionIds.map(() => "?").join(", ")})`,
+        );
+        values.push(...sessionIds);
+      }
+    }
+    if (request.payloadProjectId !== undefined) {
+      z.string().min(1).parse(request.payloadProjectId);
+      clauses.push("json_extract(payload_json, '$.turn.project.projectId') = ?");
+      values.push(request.payloadProjectId);
+    }
     if (request.observedSessionId !== undefined) {
       z.string().min(1).parse(request.observedSessionId);
       clauses.push(

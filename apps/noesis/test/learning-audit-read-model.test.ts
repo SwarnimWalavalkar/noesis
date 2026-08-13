@@ -20,6 +20,21 @@ describe("learning audit read model", () => {
       Object.freeze({ projectId: "project-a", root: "/workspace/a" }),
       Object.freeze({ projectId: "project-b", root: "/workspace/b" }),
     ] as const;
+    for (let index = 0; index < 1_001; index += 1) {
+      const jobId = `unrelated-${String(index).padStart(4, "0")}`;
+      await workspace.jobs.enqueue({
+        jobId,
+        kind: "fixture.unrelated",
+        payload: Object.freeze({}),
+        payloadRefs: Object.freeze([]),
+        operationId: `operation-${jobId}`,
+        idempotencyKey: `idempotency-${jobId}`,
+        notBefore: new Date(Date.UTC(2026, 7, 13, 0, 0, 0, index)).toISOString(),
+        maxAttempts: 1,
+        estimatedCost: 0,
+        budget: 0,
+      });
+    }
     for (const project of projects) {
       const sessionId = `session-${project.projectId}`;
       await workspace.operational.sessions.put({
@@ -136,5 +151,5 @@ describe("learning audit read model", () => {
     expect(Object.hasOwn(privateSignal ?? {}, "raw")).toBe(false);
     expect(Object.hasOwn(privateSignal ?? {}, "sensitivity")).toBe(false);
     workspace.close();
-  });
+  }, 30_000);
 });

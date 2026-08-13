@@ -225,6 +225,7 @@ export interface ExperimentStorePort {
   readonly getExperiment: (experimentId: string) => Promise<Experiment | undefined>;
   readonly listExperiments: (request: {
     readonly status?: Experiment["status"];
+    readonly sourceAdjustmentIds?: readonly string[];
     readonly limit: number;
   }) => Promise<readonly Experiment[]>;
   readonly putExperiment: (experiment: Experiment) => Promise<DatabaseRowRef<"experiments">>;
@@ -400,6 +401,10 @@ export interface DurableJobListRequest {
   readonly after?: DurableJobListCursor;
   /** Exact reflection-session selector over the authoritative JSON payload. */
   readonly payloadSessionId?: string;
+  /** Exact source-session selector for authoring and preflight payloads. */
+  readonly payloadSourceSessionIds?: readonly string[];
+  /** Exact reflection-project selector over the authoritative JSON payload. */
+  readonly payloadProjectId?: string;
   /** Exact session selector over authoritative many-to-one job observations. */
   readonly observedSessionId?: string;
   /** Exact experiment selector for authoring and preflight payloads. */

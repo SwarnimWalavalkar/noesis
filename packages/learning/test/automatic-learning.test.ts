@@ -523,7 +523,13 @@ function createExperimentState() {
     listExperiments: async (request: Parameters<ExperimentStorePort["listExperiments"]>[0]) =>
       Object.freeze(
         experiments
-          .filter((experiment) => request.status === undefined || experiment.status === request.status)
+          .filter(
+            (experiment) =>
+              (request.status === undefined || experiment.status === request.status) &&
+              (request.sourceAdjustmentIds === undefined ||
+                (experiment.sourceAdjustmentId !== undefined &&
+                  request.sourceAdjustmentIds.includes(experiment.sourceAdjustmentId))),
+          )
           .slice(0, request.limit),
       ),
     putExperiment: async (experiment: Experiment) => {
