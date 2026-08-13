@@ -434,6 +434,14 @@ describe("WorkspaceStore", () => {
         )
         .run(checkpoint.checkpointId),
     ).toThrow("context checkpoint identity already exists");
+    expect(() =>
+      integrityDatabase
+        .prepare(
+          `INSERT OR REPLACE INTO context_checkpoint_seals(checkpoint_id, sealed_at)
+           VALUES (?, ?)`,
+        )
+        .run(checkpoint.checkpointId, "2026-08-13T00:00:07.000Z"),
+    ).toThrow("context checkpoint seal identity already exists");
     integrityDatabase
       .prepare(
         `INSERT INTO messages(
@@ -1846,7 +1854,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 40 });
+    ).toEqual({ version: 41 });
     inspection.close();
   });
 
@@ -2563,7 +2571,7 @@ describe("WorkspaceStore", () => {
     ).toThrow(/action sequence is required/iu);
     database.close();
 
-    expect(versions.at(-1)).toBe(40);
+    expect(versions.at(-1)).toBe(41);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
