@@ -21,10 +21,14 @@ const DiscoverySchema = z.looseObject({
   resourceMetadata: OAuthProtectedResourceMetadataSchema.optional(),
   resourceMetadataUrl: z.string().optional(),
 });
+const StoredOAuthClientInformationSchema = z.union([
+  OAuthClientInformationFullSchema,
+  OAuthClientInformationSchema.extend({ token_endpoint_auth_method: z.string().optional() }),
+]);
 const CredentialSchema = z.strictObject({
   serverUrl: z.url(),
   authIdentityDigest: z.string().min(1).optional(),
-  clientInformation: z.union([OAuthClientInformationSchema, OAuthClientInformationFullSchema]).optional(),
+  clientInformation: StoredOAuthClientInformationSchema.optional(),
   tokens: OAuthTokensSchema.optional(),
   codeVerifier: z.string().min(1).optional(),
   state: z.string().min(1).optional(),

@@ -117,16 +117,28 @@ async function unauthorizedOAuthManager(callbackPort: number) {
       oauth: { redirectUri: `http://127.0.0.1:${String(callbackPort)}/oauth/callback` },
     },
   });
+  let credential: McpOAuthCredential | undefined = {
+    serverUrl: "https://example.test/mcp",
+    state: "controlled-state",
+  };
   return createMcpHostManager({
     home,
     projectDirectory: root,
     config: await loadMcpConfig({ home, projectDirectory: root }),
     credentials: {
-      read: async () => undefined,
-      write: async () => undefined,
-      update: async () => undefined,
-      delete: async () => undefined,
-      deleteIf: async () => undefined,
+      read: async () => credential,
+      write: async (_key, next) => {
+        credential = next;
+      },
+      update: async (_key, update) => {
+        credential = update(credential);
+      },
+      delete: async () => {
+        credential = undefined;
+      },
+      deleteIf: async (_key, predicate) => {
+        if (predicate(credential)) credential = undefined;
+      },
     },
     handlers: {
       connect: async () => {
@@ -192,6 +204,30 @@ describe("remote MCP transports", () => {
 
     await manager.close();
     await expect(second).rejects.toThrow("MCP host closed during OAuth authentication");
+  });
+
+  test("reports callback success only after the token exchange succeeds", async () => {
+    const callbackPort = await availablePort();
+    const manager = await unauthorizedOAuthManager(callbackPort);
+    const finishAuth = vi
+      .spyOn(StreamableHTTPClientTransport.prototype, "finishAuth")
+      .mockRejectedValue(new Error("controlled token exchange failure"));
+    const authentication = manager.authenticate("remote", { timeout: 30_000 });
+    void authentication.catch(() => undefined);
+    try {
+      await vi.waitFor(async () => {
+        expect((await fetch(`http://127.0.0.1:${String(callbackPort)}/not-the-callback`)).status).toBe(404);
+      });
+      const callback = await fetch(
+        `http://127.0.0.1:${String(callbackPort)}/oauth/callback?code=controlled-code&state=controlled-state`,
+      );
+      expect(callback.status).toBe(400);
+      expect(await callback.text()).toContain("Authentication failed");
+      await expect(authentication).rejects.toThrow("controlled token exchange failure");
+    } finally {
+      finishAuth.mockRestore();
+      await manager.close();
+    }
   });
 
   test("serves an accepted OAuth callback over IPv6 loopback", async () => {

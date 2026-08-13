@@ -1329,8 +1329,19 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     try {
       let callbackTimer: NodeJS.Timeout | undefined;
       let abortCallback: (() => void) | undefined;
+      let callbackAuthorization:
+        | Readonly<{
+            code: string;
+            complete: (succeeded: boolean) => void;
+          }>
+        | undefined;
       const listener = createServer();
-      const callback = new Promise<string>((resolve, reject) => {
+      const callback = new Promise<
+        Readonly<{
+          code: string;
+          complete: (succeeded: boolean) => void;
+        }>
+      >((resolve, reject) => {
         listener.on("request", (request, response) => {
           const requestUrl = new URL(request.url ?? "/", redirectUrl.origin);
           if (requestUrl.pathname !== redirectUrl.pathname) {
@@ -1362,12 +1373,24 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
               }
               if (error) throw new Error(`MCP OAuth failed: ${error}`);
               if (!code) throw new Error("MCP OAuth callback did not include an authorization code");
-              response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-              response.end(
-                "<!doctype html><title>Noesis MCP connected</title><h1>Authentication successful</h1><p>You can close this window and return to Noesis.</p>",
-              );
-              resolve(code);
-              listener.close();
+              let completed = false;
+              callbackAuthorization = {
+                code,
+                complete: (succeeded) => {
+                  if (completed) return;
+                  completed = true;
+                  response.writeHead(succeeded ? 200 : 400, {
+                    "content-type": "text/html; charset=utf-8",
+                  });
+                  response.end(
+                    succeeded
+                      ? "<!doctype html><title>Noesis MCP connected</title><h1>Authentication successful</h1><p>You can close this window and return to Noesis.</p>"
+                      : "<!doctype html><title>Noesis MCP authentication failed</title><h1>Authentication failed</h1><p>Return to Noesis for details and try again.</p>",
+                  );
+                  listener.close();
+                },
+              };
+              resolve(callbackAuthorization);
             })
             .catch((cause: unknown) => {
               response.writeHead(400).end("Authentication failed. Return to Noesis for details.");
@@ -1425,11 +1448,20 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       try {
         await reconnect(name);
         const status = connections.get(name)?.status;
-        if (status === "connected") return;
+        if (status === "connected") {
+          callbackAuthorization?.complete(true);
+          return;
+        }
         if (status !== "auth_required")
           throw new Error(`MCP server ${name} could not start OAuth authentication (${status ?? "missing"})`);
-        const code = await callback;
-        await finishAuthenticationFor(name, code, authentication);
+        const authorization = await callback;
+        try {
+          await finishAuthenticationFor(name, authorization.code, authentication);
+          authorization.complete(true);
+        } catch (error) {
+          authorization.complete(false);
+          throw error;
+        }
       } finally {
         if (callbackTimer) clearTimeout(callbackTimer);
         if (abortCallback) authenticationController.signal.removeEventListener("abort", abortCallback);

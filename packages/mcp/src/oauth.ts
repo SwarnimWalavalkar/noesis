@@ -9,12 +9,15 @@ import type { McpOAuthConfig } from "./config.ts";
 export interface McpOAuthCredential {
   readonly serverUrl: string;
   readonly authIdentityDigest?: string;
-  readonly clientInformation?: OAuthClientInformationMixed | undefined;
+  readonly clientInformation?: McpOAuthClientInformation | undefined;
   readonly tokens?: OAuthTokens | undefined;
   readonly codeVerifier?: string | undefined;
   readonly state?: string | undefined;
   readonly discovery?: OAuthDiscoveryState | undefined;
 }
+
+export type McpOAuthClientInformation = OAuthClientInformationMixed &
+  Readonly<{ token_endpoint_auth_method?: string | undefined }>;
 
 /**
  * Protected storage port. Runtime composition supplies the same filesystem-hardening
@@ -76,15 +79,32 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
       );
     }
   }
+  const defaultClientAuthMethod = input.config?.clientSecretEnvironment ? "client_secret_basic" : "none";
   const loadCredential = async (): Promise<McpOAuthCredential | undefined> => {
     const credential = await input.credentialStore.read(input.key);
-    return credential?.serverUrl === input.serverUrl &&
-      credential.authIdentityDigest === input.authIdentityDigest
-      ? credential
-      : undefined;
+    if (
+      credential?.serverUrl !== input.serverUrl ||
+      credential.authIdentityDigest !== input.authIdentityDigest
+    )
+      return undefined;
+    const clientInformation = credential.clientInformation;
+    if (
+      !clientInformation ||
+      ("token_endpoint_auth_method" in clientInformation &&
+        typeof clientInformation.token_endpoint_auth_method === "string")
+    )
+      return credential;
+    return {
+      ...credential,
+      clientInformation: {
+        ...clientInformation,
+        token_endpoint_auth_method: defaultClientAuthMethod,
+      },
+    };
   };
   const metadata: OAuthClientMetadata = {
     redirect_uris: [input.redirectUrl],
+    token_endpoint_auth_method: defaultClientAuthMethod,
     client_name: "Noesis",
     software_id: "noesis",
     software_version: "0.1.0",
@@ -93,6 +113,7 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
   const configuredClient = input.config?.clientId
     ? {
         client_id: input.config.clientId,
+        token_endpoint_auth_method: defaultClientAuthMethod,
         ...(input.config.clientSecretEnvironment
           ? { client_secret: input.environment?.[input.config.clientSecretEnvironment] }
           : {}),
@@ -118,6 +139,11 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
     },
     clientInformation: async () => configuredClient ?? (await loadCredential())?.clientInformation,
     saveClientInformation: async (clientInformation) => {
+      const tokenEndpointAuthMethod =
+        "token_endpoint_auth_method" in clientInformation &&
+        typeof clientInformation.token_endpoint_auth_method === "string"
+          ? clientInformation.token_endpoint_auth_method
+          : metadata.token_endpoint_auth_method;
       await updateCredential(
         input.credentialStore,
         input.key,
@@ -125,7 +151,10 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
         input.authIdentityDigest,
         (current) => ({
           ...current,
-          clientInformation,
+          clientInformation: {
+            ...clientInformation,
+            ...(tokenEndpointAuthMethod ? { token_endpoint_auth_method: tokenEndpointAuthMethod } : {}),
+          },
         }),
       );
     },

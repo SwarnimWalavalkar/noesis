@@ -1,6 +1,7 @@
 import { mkdtemp, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { selectClientAuthMethod } from "@modelcontextprotocol/sdk/client/auth.js";
 import { describe, expect, test } from "vitest";
 import { createSecureMcpOAuthCredentialStore, mcpCredentialPath } from "../src/credential-store.ts";
 import { createMcpOAuthProvider } from "../src/oauth.ts";
@@ -24,14 +25,22 @@ describe("MCP OAuth", () => {
     });
 
     const state = await provider.state?.();
-    await provider.saveClientInformation?.({ client_id: "client" });
+    await provider.saveClientInformation?.({ client_id: "client", client_secret: "incidental-secret" });
     await provider.saveTokens({ access_token: "access", token_type: "Bearer", refresh_token: "refresh" });
     await provider.saveCodeVerifier("verifier");
     await provider.redirectToAuthorization(new URL("https://auth.example/authorize"));
 
     expect(state).toBeTruthy();
     expect(await provider.state?.()).not.toBe(state);
-    expect(await provider.clientInformation()).toMatchObject({ client_id: "client" });
+    expect(provider.clientMetadata.token_endpoint_auth_method).toBe("none");
+    const clientInformation = await provider.clientInformation();
+    expect(clientInformation).toMatchObject({
+      client_id: "client",
+      client_secret: "incidental-secret",
+      token_endpoint_auth_method: "none",
+    });
+    if (!clientInformation) throw new Error("Expected stored OAuth client information");
+    expect(selectClientAuthMethod(clientInformation, ["client_secret_basic", "none"])).toBe("none");
     expect(await provider.tokens()).toMatchObject({ access_token: "access", refresh_token: "refresh" });
     expect(await provider.codeVerifier()).toBe("verifier");
     expect(redirects).toEqual(["https://auth.example/authorize"]);
@@ -65,6 +74,34 @@ describe("MCP OAuth", () => {
     });
 
     expect(await changed.tokens()).toBeUndefined();
+  });
+
+  test("loads legacy public client registrations with an explicit no-auth token method", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-mcp-oauth-legacy-public-client-"));
+    const store = createSecureMcpOAuthCredentialStore(mcpCredentialPath(home));
+    await store.write("global:server", {
+      serverUrl: "https://server.example/mcp",
+      authIdentityDigest: "auth-v1",
+      clientInformation: { client_id: "client", client_secret: "incidental-secret" },
+    });
+    const provider = createMcpOAuthProvider({
+      key: "global:server",
+      serverName: "server",
+      serverUrl: "https://server.example/mcp",
+      authIdentityDigest: "auth-v1",
+      redirectUrl: "http://127.0.0.1:1456/oauth/callback",
+      credentialStore: store,
+      onRedirect: () => undefined,
+    });
+
+    const clientInformation = await provider.clientInformation();
+    if (!clientInformation) throw new Error("Expected stored OAuth client information");
+    expect(clientInformation).toMatchObject({
+      client_id: "client",
+      client_secret: "incidental-secret",
+      token_endpoint_auth_method: "none",
+    });
+    expect(selectClientAuthMethod(clientInformation, ["client_secret_basic", "none"])).toBe("none");
   });
 
   test("fails fast when a configured OAuth client secret environment variable is missing", () => {
