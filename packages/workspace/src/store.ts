@@ -4185,15 +4185,18 @@ function createResearchRepositories(
       ) => {
         if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 1_000)
           throw new Error("Feedback signal list limit must be an integer between 1 and 1000");
-        const rows = request.experimentId
-          ? db
-              .prepare(
-                "SELECT data_json FROM feedback_signals WHERE experiment_id = ? ORDER BY created_at DESC, signal_id LIMIT ?",
-              )
-              .all(request.experimentId, request.limit)
-          : db
-              .prepare("SELECT data_json FROM feedback_signals ORDER BY created_at DESC, signal_id LIMIT ?")
-              .all(request.limit);
+        const experimentId =
+          request.experimentId === undefined ? undefined : z.string().min(1).parse(request.experimentId);
+        const rows =
+          experimentId !== undefined
+            ? db
+                .prepare(
+                  "SELECT data_json FROM feedback_signals WHERE experiment_id = ? ORDER BY created_at DESC, signal_id LIMIT ?",
+                )
+                .all(experimentId, request.limit)
+            : db
+                .prepare("SELECT data_json FROM feedback_signals ORDER BY created_at DESC, signal_id LIMIT ?")
+                .all(request.limit);
         return Object.freeze(
           rows.map((row) => {
             const signal = decodeFeedbackSignal(row);

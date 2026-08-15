@@ -190,7 +190,7 @@ function detailDocument(
     styled(
       colorEnabled,
       ANSI.dim,
-      `${record.status.replaceAll("_", " ")} · ${record.kind.replaceAll("_", " ")} · ${timestamp(record.occurredAt)}`,
+      `${safeScalar(record.status).replaceAll("_", " ")} · ${safeScalar(record.kind).replaceAll("_", " ")} · ${timestamp(record.occurredAt)}`,
     ),
     "",
     ...record.detailSections.flatMap((section) => [
@@ -226,7 +226,7 @@ function detailDocument(
           ...record.relations.map((item, index) => {
             const selected = index === relationCursor;
             const target = item.targetTitle ?? item.targetId;
-            return `${styled(colorEnabled, selected ? `${ANSI.bold}${ANSI.cyan}` : ANSI.dim, selected ? "›" : " ")} ${safeScalar(item.label)} → ${safeTerminalText(target)}`;
+            return `${styled(colorEnabled, selected ? `${ANSI.bold}${ANSI.cyan}` : ANSI.dim, selected ? "›" : " ")} ${safeScalar(item.label)} → ${safeScalar(target)}`;
           }),
         ]
       : []),

@@ -45,7 +45,7 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
       id: "reflection:reflection-1",
       kind: "reflection",
       group: "reflection",
-      status: "adjusted",
+      status: "adjusted\nINJECTED STATUS ROW",
       tone: "positive",
       title: "Applied project strategy",
       summary: "Use the existing adaptation path instead of editing protected files.",
@@ -83,7 +83,7 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
         {
           label: "experiment",
           targetId: "experiment:experiment-1",
-          targetTitle: "Use narrower research first",
+          targetTitle: "Use narrower\nresearch first",
         },
       ]),
     }),
@@ -206,6 +206,8 @@ describe("learning audit overlay", () => {
     expect(harness.output()).toContain("Please propose the capability through adapt.");
     expect(harness.output()).toContain("25 inputs were reviewed; 1 were cited");
     expect(harness.output()).not.toContain("messages:message-1");
+    expect(harness.output()).toContain("adjusted INJECTED STATUS ROW · reflection");
+    expect(harness.output()).not.toContain("\nINJECTED STATUS ROW");
     harness.component.handleInput?.("\u001b[6~");
     expect(harness.output()).toContain("experiment → Use narrower research first");
 

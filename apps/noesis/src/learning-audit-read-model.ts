@@ -5,6 +5,7 @@ import {
   canonicalJson,
   type DurableJobRecord,
   type EvidenceRef,
+  EvidenceRefSchema,
   type Experiment,
   sha256,
   toJsonValue,
@@ -295,6 +296,14 @@ function objectField(value: unknown, key: string): Readonly<Record<string, unkno
     : undefined;
 }
 
+function evidenceRefsField(value: unknown, key: string): readonly EvidenceRef[] {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return Object.freeze([]);
+  const parsed = EvidenceRefSchema.array().safeParse(Reflect.get(value, key));
+  return parsed.success
+    ? Object.freeze(parsed.data.map((reference) => Object.freeze({ ...reference })))
+    : Object.freeze([]);
+}
+
 function detailEntry(label: string, value: string | undefined) {
   return value ? Object.freeze({ label, value }) : undefined;
 }
@@ -336,25 +345,53 @@ function reflectionDetails(
   adjustments: ReadonlyMap<string, WorkingAdjustment>,
 ): readonly TuiLearningDetailSection[] {
   const status = stringField(job.result, "status") ?? job.status;
+  if (jobSensitivity(job) !== "normal")
+    return Object.freeze(
+      [
+        detailSection("Decision", [
+          detailEntry("Outcome", reflectionStatusLabel(status)),
+          detailEntry(
+            "Why",
+            "Sensitive reflection details are hidden because this TUI has no admitted grant for them.",
+          ),
+        ]),
+      ].filter(defined),
+    );
   const observation = objectField(job.result, "observation");
   const adjustmentId = stringField(job.result, "adjustmentId");
   const adjustment = adjustmentId ? adjustments.get(adjustmentId) : undefined;
   const replacedAdjustmentId = stringField(job.result, "replacedAdjustmentId");
   const replaced = replacedAdjustmentId ? adjustments.get(replacedAdjustmentId) : undefined;
-  return Object.freeze(
-    [
-      detailSection("Decision", [
-        detailEntry("Outcome", reflectionStatusLabel(status)),
-        detailEntry("Why", reflectionReason(job)),
-      ]),
-      adjustment
+  const transition =
+    status === "adjusted" || status === "replaced"
+      ? adjustment
         ? detailSection("What changed", [
             detailEntry("Before", replaced?.strategy ?? "No project strategy was active."),
             detailEntry("Now", adjustment.strategy),
             detailEntry("Success looks like", adjustment.successSignal),
             detailEntry("Scope", "This project"),
           ])
-        : undefined,
+        : undefined
+      : status === "unapplied"
+        ? adjustment
+          ? detailSection("What changed", [
+              detailEntry("Before", adjustment.strategy),
+              detailEntry("Now", "No project strategy is active."),
+              detailEntry("Scope", "This project"),
+            ])
+          : undefined
+        : status === "stale"
+          ? detailSection("What changed", [
+              detailEntry("Result", "No strategy changed because the decision was stale."),
+            ])
+          : undefined;
+  return Object.freeze(
+    [
+      detailSection("Decision", [
+        detailEntry("Outcome", reflectionStatusLabel(status)),
+        detailEntry("Why", reflectionReason(job)),
+      ]),
+      transition,
       observation
         ? detailSection("Observation", [
             detailEntry("Classified as", stringField(observation, "kind")?.replaceAll("_", " ")),
@@ -488,6 +525,8 @@ function jobSensitivity(job: DurableJobRecord): "normal" | "private" | "secret" 
 }
 
 function jobSummary(job: DurableJobRecord): string {
+  if (job.kind === "runtime.reflect_turn" && jobSensitivity(job) !== "normal")
+    return "Sensitive reflection details are hidden because this TUI has no admitted grant for them.";
   if (job.status === "failed" || job.status === "budget_exhausted" || job.status === "cancelled")
     return job.lastError?.message ?? `Learning job ${job.status.replaceAll("_", " ")}`;
   if (job.status !== "completed") return `${job.kind} is ${job.status}`;
@@ -519,9 +558,15 @@ async function jobPrimitive(
   const group: TuiLearningPrimitiveGroup = isReflection ? "reflection" : "operations";
   const adjustmentId = isReflection ? stringField(job.result, "adjustmentId") : undefined;
   const adjustment = adjustmentId ? adjustments.get(adjustmentId) : undefined;
-  const citedEvidence = adjustment?.evidenceRefs ?? [];
-  const consideredEvidence = isReflection ? job.payloadRefs : [];
   const reflectionStatus = stringField(job.result, "status") ?? job.status;
+  const citedEvidence = isReflection
+    ? reflectionStatus === "unapplied"
+      ? evidenceRefsField(job.result, "evidenceRefs")
+      : reflectionStatus === "adjusted" || reflectionStatus === "replaced"
+        ? (adjustment?.evidenceRefs ?? [])
+        : []
+    : job.payloadRefs;
+  const consideredEvidence = isReflection ? job.payloadRefs : [];
   const previewConsideredEvidence = new Set([
     "adjusted",
     "replaced",

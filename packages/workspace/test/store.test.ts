@@ -4515,6 +4515,15 @@ describe("WorkspaceStore", () => {
     expect(await store.research.feedbackSignals.getFeedbackSignal("feedback-1")).toMatchObject({
       experimentId: experiment.experimentId,
     });
+    expect(
+      await store.research.feedbackSignals.listFeedbackSignals({
+        experimentId: experiment.experimentId,
+        limit: 10,
+      }),
+    ).toHaveLength(1);
+    await expect(
+      store.research.feedbackSignals.listFeedbackSignals({ experimentId: "", limit: 10 }),
+    ).rejects.toThrow();
     store.close();
   });
 

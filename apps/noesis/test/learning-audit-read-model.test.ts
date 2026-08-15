@@ -315,4 +315,198 @@ describe("learning audit read model", () => {
     ]);
     workspace.close();
   });
+
+  test("redacts sensitive reflections and presents unapply evidence and transitions truthfully", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-learning-sensitive-unapply-"));
+    const workspace = await createWorkspaceStore(home);
+    const project = Object.freeze({
+      projectId: "project-sensitive-unapply",
+      root: "/workspace/sensitive-unapply",
+    });
+    await workspace.operational.sessions.put({
+      sessionId: "session-sensitive-unapply",
+      title: "Sensitive unapply decision",
+      status: "idle",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-08-14T00:00:00.000Z",
+      updatedAt: "2026-08-14T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const adjustmentEvidence = Object.freeze({
+      kind: "database_row" as const,
+      table: "sessions" as const,
+      rowId: "session-sensitive-unapply",
+    });
+    await workspace.operational.messages.put({
+      messageId: "message-removal-evidence",
+      sessionId: "session-sensitive-unapply",
+      role: "user",
+      content: "The temporary strategy is no longer useful.",
+      sensitivity: "normal",
+      createdAt: "2026-08-14T00:00:01.000Z",
+      metadata: Object.freeze({}),
+    });
+    const removalEvidence = Object.freeze({
+      kind: "database_row" as const,
+      table: "messages" as const,
+      rowId: "message-removal-evidence",
+    });
+    const adjustment = Object.freeze({
+      adjustmentId: "adjustment-to-remove",
+      scope: project,
+      observation: "A temporary workflow constraint was useful.",
+      strategy: "Always use the temporary workflow constraint.",
+      successSignal: "The temporary workflow remains reliable.",
+      evidenceRefs: Object.freeze([adjustmentEvidence]),
+      createdFromTurnId: "turn-adjustment-origin",
+    });
+    const sourceWorkspace = Object.freeze({
+      ...workspace,
+      workingAdjustments: Object.freeze({
+        ...workspace.workingAdjustments,
+        list: async (request: { readonly projectId?: string; readonly limit: number }) =>
+          Object.freeze(request.projectId === project.projectId ? [adjustment] : []),
+        getActive: async () => undefined,
+      }),
+    });
+
+    const enqueueReflection = async (
+      jobId: string,
+      sensitivity: "normal" | "private",
+      result: Readonly<Record<string, unknown>>,
+    ): Promise<void> => {
+      await workspace.jobs.enqueue({
+        jobId,
+        kind: "runtime.reflect_turn",
+        payload: Object.freeze({
+          turn: Object.freeze({
+            project,
+            sessionId: "session-sensitive-unapply",
+            turnId: `turn-${jobId}`,
+            sensitivity,
+          }),
+        }),
+        payloadRefs: Object.freeze([removalEvidence]),
+        operationId: `operation-${jobId}`,
+        idempotencyKey: `operation-${jobId}`,
+        notBefore: "2026-08-14T00:00:02.000Z",
+        maxAttempts: 1,
+        estimatedCost: 0,
+        budget: 1,
+      });
+      const claimed = await workspace.jobs.claim({
+        workerId: `worker-${jobId}`,
+        now: "2026-08-14T00:00:03.000Z",
+        leaseUntil: "2026-08-14T00:01:00.000Z",
+        maximumCost: 1,
+        kinds: Object.freeze(["runtime.reflect_turn"]),
+      });
+      if (!claimed?.leaseToken) throw new Error(`Expected ${jobId} to be claimed`);
+      await workspace.jobs.complete({
+        jobId: claimed.jobId,
+        leaseToken: claimed.leaseToken,
+        now: "2026-08-14T00:00:04.000Z",
+        result,
+      });
+    };
+    await enqueueReflection(
+      "reflection-unapplied",
+      "normal",
+      Object.freeze({
+        status: "unapplied",
+        adjustmentId: adjustment.adjustmentId,
+        projectId: project.projectId,
+        reason: "The temporary strategy no longer has a credible future use.",
+        evidenceRefs: Object.freeze([removalEvidence]),
+      }),
+    );
+    await enqueueReflection(
+      "reflection-private",
+      "private",
+      Object.freeze({
+        status: "no_change",
+        rationale: "PRIVATE RATIONALE MUST NOT APPEAR",
+        observation: Object.freeze({
+          kind: "correction",
+          reason: "PRIVATE OBSERVATION MUST NOT APPEAR",
+        }),
+      }),
+    );
+    await workspace.jobs.enqueue({
+      jobId: "author-with-evidence",
+      kind: "runtime.author_revision",
+      payload: Object.freeze({ sourceSessionId: "session-sensitive-unapply" }),
+      payloadRefs: Object.freeze([removalEvidence]),
+      operationId: "operation-author-with-evidence",
+      idempotencyKey: "operation-author-with-evidence",
+      notBefore: "2026-08-14T00:00:05.000Z",
+      maxAttempts: 1,
+      estimatedCost: 0,
+      budget: 0,
+    });
+
+    const snapshot = await loadLearningAuditSnapshot(
+      {
+        workspace: sourceWorkspace,
+        criteria: { list: async () => ({ ok: true, value: Object.freeze([]) }) },
+        activations: {
+          current: async () => undefined,
+          listOperations: async () => Object.freeze([]),
+          getApproval: async () => undefined,
+        },
+        feedback: {
+          listObservations: async () => Object.freeze([]),
+          listResearchRuns: async () => Object.freeze([]),
+          getOutcome: async () => undefined,
+          getSuccessorInput: async () => undefined,
+        },
+        continuousFeedback: {
+          experimentComparison: async () => {
+            throw new Error("No preflight comparison should be loaded in this fixture");
+          },
+        },
+        resolveRevision: async () => undefined,
+        resolveCapability: () => undefined,
+        projectId: project.projectId,
+      },
+      "session-sensitive-unapply",
+    );
+    const unapplied = snapshot.primitives.find(
+      (primitive) => primitive.id === "reflection:reflection-unapplied",
+    );
+    expect(unapplied?.evidence).toEqual(["messages:message-removal-evidence"]);
+    expect(unapplied?.evidence).not.toContain("sessions:session-sensitive-unapply");
+    expect(unapplied?.detailSections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "What changed",
+          entries: expect.arrayContaining([
+            expect.objectContaining({
+              label: "Before",
+              value: "Always use the temporary workflow constraint.",
+            }),
+            expect.objectContaining({ label: "Now", value: "No project strategy is active." }),
+          ]),
+        }),
+      ]),
+    );
+    const privateReflection = snapshot.primitives.find(
+      (primitive) => primitive.id === "reflection:reflection-private",
+    );
+    expect(privateReflection?.summary).toContain("Sensitive reflection details are hidden");
+    expect(JSON.stringify(privateReflection?.detailSections)).not.toContain("PRIVATE RATIONALE");
+    expect(JSON.stringify(privateReflection?.detailSections)).not.toContain("PRIVATE OBSERVATION");
+    expect(privateReflection?.rawJson).toContain('"redacted":true');
+    const author = snapshot.primitives.find((primitive) => primitive.id === "job:author-with-evidence");
+    expect(author?.evidence).toEqual(["messages:message-removal-evidence"]);
+    expect(author?.evidencePreviews).toEqual([
+      expect.objectContaining({
+        identity: "messages:message-removal-evidence",
+        excerpt: "The temporary strategy is no longer useful.",
+      }),
+    ]);
+    workspace.close();
+  });
 });
