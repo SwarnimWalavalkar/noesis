@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS } from "@noesis/agent-types";
 import {
   buildContextCheckpointRecord,
   contextCheckpointActivationRequestDigest,
@@ -41,14 +42,38 @@ describe("session compaction", () => {
 
   test("reserves non-history request capacity inside the configured context budget", () => {
     expect(resolveHistoryTokenBudget(160_000, ["system", "current input"])).toBe(128_000);
-    expect(resolveHistoryTokenBudget(10_000, ["x".repeat(4_000)])).toBe(1_904);
+    expect(resolveHistoryTokenBudget(10_000, ["x".repeat(4_000)])).toBe(4_904);
     expect(() => resolveHistoryTokenBudget(100, ["x".repeat(400)])).toThrow("no room");
   });
 
-  test("estimates token-dense UTF-8 input conservatively", () => {
-    expect(estimateContextTokens("a".repeat(12))).toBe(12);
-    expect(estimateContextTokens("你好世界")).toBe(12);
-    expect(estimateContextTokens("2 + 2 = 4")).toBe(9);
+  test("estimates provider-neutral tokens from UTF-8 bytes", () => {
+    expect(estimateContextTokens("a".repeat(12))).toBe(3);
+    expect(estimateContextTokens("你好世界")).toBe(3);
+    expect(estimateContextTokens("2 + 2 = 4")).toBe(3);
+  });
+
+  test("counts unfinished-turn labels before deciding whether compaction is required", () => {
+    const failed = Object.freeze({
+      ...message("1", "retry this operation", true),
+      turnStatus: "failed" as const,
+    });
+    const rawOnlyBudget = estimateContextTokens(failed.content);
+
+    const current = resolvedSessionContext(Object.freeze([failed]), undefined, rawOnlyBudget);
+
+    expect(current.estimatedTokens).toBeGreaterThan(rawOnlyBudget);
+    expect(current.exceedsBudget).toBe(true);
+  });
+
+  test("applies frozen character bounds to the rendered unfinished message", () => {
+    const failed = Object.freeze({
+      ...message("1", "x".repeat(MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS), true),
+      turnStatus: "failed" as const,
+    });
+
+    const current = resolvedSessionContext(Object.freeze([failed]), undefined, 1_000_000);
+
+    expect(current.exceedsBudget).toBe(true);
   });
 
   test("compacts only complete oldest turns and retains a complete recent raw tail", () => {
@@ -61,7 +86,7 @@ describe("session compaction", () => {
       message("6", "f".repeat(48), false),
     ]);
 
-    const window = prepareCompactionWindow(messages, undefined, 270, {
+    const window = prepareCompactionWindow(messages, undefined, 68, {
       compactorInputTokenBudget: 1_000,
     });
 
@@ -79,7 +104,7 @@ describe("session compaction", () => {
       message("4", "recent response", false),
     ]);
 
-    const window = prepareCompactionWindow(messages, undefined, 40, {
+    const window = prepareCompactionWindow(messages, undefined, 15, {
       compactorInputTokenBudget: 1_000,
     });
 
@@ -118,8 +143,8 @@ describe("session compaction", () => {
       createdAt: "2026-08-13T00:00:00.000Z",
     });
 
-    const current = resolvedSessionContext(messages, checkpoint, 40);
-    const window = prepareCompactionWindow(messages, checkpoint, 40, {
+    const current = resolvedSessionContext(messages, checkpoint, 15);
+    const window = prepareCompactionWindow(messages, checkpoint, 15, {
       compactorInputTokenBudget: 1_000,
     });
 

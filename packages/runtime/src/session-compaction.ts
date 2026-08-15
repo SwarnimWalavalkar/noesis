@@ -5,6 +5,7 @@ import {
   MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS,
   MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES,
   MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
+  renderFrozenConversationHistoryContent,
 } from "@noesis/agent-types";
 import { canonicalJson, sha256 } from "@noesis/domain";
 import type { ContextCheckpointRecord, Sensitivity } from "@noesis/workspace";
@@ -22,6 +23,7 @@ export interface SessionContextMessage {
   readonly createdAt: string;
   readonly sensitivity: Sensitivity;
   readonly startsTurn: boolean;
+  readonly turnStatus?: "completed" | "failed" | "aborted";
 }
 
 export interface ModelContextLimits {
@@ -58,6 +60,14 @@ export interface ContextCheckpointSummary {
 
 export function estimateContextTokens(text: string): number {
   return estimateInputTokens(text);
+}
+
+function estimateContextMessageTokens(message: SessionContextMessage): number {
+  return estimateContextTokens(renderContextMessageContent(message));
+}
+
+function renderContextMessageContent(message: SessionContextMessage): string {
+  return renderFrozenConversationHistoryContent(message);
 }
 
 export function resolveContextTokenBudget(configured: number, limits: ModelContextLimits): number {
@@ -150,12 +160,18 @@ export function resolvedSessionContext(
   const tail = messagesAfterCheckpoint(messages, checkpoint);
   const estimatedTokens =
     (checkpoint ? estimateContextTokens(checkpoint.summary) : 0) +
-    tail.reduce((total, message) => total + estimateContextTokens(message.content), 0);
-  const totalCharacters = tail.reduce((total, message) => total + message.content.length, 0);
+    tail.reduce((total, message) => total + estimateContextMessageTokens(message), 0);
+  const totalCharacters = tail.reduce(
+    (total, message) => total + renderContextMessageContent(message).length,
+    0,
+  );
   const exceedsFrozenBounds =
     tail.length > MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES ||
     totalCharacters > MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS ||
-    tail.some((message) => message.content.length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS);
+    tail.some(
+      (message) =>
+        renderContextMessageContent(message).length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS,
+    );
   return Object.freeze({
     ...(checkpoint ? { checkpoint } : {}),
     messages: tail,
@@ -183,13 +199,19 @@ export function prepareCompactionWindow(
   for (let index = groups.length - 1; index >= 0; index -= 1) {
     const group = groups[index];
     if (!group) continue;
-    const groupTokens = group.reduce((total, message) => total + estimateContextTokens(message.content), 0);
-    const groupCharacters = group.reduce((total, message) => total + message.content.length, 0);
+    const groupTokens = group.reduce((total, message) => total + estimateContextMessageTokens(message), 0);
+    const groupCharacters = group.reduce(
+      (total, message) => total + renderContextMessageContent(message).length,
+      0,
+    );
     if (
       retainedTokens + groupTokens > rawTailBudget ||
       retainedMessageCount + group.length > MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES ||
       retainedCharacters + groupCharacters > MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS ||
-      group.some((message) => message.content.length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS)
+      group.some(
+        (message) =>
+          renderContextMessageContent(message).length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS,
+      )
     )
       break;
     retainedTokens += groupTokens;
@@ -213,7 +235,7 @@ export function prepareCompactionWindow(
   const selectedGroups: (readonly SessionContextMessage[])[] = [];
   let selectedTokens = 0;
   for (const group of groupsNeedingSummary) {
-    const groupTokens = group.reduce((total, message) => total + estimateContextTokens(message.content), 0);
+    const groupTokens = group.reduce((total, message) => total + estimateContextMessageTokens(message), 0);
     if (selectedTokens + groupTokens > inputBudget) break;
     const candidateSources = Object.freeze([...selectedGroups, group].flat());
     const candidateWindow: CompactionWindow = Object.freeze({
@@ -254,6 +276,7 @@ export function serializeCompactionWindow(window: CompactionWindow, instructions
       role: message.role,
       content: message.content,
       createdAt: message.createdAt,
+      ...(message.turnStatus === undefined ? {} : { turnStatus: message.turnStatus }),
     })),
     requiredSections: [
       "goal",

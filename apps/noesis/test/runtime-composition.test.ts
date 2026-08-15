@@ -31,6 +31,7 @@ import {
   createStructuredInferencePort,
   type FrozenSessionToolResolver,
   type PiFrozenToolCatalog,
+  type PiSelfToolAdapter,
   type PiWorkflowSummary,
   projectWorkflowToolName,
   type RoleBackendRequest,
@@ -340,7 +341,7 @@ describe("apps/noesis production control-plane composition", () => {
         const text = request.prompt.includes("short manual")
           ? "short answer"
           : history.length === 0
-            ? "assistant-history-".repeat(1_600)
+            ? "assistant-history-".repeat(6_000)
             : "continued from checkpoint";
         const createdAt = new Date().toISOString();
         emit({
@@ -402,7 +403,7 @@ describe("apps/noesis production control-plane composition", () => {
     ).resolves.toMatchObject({ sources: expect.arrayContaining([expect.objectContaining({})]) });
 
     const trail = await runtime.startTrail({ title: "Context compaction" });
-    const firstInput = "user-history-".repeat(1_200);
+    const firstInput = "user-history-".repeat(5_000);
     await runtime.debug.runTurn(trail.trailId, firstInput);
 
     await runtime.compact(trail.trailId);
@@ -421,7 +422,7 @@ describe("apps/noesis production control-plane composition", () => {
         expect.objectContaining({
           kind: "message",
           role: "assistant",
-          text: "assistant-history-".repeat(1_600),
+          text: "assistant-history-".repeat(6_000),
         }),
       ]),
     );
@@ -1937,7 +1938,7 @@ describe("apps/noesis production control-plane composition", () => {
     await runtime.shutdown();
   });
 
-  test("retains an aborted partial pair for inspection but excludes it after restart and resume", async () => {
+  test("retains an aborted partial pair in the visible transcript and future frozen context", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-aborted-replay-"));
     roots.push(home);
     const config = await resolveNoesisConfig({
@@ -2021,7 +2022,20 @@ describe("apps/noesis production control-plane composition", () => {
     await reopened.resumeTrail(trail.trailId);
     await reopened.debug.runTurn(trail.trailId, "continue with clean context");
     expect(requests[0]?.systemPrompt).not.toContain("partial answer that must not resume");
-    expect(requests[0]?.systemPrompt).not.toContain("input attached to an aborted answer");
+    expect(requests[0]?.frozenTurnPlan?.conversationHistory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: "input attached to an aborted answer",
+          turnStatus: "aborted",
+        }),
+        expect.objectContaining({
+          role: "assistant",
+          content: "partial answer that must not resume",
+          turnStatus: "aborted",
+        }),
+      ]),
+    );
     expect(await reopened.debug.workspace.operational.messages.listForSession(trail.trailId)).toHaveLength(4);
     await reopened.shutdown();
   });
@@ -2461,7 +2475,6 @@ describe("apps/noesis production control-plane composition", () => {
     await runtime.interact(trail.trailId, { type: "interrupt", turnId: activeTurnId });
     await waitUntil(async () => (await runtime.inspectInteraction(trail.trailId)).phase === "idle");
     expect((await runtime.inspectInteraction(trail.trailId)).pending.map((item) => item.text)).toEqual([
-      "Run this as its own turn",
       "Preserve this queued turn",
     ]);
     await runtime.shutdown();
@@ -2552,6 +2565,7 @@ describe("apps/noesis production control-plane composition", () => {
         run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
           requests.push(request);
           emit({ type: "status", status: "started" });
+          if (request.prompt === "failed input") throw new Error("controlled turn failure");
           if (request.prompt === "aborted input")
             return Object.freeze({
               outcome: "aborted" as const,
@@ -2585,6 +2599,9 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const trail = await runtime.startTrail({ title: "Authoritative model history" });
     await runtime.debug.runTurn(trail.trailId, "accepted input");
+    await expect(runtime.debug.runTurn(trail.trailId, "failed input")).rejects.toThrow(
+      "controlled turn failure",
+    );
     await runtime.debug.runTurn(trail.trailId, "aborted input");
     await runtime.interact(trail.trailId, { type: "submit", text: "active input" });
     await activeStarted;
@@ -2598,12 +2615,24 @@ describe("apps/noesis production control-plane composition", () => {
     expect(history.map(({ role, content }) => ({ role, content }))).toEqual([
       { role: "user", content: "accepted input" },
       { role: "assistant", content: "reply:accepted input" },
+      { role: "user", content: "failed input" },
+      { role: "user", content: "aborted input" },
+      { role: "assistant", content: "aborted partial output" },
       { role: "user", content: "active input" },
       { role: "user", content: "delivered steering" },
       { role: "assistant", content: "reply:active input" },
     ]);
-    expect(history.map((message) => message.content)).not.toContain("aborted input");
-    expect(history.map((message) => message.content)).not.toContain("aborted partial output");
+    expect(inspectionRequest?.frozenTurnPlan?.conversationHistory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ content: "accepted input", turnStatus: "completed" }),
+        expect.objectContaining({ content: "reply:accepted input", turnStatus: "completed" }),
+        expect.objectContaining({ content: "failed input", turnStatus: "failed" }),
+        expect.objectContaining({ content: "aborted input", turnStatus: "aborted" }),
+        expect.objectContaining({ content: "aborted partial output", turnStatus: "aborted" }),
+        expect.objectContaining({ content: "active input", turnStatus: "completed" }),
+        expect.objectContaining({ content: "reply:active input", turnStatus: "completed" }),
+      ]),
+    );
     expect(inspectionRequest?.systemPrompt).not.toContain("accepted input");
     expect(history).toEqual(
       inspectionRequest?.frozenTurnPlan?.conversationHistory?.map(({ role, content, createdAt }) => ({
@@ -3665,6 +3694,120 @@ describe("apps/noesis production control-plane composition", () => {
         error: expect.stringMatching(/backend_failure|malformed/iu),
       },
     });
+    await runtime.shutdown();
+  });
+
+  test("pages the frozen self tool catalog and inspects one exact descriptor without overflowing", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-bounded-self-tools-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const pageSchema = z.object({
+      total: z.number().int().positive(),
+      nextCursor: z.number().int().positive().nullable(),
+      tools: z
+        .array(
+          z.object({
+            name: z.string().min(1),
+            labelTruncated: z.literal(true),
+            descriptionTruncated: z.literal(true),
+          }),
+        )
+        .min(1)
+        .max(5),
+    });
+    const detailSchema = z.object({
+      tool: z.object({
+        name: z.string().min(1),
+        labelTruncated: z.literal(true),
+        descriptionTruncated: z.literal(true),
+        schemasOmitted: z.literal(true),
+      }),
+    });
+    let step = 0;
+    let selectedTool = "";
+    const controlled = createControlledPiModels({
+      respond: (input) => {
+        if (input.systemPrompt.includes("role:")) return researchLoopControlledResponse(input);
+        const resultMessage = [...input.context.messages]
+          .reverse()
+          .find((message) => message.role === "toolResult");
+        if (step === 0) {
+          step = 1;
+          return controlledToolCallResponse("inspect_self", { section: "tools", limit: 5 }, "inspect-page");
+        }
+        if (!resultMessage || resultMessage.role !== "toolResult")
+          throw new Error("Expected the inspect_self tool result");
+        const text = resultMessage.content
+          .flatMap((block) => (block.type === "text" ? [block.text] : []))
+          .join("");
+        if (step === 1) {
+          const page = pageSchema.parse(JSON.parse(text));
+          expect(new TextEncoder().encode(text).byteLength).toBeLessThan(64 * 1024);
+          expect(page.total).toBeGreaterThan(page.tools.length);
+          expect(page.nextCursor).toBe(5);
+          selectedTool = page.tools[0]?.name ?? "";
+          step = 2;
+          return controlledToolCallResponse(
+            "inspect_self",
+            { section: "tools", tool: selectedTool },
+            "inspect-detail",
+          );
+        }
+        const detail = detailSchema.parse(JSON.parse(text));
+        expect(detail.tool.name).toBe(selectedTool);
+        step = 3;
+        return "The bounded tool catalog remains fully inspectable.";
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) => {
+        const oversizedSelfTools: PiSelfToolAdapter = Object.freeze({
+          ...selfTools,
+          inspect: async (input: Parameters<PiSelfToolAdapter["inspect"]>[0]) =>
+            await selfTools.inspect({
+              ...input,
+              ...(input.catalog
+                ? {
+                    catalog: Object.freeze({
+                      ...input.catalog,
+                      tools: Object.freeze(
+                        input.catalog.tools.map(
+                          (descriptor: NonNullable<typeof input.catalog>["tools"][number]) =>
+                            Object.freeze({
+                              ...descriptor,
+                              label: "界".repeat(30_000),
+                              description: "description".repeat(30_000),
+                            }),
+                        ),
+                      ),
+                    }),
+                  }
+                : {}),
+            }),
+        });
+        return createPiAgentRuntime(process.cwd(), controlled.models, {
+          codeExecution,
+          selfTools: oversizedSelfTools,
+        });
+      },
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({ variants: configurations, respond: scriptedHistoryRerankResponse }),
+    });
+
+    const trail = await runtime.startTrail({ title: "Bounded self inspection" });
+    const result = await runtime.debug.runTurn(trail.trailId, "Inspect the frozen tool catalog.");
+
+    expect(result.output).toBe("The bounded tool catalog remains fully inspectable.");
+    expect(step).toBe(3);
+    const transcript = await runtime.getTranscript(trail.trailId);
+    expect(
+      transcript.filter((entry) => entry.kind === "action" && entry.name === "inspect_self"),
+    ).toMatchObject([{ status: "completed" }, { status: "completed" }]);
     await runtime.shutdown();
   });
 

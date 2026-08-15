@@ -127,6 +127,18 @@ export interface FrozenConversationHistoryEntry {
   readonly content: string;
   readonly createdAt: string;
   readonly contentDigest: string;
+  /** Terminal state of the source turn. Older plans omit this field. */
+  readonly turnStatus?: "completed" | "failed" | "aborted";
+}
+
+export function renderFrozenConversationHistoryContent(entry: {
+  readonly content: string;
+  readonly role: "user" | "assistant";
+  readonly turnStatus?: "completed" | "failed" | "aborted" | undefined;
+}): string {
+  if (entry.turnStatus !== "failed" && entry.turnStatus !== "aborted") return entry.content;
+  const kind = entry.role === "user" ? "user message" : "partial assistant message";
+  return `[Previous ${kind} from a turn that ${entry.turnStatus} before completion.]\n${entry.content}`;
 }
 
 export interface FrozenContextCheckpoint {
@@ -149,12 +161,12 @@ export const MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS = 4_000_000;
 export const MAX_FROZEN_CONTEXT_CHECKPOINT_SUMMARY_CHARACTERS = 32_000;
 
 /**
- * Provider-independent upper bound used before a request reaches a tokenizer-owning provider.
- * Byte-backed subword tokenizers cannot produce more text tokens than the input has UTF-8 bytes;
- * provider message and tool framing is reserved separately at the execution boundary.
+ * Provider-independent token estimate used when a provider has not reported usage yet.
+ * BPE tokenizers average roughly four UTF-8 bytes per token. Provider-owned usage replaces
+ * this estimate at the execution boundary as soon as a successful response is available.
  */
 export function estimateInputTokens(text: string): number {
-  return Math.max(1, new TextEncoder().encode(text).byteLength);
+  return Math.max(1, Math.ceil(new TextEncoder().encode(text).byteLength / 4));
 }
 
 /** The complete SQLite-authoritative input to one foreground execution. */
@@ -238,6 +250,7 @@ const FrozenConversationHistoryEntrySchema = z.strictObject({
   content: z.string().min(1),
   createdAt: z.string().min(1),
   contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+  turnStatus: z.enum(["completed", "failed", "aborted"]).optional(),
 });
 const FrozenContextCheckpointSchema = z.strictObject({
   checkpointId: z.string().min(1),
@@ -304,9 +317,14 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     ...base
   } = decoded;
   const { learningAttribution, ...routingBase } = routing;
+  const normalizedConversationHistory = conversationHistory?.map(({ turnStatus, ...entry }) =>
+    Object.freeze({ ...entry, ...(turnStatus === undefined ? {} : { turnStatus }) }),
+  );
   const plan = Object.freeze({
     ...base,
-    ...(conversationHistory === undefined ? {} : { conversationHistory }),
+    ...(normalizedConversationHistory === undefined
+      ? {}
+      : { conversationHistory: Object.freeze(normalizedConversationHistory) }),
     ...(contextCheckpoint === undefined
       ? {}
       : { contextCheckpoint: Object.freeze({ ...contextCheckpoint }) }),
@@ -345,11 +363,12 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
       throw new Error(
         `Frozen turn plan ${plan.planId} history message ${entry.messageId} failed content digest verification`,
       );
-    if (entry.content.length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS)
+    const renderedContent = renderFrozenConversationHistoryContent(entry);
+    if (renderedContent.length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS)
       throw new Error(
         `Frozen turn plan ${plan.planId} history message ${entry.messageId} exceeds the per-entry character bound`,
       );
-    historyCharacters += entry.content.length;
+    historyCharacters += renderedContent.length;
     if (historyCharacters > MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS)
       throw new Error(`Frozen turn plan ${plan.planId} exceeds the total history character bound`);
     if (historyMessageIds.has(entry.messageId))
@@ -368,7 +387,7 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     const estimatedContextTokens =
       (plan.contextCheckpoint === undefined ? 0 : estimateInputTokens(plan.contextCheckpoint.summary)) +
       (plan.conversationHistory ?? []).reduce(
-        (total, entry) => total + estimateInputTokens(entry.content),
+        (total, entry) => total + estimateInputTokens(renderFrozenConversationHistoryContent(entry)),
         0,
       );
     if (estimatedContextTokens > plan.contextTokenBudget)

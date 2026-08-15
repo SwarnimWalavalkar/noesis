@@ -376,7 +376,7 @@ export interface CreateSessionSearchToolsOptions {
 const DEFAULT_LIMITS: SessionToolLimits = Object.freeze({
   maxResults: 8,
   maxCandidates: 32,
-  maxFragmentChars: 800,
+  maxFragmentChars: 400,
   maxTotalContextChars: 3_200,
   maxOpenChars: 1_600,
   maxExperimentScan: 200,
@@ -464,7 +464,12 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
   const now = options.now ?? Date.now;
   const allowedPrivateSessions = new Set(options.authorization.privateSessionIds ?? []);
   const allowedPrivateRevisions = new Set(options.authorization.privateRevisionIds ?? []);
-  let remainingContextCharacters = limits.maxTotalContextChars;
+  const openContextCharacters =
+    limits.maxTotalContextChars <= 1
+      ? 0
+      : Math.min(limits.maxOpenChars, Math.floor(limits.maxTotalContextChars / 2));
+  let remainingSearchContextCharacters = limits.maxTotalContextChars - openContextCharacters;
+  let remainingOpenContextCharacters = openContextCharacters;
   let refreshed = false;
 
   const fail = (
@@ -831,11 +836,18 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     citation: SessionEvidenceCitation,
     excerpt: string,
     score: number,
+    purpose: "search" | "open",
   ):
     | { readonly citation: SessionEvidenceCitation; readonly fragment: SessionContextFragment }
     | undefined => {
-    if (remainingContextCharacters <= 0) return undefined;
-    const allowed = Math.min(excerpt.length, limits.maxFragmentChars, remainingContextCharacters);
+    const remaining =
+      purpose === "search" ? remainingSearchContextCharacters : remainingOpenContextCharacters;
+    if (remaining <= 0) return undefined;
+    const allowed = Math.min(
+      excerpt.length,
+      purpose === "search" ? limits.maxFragmentChars : limits.maxOpenChars,
+      remaining,
+    );
     if (allowed <= 0) return undefined;
     const boundedCitation =
       allowed === excerpt.length
@@ -847,7 +859,8 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
             citation.startOffset + allowed,
           );
     const boundedExcerpt = excerpt.slice(0, allowed);
-    remainingContextCharacters -= boundedExcerpt.length;
+    if (purpose === "search") remainingSearchContextCharacters -= boundedExcerpt.length;
+    else remainingOpenContextCharacters -= boundedExcerpt.length;
     const provenance = [
       canonicalSourceKey(boundedCitation.source),
       ...boundedCitation.provenanceRefs.map(evidenceRefKey),
@@ -1018,7 +1031,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       const hits: SessionSearchHit[] = [];
       const fragments: SessionContextFragment[] = [];
       for (const item of accepted) {
-        const reserved = reserveCitation(item.citation, item.excerpt, item.score);
+        const reserved = reserveCitation(item.citation, item.excerpt, item.score, "search");
         if (!reserved) break;
         fragments.push(reserved.fragment);
         hits.push({
@@ -1186,8 +1199,9 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         endOffset,
         supplied.contentDigest,
       );
-      const reserved = reserveCitation(openedCitation, openedExcerpt, 1);
-      if (!reserved) return fail("bounds_exhausted", "The turn retrieval context budget is exhausted.");
+      const reserved = reserveCitation(openedCitation, openedExcerpt, 1, "open");
+      if (!reserved)
+        return fail("bounds_exhausted", "The turn's session-evidence opening allowance is exhausted.");
       const output: OpenSessionEvidenceOutput = {
         fragment: reserved.fragment,
         telemetry: telemetry({
@@ -1255,7 +1269,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
           ranked.citation.identity.experimentId,
         );
         if (!experiment || !isCompletedExperiment(experiment)) continue;
-        const reserved = reserveCitation(ranked.citation, ranked.excerpt, ranked.score);
+        const reserved = reserveCitation(ranked.citation, ranked.excerpt, ranked.score, "search");
         if (!reserved) break;
         fragments.push(reserved.fragment);
         hits.push({
@@ -1301,14 +1315,16 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     Object.freeze({
       name: "search_sessions",
       label: "Search sessions",
-      description: "Search bounded, authorized prior-session evidence with exact citations.",
+      description:
+        "Search bounded prior-session evidence with exact citations. Normal cross-session search needs no private flag; private retrieval requires one exact authorized sessionId.",
       inputSchema: SearchSessionsInputSchema,
       execute: searchSessions,
     }),
     Object.freeze({
       name: "open_session_evidence",
       label: "Open session evidence",
-      description: "Open a bounded window around an exact session citation after reauthorization.",
+      description:
+        "Open a bounded window around an exact session citation after reauthorization using the turn's reserved evidence-opening allowance.",
       inputSchema: OpenSessionEvidenceInputSchema,
       execute: openSessionEvidence,
     }),

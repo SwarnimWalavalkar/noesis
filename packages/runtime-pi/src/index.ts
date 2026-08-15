@@ -2,7 +2,6 @@ import { AgentHarness, formatSkillsForSystemPrompt, type Skill } from "@earendil
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { AssistantMessage, MutableModels, UserMessage } from "@earendil-works/pi-ai";
 import {
-  estimateInputTokens,
   type AgentAssistantMessageBoundary,
   type AgentContextUsage,
   type AgentRuntimeEvent,
@@ -11,9 +10,11 @@ import {
   type AgentSteerResult,
   type FrozenTurnPlan,
   type NoesisAgentRuntime,
+  renderFrozenConversationHistoryContent,
   validateFrozenTurnPlan,
 } from "@noesis/agent-types";
 import { toAgentActionPayload } from "./action-payload.ts";
+import { createPiRequestBudgetProjector } from "./context-budget.ts";
 import {
   createPiExecuteTool,
   type PiCodeExecutionAdapter,
@@ -43,6 +44,7 @@ export type {
 } from "@noesis/agent-types";
 export * from "./action-payload.ts";
 export * from "./auth.ts";
+export * from "./context-budget.ts";
 export * from "./execute-tool.ts";
 export * from "./experiment-fixtures.ts";
 export type {
@@ -125,8 +127,12 @@ function historyForRequest(
           }),
         ]
       : []),
-    ...(plan.conversationHistory ?? []).map(({ role, content, createdAt }) =>
-      Object.freeze({ role, content, createdAt }),
+    ...(plan.conversationHistory ?? []).map((entry) =>
+      Object.freeze({
+        role: entry.role,
+        content: renderFrozenConversationHistoryContent(entry),
+        createdAt: entry.createdAt,
+      }),
     ),
   ]);
   if (request.history !== undefined) {
@@ -522,6 +528,7 @@ export function createPiAgentRuntime(
         plan?.requestTokenBudget === undefined
           ? undefined
           : Object.freeze({ planId: plan.planId, tokens: plan.requestTokenBudget });
+      const requestBudgetProjector = createPiRequestBudgetProjector();
       const unsubscribeBudgetGuard =
         requestBudget === undefined
           ? () => undefined
@@ -534,18 +541,15 @@ export function createPiAgentRuntime(
                   parameters: tool.parameters,
                 })),
               );
-              const estimatedRequestTokens =
-                64 +
-                estimateInputTokens(completeSystemPrompt) +
-                estimateInputTokens(JSON.stringify(messages)) +
-                estimateInputTokens(activeToolMaterial) +
-                activeTools.length * 16 +
-                messages.length * 8;
-              if (estimatedRequestTokens > requestBudget.tokens)
-                throw new Error(
-                  `Frozen turn plan ${requestBudget.planId} complete request exceeds its token budget before model invocation`,
-                );
-              return undefined;
+              const projection = requestBudgetProjector.project({
+                messages,
+                systemPrompt: completeSystemPrompt,
+                activeToolMaterial,
+                activeToolCount: activeTools.length,
+                tokenBudget: requestBudget.tokens,
+                planId: requestBudget.planId,
+              });
+              return { messages: projection.messages };
             });
       const historyBaseTimestamp = Date.now() - history.length;
       for (const [index, message] of history.entries()) {

@@ -21,14 +21,15 @@ Noesis preserves instruction levels:
 
 - System instructions contain trusted product behavior and active capability instructions. They also contain host envelopes that clearly mark lower-trust data such as project strategies.
 - Prior user and assistant messages keep their original roles.
+- Visible messages from failed and aborted turns remain available with an explicit unfinished-turn label. Their unresolved delivery records are safety evidence, not queued work.
 - The current request remains a user message.
 - Tool results and recalled material are evidence, not new instructions.
 
 Conversation history must never be copied into the system prompt. Each turn records the exact bounded messages it received, with references to the source and content digests. A lower-priority instruction loses only when it conflicts with a higher-priority one. Noesis should not use hierarchy to ignore a compatible user request. This follows [The Instruction Hierarchy](https://arxiv.org/pdf/2404.13208).
 
-Long sessions use durable context checkpoints. The original transcript remains unchanged and continues to power resume, inspection, and search. Future turns receive an explicitly labelled continuation summary plus a recent tail of complete raw turns. The frozen turn plan pins the exact checkpoint and message rows it used.
+Long sessions use durable context checkpoints. The original transcript remains unchanged and continues to power resume, inspection, and search. Future turns receive an explicitly labelled continuation summary plus a recent tail of raw transcript messages, including unsuccessful-turn labels where relevant. The frozen turn plan pins the exact checkpoint and message rows it used.
 
-The default context budget is 160,000 tokens and is configurable as `context.tokenBudget` in `config.json`. It covers the complete model request, including non-history material. Noesis caps it below the selected model's context window after reserving that model's maximum output allowance, then reserves room for the system prompt, current input, capabilities, and tools before allocating the remainder to history. `/compact [optional focus]` creates a checkpoint manually; Noesis also compacts before a future turn when eligible history exceeds that allocation. A failed or cancelled compaction leaves the active context unchanged.
+The default context budget is 160,000 tokens and is configurable as `context.tokenBudget` in `config.json`. It covers the complete model request, including non-history material. Noesis caps it below the selected model's context window after reserving that model's maximum output allowance, then reserves room for the system prompt, current input, capabilities, and tools before allocating the remainder to history. Provider-reported usage is authoritative after a successful model response. Before that signal exists, Noesis uses a portable estimate of roughly four UTF-8 bytes per token rather than a tokenizer tied to one provider. If tool results make an active turn exceed its budget, older results are replaced only in the next model request by bounded references with a digest, byte count, and preview; the complete results remain in the durable transcript. `/compact [optional focus]` creates a checkpoint manually; Noesis also compacts before a future turn when eligible history exceeds that allocation. A failed or cancelled compaction leaves the active context unchanged.
 
 ## Model judgment
 
@@ -64,6 +65,8 @@ The default direct tool set also contains:
 - `shell`, backed by `shell.run`
 - `workflows_run`, backed by `workflows.run`
 - `search_sessions`, backed by `history.search_sessions`.
+
+Normal cross-session search is available without requesting private history. Private retrieval is limited to one exact authorized session. Search snippets and exact evidence opening share one small, hard-bounded retrieval allowance, with a portion reserved for opening a citation so a successful search cannot make its own evidence impossible to inspect.
 
 These tools keep common work to one call. The model can use `execute` to find more tools, combine calls, write loops, or create reusable programs. Its description includes a small fixed list of saved project workflow names and descriptions. Full input and output shapes remain available through `workflows.describe`.
 

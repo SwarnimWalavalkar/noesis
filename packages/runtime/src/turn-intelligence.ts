@@ -90,6 +90,7 @@ export interface TurnRoutingHistoryMessage {
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly createdAt: string;
+  readonly turnStatus?: "completed" | "failed" | "aborted";
 }
 
 export interface TurnCapabilityRoutingRequest {
@@ -191,6 +192,14 @@ async function freezeConversationHistory(
       durable.createdAt !== message.createdAt
     )
       throw new Error(`Turn history message ${message.messageId} does not match authoritative SQLite state`);
+    if (message.turnStatus !== undefined) {
+      const turnId = durable.metadata["turnId"];
+      if (typeof turnId !== "string" || turnId.length === 0)
+        throw new Error(`Turn history message ${message.messageId} has no durable turn identity`);
+      const turn = await workspace.operational.foregroundTurns.get(turnId);
+      if (!turn || turn.sessionId !== sessionId || turn.status !== message.turnStatus)
+        throw new Error(`Turn history message ${message.messageId} has a stale terminal turn status`);
+    }
     frozen.push(
       Object.freeze({
         messageId: message.messageId,
@@ -203,6 +212,7 @@ async function freezeConversationHistory(
         content: message.content,
         createdAt: message.createdAt,
         contentDigest: sha256(message.content),
+        ...(message.turnStatus === undefined ? {} : { turnStatus: message.turnStatus }),
       }),
     );
   }
@@ -315,8 +325,14 @@ export function createTurnIntelligencePlanner(
                     }),
                   ]
                 : []),
-              ...conversationHistory.map(({ messageId, role, content, createdAt }) =>
-                Object.freeze({ messageId, role, content, createdAt }),
+              ...conversationHistory.map(({ messageId, role, content, createdAt, turnStatus }) =>
+                Object.freeze({
+                  messageId,
+                  role,
+                  content,
+                  createdAt,
+                  ...(turnStatus === undefined ? {} : { turnStatus }),
+                }),
               ),
             ]),
             candidates: Object.freeze(

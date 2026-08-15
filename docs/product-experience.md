@@ -29,7 +29,9 @@ The user's words take priority. Phrases such as "just do it," "think this throug
 
 The approach can change during a session. A build can expose something the user needs to learn. Reflection can turn into execution. An open discussion can end with a concrete task. Noesis should preserve why the change happened.
 
-Long sessions may compact older completed turns into a continuation checkpoint while keeping recent turns raw. Compaction never deletes or rewrites the visible transcript. Resume and search still use the complete original conversation; only future model context becomes smaller.
+Long sessions may compact older settled turns into a continuation checkpoint while keeping recent transcript messages raw. Compaction never deletes or rewrites the visible transcript. Resume and search still use the complete original conversation; only future model context becomes smaller.
+
+The visible user and assistant messages from a failed or aborted turn remain in later context and are labelled as unfinished. They are not queued again or retried automatically. A later request such as "keep going" can therefore refer to the same current-session history the user sees.
 
 Prompts submitted while a turn or session-changing command is active are queued and delivered in order. Commands that change the session remain serialized so later prompts always reach the resulting session.
 

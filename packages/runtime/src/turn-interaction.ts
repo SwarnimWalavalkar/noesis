@@ -19,7 +19,7 @@ export interface InteractionPendingIntent {
   readonly intentId: string;
   readonly text: string;
   readonly mode: "turn" | "steer";
-  readonly status: "pending" | "held" | "unresolved";
+  readonly status: "pending" | "held";
   readonly createdAt: string;
 }
 
@@ -119,7 +119,6 @@ export interface TurnInteractionIntentStore {
   }) => Promise<readonly UserIntentRecord[]>;
   readonly listPending: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
   readonly listHeld: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
-  readonly listUnresolved: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
   readonly claimOldestPending: (request: {
     readonly sessionId: string;
     readonly targetTurnId: string;
@@ -283,12 +282,7 @@ const pendingIntent = (record: UserIntentRecord): InteractionPendingIntent =>
     intentId: record.intentId,
     text: intentText(record),
     mode: record.deliveryMode,
-    status:
-      record.status === "unresolved"
-        ? ("unresolved" as const)
-        : record.status === "held"
-          ? ("held" as const)
-          : ("pending" as const),
+    status: record.status === "held" ? ("held" as const) : ("pending" as const),
     createdAt: record.createdAt,
   });
 
@@ -339,12 +333,11 @@ export function createTurnInteractionController(
     sessionId: string,
     state: SessionInteractionState,
   ): Promise<InteractionSnapshot> => {
-    const [pending, held, unresolved] = await Promise.all([
+    const [pending, held] = await Promise.all([
       options.intents.listPending(sessionId),
       options.intents.listHeld(sessionId),
-      options.intents.listUnresolved(sessionId),
     ]);
-    const available = [...pending, ...held, ...unresolved].sort(
+    const available = [...pending, ...held].sort(
       (left, right) =>
         left.queueSequence - right.queueSequence || left.intentId.localeCompare(right.intentId),
     );

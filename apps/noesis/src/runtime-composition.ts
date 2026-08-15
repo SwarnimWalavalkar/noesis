@@ -6,6 +6,7 @@ import type {
   FrozenTurnPlan,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
+import { renderFrozenConversationHistoryContent } from "@noesis/agent-types";
 import { createAtomicCapabilityRegistry, createWorkspaceCapabilityControlStore } from "@noesis/capabilities";
 import {
   type CodeExecutionEvent,
@@ -148,6 +149,10 @@ import type {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
+const MAX_SELF_INSPECTION_RESULT_BYTES = 56 * 1024;
+const MAX_SELF_INSPECTION_LABEL_BYTES = 256;
+const MAX_SELF_INSPECTION_PAGE_DESCRIPTION_BYTES = 768;
+const MAX_SELF_INSPECTION_DETAIL_DESCRIPTION_BYTES = 8 * 1024;
 const SHUTDOWN_GRACE_MS = 250;
 const REFLECTION_BARRIER_MS = 1_500;
 const HISTORY_RERANK_MIN_EXCERPT_CHARACTERS = 32;
@@ -170,6 +175,26 @@ function contextCompactionInterrupted(reason: string): Error {
 
 function isContextCompactionInterrupted(error: unknown): boolean {
   return error instanceof Error && error.name === CONTEXT_COMPACTION_INTERRUPTED;
+}
+
+function boundedUtf8Text(
+  value: string,
+  maxBytes: number,
+): { readonly value: string; readonly truncated: boolean } {
+  const encoded = encoder.encode(value);
+  if (encoded.byteLength <= maxBytes) return Object.freeze({ value, truncated: false });
+  let end = Math.max(0, maxBytes - encoder.encode("…").byteLength);
+  while (end > 0) {
+    try {
+      return Object.freeze({
+        value: `${decoder.decode(encoded.slice(0, end))}…`,
+        truncated: true,
+      });
+    } catch {
+      end -= 1;
+    }
+  }
+  return Object.freeze({ value: "", truncated: true });
 }
 
 export async function waitForReflectionBarrier(
@@ -1010,6 +1035,36 @@ async function replayEligibleTurnIds(
   sessionId: string,
   outcomes: readonly OutcomeRecord[],
 ): Promise<ReadonlySet<string>> {
+  const turns = await foregroundTurnsForOutcomes(workspace, sessionId, outcomes);
+  return replayEligibleTurnIdsFromOutcomes(outcomes, turns);
+}
+
+type ForegroundTurnRecord = NonNullable<
+  Awaited<ReturnType<NoesisWorkspaceStore["operational"]["foregroundTurns"]["get"]>>
+>;
+
+async function foregroundTurnsForOutcomes(
+  workspace: NoesisWorkspaceStore,
+  sessionId: string,
+  outcomes: readonly OutcomeRecord[],
+): Promise<ReadonlyMap<string, ForegroundTurnRecord>> {
+  const entries = await Promise.all(
+    outcomes.map(async (outcome) => {
+      if (!outcome.turnId) return undefined;
+      const turn = await workspace.operational.foregroundTurns.get(outcome.turnId);
+      if (!turn || turn.sessionId !== sessionId || turn.outcomeId !== outcome.outcomeId) return undefined;
+      return Object.freeze({ turnId: outcome.turnId, turn });
+    }),
+  );
+  return new Map(
+    entries.flatMap((entry) => (entry === undefined ? [] : [[entry.turnId, entry.turn] as const])),
+  );
+}
+
+function replayEligibleTurnIdsFromOutcomes(
+  outcomes: readonly OutcomeRecord[],
+  turns: ReadonlyMap<string, ForegroundTurnRecord>,
+): ReadonlySet<string> {
   const eligible = new Set<string>();
   for (const outcome of outcomes) {
     if (!outcome.turnId) continue;
@@ -1021,14 +1076,8 @@ async function replayEligibleTurnIds(
       (outcome.status === "unknown" || outcome.status === "accepted" || outcome.status === "corrected");
     if (!legacyCompleted && !modernReplayEligible) continue;
     if (modernReplayEligible) {
-      const turn = await workspace.operational.foregroundTurns.get(outcome.turnId);
-      if (
-        !turn ||
-        turn.sessionId !== sessionId ||
-        turn.status !== "completed" ||
-        turn.outcomeId !== outcome.outcomeId
-      )
-        continue;
+      const turn = turns.get(outcome.turnId);
+      if (!turn || turn.status !== "completed") continue;
     }
     eligible.add(outcome.turnId);
   }
@@ -1141,6 +1190,49 @@ async function replayEligibleHistoryMessages(workspace: NoesisWorkspaceStore, se
     workspace.operational.outcomes.listForSession(sessionId),
   ]);
   const eligibleTurnIds = await replayEligibleTurnIds(workspace, sessionId, outcomes);
+  return orderedHistoryMessages(messages, eligibleTurnIds);
+}
+
+type ContextTurnStatus = "completed" | "failed" | "aborted";
+
+interface ContextHistoryMessage {
+  readonly message: MessageRecord;
+  readonly turnStatus?: ContextTurnStatus;
+}
+
+async function contextVisibleHistoryMessages(
+  workspace: NoesisWorkspaceStore,
+  sessionId: string,
+): Promise<readonly ContextHistoryMessage[]> {
+  const [messages, outcomes] = await Promise.all([
+    workspace.operational.messages.listForSession(sessionId),
+    workspace.operational.outcomes.listForSession(sessionId),
+  ]);
+  const turns = await foregroundTurnsForOutcomes(workspace, sessionId, outcomes);
+  const replayEligible = replayEligibleTurnIdsFromOutcomes(outcomes, turns);
+  const statuses = new Map<string, ContextTurnStatus>();
+  const visibleTurnIds = new Set(replayEligible);
+  for (const outcome of outcomes) {
+    if (!outcome.turnId) continue;
+    const turn = turns.get(outcome.turnId);
+    if (!turn || turn.status === "running") continue;
+    statuses.set(outcome.turnId, turn.status);
+    if (turn.status === "failed" || turn.status === "aborted") visibleTurnIds.add(outcome.turnId);
+  }
+  const ordered = orderedHistoryMessages(messages, visibleTurnIds);
+  return Object.freeze(
+    ordered.map((message) => {
+      const turnId = metadataString(message, "turnId");
+      const turnStatus = turnId === undefined ? undefined : statuses.get(turnId);
+      return Object.freeze({ message, ...(turnStatus === undefined ? {} : { turnStatus }) });
+    }),
+  );
+}
+
+function orderedHistoryMessages(
+  messages: readonly MessageRecord[],
+  eligibleTurnIds: ReadonlySet<string>,
+): readonly MessageRecord[] {
   const sourceOrder = new Map(messages.map((message, index) => [message.messageId, index]));
   const turnChronology = new Map<string, { readonly createdAt: string; readonly sourceIndex: number }>();
   for (const [sourceIndex, message] of messages.entries()) {
@@ -3156,7 +3248,15 @@ export async function createApplicationRuntimeComposition(
     return await running;
   };
   const hotbar: PiSelfToolAdapter["hotbar"] = async () => hotbarToolNames;
-  const inspectSelf: PiSelfToolAdapter["inspect"] = async ({ section, plan, request, catalog }) => {
+  const inspectSelf: PiSelfToolAdapter["inspect"] = async ({
+    section,
+    tool,
+    cursor,
+    limit,
+    plan,
+    request,
+    catalog,
+  }) => {
     const [memory, experiments] = await Promise.all([
       section === "overview" || section === "memory" ? criteria.list() : undefined,
       section === "overview" || section === "experiments"
@@ -3178,22 +3278,126 @@ export async function createApplicationRuntimeComposition(
     if (section === "memory") return toJsonValue(memory?.ok ? memory.value : Object.freeze([]));
     if (section === "experiments") return toJsonValue(experiments ?? Object.freeze([]));
     if (section === "tools") {
+      const pageCursor = cursor ?? 0;
+      const pageLimit = limit ?? 12;
       const aliases = catalog ? createHotbarToolAliases(catalog) : undefined;
       const reconciled = catalog
         ? reconcileHotbarTools(catalog, hotbarToolNames)
         : Object.freeze({ active: Object.freeze([]), unavailable: hotbarToolNames });
+      const sortedTools = [...(catalog?.tools ?? [])].sort((left, right) =>
+        left.name.localeCompare(right.name),
+      );
+      const summarizeDescriptor = (descriptor: (typeof sortedTools)[number], descriptionBytes: number) => {
+        const label = boundedUtf8Text(descriptor.label, MAX_SELF_INSPECTION_LABEL_BYTES);
+        const description = boundedUtf8Text(descriptor.description, descriptionBytes);
+        return {
+          name: descriptor.name,
+          label: label.value,
+          description: description.value,
+          revisionId: descriptor.revisionId,
+          ...(label.truncated ? { labelTruncated: true } : {}),
+          ...(description.truncated ? { descriptionTruncated: true } : {}),
+        };
+      };
+      const inspectionBytes = (value: JsonValue): number => encoder.encode(canonicalJson(value)).byteLength;
+      if (tool) {
+        const descriptor = sortedTools.find((candidate) => candidate.name === tool);
+        if (!descriptor) throw new Error(`Tool ${tool} is not available in this frozen turn`);
+        const complete = {
+          catalogId: catalog?.catalogId,
+          catalogDigest: catalog?.catalogDigest,
+          tool: descriptor,
+          alias: aliases?.get(tool) ?? hotbarToolAlias(tool),
+          direct: reconciled.active.includes(tool),
+          permissions: plan.permissionSnapshot,
+        };
+        const serialized = canonicalJson(complete);
+        if (encoder.encode(serialized).byteLength <= MAX_SELF_INSPECTION_RESULT_BYTES)
+          return toJsonValue(complete);
+        const boundedDetail = toJsonValue({
+          catalogId: catalog?.catalogId,
+          catalogDigest: catalog?.catalogDigest,
+          tool: {
+            ...summarizeDescriptor(descriptor, MAX_SELF_INSPECTION_DETAIL_DESCRIPTION_BYTES),
+            inputSchemaDigest: sha256(canonicalJson(descriptor.inputSchema)),
+            outputSchemaDigest: sha256(canonicalJson(descriptor.outputSchema)),
+            schemasOmitted: true,
+          },
+          alias: aliases?.get(tool) ?? hotbarToolAlias(tool),
+          direct: reconciled.active.includes(tool),
+          instructions: `Use execute with noesis.describe(${JSON.stringify(tool)}) to inspect the complete schema through the bounded Broker result path.`,
+        });
+        if (inspectionBytes(boundedDetail) <= MAX_SELF_INSPECTION_RESULT_BYTES) return boundedDetail;
+        return toJsonValue({
+          catalogId: catalog?.catalogId,
+          catalogDigest: catalog?.catalogDigest,
+          tool: {
+            name: descriptor.name,
+            revisionId: descriptor.revisionId,
+            inputSchemaDigest: sha256(canonicalJson(descriptor.inputSchema)),
+            outputSchemaDigest: sha256(canonicalJson(descriptor.outputSchema)),
+            descriptorTextOmitted: true,
+            schemasOmitted: true,
+          },
+          alias: aliases?.get(tool) ?? hotbarToolAlias(tool),
+          direct: reconciled.active.includes(tool),
+          instructions: `Use execute with noesis.describe(${JSON.stringify(tool)}) to inspect the complete descriptor through the bounded Broker result path.`,
+        });
+      }
+      const pageCandidates = sortedTools.slice(pageCursor, pageCursor + pageLimit).map((descriptor) => ({
+        ...summarizeDescriptor(descriptor, MAX_SELF_INSPECTION_PAGE_DESCRIPTION_BYTES),
+        alias: aliases?.get(descriptor.name) ?? hotbarToolAlias(descriptor.name),
+        direct: reconciled.active.includes(descriptor.name),
+      }));
+      const pageResponse = (tools: readonly JsonValue[]) =>
+        toJsonValue({
+          catalogId: catalog?.catalogId,
+          catalogDigest: catalog?.catalogDigest,
+          total: sortedTools.length,
+          cursor: pageCursor,
+          limit: pageLimit,
+          nextCursor: pageCursor + tools.length < sortedTools.length ? pageCursor + tools.length : null,
+          tools,
+          hotbar: hotbarToolNames.map((name) => ({
+            name,
+            alias: aliases?.get(name) ?? hotbarToolAlias(name),
+            available: aliases?.has(name) ?? false,
+          })),
+          unavailableHotbar: reconciled.unavailable,
+          instructions:
+            "Pass tool with one canonical name to inspect its complete descriptor and schemas. Pass nextCursor as cursor to continue this exact frozen catalog.",
+        });
+      const page: JsonValue[] = [];
+      for (const candidate of pageCandidates) {
+        const next = [...page, toJsonValue(candidate)];
+        if (inspectionBytes(pageResponse(next)) > MAX_SELF_INSPECTION_RESULT_BYTES) break;
+        page.push(toJsonValue(candidate));
+      }
+      const response = pageResponse(page);
+      if (inspectionBytes(response) <= MAX_SELF_INSPECTION_RESULT_BYTES && page.length > 0) return response;
+      const minimalPage = pageCandidates.slice(0, Math.max(1, page.length)).map((descriptor) => ({
+        name: descriptor.name,
+        revisionId: descriptor.revisionId,
+        alias: descriptor.alias,
+        direct: descriptor.direct,
+        descriptorTextOmitted: true,
+      }));
       return toJsonValue({
-        ...(catalog ?? {}),
-        hotbar: hotbarToolNames.map((name) => ({
-          name,
-          alias: aliases?.get(name) ?? hotbarToolAlias(name),
-          available: aliases?.has(name) ?? false,
-        })),
-        unavailableHotbar: reconciled.unavailable,
-        permissions: plan.permissionSnapshot,
-        frozenToolMaterials: plan.selectedCapabilities.flatMap((selection) => selection.tools),
+        catalogId: catalog?.catalogId,
+        catalogDigest: catalog?.catalogDigest,
+        total: sortedTools.length,
+        cursor: pageCursor,
+        limit: pageLimit,
+        nextCursor:
+          pageCursor + minimalPage.length < sortedTools.length ? pageCursor + minimalPage.length : null,
+        tools: minimalPage,
+        pageMetadataOmitted: true,
+        instructions:
+          "Pass tool with one canonical name to inspect its bounded descriptor. Pass nextCursor as cursor to continue this exact frozen catalog.",
       });
     }
+    if (tool !== undefined || cursor !== undefined || limit !== undefined)
+      throw new Error("tool, cursor, and limit are only valid when section is 'tools'");
     return toJsonValue({
       planId: plan.planId,
       sessionId: plan.sessionId,
@@ -3797,9 +4001,9 @@ export async function createApplicationRuntimeComposition(
     resolveContextTokenBudget(Number.MAX_SAFE_INTEGER, modelContextLimits(trail));
   const effectiveHistoryBudget = (trail: TrailState, input: string): number =>
     resolveHistoryTokenBudget(effectiveContextBudget(trail), Object.freeze([BASE_SYSTEM_PROMPT, input]));
-  const contextMessages = (messages: readonly MessageRecord[]): readonly SessionContextMessage[] =>
+  const contextMessages = (messages: readonly ContextHistoryMessage[]): readonly SessionContextMessage[] =>
     Object.freeze(
-      messages.map((message) =>
+      messages.map(({ message, turnStatus }) =>
         Object.freeze({
           messageId: message.messageId,
           role: message.role === "user" ? ("user" as const) : ("assistant" as const),
@@ -3807,6 +4011,7 @@ export async function createApplicationRuntimeComposition(
           createdAt: message.createdAt,
           sensitivity: message.sensitivity,
           startsTurn: message.role === "user" && replayHistoryKind(message) === "turn",
+          ...(turnStatus === undefined ? {} : { turnStatus }),
         }),
       ),
     );
@@ -3825,7 +4030,7 @@ export async function createApplicationRuntimeComposition(
       for (let iteration = 0; iteration < 32; iteration += 1) {
         controller.signal.throwIfAborted();
         const [messages, checkpoint] = await Promise.all([
-          replayEligibleHistoryMessages(workspace, trail.trailId).then(contextMessages),
+          contextVisibleHistoryMessages(workspace, trail.trailId).then(contextMessages),
           workspace.operational.contextCheckpoints.getActive(trail.trailId),
         ]);
         const current = resolvedSessionContext(messages, checkpoint, targetTokenBudget);
@@ -4019,10 +4224,11 @@ export async function createApplicationRuntimeComposition(
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
     const thinkingLevel = runOptions?.thinkingLevel ?? agentDefaults.thinkingLevel;
     try {
-      const allHistoryMessages = await replayEligibleHistoryMessages(workspace, trailId);
+      const allContextMessages = await contextVisibleHistoryMessages(workspace, trailId);
+      const allHistoryMessages = allContextMessages.map(({ message }) => message);
       const activeCheckpoint = await workspace.operational.contextCheckpoints.getActive(trailId);
       const resolvedContext = resolvedSessionContext(
-        contextMessages(allHistoryMessages),
+        contextMessages(allContextMessages),
         activeCheckpoint,
         historyTokenBudget,
       );
@@ -4035,15 +4241,18 @@ export async function createApplicationRuntimeComposition(
           return durable;
         }),
       );
+      const contextById = new Map(resolvedContext.messages.map((message) => [message.messageId, message]));
       const priorConversation = Object.freeze(
-        historyMessages.map((message) =>
-          Object.freeze({
+        historyMessages.map((message) => {
+          const turnStatus = contextById.get(message.messageId)?.turnStatus;
+          return Object.freeze({
             messageId: message.messageId,
             role: message.role === "user" ? ("user" as const) : ("assistant" as const),
             content: message.content,
             createdAt: message.createdAt,
-          }),
-        ),
+            ...(turnStatus === undefined ? {} : { turnStatus }),
+          });
+        }),
       );
       const plan = await turnPlanner.planAndAdmit({
         sessionId: trailId,
@@ -4064,7 +4273,7 @@ export async function createApplicationRuntimeComposition(
         DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS +
         (plan.contextCheckpoint ? estimateContextTokens(plan.contextCheckpoint.summary) : 0) +
         (plan.conversationHistory ?? []).reduce(
-          (total, message) => total + estimateContextTokens(message.content),
+          (total, message) => total + estimateContextTokens(renderFrozenConversationHistoryContent(message)),
           0,
         );
       if (estimatedCompleteRequestTokens > contextTokenBudget)

@@ -102,6 +102,7 @@ The default history budget is 160,000 tokens. Override it in `~/.noesis/config.j
 ```
 
 Noesis caps the effective budget below the selected model's context window and reserves that model's maximum output allowance.
+After a model response, Noesis uses the provider's reported usage. Before then, it uses a provider-neutral estimate of roughly four UTF-8 bytes per token. Tool-heavy turns can replace older tool results in the next model request with bounded digest-backed references; the complete results remain available in the transcript.
 
 ## MCP servers
 
