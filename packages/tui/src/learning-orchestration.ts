@@ -1,8 +1,5 @@
 import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
-import {
-  createLearningAuditOverlay,
-  type LearningAuditOverlay,
-} from "./learning-audit.ts";
+import { createLearningAuditOverlay, type LearningAuditOverlay } from "./learning-audit.ts";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
 
 export interface TuiLearningOrchestration {
@@ -42,9 +39,7 @@ export function createTuiLearningOrchestration(options: {
       }
       const { inspectLearningAudit } = options.runtime;
       if (!inspectLearningAudit) {
-        options.reportUnavailable(
-          "The learning audit is unavailable in this runtime.",
-        );
+        options.reportUnavailable("The learning audit is unavailable in this runtime.");
         options.tui.requestRender();
         return;
       }

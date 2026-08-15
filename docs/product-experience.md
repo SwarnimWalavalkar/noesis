@@ -20,10 +20,10 @@ An explicit project change does not wait for this loop. Noesis may publish and u
 
 Noesis has two default ways of working. It infers them from the conversation. The user does not need to configure a mode.
 
-| Approach | When to use it | What Noesis does |
-| --- | --- | --- |
+| Approach     | When to use it                                                        | What Noesis does                                                                                                           |
+| ------------ | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
 | Work with me | The work is unclear, exploratory, educational, or calls for judgment. | Surface assumptions, develop the question, preserve uncertainty, offer alternatives, and keep the user's reasoning active. |
-| Do for me | The user asks for a clear outcome within a clear scope. | Act directly, make reasonable decisions, report important tradeoffs, and return the finished result. |
+| Do for me    | The user asks for a clear outcome within a clear scope.               | Act directly, make reasonable decisions, report important tradeoffs, and return the finished result.                       |
 
 The user's words take priority. Phrases such as "just do it," "think this through with me," or "teach me instead of solving it" should change how Noesis works without a setting or command.
 
@@ -82,7 +82,7 @@ Each lasting change has a history that the user can inspect. It connects:
 
 The main interaction remains conversational. A user can ask, "Why did you work with me instead of doing it?", "What have you learned about this project?", "Why did you use this ability?", or "Undo that change." Commands and detailed views can offer precise inspection, but they are not the only way to use the system.
 
-`/learning` opens an interactive explorer built with the same terminal primitives as the rest of Noesis. Its default view highlights lasting changes, experiments, protected decisions, feedback, and failures. Routine `no_change` reflections appear as a summary instead of flooding the timeline; the complete audit view still exposes every reflection and background job. Wide terminals show activity and decision detail together, while narrow terminals use a focused drill-down. Each record keeps its exact identity, readable bounded evidence, typed relationships, and a sensitivity-aware raw projection. The interface is a read model; it does not become another authority for learning state.
+`/learning` opens an interactive explorer built with the same terminal primitives as the rest of Noesis. Its default view highlights lasting changes, experiments, protected decisions, feedback, and failures. Activity is grouped by type. Failed reflections stay in a quiet expandable section so they do not crowd lasting changes. Routine `no_change` reflections appear as a summary instead of flooding the timeline; the complete audit view still exposes every reflection and background job. Wide terminals show activity and decision detail together, while narrow terminals use a focused drill-down. Enter opens the highlighted record, or a related record only once Tab has moved focus there. Tab moves focus between activity, the decision, and related records. Each record keeps its exact identity, readable bounded evidence, typed relationships, and a sensitivity-aware raw projection. The interface is a read model; it does not become another authority for learning state.
 
 Challenging a lesson does not erase history. Noesis records the correction and may narrow or retire the current revision. It keeps the evidence behind the earlier behavior. A revert restores the prior complete version instead of rebuilding it from files that may have changed.
 

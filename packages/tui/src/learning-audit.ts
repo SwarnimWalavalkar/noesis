@@ -1,31 +1,25 @@
-import {
-  type Component,
-  matchesKey,
-  wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
-import type {
-  NoesisTuiRuntime,
-  TuiLearningAuditSnapshot,
-  TuiLearningPrimitive,
-} from "./runtime-port.ts";
+import { type Component, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import type { NoesisTuiRuntime, TuiLearningAuditSnapshot, TuiLearningPrimitive } from "./runtime-port.ts";
 import {
   type AuditFilter,
   type DetailFocus,
+  detailDocument,
   emptyListMessage,
   filterChips,
   formatRelativeTime,
   headlineStats,
   isNoteworthy,
+  isQuietFailure,
   isRoutine,
   joinColumns,
   listViewport,
+  navigableRecords,
   nextGroupFilter,
   PAGE_STEP,
   pad,
+  paneRule,
   previewDocument,
   relatedSectionIndex,
-  rule,
-  detailDocument,
   toggleAllActivity,
   WIDE_LAYOUT_MIN,
   wrapDocument,
@@ -58,9 +52,7 @@ export interface CreateLearningAuditOverlayOptions {
   readonly now?: () => Date;
 }
 
-export function createLearningAuditOverlay(
-  options: CreateLearningAuditOverlayOptions,
-): LearningAuditOverlay {
+export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOptions): LearningAuditOverlay {
   let disposed = false;
   let generation = 0;
   let snapshot: TuiLearningAuditSnapshot | undefined;
@@ -69,6 +61,7 @@ export function createLearningAuditOverlay(
   let screen: AuditScreen = { kind: "list" };
   let filter: AuditFilter = "noteworthy";
   let currentSessionOnly = false;
+  let failedExpanded = false;
   let cursor = 0;
   let scroll = 0;
   let relationCursor = 0;
@@ -85,35 +78,48 @@ export function createLearningAuditOverlay(
   const scopedRecords = (): readonly TuiLearningPrimitive[] => {
     const current = snapshot;
     return (
-      current?.primitives.filter(
-        (record) =>
-          !currentSessionOnly || record.sessionId === current.sessionId,
-      ) ?? []
+      current?.primitives.filter((record) => !currentSessionOnly || record.sessionId === current.sessionId) ??
+      []
     );
   };
 
-  const visibleRecords = (): readonly TuiLearningPrimitive[] => {
+  const collapseFailures = (): boolean => filter === "noteworthy" || filter === "all";
+
+  const filteredRecords = (): readonly TuiLearningPrimitive[] => {
     const scoped = scopedRecords();
     if (filter === "noteworthy") return scoped.filter(isNoteworthy);
     if (filter === "all") return scoped;
     return scoped.filter((record) => record.group === filter);
   };
 
+  const failedCount = (): number =>
+    collapseFailures() ? filteredRecords().filter(isQuietFailure).length : 0;
+
+  const visibleRecords = (): readonly TuiLearningPrimitive[] =>
+    navigableRecords(filteredRecords(), collapseFailures() ? failedExpanded : true);
+
+  const listOptions = (): {
+    readonly grouped: boolean;
+    readonly failedCount: number;
+    readonly failedExpanded: boolean;
+  } =>
+    Object.freeze({
+      grouped: filter === "noteworthy" || filter === "all",
+      failedCount: failedCount(),
+      failedExpanded: collapseFailures() ? failedExpanded : true,
+    });
+
   const revealRecord = (record: TuiLearningPrimitive): void => {
-    if (currentSessionOnly && record.sessionId !== snapshot?.sessionId)
-      currentSessionOnly = false;
-    if (visibleRecords().some((candidate) => candidate.id === record.id))
-      return;
+    if (currentSessionOnly && record.sessionId !== snapshot?.sessionId) currentSessionOnly = false;
+    if (isQuietFailure(record) && collapseFailures()) failedExpanded = true;
+    if (visibleRecords().some((candidate) => candidate.id === record.id)) return;
     filter = isNoteworthy(record) ? "noteworthy" : "all";
-    if (visibleRecords().some((candidate) => candidate.id === record.id))
-      return;
+    if (visibleRecords().some((candidate) => candidate.id === record.id)) return;
     filter = "all";
   };
 
   const openRecord = (recordId: string, back: AuditScreen): void => {
-    const visibleIndex = visibleRecords().findIndex(
-      (record) => record.id === recordId,
-    );
+    const visibleIndex = visibleRecords().findIndex((record) => record.id === recordId);
     if (visibleIndex >= 0) cursor = visibleIndex;
     screen = { kind: "detail", recordId, back, raw: false };
     scroll = 0;
@@ -123,9 +129,7 @@ export function createLearningAuditOverlay(
   };
 
   const applyFocus = (recordId: string): boolean => {
-    const record = snapshot?.primitives.find(
-      (candidate) => candidate.id === recordId,
-    );
+    const record = snapshot?.primitives.find((candidate) => candidate.id === recordId);
     if (!record) return false;
     revealRecord(record);
     openRecord(recordId, { kind: "list" });
@@ -138,9 +142,7 @@ export function createLearningAuditOverlay(
     notice = undefined;
     render();
     try {
-      const next = await options.runtime.inspectLearningAudit(
-        options.sessionId,
-      );
+      const next = await options.runtime.inspectLearningAudit(options.sessionId);
       if (disposed || generation !== request) return;
       snapshot = next;
       busy = "";
@@ -158,10 +160,7 @@ export function createLearningAuditOverlay(
   };
 
   const moveList = (delta: number): void => {
-    cursor = Math.max(
-      0,
-      Math.min(cursor + delta, Math.max(0, visibleRecords().length - 1)),
-    );
+    cursor = Math.max(0, Math.min(cursor + delta, Math.max(0, visibleRecords().length - 1)));
     render();
   };
 
@@ -174,10 +173,7 @@ export function createLearningAuditOverlay(
   const moveRelated = (record: TuiLearningPrimitive, delta: number): void => {
     if (record.relations.length === 0) return;
     detailFocus = "related";
-    relationCursor = Math.max(
-      0,
-      Math.min(relationCursor + delta, record.relations.length - 1),
-    );
+    relationCursor = Math.max(0, Math.min(relationCursor + delta, record.relations.length - 1));
   };
 
   const handleList = (data: string): void => {
@@ -219,20 +215,22 @@ export function createLearningAuditOverlay(
       render();
       return;
     }
+    if (data === "x" && failedCount() > 0) {
+      failedExpanded = !failedExpanded;
+      cursor = Math.min(cursor, Math.max(0, visibleRecords().length - 1));
+      render();
+      return;
+    }
     if (data === "r") {
       void refresh();
       return;
     }
-    if (!matchesKey(data, "enter") && !(wideLayout && matchesKey(data, "tab")))
-      return;
+    if (!matchesKey(data, "enter") && !(wideLayout && matchesKey(data, "tab"))) return;
     const selected = visibleRecords()[cursor];
     if (selected) openRecord(selected.id, screen);
   };
 
-  const handleDetail = (
-    data: string,
-    detail: Extract<AuditScreen, { kind: "detail" }>,
-  ): void => {
+  const handleDetail = (data: string, detail: Extract<AuditScreen, { kind: "detail" }>): void => {
     const record = detailRecord();
     if (matchesKey(data, "escape")) {
       screen = detail.back;
@@ -271,21 +269,14 @@ export function createLearningAuditOverlay(
     } else if (matchesKey(data, "down")) {
       if (detailFocus === "related" && record) moveRelated(record, 1);
       else scroll += 1;
-    } else if (matchesKey(data, "pageUp"))
-      scroll = Math.max(0, scroll - PAGE_STEP);
+    } else if (matchesKey(data, "pageUp")) scroll = Math.max(0, scroll - PAGE_STEP);
     else if (matchesKey(data, "pageDown")) scroll += PAGE_STEP;
-    else if (matchesKey(data, "left") && record?.relations.length)
-      moveRelated(record, -1);
-    else if (matchesKey(data, "right") && record?.relations.length)
-      moveRelated(record, 1);
+    else if (matchesKey(data, "left") && record?.relations.length) moveRelated(record, -1);
+    else if (matchesKey(data, "right") && record?.relations.length) moveRelated(record, 1);
     else if (matchesKey(data, "enter")) {
+      if (detailFocus !== "related") return;
       const target = record?.relations[relationCursor];
-      if (
-        target &&
-        snapshot?.primitives.some(
-          (candidate) => candidate.id === target.targetId,
-        )
-      ) {
+      if (target && snapshot?.primitives.some((candidate) => candidate.id === target.targetId)) {
         openRecord(target.targetId, detail);
         return;
       }
@@ -294,25 +285,21 @@ export function createLearningAuditOverlay(
     render();
   };
 
-  const listHint = (): string =>
-    wideLayout
-      ? "↑/↓ select · enter/tab inspect · a all · f group · s session · r refresh · esc close"
-      : "↑/↓ select · enter inspect · a all · f group · s session · r refresh · esc close";
+  const listHint = (): string => {
+    const failed = failedCount() > 0 ? " · x failed" : "";
+    return wideLayout
+      ? `↑/↓ · Enter open · Tab decision · a all · f group · s session${failed} · Esc`
+      : `↑/↓ · Enter open · a all · f group · s session${failed} · Esc`;
+  };
 
   const detailHint = (record: TuiLearningPrimitive | undefined): string => {
     const related = Boolean(record?.relations.length);
-    if (wideLayout) {
-      if (detailFocus === "related")
-        return "↑/↓ related · enter follow · space raw · tab/esc activity";
-      return related
-        ? "↑/↓ scroll · tab related · enter follow · space raw · esc activity"
-        : "↑/↓ scroll · space raw · tab/esc activity";
-    }
     if (detailFocus === "related")
-      return "↑/↓ related · enter follow · space raw · tab document · esc back";
-    return related
-      ? "↑/↓ scroll · tab related · enter follow · space raw · esc back"
-      : "↑/↓ scroll · space raw · esc back";
+      return wideLayout
+        ? "↑/↓ · Enter open · Tab activity · Space raw · Esc"
+        : "↑/↓ · Enter open · Tab back · Space raw · Esc";
+    if (related) return "↑/↓ · Tab related · Space raw · Esc";
+    return wideLayout ? "↑/↓ · Space raw · Tab activity · Esc" : "↑/↓ · Space raw · Esc";
   };
 
   const component: LearningAuditOverlay = {
@@ -343,28 +330,21 @@ export function createLearningAuditOverlay(
       const height = Math.max(8, options.height() - 4);
       wideLayout = width >= WIDE_LAYOUT_MIN;
       const clock = now();
-      const noticeRows = notice
-        ? wrapTextWithAnsi(safeTerminalText(notice), width).slice(0, 3)
-        : [];
+      const noticeRows = notice ? wrapTextWithAnsi(safeTerminalText(notice), width).slice(0, 3) : [];
       const bodyRows = Math.max(1, height - 6 - noticeRows.length);
       let body: readonly string[];
       if (busy) body = [styled(options.colorEnabled, ANSI.cyan, busy)];
       else if (!snapshot)
-        body = [
-          styled(
-            options.colorEnabled,
-            ANSI.red,
-            "The learning ledger is unavailable.",
-          ),
-        ];
+        body = [styled(options.colorEnabled, ANSI.red, "The learning ledger is unavailable.")];
       else {
         const records = visibleRecords();
         const scoped = scopedRecords();
         const routineCount = scoped.filter(isRoutine).length;
         const updated = formatRelativeTime(snapshot.generatedAt, clock);
+        const stats = headlineStats(scoped, options.colorEnabled);
         const overview = wrapDocument(
           [
-            styled(options.colorEnabled, ANSI.bold, headlineStats(scoped)),
+            ...(stats.length > 0 ? [stats] : []),
             filterChips(filter, options.colorEnabled),
             styled(
               options.colorEnabled,
@@ -377,29 +357,17 @@ export function createLearningAuditOverlay(
         );
         if (wideLayout) {
           const paneRows = Math.max(1, bodyRows - overview.length);
-          const leftWidth = Math.min(
-            52,
-            Math.max(36, Math.floor(width * 0.38)),
-          );
+          const leftWidth = Math.min(52, Math.max(36, Math.floor(width * 0.38)));
           const rightWidth = Math.max(24, width - leftWidth - 3);
-          const empty = emptyListMessage(
-            filter,
-            records.length,
-            scoped.length,
-            routineCount,
-          );
+          const empty = emptyListMessage(filter, records.length, scoped.length, routineCount, failedCount());
           const leftPrefix = [
-            rule(
-              screen.kind === "list" ? "activity · focused" : "activity",
-              leftWidth,
-              options.colorEnabled,
-            ),
+            paneRule("activity", screen.kind === "list", leftWidth, options.colorEnabled),
             ...(filter === "noteworthy" && routineCount > 0
               ? [
                   styled(
                     options.colorEnabled,
                     ANSI.dim,
-                    `${String(routineCount)} routine no-change reflections hidden · a shows all`,
+                    `${String(routineCount)} routine hidden · a shows all`,
                   ),
                 ]
               : []),
@@ -415,29 +383,21 @@ export function createLearningAuditOverlay(
               options.colorEnabled,
               clock,
               empty,
+              listOptions(),
             ),
           ];
-          const selected =
-            screen.kind === "detail" ? detailRecord() : records[cursor];
+          const selected = screen.kind === "detail" ? detailRecord() : records[cursor];
           let right: readonly string[];
           if (!selected)
             right = [
-              rule("selected decision", rightWidth, options.colorEnabled),
-              styled(
-                options.colorEnabled,
-                ANSI.dim,
-                empty ?? "Select a learning record to inspect it.",
-              ),
+              paneRule("decision", false, rightWidth, options.colorEnabled),
+              styled(options.colorEnabled, ANSI.dim, empty ?? "Select a record."),
             ];
           else {
             const focused = screen.kind === "detail";
             const document = wrapDocument(
               [
-                rule(
-                  focused ? "selected decision · focused" : "selected decision",
-                  rightWidth,
-                  options.colorEnabled,
-                ),
+                paneRule("decision", focused, rightWidth, options.colorEnabled),
                 ...(focused && screen.kind === "detail"
                   ? detailDocument(
                       selected,
@@ -446,13 +406,9 @@ export function createLearningAuditOverlay(
                       rightWidth,
                       options.colorEnabled,
                       clock,
+                      detailFocus === "related",
                     )
-                  : previewDocument(
-                      selected,
-                      rightWidth,
-                      options.colorEnabled,
-                      clock,
-                    )),
+                  : previewDocument(selected, rightWidth, options.colorEnabled, clock)),
               ],
               rightWidth,
             );
@@ -464,8 +420,7 @@ export function createLearningAuditOverlay(
                 if (relatedAt >= 0) {
                   const target = relatedAt + 1 + relationCursor;
                   if (target < scroll) scroll = target;
-                  if (target >= scroll + paneRows)
-                    scroll = Math.max(0, target - paneRows + 1);
+                  if (target >= scroll + paneRows) scroll = Math.max(0, target - paneRows + 1);
                 }
               }
             }
@@ -474,22 +429,10 @@ export function createLearningAuditOverlay(
           }
           body = [
             ...overview,
-            ...joinColumns(
-              left,
-              right,
-              leftWidth,
-              rightWidth,
-              paneRows,
-              options.colorEnabled,
-            ),
+            ...joinColumns(left, right, leftWidth, rightWidth, paneRows, options.colorEnabled),
           ];
         } else if (screen.kind === "list") {
-          const empty = emptyListMessage(
-            filter,
-            records.length,
-            scoped.length,
-            routineCount,
-          );
+          const empty = emptyListMessage(filter, records.length, scoped.length, routineCount, failedCount());
           body = [
             ...overview,
             ...(filter === "noteworthy" && routineCount > 0
@@ -497,7 +440,7 @@ export function createLearningAuditOverlay(
                   styled(
                     options.colorEnabled,
                     ANSI.dim,
-                    `${String(routineCount)} routine no-change reflections hidden · press a for all activity`,
+                    `${String(routineCount)} routine hidden · a shows all`,
                   ),
                   "",
                 ]
@@ -506,27 +449,17 @@ export function createLearningAuditOverlay(
               records,
               cursor,
               width,
-              Math.max(
-                1,
-                bodyRows -
-                  overview.length -
-                  (routineCount > 0 && filter === "noteworthy" ? 2 : 0),
-              ),
+              Math.max(1, bodyRows - overview.length - (routineCount > 0 && filter === "noteworthy" ? 2 : 0)),
               options.colorEnabled,
               clock,
               empty,
+              listOptions(),
             ),
           ];
         } else {
           const record = detailRecord();
           if (!record)
-            body = [
-              styled(
-                options.colorEnabled,
-                ANSI.red,
-                "This learning record is unavailable.",
-              ),
-            ];
+            body = [styled(options.colorEnabled, ANSI.red, "This learning record is unavailable.")];
           else {
             const document = wrapDocument(
               detailDocument(
@@ -536,6 +469,7 @@ export function createLearningAuditOverlay(
                 width,
                 options.colorEnabled,
                 clock,
+                detailFocus === "related",
               ),
               width,
             );
@@ -546,50 +480,32 @@ export function createLearningAuditOverlay(
               if (relatedAt >= 0) {
                 const target = relatedAt + 1 + relationCursor;
                 if (target < scroll) scroll = target;
-                if (target >= scroll + bodyRows)
-                  scroll = Math.max(0, target - bodyRows + 1);
+                if (target >= scroll + bodyRows) scroll = Math.max(0, target - bodyRows + 1);
               }
             }
             body = document.slice(scroll, scroll + bodyRows);
           }
         }
       }
-      const title =
+      const subtitle =
         screen.kind === "list"
-          ? "LEARNING · project evolution"
-          : `LEARNING · ${detailRecord()?.kind.replaceAll("_", " ") ?? "record"}`;
-      const hint =
-        screen.kind === "list" ? listHint() : detailHint(detailRecord());
+          ? "project evolution"
+          : (detailRecord()?.kind.replaceAll("_", " ") ?? "record");
+      const hint = screen.kind === "list" ? listHint() : detailHint(detailRecord());
       return [
-        styled(
-          options.colorEnabled,
-          ANSI.dim,
-          `╭─${"─".repeat(Math.max(0, outerWidth - 3))}╮`,
-        ),
+        styled(options.colorEnabled, ANSI.dim, `╭─ ${"─".repeat(Math.max(0, outerWidth - 4))}╮`),
         elideText(
-          `│ ${styled(options.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, title)}`,
+          `│ ${styled(options.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "LEARNING")}${styled(options.colorEnabled, ANSI.dim, ` · ${subtitle}`)}`,
           outerWidth,
         ),
         ...(noticeRows.length > 0
           ? noticeRows.map((line) =>
-              elideText(
-                `│ ${styled(options.colorEnabled, ANSI.yellow, line)}`,
-                outerWidth,
-              ),
+              elideText(`│ ${styled(options.colorEnabled, ANSI.yellow, line)}`, outerWidth),
             )
           : []),
-        ...body
-          .slice(0, bodyRows)
-          .map((line) => elideText(`│ ${pad(line, width)}`, outerWidth)),
-        elideText(
-          `│ ${styled(options.colorEnabled, ANSI.dim, hint)}`,
-          outerWidth,
-        ),
-        styled(
-          options.colorEnabled,
-          ANSI.dim,
-          `╰─${"─".repeat(Math.max(0, outerWidth - 3))}╯`,
-        ),
+        ...body.slice(0, bodyRows).map((line) => elideText(`│ ${pad(line, width)}`, outerWidth)),
+        elideText(`│ ${styled(options.colorEnabled, ANSI.dim, hint)}`, outerWidth),
+        styled(options.colorEnabled, ANSI.dim, `╰─ ${"─".repeat(Math.max(0, outerWidth - 4))}╯`),
       ];
     },
   };
