@@ -144,8 +144,7 @@ export function createPiRequestBudgetProjector(): PiRequestBudgetProjector {
       let projection: PiRequestBudgetProjection;
       if (reported) {
         const trailingEstimatedTokens = heuristicMessageTokens(input.messages.slice(reported.index + 1));
-        const fixedAdjustment =
-          previousFixedTokens === undefined ? fixedTokens : fixedTokens - previousFixedTokens;
+        const fixedAdjustment = previousFixedTokens === undefined ? 0 : fixedTokens - previousFixedTokens;
         const estimatedTokens = Math.max(1, reported.tokens + trailingEstimatedTokens + fixedAdjustment);
         projection = Object.freeze({
           messages: applyProjection(input.messages, projectedToolCallIds),

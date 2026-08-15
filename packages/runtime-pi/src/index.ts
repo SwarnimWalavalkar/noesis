@@ -10,6 +10,7 @@ import {
   type AgentSteerResult,
   type FrozenTurnPlan,
   type NoesisAgentRuntime,
+  renderFrozenConversationHistoryContent,
   validateFrozenTurnPlan,
 } from "@noesis/agent-types";
 import { toAgentActionPayload } from "./action-payload.ts";
@@ -126,8 +127,12 @@ function historyForRequest(
           }),
         ]
       : []),
-    ...(plan.conversationHistory ?? []).map(({ role, content, createdAt }) =>
-      Object.freeze({ role, content, createdAt }),
+    ...(plan.conversationHistory ?? []).map((entry) =>
+      Object.freeze({
+        role: entry.role,
+        content: renderFrozenConversationHistoryContent(entry),
+        createdAt: entry.createdAt,
+      }),
     ),
   ]);
   if (request.history !== undefined) {

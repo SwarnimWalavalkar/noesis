@@ -339,12 +339,11 @@ export function createTurnInteractionController(
     sessionId: string,
     state: SessionInteractionState,
   ): Promise<InteractionSnapshot> => {
-    const [pending, held, unresolved] = await Promise.all([
+    const [pending, held] = await Promise.all([
       options.intents.listPending(sessionId),
       options.intents.listHeld(sessionId),
-      options.intents.listUnresolved(sessionId),
     ]);
-    const available = [...pending, ...held, ...unresolved].sort(
+    const available = [...pending, ...held].sort(
       (left, right) =>
         left.queueSequence - right.queueSequence || left.intentId.localeCompare(right.intentId),
     );

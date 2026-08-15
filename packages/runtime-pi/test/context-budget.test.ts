@@ -52,6 +52,25 @@ describe("Pi request token budgeting", () => {
     expect(result.estimatedTokens).toBeLessThan(14_000);
   });
 
+  test("does not add fixed request material to authoritative provider usage twice", () => {
+    const reported = {
+      ...fauxAssistantMessage("The provider accepted the complete request."),
+      usage: usage(145_000),
+    };
+    const result = createPiRequestBudgetProjector().project({
+      messages: [{ role: "user", content: "Continue.", timestamp: 1 }, reported],
+      systemPrompt: "system".repeat(4_000),
+      activeToolMaterial: "schema".repeat(8_000),
+      activeToolCount: 12,
+      tokenBudget: 160_000,
+      planId: "plan-authoritative-provider-usage",
+    });
+
+    expect(result.providerReportedTokens).toBe(145_000);
+    expect(result.fixedTokens).toBeGreaterThan(10_000);
+    expect(result.estimatedTokens).toBe(145_000);
+  });
+
   test("projects older tool results only in the model request while retaining trace identity", () => {
     const first = "alpha".repeat(8_000);
     const second = "beta".repeat(10_000);

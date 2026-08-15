@@ -127,6 +127,18 @@ export interface FrozenConversationHistoryEntry {
   readonly content: string;
   readonly createdAt: string;
   readonly contentDigest: string;
+  /** Terminal state of the source turn. Older plans omit this field. */
+  readonly turnStatus?: "completed" | "failed" | "aborted";
+}
+
+export function renderFrozenConversationHistoryContent(entry: {
+  readonly content: string;
+  readonly role: "user" | "assistant";
+  readonly turnStatus?: "completed" | "failed" | "aborted" | undefined;
+}): string {
+  if (entry.turnStatus !== "failed" && entry.turnStatus !== "aborted") return entry.content;
+  const kind = entry.role === "user" ? "user message" : "partial assistant message";
+  return `[Previous ${kind} from a turn that ${entry.turnStatus} before completion.]\n${entry.content}`;
 }
 
 export interface FrozenContextCheckpoint {
@@ -238,6 +250,7 @@ const FrozenConversationHistoryEntrySchema = z.strictObject({
   content: z.string().min(1),
   createdAt: z.string().min(1),
   contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+  turnStatus: z.enum(["completed", "failed", "aborted"]).optional(),
 });
 const FrozenContextCheckpointSchema = z.strictObject({
   checkpointId: z.string().min(1),
@@ -304,9 +317,14 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     ...base
   } = decoded;
   const { learningAttribution, ...routingBase } = routing;
+  const normalizedConversationHistory = conversationHistory?.map(({ turnStatus, ...entry }) =>
+    Object.freeze({ ...entry, ...(turnStatus === undefined ? {} : { turnStatus }) }),
+  );
   const plan = Object.freeze({
     ...base,
-    ...(conversationHistory === undefined ? {} : { conversationHistory }),
+    ...(normalizedConversationHistory === undefined
+      ? {}
+      : { conversationHistory: Object.freeze(normalizedConversationHistory) }),
     ...(contextCheckpoint === undefined
       ? {}
       : { contextCheckpoint: Object.freeze({ ...contextCheckpoint }) }),
@@ -368,7 +386,7 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     const estimatedContextTokens =
       (plan.contextCheckpoint === undefined ? 0 : estimateInputTokens(plan.contextCheckpoint.summary)) +
       (plan.conversationHistory ?? []).reduce(
-        (total, entry) => total + estimateInputTokens(entry.content),
+        (total, entry) => total + estimateInputTokens(renderFrozenConversationHistoryContent(entry)),
         0,
       );
     if (estimatedContextTokens > plan.contextTokenBudget)

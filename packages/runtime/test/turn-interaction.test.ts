@@ -1012,7 +1012,7 @@ describe("TurnInteractionController", () => {
     await controller.close();
   });
 
-  test("does not let an unacknowledged steer block interrupt and lets the user restore it", async () => {
+  test("does not present an unacknowledged steer as queued after interrupt", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
     const active = deferred<{ readonly outcome: "completed" | "aborted" }>();
@@ -1051,13 +1051,12 @@ describe("TurnInteractionController", () => {
       effect: "interrupted",
     });
     await expect(steer).resolves.toMatchObject({ effect: "unresolved" });
-    expect((await controller.inspect("session-1")).pending).toEqual(
+    expect((await controller.inspect("session-1")).pending).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ text: "uncertain steering" })]),
+    );
+    expect(intents.records()).toEqual(
       expect.arrayContaining([expect.objectContaining({ text: "uncertain steering", status: "unresolved" })]),
     );
-    await expect(controller.dispatch("session-1", { type: "restore-newest" })).resolves.toMatchObject({
-      effect: "restored",
-      restoredText: "uncertain steering",
-    });
     await controller.close();
   });
 

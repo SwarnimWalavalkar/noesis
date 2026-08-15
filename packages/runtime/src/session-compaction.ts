@@ -22,6 +22,7 @@ export interface SessionContextMessage {
   readonly createdAt: string;
   readonly sensitivity: Sensitivity;
   readonly startsTurn: boolean;
+  readonly turnStatus?: "completed" | "failed" | "aborted";
 }
 
 export interface ModelContextLimits {
@@ -254,6 +255,7 @@ export function serializeCompactionWindow(window: CompactionWindow, instructions
       role: message.role,
       content: message.content,
       createdAt: message.createdAt,
+      ...(message.turnStatus === undefined ? {} : { turnStatus: message.turnStatus }),
     })),
     requiredSections: [
       "goal",

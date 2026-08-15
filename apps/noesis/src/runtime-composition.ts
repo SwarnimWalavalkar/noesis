@@ -6,6 +6,7 @@ import type {
   FrozenTurnPlan,
   NoesisAgentRuntime,
 } from "@noesis/agent-types";
+import { renderFrozenConversationHistoryContent } from "@noesis/agent-types";
 import { createAtomicCapabilityRegistry, createWorkspaceCapabilityControlStore } from "@noesis/capabilities";
 import {
   type CodeExecutionEvent,
@@ -1141,6 +1142,55 @@ async function replayEligibleHistoryMessages(workspace: NoesisWorkspaceStore, se
     workspace.operational.outcomes.listForSession(sessionId),
   ]);
   const eligibleTurnIds = await replayEligibleTurnIds(workspace, sessionId, outcomes);
+  return orderedHistoryMessages(messages, eligibleTurnIds);
+}
+
+type ContextTurnStatus = "completed" | "failed" | "aborted";
+
+interface ContextHistoryMessage {
+  readonly message: MessageRecord;
+  readonly turnStatus?: ContextTurnStatus;
+}
+
+async function contextVisibleHistoryMessages(
+  workspace: NoesisWorkspaceStore,
+  sessionId: string,
+): Promise<readonly ContextHistoryMessage[]> {
+  const [messages, outcomes] = await Promise.all([
+    workspace.operational.messages.listForSession(sessionId),
+    workspace.operational.outcomes.listForSession(sessionId),
+  ]);
+  const statuses = new Map<string, ContextTurnStatus>();
+  for (const outcome of outcomes) {
+    if (!outcome.turnId) continue;
+    const turn = await workspace.operational.foregroundTurns.get(outcome.turnId);
+    if (
+      !turn ||
+      turn.sessionId !== sessionId ||
+      turn.outcomeId !== outcome.outcomeId ||
+      turn.status === "running"
+    )
+      continue;
+    statuses.set(outcome.turnId, turn.status);
+  }
+  const replayEligible = await replayEligibleTurnIds(workspace, sessionId, outcomes);
+  const visibleTurnIds = new Set([...replayEligible, ...statuses.keys()]);
+  const ordered = orderedHistoryMessages(messages, visibleTurnIds);
+  return Object.freeze(
+    ordered.map((message) => {
+      const turnId = metadataString(message, "turnId");
+      const resolvedStatus = turnId === undefined ? undefined : statuses.get(turnId);
+      const turnStatus =
+        resolvedStatus === "failed" || resolvedStatus === "aborted" ? resolvedStatus : undefined;
+      return Object.freeze({ message, ...(turnStatus === undefined ? {} : { turnStatus }) });
+    }),
+  );
+}
+
+function orderedHistoryMessages(
+  messages: readonly MessageRecord[],
+  eligibleTurnIds: ReadonlySet<string>,
+): readonly MessageRecord[] {
   const sourceOrder = new Map(messages.map((message, index) => [message.messageId, index]));
   const turnChronology = new Map<string, { readonly createdAt: string; readonly sourceIndex: number }>();
   for (const [sourceIndex, message] of messages.entries()) {
@@ -3856,9 +3906,9 @@ export async function createApplicationRuntimeComposition(
     resolveContextTokenBudget(Number.MAX_SAFE_INTEGER, modelContextLimits(trail));
   const effectiveHistoryBudget = (trail: TrailState, input: string): number =>
     resolveHistoryTokenBudget(effectiveContextBudget(trail), Object.freeze([BASE_SYSTEM_PROMPT, input]));
-  const contextMessages = (messages: readonly MessageRecord[]): readonly SessionContextMessage[] =>
+  const contextMessages = (messages: readonly ContextHistoryMessage[]): readonly SessionContextMessage[] =>
     Object.freeze(
-      messages.map((message) =>
+      messages.map(({ message, turnStatus }) =>
         Object.freeze({
           messageId: message.messageId,
           role: message.role === "user" ? ("user" as const) : ("assistant" as const),
@@ -3866,6 +3916,7 @@ export async function createApplicationRuntimeComposition(
           createdAt: message.createdAt,
           sensitivity: message.sensitivity,
           startsTurn: message.role === "user" && replayHistoryKind(message) === "turn",
+          ...(turnStatus === undefined ? {} : { turnStatus }),
         }),
       ),
     );
@@ -3884,7 +3935,7 @@ export async function createApplicationRuntimeComposition(
       for (let iteration = 0; iteration < 32; iteration += 1) {
         controller.signal.throwIfAborted();
         const [messages, checkpoint] = await Promise.all([
-          replayEligibleHistoryMessages(workspace, trail.trailId).then(contextMessages),
+          contextVisibleHistoryMessages(workspace, trail.trailId).then(contextMessages),
           workspace.operational.contextCheckpoints.getActive(trail.trailId),
         ]);
         const current = resolvedSessionContext(messages, checkpoint, targetTokenBudget);
@@ -4078,10 +4129,11 @@ export async function createApplicationRuntimeComposition(
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
     const thinkingLevel = runOptions?.thinkingLevel ?? agentDefaults.thinkingLevel;
     try {
-      const allHistoryMessages = await replayEligibleHistoryMessages(workspace, trailId);
+      const allContextMessages = await contextVisibleHistoryMessages(workspace, trailId);
+      const allHistoryMessages = allContextMessages.map(({ message }) => message);
       const activeCheckpoint = await workspace.operational.contextCheckpoints.getActive(trailId);
       const resolvedContext = resolvedSessionContext(
-        contextMessages(allHistoryMessages),
+        contextMessages(allContextMessages),
         activeCheckpoint,
         historyTokenBudget,
       );
@@ -4094,15 +4146,18 @@ export async function createApplicationRuntimeComposition(
           return durable;
         }),
       );
+      const contextById = new Map(resolvedContext.messages.map((message) => [message.messageId, message]));
       const priorConversation = Object.freeze(
-        historyMessages.map((message) =>
-          Object.freeze({
+        historyMessages.map((message) => {
+          const turnStatus = contextById.get(message.messageId)?.turnStatus;
+          return Object.freeze({
             messageId: message.messageId,
             role: message.role === "user" ? ("user" as const) : ("assistant" as const),
             content: message.content,
             createdAt: message.createdAt,
-          }),
-        ),
+            ...(turnStatus === undefined ? {} : { turnStatus }),
+          });
+        }),
       );
       const plan = await turnPlanner.planAndAdmit({
         sessionId: trailId,
@@ -4123,7 +4178,7 @@ export async function createApplicationRuntimeComposition(
         DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS +
         (plan.contextCheckpoint ? estimateContextTokens(plan.contextCheckpoint.summary) : 0) +
         (plan.conversationHistory ?? []).reduce(
-          (total, message) => total + estimateContextTokens(message.content),
+          (total, message) => total + estimateContextTokens(renderFrozenConversationHistoryContent(message)),
           0,
         );
       if (estimatedCompleteRequestTokens > contextTokenBudget)

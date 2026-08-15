@@ -1937,7 +1937,7 @@ describe("apps/noesis production control-plane composition", () => {
     await runtime.shutdown();
   });
 
-  test("retains an aborted partial pair for inspection but excludes it after restart and resume", async () => {
+  test("retains an aborted partial pair in the visible transcript and future frozen context", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-aborted-replay-"));
     roots.push(home);
     const config = await resolveNoesisConfig({
@@ -2021,7 +2021,20 @@ describe("apps/noesis production control-plane composition", () => {
     await reopened.resumeTrail(trail.trailId);
     await reopened.debug.runTurn(trail.trailId, "continue with clean context");
     expect(requests[0]?.systemPrompt).not.toContain("partial answer that must not resume");
-    expect(requests[0]?.systemPrompt).not.toContain("input attached to an aborted answer");
+    expect(requests[0]?.frozenTurnPlan?.conversationHistory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "user",
+          content: "input attached to an aborted answer",
+          turnStatus: "aborted",
+        }),
+        expect.objectContaining({
+          role: "assistant",
+          content: "partial answer that must not resume",
+          turnStatus: "aborted",
+        }),
+      ]),
+    );
     expect(await reopened.debug.workspace.operational.messages.listForSession(trail.trailId)).toHaveLength(4);
     await reopened.shutdown();
   });
@@ -2461,7 +2474,6 @@ describe("apps/noesis production control-plane composition", () => {
     await runtime.interact(trail.trailId, { type: "interrupt", turnId: activeTurnId });
     await waitUntil(async () => (await runtime.inspectInteraction(trail.trailId)).phase === "idle");
     expect((await runtime.inspectInteraction(trail.trailId)).pending.map((item) => item.text)).toEqual([
-      "Run this as its own turn",
       "Preserve this queued turn",
     ]);
     await runtime.shutdown();
@@ -2552,6 +2564,7 @@ describe("apps/noesis production control-plane composition", () => {
         run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
           requests.push(request);
           emit({ type: "status", status: "started" });
+          if (request.prompt === "failed input") throw new Error("controlled turn failure");
           if (request.prompt === "aborted input")
             return Object.freeze({
               outcome: "aborted" as const,
@@ -2585,6 +2598,9 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const trail = await runtime.startTrail({ title: "Authoritative model history" });
     await runtime.debug.runTurn(trail.trailId, "accepted input");
+    await expect(runtime.debug.runTurn(trail.trailId, "failed input")).rejects.toThrow(
+      "controlled turn failure",
+    );
     await runtime.debug.runTurn(trail.trailId, "aborted input");
     await runtime.interact(trail.trailId, { type: "submit", text: "active input" });
     await activeStarted;
@@ -2598,12 +2614,20 @@ describe("apps/noesis production control-plane composition", () => {
     expect(history.map(({ role, content }) => ({ role, content }))).toEqual([
       { role: "user", content: "accepted input" },
       { role: "assistant", content: "reply:accepted input" },
+      { role: "user", content: "failed input" },
+      { role: "user", content: "aborted input" },
+      { role: "assistant", content: "aborted partial output" },
       { role: "user", content: "active input" },
       { role: "user", content: "delivered steering" },
       { role: "assistant", content: "reply:active input" },
     ]);
-    expect(history.map((message) => message.content)).not.toContain("aborted input");
-    expect(history.map((message) => message.content)).not.toContain("aborted partial output");
+    expect(inspectionRequest?.frozenTurnPlan?.conversationHistory).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ content: "failed input", turnStatus: "failed" }),
+        expect.objectContaining({ content: "aborted input", turnStatus: "aborted" }),
+        expect.objectContaining({ content: "aborted partial output", turnStatus: "aborted" }),
+      ]),
+    );
     expect(inspectionRequest?.systemPrompt).not.toContain("accepted input");
     expect(history).toEqual(
       inspectionRequest?.frozenTurnPlan?.conversationHistory?.map(({ role, content, createdAt }) => ({

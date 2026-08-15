@@ -483,6 +483,67 @@ describe("agent runtime factories", () => {
     ).rejects.toThrow(`Runtime history does not match frozen turn plan ${plan.planId}`);
   });
 
+  test("labels visible messages from unsuccessful turns as unfinished model context", async () => {
+    const createdAt = "2026-07-25T00:00:00.000Z";
+    const content = "Finish the repository audit.";
+    const plan = frozenPlan(
+      Object.freeze([
+        Object.freeze({
+          messageId: "failed-history-user",
+          messageRef: Object.freeze({
+            kind: "database_row" as const,
+            table: "messages" as const,
+            rowId: "failed-history-user",
+          }),
+          role: "user" as const,
+          content,
+          createdAt,
+          contentDigest: sha256(content),
+          turnStatus: "failed" as const,
+        }),
+      ]),
+    );
+    const controlled = createControlledPiModels({
+      respond: ({ context }) => {
+        const prior = context.messages[0];
+        expect(prior).toMatchObject({ role: "user" });
+        expect(JSON.stringify(prior)).toContain("Previous user message from a turn that failed");
+        expect(JSON.stringify(prior)).toContain(content);
+        return "The unfinished request remains visible.";
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      codeExecution: controlledCodeExecution(
+        {
+          resolve: async (received) =>
+            Object.freeze({
+              planId: received.planId,
+              canonicalDigest: received.canonicalDigest,
+              consumedMaterials: frozenPlanMaterialUses(received),
+              definitions: definitions("unused"),
+            }),
+        },
+        "unused",
+      ),
+    });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "Keep going.",
+          activeCapabilities: Object.freeze([]),
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({ text: "The unfinished request remains visible." });
+  });
+
   test("loads an explicitly invoked skill from the pinned snapshot before model inference", async () => {
     const plan = frozenPlan();
     const skillContent = "Ask why repeatedly, then identify the smallest actionable root cause.";
