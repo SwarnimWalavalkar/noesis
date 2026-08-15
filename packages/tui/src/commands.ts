@@ -18,6 +18,7 @@ export interface SlashCommandContext {
   readonly prepareTrailSelection?: (trailId: string) => Promise<void>;
   readonly requestRender: () => void;
   readonly openMcpManager?: () => void;
+  readonly openLearningAudit?: () => void;
 }
 
 export const HELP_LINES = [
@@ -118,6 +119,13 @@ export function steerFeedback(result: TuiInteractionResult, explicit: boolean): 
     return "Steer delivery could not be confirmed. It is held for inspection and will not retry automatically.";
   if (result.effect !== "idle") return undefined;
   return explicit ? "No active turn is available to steer." : "No queued message is available to promote.";
+}
+
+export function isSlashCommandSubmission(text: string): boolean {
+  const command = text.trim();
+  return (
+    command === "?" || (command.startsWith("/") && (command !== "/learning" || text === text.trimStart()))
+  );
 }
 
 /**
@@ -362,6 +370,10 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
   }
 
   if (command === "/learning") {
+    if (context.openLearningAudit) {
+      context.openLearningAudit();
+      return true;
+    }
     if (!runtime.inspectLearning && !runtime.listLearningActivity) {
       publishInspector("Learning activity inspection is unavailable in this runtime.");
       return true;

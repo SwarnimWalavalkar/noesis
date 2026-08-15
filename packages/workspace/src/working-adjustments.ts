@@ -49,6 +49,25 @@ export function createProtectedWorkingAdjustmentStore(
         .get(projectId),
     );
 
+  const list: NonNullable<ProtectedWorkingAdjustmentStore["list"]> = async (request) => {
+    if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 1_000)
+      throw new Error("Working adjustment list limit must be an integer between 1 and 1000");
+    const rows = request.projectId
+      ? db
+          .prepare(
+            "SELECT data_json FROM working_adjustments WHERE project_id = ? ORDER BY created_at DESC, adjustment_id LIMIT ?",
+          )
+          .all(request.projectId, request.limit)
+      : db
+          .prepare(
+            "SELECT data_json FROM working_adjustments ORDER BY created_at DESC, adjustment_id LIMIT ?",
+          )
+          .all(request.limit);
+    return Object.freeze(
+      rows.map((row) => WorkingAdjustmentSchema.parse(parseJson(requiredString(row, "data_json")))),
+    );
+  };
+
   const activeId = (projectId: string): string | null => {
     const row = db
       .prepare("SELECT adjustment_id FROM active_project_adjustments WHERE project_id = ?")
@@ -216,5 +235,5 @@ export function createProtectedWorkingAdjustmentStore(
       });
     });
 
-  return Object.freeze({ get, getActive, listSettledEvidence, apply, unapply });
+  return Object.freeze({ get, getActive, list, listSettledEvidence, apply, unapply });
 }

@@ -319,6 +319,9 @@ importers:
       '@noesis/agent-types':
         specifier: workspace:*
         version: link:../agent-types
+      '@noesis/runtime-pi':
+        specifier: workspace:*
+        version: link:../runtime-pi
 
   packages/workspace:
     dependencies:

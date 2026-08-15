@@ -237,6 +237,7 @@ describe("ambient learning read model", () => {
       workingAdjustments: {
         get: async (adjustmentId) => (adjustmentId === adjustment.adjustmentId ? adjustment : undefined),
         getActive: async () => adjustment,
+        list: async () => Object.freeze([adjustment]),
         listSettledEvidence: async ({ limit }) => Object.freeze(settledEvidence.slice(0, limit)),
       },
       outcomes: {
@@ -270,6 +271,7 @@ describe("ambient learning read model", () => {
       workingAdjustments: {
         get: async () => adjustment,
         getActive: async () => undefined,
+        list: async () => Object.freeze([adjustment]),
         listSettledEvidence: async () => Object.freeze([]),
       },
       outcomes: { get: async () => undefined },
@@ -283,6 +285,7 @@ describe("ambient learning read model", () => {
       workingAdjustments: {
         get: async () => adjustment,
         getActive: async () => adjustment,
+        list: async () => Object.freeze([adjustment]),
         listSettledEvidence: async () => Object.freeze([]),
       },
       outcomes: { get: async () => undefined },
@@ -381,6 +384,7 @@ describe("ambient learning read model", () => {
             activeReadCount += 1;
             return activeReadCount === 1 ? adjustment : undefined;
           },
+          list: async () => Object.freeze([historicalAdjustment, adjustment]),
           listSettledEvidence: async () => Object.freeze([]),
         },
         outcomes: { get: async () => undefined },
@@ -463,6 +467,7 @@ describe("ambient learning read model", () => {
             : projectId === second.scope.projectId
               ? second
               : undefined,
+        list: async () => Object.freeze([first, second]),
         listSettledEvidence: async () => Object.freeze([]),
       },
       outcomes: { get: async () => undefined },

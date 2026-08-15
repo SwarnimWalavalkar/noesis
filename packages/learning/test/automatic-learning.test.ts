@@ -16,6 +16,7 @@ import {
   type ExperimentStorePort,
   err,
   type FeedbackSignal,
+  type FeedbackSignalStorePort,
   type FileRevisionRef,
   ok,
   type Result,
@@ -207,6 +208,14 @@ function createFeedbackHarness() {
   return Object.freeze({
     port: Object.freeze({
       getFeedbackSignal: async (signalId: string) => signals.find((signal) => signal.signalId === signalId),
+      listFeedbackSignals: async (request: Parameters<FeedbackSignalStorePort["listFeedbackSignals"]>[0]) =>
+        Object.freeze(
+          signals
+            .filter(
+              (signal) => request.experimentId === undefined || signal.experimentId === request.experimentId,
+            )
+            .slice(0, request.limit),
+        ),
       recordFeedbackSignal: async (signal: FeedbackSignal) => {
         const existing = signals.find((candidate) => candidate.signalId === signal.signalId);
         if (existing && JSON.stringify(existing) !== JSON.stringify(signal)) {
@@ -514,7 +523,13 @@ function createExperimentState() {
     listExperiments: async (request: Parameters<ExperimentStorePort["listExperiments"]>[0]) =>
       Object.freeze(
         experiments
-          .filter((experiment) => request.status === undefined || experiment.status === request.status)
+          .filter(
+            (experiment) =>
+              (request.status === undefined || experiment.status === request.status) &&
+              (request.sourceAdjustmentIds === undefined ||
+                (experiment.sourceAdjustmentId !== undefined &&
+                  request.sourceAdjustmentIds.includes(experiment.sourceAdjustmentId))),
+          )
           .slice(0, request.limit),
       ),
     putExperiment: async (experiment: Experiment) => {

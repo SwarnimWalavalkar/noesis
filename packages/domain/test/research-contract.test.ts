@@ -1,34 +1,34 @@
 import { describe, expect, test } from "vitest";
 import {
-  ExperimentSchema,
-  ExperimentTrialSchema,
-  PreflightPlanSchema,
-  PreflightReportSchema,
-  capabilityRevisionRef,
-  declaredAuthorityFor,
-  isExperimentTransitionAllowed,
-  preflightPlanMatchesExperiment,
-  preflightReportMatchesPlan,
-  sha256,
-  type CapabilityRevision,
   type ArtifactFileRef,
   type ArtifactWriteRequest,
+  type CapabilityRevision,
+  capabilityRevisionRef,
   type DatabaseRowRef,
   type DatabaseTable,
   type DefinitionMetadataCommitRequest,
   type DefinitionMetadataCommitResult,
   type DefinitionWriteRequest,
+  declaredAuthorityFor,
   type EvaluationRecord,
   type EvidenceKind,
   type EvidenceRevisionRef,
   type EvidenceWriteRequest,
   type Experiment,
+  ExperimentSchema,
   type ExperimentTrial,
+  ExperimentTrialSchema,
   type FeedbackSignal,
   type FileRevisionRef,
+  isExperimentTransitionAllowed,
   type PreflightPlan,
+  PreflightPlanSchema,
   type PreflightReport,
+  PreflightReportSchema,
+  preflightPlanMatchesExperiment,
+  preflightReportMatchesPlan,
   type ResearchStatePort,
+  sha256,
   type WorkspaceStore,
 } from "../src/index.ts";
 
@@ -58,7 +58,13 @@ function createFakeResearchState(): ResearchStatePort {
       getExperiment: async (experimentId: string) => experiments.get(experimentId),
       listExperiments: async (request: Parameters<ResearchStatePort["experiments"]["listExperiments"]>[0]) =>
         [...experiments.values()]
-          .filter((experiment) => request.status === undefined || experiment.status === request.status)
+          .filter(
+            (experiment) =>
+              (request.status === undefined || experiment.status === request.status) &&
+              (request.sourceAdjustmentIds === undefined ||
+                (experiment.sourceAdjustmentId !== undefined &&
+                  request.sourceAdjustmentIds.includes(experiment.sourceAdjustmentId))),
+          )
           .slice(0, request.limit),
       putExperiment: async (experiment: Experiment) => {
         const existing = experiments.get(experiment.experimentId);
@@ -119,6 +125,16 @@ function createFakeResearchState(): ResearchStatePort {
     }),
     feedbackSignals: Object.freeze({
       getFeedbackSignal: async (signalId: string) => feedbackSignals.get(signalId),
+      listFeedbackSignals: async (
+        request: Parameters<ResearchStatePort["feedbackSignals"]["listFeedbackSignals"]>[0],
+      ) =>
+        Object.freeze(
+          [...feedbackSignals.values()]
+            .filter(
+              (signal) => request.experimentId === undefined || signal.experimentId === request.experimentId,
+            )
+            .slice(0, request.limit),
+        ),
       recordFeedbackSignal: async (signal: FeedbackSignal) => {
         feedbackSignals.set(signal.signalId, signal);
         return row("feedback_signals", signal.signalId);
@@ -235,6 +251,7 @@ function createFakeWorkspaceStore(): WorkspaceStore {
     workingAdjustments: Object.freeze({
       get: async () => undefined,
       getActive: async () => undefined,
+      list: async () => [],
       listSettledEvidence: async () => [],
     }),
     jobs: Object.freeze({

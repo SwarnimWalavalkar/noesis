@@ -150,6 +150,90 @@ export interface TuiLearningInspection {
   readonly currentWorkingAdjustment?: TuiWorkingAdjustmentState;
 }
 
+export type TuiLearningPrimitiveKind =
+  | "criterion"
+  | "reflection"
+  | "working_adjustment"
+  | "experiment"
+  | "capability_revision"
+  | "preflight_plan"
+  | "trial"
+  | "evaluation"
+  | "preflight_report"
+  | "activation"
+  | "approval"
+  | "feedback_signal"
+  | "observation"
+  | "outcome_research"
+  | "experiment_outcome"
+  | "successor_lineage"
+  | "job";
+
+export type TuiLearningPrimitiveGroup =
+  | "memory"
+  | "reflection"
+  | "changes"
+  | "evaluation"
+  | "activation"
+  | "feedback"
+  | "operations";
+
+export interface TuiLearningRelation {
+  readonly label: string;
+  readonly targetId: string;
+  readonly targetTitle?: string;
+}
+
+export interface TuiLearningDetailEntry {
+  readonly label?: string;
+  readonly value: string;
+}
+
+export interface TuiLearningDetailSection {
+  readonly title: string;
+  readonly entries: readonly TuiLearningDetailEntry[];
+}
+
+export interface TuiLearningEvidencePreview {
+  readonly identity: string;
+  readonly label: string;
+  readonly excerpt: string;
+  readonly occurredAt?: string;
+  readonly redacted: boolean;
+}
+
+export interface TuiLearningPrimitive {
+  readonly id: string;
+  readonly kind: TuiLearningPrimitiveKind;
+  readonly group: TuiLearningPrimitiveGroup;
+  readonly status: string;
+  readonly tone: "neutral" | "positive" | "active" | "pending" | "negative";
+  readonly title: string;
+  readonly summary: string;
+  readonly occurredAt?: string;
+  readonly sessionId?: string;
+  readonly projectId?: string;
+  readonly experimentId?: string;
+  readonly capabilityId?: string;
+  readonly evidence: readonly string[];
+  readonly evidencePreviews: readonly TuiLearningEvidencePreview[];
+  readonly consideredEvidenceCount: number;
+  readonly consideredEvidencePreviews: readonly TuiLearningEvidencePreview[];
+  readonly relations: readonly TuiLearningRelation[];
+  readonly detailSections: readonly TuiLearningDetailSection[];
+  /** Bounded, sensitivity-aware projection of the authoritative record. */
+  readonly rawJson: string;
+}
+
+export interface TuiLearningAuditSnapshot {
+  readonly projectId: string;
+  readonly sessionId: string;
+  readonly generatedAt: string;
+  readonly activeAdjustmentId?: string;
+  readonly activeActivationId?: string;
+  readonly primitives: readonly TuiLearningPrimitive[];
+}
+
 export type TuiMcpScope = "global" | "project";
 export type TuiMcpServerStatus =
   | "disabled"
@@ -315,6 +399,7 @@ export type NoesisTuiRuntime = Pick<
   ) => Promise<TuiExecutionDetail | undefined>;
   readonly listLearningActivity?: (sessionId: string) => Promise<readonly TuiLearningActivitySummary[]>;
   readonly inspectLearning?: (sessionId: string) => Promise<TuiLearningInspection>;
+  readonly inspectLearningAudit?: (sessionId: string) => Promise<TuiLearningAuditSnapshot>;
   readonly waitForLearningActivity?: (
     sessionId: string,
     jobId: string,

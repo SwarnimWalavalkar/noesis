@@ -16,6 +16,7 @@ The core work described by these plans has shipped. Their preimplementation gap 
 - [Project level self evaluation](noesis-self-evolving-harness-architecture-plan.md)
 - [Bounded improvements delivery plan](noesis-bounded-improvements-delivery-plan.md)
 - [Durable session compaction](noesis-session-compaction-design.html)
+- [Self-improvement explorer](noesis-self-improvement-explorer-design.html)
 
 Keep future plans in this directory. Add their status here when they are created, completed, superseded, or abandoned.
 
@@ -23,4 +24,3 @@ Keep future plans in this directory. Add their status here when they are created
 
 - [MCP integration](noesis-mcp-integration-design.html)
 - [Learning architecture simplification](noesis-learning-architecture-simplification.html)
-- [Self-improvement explorer](noesis-self-improvement-explorer-design.html)

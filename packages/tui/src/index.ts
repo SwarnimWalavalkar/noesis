@@ -12,6 +12,7 @@ import { tuiActionForAgentEvent } from "./agent-event.ts";
 import {
   exclusiveSlashCommandScope,
   isExclusiveSlashCommand,
+  isSlashCommandSubmission,
   runSlashCommand,
   steerFeedback,
 } from "./commands.ts";
@@ -19,6 +20,7 @@ import { createExclusiveCommandBarrier, type ExclusiveCommandBarrier } from "./e
 import { editTextInExternalEditor } from "./external-editor.ts";
 import { learningDiagnosticNotice, reconcileSettledTurnPresentation } from "./learning-presentation.ts";
 import { boundedInspectorText, type ShutdownSettlement } from "./lifecycle-utils.ts";
+import { createTuiLearningOrchestration } from "./learning.ts";
 import { createTuiMcpOrchestration } from "./mcp.ts";
 import {
   createHeaderView,
@@ -53,12 +55,12 @@ import {
 } from "./state.ts";
 import { createStreamDeltaBuffer } from "./stream-delta-buffer.ts";
 import { ANSI, safeTerminalText, shouldUseColor, styled } from "./theme.ts";
-
 export * from "./action-summary.ts";
 export * from "./agent-event.ts";
 export * from "./commands.ts";
 export * from "./external-editor.ts";
 export * from "./lifecycle-utils.ts";
+export * from "./learning.ts";
 export * from "./mcp.ts";
 export * from "./onboarding.ts";
 export * from "./rendering.ts";
@@ -66,11 +68,7 @@ export * from "./runtime-port.ts";
 export * from "./safe-editor.ts";
 export * from "./session-picker.ts";
 export * from "./state.ts";
-
-const SHUTDOWN_GRACE_MS = 250;
-const INTERRUPT_FEEDBACK_MS = 20;
-const INSPECTOR_PAGE_ROWS = 10;
-
+const [SHUTDOWN_GRACE_MS, INTERRUPT_FEEDBACK_MS, INSPECTOR_PAGE_ROWS] = [250, 20, 10];
 export async function startNoesisTui(
   runtime: NoesisTuiRuntime,
   options: TuiStartOptions = {},
@@ -138,6 +136,13 @@ export async function startNoesisTui(
     mutationsEnabled: () => view.state.interaction.phase === "idle",
     reportUnavailable: (text) => view.dispatch({ type: "system-message", text }),
   });
+  const learning = createTuiLearningOrchestration({
+    runtime,
+    tui,
+    colorEnabled,
+    height: () => terminal.rows,
+    reportUnavailable: (text) => view.dispatch({ type: "system-message", text }),
+  });
   const statusView = createStatusView(view, () => terminal.rows);
   const queuedInputsView = createQueuedInputsView(view, () => terminal.rows);
   const inputLabelView = createInputLabelView(colorEnabled, () => terminal.rows);
@@ -188,6 +193,7 @@ export async function startNoesisTui(
       activeTurnToken = undefined;
       inspectorHandle?.hide();
       inspectorHandle = undefined;
+      learning.dispose();
       await mcp.dispose();
       streamDeltas.clear();
       editor.disableSubmit = true;
@@ -237,7 +243,6 @@ export async function startNoesisTui(
     shutdownPromise.then(resolveShutdown, rejectShutdown);
     return shutdownPromise;
   };
-
   const closeRunInspector = (): void => {
     inspectorMaxScroll = 0;
     view.dispatch({ type: "inspector-closed" });
@@ -245,7 +250,6 @@ export async function startNoesisTui(
     inspectorHandle = undefined;
     tui.requestRender();
   };
-
   const openRunInspector = (actionId: string): void => {
     inspectorMaxScroll = 0;
     view.dispatch({ type: "inspector-opened", actionId });
@@ -275,7 +279,6 @@ export async function startNoesisTui(
       () => settle(),
     );
   };
-
   const handleTranscriptKey = (data: string): boolean => {
     const state = view.state;
     if (state.inspector) {
@@ -331,7 +334,6 @@ export async function startNoesisTui(
     }
     return false;
   };
-
   const applyInteractionSnapshot = (snapshot: TuiInteractionSnapshot): void => {
     if (view.state.trailId !== snapshot.sessionId) return;
     view.dispatch({
@@ -342,7 +344,6 @@ export async function startNoesisTui(
     if (execution) view.dispatch({ type: "execution-changed", execution });
     tui.requestRender(snapshot.phase === "interrupting");
   };
-
   const reconcileSettledTurn = (
     trailId: string,
     turnId: string,
@@ -359,10 +360,10 @@ export async function startNoesisTui(
         requestRender: () => tui.requestRender(),
         reportDiagnostic: reportLearningDiagnostic,
         reportFailure,
+        rememberLearningFocus: (recordId) => learning.rememberFocus(recordId),
       },
     );
   };
-
   const onInteractionEvent = (interactionEvent: TuiInteractionEvent): void => {
     if (phase !== "main") return;
     if (interactionEvent.type === "state") {
@@ -424,7 +425,6 @@ export async function startNoesisTui(
     if (action) view.dispatch(action);
     tui.requestRender();
   };
-
   const interactWithSession = async (
     trailId: string,
     command: TuiInteractionCommand,
@@ -447,7 +447,6 @@ export async function startNoesisTui(
     interact: interactWithSession,
     onPromptFailure: reportFailure,
   });
-
   const interruptActiveTurn = async (): Promise<TuiInteractionResult> => {
     const visibleTurnId = view.state.interaction.active?.turnId;
     if (view.state.interaction.phase !== "idle") {
@@ -521,7 +520,6 @@ export async function startNoesisTui(
         tui.requestRender(true);
       });
   };
-
   removeExitInputListener = tui.addInputListener((data) => {
     if (phase !== "main") {
       if (matchesKey(data, "ctrl+c")) {
@@ -531,7 +529,7 @@ export async function startNoesisTui(
       }
       return undefined;
     }
-    if (mcp.ownsKeyboardFocus()) {
+    if (mcp.ownsKeyboardFocus() || learning.ownsKeyboardFocus()) {
       if (matchesKey(data, "ctrl+c")) {
         void shutdown();
         return { consume: true };
@@ -634,7 +632,7 @@ export async function startNoesisTui(
         return;
       }
       let handled = false;
-      if (normalizedInput === "?" || normalizedInput.startsWith("/")) {
+      if (isSlashCommandSubmission(text)) {
         const commandWork = runSlashCommand(normalizedInput, {
           runtime,
           trailId: submittedTrailId,
@@ -649,6 +647,9 @@ export async function startNoesisTui(
             if (isCurrentSubmission()) tui.requestRender();
           },
           openMcpManager: mcp.openManager,
+          ...(runtime.inspectLearningAudit
+            ? { openLearningAudit: () => learning.open(submittedTrailId) }
+            : {}),
         });
         handled = await commandWork;
       }
@@ -790,6 +791,7 @@ export async function startNoesisTui(
       tui.start();
     }
   } catch (error) {
+    learning.dispose();
     await mcp.dispose();
     throw error;
   }

@@ -3,10 +3,10 @@ import type {
   ArtifactFileRef,
   DatabaseRowRef,
   DatabaseTable,
+  EvaluationRecord,
   EvidenceKind,
   EvidenceRef,
   EvidenceRevisionRef,
-  EvaluationRecord,
   Experiment,
   ExperimentTrial,
   FeedbackSignal,
@@ -225,6 +225,7 @@ export interface ExperimentStorePort {
   readonly getExperiment: (experimentId: string) => Promise<Experiment | undefined>;
   readonly listExperiments: (request: {
     readonly status?: Experiment["status"];
+    readonly sourceAdjustmentIds?: readonly string[];
     readonly limit: number;
   }) => Promise<readonly Experiment[]>;
   readonly putExperiment: (experiment: Experiment) => Promise<DatabaseRowRef<"experiments">>;
@@ -258,12 +259,20 @@ export interface EvaluationStorePort {
 
 export interface FeedbackSignalStorePort {
   readonly getFeedbackSignal: (signalId: string) => Promise<FeedbackSignal | undefined>;
+  readonly listFeedbackSignals: (request: {
+    readonly experimentId?: string;
+    readonly limit: number;
+  }) => Promise<readonly FeedbackSignal[]>;
   readonly recordFeedbackSignal: (signal: FeedbackSignal) => Promise<DatabaseRowRef<"feedback_signals">>;
 }
 
 export interface WorkingAdjustmentReadPort {
   readonly get: (adjustmentId: string) => Promise<WorkingAdjustment | undefined>;
   readonly getActive: (projectId: string) => Promise<WorkingAdjustment | undefined>;
+  readonly list: (request: {
+    readonly projectId?: string;
+    readonly limit: number;
+  }) => Promise<readonly WorkingAdjustment[]>;
   readonly listSettledEvidence: (request: {
     readonly projectId: string;
     readonly adjustmentId: string;
@@ -390,8 +399,14 @@ export interface DurableJobListRequest {
   readonly kinds?: readonly string[];
   readonly limit?: number;
   readonly after?: DurableJobListCursor;
+  /** Stable authoritative order. Defaults to oldest for scheduler compatibility. */
+  readonly order?: "oldest" | "newest";
   /** Exact reflection-session selector over the authoritative JSON payload. */
   readonly payloadSessionId?: string;
+  /** Exact source-session selector for authoring and preflight payloads. */
+  readonly payloadSourceSessionIds?: readonly string[];
+  /** Exact reflection-project selector over the authoritative JSON payload. */
+  readonly payloadProjectId?: string;
   /** Exact session selector over authoritative many-to-one job observations. */
   readonly observedSessionId?: string;
   /** Exact experiment selector for authoring and preflight payloads. */
