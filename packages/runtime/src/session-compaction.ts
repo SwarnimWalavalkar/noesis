@@ -63,7 +63,11 @@ export function estimateContextTokens(text: string): number {
 }
 
 function estimateContextMessageTokens(message: SessionContextMessage): number {
-  return estimateContextTokens(renderFrozenConversationHistoryContent(message));
+  return estimateContextTokens(renderContextMessageContent(message));
+}
+
+function renderContextMessageContent(message: SessionContextMessage): string {
+  return renderFrozenConversationHistoryContent(message);
 }
 
 export function resolveContextTokenBudget(configured: number, limits: ModelContextLimits): number {
@@ -157,11 +161,17 @@ export function resolvedSessionContext(
   const estimatedTokens =
     (checkpoint ? estimateContextTokens(checkpoint.summary) : 0) +
     tail.reduce((total, message) => total + estimateContextMessageTokens(message), 0);
-  const totalCharacters = tail.reduce((total, message) => total + message.content.length, 0);
+  const totalCharacters = tail.reduce(
+    (total, message) => total + renderContextMessageContent(message).length,
+    0,
+  );
   const exceedsFrozenBounds =
     tail.length > MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES ||
     totalCharacters > MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS ||
-    tail.some((message) => message.content.length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS);
+    tail.some(
+      (message) =>
+        renderContextMessageContent(message).length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS,
+    );
   return Object.freeze({
     ...(checkpoint ? { checkpoint } : {}),
     messages: tail,
@@ -190,12 +200,18 @@ export function prepareCompactionWindow(
     const group = groups[index];
     if (!group) continue;
     const groupTokens = group.reduce((total, message) => total + estimateContextMessageTokens(message), 0);
-    const groupCharacters = group.reduce((total, message) => total + message.content.length, 0);
+    const groupCharacters = group.reduce(
+      (total, message) => total + renderContextMessageContent(message).length,
+      0,
+    );
     if (
       retainedTokens + groupTokens > rawTailBudget ||
       retainedMessageCount + group.length > MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES ||
       retainedCharacters + groupCharacters > MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS ||
-      group.some((message) => message.content.length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS)
+      group.some(
+        (message) =>
+          renderContextMessageContent(message).length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS,
+      )
     )
       break;
     retainedTokens += groupTokens;

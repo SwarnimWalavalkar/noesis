@@ -363,11 +363,12 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
       throw new Error(
         `Frozen turn plan ${plan.planId} history message ${entry.messageId} failed content digest verification`,
       );
-    if (entry.content.length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS)
+    const renderedContent = renderFrozenConversationHistoryContent(entry);
+    if (renderedContent.length > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS)
       throw new Error(
         `Frozen turn plan ${plan.planId} history message ${entry.messageId} exceeds the per-entry character bound`,
       );
-    historyCharacters += entry.content.length;
+    historyCharacters += renderedContent.length;
     if (historyCharacters > MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS)
       throw new Error(`Frozen turn plan ${plan.planId} exceeds the total history character bound`);
     if (historyMessageIds.has(entry.messageId))

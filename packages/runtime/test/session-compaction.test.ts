@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS } from "@noesis/agent-types";
 import {
   buildContextCheckpointRecord,
   contextCheckpointActivationRequestDigest,
@@ -61,6 +62,17 @@ describe("session compaction", () => {
     const current = resolvedSessionContext(Object.freeze([failed]), undefined, rawOnlyBudget);
 
     expect(current.estimatedTokens).toBeGreaterThan(rawOnlyBudget);
+    expect(current.exceedsBudget).toBe(true);
+  });
+
+  test("applies frozen character bounds to the rendered unfinished message", () => {
+    const failed = Object.freeze({
+      ...message("1", "x".repeat(MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS), true),
+      turnStatus: "failed" as const,
+    });
+
+    const current = resolvedSessionContext(Object.freeze([failed]), undefined, 1_000_000);
+
     expect(current.exceedsBudget).toBe(true);
   });
 
