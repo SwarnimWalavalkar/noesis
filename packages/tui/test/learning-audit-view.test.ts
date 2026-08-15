@@ -13,9 +13,9 @@ import {
   listViewport,
   navigableRecords,
   nextGroupFilter,
-  relatedSectionIndex,
-  rule,
+  sectionRevealLine,
   toggleAllActivity,
+  wrapDocument,
 } from "../src/learning-audit-view.ts";
 import type { TuiLearningPrimitive } from "../src/runtime-port.ts";
 
@@ -356,5 +356,66 @@ describe("learning audit view helpers", () => {
     expect(citedExpanded).toContain("third cited preview");
     expect(citedExpanded).toContain("+ 1 more exact references in raw");
     expect(citedExpanded).toContain("Enter hides");
+  });
+
+  test("offers expansion only when additional readable previews exist", () => {
+    const unavailable = record({
+      id: "reflection:unavailable-previews",
+      kind: "reflection",
+      group: "reflection",
+      title: "No readable previews",
+      evidence: Object.freeze(["messages:1", "messages:2", "messages:3"]),
+      consideredEvidenceCount: 25,
+    });
+
+    expect(interactableStops(unavailable)).toEqual([]);
+    expect(
+      detailDocument(
+        unavailable,
+        false,
+        0,
+        80,
+        false,
+        new Date("2026-08-14T12:00:00.000Z"),
+        "document",
+        false,
+        false,
+      ).join("\n"),
+    ).not.toContain("Enter expands");
+  });
+
+  test("reveals an expanded section tail when its raw-reference marker wraps", () => {
+    const subject = record({
+      id: "reflection:wrapped-tail",
+      kind: "reflection",
+      group: "reflection",
+      title: "Wrapped expansion tail",
+      consideredEvidenceCount: 25,
+      consideredEvidencePreviews: Object.freeze([
+        Object.freeze({ identity: "a", label: "TOOL", excerpt: "first preview", redacted: false }),
+        Object.freeze({ identity: "b", label: "USER", excerpt: "second preview", redacted: false }),
+        Object.freeze({ identity: "c", label: "TOOL", excerpt: "third preview", redacted: false }),
+      ]),
+    });
+    const document = wrapDocument(
+      detailDocument(
+        subject,
+        false,
+        0,
+        24,
+        false,
+        new Date("2026-08-14T12:00:00.000Z"),
+        "inputs",
+        false,
+        true,
+      ),
+      24,
+    );
+    const section = sectionRevealLine(document, "INPUTS CONSIDERED · ", false);
+    const revealed = sectionRevealLine(document, "INPUTS CONSIDERED · ", true);
+
+    expect(section).toBeGreaterThanOrEqual(0);
+    expect(revealed).toBeGreaterThan(section);
+    expect(document[revealed]).toContain("raw");
   });
 });

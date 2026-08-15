@@ -36,13 +36,25 @@ function overlayEdge(text: string, colorEnabled: boolean): string {
   return styled(colorEnabled, ANSI.dim, text);
 }
 
+function normalizedWidth(width: number): number {
+  return Math.max(0, Math.floor(width));
+}
+
 function overlayRule(outerWidth: number, colorEnabled: boolean, left: string, right: string): string {
-  return overlayEdge(`${left}${"─".repeat(Math.max(0, outerWidth - 2))}${right}`, colorEnabled);
+  const width = normalizedWidth(outerWidth);
+  if (width === 0) return "";
+  if (width === 1) return overlayEdge(left, colorEnabled);
+  return overlayEdge(`${left}${"─".repeat(width - 2)}${right}`, colorEnabled);
 }
 
 function overlayRow(inner: string, outerWidth: number, colorEnabled: boolean): string {
-  const width = Math.max(16, outerWidth - 4);
-  return `${overlayEdge("│", colorEnabled)} ${pad(elideText(inner, width), width)} ${overlayEdge("│", colorEnabled)}`;
+  const width = normalizedWidth(outerWidth);
+  if (width === 0) return "";
+  if (width === 1) return overlayEdge("│", colorEnabled);
+  if (width === 2) return overlayEdge("││", colorEnabled);
+  if (width === 3) return overlayEdge("│ │", colorEnabled);
+  const innerWidth = width - 4;
+  return `${overlayEdge("│", colorEnabled)} ${pad(elideText(inner, innerWidth), innerWidth)} ${overlayEdge("│", colorEnabled)}`;
 }
 
 type AuditScreen =
@@ -400,7 +412,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       return handleDetail(data, screen);
     },
     render(outerWidth) {
-      const width = Math.max(16, outerWidth - 4);
+      const width = Math.max(1, normalizedWidth(outerWidth) - 4);
       const height = Math.max(8, options.height() - 4);
       wideLayout = width >= WIDE_LAYOUT_MIN;
       const clock = now();

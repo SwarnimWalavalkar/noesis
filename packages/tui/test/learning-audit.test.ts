@@ -12,6 +12,7 @@ import {
   type TuiLearningAuditSnapshot,
   type TuiLearningPrimitive,
 } from "../src/index.ts";
+import { ANSI } from "../src/theme.ts";
 import { createInMemoryTestRuntime } from "./support/in-memory-runtime.ts";
 import { createTestTerminal } from "./support/test-terminal.ts";
 
@@ -373,7 +374,8 @@ describe("learning audit overlay", () => {
     const harness = createHarness();
     await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · project evolution"));
     const rows = harness.component.render(160);
-    const plain = (line: string): string => line.replaceAll(/\u001b\[[0-9;]*m/gu, "");
+    const plain = (line: string): string =>
+      Object.values(ANSI).reduce((text, code) => text.replaceAll(code, ""), line);
     expect(plain(rows[0] ?? "")).toMatch(/^╭─+╮$/u);
     expect(plain(rows.at(-1) ?? "")).toMatch(/^╰─+╯$/u);
     for (const row of rows) {
@@ -382,6 +384,10 @@ describe("learning audit overlay", () => {
         true,
       );
       expect(plain(row).endsWith("╮") || plain(row).endsWith("│") || plain(row).endsWith("╯")).toBe(true);
+    }
+
+    for (const width of [1, 2, 3, 4, 8, 19]) {
+      for (const row of harness.component.render(width)) expect(visibleWidth(row)).toBe(width);
     }
   });
 

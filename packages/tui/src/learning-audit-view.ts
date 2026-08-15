@@ -181,14 +181,11 @@ export function citedCountSentence(considered: number, cited: number): string {
 }
 
 export function canExpandEvidence(record: TuiLearningPrimitive): boolean {
-  return record.evidencePreviews.length > COLLAPSED_PREVIEW || record.evidence.length > COLLAPSED_PREVIEW;
+  return record.evidencePreviews.length > COLLAPSED_PREVIEW;
 }
 
 export function canExpandInputs(record: TuiLearningPrimitive): boolean {
-  return (
-    record.consideredEvidencePreviews.length > COLLAPSED_PREVIEW ||
-    record.consideredEvidenceCount > COLLAPSED_PREVIEW
-  );
+  return record.consideredEvidencePreviews.length > COLLAPSED_PREVIEW;
 }
 
 export function interactableStops(record: TuiLearningPrimitive): readonly DetailStop[] {
@@ -590,9 +587,10 @@ export function detailDocument(
 }
 
 function sectionIndex(document: readonly string[], prefix: string): number {
+  const heading = `── ${prefix}`.trimEnd();
   return document.findIndex((line) => {
     const plain = Object.values(ANSI).reduce((text, code) => text.replaceAll(code, ""), line);
-    return plain.startsWith(`── ${prefix}`);
+    return plain.startsWith(heading);
   });
 }
 
@@ -616,6 +614,13 @@ export function sectionRevealLine(document: readonly string[], prefix: string, e
   }
   for (let index = end - 1; index > start; index -= 1) {
     if ((document[index] ?? "").includes("more exact references in raw")) return index;
+  }
+  for (let index = end - 1; index > start; index -= 1) {
+    const plain = Object.values(ANSI).reduce(
+      (text, code) => text.replaceAll(code, ""),
+      document[index] ?? "",
+    );
+    if (plain.trim().length > 0) return index;
   }
   return start;
 }
