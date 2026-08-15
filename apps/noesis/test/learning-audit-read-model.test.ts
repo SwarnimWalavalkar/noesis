@@ -426,7 +426,8 @@ describe("learning audit read model", () => {
       "reflection-private",
       "private",
       Object.freeze({
-        status: "no_change",
+        status: "adjusted",
+        adjustmentId: adjustment.adjustmentId,
         rationale: "PRIVATE RATIONALE MUST NOT APPEAR",
         observation: Object.freeze({
           kind: "correction",
@@ -499,6 +500,10 @@ describe("learning audit read model", () => {
     expect(JSON.stringify(privateReflection?.detailSections)).not.toContain("PRIVATE RATIONALE");
     expect(JSON.stringify(privateReflection?.detailSections)).not.toContain("PRIVATE OBSERVATION");
     expect(privateReflection?.rawJson).toContain('"redacted":true');
+    expect(privateReflection?.evidence).toEqual([]);
+    expect(privateReflection?.evidencePreviews).toEqual([]);
+    expect(privateReflection?.consideredEvidenceCount).toBe(0);
+    expect(privateReflection?.consideredEvidencePreviews).toEqual([]);
     const author = snapshot.primitives.find((primitive) => primitive.id === "job:author-with-evidence");
     expect(author?.evidence).toEqual(["messages:message-removal-evidence"]);
     expect(author?.evidencePreviews).toEqual([

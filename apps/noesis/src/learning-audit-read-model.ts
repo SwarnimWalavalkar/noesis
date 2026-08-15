@@ -559,14 +559,18 @@ async function jobPrimitive(
   const adjustmentId = isReflection ? stringField(job.result, "adjustmentId") : undefined;
   const adjustment = adjustmentId ? adjustments.get(adjustmentId) : undefined;
   const reflectionStatus = stringField(job.result, "status") ?? job.status;
-  const citedEvidence = isReflection
-    ? reflectionStatus === "unapplied"
-      ? evidenceRefsField(job.result, "evidenceRefs")
-      : reflectionStatus === "adjusted" || reflectionStatus === "replaced"
-        ? (adjustment?.evidenceRefs ?? [])
-        : []
-    : job.payloadRefs;
-  const consideredEvidence = isReflection ? job.payloadRefs : [];
+  const sensitivity = jobSensitivity(job);
+  const citedEvidence =
+    isReflection && sensitivity !== "normal"
+      ? []
+      : isReflection
+        ? reflectionStatus === "unapplied"
+          ? evidenceRefsField(job.result, "evidenceRefs")
+          : reflectionStatus === "adjusted" || reflectionStatus === "replaced"
+            ? (adjustment?.evidenceRefs ?? [])
+            : []
+        : job.payloadRefs;
+  const consideredEvidence = isReflection && sensitivity === "normal" ? job.payloadRefs : [];
   const previewConsideredEvidence = new Set([
     "adjusted",
     "replaced",
@@ -614,7 +618,7 @@ async function jobPrimitive(
       ),
     ].filter(defined),
     raw: job,
-    sensitivity: jobSensitivity(job),
+    sensitivity,
   });
 }
 
