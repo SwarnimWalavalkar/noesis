@@ -81,6 +81,22 @@ describe("working-adjustment notice presentation", () => {
     expect(
       learningAuditFocusId(
         Object.freeze({
+          ...activity("unapplied"),
+          adjustmentId: "adjustment-1",
+        }),
+      ),
+    ).toBe("reflection:job-unapplied");
+    expect(
+      learningAuditFocusId(
+        Object.freeze({
+          ...activity("stale"),
+          adjustmentId: "adjustment-1",
+        }),
+      ),
+    ).toBe("reflection:job-stale");
+    expect(
+      learningAuditFocusId(
+        Object.freeze({
           ...activity("failed"),
           stage: "authoring" as const,
           experimentId: "experiment-1",

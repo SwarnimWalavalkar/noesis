@@ -21,8 +21,7 @@ const ESCAPE = "\u001b";
 const NOW = new Date("2026-08-14T12:00:00.000Z");
 
 function record(
-  input: Partial<TuiLearningPrimitive> &
-    Pick<TuiLearningPrimitive, "id" | "kind" | "group" | "title">,
+  input: Partial<TuiLearningPrimitive> & Pick<TuiLearningPrimitive, "id" | "kind" | "group" | "title">,
 ): TuiLearningPrimitive {
   return Object.freeze({
     status: "recorded",
@@ -50,8 +49,7 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
       group: "reflection",
       status: "adjusted\nINJECTED STATUS ROW",
       tone: "positive",
-      title:
-        "Use the existing adaptation path instead of editing protected files.",
+      title: "Use the existing adaptation path instead of editing protected files.",
       summary: "The correction establishes a reusable constraint.",
       sessionId: "session-1",
       occurredAt: "2026-08-14T00:00:02.000Z",
@@ -123,8 +121,7 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
       group: "reflection",
       status: "no_change",
       title: "No lasting change",
-      summary:
-        "The reflector found no durable lesson with a credible future use.",
+      summary: "The reflector found no durable lesson with a credible future use.",
       sessionId: "session-1",
       occurredAt: "2026-08-14T00:00:01.500Z",
       consideredEvidenceCount: 4,
@@ -156,8 +153,7 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
       kind: "evaluation",
       group: "evaluation",
       status: "passed",
-      title:
-        "Evaluation\u001b]8;;https://hostile.test\u0007injected\u001b]8;;\u0007",
+      title: "Evaluation\u001b]8;;https://hostile.test\u0007injected\u001b]8;;\u0007",
     }),
   ]),
 });
@@ -202,17 +198,11 @@ describe("learning audit overlay", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("  /learning\r");
-    await vi.waitFor(() =>
-      expect(terminal.output).toContain(
-        "Controlled completion for:   /learning",
-      ),
-    );
+    await vi.waitFor(() => expect(terminal.output).toContain("Controlled completion for:   /learning"));
     expect(terminal.output).not.toContain("LEARNING · audit ledger");
 
     terminal.type("/learning\r");
-    await vi.waitFor(() =>
-      expect(terminal.output).toContain("LEARNING · project evolution"),
-    );
+    await vi.waitFor(() => expect(terminal.output).toContain("LEARNING · project evolution"));
     expect(terminal.output).toContain("Use the existing adaptation path");
     expect(terminal.output).toContain("1 routine");
     terminal.send(ESCAPE);
@@ -225,9 +215,7 @@ describe("learning audit overlay", () => {
 
   test("shows noteworthy activity by default and keeps routine reflection auditable", async () => {
     const harness = createHarness();
-    await vi.waitFor(() =>
-      expect(harness.output()).toContain("LEARNING · project evolution"),
-    );
+    await vi.waitFor(() => expect(harness.output()).toContain("LEARNING · project evolution"));
     expect(harness.output()).toContain(
       "Use the existing adaptation path instead of editing protected files.",
     );
@@ -240,6 +228,7 @@ describe("learning audit overlay", () => {
     expect(harness.output()).not.toContain("Reflection failed");
     expect(harness.output()).toContain("Use narrower research first");
     expect(harness.output()).toContain("12h ago");
+    expect(harness.output()).toContain("r refresh");
     expect(harness.output()).not.toContain("\u001b]");
 
     harness.component.handleInput?.("x");
@@ -266,18 +255,12 @@ describe("learning audit overlay", () => {
 
   test("explains a decision with cited evidence and keeps identities in raw authority", async () => {
     const harness = createHarness();
-    await vi.waitFor(() =>
-      expect(harness.output()).toContain("Use the existing adaptation path"),
-    );
+    await vi.waitFor(() => expect(harness.output()).toContain("Use the existing adaptation path"));
     harness.component.handleInput?.(ENTER);
     expect(harness.output()).toContain("WHAT CHANGED");
-    expect(harness.output()).toContain(
-      "Use adapt for self-extension requests.",
-    );
+    expect(harness.output()).toContain("Use adapt for self-extension requests.");
     expect(harness.output()).toContain("USER");
-    expect(harness.output()).toContain(
-      "Please propose the capability through adapt.",
-    );
+    expect(harness.output()).toContain("Please propose the capability through adapt.");
     expect(harness.output()).toContain("25 inputs were reviewed; 1 was cited");
     expect(harness.output()).not.toContain("messages:message-1");
     expect(harness.output()).toContain("adjusted INJECTED STATUS ROW");
@@ -287,9 +270,7 @@ describe("learning audit overlay", () => {
     expect(harness.output()).toContain("WHAT CHANGED");
     expect(harness.output()).toContain("Use the existing adaptation path");
     harness.component.handleInput?.("\u001b[6~");
-    expect(harness.output()).toContain(
-      "experiment · Use narrower research first",
-    );
+    expect(harness.output()).toContain("experiment · Use narrower research first");
     expect(harness.output()).toContain("Tab to choose");
 
     harness.component.handleInput?.(TAB);
@@ -304,9 +285,7 @@ describe("learning audit overlay", () => {
 
   test("supports keyboard navigation and closes cleanly", async () => {
     const harness = createHarness();
-    await vi.waitFor(() =>
-      expect(harness.output()).toContain("Use the existing adaptation path"),
-    );
+    await vi.waitFor(() => expect(harness.output()).toContain("Use the existing adaptation path"));
     harness.component.handleInput?.(DOWN);
     harness.component.handleInput?.(ENTER);
     expect(harness.output()).toContain("Use narrower research first");
@@ -340,9 +319,7 @@ describe("learning audit overlay", () => {
 
   test("focuses related records with tab and up/down instead of left/right", async () => {
     const harness = createHarness();
-    await vi.waitFor(() =>
-      expect(harness.output()).toContain("Use the existing adaptation path"),
-    );
+    await vi.waitFor(() => expect(harness.output()).toContain("Use the existing adaptation path"));
     harness.component.handleInput?.(ENTER);
     expect(harness.output()).toContain("Tab related");
     harness.component.handleInput?.(TAB);
@@ -354,18 +331,21 @@ describe("learning audit overlay", () => {
 
   test("opens /learning onto a remembered decision", async () => {
     const harness = createHarness("experiment:experiment-1");
-    await vi.waitFor(() =>
-      expect(harness.output(160)).toContain("LEARNING · experiment"),
-    );
+    await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · experiment"));
     expect(harness.output(160)).toContain("Use narrower research first");
     expect(harness.output(160)).toContain("▸ DECISION");
   });
 
+  test("finishes loading when a remembered record is outside the bounded snapshot", async () => {
+    const harness = createHarness("experiment:outside-bounded-snapshot");
+    await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · project evolution"));
+    expect(harness.output(160)).not.toContain("Refreshing the learning ledger");
+    expect(harness.output(160)).toContain("Use the existing adaptation path");
+  });
+
   test("expands quiet failed reflections when opening onto one", async () => {
     const harness = createHarness("reflection:failed-1");
-    await vi.waitFor(() =>
-      expect(harness.output(160)).toContain("Reflection failed"),
-    );
+    await vi.waitFor(() => expect(harness.output(160)).toContain("Reflection failed"));
     expect(harness.output(160)).toContain("× failed");
   });
 
@@ -392,13 +372,7 @@ describe("learning audit overlay", () => {
       close: () => undefined,
       now: () => NOW,
     });
-    await vi.waitFor(() =>
-      expect(component.render(110).join("\n")).toContain(
-        "No lasting changes yet",
-      ),
-    );
-    expect(component.render(110).join("\n")).toContain(
-      "Ambient reflection is running.",
-    );
+    await vi.waitFor(() => expect(component.render(110).join("\n")).toContain("No lasting changes yet"));
+    expect(component.render(110).join("\n")).toContain("Ambient reflection is running.");
   });
 });

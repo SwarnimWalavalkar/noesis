@@ -729,14 +729,12 @@ export async function loadLearningAuditSnapshot(
   const experiments = await resolveProjectExperiments(source.workspace, originJobs, adjustments);
   const experimentIds = new Set(experiments.map((experiment) => experiment.experimentId));
   const experimentJobs = await listExperimentJobs(source.workspace, [...experimentIds]);
-  const jobs = Object.freeze(
-    [...new Map([...originJobs, ...experimentJobs].map((job) => [job.jobId, job] as const)).values()]
-      .sort(
-        (left, right) =>
-          right.createdAt.localeCompare(left.createdAt) || right.jobId.localeCompare(left.jobId),
-      )
-      .slice(0, AUDIT_LIMIT),
+  const allJobs = Object.freeze(
+    [...new Map([...originJobs, ...experimentJobs].map((job) => [job.jobId, job] as const)).values()].sort(
+      (left, right) => right.createdAt.localeCompare(left.createdAt) || right.jobId.localeCompare(left.jobId),
+    ),
   );
+  const jobs = Object.freeze(allJobs.slice(0, AUDIT_LIMIT));
   const activationOperations = allActivationOperations.filter((operation) =>
     experimentIds.has(operation.binding.experimentId),
   );
@@ -776,7 +774,7 @@ export async function loadLearningAuditSnapshot(
   const adjustmentsById = new Map(
     adjustments.map((adjustment) => [adjustment.adjustmentId, adjustment] as const),
   );
-  const originSessions = originSessionMaps(jobs, adjustments, experiments);
+  const originSessions = originSessionMaps(allJobs, adjustments, experiments);
   const hypothesisByExperimentId = new Map(
     experiments.map((experiment) => [experiment.experimentId, experiment.hypothesis] as const),
   );

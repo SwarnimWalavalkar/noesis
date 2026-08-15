@@ -7,15 +7,17 @@ import {
   headlineStats,
   isNoteworthy,
   isQuietFailure,
+  listViewport,
   navigableRecords,
   nextGroupFilter,
+  relatedSectionIndex,
+  rule,
   toggleAllActivity,
 } from "../src/learning-audit-view.ts";
 import type { TuiLearningPrimitive } from "../src/runtime-port.ts";
 
 function record(
-  input: Partial<TuiLearningPrimitive> &
-    Pick<TuiLearningPrimitive, "id" | "kind" | "group" | "title">,
+  input: Partial<TuiLearningPrimitive> & Pick<TuiLearningPrimitive, "id" | "kind" | "group" | "title">,
 ): TuiLearningPrimitive {
   return Object.freeze({
     status: "recorded",
@@ -144,39 +146,30 @@ describe("learning audit view helpers", () => {
     });
     expect(isQuietFailure(failed)).toBe(true);
     expect(isQuietFailure(lesson)).toBe(false);
-    expect(
-      navigableRecords([failed, experiment, lesson], false).map(
-        (item) => item.id,
-      ),
-    ).toEqual(["reflection:1", "experiment:1"]);
-    expect(
-      navigableRecords([failed, experiment, lesson], true).map(
-        (item) => item.id,
-      ),
-    ).toEqual(["reflection:1", "experiment:1", "reflection:failed"]);
+    expect(navigableRecords([failed, experiment, lesson], false).map((item) => item.id)).toEqual([
+      "reflection:1",
+      "experiment:1",
+    ]);
+    expect(navigableRecords([failed, experiment, lesson], true).map((item) => item.id)).toEqual([
+      "reflection:1",
+      "experiment:1",
+      "reflection:failed",
+    ]);
   });
 
   test("formats relative time and exact UTC timestamps", () => {
     const now = new Date("2026-08-14T12:00:00.000Z");
-    expect(formatRelativeTime("2026-08-14T11:59:58.000Z", now)).toBe(
-      "just now",
-    );
+    expect(formatRelativeTime("2026-08-14T11:59:58.000Z", now)).toBe("just now");
     expect(formatRelativeTime("2026-08-14T11:59:00.000Z", now)).toBe("1m ago");
     expect(formatRelativeTime("2026-08-14T00:00:02.000Z", now)).toBe("12h ago");
     expect(formatRelativeTime(undefined, now)).toBeUndefined();
-    expect(formatExactTime("2026-08-14T00:00:02.000Z")).toBe(
-      "2026-08-14 00:00:02 UTC",
-    );
+    expect(formatExactTime("2026-08-14T00:00:02.000Z")).toBe("2026-08-14 00:00:02 UTC");
     expect(formatExactTime(undefined)).toBeUndefined();
   });
 
   test("uses singular grammar for a single cited input", () => {
-    expect(citedCountSentence(25, 1)).toBe(
-      "25 inputs were reviewed; 1 was cited for the decision.",
-    );
-    expect(citedCountSentence(1, 1)).toBe(
-      "1 input was reviewed; 1 was cited for the decision.",
-    );
+    expect(citedCountSentence(25, 1)).toBe("25 inputs were reviewed; 1 was cited for the decision.");
+    expect(citedCountSentence(1, 1)).toBe("1 input was reviewed; 1 was cited for the decision.");
   });
 
   test("teaches status glyphs and marks the active filter", () => {
@@ -211,5 +204,47 @@ describe("learning audit view helpers", () => {
     expect(filterChips("noteworthy", false)).toContain("[noteworthy]");
     expect(filterChips("noteworthy", false)).toContain("all");
     expect(filterChips("all", false)).toContain("[all]");
+  });
+
+  test("keeps the selected grouped record visible in one- and two-row viewports", () => {
+    const records = [
+      record({
+        id: "reflection:1",
+        kind: "reflection",
+        group: "reflection",
+        title: "First decision",
+      }),
+      record({
+        id: "experiment:1",
+        kind: "experiment",
+        group: "changes",
+        title: "Selected experiment",
+        summary: "Selected experiment detail",
+      }),
+    ];
+    const options = Object.freeze({
+      grouped: true,
+      failedCount: 0,
+      failedExpanded: false,
+    });
+    const now = new Date("2026-08-14T12:00:00.000Z");
+
+    const oneRow = listViewport(records, 1, 80, 1, false, now, undefined, options);
+    expect(oneRow).toHaveLength(1);
+    expect(oneRow[0]).toContain("› ◆ Selected experiment");
+
+    const twoRows = listViewport(records, 1, 80, 2, false, now, undefined, options);
+    expect(twoRows).toHaveLength(2);
+    expect(twoRows[0]).toContain("› ◆ Selected experiment");
+    expect(twoRows[1]).toContain("Selected experiment detail");
+  });
+
+  test("locates the structural related section rather than record content", () => {
+    expect(
+      relatedSectionIndex([
+        "Decision text containing RELATED in user content",
+        rule("related · 2", 80, true),
+      ]),
+    ).toBe(1);
   });
 });

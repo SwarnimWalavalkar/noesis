@@ -13,16 +13,15 @@ export type DetailFocus = "document" | "related";
 
 export const PAGE_STEP = 8;
 export const WIDE_LAYOUT_MIN = 110;
-export const GROUP_FILTERS: readonly TuiLearningPrimitiveGroup[] =
-  Object.freeze([
-    "memory",
-    "reflection",
-    "changes",
-    "evaluation",
-    "activation",
-    "feedback",
-    "operations",
-  ]);
+export const GROUP_FILTERS: readonly TuiLearningPrimitiveGroup[] = Object.freeze([
+  "memory",
+  "reflection",
+  "changes",
+  "evaluation",
+  "activation",
+  "feedback",
+  "operations",
+]);
 
 const SUPPORTING_KINDS: ReadonlySet<TuiLearningPrimitiveKind> = new Set([
   "trial",
@@ -33,11 +32,7 @@ const SUPPORTING_KINDS: ReadonlySet<TuiLearningPrimitiveKind> = new Set([
   "outcome_research",
 ]);
 
-const CHIP_ORDER: readonly AuditFilter[] = Object.freeze([
-  "noteworthy",
-  "all",
-  ...GROUP_FILTERS,
-]);
+const CHIP_ORDER: readonly AuditFilter[] = Object.freeze(["noteworthy", "all", ...GROUP_FILTERS]);
 
 const TONE_PRESENTATION = Object.freeze({
   neutral: Object.freeze({ glyph: "—", color: ANSI.dim }),
@@ -54,16 +49,15 @@ export function pad(line: string, width: number): string {
   return `${line}${" ".repeat(Math.max(0, width - visibleWidth(line)))}`;
 }
 
-const GROUP_GLYPH: Readonly<Record<TuiLearningPrimitiveGroup, string>> =
-  Object.freeze({
-    memory: "○",
-    reflection: "◇",
-    changes: "◆",
-    evaluation: "□",
-    activation: "▹",
-    feedback: "↻",
-    operations: "·",
-  });
+const GROUP_GLYPH: Readonly<Record<TuiLearningPrimitiveGroup, string>> = Object.freeze({
+  memory: "○",
+  reflection: "◇",
+  changes: "◆",
+  evaluation: "□",
+  activation: "▹",
+  feedback: "↻",
+  operations: "·",
+});
 
 export function isRoutine(record: TuiLearningPrimitive): boolean {
   return record.kind === "reflection" && record.status === "no_change";
@@ -75,23 +69,17 @@ export function isQuietFailure(record: TuiLearningPrimitive): boolean {
 
 export function isNoteworthy(record: TuiLearningPrimitive): boolean {
   if (isRoutine(record)) return false;
-  if (record.group === "operations")
-    return record.tone === "pending" || record.tone === "negative";
+  if (record.group === "operations") return record.tone === "pending" || record.tone === "negative";
   if (record.kind === "working_adjustment") return record.tone === "active";
-  if (record.kind === "observation")
-    return record.tone === "positive" || record.tone === "negative";
+  if (record.kind === "observation") return record.tone === "positive" || record.tone === "negative";
   if (record.kind === "capability_revision") return record.tone === "active";
-  if (SUPPORTING_KINDS.has(record.kind))
-    return record.tone === "pending" || record.tone === "negative";
+  if (SUPPORTING_KINDS.has(record.kind)) return record.tone === "pending" || record.tone === "negative";
   return true;
 }
 
-export function sortByGroup(
-  records: readonly TuiLearningPrimitive[],
-): readonly TuiLearningPrimitive[] {
+export function sortByGroup(records: readonly TuiLearningPrimitive[]): readonly TuiLearningPrimitive[] {
   return [...records].sort((left, right) => {
-    const groupDelta =
-      GROUP_FILTERS.indexOf(left.group) - GROUP_FILTERS.indexOf(right.group);
+    const groupDelta = GROUP_FILTERS.indexOf(left.group) - GROUP_FILTERS.indexOf(right.group);
     if (groupDelta !== 0) return groupDelta;
     return (right.occurredAt ?? "").localeCompare(left.occurredAt ?? "");
   });
@@ -102,9 +90,7 @@ export function navigableRecords(
   failedExpanded: boolean,
 ): readonly TuiLearningPrimitive[] {
   const failed = sortByGroup(records.filter(isQuietFailure));
-  const primary = sortByGroup(
-    records.filter((record) => !isQuietFailure(record)),
-  );
+  const primary = sortByGroup(records.filter((record) => !isQuietFailure(record)));
   return failedExpanded ? [...primary, ...failed] : primary;
 }
 
@@ -112,57 +98,35 @@ function sectionOf(record: TuiLearningPrimitive): string {
   return isQuietFailure(record) ? "failed" : record.group;
 }
 
-function recordGlyph(
-  record: TuiLearningPrimitive,
-  colorEnabled: boolean,
-): string {
+function recordGlyph(record: TuiLearningPrimitive, colorEnabled: boolean): string {
   const glyph = isQuietFailure(record) ? "×" : GROUP_GLYPH[record.group];
-  const color = isQuietFailure(record)
-    ? ANSI.dim
-    : TONE_PRESENTATION[record.tone].color;
+  const color = isQuietFailure(record) ? ANSI.dim : TONE_PRESENTATION[record.tone].color;
   return styled(colorEnabled, color, glyph);
 }
 
 function groupHeader(section: string, colorEnabled: boolean): string {
-  const glyph =
-    section === "failed"
-      ? "×"
-      : GROUP_GLYPH[section as TuiLearningPrimitiveGroup];
+  const glyph = section === "failed" ? "×" : GROUP_GLYPH[section as TuiLearningPrimitiveGroup];
   return styled(colorEnabled, ANSI.dim, `${glyph} ${section}`);
 }
 
-export function nextGroupFilter(
-  current: AuditFilter,
-): TuiLearningPrimitiveGroup {
-  const index = GROUP_FILTERS.indexOf(current as TuiLearningPrimitiveGroup);
+export function nextGroupFilter(current: AuditFilter): TuiLearningPrimitiveGroup {
+  const currentGroup = GROUP_FILTERS.find((group) => group === current);
+  const index = currentGroup ? GROUP_FILTERS.indexOf(currentGroup) : -1;
   return GROUP_FILTERS[(index + 1) % GROUP_FILTERS.length] ?? "memory";
 }
 
 export function toggleAllActivity(current: AuditFilter): AuditFilter {
-  return current === "all"
-    ? "noteworthy"
-    : current === "noteworthy"
-      ? "all"
-      : "noteworthy";
+  return current === "all" ? "noteworthy" : current === "noteworthy" ? "all" : "noteworthy";
 }
 
-export function headlineStats(
-  records: readonly TuiLearningPrimitive[],
-  colorEnabled: boolean,
-): string {
+export function headlineStats(records: readonly TuiLearningPrimitive[], colorEnabled: boolean): string {
   const active = records.filter((record) => record.tone === "active").length;
   const evaluating = records.filter(
     (record) => record.tone === "pending" && record.group !== "operations",
   ).length;
-  const attention = records.filter(
-    (record) => record.tone === "negative" && !isQuietFailure(record),
-  ).length;
+  const attention = records.filter((record) => record.tone === "negative" && !isQuietFailure(record)).length;
   const routine = records.filter(isRoutine).length;
-  const item = (
-    tone: keyof typeof TONE_PRESENTATION,
-    count: number,
-    label: string,
-  ): string =>
+  const item = (tone: keyof typeof TONE_PRESENTATION, count: number, label: string): string =>
     count === 0
       ? ""
       : `${styled(colorEnabled, TONE_PRESENTATION[tone].color, TONE_PRESENTATION[tone].glyph)} ${String(count)} ${label}`;
@@ -176,10 +140,7 @@ export function headlineStats(
     .join("   ");
 }
 
-export function filterChips(
-  filter: AuditFilter,
-  colorEnabled: boolean,
-): string {
+export function filterChips(filter: AuditFilter, colorEnabled: boolean): string {
   return CHIP_ORDER.map((item) => {
     const label = item === "all" ? "all" : item;
     return item === filter
@@ -188,10 +149,7 @@ export function filterChips(
   }).join("  ");
 }
 
-export function formatRelativeTime(
-  value: string | undefined,
-  now: Date,
-): string | undefined {
+export function formatRelativeTime(value: string | undefined, now: Date): string | undefined {
   if (!value) return undefined;
   const parsed = new Date(value);
   if (Number.isNaN(parsed.valueOf())) return safeScalar(value);
@@ -215,10 +173,7 @@ export function formatExactTime(value: string | undefined): string | undefined {
 }
 
 export function citedCountSentence(considered: number, cited: number): string {
-  const reviewed =
-    considered === 1
-      ? "1 input was reviewed"
-      : `${String(considered)} inputs were reviewed`;
+  const reviewed = considered === 1 ? "1 input was reviewed" : `${String(considered)} inputs were reviewed`;
   const citedPart = cited === 1 ? "1 was cited" : `${String(cited)} were cited`;
   return `${reviewed}; ${citedPart} for the decision.`;
 }
@@ -231,8 +186,7 @@ export function emptyListMessage(
   failedCount = 0,
 ): string | undefined {
   if (visibleCount > 0 || failedCount > 0) return undefined;
-  if (scopedCount === 0)
-    return "No learning activity recorded for this project yet.";
+  if (scopedCount === 0) return "No learning activity recorded for this project yet.";
   if (filter === "noteworthy" && routineCount > 0)
     return "No lasting changes yet. Ambient reflection is running.";
   return "Nothing in this view.";
@@ -269,28 +223,16 @@ function buildListLines(
       selected ? `${ANSI.bold}${ANSI.cyan}` : ANSI.dim,
       selected ? "›" : " ",
     );
-    const title = styled(
-      colorEnabled,
-      selected ? ANSI.bold : "",
-      safeScalar(record.title),
-    );
+    const title = styled(colorEnabled, selected ? ANSI.bold : "", safeScalar(record.title));
     const relative = formatRelativeTime(record.occurredAt, now);
     const summary = safeScalar(record.summary);
-    const context = (
-      grouped ? [relative] : [record.kind.replaceAll("_", " "), relative]
-    )
+    const context = (grouped ? [relative] : [safeScalar(record.kind).replaceAll("_", " "), relative])
       .filter((value): value is string => value !== undefined)
       .join(" · ");
-    const detail =
-      summary && summary !== safeScalar(record.title)
-        ? `${context} · ${summary}`
-        : context;
+    const detail = summary && summary !== safeScalar(record.title) ? `${context} · ${summary}` : context;
     lines.push({
       kind: "row",
-      text: elideText(
-        `${marker} ${recordGlyph(record, colorEnabled)} ${title}`,
-        width,
-      ),
+      text: elideText(`${marker} ${recordGlyph(record, colorEnabled)} ${title}`, width),
       anchor: index,
     });
     lines.push({
@@ -314,37 +256,22 @@ function windowListLines(
   const selectedAt = lines.findIndex((line) => line.anchor === cursor);
   if (selectedAt < 0) return lines.slice(0, itemRows).map((line) => line.text);
   let selectedEnd = selectedAt;
-  while (
-    selectedEnd + 1 < lines.length &&
-    lines[selectedEnd + 1]?.anchor === cursor
-  )
-    selectedEnd += 1;
+  while (selectedEnd + 1 < lines.length && lines[selectedEnd + 1]?.anchor === cursor) selectedEnd += 1;
+  if (itemRows === 1) return [lines[selectedAt]?.text ?? ""];
   const stickyNeeded = (start: number): boolean =>
-    grouped &&
-    lines[start]?.kind !== "header" &&
-    lines[start]?.anchor !== undefined;
-  const budgetFor = (start: number): number =>
-    stickyNeeded(start) ? itemRows - 1 : itemRows;
-  let start = Math.max(
-    0,
-    Math.min(selectedAt, Math.max(0, lines.length - itemRows)),
-  );
-  if (selectedEnd >= start + budgetFor(start))
-    start = Math.max(0, selectedEnd - budgetFor(start) + 1);
+    grouped && itemRows >= 3 && lines[start]?.kind !== "header" && lines[start]?.anchor !== undefined;
+  const budgetFor = (start: number): number => (stickyNeeded(start) ? itemRows - 1 : itemRows);
+  let start = Math.max(0, Math.min(selectedAt, Math.max(0, lines.length - itemRows)));
+  if (selectedEnd >= start + budgetFor(start)) start = Math.max(0, selectedEnd - budgetFor(start) + 1);
   if (selectedAt < start) start = selectedAt;
   const budget = budgetFor(start);
-  if (selectedEnd >= start + budget)
-    start = Math.max(0, selectedEnd - budget + 1);
+  if (selectedEnd >= start + budget) start = Math.max(0, selectedEnd - budget + 1);
   const slice = lines.slice(start, start + budget);
-  if (!stickyNeeded(start) || slice.length === 0)
-    return slice.map((line) => line.text);
+  if (!stickyNeeded(start) || slice.length === 0) return slice.map((line) => line.text);
   const anchor = slice.find((line) => line.anchor !== undefined)?.anchor;
   const record = anchor === undefined ? undefined : records[anchor];
   return record
-    ? [
-        elideText(groupHeader(sectionOf(record), colorEnabled), width),
-        ...slice.map((line) => line.text),
-      ]
+    ? [elideText(groupHeader(sectionOf(record), colorEnabled), width), ...slice.map((line) => line.text)]
     : slice.map((line) => line.text);
 }
 
@@ -364,32 +291,14 @@ export function listViewport(
 ): readonly string[] {
   const footer =
     options.failedCount > 0 && !options.failedExpanded
-      ? elideText(
-          styled(
-            colorEnabled,
-            ANSI.dim,
-            `${String(options.failedCount)} failed · x shows`,
-          ),
-          width,
-        )
+      ? elideText(styled(colorEnabled, ANSI.dim, `${String(options.failedCount)} failed · x shows`), width)
       : undefined;
   const itemRows = footer ? Math.max(1, maxRows - 1) : maxRows;
   if (records.length === 0) {
-    const message = emptyMessage
-      ? [elideText(styled(colorEnabled, ANSI.dim, emptyMessage), width)]
-      : [];
+    const message = emptyMessage ? [elideText(styled(colorEnabled, ANSI.dim, emptyMessage), width)] : [];
     if (!footer)
-      return message.length > 0
-        ? message
-        : [styled(colorEnabled, ANSI.dim, "Nothing in this view.")];
-    return [
-      ...message,
-      ...Array.from(
-        { length: Math.max(0, itemRows - message.length) },
-        () => "",
-      ),
-      footer,
-    ];
+      return message.length > 0 ? message : [styled(colorEnabled, ANSI.dim, "Nothing in this view.")];
+    return [...message, ...Array.from({ length: Math.max(0, itemRows - message.length) }, () => ""), footer];
   }
   const texts = windowListLines(
     buildListLines(records, cursor, width, colorEnabled, now, options.grouped),
@@ -401,11 +310,10 @@ export function listViewport(
     options.grouped,
   );
   if (!footer) return texts;
-  return [
-    ...texts,
-    ...Array.from({ length: Math.max(0, itemRows - texts.length) }, () => ""),
-    footer,
-  ].slice(0, itemRows + 1);
+  return [...texts, ...Array.from({ length: Math.max(0, itemRows - texts.length) }, () => ""), footer].slice(
+    0,
+    itemRows + 1,
+  );
 }
 
 export function rule(
@@ -415,9 +323,7 @@ export function rule(
   options: { readonly accent?: boolean; readonly caption?: string } = {},
 ): string {
   const safe = safeScalar(label).toUpperCase();
-  const caption = options.caption
-    ? styled(colorEnabled, ANSI.dim, `  ${options.caption}`)
-    : "";
+  const caption = options.caption ? styled(colorEnabled, ANSI.dim, `  ${options.caption}`) : "";
   const heading = `${styled(
     colorEnabled,
     options.accent ? `${ANSI.bold}${ANSI.cyan}` : ANSI.bold,
@@ -427,15 +333,8 @@ export function rule(
   return `${prefix}${styled(colorEnabled, ANSI.dim, "─".repeat(Math.max(0, width - visibleWidth(prefix))))}`;
 }
 
-export function paneRule(
-  label: string,
-  focused: boolean,
-  width: number,
-  colorEnabled: boolean,
-): string {
-  const mark = focused
-    ? styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "▸")
-    : " ";
+export function paneRule(label: string, focused: boolean, width: number, colorEnabled: boolean): string {
+  const mark = focused ? styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "▸") : " ";
   const heading = styled(
     colorEnabled,
     focused ? `${ANSI.bold}${ANSI.cyan}` : ANSI.dim,
@@ -451,10 +350,7 @@ function labeledEntries(
 ): readonly string[] {
   const width = Math.min(
     18,
-    Math.max(
-      0,
-      ...entries.map((entry) => (entry.label ? visibleWidth(entry.label) : 0)),
-    ),
+    Math.max(0, ...entries.map((entry) => (entry.label ? visibleWidth(entry.label) : 0))),
   );
   return entries.map((entry) => {
     if (!entry.label) return safeTerminalText(entry.value);
@@ -485,13 +381,7 @@ function evidenceLines(
       "",
     ]),
     ...(total > previews.length
-      ? [
-          styled(
-            colorEnabled,
-            ANSI.dim,
-            `+ ${String(total - previews.length)} more exact references in raw`,
-          ),
-        ]
+      ? [styled(colorEnabled, ANSI.dim, `+ ${String(total - previews.length)} more exact references in raw`)]
       : []),
   ];
 }
@@ -502,9 +392,7 @@ function recordHeading(
   now: Date,
   exactTime: boolean,
 ): readonly string[] {
-  const time = exactTime
-    ? formatExactTime(record.occurredAt)
-    : formatRelativeTime(record.occurredAt, now);
+  const time = exactTime ? formatExactTime(record.occurredAt) : formatRelativeTime(record.occurredAt, now);
   const summary = safeTerminalText(record.summary);
   const title = safeTerminalText(record.title);
   return [
@@ -512,11 +400,7 @@ function recordHeading(
     styled(
       colorEnabled,
       ANSI.dim,
-      [
-        record.kind.replaceAll("_", " "),
-        safeScalar(record.status).replaceAll("_", " "),
-        time,
-      ]
+      [safeScalar(record.kind).replaceAll("_", " "), safeScalar(record.status).replaceAll("_", " "), time]
         .filter((value): value is string => value !== undefined)
         .join(" · "),
     ),
@@ -530,9 +414,7 @@ export function previewDocument(
   colorEnabled: boolean,
   now: Date,
 ): readonly string[] {
-  const whatChanged = record.detailSections.find(
-    (section) => section.title.toLowerCase() === "what changed",
-  );
+  const whatChanged = record.detailSections.find((section) => section.title.toLowerCase() === "what changed");
   const firstEvidence = record.evidencePreviews[0];
   return [
     ...recordHeading(record, colorEnabled, now, false),
@@ -579,54 +461,30 @@ export function detailDocument(
       ...labeledEntries(section.entries, colorEnabled),
       "",
     ]),
-    rule(
-      `evidence cited · ${String(record.evidence.length)}`,
-      width,
-      colorEnabled,
-    ),
-    ...evidenceLines(
-      record.evidencePreviews,
-      record.evidence.length,
-      colorEnabled,
-    ),
+    rule(`evidence cited · ${String(record.evidence.length)}`, width, colorEnabled),
+    ...evidenceLines(record.evidencePreviews, record.evidence.length, colorEnabled),
     ...(record.consideredEvidenceCount > 0
       ? [
           "",
-          rule(
-            `inputs considered · ${String(record.consideredEvidenceCount)}`,
-            width,
-            colorEnabled,
-          ),
+          rule(`inputs considered · ${String(record.consideredEvidenceCount)}`, width, colorEnabled),
           ...(record.evidence.length > 0
             ? [
                 styled(
                   colorEnabled,
                   ANSI.dim,
-                  citedCountSentence(
-                    record.consideredEvidenceCount,
-                    record.evidence.length,
-                  ),
+                  citedCountSentence(record.consideredEvidenceCount, record.evidence.length),
                 ),
               ]
-            : evidenceLines(
-                record.consideredEvidencePreviews,
-                record.consideredEvidenceCount,
-                colorEnabled,
-              )),
+            : evidenceLines(record.consideredEvidencePreviews, record.consideredEvidenceCount, colorEnabled)),
         ]
       : []),
     ...(record.relations.length > 0
       ? [
           "",
-          rule(
-            `related · ${String(record.relations.length)}`,
-            width,
-            colorEnabled,
-            {
-              accent: relatedFocused,
-              caption: relatedFocused ? "Enter opens" : "Tab to choose",
-            },
-          ),
+          rule(`related · ${String(record.relations.length)}`, width, colorEnabled, {
+            accent: relatedFocused,
+            caption: relatedFocused ? "Enter opens" : "Tab to choose",
+          }),
           ...record.relations.map((item, index) => {
             const selected = relatedFocused && index === relationCursor;
             const target = item.targetTitle ?? item.targetId;
@@ -644,13 +502,13 @@ export function detailDocument(
 }
 
 export function relatedSectionIndex(document: readonly string[]): number {
-  return document.findIndex((line) => line.includes("RELATED"));
+  return document.findIndex((line) => {
+    const plain = Object.values(ANSI).reduce((text, code) => text.replaceAll(code, ""), line);
+    return plain.startsWith("── RELATED · ");
+  });
 }
 
-export function wrapDocument(
-  lines: readonly string[],
-  width: number,
-): readonly string[] {
+export function wrapDocument(lines: readonly string[], width: number): readonly string[] {
   return lines.flatMap((line) => {
     const wrapped = line ? wrapTextWithAnsi(line, width) : [""];
     return wrapped.length > 0 ? wrapped : [""];

@@ -1,5 +1,4 @@
 import { type Component, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { NoesisTuiRuntime, TuiLearningAuditSnapshot, TuiLearningPrimitive } from "./runtime-port.ts";
 import {
   type AuditFilter,
   type DetailFocus,
@@ -24,6 +23,7 @@ import {
   WIDE_LAYOUT_MIN,
   wrapDocument,
 } from "./learning-audit-view.ts";
+import type { NoesisTuiRuntime, TuiLearningAuditSnapshot, TuiLearningPrimitive } from "./runtime-port.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 
 type AuditScreen =
@@ -148,8 +148,9 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       busy = "";
       cursor = Math.min(cursor, Math.max(0, visibleRecords().length - 1));
       if (pendingFocusId) {
-        applyFocus(pendingFocusId);
+        const focused = applyFocus(pendingFocusId);
         pendingFocusId = undefined;
+        if (!focused) render();
       } else render();
     } catch (error) {
       if (disposed || generation !== request) return;
@@ -288,8 +289,8 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
   const listHint = (): string => {
     const failed = failedCount() > 0 ? " · x failed" : "";
     return wideLayout
-      ? `↑/↓ · Enter open · Tab decision · a all · f group · s session${failed} · Esc`
-      : `↑/↓ · Enter open · a all · f group · s session${failed} · Esc`;
+      ? `↑/↓ · Enter open · Tab decision · a all · f group · s session${failed} · r refresh · Esc`
+      : `↑/↓ · Enter open · a all · f group · s session${failed} · r refresh · Esc`;
   };
 
   const detailHint = (record: TuiLearningPrimitive | undefined): string => {
@@ -490,7 +491,10 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       const subtitle =
         screen.kind === "list"
           ? "project evolution"
-          : (detailRecord()?.kind.replaceAll("_", " ") ?? "record");
+          : safeTerminalText(detailRecord()?.kind ?? "record")
+              .replaceAll("\t", " ")
+              .replaceAll("\n", " ")
+              .replaceAll("_", " ");
       const hint = screen.kind === "list" ? listHint() : detailHint(detailRecord());
       return [
         styled(options.colorEnabled, ANSI.dim, `╭─ ${"─".repeat(Math.max(0, outerWidth - 4))}╮`),

@@ -39,6 +39,8 @@ export interface SettledTurnPresentation {
 }
 
 export function learningAuditFocusId(activity: TuiLearningActivitySummary): string {
+  if (activity.stage === "reflection" && (activity.status === "unapplied" || activity.status === "stale"))
+    return `reflection:${activity.jobId}`;
   if (activity.adjustmentId) return `working_adjustment:${activity.adjustmentId}`;
   if (activity.experimentId) return `experiment:${activity.experimentId}`;
   if (activity.stage === "reflection") return `reflection:${activity.jobId}`;
