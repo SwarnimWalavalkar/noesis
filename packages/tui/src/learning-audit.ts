@@ -19,6 +19,7 @@ import {
   paneRule,
   previewDocument,
   relatedSectionIndex,
+  safeScalar,
   toggleAllActivity,
   WIDE_LAYOUT_MIN,
   wrapDocument,
@@ -491,10 +492,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       const subtitle =
         screen.kind === "list"
           ? "project evolution"
-          : safeTerminalText(detailRecord()?.kind ?? "record")
-              .replaceAll("\t", " ")
-              .replaceAll("\n", " ")
-              .replaceAll("_", " ");
+          : safeScalar(detailRecord()?.kind ?? "record").replaceAll("_", " ");
       const hint = screen.kind === "list" ? listHint() : detailHint(detailRecord());
       return [
         styled(options.colorEnabled, ANSI.dim, `╭─ ${"─".repeat(Math.max(0, outerWidth - 4))}╮`),
