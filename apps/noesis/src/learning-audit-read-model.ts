@@ -26,7 +26,8 @@ import type { ProtectedWorkspaceRuntime } from "../../../packages/workspace/src/
 
 const AUDIT_LIMIT = 1_000;
 const RAW_JSON_LIMIT = 64_000;
-const EVIDENCE_PREVIEW_LIMIT = 6;
+const EVIDENCE_PREVIEW_LIMIT = 8;
+const CONSIDERED_PREVIEW_LIMIT = 8;
 const EVIDENCE_EXCERPT_LIMIT = 480;
 
 interface LearningAuditSource {
@@ -254,9 +255,12 @@ function createEvidencePreviewResolver(workspace: NoesisWorkspaceStore) {
     });
   };
 
-  return async (references: readonly EvidenceRef[]): Promise<readonly TuiLearningEvidencePreview[]> =>
+  return async (
+    references: readonly EvidenceRef[],
+    limit: number = EVIDENCE_PREVIEW_LIMIT,
+  ): Promise<readonly TuiLearningEvidencePreview[]> =>
     await Promise.all(
-      references.slice(0, EVIDENCE_PREVIEW_LIMIT).map((reference) => {
+      references.slice(0, limit).map((reference) => {
         const identity = evidenceIdentity(reference);
         const existing = cache.get(identity);
         if (existing) return existing;
@@ -602,7 +606,10 @@ function originSessionMaps(
 async function jobPrimitive(
   job: DurableJobRecord,
   adjustments: ReadonlyMap<string, WorkingAdjustment>,
-  evidencePreviews: (references: readonly EvidenceRef[]) => Promise<readonly TuiLearningEvidencePreview[]>,
+  evidencePreviews: (
+    references: readonly EvidenceRef[],
+    limit?: number,
+  ) => Promise<readonly TuiLearningEvidencePreview[]>,
 ): Promise<TuiLearningPrimitive> {
   const experimentId = jobExperimentId(job);
   const sessionId = jobSessionId(job);
@@ -659,7 +666,9 @@ async function jobPrimitive(
     evidence: citedEvidence,
     evidencePreviews: await evidencePreviews(citedEvidence),
     consideredEvidenceCount: consideredEvidence.length,
-    consideredEvidencePreviews: previewConsideredEvidence ? await evidencePreviews(consideredEvidence) : [],
+    consideredEvidencePreviews: previewConsideredEvidence
+      ? await evidencePreviews(consideredEvidence, CONSIDERED_PREVIEW_LIMIT)
+      : [],
     detailSections: isReflection ? reflectionDetails(job, adjustments) : [],
     relations: [
       relation("experiment", "experiment", experimentId),

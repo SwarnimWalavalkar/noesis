@@ -9,10 +9,12 @@ import { highlightCode } from "./syntax.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 
 export type AuditFilter = "noteworthy" | "all" | TuiLearningPrimitiveGroup;
-export type DetailFocus = "document" | "related";
+export type DetailFocus = "document" | "evidence" | "inputs" | "related";
+export type DetailStop = Exclude<DetailFocus, "document">;
 
 export const PAGE_STEP = 8;
 export const WIDE_LAYOUT_MIN = 110;
+export const COLLAPSED_PREVIEW = 2;
 export const GROUP_FILTERS: readonly TuiLearningPrimitiveGroup[] = Object.freeze([
   "memory",
   "reflection",
@@ -176,6 +178,64 @@ export function citedCountSentence(considered: number, cited: number): string {
   const reviewed = considered === 1 ? "1 input was reviewed" : `${String(considered)} inputs were reviewed`;
   const citedPart = cited === 1 ? "1 was cited" : `${String(cited)} were cited`;
   return `${reviewed}; ${citedPart} for the decision.`;
+}
+
+export function canExpandEvidence(record: TuiLearningPrimitive): boolean {
+  return record.evidencePreviews.length > COLLAPSED_PREVIEW || record.evidence.length > COLLAPSED_PREVIEW;
+}
+
+export function canExpandInputs(record: TuiLearningPrimitive): boolean {
+  return (
+    record.consideredEvidencePreviews.length > COLLAPSED_PREVIEW ||
+    record.consideredEvidenceCount > COLLAPSED_PREVIEW
+  );
+}
+
+export function interactableStops(record: TuiLearningPrimitive): readonly DetailStop[] {
+  return [
+    ...(canExpandEvidence(record) ? (["evidence"] as const) : []),
+    ...(canExpandInputs(record) ? (["inputs"] as const) : []),
+    ...(record.relations.length > 0 ? (["related"] as const) : []),
+  ];
+}
+
+export function cycleDetailFocus(
+  record: TuiLearningPrimitive,
+  current: DetailFocus,
+  reverse = false,
+): DetailFocus {
+  const stops = interactableStops(record);
+  if (stops.length === 0) return current;
+  const idx = current === "document" ? -1 : stops.indexOf(current);
+  if (idx < 0) return (reverse ? stops[stops.length - 1] : stops[0]) ?? current;
+  const nextIndex = reverse ? (idx - 1 + stops.length) % stops.length : (idx + 1) % stops.length;
+  return stops[nextIndex] ?? current;
+}
+
+function boundedPreviews(
+  previews: readonly TuiLearningEvidencePreview[],
+  total: number,
+  expanded: boolean,
+): {
+  readonly previews: readonly TuiLearningEvidencePreview[];
+  readonly total: number;
+} {
+  const shown = previews.slice(0, expanded ? previews.length : COLLAPSED_PREVIEW);
+  return {
+    previews: shown,
+    total: expanded || shown.length === 0 ? total : shown.length,
+  };
+}
+
+function expandRuleOptions(
+  focus: DetailFocus,
+  section: "evidence" | "inputs",
+  expanded: boolean,
+): { readonly accent: boolean; readonly caption: string } {
+  return {
+    accent: focus === section,
+    caption: focus === section ? (expanded ? "Enter hides" : "Enter expands") : "Tab to choose",
+  };
 }
 
 export function emptyListMessage(
@@ -438,6 +498,15 @@ export function previewDocument(
   ];
 }
 
+function formatRawJson(rawJson: string): string {
+  try {
+    const parsed: unknown = JSON.parse(rawJson);
+    return JSON.stringify(parsed, undefined, 2) ?? rawJson;
+  } catch {
+    return rawJson;
+  }
+}
+
 export function detailDocument(
   record: TuiLearningPrimitive,
   raw: boolean,
@@ -445,14 +514,22 @@ export function detailDocument(
   width: number,
   colorEnabled: boolean,
   now: Date,
-  relatedFocused: boolean,
+  focus: DetailFocus,
+  evidenceExpanded: boolean,
+  inputsExpanded: boolean,
 ): readonly string[] {
   if (raw)
     return [
       styled(colorEnabled, ANSI.dim, "Raw record · Space returns"),
       "",
-      ...highlightCode(safeTerminalText(record.rawJson), "json", colorEnabled),
+      ...highlightCode(safeTerminalText(formatRawJson(record.rawJson)), "json", colorEnabled),
     ];
+  const cited = boundedPreviews(record.evidencePreviews, record.evidence.length, evidenceExpanded);
+  const considered = boundedPreviews(
+    record.consideredEvidencePreviews,
+    record.consideredEvidenceCount,
+    inputsExpanded,
+  );
   return [
     ...recordHeading(record, colorEnabled, now, true),
     "",
@@ -461,12 +538,22 @@ export function detailDocument(
       ...labeledEntries(section.entries, colorEnabled),
       "",
     ]),
-    rule(`evidence cited · ${String(record.evidence.length)}`, width, colorEnabled),
-    ...evidenceLines(record.evidencePreviews, record.evidence.length, colorEnabled),
+    rule(
+      `evidence cited · ${String(record.evidence.length)}`,
+      width,
+      colorEnabled,
+      canExpandEvidence(record) ? expandRuleOptions(focus, "evidence", evidenceExpanded) : {},
+    ),
+    ...evidenceLines(cited.previews, cited.total, colorEnabled),
     ...(record.consideredEvidenceCount > 0
       ? [
           "",
-          rule(`inputs considered · ${String(record.consideredEvidenceCount)}`, width, colorEnabled),
+          rule(
+            `inputs considered · ${String(record.consideredEvidenceCount)}`,
+            width,
+            colorEnabled,
+            canExpandInputs(record) ? expandRuleOptions(focus, "inputs", inputsExpanded) : {},
+          ),
           ...(record.evidence.length > 0
             ? [
                 styled(
@@ -475,18 +562,19 @@ export function detailDocument(
                   citedCountSentence(record.consideredEvidenceCount, record.evidence.length),
                 ),
               ]
-            : evidenceLines(record.consideredEvidencePreviews, record.consideredEvidenceCount, colorEnabled)),
+            : []),
+          ...evidenceLines(considered.previews, considered.total, colorEnabled),
         ]
       : []),
     ...(record.relations.length > 0
       ? [
           "",
           rule(`related · ${String(record.relations.length)}`, width, colorEnabled, {
-            accent: relatedFocused,
-            caption: relatedFocused ? "Enter opens" : "Tab to choose",
+            accent: focus === "related",
+            caption: focus === "related" ? "Enter opens" : "Tab to choose",
           }),
           ...record.relations.map((item, index) => {
-            const selected = relatedFocused && index === relationCursor;
+            const selected = focus === "related" && index === relationCursor;
             const target = item.targetTitle ?? item.targetId;
             const marker = styled(
               colorEnabled,
@@ -501,11 +589,35 @@ export function detailDocument(
   ];
 }
 
-export function relatedSectionIndex(document: readonly string[]): number {
+function sectionIndex(document: readonly string[], prefix: string): number {
   return document.findIndex((line) => {
     const plain = Object.values(ANSI).reduce((text, code) => text.replaceAll(code, ""), line);
-    return plain.startsWith("── RELATED · ");
+    return plain.startsWith(`── ${prefix}`);
   });
+}
+
+export function relatedSectionIndex(document: readonly string[]): number {
+  return sectionIndex(document, "RELATED · ");
+}
+
+export function sectionRevealLine(document: readonly string[], prefix: string, expanded: boolean): number {
+  const start = sectionIndex(document, prefix);
+  if (start < 0 || !expanded) return start;
+  let end = document.length;
+  for (let index = start + 1; index < document.length; index += 1) {
+    const plain = Object.values(ANSI).reduce(
+      (text, code) => text.replaceAll(code, ""),
+      document[index] ?? "",
+    );
+    if (plain.startsWith("── ")) {
+      end = index;
+      break;
+    }
+  }
+  for (let index = end - 1; index > start; index -= 1) {
+    if ((document[index] ?? "").includes("more exact references in raw")) return index;
+  }
+  return start;
 }
 
 export function wrapDocument(lines: readonly string[], width: number): readonly string[] {

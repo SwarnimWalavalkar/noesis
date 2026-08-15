@@ -1,12 +1,16 @@
 import { type Component, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
   type AuditFilter,
+  canExpandEvidence,
+  canExpandInputs,
+  cycleDetailFocus,
   type DetailFocus,
   detailDocument,
   emptyListMessage,
   filterChips,
   formatRelativeTime,
   headlineStats,
+  interactableStops,
   isNoteworthy,
   isQuietFailure,
   isRoutine,
@@ -20,12 +24,26 @@ import {
   previewDocument,
   relatedSectionIndex,
   safeScalar,
+  sectionRevealLine,
   toggleAllActivity,
   WIDE_LAYOUT_MIN,
   wrapDocument,
 } from "./learning-audit-view.ts";
 import type { NoesisTuiRuntime, TuiLearningAuditSnapshot, TuiLearningPrimitive } from "./runtime-port.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
+
+function overlayEdge(text: string, colorEnabled: boolean): string {
+  return styled(colorEnabled, ANSI.dim, text);
+}
+
+function overlayRule(outerWidth: number, colorEnabled: boolean, left: string, right: string): string {
+  return overlayEdge(`${left}${"─".repeat(Math.max(0, outerWidth - 2))}${right}`, colorEnabled);
+}
+
+function overlayRow(inner: string, outerWidth: number, colorEnabled: boolean): string {
+  const width = Math.max(16, outerWidth - 4);
+  return `${overlayEdge("│", colorEnabled)} ${pad(elideText(inner, width), width)} ${overlayEdge("│", colorEnabled)}`;
+}
 
 type AuditScreen =
   | { readonly kind: "list" }
@@ -67,6 +85,8 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
   let scroll = 0;
   let relationCursor = 0;
   let detailFocus: DetailFocus = "document";
+  let evidenceExpanded = false;
+  let inputsExpanded = false;
   let wideLayout = false;
   let pendingFocusId = options.focusRecordId;
 
@@ -126,6 +146,8 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     scroll = 0;
     relationCursor = 0;
     detailFocus = "document";
+    evidenceExpanded = false;
+    inputsExpanded = false;
     render();
   };
 
@@ -170,6 +192,44 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     if (screen.kind !== "detail") return undefined;
     const recordId = screen.recordId;
     return snapshot?.primitives.find((record) => record.id === recordId);
+  };
+
+  const revealDocumentLine = (
+    document: readonly string[],
+    line: number,
+    paneRows: number,
+    pin: "nearest" | "start" = "nearest",
+  ): void => {
+    const maxScroll = Math.max(0, document.length - paneRows);
+    scroll = Math.min(scroll, maxScroll);
+    if (line < 0) return;
+    if (pin === "start") {
+      scroll = Math.min(line, maxScroll);
+      return;
+    }
+    if (line < scroll) scroll = line;
+    if (line >= scroll + paneRows) scroll = Math.max(0, line - paneRows + 1);
+  };
+
+  const revealFocusedSection = (document: readonly string[], paneRows: number): void => {
+    if (detailFocus === "evidence")
+      revealDocumentLine(
+        document,
+        sectionRevealLine(document, "EVIDENCE CITED · ", evidenceExpanded),
+        paneRows,
+        evidenceExpanded ? "nearest" : "start",
+      );
+    else if (detailFocus === "inputs")
+      revealDocumentLine(
+        document,
+        sectionRevealLine(document, "INPUTS CONSIDERED · ", inputsExpanded),
+        paneRows,
+        inputsExpanded ? "nearest" : "start",
+      );
+    else if (detailFocus === "related") {
+      const relatedAt = relatedSectionIndex(document);
+      if (relatedAt >= 0) revealDocumentLine(document, relatedAt + 1 + relationCursor, paneRows, "start");
+    }
   };
 
   const moveRelated = (record: TuiLearningPrimitive, delta: number): void => {
@@ -229,7 +289,13 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     }
     if (!matchesKey(data, "enter") && !(wideLayout && matchesKey(data, "tab"))) return;
     const selected = visibleRecords()[cursor];
-    if (selected) openRecord(selected.id, screen);
+    if (!selected) return;
+    openRecord(selected.id, screen);
+    if (!matchesKey(data, "tab")) return;
+    const first = interactableStops(selected)[0];
+    if (!first) return;
+    detailFocus = first;
+    render();
   };
 
   const handleDetail = (data: string, detail: Extract<AuditScreen, { kind: "detail" }>): void => {
@@ -241,27 +307,22 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       render();
       return;
     }
-    if (matchesKey(data, "tab")) {
-      if (detailFocus === "document" && record && record.relations.length > 0) {
-        detailFocus = "related";
-        render();
-        return;
-      }
-      if (wideLayout || detailFocus === "related") {
-        if (wideLayout) {
-          screen = detail.back;
-          scroll = 0;
-        }
-        detailFocus = "document";
-        render();
-        return;
-      }
+    if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
+      if (record && !detail.raw)
+        detailFocus = cycleDetailFocus(record, detailFocus, matchesKey(data, "shift+tab"));
+      render();
       return;
     }
     if (data === " ") {
       screen = { ...detail, raw: !detail.raw };
       scroll = 0;
       detailFocus = "document";
+      render();
+      return;
+    }
+    if (data === "i" && record && canExpandInputs(record) && !detail.raw) {
+      detailFocus = "inputs";
+      inputsExpanded = !inputsExpanded;
       render();
       return;
     }
@@ -276,6 +337,16 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     else if (matchesKey(data, "left") && record?.relations.length) moveRelated(record, -1);
     else if (matchesKey(data, "right") && record?.relations.length) moveRelated(record, 1);
     else if (matchesKey(data, "enter")) {
+      if (detailFocus === "evidence" && record && canExpandEvidence(record) && !detail.raw) {
+        evidenceExpanded = !evidenceExpanded;
+        render();
+        return;
+      }
+      if (detailFocus === "inputs" && record && canExpandInputs(record) && !detail.raw) {
+        inputsExpanded = !inputsExpanded;
+        render();
+        return;
+      }
       if (detailFocus !== "related") return;
       const target = record?.relations[relationCursor];
       if (target && snapshot?.primitives.some((candidate) => candidate.id === target.targetId)) {
@@ -295,13 +366,14 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
   };
 
   const detailHint = (record: TuiLearningPrimitive | undefined): string => {
-    const related = Boolean(record?.relations.length);
-    if (detailFocus === "related")
-      return wideLayout
-        ? "↑/↓ · Enter open · Tab activity · Space raw · Esc"
-        : "↑/↓ · Enter open · Tab back · Space raw · Esc";
-    if (related) return "↑/↓ · Tab related · Space raw · Esc";
-    return wideLayout ? "↑/↓ · Space raw · Tab activity · Esc" : "↑/↓ · Space raw · Esc";
+    const stops = record ? interactableStops(record) : [];
+    if (detailFocus === "evidence")
+      return `↑/↓ · Enter ${evidenceExpanded ? "hides" : "expands"} · Tab next · Space raw · Esc`;
+    if (detailFocus === "inputs")
+      return `↑/↓ · Enter ${inputsExpanded ? "hides" : "expands"} · Tab next · Space raw · Esc`;
+    if (detailFocus === "related") return "↑/↓ · Enter open · Tab next · Space raw · Esc";
+    if (stops.length > 0) return "↑/↓ · Tab next · Space raw · Esc";
+    return "↑/↓ · Space raw · Esc";
   };
 
   const component: LearningAuditOverlay = {
@@ -408,7 +480,9 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
                       rightWidth,
                       options.colorEnabled,
                       clock,
-                      detailFocus === "related",
+                      detailFocus,
+                      evidenceExpanded,
+                      inputsExpanded,
                     )
                   : previewDocument(selected, rightWidth, options.colorEnabled, clock)),
               ],
@@ -417,14 +491,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
             const maxScroll = Math.max(0, document.length - paneRows);
             if (focused) {
               scroll = Math.min(scroll, maxScroll);
-              if (detailFocus === "related") {
-                const relatedAt = relatedSectionIndex(document);
-                if (relatedAt >= 0) {
-                  const target = relatedAt + 1 + relationCursor;
-                  if (target < scroll) scroll = target;
-                  if (target >= scroll + paneRows) scroll = Math.max(0, target - paneRows + 1);
-                }
-              }
+              revealFocusedSection(document, paneRows);
             }
             const start = focused ? scroll : 0;
             right = document.slice(start, start + paneRows);
@@ -471,20 +538,15 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
                 width,
                 options.colorEnabled,
                 clock,
-                detailFocus === "related",
+                detailFocus,
+                evidenceExpanded,
+                inputsExpanded,
               ),
               width,
             );
             const maxScroll = Math.max(0, document.length - bodyRows);
             scroll = Math.min(scroll, maxScroll);
-            if (detailFocus === "related") {
-              const relatedAt = relatedSectionIndex(document);
-              if (relatedAt >= 0) {
-                const target = relatedAt + 1 + relationCursor;
-                if (target < scroll) scroll = target;
-                if (target >= scroll + bodyRows) scroll = Math.max(0, target - bodyRows + 1);
-              }
-            }
+            revealFocusedSection(document, bodyRows);
             body = document.slice(scroll, scroll + bodyRows);
           }
         }
@@ -495,19 +557,18 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
           : safeScalar(detailRecord()?.kind ?? "record").replaceAll("_", " ");
       const hint = screen.kind === "list" ? listHint() : detailHint(detailRecord());
       return [
-        styled(options.colorEnabled, ANSI.dim, `╭─ ${"─".repeat(Math.max(0, outerWidth - 4))}╮`),
-        elideText(
-          `│ ${styled(options.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "LEARNING")}${styled(options.colorEnabled, ANSI.dim, ` · ${subtitle}`)}`,
+        overlayRule(outerWidth, options.colorEnabled, "╭", "╮"),
+        overlayRow(
+          `${styled(options.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "LEARNING")}${styled(options.colorEnabled, ANSI.dim, ` · ${subtitle}`)}`,
           outerWidth,
+          options.colorEnabled,
         ),
-        ...(noticeRows.length > 0
-          ? noticeRows.map((line) =>
-              elideText(`│ ${styled(options.colorEnabled, ANSI.yellow, line)}`, outerWidth),
-            )
-          : []),
-        ...body.slice(0, bodyRows).map((line) => elideText(`│ ${pad(line, width)}`, outerWidth)),
-        elideText(`│ ${styled(options.colorEnabled, ANSI.dim, hint)}`, outerWidth),
-        styled(options.colorEnabled, ANSI.dim, `╰─ ${"─".repeat(Math.max(0, outerWidth - 4))}╯`),
+        ...noticeRows.map((line) =>
+          overlayRow(styled(options.colorEnabled, ANSI.yellow, line), outerWidth, options.colorEnabled),
+        ),
+        ...body.slice(0, bodyRows).map((line) => overlayRow(line, outerWidth, options.colorEnabled)),
+        overlayRow(styled(options.colorEnabled, ANSI.dim, hint), outerWidth, options.colorEnabled),
+        overlayRule(outerWidth, options.colorEnabled, "╰", "╯"),
       ];
     },
   };

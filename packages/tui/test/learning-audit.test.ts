@@ -1,3 +1,4 @@
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { createPiAgentRuntime } from "@noesis/runtime-pi";
 import { describe, expect, test, vi } from "vitest";
 import {
@@ -53,7 +54,13 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
       summary: "The correction establishes a reusable constraint.",
       sessionId: "session-1",
       occurredAt: "2026-08-14T00:00:02.000Z",
-      evidence: Object.freeze(["messages:message-1"]),
+      evidence: Object.freeze([
+        "messages:message-1",
+        "messages:message-2",
+        "messages:message-3",
+        "messages:message-4",
+        "messages:message-5",
+      ]),
       evidencePreviews: Object.freeze([
         Object.freeze({
           identity: "messages:message-1",
@@ -62,8 +69,45 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
           occurredAt: "2026-08-14T00:00:00.000Z",
           redacted: false,
         }),
+        Object.freeze({
+          identity: "messages:message-2",
+          label: "ASSISTANT",
+          excerpt: "The existing adaptation path already covers this request.",
+          occurredAt: "2026-08-14T00:00:00.250Z",
+          redacted: false,
+        }),
+        Object.freeze({
+          identity: "messages:message-3",
+          label: "USER",
+          excerpt: "Keep the change on the existing adaptation path.",
+          occurredAt: "2026-08-14T00:00:00.500Z",
+          redacted: false,
+        }),
       ]),
       consideredEvidenceCount: 25,
+      consideredEvidencePreviews: Object.freeze([
+        Object.freeze({
+          identity: "messages:message-considered",
+          label: "TOOL",
+          excerpt: "files.list completed with the project tree.",
+          occurredAt: "2026-08-14T00:00:01.000Z",
+          redacted: false,
+        }),
+        Object.freeze({
+          identity: "messages:message-considered-2",
+          label: "ASSISTANT",
+          excerpt: "Listed the project files before proposing the change.",
+          occurredAt: "2026-08-14T00:00:01.500Z",
+          redacted: false,
+        }),
+        Object.freeze({
+          identity: "tool_calls:call-considered-3",
+          label: "TOOL",
+          excerpt: "search.query returned the existing adaptation skill.",
+          occurredAt: "2026-08-14T00:00:01.750Z",
+          redacted: false,
+        }),
+      ]),
       detailSections: Object.freeze([
         Object.freeze({
           title: "Decision",
@@ -261,18 +305,49 @@ describe("learning audit overlay", () => {
     expect(harness.output()).toContain("Use adapt for self-extension requests.");
     expect(harness.output()).toContain("USER");
     expect(harness.output()).toContain("Please propose the capability through adapt.");
-    expect(harness.output()).toContain("25 inputs were reviewed; 1 was cited");
-    expect(harness.output()).not.toContain("messages:message-1");
     expect(harness.output()).toContain("adjusted INJECTED STATUS ROW");
     expect(harness.output()).toContain("2026-08-14 00:00:02 UTC");
     expect(harness.output()).not.toContain("\nINJECTED STATUS ROW");
+    expect(harness.output()).toContain("EVIDENCE CITED · 5");
+    expect(harness.output()).toContain("Tab to choose");
+    expect(harness.output()).toContain("Tab next");
+    expect(harness.output()).not.toContain("i expands");
+    expect(harness.output()).not.toContain("i inputs");
+    expect(harness.output()).not.toContain("Keep the change on the existing adaptation path.");
+    expect(harness.output()).not.toContain("search.query returned the existing adaptation skill.");
+    expect(harness.output()).not.toContain("more exact references in raw");
     harness.component.handleInput?.(ENTER);
     expect(harness.output()).toContain("WHAT CHANGED");
     expect(harness.output()).toContain("Use the existing adaptation path");
-    harness.component.handleInput?.("\u001b[6~");
-    expect(harness.output()).toContain("experiment · Use narrower research first");
-    expect(harness.output()).toContain("Tab to choose");
 
+    harness.component.handleInput?.(TAB);
+    expect(harness.output()).toContain("Enter expands");
+    expect(harness.output()).toContain("Please propose the capability through adapt.");
+    expect(harness.output()).toContain("The existing adaptation path already covers this request.");
+    expect(harness.output()).not.toContain("Keep the change on the existing adaptation path.");
+    harness.component.handleInput?.(ENTER);
+    expect(harness.output()).toContain("Keep the change on the existing adaptation path.");
+    expect(harness.output()).toContain("+ 2 more exact references in raw");
+    expect(harness.output()).toContain("Enter hides");
+    harness.component.handleInput?.(TAB);
+    expect(harness.output()).toContain("Enter expands");
+    expect(harness.output()).toContain("25 inputs were reviewed; 5 were cited");
+    expect(harness.output()).toContain("files.list completed with the project tree.");
+    expect(harness.output()).toContain("Listed the project files before proposing the change.");
+    expect(harness.output()).not.toContain("search.query returned the existing adaptation skill.");
+    harness.component.handleInput?.(ENTER);
+    expect(harness.output()).toContain("search.query returned the existing adaptation skill.");
+    expect(harness.output()).toContain("+ 22 more exact references in raw");
+    expect(harness.output()).toContain("Enter hides");
+    expect(harness.output()).not.toContain("messages:message-considered");
+    expect(harness.output()).not.toContain("messages:message-1");
+    harness.component.handleInput?.(TAB);
+    expect(harness.output()).toContain("Enter opens");
+    harness.component.handleInput?.(TAB);
+    expect(harness.output()).toContain("LEARNING · reflection");
+    expect(harness.output()).toContain("Enter hides");
+    expect(harness.output()).not.toContain("Tab decision");
+    harness.component.handleInput?.(TAB);
     harness.component.handleInput?.(TAB);
     expect(harness.output()).toContain("Enter opens");
     harness.component.handleInput?.(ENTER);
@@ -292,6 +367,22 @@ describe("learning audit overlay", () => {
     harness.component.handleInput?.(ESCAPE);
     harness.component.handleInput?.(ESCAPE);
     expect(harness.closes).toBe(1);
+  });
+
+  test("closes the overlay frame on every row", async () => {
+    const harness = createHarness();
+    await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · project evolution"));
+    const rows = harness.component.render(160);
+    const plain = (line: string): string => line.replaceAll(/\u001b\[[0-9;]*m/gu, "");
+    expect(plain(rows[0] ?? "")).toMatch(/^╭─+╮$/u);
+    expect(plain(rows.at(-1) ?? "")).toMatch(/^╰─+╯$/u);
+    for (const row of rows) {
+      expect(visibleWidth(row)).toBe(160);
+      expect(plain(row).startsWith("╭") || plain(row).startsWith("│") || plain(row).startsWith("╰")).toBe(
+        true,
+      );
+      expect(plain(row).endsWith("╮") || plain(row).endsWith("│") || plain(row).endsWith("╯")).toBe(true);
+    }
   });
 
   test("renders responsive master-detail panes at wide terminal widths", async () => {
@@ -319,14 +410,26 @@ describe("learning audit overlay", () => {
 
   test("focuses related records with tab and up/down instead of left/right", async () => {
     const harness = createHarness();
-    await vi.waitFor(() => expect(harness.output()).toContain("Use the existing adaptation path"));
+    await vi.waitFor(() => expect(harness.output(160)).toContain("Use the existing adaptation path"));
     harness.component.handleInput?.(ENTER);
-    expect(harness.output()).toContain("Tab related");
+    expect(harness.output(160)).toContain("LEARNING · reflection");
+    expect(harness.output(160)).toContain("Tab next");
     harness.component.handleInput?.(TAB);
-    expect(harness.output()).toContain("Enter opens");
-    expect(harness.output()).toContain("Enter open");
+    expect(harness.output(160)).toContain("Enter expands");
+    harness.component.handleInput?.(TAB);
+    expect(harness.output(160)).toContain("Enter expands");
+    harness.component.handleInput?.(TAB);
+    expect(harness.output(160)).toContain("Enter opens");
+    expect(harness.output(160)).toContain("Enter open");
+    harness.component.handleInput?.(TAB);
+    expect(harness.output(160)).toContain("LEARNING · reflection");
+    expect(harness.output(160)).toContain("Enter expands");
+    expect(harness.output(160)).not.toContain("Tab decision");
+    harness.component.handleInput?.(TAB);
+    harness.component.handleInput?.(TAB);
+    expect(harness.output(160)).toContain("Enter opens");
     harness.component.handleInput?.(ENTER);
-    expect(harness.output()).toContain("Use narrower research first");
+    expect(harness.output(160)).toContain("Use narrower research first");
   });
 
   test("opens /learning onto a remembered decision", async () => {

@@ -1,10 +1,13 @@
 import { describe, expect, test } from "vitest";
 import {
   citedCountSentence,
+  cycleDetailFocus,
+  detailDocument,
   filterChips,
   formatExactTime,
   formatRelativeTime,
   headlineStats,
+  interactableStops,
   isNoteworthy,
   isQuietFailure,
   listViewport,
@@ -239,12 +242,119 @@ describe("learning audit view helpers", () => {
     expect(twoRows[1]).toContain("Selected experiment detail");
   });
 
-  test("locates the structural related section rather than record content", () => {
+  test("pretty-prints the raw JSON projection", () => {
+    const now = new Date("2026-08-14T12:00:00.000Z");
     expect(
-      relatedSectionIndex([
-        "Decision text containing RELATED in user content",
-        rule("related · 2", 80, true),
+      detailDocument(
+        record({
+          id: "experiment:1",
+          kind: "experiment",
+          group: "changes",
+          title: "Prefer narrow research",
+          rawJson: '{"hypothesis":"Use narrower research first"}',
+        }),
+        true,
+        0,
+        80,
+        false,
+        now,
+        "document",
+        false,
+        false,
+      ).join("\n"),
+    ).toContain('  "hypothesis": "Use narrower research first"');
+  });
+
+  test("shows a few considered inputs and expands to a bounded remainder", () => {
+    const now = new Date("2026-08-14T12:00:00.000Z");
+    const subject = record({
+      id: "reflection:1",
+      kind: "reflection",
+      group: "reflection",
+      title: "Prefer adapt",
+      evidence: Object.freeze(["messages:1"]),
+      evidencePreviews: Object.freeze([
+        Object.freeze({
+          identity: "messages:1",
+          label: "USER",
+          excerpt: "cited user request",
+          redacted: false,
+        }),
       ]),
-    ).toBe(1);
+      consideredEvidenceCount: 25,
+      consideredEvidencePreviews: Object.freeze([
+        Object.freeze({
+          identity: "a",
+          label: "TOOL",
+          excerpt: "first input preview",
+          redacted: false,
+        }),
+        Object.freeze({
+          identity: "b",
+          label: "USER",
+          excerpt: "second input preview",
+          redacted: false,
+        }),
+        Object.freeze({
+          identity: "c",
+          label: "TOOL",
+          excerpt: "third input preview",
+          redacted: false,
+        }),
+      ]),
+    });
+    expect(interactableStops(subject)).toEqual(["inputs"]);
+    const collapsed = detailDocument(subject, false, 0, 80, false, now, "document", false, false).join("\n");
+    expect(collapsed).toContain("first input preview");
+    expect(collapsed).toContain("second input preview");
+    expect(collapsed).not.toContain("third input preview");
+    expect(collapsed).not.toContain("more exact references in raw");
+    expect(collapsed).toContain("Tab to choose");
+    const expanded = detailDocument(subject, false, 0, 80, false, now, "inputs", false, true).join("\n");
+    expect(expanded).toContain("third input preview");
+    expect(expanded).toContain("+ 22 more exact references in raw");
+    expect(expanded).toContain("Enter hides");
+    const withEvidence = record({
+      ...subject,
+      evidence: Object.freeze(["a", "b", "c", "d"]),
+      evidencePreviews: Object.freeze([
+        Object.freeze({ identity: "a", label: "USER", excerpt: "first cited preview", redacted: false }),
+        Object.freeze({ identity: "b", label: "USER", excerpt: "second cited preview", redacted: false }),
+        Object.freeze({ identity: "c", label: "USER", excerpt: "third cited preview", redacted: false }),
+      ]),
+      relations: Object.freeze([{ label: "experiment", targetId: "experiment:1" }]),
+    });
+    expect(interactableStops(withEvidence)).toEqual(["evidence", "inputs", "related"]);
+    expect(cycleDetailFocus(withEvidence, "document")).toBe("evidence");
+    expect(cycleDetailFocus(withEvidence, "related")).toBe("evidence");
+    expect(cycleDetailFocus(withEvidence, "evidence", true)).toBe("related");
+    const citedCollapsed = detailDocument(
+      withEvidence,
+      false,
+      0,
+      80,
+      false,
+      now,
+      "document",
+      false,
+      false,
+    ).join("\n");
+    expect(citedCollapsed).toContain("first cited preview");
+    expect(citedCollapsed).toContain("second cited preview");
+    expect(citedCollapsed).not.toContain("third cited preview");
+    const citedExpanded = detailDocument(
+      withEvidence,
+      false,
+      0,
+      80,
+      false,
+      now,
+      "evidence",
+      true,
+      false,
+    ).join("\n");
+    expect(citedExpanded).toContain("third cited preview");
+    expect(citedExpanded).toContain("+ 1 more exact references in raw");
+    expect(citedExpanded).toContain("Enter hides");
   });
 });

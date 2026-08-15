@@ -212,12 +212,17 @@
         <p>
           <code>/learning</code> opens the focused overlay. Enter opens the
           highlighted record, or a related record only after Tab has moved focus
-          there. Tab moves focus: activity to the decision on a wide terminal,
-          then to related records, then back. <code>a</code> toggles noteworthy
+          there. Tab cycles expandable sections inside the open record: evidence
+          cited, inputs considered, and related records, then wraps to the first
+          of those sections. Escape leaves the record, one level back.
+          <code>a</code> toggles noteworthy
           and complete activity, <code>f</code> cycles groups,
           <code>s</code> toggles the current-session view,
-          <code>x</code> expands quiet failed reflections, Space opens the
-          bounded raw projection, and <code>r</code> refreshes. Opening
+          <code>x</code> expands quiet failed reflections.
+          Evidence cited and inputs considered show a few readable previews;
+          Enter expands a larger bounded set, and the remainder stays in raw.
+          Space opens the bounded
+          raw projection, and <code>r</code> refreshes. Opening
           <code>/learning</code> after a transcript notice focuses that
           decision.
         </p>
@@ -236,8 +241,11 @@
   2 failed · x shows            │
 
 ↑/↓ · Enter open · Tab decision · a all · f group · x failed · Esc
-decision: Tab related
-related: Enter opens</code></pre>
+decision: Tab next
+evidence: Enter expands
+inputs: Enter expands
+related: Enter opens
+Esc: one level back</code></pre>
       </section>
 
       <section>
