@@ -8,10 +8,13 @@ import {
   type Experiment,
   sha256,
   toJsonValue,
+  type WorkingAdjustment,
 } from "@noesis/domain";
 import type { ContinuousFeedbackController } from "@noesis/runtime";
 import type {
   TuiLearningAuditSnapshot,
+  TuiLearningDetailSection,
+  TuiLearningEvidencePreview,
   TuiLearningPrimitive,
   TuiLearningPrimitiveGroup,
   TuiLearningPrimitiveKind,
@@ -22,6 +25,8 @@ import type { ProtectedWorkspaceRuntime } from "../../../packages/workspace/src/
 
 const AUDIT_LIMIT = 1_000;
 const RAW_JSON_LIMIT = 64_000;
+const EVIDENCE_PREVIEW_LIMIT = 6;
+const EVIDENCE_EXCERPT_LIMIT = 480;
 
 interface LearningAuditSource {
   readonly workspace: NoesisWorkspaceStore;
@@ -48,9 +53,24 @@ interface LearningAuditSource {
   readonly now?: () => Date;
 }
 
-interface PrimitiveInput extends Omit<TuiLearningPrimitive, "evidence" | "relations" | "rawJson" | "tone"> {
+interface PrimitiveInput
+  extends Omit<
+    TuiLearningPrimitive,
+    | "evidence"
+    | "evidencePreviews"
+    | "consideredEvidenceCount"
+    | "consideredEvidencePreviews"
+    | "relations"
+    | "detailSections"
+    | "rawJson"
+    | "tone"
+  > {
   readonly evidence?: readonly EvidenceRef[];
+  readonly evidencePreviews?: readonly TuiLearningEvidencePreview[];
+  readonly consideredEvidenceCount?: number;
+  readonly consideredEvidencePreviews?: readonly TuiLearningEvidencePreview[];
   readonly relations?: readonly TuiLearningRelation[];
+  readonly detailSections?: readonly TuiLearningDetailSection[];
   readonly raw: unknown;
   readonly sensitivity?: "normal" | "private" | "secret";
   readonly tone?: TuiLearningPrimitive["tone"];
@@ -91,13 +111,172 @@ function boundedRawJson(value: unknown, sensitivity: "normal" | "private" | "sec
   });
 }
 
+function boundedExcerpt(value: string): string {
+  const normalized = value.replaceAll("\t", " ").replaceAll(/\s+/g, " ").trim();
+  return normalized.length <= EVIDENCE_EXCERPT_LIMIT
+    ? normalized
+    : `${normalized.slice(0, EVIDENCE_EXCERPT_LIMIT - 1)}…`;
+}
+
+function unknownExcerpt(value: unknown): string {
+  if (typeof value === "string") return boundedExcerpt(value);
+  if (value === undefined) return "No content was recorded.";
+  try {
+    return boundedExcerpt(canonicalJson(toJsonValue(value)));
+  } catch {
+    return "The recorded content is not available as bounded JSON.";
+  }
+}
+
+function redactedEvidence(identity: string, label: string): TuiLearningEvidencePreview {
+  return Object.freeze({
+    identity,
+    label,
+    excerpt: "Sensitive evidence is hidden because this TUI has no admitted grant for it.",
+    redacted: true,
+  });
+}
+
+function createEvidencePreviewResolver(workspace: NoesisWorkspaceStore) {
+  const cache = new Map<string, Promise<TuiLearningEvidencePreview>>();
+
+  const resolve = async (reference: EvidenceRef): Promise<TuiLearningEvidencePreview> => {
+    const identity = evidenceIdentity(reference);
+    if (reference.kind === "artifact_file")
+      return Object.freeze({
+        identity,
+        label: `ARTIFACT · ${reference.mediaType}`,
+        excerpt: "Artifact content remains available through its authoritative artifact record.",
+        redacted: true,
+      });
+    if (reference.kind === "file_revision" || reference.kind === "evidence_revision") {
+      const label =
+        reference.kind === "evidence_revision"
+          ? `EVIDENCE · ${reference.evidenceKind.replaceAll("_", " ")}`
+          : `REVISION · ${reference.workingPath}`;
+      return Object.freeze({
+        identity,
+        label,
+        excerpt: "Revision content is hidden because its transitive sensitivity is not admitted by this TUI.",
+        redacted: true,
+      });
+    }
+    if (reference.table === "messages") {
+      const message = await workspace.operational.messages.get(reference.rowId);
+      if (!message)
+        return Object.freeze({
+          identity,
+          label: "MESSAGE",
+          excerpt: "The referenced message is unavailable.",
+          redacted: true,
+        });
+      if (message.sensitivity !== "normal") return redactedEvidence(identity, message.role.toUpperCase());
+      return Object.freeze({
+        identity,
+        label: message.role.toUpperCase(),
+        excerpt: boundedExcerpt(message.content),
+        occurredAt: message.createdAt,
+        redacted: false,
+      });
+    }
+    if (reference.table === "tool_calls") {
+      const call = await workspace.operational.toolCalls.get(reference.rowId);
+      if (!call)
+        return Object.freeze({
+          identity,
+          label: "TOOL",
+          excerpt: "The referenced tool call is unavailable.",
+          redacted: true,
+        });
+      if (call.sensitivity !== "normal") return redactedEvidence(identity, `TOOL · ${call.toolName}`);
+      return Object.freeze({
+        identity,
+        label: `TOOL · ${call.toolName} · ${call.status}`,
+        excerpt: unknownExcerpt(call.response ?? call.update ?? call.request),
+        occurredAt: call.completedAt ?? call.createdAt,
+        redacted: false,
+      });
+    }
+    if (reference.table === "outcomes") {
+      const outcome = await workspace.operational.outcomes.get(reference.rowId);
+      if (!outcome)
+        return Object.freeze({
+          identity,
+          label: "OUTCOME",
+          excerpt: "The referenced outcome is unavailable.",
+          redacted: true,
+        });
+      if (outcome.sensitivity !== "normal") return redactedEvidence(identity, `OUTCOME · ${outcome.status}`);
+      return Object.freeze({
+        identity,
+        label: `OUTCOME · ${outcome.status}`,
+        excerpt: boundedExcerpt(outcome.summary),
+        occurredAt: outcome.createdAt,
+        redacted: false,
+      });
+    }
+    if (reference.table === "sessions") {
+      const session = await workspace.operational.sessions.get(reference.rowId);
+      const sensitivity = await workspace.operational.sessions.sensitivity(reference.rowId);
+      if (!session || sensitivity !== "normal") return redactedEvidence(identity, "SESSION");
+      return Object.freeze({
+        identity,
+        label: "SESSION",
+        excerpt: boundedExcerpt(session.title),
+        occurredAt: session.updatedAt,
+        redacted: false,
+      });
+    }
+    if (reference.table === "feedback_signals") {
+      const signal = await workspace.research.feedbackSignals.getFeedbackSignal(reference.rowId);
+      if (!signal || signal.sensitivity !== "normal") return redactedEvidence(identity, "FEEDBACK");
+      return Object.freeze({
+        identity,
+        label: `FEEDBACK · ${signal.kind.replaceAll("_", " ")}`,
+        excerpt: `${signal.scope} scope · strength ${String(signal.strength)} · novelty ${String(signal.novelty)}`,
+        redacted: false,
+      });
+    }
+    if (reference.table === "experiments") {
+      return Object.freeze({
+        identity,
+        label: "EXPERIMENT",
+        excerpt: "Open the related experiment primitive to inspect its authorized projection.",
+        redacted: true,
+      });
+    }
+    return Object.freeze({
+      identity,
+      label: reference.table.replaceAll("_", " ").toUpperCase(),
+      excerpt: "The exact authoritative reference is available in the raw audit view.",
+      redacted: true,
+    });
+  };
+
+  return async (references: readonly EvidenceRef[]): Promise<readonly TuiLearningEvidencePreview[]> =>
+    await Promise.all(
+      references.slice(0, EVIDENCE_PREVIEW_LIMIT).map((reference) => {
+        const identity = evidenceIdentity(reference);
+        const existing = cache.get(identity);
+        if (existing) return existing;
+        const pending = resolve(reference);
+        cache.set(identity, pending);
+        return pending;
+      }),
+    );
+}
+
 function primitive(input: PrimitiveInput): TuiLearningPrimitive {
   const { raw, sensitivity, ...record } = input;
   return Object.freeze({
     ...record,
     tone: input.tone ?? "neutral",
     evidence: Object.freeze((input.evidence ?? []).map(evidenceIdentity)),
+    evidencePreviews: Object.freeze(input.evidencePreviews ?? []),
+    consideredEvidenceCount: input.consideredEvidenceCount ?? 0,
+    consideredEvidencePreviews: Object.freeze(input.consideredEvidencePreviews ?? []),
     relations: Object.freeze((input.relations ?? []).filter(defined)),
+    detailSections: Object.freeze(input.detailSections ?? []),
     rawJson: boundedRawJson(raw, sensitivity),
   });
 }
@@ -106,6 +285,84 @@ function stringField(value: unknown, key: string): string | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const field = Reflect.get(value, key);
   return typeof field === "string" && field.length > 0 ? field : undefined;
+}
+
+function objectField(value: unknown, key: string): Readonly<Record<string, unknown>> | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const field = Reflect.get(value, key);
+  return typeof field === "object" && field !== null && !Array.isArray(field)
+    ? Object.freeze({ ...field })
+    : undefined;
+}
+
+function detailEntry(label: string, value: string | undefined) {
+  return value ? Object.freeze({ label, value }) : undefined;
+}
+
+function detailSection(
+  title: string,
+  entries: readonly (ReturnType<typeof detailEntry> | undefined)[],
+): TuiLearningDetailSection | undefined {
+  const present = entries.filter(defined);
+  return present.length > 0 ? Object.freeze({ title, entries: Object.freeze(present) }) : undefined;
+}
+
+function reflectionStatusLabel(status: string): string {
+  if (status === "no_change") return "No lasting change";
+  if (status === "adjusted") return "Applied project strategy";
+  if (status === "replaced") return "Updated project strategy";
+  if (status === "unapplied") return "Removed project strategy";
+  if (status === "experiment") return "Proposed an experiment";
+  if (status === "deduped") return "Matched an existing experiment";
+  if (status === "stale") return "Decision became stale before application";
+  if (status === "failed" || status === "budget_exhausted" || status === "cancelled")
+    return `Reflection ${status.replaceAll("_", " ")}`;
+  return status.replaceAll("_", " ");
+}
+
+function reflectionReason(job: DurableJobRecord): string {
+  const rationale = stringField(job.result, "rationale");
+  if (rationale) return rationale;
+  const reason = stringField(job.result, "reason");
+  if (reason === "reflector_no_change")
+    return "The reflector found no durable lesson with a credible future use.";
+  if (reason === "disabled") return "Ambient learning was disabled for this turn.";
+  if (reason === "sensitive") return "The turn was too sensitive for ambient learning.";
+  return reason ?? job.lastError?.message ?? `The reflection is ${job.status.replaceAll("_", " ")}.`;
+}
+
+function reflectionDetails(
+  job: DurableJobRecord,
+  adjustments: ReadonlyMap<string, WorkingAdjustment>,
+): readonly TuiLearningDetailSection[] {
+  const status = stringField(job.result, "status") ?? job.status;
+  const observation = objectField(job.result, "observation");
+  const adjustmentId = stringField(job.result, "adjustmentId");
+  const adjustment = adjustmentId ? adjustments.get(adjustmentId) : undefined;
+  const replacedAdjustmentId = stringField(job.result, "replacedAdjustmentId");
+  const replaced = replacedAdjustmentId ? adjustments.get(replacedAdjustmentId) : undefined;
+  return Object.freeze(
+    [
+      detailSection("Decision", [
+        detailEntry("Outcome", reflectionStatusLabel(status)),
+        detailEntry("Why", reflectionReason(job)),
+      ]),
+      adjustment
+        ? detailSection("What changed", [
+            detailEntry("Before", replaced?.strategy ?? "No project strategy was active."),
+            detailEntry("Now", adjustment.strategy),
+            detailEntry("Success looks like", adjustment.successSignal),
+            detailEntry("Scope", "This project"),
+          ])
+        : undefined,
+      observation
+        ? detailSection("Observation", [
+            detailEntry("Classified as", stringField(observation, "kind")?.replaceAll("_", " ")),
+            detailEntry("Reason", stringField(observation, "reason")),
+          ])
+        : undefined,
+    ].filter(defined),
+  );
 }
 
 async function listProjectReflectionJobs(
@@ -234,6 +491,7 @@ function jobSummary(job: DurableJobRecord): string {
   if (job.status === "failed" || job.status === "budget_exhausted" || job.status === "cancelled")
     return job.lastError?.message ?? `Learning job ${job.status.replaceAll("_", " ")}`;
   if (job.status !== "completed") return `${job.kind} is ${job.status}`;
+  if (job.kind === "runtime.reflect_turn") return reflectionReason(job);
   const resultStatus = stringField(job.result, "status");
   return (
     stringField(job.result, "rationale") ??
@@ -245,17 +503,33 @@ function jobSummary(job: DurableJobRecord): string {
 }
 
 function reflectionTitle(job: DurableJobRecord): string {
-  const result = stringField(job.result, "status");
-  return result ? `Reflection · ${result.replaceAll("_", " ")}` : "Turn reflection";
+  return reflectionStatusLabel(stringField(job.result, "status") ?? job.status);
 }
 
-function jobPrimitive(job: DurableJobRecord): TuiLearningPrimitive {
+async function jobPrimitive(
+  job: DurableJobRecord,
+  adjustments: ReadonlyMap<string, WorkingAdjustment>,
+  evidencePreviews: (references: readonly EvidenceRef[]) => Promise<readonly TuiLearningEvidencePreview[]>,
+): Promise<TuiLearningPrimitive> {
   const experimentId = jobExperimentId(job);
   const sessionId = jobSessionId(job);
   const projectId = jobProjectId(job);
   const isReflection = job.kind === "runtime.reflect_turn";
   const kind: TuiLearningPrimitiveKind = isReflection ? "reflection" : "job";
   const group: TuiLearningPrimitiveGroup = isReflection ? "reflection" : "operations";
+  const adjustmentId = isReflection ? stringField(job.result, "adjustmentId") : undefined;
+  const adjustment = adjustmentId ? adjustments.get(adjustmentId) : undefined;
+  const citedEvidence = adjustment?.evidenceRefs ?? [];
+  const consideredEvidence = isReflection ? job.payloadRefs : [];
+  const reflectionStatus = stringField(job.result, "status") ?? job.status;
+  const previewConsideredEvidence = new Set([
+    "adjusted",
+    "replaced",
+    "unapplied",
+    "experiment",
+    "deduped",
+    "stale",
+  ]).has(reflectionStatus);
   return primitive({
     id: nativeId(kind, job.jobId),
     kind,
@@ -275,7 +549,11 @@ function jobPrimitive(job: DurableJobRecord): TuiLearningPrimitive {
     ...(sessionId ? { sessionId } : {}),
     ...(projectId ? { projectId } : {}),
     ...(experimentId ? { experimentId } : {}),
-    evidence: job.payloadRefs,
+    evidence: citedEvidence,
+    evidencePreviews: await evidencePreviews(citedEvidence),
+    consideredEvidenceCount: consideredEvidence.length,
+    consideredEvidencePreviews: previewConsideredEvidence ? await evidencePreviews(consideredEvidence) : [],
+    detailSections: isReflection ? reflectionDetails(job, adjustments) : [],
     relations: [
       relation("experiment", "experiment", experimentId),
       relation("adjustment", "working_adjustment", stringField(job.result, "adjustmentId")),
@@ -383,7 +661,15 @@ export async function loadLearningAuditSnapshot(
       })
       .filter(defined),
   );
-  const primitives: TuiLearningPrimitive[] = jobs.map(jobPrimitive);
+  const adjustmentsById = new Map(
+    adjustments.map((adjustment) => [adjustment.adjustmentId, adjustment] as const),
+  );
+  const resolveEvidencePreviews = createEvidencePreviewResolver(source.workspace);
+  const primitives: TuiLearningPrimitive[] = [
+    ...(await Promise.all(
+      jobs.map(async (job) => await jobPrimitive(job, adjustmentsById, resolveEvidencePreviews)),
+    )),
+  ];
 
   for (const criterion of criteriaResult.value) {
     const definition = criterion.definition;
@@ -416,6 +702,18 @@ export async function loadLearningAuditSnapshot(
         summary: adjustment.strategy,
         projectId: adjustment.scope.projectId,
         evidence: adjustment.evidenceRefs,
+        evidencePreviews: await resolveEvidencePreviews(adjustment.evidenceRefs),
+        detailSections: [
+          detailSection("Current behavior", [
+            detailEntry("Strategy", adjustment.strategy),
+            detailEntry("Success looks like", adjustment.successSignal),
+            detailEntry("Scope", "This project"),
+          ]),
+          detailSection("Origin", [
+            detailEntry("Observation", adjustment.observation),
+            detailEntry("Created from turn", adjustment.createdFromTurnId),
+          ]),
+        ].filter(defined),
         relations: [
           relation("source reflection", "reflection", reflectionByTurnId.get(adjustment.createdFromTurnId)),
         ].filter(defined),
@@ -780,12 +1078,30 @@ export async function loadLearningAuditSnapshot(
       }),
     );
 
+  const sorted = sortPrimitives(primitives);
+  const titles = new Map(sorted.map((item) => [item.id, item.title] as const));
+  const presented = Object.freeze(
+    sorted.map((item) =>
+      Object.freeze({
+        ...item,
+        relations: Object.freeze(
+          item.relations.map((itemRelation) => {
+            const targetTitle = titles.get(itemRelation.targetId);
+            return Object.freeze({
+              ...itemRelation,
+              ...(targetTitle ? { targetTitle } : {}),
+            });
+          }),
+        ),
+      }),
+    ),
+  );
   return Object.freeze({
     projectId: source.projectId,
     sessionId,
     generatedAt: (source.now ?? (() => new Date()))().toISOString(),
     ...(activeAdjustment ? { activeAdjustmentId: activeAdjustment.adjustmentId } : {}),
     ...(activation ? { activeActivationId: activation.activationId } : {}),
-    primitives: sortPrimitives(primitives),
+    primitives: presented,
   });
 }

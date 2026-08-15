@@ -2,15 +2,17 @@ import { type Component, matchesKey, visibleWidth, wrapTextWithAnsi } from "@ear
 import type {
   NoesisTuiRuntime,
   TuiLearningAuditSnapshot,
+  TuiLearningEvidencePreview,
   TuiLearningPrimitive,
   TuiLearningPrimitiveGroup,
 } from "./runtime-port.ts";
 import { highlightCode } from "./syntax.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 
-type AuditFilter = "all" | TuiLearningPrimitiveGroup;
+type AuditFilter = "noteworthy" | "all" | TuiLearningPrimitiveGroup;
 
 const FILTERS: readonly AuditFilter[] = Object.freeze([
+  "noteworthy",
   "all",
   "memory",
   "reflection",
@@ -21,6 +23,7 @@ const FILTERS: readonly AuditFilter[] = Object.freeze([
   "operations",
 ]);
 const PAGE_STEP = 8;
+const WIDE_LAYOUT_MIN = 110;
 
 type AuditScreen =
   | { readonly kind: "list" }
@@ -48,11 +51,6 @@ export interface CreateLearningAuditOverlayOptions {
 const safeScalar = (value: string): string =>
   safeTerminalText(value).replaceAll("\t", " ").replaceAll("\n", " ");
 
-function shortIdentity(value: string): string {
-  const safe = safeScalar(value);
-  return safe.length <= 42 ? safe : `${safe.slice(0, 19)}…${safe.slice(-18)}`;
-}
-
 const TONE_PRESENTATION = Object.freeze({
   neutral: Object.freeze({ glyph: "—", color: ANSI.dim }),
   positive: Object.freeze({ glyph: "✓", color: ANSI.green }),
@@ -65,23 +63,28 @@ function pad(line: string, width: number): string {
   return `${line}${" ".repeat(Math.max(0, width - visibleWidth(line)))}`;
 }
 
-function groupCounts(snapshot: TuiLearningAuditSnapshot): string {
-  const counts = new Map<TuiLearningPrimitiveGroup, number>();
-  for (const item of snapshot.primitives) counts.set(item.group, (counts.get(item.group) ?? 0) + 1);
-  const groups: readonly TuiLearningPrimitiveGroup[] = [
-    "changes",
-    "evaluation",
-    "feedback",
-    "reflection",
-    "activation",
-    "memory",
-    "operations",
-  ];
-  return groups.map((group) => `${group} ${String(counts.get(group) ?? 0)}`).join(" · ");
+function isRoutine(record: TuiLearningPrimitive): boolean {
+  return record.kind === "reflection" && record.status === "no_change";
+}
+
+function isNoteworthy(record: TuiLearningPrimitive): boolean {
+  if (isRoutine(record)) return false;
+  if (record.group === "operations") return record.tone === "pending" || record.tone === "negative";
+  return true;
+}
+
+function headlineStats(records: readonly TuiLearningPrimitive[]): string {
+  const active = records.filter((record) => record.tone === "active").length;
+  const evaluating = records.filter(
+    (record) => record.tone === "pending" && record.group !== "operations",
+  ).length;
+  const attention = records.filter((record) => record.tone === "negative").length;
+  const routine = records.filter(isRoutine).length;
+  return `active ${String(active)} · evaluating ${String(evaluating)} · needs attention ${String(attention)} · routine reflections ${String(routine)}`;
 }
 
 function filterLabel(filter: AuditFilter): string {
-  return filter === "all" ? "everything" : filter;
+  return filter === "all" ? "all activity" : filter;
 }
 
 function timestamp(value: string | undefined): string {
@@ -114,39 +117,18 @@ function listViewport(
     const presentation = TONE_PRESENTATION[record.tone];
     const glyph = styled(colorEnabled, presentation.color, presentation.glyph);
     const title = styled(colorEnabled, selected ? ANSI.bold : "", safeScalar(record.title));
-    const identity = styled(colorEnabled, ANSI.dim, `${record.kind} · ${shortIdentity(record.id)}`);
     const context = [
       safeScalar(record.status).replaceAll("_", " "),
-      record.projectId ? `project ${shortIdentity(record.projectId)}` : undefined,
-      record.experimentId ? `experiment ${shortIdentity(record.experimentId)}` : undefined,
+      record.kind.replaceAll("_", " "),
       timestamp(record.occurredAt),
     ]
       .filter((value): value is string => value !== undefined)
       .join(" · ");
     return [
-      elideText(`${marker} ${glyph} ${title}  ${identity}`, width),
+      elideText(`${marker} ${glyph} ${title}`, width),
       elideText(`    ${styled(colorEnabled, ANSI.dim, context)} · ${safeScalar(record.summary)}`, width),
     ];
   });
-}
-
-function fieldLines(record: TuiLearningPrimitive, colorEnabled: boolean): readonly string[] {
-  const fields: readonly (readonly [string, string | undefined])[] = [
-    ["identity", record.id],
-    ["primitive", record.kind],
-    ["group", record.group],
-    ["status", record.status.replaceAll("_", " ")],
-    ["updated", record.occurredAt],
-    ["session", record.sessionId],
-    ["project", record.projectId],
-    ["experiment", record.experimentId],
-    ["capability", record.capabilityId],
-  ];
-  const present = fields.filter((entry): entry is readonly [string, string] => entry[1] !== undefined);
-  const keyWidth = Math.max(0, ...present.map(([key]) => key.length));
-  return present.map(
-    ([key, value]) => `${styled(colorEnabled, ANSI.dim, key.padEnd(keyWidth))}  ${safeTerminalText(value)}`,
-  );
 }
 
 function rule(label: string, width: number, colorEnabled: boolean): string {
@@ -156,6 +138,33 @@ function rule(label: string, width: number, colorEnabled: boolean): string {
     ANSI.dim,
     "─".repeat(Math.max(0, width - safe.length - 4)),
   )}`;
+}
+
+function evidenceLines(
+  previews: readonly TuiLearningEvidencePreview[],
+  total: number,
+  colorEnabled: boolean,
+): readonly string[] {
+  if (previews.length === 0)
+    return [
+      styled(
+        colorEnabled,
+        ANSI.dim,
+        total === 0
+          ? "No evidence was cited for this decision."
+          : "Exact references remain available in the raw audit view.",
+      ),
+    ];
+  return [
+    ...previews.flatMap((preview) => [
+      `${styled(colorEnabled, ANSI.bold, safeScalar(preview.label))}${preview.occurredAt ? styled(colorEnabled, ANSI.dim, ` · ${timestamp(preview.occurredAt)}`) : ""}`,
+      `  ${styled(colorEnabled, preview.redacted ? ANSI.dim : "", safeTerminalText(preview.excerpt))}`,
+      "",
+    ]),
+    ...(total > previews.length
+      ? [styled(colorEnabled, ANSI.dim, `+ ${String(total - previews.length)} more exact references in raw`)]
+      : []),
+  ];
 }
 
 function detailDocument(
@@ -178,22 +187,49 @@ function detailDocument(
       safeTerminalText(record.title),
     )}`,
     safeTerminalText(record.summary),
+    styled(
+      colorEnabled,
+      ANSI.dim,
+      `${record.status.replaceAll("_", " ")} · ${record.kind.replaceAll("_", " ")} · ${timestamp(record.occurredAt)}`,
+    ),
     "",
-    rule("identity", width, colorEnabled),
-    ...fieldLines(record, colorEnabled),
-    "",
-    rule(`lineage · ${String(record.relations.length)}`, width, colorEnabled),
-    ...(record.relations.length === 0
-      ? [styled(colorEnabled, ANSI.dim, "No typed relationships are recorded.")]
-      : record.relations.map((item, index) => {
-          const selected = index === relationCursor;
-          return `${styled(colorEnabled, selected ? `${ANSI.bold}${ANSI.cyan}` : ANSI.dim, selected ? "›" : " ")} ${safeScalar(item.label)} → ${safeTerminalText(item.targetId)}`;
-        })),
-    "",
-    rule(`evidence · ${String(record.evidence.length)}`, width, colorEnabled),
-    ...(record.evidence.length === 0
-      ? [styled(colorEnabled, ANSI.dim, "No evidence references are recorded on this primitive.")]
-      : record.evidence.map((reference) => `• ${safeTerminalText(reference)}`)),
+    ...record.detailSections.flatMap((section) => [
+      rule(section.title, width, colorEnabled),
+      ...section.entries.map((entry) =>
+        entry.label
+          ? `${styled(colorEnabled, ANSI.dim, entry.label)}  ${safeTerminalText(entry.value)}`
+          : safeTerminalText(entry.value),
+      ),
+      "",
+    ]),
+    rule(`evidence cited · ${String(record.evidence.length)}`, width, colorEnabled),
+    ...evidenceLines(record.evidencePreviews, record.evidence.length, colorEnabled),
+    ...(record.consideredEvidenceCount > 0
+      ? [
+          "",
+          rule(`inputs considered · ${String(record.consideredEvidenceCount)}`, width, colorEnabled),
+          ...(record.evidence.length > 0
+            ? [
+                styled(
+                  colorEnabled,
+                  ANSI.dim,
+                  `${String(record.consideredEvidenceCount)} inputs were reviewed; ${String(record.evidence.length)} were cited for the decision.`,
+                ),
+              ]
+            : evidenceLines(record.consideredEvidencePreviews, record.consideredEvidenceCount, colorEnabled)),
+        ]
+      : []),
+    ...(record.relations.length > 0
+      ? [
+          "",
+          rule(`what followed · ${String(record.relations.length)}`, width, colorEnabled),
+          ...record.relations.map((item, index) => {
+            const selected = index === relationCursor;
+            const target = item.targetTitle ?? item.targetId;
+            return `${styled(colorEnabled, selected ? `${ANSI.bold}${ANSI.cyan}` : ANSI.dim, selected ? "›" : " ")} ${safeScalar(item.label)} → ${safeTerminalText(target)}`;
+          }),
+        ]
+      : []),
   ];
 }
 
@@ -201,6 +237,21 @@ function wrapDocument(lines: readonly string[], width: number): readonly string[
   return lines.flatMap((line) => {
     const wrapped = line ? wrapTextWithAnsi(line, width) : [""];
     return wrapped.length > 0 ? wrapped : [""];
+  });
+}
+
+function joinColumns(
+  left: readonly string[],
+  right: readonly string[],
+  leftWidth: number,
+  rightWidth: number,
+  maxRows: number,
+  colorEnabled: boolean,
+): readonly string[] {
+  return Array.from({ length: maxRows }, (_, index) => {
+    const leftLine = elideText(left[index] ?? "", leftWidth);
+    const rightLine = elideText(right[index] ?? "", rightWidth);
+    return `${pad(leftLine, leftWidth)} ${styled(colorEnabled, ANSI.dim, "│")} ${rightLine}`;
   });
 }
 
@@ -216,21 +267,26 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
   let cursor = 0;
   let scroll = 0;
   let relationCursor = 0;
+  let wideLayout = false;
 
   const render = (): void => {
     if (!disposed) options.requestRender();
   };
 
-  const visibleRecords = (): readonly TuiLearningPrimitive[] => {
-    const filter = FILTERS[filterIndex] ?? "all";
+  const scopedRecords = (): readonly TuiLearningPrimitive[] => {
     const current = snapshot;
     return (
-      current?.primitives.filter(
-        (record) =>
-          (filter === "all" || record.group === filter) &&
-          (!currentSessionOnly || record.sessionId === current.sessionId),
-      ) ?? []
+      current?.primitives.filter((record) => !currentSessionOnly || record.sessionId === current.sessionId) ??
+      []
     );
+  };
+
+  const visibleRecords = (): readonly TuiLearningPrimitive[] => {
+    const filter = FILTERS[filterIndex] ?? "all";
+    const scoped = scopedRecords();
+    if (filter === "noteworthy") return scoped.filter(isNoteworthy);
+    if (filter === "all") return scoped;
+    return scoped.filter((record) => record.group === filter);
   };
 
   const refresh = async (): Promise<void> => {
@@ -259,6 +315,8 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
   };
 
   const openRecord = (recordId: string, back: AuditScreen): void => {
+    const visibleIndex = visibleRecords().findIndex((record) => record.id === recordId);
+    if (visibleIndex >= 0) cursor = visibleIndex;
     screen = { kind: "detail", recordId, back, raw: false };
     scroll = 0;
     relationCursor = 0;
@@ -292,7 +350,14 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       moveList(PAGE_STEP);
       return;
     }
-    if (data === "f" || matchesKey(data, "tab")) {
+    if (data === "a") {
+      const current = FILTERS[filterIndex] ?? "noteworthy";
+      filterIndex = current === "all" ? 0 : 1;
+      cursor = 0;
+      render();
+      return;
+    }
+    if (data === "f") {
       filterIndex = (filterIndex + 1) % FILTERS.length;
       cursor = 0;
       render();
@@ -308,7 +373,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       void refresh();
       return;
     }
-    if (!matchesKey(data, "enter")) return;
+    if (!matchesKey(data, "enter") && !(wideLayout && matchesKey(data, "tab"))) return;
     const selected = visibleRecords()[cursor];
     if (selected) openRecord(selected.id, screen);
   };
@@ -316,6 +381,12 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
   const handleDetail = (data: string, detail: Extract<AuditScreen, { kind: "detail" }>): void => {
     const record = detailRecord();
     if (matchesKey(data, "escape")) {
+      screen = detail.back;
+      scroll = 0;
+      render();
+      return;
+    }
+    if (wideLayout && matchesKey(data, "tab")) {
       screen = detail.back;
       scroll = 0;
       render();
@@ -367,47 +438,132 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     render(outerWidth) {
       const width = Math.max(16, outerWidth - 4);
       const height = Math.max(8, options.height() - 4);
+      wideLayout = width >= WIDE_LAYOUT_MIN;
       const noticeRows = notice ? wrapTextWithAnsi(safeTerminalText(notice), width).slice(0, 3) : [];
       const bodyRows = Math.max(1, height - 6 - noticeRows.length);
       let body: readonly string[];
       if (busy) body = [styled(options.colorEnabled, ANSI.cyan, busy)];
       else if (!snapshot)
         body = [styled(options.colorEnabled, ANSI.red, "The learning ledger is unavailable.")];
-      else if (screen.kind === "list") {
+      else {
         const filter = FILTERS[filterIndex] ?? "all";
         const records = visibleRecords();
-        body = [
-          styled(options.colorEnabled, ANSI.dim, groupCounts(snapshot)),
+        const scoped = scopedRecords();
+        const overview = [
+          styled(options.colorEnabled, ANSI.bold, headlineStats(scoped)),
           styled(
             options.colorEnabled,
             ANSI.dim,
-            `view ${filterLabel(filter)} · ${currentSessionOnly ? "current session" : "all sessions"} · ${String(records.length)} records`,
+            `view ${filterLabel(filter)} · ${currentSessionOnly ? "current session" : "all sessions"} · ${String(records.length)} visible`,
           ),
           "",
-          ...listViewport(records, cursor, width, Math.max(1, bodyRows - 3), options.colorEnabled),
         ];
-      } else {
-        const record = detailRecord();
-        if (!record)
-          body = [styled(options.colorEnabled, ANSI.red, "This learning primitive is unavailable.")];
-        else {
-          const document = wrapDocument(
-            detailDocument(record, screen.raw, relationCursor, width, options.colorEnabled),
-            width,
-          );
-          const maxScroll = Math.max(0, document.length - bodyRows);
-          scroll = Math.min(scroll, maxScroll);
-          body = document.slice(scroll, scroll + bodyRows);
+        if (wideLayout) {
+          const paneRows = Math.max(1, bodyRows - overview.length);
+          const leftWidth = Math.min(52, Math.max(36, Math.floor(width * 0.38)));
+          const rightWidth = Math.max(24, width - leftWidth - 3);
+          const routineCount = scoped.filter(isRoutine).length;
+          const leftPrefix = [
+            rule(screen.kind === "list" ? "activity · focused" : "activity", leftWidth, options.colorEnabled),
+            ...(filter === "noteworthy" && routineCount > 0
+              ? [
+                  styled(
+                    options.colorEnabled,
+                    ANSI.dim,
+                    `${String(routineCount)} routine no-change reflections hidden · a shows all`,
+                  ),
+                ]
+              : []),
+            "",
+          ];
+          const left = [
+            ...leftPrefix,
+            ...listViewport(
+              records,
+              cursor,
+              leftWidth,
+              Math.max(1, paneRows - leftPrefix.length),
+              options.colorEnabled,
+            ),
+          ];
+          const selected = screen.kind === "detail" ? detailRecord() : records[cursor];
+          let right: readonly string[];
+          if (!selected)
+            right = [
+              rule("selected decision", rightWidth, options.colorEnabled),
+              styled(options.colorEnabled, ANSI.dim, "Select a learning record to inspect it."),
+            ];
+          else {
+            const document = wrapDocument(
+              [
+                rule(
+                  screen.kind === "detail" ? "selected decision · focused" : "selected decision",
+                  rightWidth,
+                  options.colorEnabled,
+                ),
+                ...detailDocument(
+                  selected,
+                  screen.kind === "detail" && screen.raw,
+                  relationCursor,
+                  rightWidth,
+                  options.colorEnabled,
+                ),
+              ],
+              rightWidth,
+            );
+            const selectedScroll = screen.kind === "detail" ? scroll : 0;
+            const maxScroll = Math.max(0, document.length - paneRows);
+            if (screen.kind === "detail") scroll = Math.min(scroll, maxScroll);
+            right = document.slice(
+              Math.min(selectedScroll, maxScroll),
+              Math.min(selectedScroll, maxScroll) + paneRows,
+            );
+          }
+          body = [
+            ...overview,
+            ...joinColumns(left, right, leftWidth, rightWidth, paneRows, options.colorEnabled),
+          ];
+        } else if (screen.kind === "list") {
+          const routineCount = scoped.filter(isRoutine).length;
+          body = [
+            ...overview,
+            ...(filter === "noteworthy" && routineCount > 0
+              ? [
+                  styled(
+                    options.colorEnabled,
+                    ANSI.dim,
+                    `${String(routineCount)} routine no-change reflections hidden · press a for all activity`,
+                  ),
+                  "",
+                ]
+              : []),
+            ...listViewport(records, cursor, width, Math.max(1, bodyRows - 3), options.colorEnabled),
+          ];
+        } else {
+          const record = detailRecord();
+          if (!record)
+            body = [styled(options.colorEnabled, ANSI.red, "This learning primitive is unavailable.")];
+          else {
+            const document = wrapDocument(
+              detailDocument(record, screen.raw, relationCursor, width, options.colorEnabled),
+              width,
+            );
+            const maxScroll = Math.max(0, document.length - bodyRows);
+            scroll = Math.min(scroll, maxScroll);
+            body = document.slice(scroll, scroll + bodyRows);
+          }
         }
       }
       const title =
         screen.kind === "list"
-          ? "LEARNING · audit ledger"
+          ? "LEARNING · project evolution"
           : `LEARNING · ${detailRecord()?.kind.replaceAll("_", " ") ?? "record"}`;
       const hint =
         screen.kind === "list"
-          ? "↑/↓ select · enter inspect · f/tab filter · s session · r refresh · esc close"
-          : "↑/↓ scroll · ←/→ lineage · enter follow · space raw · esc back";
+          ? "↑/↓ select · enter/tab inspect · a all activity · f filter · s session · r refresh · esc close"
+          : wideLayout
+            ? "↑/↓ scroll · ←/→ lineage · enter follow · space raw · tab/esc activity"
+            : "↑/↓ scroll · ←/→ lineage · enter follow · space raw · esc back";
       return [
         styled(options.colorEnabled, ANSI.dim, `╭─${"─".repeat(Math.max(0, outerWidth - 3))}╮`),
         elideText(`│ ${styled(options.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, title)}`, outerWidth),

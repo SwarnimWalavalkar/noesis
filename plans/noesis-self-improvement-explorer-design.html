@@ -28,14 +28,15 @@
   <p class="lead">Users and builders can inspect how Noesis reflects, changes, evaluates, activates, observes, and learns without turning those records into a second source of truth.</p>
 
   <section><h2>Current surface</h2>
-    <p>The old <code>/learning</code> command showed session activity and the current project strategy as flat text. The durable system contains much more: memories, routine reflections, working adjustments, experiments, immutable revisions, preflight and evaluation, activation, feedback, outcome research, outcomes, lineage, and orchestration jobs.</p>
+    <p>The first audit ledger exposed every durable primitive, but its flat chronology gave routine <code>no_change</code> reflections the same weight as lasting changes, failures, and protected decisions. Its generic inspector exposed exact IDs and references without explaining the decision or showing readable evidence.</p>
   </section>
 
   <section><h2>Smallest coherent product</h2>
-    <p class="decision"><code>/learning</code> opens an inspect-only Pi TUI audit ledger. It shows every self-improvement primitive, including <code>no_change</code> reflections and routine jobs. Material changes remain easy to isolate through group filters, while the complete machinery stays available for product and architecture study.</p>
+    <p class="decision"><code>/learning</code> opens a signal-first, inspect-only Pi TUI explorer. The default view highlights changes, experiments, evaluation, activation, feedback, and failures. Routine <code>no_change</code> reflections are summarized as one health signal and remain available in the complete audit view.</p>
     <div class="grid">
-      <div class="card"><strong>Ledger</strong><p class="muted">A dense chronological list groups memory, reflection, changes, evaluation, activation, feedback, and operations. It can narrow to the current session without losing the project-wide view.</p></div>
-      <div class="card"><strong>Inspection</strong><p class="muted">Each record exposes its exact identity, authority-derived status, project/session/capability context, evidence references, and typed lineage to related records.</p></div>
+      <div class="card"><strong>Noteworthy first</strong><p class="muted">The main list shows material decisions and anything needing attention. A routine-reflection count proves the ambient loop is healthy without filling the timeline with repeated non-events.</p></div>
+      <div class="card"><strong>Decision anatomy</strong><p class="muted">Reflection details explain the decision, rationale, observation, previous and new behavior, success signal, cited evidence, inputs considered, and what followed.</p></div>
+      <div class="card"><strong>Responsive inspection</strong><p class="muted">Wide terminals use a master-detail layout composed through Pi TUI's component contract. Narrow terminals retain the focused list-to-detail flow.</p></div>
       <div class="card"><strong>Raw authority</strong><p class="muted">The raw view is bounded and sensitivity-aware. Private or secret payloads remain redacted when the TUI has no admitted grant; missing relationships remain explicit instead of being guessed.</p></div>
     </div>
   </section>
@@ -43,7 +44,9 @@
   <section><h2>Decisions</h2><ol>
     <li>The active project is the default authority boundary. Current-session filtering is a view over that ledger, not a separate read model.</li>
     <li>Project strategies, experiments, revisions, evaluation records, activation records, feedback, and jobs share one list while retaining their own primitive kind and raw schema.</li>
-    <li><code>no_change</code> and routine jobs stay visible. Transparency means showing the machinery that decided not to change, not only successful adaptations.</li>
+    <li><code>no_change</code> and routine jobs stay auditable, but the default interface summarizes them instead of treating each one as a material event.</li>
+    <li>IDs are technical details, not explanations. The normal inspector uses authority-derived titles, semantic sections, and bounded evidence excerpts. Exact identities remain in the raw view.</li>
+    <li>Inputs considered and evidence cited are different. Reflection inputs come from the durable job payload; evidence supporting an applied adjustment comes from the immutable adjustment record.</li>
     <li>The first version is read-only. It does not create a durable Change object and does not infer current state from chronology.</li>
     <li>Terminal-controlled text is sanitized. Raw records are bounded, and sensitive raw payloads fail closed.</li>
   </ol></section>
@@ -54,20 +57,24 @@
   </ol></section>
 
   <section><h2>Interaction sketch</h2>
-    <p><code>/learning</code> opens the focused overlay. Arrow keys navigate, Enter inspects or follows typed lineage, <code>f</code> cycles groups, <code>s</code> toggles the current-session view, Space opens the bounded raw projection, and <code>r</code> refreshes from the application read model.</p>
-    <pre><code>LEARNING · audit ledger
+    <p><code>/learning</code> opens the focused overlay. Arrow keys navigate, Enter or Tab focuses detail, <code>a</code> toggles noteworthy and complete activity, <code>f</code> cycles groups, <code>s</code> toggles the current-session view, Space opens the bounded raw projection, and <code>r</code> refreshes from the application read model.</p>
+    <pre><code>LEARNING · project evolution
 
-  — Reflection · no change          reflection
-  ● Prefer narrow research first    experiment
-  ✓ Candidate beat baseline         evaluation
-  ◆ Current activation r12          activation
+active 2 · evaluating 1 · needs attention 1 · routine reflections 24
 
-↑/↓ select · enter inspect · f/tab filter · s session · r refresh · esc close
+  NOTEWORTHY ACTIVITY             │ SELECTED DECISION
+  ◆ Preserve review constraints   │ ✓ Applied project strategy
+  ● Prefer narrow research first  │ What changed
+  × Reflection failed             │ Before  No project strategy
+                                  │ Now     Preserve review-only scope
+                                  │ Evidence cited · 3
+
+↑/↓ select · enter/tab inspect · a all activity · f filter · s session
 detail: space raw · ←/→ lineage · enter follow</code></pre>
   </section>
 
   <section><h2>Read-model boundary</h2>
-    <p class="muted">The application composes one read model across authoritative criteria, jobs, adjustments, experiments, revisions, preflight plans and reports, trials, evaluations, activation operations and approvals, signals, observations, research, outcomes, and successor lineage. The read model creates no second durable Change authority. The Pi TUI renders it and owns no durable state. Missing links remain visible as incomplete data rather than being guessed from activity history.</p>
+    <p class="muted">The application composes one read model across authoritative criteria, jobs, adjustments, experiments, revisions, preflight plans and reports, trials, evaluations, activation operations and approvals, signals, observations, research, outcomes, and successor lineage. It also resolves a bounded set of normal-sensitivity evidence into sanitized previews. The read model creates no second durable Change authority. The Pi TUI renders it and owns no durable state. Missing links remain visible as incomplete data rather than being guessed from activity history.</p>
     <ul>
       <li>Adjustment content comes from immutable working-adjustment rows; whether it is current comes from the active project binding.</li>
       <li>Hypothesis, experiment state, source adjustment, and final outcome come from the authoritative experiment row.</li>

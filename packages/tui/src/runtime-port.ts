@@ -181,6 +181,25 @@ export type TuiLearningPrimitiveGroup =
 export interface TuiLearningRelation {
   readonly label: string;
   readonly targetId: string;
+  readonly targetTitle?: string;
+}
+
+export interface TuiLearningDetailEntry {
+  readonly label?: string;
+  readonly value: string;
+}
+
+export interface TuiLearningDetailSection {
+  readonly title: string;
+  readonly entries: readonly TuiLearningDetailEntry[];
+}
+
+export interface TuiLearningEvidencePreview {
+  readonly identity: string;
+  readonly label: string;
+  readonly excerpt: string;
+  readonly occurredAt?: string;
+  readonly redacted: boolean;
 }
 
 export interface TuiLearningPrimitive {
@@ -197,7 +216,11 @@ export interface TuiLearningPrimitive {
   readonly experimentId?: string;
   readonly capabilityId?: string;
   readonly evidence: readonly string[];
+  readonly evidencePreviews: readonly TuiLearningEvidencePreview[];
+  readonly consideredEvidenceCount: number;
+  readonly consideredEvidencePreviews: readonly TuiLearningEvidencePreview[];
   readonly relations: readonly TuiLearningRelation[];
+  readonly detailSections: readonly TuiLearningDetailSection[];
   /** Bounded, sensitivity-aware projection of the authoritative record. */
   readonly rawJson: string;
 }
