@@ -176,6 +176,13 @@ describe("learning audit read model", () => {
     expect(ids).toContain("experiment:experiment-project-a");
     expect(ids).toContain("feedback_signal:signal-project-a");
     expect(ids.some((id) => id.includes("project-b"))).toBe(false);
+    const experiment = snapshot.primitives.find(
+      (primitive) => primitive.id === "experiment:experiment-project-a",
+    );
+    expect(experiment).toMatchObject({
+      title: "Hypothesis for project-a",
+      sessionId: "session-project-a",
+    });
     const reflection = snapshot.primitives.find(
       (primitive) => primitive.id === "reflection:reflection-project-a",
     );
@@ -290,6 +297,10 @@ describe("learning audit read model", () => {
     const reflection = snapshot.primitives.find(
       (primitive) => primitive.id === "reflection:reflection-readable",
     );
+    expect(reflection).toMatchObject({
+      title: "The correction establishes a reusable project constraint.",
+      consideredEvidenceCount: 1,
+    });
     expect(reflection?.detailSections).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

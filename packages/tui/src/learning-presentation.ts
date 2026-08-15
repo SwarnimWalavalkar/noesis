@@ -34,7 +34,15 @@ export interface SettledTurnPresentationRequest {
 export interface SettledTurnPresentation {
   readonly actions: readonly NoesisTuiAction[];
   readonly pendingReflectionJobId?: string;
+  readonly learningFocusId?: string;
   readonly learningActivityFailure?: Readonly<{ readonly error: unknown }>;
+}
+
+export function learningAuditFocusId(activity: TuiLearningActivitySummary): string {
+  if (activity.adjustmentId) return `working_adjustment:${activity.adjustmentId}`;
+  if (activity.experimentId) return `experiment:${activity.experimentId}`;
+  if (activity.stage === "reflection") return `reflection:${activity.jobId}`;
+  return `job:${activity.jobId}`;
 }
 
 export function workingAdjustmentNotice(activity: TuiLearningActivitySummary): string | undefined {
@@ -65,7 +73,7 @@ export function startLateLearningNoticeRefresh(
   request: Readonly<{
     trailId: string;
     jobId: string;
-    onNotice: (notice: string) => void;
+    onNotice: (notice: string, focusId: string) => void;
     onFailure: (error: unknown) => void;
     onError: (error: unknown) => void;
   }>,
@@ -76,7 +84,7 @@ export function startLateLearningNoticeRefresh(
     .then((activity) => {
       if (!activity) return;
       const notice = workingAdjustmentNotice(activity);
-      if (notice) request.onNotice(notice);
+      if (notice) request.onNotice(notice, learningAuditFocusId(activity));
     }, request.onFailure)
     .catch(request.onError);
 }
@@ -128,6 +136,9 @@ export async function settledTurnPresentation(
     );
   const learningNotice = workingAdjustmentNoticeForTurn(learning.activities, request.turnId);
   if (learningNotice) actions.push({ type: "system-message", text: learningNotice });
+  const focusActivity = learning.activities.find(
+    (activity) => activity.turnId === request.turnId && workingAdjustmentNotice(activity) !== undefined,
+  );
   const pendingReflectionJobId = learning.activities.find(
     (activity) =>
       activity.turnId === request.turnId &&
@@ -137,6 +148,7 @@ export async function settledTurnPresentation(
   return Object.freeze({
     actions: Object.freeze(actions),
     ...(pendingReflectionJobId ? { pendingReflectionJobId } : {}),
+    ...(focusActivity ? { learningFocusId: learningAuditFocusId(focusActivity) } : {}),
     ...(learning.failure ? { learningActivityFailure: learning.failure } : {}),
   });
 }
@@ -152,6 +164,7 @@ export function reconcileSettledTurnPresentation(
     requestRender: () => void;
     reportDiagnostic: (error: unknown) => void;
     reportFailure: (error: unknown) => void;
+    rememberLearningFocus?: (recordId: string) => void;
   }>,
 ): void {
   void settledTurnPresentation(runtime, request)
@@ -161,9 +174,10 @@ export function reconcileSettledTurnPresentation(
         startLateLearningNoticeRefresh(runtime, {
           trailId: request.trailId,
           jobId: presentation.pendingReflectionJobId,
-          onNotice: (notice) => {
+          onNotice: (notice, focusId) => {
             if (!host.isTrailCurrent()) return;
             host.dispatch({ type: "system-message", text: notice });
+            host.rememberLearningFocus?.(focusId);
             host.requestRender();
           },
           onFailure: (error) => {
@@ -180,11 +194,14 @@ export function reconcileSettledTurnPresentation(
           }
           host.requestRender();
         }
+        if (currentTrail && presentation.learningFocusId)
+          host.rememberLearningFocus?.(presentation.learningFocusId);
         if (currentTrail && presentation.learningActivityFailure)
           host.reportDiagnostic(presentation.learningActivityFailure.error);
         return;
       }
       for (const action of presentation.actions) host.dispatch(action);
+      if (presentation.learningFocusId) host.rememberLearningFocus?.(presentation.learningFocusId);
       host.requestRender();
       if (presentation.learningActivityFailure)
         host.reportDiagnostic(presentation.learningActivityFailure.error);

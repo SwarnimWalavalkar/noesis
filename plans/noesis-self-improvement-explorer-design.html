@@ -45,7 +45,7 @@
     <li>The active project is the default authority boundary. Current-session filtering is a view over that ledger, not a separate read model.</li>
     <li>Project strategies, experiments, revisions, evaluation records, activation records, feedback, and jobs share one list while retaining their own primitive kind and raw schema.</li>
     <li><code>no_change</code> and routine jobs stay auditable, but the default interface summarizes them instead of treating each one as a material event.</li>
-    <li>IDs are technical details, not explanations. The normal inspector uses authority-derived titles, semantic sections, and bounded evidence excerpts. Exact identities remain in the raw view.</li>
+    <li>IDs are technical details, not explanations. The normal inspector uses authority-derived titles, semantic sections, and bounded evidence excerpts. Exact identities remain in the raw view. Supporting audit rows such as trials, plans, and signals stay one keystroke away through related records or the complete activity view.</li>
     <li>Inputs considered and evidence cited are different. Reflection inputs come from the durable job payload; evidence supporting an applied adjustment comes from the immutable adjustment record.</li>
     <li>The first version is read-only. It does not create a durable Change object and does not infer current state from chronology.</li>
     <li>Terminal-controlled text is sanitized. Raw records are bounded, and sensitive raw payloads fail closed.</li>
@@ -57,20 +57,20 @@
   </ol></section>
 
   <section><h2>Interaction sketch</h2>
-    <p><code>/learning</code> opens the focused overlay. Arrow keys navigate, Enter or Tab focuses detail, <code>a</code> toggles noteworthy and complete activity, <code>f</code> cycles groups, <code>s</code> toggles the current-session view, Space opens the bounded raw projection, and <code>r</code> refreshes from the application read model.</p>
+    <p><code>/learning</code> opens the focused overlay. Arrow keys navigate, Enter or Tab focuses detail, <code>a</code> toggles noteworthy and complete activity, <code>f</code> cycles groups without passing through all activity, <code>s</code> toggles the current-session view, Tab in detail focuses related records so Up/Down can follow them, Space opens the bounded raw projection, and <code>r</code> refreshes from the application read model. Opening <code>/learning</code> after a transcript notice focuses that decision.</p>
     <pre><code>LEARNING · project evolution
 
 active 2 · evaluating 1 · needs attention 1 · routine reflections 24
 
   NOTEWORTHY ACTIVITY             │ SELECTED DECISION
-  ◆ Preserve review constraints   │ ✓ Applied project strategy
+  ◆ Preserve review constraints   │ ✓ Preserve review constraints
   ● Prefer narrow research first  │ What changed
   × Reflection failed             │ Before  No project strategy
                                   │ Now     Preserve review-only scope
                                   │ Evidence cited · 3
 
-↑/↓ select · enter/tab inspect · a all activity · f filter · s session
-detail: space raw · ←/→ lineage · enter follow</code></pre>
+↑/↓ select · enter inspect · a all · f group · s session
+detail: tab related · enter follow · space raw</code></pre>
   </section>
 
   <section><h2>Read-model boundary</h2>

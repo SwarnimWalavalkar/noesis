@@ -360,6 +360,7 @@ export async function startNoesisTui(
         requestRender: () => tui.requestRender(),
         reportDiagnostic: reportLearningDiagnostic,
         reportFailure,
+        rememberLearningFocus: (recordId) => learning.rememberFocus(recordId),
       },
     );
   };

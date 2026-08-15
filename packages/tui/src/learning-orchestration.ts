@@ -1,9 +1,13 @@
 import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
-import { createLearningAuditOverlay, type LearningAuditOverlay } from "./learning-audit.ts";
+import {
+  createLearningAuditOverlay,
+  type LearningAuditOverlay,
+} from "./learning-audit.ts";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
 
 export interface TuiLearningOrchestration {
   readonly open: (sessionId: string) => void;
+  readonly rememberFocus: (recordId: string) => void;
   readonly ownsKeyboardFocus: () => boolean;
   readonly dispose: () => void;
 }
@@ -17,6 +21,7 @@ export function createTuiLearningOrchestration(options: {
 }): TuiLearningOrchestration {
   let handle: OverlayHandle | undefined;
   let overlay: LearningAuditOverlay | undefined;
+  let rememberedFocusId: string | undefined;
 
   const close = (): void => {
     overlay?.dispose();
@@ -28,13 +33,18 @@ export function createTuiLearningOrchestration(options: {
 
   return Object.freeze({
     open(sessionId: string) {
-      if (handle) {
+      const focusRecordId = rememberedFocusId;
+      rememberedFocusId = undefined;
+      if (handle && overlay) {
+        if (focusRecordId) overlay.focusRecord(focusRecordId);
         handle.focus();
         return;
       }
       const { inspectLearningAudit } = options.runtime;
       if (!inspectLearningAudit) {
-        options.reportUnavailable("The learning audit is unavailable in this runtime.");
+        options.reportUnavailable(
+          "The learning audit is unavailable in this runtime.",
+        );
         options.tui.requestRender();
         return;
       }
@@ -45,6 +55,7 @@ export function createTuiLearningOrchestration(options: {
         height: options.height,
         requestRender: () => options.tui.requestRender(),
         close,
+        ...(focusRecordId ? { focusRecordId } : {}),
       });
       handle = options.tui.showOverlay(overlay, {
         anchor: "center",
@@ -52,6 +63,9 @@ export function createTuiLearningOrchestration(options: {
         maxHeight: "92%",
         margin: 1,
       });
+    },
+    rememberFocus(recordId: string) {
+      rememberedFocusId = recordId;
     },
     ownsKeyboardFocus: () => Boolean(handle?.isFocused()),
     dispose: close,

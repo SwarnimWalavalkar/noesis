@@ -1,6 +1,7 @@
 import type { TrailState } from "@noesis/runtime";
 import { describe, expect, test } from "vitest";
 import {
+  learningAuditFocusId,
   learningDiagnosticNotice,
   reconcileSettledTurnPresentation,
   settledTurnPresentation,
@@ -65,6 +66,27 @@ describe("working-adjustment notice presentation", () => {
     expect(
       workingAdjustmentNoticeForTurn([activity("adjusted", "other-turn"), activity("no_change")], "turn-1"),
     ).toBeUndefined();
+  });
+
+  test("names the audit record a later /learning command should open", () => {
+    expect(learningAuditFocusId(activity("adjusted"))).toBe("reflection:job-adjusted");
+    expect(
+      learningAuditFocusId(
+        Object.freeze({
+          ...activity("adjusted"),
+          adjustmentId: "adjustment-1",
+        }),
+      ),
+    ).toBe("working_adjustment:adjustment-1");
+    expect(
+      learningAuditFocusId(
+        Object.freeze({
+          ...activity("failed"),
+          stage: "authoring" as const,
+          experimentId: "experiment-1",
+        }),
+      ),
+    ).toBe("experiment:experiment-1");
   });
 
   test("includes the applied strategy and tracks a running reflection without a transcript placeholder", async () => {
