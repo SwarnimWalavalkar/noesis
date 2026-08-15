@@ -500,7 +500,7 @@ describe("AC-07 session search tools", () => {
   test("reserves context for opening evidence after search snippets consume their allowance", async () => {
     const sessionTools = tools(
       { currentSessionId: "session-b" },
-      { maxFragmentChars: 40, maxTotalContextChars: 80, maxOpenChars: 40, maxResults: 8 },
+      { maxFragmentChars: 40, maxTotalContextChars: 40, maxOpenChars: 40, maxResults: 8 },
     );
     const search = await sessionTools.searchSessions({
       query: "release research citations preserve voice",
@@ -509,7 +509,7 @@ describe("AC-07 session search tools", () => {
     });
     expect(search.ok).toBe(true);
     if (!search.ok) return;
-    expect(search.value.fragments.reduce((sum, fragment) => sum + fragment.content.length, 0)).toBe(40);
+    expect(search.value.fragments.reduce((sum, fragment) => sum + fragment.content.length, 0)).toBe(20);
     const citation = search.value.fragments[0]?.citation;
     if (!citation) throw new Error("Expected one bounded search citation");
 
@@ -522,7 +522,7 @@ describe("AC-07 session search tools", () => {
     expect(opened).toMatchObject({ ok: true });
     if (!opened.ok) return;
     expect(opened.value.fragment.content.length).toBeGreaterThan(0);
-    expect(opened.value.fragment.content.length).toBeLessThanOrEqual(40);
+    expect(opened.value.fragment.content.length).toBeLessThanOrEqual(20);
   });
 
   test("uses model ranking before a context budget truncates an otherwise fully returned candidate set", async () => {

@@ -5,6 +5,7 @@ import {
   MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS,
   MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES,
   MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
+  renderFrozenConversationHistoryContent,
 } from "@noesis/agent-types";
 import { canonicalJson, sha256 } from "@noesis/domain";
 import type { ContextCheckpointRecord, Sensitivity } from "@noesis/workspace";
@@ -59,6 +60,10 @@ export interface ContextCheckpointSummary {
 
 export function estimateContextTokens(text: string): number {
   return estimateInputTokens(text);
+}
+
+function estimateContextMessageTokens(message: SessionContextMessage): number {
+  return estimateContextTokens(renderFrozenConversationHistoryContent(message));
 }
 
 export function resolveContextTokenBudget(configured: number, limits: ModelContextLimits): number {
@@ -151,7 +156,7 @@ export function resolvedSessionContext(
   const tail = messagesAfterCheckpoint(messages, checkpoint);
   const estimatedTokens =
     (checkpoint ? estimateContextTokens(checkpoint.summary) : 0) +
-    tail.reduce((total, message) => total + estimateContextTokens(message.content), 0);
+    tail.reduce((total, message) => total + estimateContextMessageTokens(message), 0);
   const totalCharacters = tail.reduce((total, message) => total + message.content.length, 0);
   const exceedsFrozenBounds =
     tail.length > MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES ||
@@ -184,7 +189,7 @@ export function prepareCompactionWindow(
   for (let index = groups.length - 1; index >= 0; index -= 1) {
     const group = groups[index];
     if (!group) continue;
-    const groupTokens = group.reduce((total, message) => total + estimateContextTokens(message.content), 0);
+    const groupTokens = group.reduce((total, message) => total + estimateContextMessageTokens(message), 0);
     const groupCharacters = group.reduce((total, message) => total + message.content.length, 0);
     if (
       retainedTokens + groupTokens > rawTailBudget ||
@@ -214,7 +219,7 @@ export function prepareCompactionWindow(
   const selectedGroups: (readonly SessionContextMessage[])[] = [];
   let selectedTokens = 0;
   for (const group of groupsNeedingSummary) {
-    const groupTokens = group.reduce((total, message) => total + estimateContextTokens(message.content), 0);
+    const groupTokens = group.reduce((total, message) => total + estimateContextMessageTokens(message), 0);
     if (selectedTokens + groupTokens > inputBudget) break;
     const candidateSources = Object.freeze([...selectedGroups, group].flat());
     const candidateWindow: CompactionWindow = Object.freeze({

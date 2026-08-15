@@ -325,8 +325,14 @@ export function createTurnIntelligencePlanner(
                     }),
                   ]
                 : []),
-              ...conversationHistory.map(({ messageId, role, content, createdAt }) =>
-                Object.freeze({ messageId, role, content, createdAt }),
+              ...conversationHistory.map(({ messageId, role, content, createdAt, turnStatus }) =>
+                Object.freeze({
+                  messageId,
+                  role,
+                  content,
+                  createdAt,
+                  ...(turnStatus === undefined ? {} : { turnStatus }),
+                }),
               ),
             ]),
             candidates: Object.freeze(

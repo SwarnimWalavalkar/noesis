@@ -120,7 +120,7 @@ export interface TuiQueuedInput {
   readonly queueId: string;
   readonly text: string;
   readonly createdAt: string;
-  readonly status?: "pending" | "held" | "unresolved";
+  readonly status?: "pending" | "held";
 }
 
 export interface TuiInteractionView {

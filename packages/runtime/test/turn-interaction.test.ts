@@ -71,12 +71,6 @@ function createIntentStore(): TurnInteractionIntentStore & {
       Object.freeze(
         [...records.values()].filter((record) => record.sessionId === sessionId && record.status === "held"),
       ),
-    listUnresolved: async (sessionId) =>
-      Object.freeze(
-        [...records.values()].filter(
-          (record) => record.sessionId === sessionId && record.status === "unresolved",
-        ),
-      ),
     claimOldestPending: async ({ sessionId, targetTurnId, claimedAt }) => {
       const current = pending(sessionId).find((record) => record.deliveryMode === "turn");
       return current

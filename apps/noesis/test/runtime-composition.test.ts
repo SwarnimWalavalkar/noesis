@@ -31,6 +31,7 @@ import {
   createStructuredInferencePort,
   type FrozenSessionToolResolver,
   type PiFrozenToolCatalog,
+  type PiSelfToolAdapter,
   type PiWorkflowSummary,
   projectWorkflowToolName,
   type RoleBackendRequest,
@@ -2623,9 +2624,13 @@ describe("apps/noesis production control-plane composition", () => {
     ]);
     expect(inspectionRequest?.frozenTurnPlan?.conversationHistory).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({ content: "accepted input", turnStatus: "completed" }),
+        expect.objectContaining({ content: "reply:accepted input", turnStatus: "completed" }),
         expect.objectContaining({ content: "failed input", turnStatus: "failed" }),
         expect.objectContaining({ content: "aborted input", turnStatus: "aborted" }),
         expect.objectContaining({ content: "aborted partial output", turnStatus: "aborted" }),
+        expect.objectContaining({ content: "active input", turnStatus: "completed" }),
+        expect.objectContaining({ content: "reply:active input", turnStatus: "completed" }),
       ]),
     );
     expect(inspectionRequest?.systemPrompt).not.toContain("accepted input");
@@ -3704,15 +3709,22 @@ describe("apps/noesis production control-plane composition", () => {
       total: z.number().int().positive(),
       nextCursor: z.number().int().positive().nullable(),
       tools: z
-        .array(z.object({ name: z.string().min(1) }))
+        .array(
+          z.object({
+            name: z.string().min(1),
+            labelTruncated: z.literal(true),
+            descriptionTruncated: z.literal(true),
+          }),
+        )
         .min(1)
         .max(5),
     });
     const detailSchema = z.object({
       tool: z.object({
         name: z.string().min(1),
-        inputSchema: z.unknown(),
-        outputSchema: z.unknown(),
+        labelTruncated: z.literal(true),
+        descriptionTruncated: z.literal(true),
+        schemasOmitted: z.literal(true),
       }),
     });
     let step = 0;
@@ -3753,8 +3765,36 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution, selfTools) => {
+        const oversizedSelfTools: PiSelfToolAdapter = Object.freeze({
+          ...selfTools,
+          inspect: async (input: Parameters<PiSelfToolAdapter["inspect"]>[0]) =>
+            await selfTools.inspect({
+              ...input,
+              ...(input.catalog
+                ? {
+                    catalog: Object.freeze({
+                      ...input.catalog,
+                      tools: Object.freeze(
+                        input.catalog.tools.map(
+                          (descriptor: NonNullable<typeof input.catalog>["tools"][number]) =>
+                            Object.freeze({
+                              ...descriptor,
+                              label: "界".repeat(30_000),
+                              description: "description".repeat(30_000),
+                            }),
+                        ),
+                      ),
+                    }),
+                  }
+                : {}),
+            }),
+        });
+        return createPiAgentRuntime(process.cwd(), controlled.models, {
+          codeExecution,
+          selfTools: oversizedSelfTools,
+        });
+      },
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({ variants: configurations, respond: scriptedHistoryRerankResponse }),
     });

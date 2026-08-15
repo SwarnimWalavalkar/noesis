@@ -51,6 +51,19 @@ describe("session compaction", () => {
     expect(estimateContextTokens("2 + 2 = 4")).toBe(3);
   });
 
+  test("counts unfinished-turn labels before deciding whether compaction is required", () => {
+    const failed = Object.freeze({
+      ...message("1", "retry this operation", true),
+      turnStatus: "failed" as const,
+    });
+    const rawOnlyBudget = estimateContextTokens(failed.content);
+
+    const current = resolvedSessionContext(Object.freeze([failed]), undefined, rawOnlyBudget);
+
+    expect(current.estimatedTokens).toBeGreaterThan(rawOnlyBudget);
+    expect(current.exceedsBudget).toBe(true);
+  });
+
   test("compacts only complete oldest turns and retains a complete recent raw tail", () => {
     const messages = Object.freeze([
       message("1", "a".repeat(48), true),

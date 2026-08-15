@@ -47,7 +47,7 @@ describe("Pi request token budgeting", () => {
     });
 
     expect(result.providerReportedTokens).toBe(12_000);
-    expect(result.trailingEstimatedTokens).toBe(1_000);
+    expect(result.trailingEstimatedTokens).toBe(estimateInputTokens(JSON.stringify(messages[2])));
     expect(result.projectedToolResults).toBe(0);
     expect(result.estimatedTokens).toBeLessThan(14_000);
   });
@@ -121,6 +121,30 @@ describe("Pi request token budgeting", () => {
     if (!original || original.role !== "toolResult" || original.content[0]?.type !== "text")
       throw new Error("Expected the original text tool result");
     expect(original.content[0].text).toBe(first);
+  });
+
+  test("uses UTF-8 bytes for token-dense unreported tool results", () => {
+    const result = createPiRequestBudgetProjector().project({
+      messages: [
+        { role: "user", content: "Inspect the multilingual result.", timestamp: 1 },
+        {
+          role: "toolResult",
+          toolCallId: "call-multilingual",
+          toolName: "search",
+          content: [{ type: "text", text: "界".repeat(4_000) }],
+          isError: false,
+          timestamp: 2,
+        },
+      ],
+      systemPrompt: "System",
+      activeToolMaterial: "[]",
+      activeToolCount: 0,
+      tokenBudget: 2_000,
+      planId: "plan-multilingual-projection",
+    });
+
+    expect(result.projectedToolResults).toBe(1);
+    expect(result.estimatedTokens).toBeLessThanOrEqual(2_000);
   });
 
   test("returns to authoritative provider usage after a projected request completes", () => {

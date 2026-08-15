@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { calculateContextTokens, estimateTokens } from "@earendil-works/pi-coding-agent";
+import { calculateContextTokens } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
 import { estimateInputTokens } from "@noesis/agent-types";
 import { sha256 } from "@noesis/domain";
@@ -94,8 +94,12 @@ function applyProjection(messages: readonly AgentMessage[], projected: ReadonlyS
   );
 }
 
+function estimateMessageTokens(message: AgentMessage): number {
+  return estimateInputTokens(JSON.stringify(message));
+}
+
 function heuristicMessageTokens(messages: readonly AgentMessage[]): number {
-  return messages.reduce((total, message) => total + estimateTokens(message), 0);
+  return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
 }
 
 function lastReportedUsage(
@@ -164,8 +168,8 @@ export function createPiRequestBudgetProjector(): PiRequestBudgetProjector {
           message.role === "toolResult" && !projectedToolCallIds.has(message.toolCallId) ? [message] : [],
         );
         for (const candidate of candidates) {
-          const originalTokens = estimateTokens(candidate);
-          const compactedTokens = estimateTokens(projectedToolResult(candidate));
+          const originalTokens = estimateMessageTokens(candidate);
+          const compactedTokens = estimateMessageTokens(projectedToolResult(candidate));
           if (compactedTokens >= originalTokens) continue;
           projectedToolCallIds.add(candidate.toolCallId);
           if (reported) {
