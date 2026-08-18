@@ -968,6 +968,7 @@ export interface CompoundingMeasurementStore {
 export interface NoesisWorkspaceStore extends WorkspaceStore {
   readonly paths: WorkspacePaths;
   readonly operational: OperationalRepositories;
+  readonly capabilities: CapabilityLifecycleStore;
   readonly search: SearchIndexPort;
   readonly recordDirectEdit: (
     workingPath: string,
@@ -987,4 +988,64 @@ export interface NoesisWorkspaceStore extends WorkspaceStore {
   readonly close: () => void;
   readonly unsafeDatabasePathForTesting: string;
   readonly getArtifactMetadata: (artifactId: string) => Promise<ArtifactFileRef | undefined>;
+}
+
+export interface CapabilityLifecycleStore {
+  readonly create: (request: {
+    readonly definition: import("@noesis/domain").CapabilityDefinition;
+    readonly revision: import("@noesis/domain").CapabilityLifecycleRevision;
+    readonly binding: Omit<import("@noesis/domain").CapabilityBinding, "revisionNumber" | "updatedAt">;
+  }) => Promise<import("@noesis/domain").CapabilityBinding>;
+  readonly getDefinition: (
+    capabilityId: string,
+  ) => Promise<import("@noesis/domain").CapabilityDefinition | undefined>;
+  readonly listDefinitions: () => Promise<readonly import("@noesis/domain").CapabilityDefinition[]>;
+  readonly getRevision: (
+    reference: import("@noesis/domain").CapabilityRevisionRef,
+  ) => Promise<import("@noesis/domain").CapabilityLifecycleRevision | undefined>;
+  readonly listRevisions: (
+    capabilityId: string,
+  ) => Promise<readonly import("@noesis/domain").CapabilityLifecycleRevision[]>;
+  readonly addRevision: (
+    revision: import("@noesis/domain").CapabilityLifecycleRevision,
+  ) => Promise<import("@noesis/domain").CapabilityLifecycleRevision>;
+  readonly getBinding: (
+    capabilityId: string,
+  ) => Promise<import("@noesis/domain").CapabilityBinding | undefined>;
+  readonly listBindings: () => Promise<readonly import("@noesis/domain").CapabilityBinding[]>;
+  readonly listEligibleBindings: (request: {
+    readonly project: import("@noesis/domain").ProjectRef;
+    readonly sessionId: string;
+  }) => Promise<readonly import("@noesis/domain").CapabilityBinding[]>;
+  readonly updateBinding: (request: {
+    readonly capabilityId: string;
+    readonly expectedRevisionNumber: number;
+    readonly revision?: import("@noesis/domain").CapabilityRevisionRef;
+    readonly scope?: import("@noesis/domain").CapabilityScope;
+    readonly activationMode?: import("@noesis/domain").CapabilityActivationMode;
+    readonly state?: import("@noesis/domain").CapabilityBindingState;
+  }) => Promise<
+    | { readonly status: "updated"; readonly binding: import("@noesis/domain").CapabilityBinding }
+    | { readonly status: "stale"; readonly binding: import("@noesis/domain").CapabilityBinding }
+  >;
+  readonly addFeedback: (
+    feedback: import("@noesis/domain").CapabilityFeedback,
+  ) => Promise<import("@noesis/domain").CapabilityFeedback>;
+  readonly listFeedback: (
+    capabilityId: string,
+  ) => Promise<readonly import("@noesis/domain").CapabilityFeedback[]>;
+  readonly createGate: (
+    request: import("@noesis/domain").CapabilityGateRequest,
+  ) => Promise<import("@noesis/domain").CapabilityGateRequest>;
+  readonly getGate: (
+    gateRequestId: string,
+  ) => Promise<import("@noesis/domain").CapabilityGateRequest | undefined>;
+  readonly listPendingGates: () => Promise<readonly import("@noesis/domain").CapabilityGateRequest[]>;
+  readonly settleGate: (request: {
+    readonly gateRequestId: string;
+    readonly status: "approved" | "denied" | "superseded";
+    readonly instruction?: string;
+  }) => Promise<import("@noesis/domain").CapabilityGateRequest>;
+  readonly completeCutover: () => Promise<boolean>;
+  readonly isCutoverComplete: () => Promise<boolean>;
 }

@@ -145,7 +145,7 @@ export async function startNoesisTui(
   });
   const statusView = createStatusView(view, () => terminal.rows);
   const queuedInputsView = createQueuedInputsView(view, () => terminal.rows);
-  const inputLabelView = createInputLabelView(colorEnabled, () => terminal.rows);
+  const inputLabelView = createInputLabelView(view, () => terminal.rows);
   const helpView = createHelpView(view, () => terminal.rows);
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
   enrichEditorSkills(editor, runtime.listSkills, () => phase !== "stopped");

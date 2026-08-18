@@ -13,6 +13,8 @@ const isolatedRoleMessageNames = {
   history_reranker: ["candidates"],
   signal_interpreter: ["turn", "related_history"],
   reflector: [
+    "settled_turn",
+    "current_capabilities",
     "current_turn",
     "signals",
     "evidence",

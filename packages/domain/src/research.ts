@@ -19,6 +19,11 @@ export const DATABASE_TABLES = [
   "search_configuration",
   "activity_log",
   "file_revisions",
+  "capabilities",
+  "capability_revisions",
+  "capability_bindings",
+  "capability_feedback",
+  "capability_gate_requests",
 ] as const;
 
 export type DatabaseTable = (typeof DATABASE_TABLES)[number];
@@ -180,6 +185,90 @@ export interface CapabilityRevisionRef {
   readonly capabilityId: string;
   readonly capabilityRevisionId: string;
   readonly bundleDigest: string;
+}
+
+export const CAPABILITY_KINDS = [
+  "instruction",
+  "skill",
+  "tool",
+  "workflow",
+  "router",
+  "model_configuration",
+  "harness_configuration",
+  "core_update",
+  "composite",
+] as const;
+export type CapabilityKind = (typeof CAPABILITY_KINDS)[number];
+
+/** Stable, user-facing identity for one thing Noesis can do better. */
+export interface CapabilityDefinition {
+  readonly capabilityId: string;
+  readonly name: string;
+  readonly kind: CapabilityKind;
+  readonly description: string;
+  readonly applicability: string;
+  readonly createdAt: string;
+}
+
+/** Immutable lifecycle metadata around the exact executable bundle already understood by Noesis. */
+export interface CapabilityLifecycleRevision {
+  readonly revision: CapabilityRevision;
+  readonly reference: CapabilityRevisionRef;
+  readonly summary: string;
+  readonly rationale: string;
+  readonly anticipatedEffect: string;
+  readonly createdAt: string;
+}
+
+export type CapabilityScope =
+  | { readonly kind: "global" }
+  | { readonly kind: "project"; readonly project: ProjectRef }
+  | { readonly kind: "session"; readonly sessionId: string };
+
+export type CapabilityActivationMode = "relevant" | "always";
+export type CapabilityBindingState = "active" | "paused";
+
+/** Sole operational authority for which exact revision may enter future frozen turns. */
+export interface CapabilityBinding {
+  readonly capabilityId: string;
+  readonly revision: CapabilityRevisionRef;
+  readonly scope: CapabilityScope;
+  readonly activationMode: CapabilityActivationMode;
+  readonly state: CapabilityBindingState;
+  readonly revisionNumber: number;
+  readonly updatedAt: string;
+}
+
+export type CapabilityFeedbackDisposition =
+  | "positive"
+  | "correction"
+  | "regression"
+  | "scope_change"
+  | "activation_change"
+  | "restore_request";
+
+export interface CapabilityFeedback {
+  readonly feedbackId: string;
+  readonly capabilityId: string;
+  readonly revision: CapabilityRevisionRef;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly interpretation: string;
+  readonly disposition: CapabilityFeedbackDisposition;
+  readonly createdAt: string;
+}
+
+export type CapabilityGateStatus = "pending" | "approved" | "denied" | "superseded";
+
+export interface CapabilityGateRequest {
+  readonly gateRequestId: string;
+  readonly capabilityId: string;
+  readonly revision: CapabilityRevisionRef;
+  readonly expectedBindingRevision: number | null;
+  readonly consequence: string;
+  readonly status: CapabilityGateStatus;
+  readonly instruction?: string;
+  readonly createdAt: string;
+  readonly settledAt?: string;
 }
 
 /** Derived from the SQLite activation pointer; neither immutable definition owns current state. */

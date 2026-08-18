@@ -44,7 +44,10 @@ export function createTuiLearningOrchestration(options: {
         return;
       }
       overlay = createLearningAuditOverlay({
-        runtime: { inspectLearningAudit },
+        runtime: {
+          inspectLearningAudit,
+          ...(options.runtime.manageCapability ? { manageCapability: options.runtime.manageCapability } : {}),
+        },
         sessionId,
         colorEnabled: options.colorEnabled,
         height: options.height,

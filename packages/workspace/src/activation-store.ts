@@ -774,7 +774,7 @@ export async function createProtectedActivationStore(
       const current = currentActivationIdentity();
       if (current.activationId !== plan.activationId || current.revision !== plan.activationRevision)
         throw new Error("Activation snapshot changed before frozen turn admission (CAS conflict)");
-      if (plan.project !== undefined) {
+      if (plan.project !== undefined && plan.workingAdjustmentId !== undefined) {
         const activeAdjustment = db
           .prepare("SELECT adjustment_id FROM active_project_adjustments WHERE project_id = ?")
           .get(plan.project.projectId);
@@ -799,11 +799,37 @@ export async function createProtectedActivationStore(
       const activation = decodeActivation(activationRow);
       for (const selection of plan.selectedCapabilities) {
         const active = activation.activeCapabilityRevisions[selection.capabilityId];
-        if (
-          !active ||
-          active.kind !== "capability_revision" ||
-          !sameCapabilityRevisionRef(active, selection.revision)
-        )
+        const legacyActive =
+          active?.kind === "capability_revision" && sameCapabilityRevisionRef(active, selection.revision);
+        const bindingRow = legacyActive
+          ? undefined
+          : db
+              .prepare(
+                `SELECT revision_json, scope_json, state
+                 FROM capability_bindings WHERE capability_id = ?`,
+              )
+              .get(selection.capabilityId);
+        const lifecycleActive = (() => {
+          if (bindingRow === undefined || requiredString(bindingRow, "state") !== "active") return false;
+          const reference = CapabilityRevisionRefSchema.parse(
+            parseJson(requiredString(bindingRow, "revision_json")),
+          );
+          if (!sameCapabilityRevisionRef(reference, selection.revision)) return false;
+          const scope = parseJson(requiredString(bindingRow, "scope_json"));
+          if (scope === null || typeof scope !== "object") return false;
+          const kind = Reflect.get(scope, "kind");
+          if (kind === "global") return true;
+          if (kind === "session") return Reflect.get(scope, "sessionId") === plan.sessionId;
+          if (kind !== "project" || plan.project === undefined) return false;
+          const project = Reflect.get(scope, "project");
+          return (
+            project !== null &&
+            typeof project === "object" &&
+            Reflect.get(project, "projectId") === plan.project.projectId &&
+            Reflect.get(project, "root") === plan.project.root
+          );
+        })();
+        if (!legacyActive && !lifecycleActive)
           throw new Error(
             `Frozen turn plan selected inactive revision ${selection.revision.capabilityRevisionId}`,
           );
@@ -822,7 +848,11 @@ export async function createProtectedActivationStore(
           plan.activationId,
           plan.activationRevision,
           JSON.stringify(activation.activeDefinitions),
-          JSON.stringify(activation.activeCapabilityRevisions),
+          JSON.stringify(
+            Object.fromEntries(
+              plan.selectedCapabilities.map((selection) => [selection.capabilityId, selection.revision]),
+            ),
+          ),
           plan.createdAt,
         );
       if (insertedPin.changes !== 1)

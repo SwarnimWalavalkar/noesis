@@ -484,4 +484,109 @@ describe("learning audit overlay", () => {
     await vi.waitFor(() => expect(component.render(110).join("\n")).toContain("No lasting changes yet"));
     expect(component.render(110).join("\n")).toContain("Ambient reflection is running.");
   });
+
+  test("manages the live Capability binding from the detail pane", async () => {
+    const capability = record({
+      id: "capability:concise-research",
+      kind: "capability",
+      group: "changes",
+      status: "active · relevant",
+      tone: "active",
+      title: "Concise research",
+      capabilityId: "concise-research",
+      capabilityRevisionId: "revision-2",
+      capabilityBundleDigest: "a".repeat(64),
+      capabilityBindingRevision: 3,
+      capabilityState: "active",
+      capabilityActivationMode: "relevant",
+      capabilityScope: "global",
+    });
+    const managed: unknown[] = [];
+    const component = createLearningAuditOverlay({
+      runtime: {
+        inspectLearningAudit: async () =>
+          Object.freeze({ ...snapshot, primitives: Object.freeze([capability]) }),
+        manageCapability: async (intent) => {
+          managed.push(intent);
+        },
+      },
+      sessionId: "session-1",
+      colorEnabled: false,
+      height: () => 32,
+      requestRender: () => undefined,
+      close: () => undefined,
+      focusRecordId: capability.id,
+      now: () => NOW,
+    });
+    await vi.waitFor(() => expect(component.render(160).join("\n")).toContain("p pause/resume"));
+    component.handleInput?.("m");
+    await vi.waitFor(() => expect(managed).toHaveLength(1));
+    await vi.waitFor(() => expect(component.render(160).join("\n")).not.toContain("Updating capability"));
+    component.handleInput?.("p");
+    await vi.waitFor(() => expect(managed).toHaveLength(2));
+    await vi.waitFor(() => expect(component.render(160).join("\n")).not.toContain("Updating capability"));
+    component.handleInput?.("g");
+    await vi.waitFor(() => expect(managed).toHaveLength(3));
+    expect(managed).toEqual([
+      {
+        type: "set-activation-mode",
+        capabilityId: "concise-research",
+        mode: "always",
+        expectedBindingRevision: 3,
+      },
+      {
+        type: "pause",
+        capabilityId: "concise-research",
+        expectedBindingRevision: 3,
+      },
+      {
+        type: "set-scope",
+        capabilityId: "concise-research",
+        scope: "project",
+        expectedBindingRevision: 3,
+      },
+    ]);
+  });
+
+  test("changes a pending Capability gate with natural-language input", async () => {
+    const gate = record({
+      id: "capability-gate:gate-1",
+      kind: "capability_gate",
+      group: "changes",
+      status: "pending",
+      tone: "pending",
+      title: "Recovery behavior needs approval",
+      gateRequestId: "gate-1",
+    });
+    const managed: unknown[] = [];
+    const component = createLearningAuditOverlay({
+      runtime: {
+        inspectLearningAudit: async () => Object.freeze({ ...snapshot, primitives: Object.freeze([gate]) }),
+        manageCapability: async (intent) => {
+          managed.push(intent);
+        },
+      },
+      sessionId: "session-1",
+      colorEnabled: false,
+      height: () => 32,
+      requestRender: () => undefined,
+      close: () => undefined,
+      focusRecordId: gate.id,
+      now: () => NOW,
+    });
+    await vi.waitFor(() => expect(component.render(120).join("\n")).toContain("c change"));
+    component.handleInput?.("c");
+    expect(component.render(120).join("\n")).toContain("How should this Capability change?");
+    component.handleInput?.("Keep recovery manual and explain the fallback.");
+    component.handleInput?.(ENTER);
+    await vi.waitFor(() =>
+      expect(managed).toEqual([
+        {
+          type: "change",
+          gateRequestId: "gate-1",
+          instruction: "Keep recovery manual and explain the fallback.",
+        },
+      ]),
+    );
+  });
 });

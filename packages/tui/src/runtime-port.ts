@@ -108,6 +108,12 @@ export interface TuiLearningActivitySummary {
     | "completed"
     | "no_change"
     | "adjusted"
+    | "activated"
+    | "revised"
+    | "pending"
+    | "paused"
+    | "restored"
+    | "binding_changed"
     | "replaced"
     | "unapplied"
     | "stale"
@@ -118,6 +124,7 @@ export interface TuiLearningActivitySummary {
   readonly experimentId?: string;
   readonly capabilityId?: string;
   readonly capabilityRevisionId?: string;
+  readonly capabilityBundleDigest?: string;
   readonly projectId?: string;
   readonly adjustmentId?: string;
   readonly activeAdjustmentId?: string;
@@ -152,6 +159,9 @@ export interface TuiLearningInspection {
 
 export type TuiLearningPrimitiveKind =
   | "criterion"
+  | "capability"
+  | "capability_feedback"
+  | "capability_gate"
   | "reflection"
   | "working_adjustment"
   | "experiment"
@@ -215,6 +225,13 @@ export interface TuiLearningPrimitive {
   readonly projectId?: string;
   readonly experimentId?: string;
   readonly capabilityId?: string;
+  readonly capabilityRevisionId?: string;
+  readonly capabilityBundleDigest?: string;
+  readonly capabilityBindingRevision?: number;
+  readonly capabilityState?: "active" | "paused";
+  readonly capabilityActivationMode?: "relevant" | "always";
+  readonly capabilityScope?: "global" | "project" | "session";
+  readonly gateRequestId?: string;
   readonly evidence: readonly string[];
   readonly evidencePreviews: readonly TuiLearningEvidencePreview[];
   readonly consideredEvidenceCount: number;
@@ -233,6 +250,37 @@ export interface TuiLearningAuditSnapshot {
   readonly activeActivationId?: string;
   readonly primitives: readonly TuiLearningPrimitive[];
 }
+
+export type TuiCapabilityManagementIntent =
+  | { readonly type: "pause"; readonly capabilityId: string; readonly expectedBindingRevision: number }
+  | { readonly type: "resume"; readonly capabilityId: string; readonly expectedBindingRevision: number }
+  | {
+      readonly type: "set-activation-mode";
+      readonly capabilityId: string;
+      readonly mode: "relevant" | "always";
+      readonly expectedBindingRevision: number;
+    }
+  | {
+      readonly type: "set-scope";
+      readonly capabilityId: string;
+      readonly scope: "global" | "project" | "session";
+      readonly sessionId?: string;
+      readonly expectedBindingRevision: number;
+    }
+  | {
+      readonly type: "restore";
+      readonly capabilityId: string;
+      readonly target: {
+        readonly kind: "capability_revision";
+        readonly capabilityId: string;
+        readonly capabilityRevisionId: string;
+        readonly bundleDigest: string;
+      };
+      readonly expectedBindingRevision: number;
+    }
+  | { readonly type: "approve"; readonly gateRequestId: string }
+  | { readonly type: "deny"; readonly gateRequestId: string }
+  | { readonly type: "change"; readonly gateRequestId: string; readonly instruction: string };
 
 export type TuiMcpScope = "global" | "project";
 export type TuiMcpServerStatus =
@@ -400,6 +448,7 @@ export type NoesisTuiRuntime = Pick<
   readonly listLearningActivity?: (sessionId: string) => Promise<readonly TuiLearningActivitySummary[]>;
   readonly inspectLearning?: (sessionId: string) => Promise<TuiLearningInspection>;
   readonly inspectLearningAudit?: (sessionId: string) => Promise<TuiLearningAuditSnapshot>;
+  readonly manageCapability?: (intent: TuiCapabilityManagementIntent) => Promise<void>;
   readonly waitForLearningActivity?: (
     sessionId: string,
     jobId: string,

@@ -10,6 +10,7 @@ export type {
   ActivationRecord,
   BackupReport,
   CanonicalSearchSource,
+  CapabilityLifecycleStore,
   ClassifyExperimentObservationsRequest,
   ClassifyOutcomeRequest,
   CodeExecutionRecord,

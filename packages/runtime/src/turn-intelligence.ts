@@ -22,7 +22,7 @@ import type {
   WorkingAdjustment,
 } from "@noesis/domain";
 import { canonicalJson, sha256 } from "@noesis/domain";
-import { isWorkingAdjustmentAdmissionConflictError, type NoesisWorkspaceStore } from "@noesis/workspace";
+import type { NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
 
 const decoder = new TextDecoder("utf8", { fatal: true });
@@ -134,7 +134,6 @@ export interface TurnIntelligencePlannerOptions {
 }
 
 const WORKING_ADJUSTMENT_ENVELOPE_VERSION = "project-working-adjustment-v1";
-const MAX_WORKING_ADJUSTMENT_ADMISSION_ATTEMPTS = 3;
 
 /**
  * Renders model-authored strategy as delimited data inside a protected, stable instruction.
@@ -264,19 +263,14 @@ export function createTurnIntelligencePlanner(
   const createPlanId = options.createPlanId ?? ((turnId) => `turn_plan_${turnId}`);
 
   const planAndAdmitOnce = async (request: TurnPlanningRequest): Promise<FrozenTurnPlan> => {
-    const [activation, workingAdjustment] = await Promise.all([
+    const [activation, lifecycleBindings] = await Promise.all([
       options.protectedRuntime.activations.current(),
-      options.workspace.workingAdjustments.getActive(options.project.projectId),
+      options.workspace.capabilities.listEligibleBindings({
+        project: options.project,
+        sessionId: request.sessionId,
+      }),
     ]);
     if (!activation) throw new Error("A frozen turn plan requires an active genesis baseline");
-    if (
-      workingAdjustment !== undefined &&
-      (workingAdjustment.scope.projectId !== options.project.projectId ||
-        workingAdjustment.scope.root !== options.project.root)
-    )
-      throw new Error(
-        `Active working adjustment ${workingAdjustment.adjustmentId} does not match the host-derived project`,
-      );
     const [conversationHistory, contextCheckpoint] = await Promise.all([
       freezeConversationHistory(options.workspace, request.sessionId, request.priorHistory ?? []),
       freezeContextCheckpoint(options.workspace, request.sessionId, request.contextCheckpointId),
@@ -287,7 +281,20 @@ export function createTurnIntelligencePlanner(
       readonly revision: CapabilityRevision;
       readonly baseline: FrozenBaselineRef;
     }[] = [];
-    for (const reference of Object.values(activation.activeCapabilityRevisions)) {
+    const legacyReferences = Object.values(activation.activeCapabilityRevisions);
+    const lifecycleModes = new Map(
+      lifecycleBindings.map((binding) => [binding.revision.capabilityRevisionId, binding.activationMode]),
+    );
+    const references = [...legacyReferences, ...lifecycleBindings.map((binding) => binding.revision)].filter(
+      (reference, index, all) =>
+        reference.kind === "capability_revision" &&
+        all.findIndex(
+          (candidate) =>
+            candidate.kind === "capability_revision" &&
+            candidate.capabilityRevisionId === reference.capabilityRevisionId,
+        ) === index,
+    );
+    for (const reference of references) {
       if (reference.kind !== "capability_revision") continue;
       const [capability, revision, baseline] = await Promise.all([
         options.capabilities.resolveCapability(reference.capabilityId),
@@ -302,7 +309,16 @@ export function createTurnIntelligencePlanner(
     }
 
     const general = resolved.filter((item) => item.baseline.kind === "genesis");
-    const candidates = resolved.filter((item) => item.baseline.kind !== "genesis");
+    const always = resolved.filter(
+      (item) =>
+        item.baseline.kind !== "genesis" &&
+        lifecycleModes.get(item.reference.capabilityRevisionId) === "always",
+    );
+    const candidates = resolved.filter(
+      (item) =>
+        item.baseline.kind !== "genesis" &&
+        lifecycleModes.get(item.reference.capabilityRevisionId) === "relevant",
+    );
     const routing: TurnCapabilityRoutingDecision =
       candidates.length === 0
         ? Object.freeze({
@@ -375,6 +391,7 @@ export function createTurnIntelligencePlanner(
 
     const selectedResolved = [
       ...general.map((item) => Object.freeze({ ...item, selectionReason: "protected genesis baseline" })),
+      ...always.map((item) => Object.freeze({ ...item, selectionReason: "always active" })),
       ...routing.selections.map((selection) => {
         const item = candidatesById.get(selection.capabilityId);
         if (!item)
@@ -410,16 +427,12 @@ export function createTurnIntelligencePlanner(
       ...selection.promptModules.map((material) => material.content.trim()),
       ...selection.skills.map((material) => material.content.trim()),
     ]);
-    const workingAdjustmentEnvelope = workingAdjustment
-      ? renderWorkingAdjustmentEnvelope(workingAdjustment)
-      : undefined;
     const unsigned = Object.freeze({
       schemaVersion: 1 as const,
       planId: createPlanId(request.turnId),
       sessionId: request.sessionId,
       turnId: request.turnId,
       project: options.project,
-      ...(workingAdjustment ? { workingAdjustmentId: workingAdjustment.adjustmentId } : {}),
       activationId: activation.activationId,
       activationRevision: activation.revision,
       selectedCapabilities: Object.freeze(selections),
@@ -427,7 +440,7 @@ export function createTurnIntelligencePlanner(
       ...(contextCheckpoint ? { contextCheckpoint } : {}),
       ...(request.contextTokenBudget === undefined ? {} : { contextTokenBudget: request.contextTokenBudget }),
       ...(request.requestTokenBudget === undefined ? {} : { requestTokenBudget: request.requestTokenBudget }),
-      renderedSystemPrompt: [request.baseSystemPrompt.trim(), ...promptLayers, workingAdjustmentEnvelope]
+      renderedSystemPrompt: [request.baseSystemPrompt.trim(), ...promptLayers]
         .filter((layer): layer is string => Boolean(layer))
         .join("\n\n"),
       provider: request.provider,
@@ -449,18 +462,7 @@ export function createTurnIntelligencePlanner(
   };
 
   const planAndAdmit = async (request: TurnPlanningRequest): Promise<FrozenTurnPlan> => {
-    for (let attempt = 1; attempt <= MAX_WORKING_ADJUSTMENT_ADMISSION_ATTEMPTS; attempt += 1) {
-      try {
-        return await planAndAdmitOnce(request);
-      } catch (error) {
-        if (
-          !isWorkingAdjustmentAdmissionConflictError(error) ||
-          attempt === MAX_WORKING_ADJUSTMENT_ADMISSION_ATTEMPTS
-        )
-          throw error;
-      }
-    }
-    throw new Error("Working adjustment admission retry exhausted without a result");
+    return await planAndAdmitOnce(request);
   };
 
   return Object.freeze({ planAndAdmit });

@@ -3081,7 +3081,7 @@ describe("apps/noesis production control-plane composition", () => {
         },
       ],
     });
-    expect(await runtime.debug.workspace.definitionMetadata.listCurrent("runtime_role")).toHaveLength(10);
+    expect(await runtime.debug.workspace.definitionMetadata.listCurrent("runtime_role")).toHaveLength(4);
     expect(JSON.stringify(seenConfigurations)).not.toMatch(
       /protectedActivations|protectedFeedback|authorityBoundary|restorationHandle/iu,
     );
@@ -3352,7 +3352,7 @@ describe("apps/noesis production control-plane composition", () => {
     await reopened.shutdown();
   });
 
-  test("carries one reflected project adjustment across sessions without leaking it to another project", async () => {
+  test("carries one reflected global Capability across sessions and projects", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-project-adjustment-"));
     roots.push(home);
     const projectRoot = join(home, "project-p");
@@ -3370,31 +3370,47 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const reflectorContexts: string[] = [];
     let reflectorRuns = 0;
+    let createdCapabilityId: string | undefined;
     const strategy = "Verify the observable project state before reporting completion.";
     const controlled = createControlledPiModels({
       respond: (input) => {
         const { systemPrompt, lastUserText } = input;
         if (systemPrompt.includes("role: history_reranker")) return researchLoopControlledResponse(input);
+        if (systemPrompt.includes("role: capability_router"))
+          return JSON.stringify({
+            selections: createdCapabilityId
+              ? [{ capabilityId: createdCapabilityId, reason: "The verification Capability is relevant." }]
+              : [],
+            reason: createdCapabilityId ? "Selected the relevant Capability." : "No Capability exists yet.",
+            learningAttribution: createdCapabilityId
+              ? { capabilityId: createdCapabilityId, reason: "Primary behavior under observation." }
+              : null,
+          });
         if (!systemPrompt.includes("role: reflector")) return `Controlled completion for: ${lastUserText}`;
         reflectorContexts.push(lastUserText);
         reflectorRuns += 1;
         if (reflectorRuns === 1)
           return JSON.stringify({
-            observation: {
-              kind: "other",
-              reason: "The completed project turn supports a temporary project strategy.",
+            decision: "create",
+            proposal: {
+              name: "Verified completion claims",
+              kind: "instruction",
+              description: "Verify observable state before reporting completion.",
+              applicability: "Work that reports a concrete completion state.",
+              summary: "Completion claims now require observable verification.",
+              rationale: "The settled turn established a reusable verification preference.",
+              anticipatedEffect: "Future completion reports are evidence grounded.",
+              instruction: strategy,
+              scope: "global",
+              activationMode: "relevant",
+              consequence: "ordinary",
+              consequenceDescription: "Only model instructions change.",
+              evidenceCitationIndexes: [0],
             },
-            decision: "apply_working_adjustment",
-            expectedActiveAdjustmentId: null,
-            rationale: "This project benefits from checking observable state before completion claims.",
-            strategy,
-            successSignal: "A later settled project turn reports only verified completion state.",
-            evidenceCitationIndexes: [0],
           });
         return JSON.stringify({
-          observation: { kind: "other", reason: "No further project strategy change is needed." },
           decision: "no_change",
-          reason: "Keep the current project strategy unchanged.",
+          reason: "Keep the current Capability unchanged.",
         });
       },
     });
@@ -3413,36 +3429,49 @@ describe("apps/noesis production control-plane composition", () => {
     const source = await first.debug.runTurn(firstTrail.trailId, "Finish the first project task.");
     await first.controlPlane.idle();
     if (!source.frozenTurnPlan) throw new Error("Expected the source turn to retain its frozen plan");
-    const active = await first.debug.workspace.workingAdjustments.getActive(project.projectId);
+    const [definition] = await first.debug.workspace.capabilities.listDefinitions();
+    if (!definition) throw new Error("Expected the source reflection to create a Capability");
+    createdCapabilityId = definition.capabilityId;
+    const active = await first.debug.workspace.capabilities.getBinding(definition.capabilityId);
     expect(active).toMatchObject({
-      scope: project,
-      strategy,
-      createdFromTurnId: source.frozenTurnPlan.turnId,
+      scope: { kind: "global" },
+      activationMode: "relevant",
+      state: "active",
     });
-    if (!active) throw new Error("Expected the source reflection to apply a project adjustment");
+    if (!active) throw new Error("Expected the source reflection to activate a Capability");
     await first.shutdown();
 
     const resumed = await compose(project);
     const resumedTrail = await resumed.startTrail({ title: "Project P resumed" });
     const served = await resumed.debug.runTurn(resumedTrail.trailId, "Continue in a new session.");
-    expect(served.frozenTurnPlan).toMatchObject({
-      project,
-      workingAdjustmentId: active.adjustmentId,
-    });
+    expect(served.frozenTurnPlan).toMatchObject({ project });
+    expect(
+      served.frozenTurnPlan?.selectedCapabilities.some(
+        (selection) => selection.capabilityId === definition.capabilityId,
+      ),
+    ).toBe(true);
     expect(served.frozenTurnPlan?.renderedSystemPrompt).toContain(strategy);
     const next = await resumed.debug.runTurn(resumedTrail.trailId, "Check the prior result and continue.");
-    expect(next.frozenTurnPlan?.workingAdjustmentId).toBe(active.adjustmentId);
+    expect(
+      next.frozenTurnPlan?.selectedCapabilities.some(
+        (selection) => selection.capabilityId === definition.capabilityId,
+      ),
+    ).toBe(true);
     await resumed.controlPlane.idle();
-    expect(reflectorContexts.at(-1)).toContain(active.adjustmentId);
-    expect(reflectorContexts.at(-1)).toContain(served.frozenTurnPlan?.turnId);
+    expect(reflectorContexts.at(-1)).toContain(definition.capabilityId);
+    expect(reflectorContexts.at(-1)).toContain(next.frozenTurnPlan?.turnId);
     await resumed.shutdown();
 
     const isolated = await compose(otherProject);
     const isolatedTrail = await isolated.startTrail({ title: "Project Q" });
     const isolatedTurn = await isolated.debug.runTurn(isolatedTrail.trailId, "Work in another project.");
     expect(isolatedTurn.frozenTurnPlan).toMatchObject({ project: otherProject });
-    expect(isolatedTurn.frozenTurnPlan?.workingAdjustmentId).toBeUndefined();
-    expect(isolatedTurn.frozenTurnPlan?.renderedSystemPrompt).not.toContain(strategy);
+    expect(
+      isolatedTurn.frozenTurnPlan?.selectedCapabilities.some(
+        (selection) => selection.capabilityId === definition.capabilityId,
+      ),
+    ).toBe(true);
+    expect(isolatedTurn.frozenTurnPlan?.renderedSystemPrompt).toContain(strategy);
     await isolated.shutdown();
   });
 
@@ -3462,10 +3491,6 @@ describe("apps/noesis production control-plane composition", () => {
         if (!systemPrompt.includes("role: reflector")) return `Controlled completion for: ${lastUserText}`;
         reflectorRuns += 1;
         return JSON.stringify({
-          observation: {
-            kind: "correction",
-            reason: "The user corrects how this research brief should be written.",
-          },
           decision: "no_change",
           reason: "The single correction is useful evidence but not yet a durable adaptation.",
         });
@@ -3491,7 +3516,7 @@ describe("apps/noesis production control-plane composition", () => {
     expect(reflectorRuns).toBe(1);
     const outcomes = await runtime.debug.workspace.operational.outcomes.listForSession(trail.trailId);
     expect(outcomes).toHaveLength(1);
-    expect(outcomes[0]).toMatchObject({ status: "corrected" });
+    expect(outcomes[0]).toMatchObject({ status: "unknown" });
     await runtime.shutdown();
   });
 
@@ -3844,10 +3869,6 @@ describe("apps/noesis production control-plane composition", () => {
             await blockedReflection;
             return Object.freeze({
               text: JSON.stringify({
-                observation: {
-                  kind: "other",
-                  reason: "The fixture is exercising bounded shutdown rather than user feedback.",
-                },
                 decision: "no_change",
                 reason: "The fixture releases only after bounded shutdown returns.",
               }),
@@ -3874,7 +3895,7 @@ describe("apps/noesis production control-plane composition", () => {
       const jobs = await runtime.debug.workspace.jobs.list({ limit: 10 });
       expect(jobs).toMatchObject([
         {
-          kind: "runtime.reflect_turn",
+          kind: "runtime.reflect_capability",
           status: "running",
           leaseToken: expect.any(String),
           leaseUntil: expect.any(String),
@@ -3934,10 +3955,6 @@ describe("apps/noesis production control-plane composition", () => {
             ]);
             return Object.freeze({
               text: JSON.stringify({
-                observation: {
-                  kind: "other",
-                  reason: "The fixture is exercising shutdown cancellation rather than user feedback.",
-                },
                 decision: "no_change",
                 reason: "The role run settled after receiving shutdown cancellation.",
               }),

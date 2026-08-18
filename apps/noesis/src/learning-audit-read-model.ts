@@ -41,7 +41,7 @@ interface LearningAuditSource {
     ProtectedWorkspaceRuntime["feedback"],
     "listObservations" | "listResearchRuns" | "getOutcome" | "getSuccessorInput"
   >;
-  readonly continuousFeedback: Pick<ContinuousFeedbackController, "experimentComparison">;
+  readonly continuousFeedback?: Pick<ContinuousFeedbackController, "experimentComparison">;
   readonly resolveRevision: (reference: CapabilityRevisionRef) => Promise<CapabilityRevision | undefined>;
   readonly resolveCapability: (capabilityId: string) =>
     | Readonly<{
@@ -896,7 +896,7 @@ export async function loadLearningAuditSnapshot(
     const [trials, evaluations, comparison, researchRuns, outcome, successorInput] = await Promise.all([
       source.workspace.research.trials.listTrials(experiment.experimentId),
       source.workspace.research.evaluations.listEvaluations(experiment.experimentId),
-      experiment.preflightRef
+      experiment.preflightRef && source.continuousFeedback
         ? source.continuousFeedback.experimentComparison(experiment.experimentId)
         : undefined,
       source.feedback.listResearchRuns(experiment.experimentId),
@@ -1215,6 +1215,149 @@ export async function loadLearningAuditSnapshot(
           defined,
         ),
         raw: activation,
+      }),
+    );
+
+  const [capabilityDefinitions, capabilityBindings, pendingGates] = await Promise.all([
+    source.workspace.capabilities.listDefinitions(),
+    source.workspace.capabilities.listBindings(),
+    source.workspace.capabilities.listPendingGates(),
+  ]);
+  const capabilityDefinitionById = new Map(
+    capabilityDefinitions.map((definition) => [definition.capabilityId, definition] as const),
+  );
+  for (const binding of capabilityBindings) {
+    const definition = capabilityDefinitionById.get(binding.capabilityId);
+    const [revisions, feedback] = await Promise.all([
+      source.workspace.capabilities.listRevisions(binding.capabilityId),
+      source.workspace.capabilities.listFeedback(binding.capabilityId),
+    ]);
+    primitives.push(
+      primitive({
+        id: nativeId("capability", binding.capabilityId),
+        kind: "capability",
+        group: "changes",
+        status: `${binding.state} · ${binding.activationMode}`,
+        tone: binding.state === "active" ? "active" : "neutral",
+        title: definition?.name ?? binding.capabilityId,
+        summary: definition?.description ?? "Durable capability",
+        occurredAt: binding.updatedAt,
+        ...(binding.scope.kind === "project" ? { projectId: binding.scope.project.projectId } : {}),
+        capabilityId: binding.capabilityId,
+        capabilityRevisionId: binding.revision.capabilityRevisionId,
+        capabilityBundleDigest: binding.revision.bundleDigest,
+        capabilityBindingRevision: binding.revisionNumber,
+        capabilityState: binding.state,
+        capabilityActivationMode: binding.activationMode,
+        capabilityScope: binding.scope.kind,
+        relations: [
+          relation("current revision", "capability_revision", binding.revision.capabilityRevisionId),
+          ...revisions.map((revision) =>
+            relation("revision", "capability_revision", revision.reference.capabilityRevisionId),
+          ),
+        ].filter(defined),
+        detailSections: [
+          detailSection("BEHAVIOR", [
+            detailEntry("applies when", definition?.applicability),
+            detailEntry("scope", canonicalJson(binding.scope)),
+            detailEntry("selection", binding.activationMode),
+            detailEntry("state", binding.state),
+          ]),
+          detailSection("HISTORY", [
+            detailEntry("revisions", String(revisions.length)),
+            detailEntry("feedback", String(feedback.length)),
+          ]),
+        ].filter(defined),
+        raw: { definition, binding },
+      }),
+    );
+    for (const revision of revisions)
+      primitives.push(
+        primitive({
+          id: nativeId("capability_revision", revision.reference.capabilityRevisionId),
+          kind: "capability_revision",
+          group: "changes",
+          status:
+            revision.reference.capabilityRevisionId === binding.revision.capabilityRevisionId
+              ? "current"
+              : "superseded",
+          tone:
+            revision.reference.capabilityRevisionId === binding.revision.capabilityRevisionId
+              ? "active"
+              : "neutral",
+          title: revision.summary,
+          summary: revision.anticipatedEffect,
+          occurredAt: revision.createdAt,
+          capabilityId: binding.capabilityId,
+          capabilityRevisionId: revision.reference.capabilityRevisionId,
+          capabilityBundleDigest: revision.reference.bundleDigest,
+          capabilityBindingRevision: binding.revisionNumber,
+          capabilityState: binding.state,
+          capabilityActivationMode: binding.activationMode,
+          capabilityScope: binding.scope.kind,
+          evidence: revision.revision.evidenceRefs,
+          relations: [
+            relation("capability", "capability", binding.capabilityId),
+            relation("predecessor", "capability_revision", revision.revision.predecessorRevisionId),
+          ].filter(defined),
+          detailSections: [
+            detailSection("DECISION", [
+              detailEntry("why", revision.rationale),
+              detailEntry("expected effect", revision.anticipatedEffect),
+            ]),
+          ].filter(defined),
+          raw: revision,
+        }),
+      );
+    for (const item of feedback)
+      primitives.push(
+        primitive({
+          id: nativeId("capability_feedback", item.feedbackId),
+          kind: "capability_feedback",
+          group: "feedback",
+          status: item.disposition,
+          tone: item.disposition === "correction" ? "negative" : "neutral",
+          title: `Feedback · ${item.disposition}`,
+          summary: item.interpretation,
+          occurredAt: item.createdAt,
+          capabilityId: item.capabilityId,
+          evidence: item.evidenceRefs,
+          relations: [
+            relation("capability", "capability", item.capabilityId),
+            relation("revision", "capability_revision", item.revision.capabilityRevisionId),
+          ].filter(defined),
+          raw: item,
+        }),
+      );
+  }
+  for (const gate of pendingGates)
+    primitives.push(
+      primitive({
+        id: nativeId("capability_gate", gate.gateRequestId),
+        kind: "capability_gate",
+        group: "activation",
+        status: gate.status,
+        tone: "pending",
+        title: "Capability needs a decision",
+        summary: gate.consequence,
+        occurredAt: gate.createdAt,
+        capabilityId: gate.capabilityId,
+        capabilityRevisionId: gate.revision.capabilityRevisionId,
+        ...(gate.expectedBindingRevision === null
+          ? {}
+          : { capabilityBindingRevision: gate.expectedBindingRevision }),
+        gateRequestId: gate.gateRequestId,
+        relations: [
+          relation("capability", "capability", gate.capabilityId),
+          relation("revision", "capability_revision", gate.revision.capabilityRevisionId),
+        ].filter(defined),
+        detailSections: [
+          detailSection("DECISION", [
+            detailEntry("consequence", gate.consequence),
+            detailEntry("options", "approve · deny · change"),
+          ]),
+        ].filter(defined),
+        raw: gate,
       }),
     );
 

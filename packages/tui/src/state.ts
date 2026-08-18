@@ -181,6 +181,10 @@ export interface NoesisTuiState {
   readonly colorEnabled: boolean;
   readonly activeTool?: string;
   readonly error?: string;
+  readonly notification?: Readonly<{
+    readonly text: string;
+    readonly tone: "info" | "success" | "attention";
+  }>;
 }
 
 export type NoesisTuiAction =
@@ -256,6 +260,11 @@ export type NoesisTuiAction =
   | { readonly type: "compacted" }
   | { readonly type: "pane-selected"; readonly pane: Pane }
   | { readonly type: "failed"; readonly error: string }
+  | {
+      readonly type: "notification-shown";
+      readonly text: string;
+      readonly tone: "info" | "success" | "attention";
+    }
   | { readonly type: "system-message"; readonly text: string };
 
 const NO_EXPANDED_ACTIONS: ReadonlySet<string> = new Set<string>();
@@ -332,6 +341,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         context: _context,
         contextUsage: _contextUsage,
         error: _error,
+        notification: _notification,
         inspector: _inspector,
         ...rest
       } = state;
@@ -358,7 +368,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         expandedActionIds: NO_EXPANDED_ACTIONS,
       };
     case "prompt-submitted": {
-      const { error: _error, ...rest } = state;
+      const { error: _error, notification: _notification, ...rest } = state;
       return {
         ...rest,
         execution: "thinking",
@@ -564,6 +574,8 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       return { ...state, pane: action.pane };
     case "failed":
       return { ...state, execution: "error", error: action.error };
+    case "notification-shown":
+      return { ...state, notification: Object.freeze({ text: action.text, tone: action.tone }) };
     case "system-message":
       return {
         ...state,

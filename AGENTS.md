@@ -6,8 +6,8 @@
 - Use capable models for decisions that depend on meaning, including intent, correction, feedback, relevance, progress, scope, and learning value. Do not use regular expressions, keyword lists, or fixed heuristics as semantic classifiers. Keep regular expressions for syntax and validation.
 - Deliver immediate value first. Preserve a future advantage only when the evidence supports a credible future use.
 - Infer collaboration posture. Ambiguous intellectual work defaults toward `work_with_me`, while explicit execution defaults toward `do_for_me`. A conversational instruction overrides the inference.
-- Start new learning at the narrowest plausible scope. Every durable learning names its anticipated future use, and recurring evidence is required before its scope broadens.
-- Run reflection ambiently after useful work. `no_change` is a valid result, and not every session must compound.
+- New learned Capabilities default to global eligibility and semantic relevance. The model or user may narrow them to a project or session, or make them always active.
+- Run reflection ambiently after every settled foreground turn, including failed and aborted work. `no_change` is a valid result.
 - Keep every adaptation inspectable, contestable, and revertible. Normal workflows stay conversational instead of becoming approval dialogs.
 - An explicit foreground task may publish a project-local script or workflow and use it immediately through `execute` under the current authority. Do not force this path through reflection, a candidate, or evaluation. Reflection observes its results; broader learned or global consolidation still uses protected evaluation and activation.
 - Generated content may create project-local executable definitions, but it cannot modify the protected control plane or approve broader promotion.
@@ -34,13 +34,13 @@
 
 ## Protected control plane
 
-- Reflection may propose memory, knowledge, workflows, cases, or candidates. It must never promote broader learned executable behavior. Explicit foreground publication of a project-local script or workflow is not promotion.
-- Permission, evaluation, workspace integrity, activation, promotion, and rollback rules stay outside generated or self-modifiable content.
+- Reflection may create or revise an exact Capability and activate ordinary revisions immediately. Explicit foreground publication of a project-local script or workflow remains an independent direct path.
+- Recovery and audit control, credential export, and irreversible external actions without foreground user intent require an explicit approve, deny, or change decision. Workspace integrity and truthful rollback remain protected code.
 - All side effects and protected promotion, rollback, and scheduling transitions go through `AuthorityBoundary` and `EffectGateway`. Ordinary callers never install grants or mint receipts.
 - Reserve grant use and cost durably in authoritative operational state before execution. Rehydrate reservations and completions from SQLite and fail closed when a reservation has no unambiguous outcome.
 - Effectful retries require stable operation identities and idempotency keys bound to principal, effect class, resource, and request identity. Never retry an incomplete effect by assuming it failed.
 - Background jobs receive scheduler-specific grants that cannot widen themselves.
-- Candidate authors provide source cases only and cannot see judge decisions or protected cases. Evaluation owns comparison evidence; activation binds the exact candidate revision and preflight evidence. Retain failed evaluations and regression evidence.
+- Capability revisions bind every exact material they contain plus their evidence. Ambient authoring currently creates instruction Capabilities; the model changes project tools and workflows through the explicit foreground `adapt` path. Existing experiment and preflight records remain readable history; a future evaluation system must execute real candidate behavior before making comparative claims.
 
 ## Local workflow
 

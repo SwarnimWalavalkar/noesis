@@ -15,6 +15,7 @@ import type {
 } from "./turn-interaction.ts";
 
 export * from "./coordinator-contracts.ts";
+export * from "./capability-coordinator.ts";
 export * from "./coordinator.ts";
 export * from "./coordinator-composition.ts";
 export * from "./preflight-policy.ts";

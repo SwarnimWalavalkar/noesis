@@ -1,70 +1,1192 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Simplifying Noesis learning</title>
-  <style>
-    :root { color-scheme: dark; --bg: #090a0c; --panel: #111318; --text: #f2f0e9; --muted: #9a9da6; --line: #292d35; --accent: #ffcd70; }
-    * { box-sizing: border-box; }
-    body { margin: 0; padding: 52px 24px; background: var(--bg); color: var(--text); font: 16px/1.65 ui-sans-serif, system-ui; }
-    main { max-width: 980px; margin: auto; }
-    h1 { margin: .2em 0; font-size: clamp(34px, 7vw, 68px); line-height: 1; }
-    h2 { margin-top: 2.4em; }
-    code, .tag { font-family: ui-monospace, monospace; }
-    .tag { color: var(--accent); font-size: 12px; letter-spacing: .12em; text-transform: uppercase; }
-    .lead { max-width: 800px; color: #d7d4cc; font-size: 21px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
-    .card { padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); }
-    .muted { color: var(--muted); }
-    li { margin: .55em 0; }
-    .decision { padding-left: 18px; border-left: 3px solid var(--accent); }
-  </style>
-</head>
-<body><main>
-  <div class="tag">Design workshop · open</div>
-  <h1>One understandable improvement loop</h1>
-  <p class="lead">The system should remain ambitious without making every useful change cross a maze of product nouns and durable jobs.</p>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Noesis capability loop rearchitecture</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #090a0c;
+        --panel: #111318;
+        --panel-2: #171a20;
+        --text: #f2f0e9;
+        --muted: #9a9da6;
+        --line: #292d35;
+        --accent: #d0a8ff;
+        --accent-2: #9eff71;
+        --warn: #ffcd70;
+        --danger: #ff7d73;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 52px 24px 96px;
+        background:
+          radial-gradient(circle at 85% 4%, rgb(208 168 255 / 10%), transparent 30rem),
+          var(--bg);
+        color: var(--text);
+        font:
+          16px/1.65 ui-sans-serif,
+          system-ui,
+          sans-serif;
+      }
+      main {
+        max-width: 1080px;
+        margin: auto;
+      }
+      h1 {
+        max-width: 900px;
+        margin: 0.2em 0;
+        font-size: clamp(38px, 7vw, 72px);
+        line-height: 0.98;
+        letter-spacing: -0.04em;
+      }
+      h2 {
+        margin: 2.5em 0 0.7em;
+        font-size: clamp(25px, 4vw, 38px);
+        line-height: 1.15;
+      }
+      h3 {
+        margin: 1.7em 0 0.5em;
+      }
+      p,
+      li {
+        max-width: 880px;
+      }
+      li {
+        margin: 0.5em 0;
+      }
+      code,
+      pre,
+      .tag,
+      .task-id {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      code {
+        color: #e6d7ff;
+      }
+      .tag {
+        color: var(--accent);
+        font-size: 12px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .lead {
+        max-width: 860px;
+        color: #d7d4cc;
+        font-size: clamp(19px, 2.6vw, 24px);
+      }
+      .thesis {
+        margin: 32px 0;
+        padding: 24px 26px;
+        border: 1px solid #57466d;
+        border-radius: 16px;
+        background: linear-gradient(135deg, rgb(208 168 255 / 13%), rgb(158 255 113 / 5%));
+        font-size: 21px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 16px;
+      }
+      .card {
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+      }
+      .card strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .decision,
+      .warning {
+        max-width: 900px;
+        padding: 14px 18px;
+        border-left: 3px solid var(--accent);
+        background: rgb(208 168 255 / 6%);
+      }
+      .warning {
+        border-left-color: var(--warn);
+        background: rgb(255 205 112 / 6%);
+      }
+      .flow,
+      pre {
+        overflow: auto;
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+        color: #ddd9e7;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 18px 0 28px;
+        background: var(--panel);
+      }
+      th,
+      td {
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        color: var(--accent);
+        background: var(--panel-2);
+      }
+      .task {
+        margin: 14px 0;
+        padding: 18px 20px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+      }
+      .task-id {
+        margin-right: 8px;
+        color: var(--accent-2);
+        font-size: 13px;
+      }
+      .pill {
+        display: inline-block;
+        margin: 2px 5px 2px 0;
+        padding: 2px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="tag">Implementation plan · decided architecture</div>
+      <h1>The capability loop</h1>
+      <p class="lead">
+        Replace the ceremony-heavy adjustment → experiment → candidate → preflight → activation
+        pipeline with one transparent, versioned Capability that Noesis can create, activate, improve,
+        pause, and restore through real work with the user.
+      </p>
 
-  <section><h2>Current truth</h2><div class="grid">
-    <div class="card"><strong>Immediate lane</strong><p class="muted">A project strategy can be applied or removed quickly. Explicit project scripts and workflows publish immediately.</p></div>
-    <div class="card"><strong>Durable lane</strong><p class="muted">Broader changes become experiments, authored capability revisions, preflights, activation, and later outcome feedback.</p></div>
-    <div class="card"><strong>The problem</strong><p class="muted">The authority split is useful, but the user-facing story and internal orchestration may contain more states and jobs than the product needs.</p></div>
-  </div></section>
+      <div class="thesis">
+        <strong>Optimize for the shortest recoverable loop:</strong><br />
+        observe → create or revise a capability → put it into real use → learn from feedback → keep,
+        iterate, pause, or restore.
+      </div>
 
-  <section><h2>Current state and job map</h2>
-    <p><code>settled turn → runtime.reflect_turn → no_change | WorkingAdjustment compare-and-swap | Experiment</code></p>
-    <p><code>Experiment → runtime.author_revision → runtime.preflight → protected activation → observing → runtime.outcome_judge → keep | revise | revert</code></p>
-    <p class="muted">Working adjustments are immutable project strategies with one active binding per project. Experiments and capability revisions are broader durable changes with different authority, evaluation, and recovery requirements. <code>sourceAdjustmentId</code> links the two paths when an experiment grows from a project adjustment.</p>
-  </section>
+      <section>
+        <h2>1. Decisions</h2>
+        <div class="grid">
+          <div class="card">
+            <strong>One product noun</strong>
+            <span class="muted">
+              The durable, user-facing abstraction is <code>Capability</code>. Working adjustment,
+              experiment, candidate, and activation no longer describe separate product lifecycles.
+            </span>
+          </div>
+          <div class="card">
+            <strong>Global by default</strong>
+            <span class="muted">
+              New capabilities are globally eligible unless the model or user chooses a project or
+              session scope. Global eligibility does not mean unconditional prompt injection.
+            </span>
+          </div>
+          <div class="card">
+            <strong>Relevant or always</strong>
+            <span class="muted">
+              Each active binding is either selected semantically when relevant or mounted on every
+              eligible turn. The user can change this at any time.
+            </span>
+          </div>
+          <div class="card">
+            <strong>Reflect every turn</strong>
+            <span class="muted">
+              There is no preliminary “useful work” classifier. Every admitted foreground turn that
+              settles runs the same reflector and may return <code>no_change</code>.
+            </span>
+          </div>
+          <div class="card">
+            <strong>Real use is the loop</strong>
+            <span class="muted">
+              Ordinary capabilities activate without preflight. User feedback and later ambient
+              reflection drive iteration and recovery.
+            </span>
+          </div>
+          <div class="card">
+            <strong>Evaluation deferred</strong>
+            <span class="muted">
+              This implementation creates no new evaluation system. Existing evaluation records stay
+              readable as history; future real evaluation is a separate design.
+            </span>
+          </div>
+          <div class="card">
+            <strong>No usage ledger</strong>
+            <span class="muted">
+              A Capability does not own a row for every turn that selected it. The frozen turn plan
+              already pins exact revisions, so usage can be derived later if it is ever needed.
+            </span>
+          </div>
+          <div class="card">
+            <strong>Small consequence gate</strong>
+            <span class="muted">
+              Only autonomous activation that threatens recovery or causes an irreversible external
+              consequence pauses for approve, deny, or change.
+            </span>
+          </div>
+        </div>
+      </section>
 
-  <section><h2>Promising simplification</h2>
-    <p class="decision">Present one user-facing read model: a change. A change may be active only in this project, under evaluation, durable, revised, or reverted. Do not add a durable Change record or merge existing authorities unless observed duplication proves that one responsibility is stored twice.</p>
-    <ul>
-      <li>Reflection produces <code>no_change</code>, an immediate narrow change, or a broader experiment.</li>
-      <li>First simplify presentation: join existing records by exact IDs and hide routine job nouns from the normal view.</li>
-      <li>Then test orchestration simplification: compare today's recoverable authoring and preflight jobs with one experiment job that records the same explicit stages.</li>
-      <li>Keep WorkingAdjustment and Experiment separate unless that comparison finds duplicated transitions, ownership, and recovery state.</li>
-      <li>Feedback updates the same change story instead of exposing a separate pipeline.</li>
-      <li>The system records exact evidence, scope, revision, and authority even if the TUI uses fewer nouns.</li>
-    </ul>
-  </section>
+      <section>
+        <h2>2. Product contract</h2>
+        <p class="decision">
+          Noesis may autonomously change meaningful parts of its harness, including prompts, skills,
+          tools, workflows, routing, model configuration, and authority configuration. The ordinary
+          safety mechanism is visible provenance plus fast iteration and exact restoration—not a
+          mandatory speculative evaluation pipeline.
+        </p>
+        <ul>
+          <li>A Capability can become active as soon as its exact revision is recorded and validated.</li>
+          <li>The default scope is <code>global</code>; the user can narrow it later.</li>
+          <li>
+            The default activation mode is <code>relevant</code>; the user can make it
+            <code>always</code>.
+          </li>
+          <li>
+            Every material activation, revision, pause, restoration, scope change, and gate decision
+            is visible in <code>/learning</code>.
+          </li>
+          <li>
+            The user can give ordinary conversational feedback or manage the Capability directly in
+            the TUI.
+          </li>
+          <li>
+            A revision never deletes its predecessor, its motivating evidence, or the recovery path
+            required to undo it.
+          </li>
+          <li>
+            <code>no_change</code> remains a normal result but appears only as an aggregate health
+            signal unless the user opens the complete audit view.
+          </li>
+        </ul>
 
-  <section><h2>Questions to settle together</h2><ol>
-    <li>Which changes besides project strategy should be immediate and unilateral?</li>
-    <li>Which current transitions, records, or recovery paths are genuinely duplicated rather than merely related?</li>
-    <li>What is the minimum credible evaluation for prompts, skills, routers, and executable tools?</li>
-    <li>Can authoring and preflight become stages of one durable job while retaining independent retry, recovery, inspection, and immutable evidence?</li>
-    <li>When is direct user correction sufficient to keep, revise, or revert a change?</li>
-    <li>Which existing records and migrations must remain readable during simplification?</li>
-  </ol></section>
+        <h3>The intentionally changed doctrine</h3>
+        <p>
+          The implementation must update <code>AGENTS.md</code>, <code>docs/product-thesis.md</code>,
+          <code>docs/product-experience.md</code>, and
+          <code>docs/agent-intelligence-and-experience.md</code> before the new behavior ships. The
+          following old rules no longer describe the product:
+        </p>
+        <ul>
+          <li>New learning always starts at the narrowest plausible scope.</li>
+          <li>Repeated evidence is required before global reach.</li>
+          <li>Generated learning cannot change tools, permissions, or authority.</li>
+          <li>Broader learned behavior must pass preflight and protected activation.</li>
+          <li>A project-only WorkingAdjustment is the sole immediate ambient-learning form.</li>
+        </ul>
+        <p class="warning">
+          This is not permission theatre. Noesis already operates with the user’s terminal and file
+          access. The rearchitecture preserves durable effect settlement, idempotency, credential
+          storage, audit, and recovery because they are operationally useful; it does not pretend they
+          form a sandbox that the agent otherwise lacks.
+        </p>
+      </section>
 
-  <section><h2>Things not to simplify away</h2><ul>
-    <li>One declared authority for each datum.</li>
-    <li>Exact immutable revisions used by turns and evaluations.</li>
-    <li><code>no_change</code> as a normal result.</li>
-    <li>Protected permission and authority expansion.</li>
-    <li>Visible evidence, contestability, and reliable revert.</li>
-  </ul></section>
-</main></body>
+      <section>
+        <h2>3. The complete lifecycle</h2>
+        <pre class="flow"><code>every admitted foreground turn reaches a terminal state
+  → enqueue one durable capability reflection
+  → reflector returns no_change | create | revise | restore | pause | change_binding
+
+create or revise
+  → simple revision returned directly, or specialized author materializes exact bytes
+  → validate definition, dependencies, predecessor, and recovery information
+  → consequence gate says automatic | user_decision
+
+automatic
+  → record immutable CapabilityRevision
+  → compare-and-swap CapabilityBinding
+  → emit transient TUI notification
+  → revision becomes eligible for the next frozen turn
+
+user_decision
+  → /learning shows pending Capability
+  → approve | deny | change in natural language
+  → approve binds exact revision
+  → deny retains the rejected revision and evidence
+  → change authors a child revision and presents that exact child
+
+later work
+  → scope filter determines eligibility
+  → “always” capabilities mount directly
+  → capable router selects among “relevant” capabilities
+  → FrozenTurnPlan pins exact selected revisions
+  → user feedback or ambient reflection keeps, iterates, pauses, or restores</code></pre>
+
+        <h3>Exactly which turns reflect</h3>
+        <p>
+          Reflection runs once for every admitted user foreground turn after it reaches a durable
+          terminal state:
+        </p>
+        <ul>
+          <li><code>completed</code>, including turns with no tool calls;</li>
+          <li><code>failed</code>, because failure can reveal a missing or harmful capability;</li>
+          <li><code>aborted</code>, because the visible partial work and user interruption are evidence.</li>
+        </ul>
+        <p>
+          A queued prompt that has not been admitted is not a turn. Slash commands that only inspect
+          or navigate TUI state do not reflect. Background jobs do not recursively create reflection
+          jobs. There is no higher-level model call deciding whether work was “useful”; the reflector
+          itself makes the only semantic decision and may cheaply return <code>no_change</code>.
+        </p>
+        <p>
+          The next turn in the same session waits only for the exact preceding reflection job up to the
+          existing bounded deadline. It never waits for a general learning drain. A late result becomes
+          visible to a later turn.
+        </p>
+      </section>
+
+      <section>
+        <h2>4. Capability model</h2>
+        <p>
+          Reuse and deepen the existing <code>Capability</code> and
+          <code>CapabilityRevision</code> concepts. Do not introduce a parallel durable Change entity.
+          <code>WorkspaceStore</code> remains the sole authority for operational bindings and lifecycle
+          decisions; immutable file revisions remain authority for declarative bytes.
+        </p>
+
+        <h3>Capability</h3>
+        <pre><code>interface Capability {
+  readonly capabilityId: string;
+  readonly name: string;
+  readonly kind:
+    | "instruction"
+    | "skill"
+    | "tool"
+    | "workflow"
+    | "router"
+    | "model_configuration"
+    | "harness_configuration"
+    | "core_update"
+    | "composite";
+  readonly description: string;
+  readonly applicability: string;
+  readonly createdAt: string;
+}</code></pre>
+        <p>
+          <code>applicability</code> is a concise semantic description of when the Capability helps. It
+          is used by the capable router. It is not a regex, tag match, or keyword classifier.
+        </p>
+
+        <h3>CapabilityRevision</h3>
+        <pre><code>interface CapabilityRevision {
+  readonly capabilityRevisionId: string;
+  readonly capabilityId: string;
+  readonly predecessorRevisionId?: string;
+  readonly summary: string;
+  readonly rationale: string;
+  readonly anticipatedEffect: string;
+  readonly materials: readonly CapabilityMaterialRef[];
+  readonly dependencyLock?: FileRevisionRef;
+  readonly permissionManifest: PermissionManifest;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly createdAt: string;
+}</code></pre>
+        <p>
+          A revision contains or references the exact implementation that can be mounted. Authoring
+          always receives the complete predecessor materials. The revision is immutable once any
+          binding or frozen turn references it.
+        </p>
+
+        <h3>CapabilityBinding</h3>
+        <pre><code>interface CapabilityBinding {
+  readonly capabilityId: string;
+  readonly revision: CapabilityRevisionRef;
+  readonly scope:
+    | { readonly kind: "global" }
+    | { readonly kind: "project"; readonly project: ProjectRef }
+    | { readonly kind: "session"; readonly sessionId: string };
+  readonly activationMode: "relevant" | "always";
+  readonly state: "active" | "paused";
+  readonly revisionNumber: number;
+  readonly updatedAt: string;
+}</code></pre>
+        <ul>
+          <li>One current binding exists per Capability.</li>
+          <li>New bindings default to <code>global</code> and <code>relevant</code>.</li>
+          <li>Changing scope moves the binding; it does not clone the Capability.</li>
+          <li><code>always</code> bypasses relevance selection but still obeys scope eligibility.</li>
+          <li>All mutations compare the expected binding revision in one SQLite transaction.</li>
+        </ul>
+
+        <h3>No Capability-use table</h3>
+        <p class="decision">
+          Do not add <code>capability_uses</code>, served-turn arrays, counters owned by the Capability,
+          or a denormalized list of every turn that used a skill. The existing
+          <code>FrozenTurnPlan.selectedCapabilities</code> already records the exact revision selected
+          for a turn. A future audit query can derive usage from frozen plans and foreground turns.
+        </p>
+        <p>
+          The Capability stores motivating evidence and feedback that changed its lifecycle. It does
+          not absorb every operational event merely because that event may later be useful for
+          analytics.
+        </p>
+
+        <h3>CapabilityFeedback</h3>
+        <pre><code>interface CapabilityFeedback {
+  readonly feedbackId: string;
+  readonly capabilityId: string;
+  readonly revision: CapabilityRevisionRef;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly interpretation: string;
+  readonly disposition:
+    | "positive"
+    | "correction"
+    | "regression"
+    | "scope_change"
+    | "activation_change"
+    | "restore_request";
+  readonly createdAt: string;
+}</code></pre>
+        <p>
+          Feedback is recorded when it causes or credibly supports a lifecycle decision. Noesis does
+          not manufacture a feedback row for every silent successful turn.
+        </p>
+      </section>
+
+      <section>
+        <h2>5. Model intelligence</h2>
+        <p>
+          Use capable models wherever meaning is required. Keep persistence, immutable identity,
+          compare-and-swap, schema validation, and recovery deterministic.
+        </p>
+
+        <h3>Ambient capability reflector</h3>
+        <p>The reflector receives:</p>
+        <ul>
+          <li>the exact settled user and assistant messages, including unfinished-turn labels;</li>
+          <li>bounded tool calls, failures, outcome facts, and runtime telemetry;</li>
+          <li>the exact Capability revisions selected by the frozen turn plan;</li>
+          <li>explicit conversational feedback from the current turn;</li>
+          <li>bounded, opened cross-session evidence chosen for relevance;</li>
+          <li>active Capability descriptors and likely conflicts or overlaps;</li>
+          <li>the current binding and complete predecessor for any proposed revision;</li>
+          <li>the user’s direct remembered criteria when relevant.</li>
+        </ul>
+        <p>Its structured decision is:</p>
+        <pre><code>no_change
+create_capability
+revise_capability
+restore_capability
+pause_capability
+change_binding</code></pre>
+        <p>
+          Every non-<code>no_change</code> result cites exact evidence and explains anticipated effect.
+          The host rejects nonexistent, unauthorized, or sensitivity-incompatible citations.
+        </p>
+
+        <h3>Specialized author</h3>
+        <p>
+          A simple instruction revision may be complete in the reflection result. Tools, skills,
+          workflows, routers, and configuration use a specialized author with:
+        </p>
+        <ul>
+          <li>the exact predecessor bytes and manifest;</li>
+          <li>the exact requested target and user amendment;</li>
+          <li>opened evidence excerpts rather than opaque evidence IDs;</li>
+          <li>available catalog, schemas, dependencies, and runtime constraints;</li>
+          <li>related active capabilities and known conflicts;</li>
+          <li>the required output schema for that Capability kind.</li>
+        </ul>
+        <p>
+          The author returns exact declarative materials. It never returns a digest standing in for
+          behavior it has not seen.
+        </p>
+
+        <h3>Capability router</h3>
+        <p>
+          Before each turn, deterministic scope filtering partitions active bindings:
+        </p>
+        <ol>
+          <li>Ineligible project or session bindings are removed.</li>
+          <li><code>always</code> bindings are selected directly.</li>
+          <li>
+            The existing capable router receives the request, bounded conversation, and descriptors of
+            eligible <code>relevant</code> capabilities.
+          </li>
+          <li>The union is materialized and frozen into the turn plan.</li>
+        </ol>
+        <p>
+          The router records its reason, but no separate Capability-use record is written. The frozen
+          plan is enough to reconstruct what the model received.
+        </p>
+
+        <h3>Feedback iteration</h3>
+        <p>
+          The external semantic interface is named <code>iterateOnFeedback</code>. It receives the user’s
+          feedback, current conversation, candidate Capability targets, their exact active revisions,
+          and the prior evidence. It returns:
+        </p>
+        <pre><code>keep
+revise
+restore
+pause
+change_scope
+change_activation_mode</code></pre>
+        <p>
+          Explicit feedback can run immediately. Otherwise it is folded into the ambient reflector for
+          the current settled turn. Silence is not positive feedback, and code does not use keywords to
+          infer corrections.
+        </p>
+
+        <h3>Calls removed from the ordinary loop</h3>
+        <ul>
+          <li>scope-verification call;</li>
+          <li>experiment-brief generation;</li>
+          <li>synthetic transfer-case generation;</li>
+          <li>baseline and candidate simulation calls;</li>
+          <li>blind judging over simulated artifacts;</li>
+          <li>preflight aggregation;</li>
+          <li>post-activation experiment outcome judging;</li>
+          <li>revision-agent successor experiment creation.</li>
+        </ul>
+        <p>
+          A normal turn therefore produces one reflection call and, only when necessary, one
+          specialized authoring call. JSON repair remains bounded and explicit.
+        </p>
+      </section>
+
+      <section>
+        <h2>6. Activation and the tiny consequence gate</h2>
+        <p>
+          Activation is ordinarily an atomic binding update, not a promotion. Protected code validates
+          exact revision identity, material availability, dependency integrity, and expected current
+          binding before changing what future turns can mount.
+        </p>
+
+        <h3>Automatic activation</h3>
+        <p>Automatic activation covers reversible capability changes, including:</p>
+        <div>
+          <span class="pill">prompts</span>
+          <span class="pill">skills</span>
+          <span class="pill">tools</span>
+          <span class="pill">workflows</span>
+          <span class="pill">routing</span>
+          <span class="pill">model configuration</span>
+          <span class="pill">harness configuration</span>
+          <span class="pill">authority configuration</span>
+        </div>
+        <p>
+          A tool is not gated merely because it is a tool. A global revision is not gated merely because
+          it is global. A permission change is not gated merely because an older architecture labeled it
+          protected.
+        </p>
+
+        <h3>User decision</h3>
+        <p>
+          An autonomous background activation requires a user decision only if the activation itself:
+        </p>
+        <ol>
+          <li>removes or weakens audit, notification, restoration, or safe-mode recovery;</li>
+          <li>can make the previous bootable runtime unrecoverable;</li>
+          <li>exports credential values or changes credential ownership;</li>
+          <li>
+            performs an irreversible external action such as deletion, publication, deployment,
+            purchase, or communication that the foreground request did not already authorize;
+          </li>
+          <li>changes the small gate that decides these exact cases.</li>
+        </ol>
+        <p>
+          Foreground user instruction supplies intent for the requested action and must not trigger a
+          redundant learning approval.
+        </p>
+        <p>
+          The host imposes these few bootstrap constraints using exact owned resources and effect
+          classes. The model supplies a consequence description but does not decide whether it may erase
+          its own recovery mechanism.
+        </p>
+
+        <h3>Approve, deny, or change</h3>
+        <ul>
+          <li><strong>Approve:</strong> bind the exact pending revision if the expected binding is unchanged.</li>
+          <li><strong>Deny:</strong> retain the revision and evidence as rejected history.</li>
+          <li>
+            <strong>Change:</strong> collect natural-language direction, author a child revision, and
+            replace the pending request with that exact child.
+          </li>
+        </ul>
+        <p>
+          A gate request never holds mutable generated bytes. It pins an immutable revision and expected
+          current binding.
+        </p>
+      </section>
+
+      <section>
+        <h2>7. Transparency and <code>/learning</code></h2>
+        <p class="decision">
+          Learning outcomes are TUI notifications and Capability records, not assistant messages and not
+          transcript notes. The conversation stays about the user’s work.
+        </p>
+
+        <h3>Notification</h3>
+        <pre><code>◆ Capability activated · Better self-extension flow · global
+  /learning to inspect or manage</code></pre>
+        <p>
+          The notification is transient Pi TUI chrome. A small status indicator remains while an unseen
+          material Capability or pending gate exists. Opening <code>/learning</code> marks it seen. The
+          durable source is Capability activity in SQLite; the notification is only a projection.
+        </p>
+
+        <h3>Default two-column view</h3>
+        <pre><code>LEARNING · capabilities
+
+ACTIVE / PENDING                 │ BETTER SELF-EXTENSION FLOW
+▸ ◆ Better self-extension       │ Active · global · relevant
+  ◆ Research source preference  │
+  ◇ New tool needs approval     │ WHAT IT DOES
+  ⏸ Concise planning style      │ Prefer adapt and declarative tools...
+                                │
+RECENT                          │ WHY
+  ↻ Revised review behavior     │ User corrected direct repository edits.
+  ↶ Restored shell strategy     │
+                                │ EVIDENCE
+diagnostics: 42 reflected       │ “Do not modify repository files...”
+39 no change · 1 failed         │ Enter opens exact turn
+                                │
+                                │ REVISION
+                                │ r3 ← r2 · view exact diff
+
+↑/↓ select · enter inspect · a always · s scope · p pause
+r restore · e edit · y approve · n deny · space raw · esc close</code></pre>
+
+        <h3>Capability detail</h3>
+        <p>The normal view prioritizes:</p>
+        <ol>
+          <li>what the Capability does;</li>
+          <li>what changed from the predecessor;</li>
+          <li>why Noesis created or revised it;</li>
+          <li>readable cited evidence with links to exact records;</li>
+          <li>scope and relevant/always activation mode;</li>
+          <li>current revision and prior restorable revisions;</li>
+          <li>feedback that caused iteration, pause, or restoration;</li>
+          <li>pending user decision and its consequence;</li>
+          <li>validation, loading, or recovery diagnostics.</li>
+        </ol>
+        <p>
+          Raw IDs, JSON, legacy experiments, preflight records, and job data remain available in a
+          bounded sensitivity-aware audit view. They do not dominate the product view.
+        </p>
+
+        <h3>Mutations</h3>
+        <p>
+          The TUI emits typed intents and waits for authoritative settlement. It never mutates local UI
+          state optimistically as if the operation succeeded.
+        </p>
+        <pre><code>type TuiCapabilityIntent =
+  | { type: "approve"; gateRequestId: string }
+  | { type: "deny"; gateRequestId: string }
+  | { type: "change"; gateRequestId: string; instruction: string }
+  | { type: "pause" | "resume"; capabilityId: string; expectedBindingRevision: number }
+  | { type: "restore"; capabilityId: string; target: CapabilityRevisionRef; expectedBindingRevision: number }
+  | { type: "set-scope"; capabilityId: string; scope: CapabilityScope; expectedBindingRevision: number }
+  | { type: "set-activation-mode"; capabilityId: string; mode: "relevant" | "always"; expectedBindingRevision: number };</code></pre>
+      </section>
+
+      <section>
+        <h2>8. Recovery and failure behavior</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Failure</th>
+              <th>Required behavior</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Reflection fails or times out</td>
+              <td>The foreground turn remains complete. Record a quiet diagnostic; make no change.</td>
+            </tr>
+            <tr>
+              <td>Author returns malformed material</td>
+              <td>Retain the current binding. Record the failed attempt and bounded error.</td>
+            </tr>
+            <tr>
+              <td>Dependency is missing or stale</td>
+              <td>Do not bind the revision. Show the exact failed dependency in <code>/learning</code>.</td>
+            </tr>
+            <tr>
+              <td>Binding changed concurrently</td>
+              <td>Return a stale result. Never overwrite the newer user or model decision.</td>
+            </tr>
+            <tr>
+              <td>Capability breaks turn planning</td>
+              <td>
+                If resolution identifies one invalid Capability, compare-and-pause that exact binding and
+                retry. If the failure is an ambiguous composition failure, admit one genesis-only safe-mode
+                plan for the session instead. Notify the user and preserve the failed planning diagnostic;
+                do not invent a “last known good” ledger.
+              </td>
+            </tr>
+            <tr>
+              <td>Capability behaves poorly</td>
+              <td>User feedback or ambient reflection creates a child revision, pauses, or restores.</td>
+            </tr>
+            <tr>
+              <td>Process crashes during activation</td>
+              <td>SQLite transaction leaves either the old binding or the complete new binding active.</td>
+            </tr>
+            <tr>
+              <td>Core runtime update cannot boot</td>
+              <td>
+                External boot selector restores the previous build. Learned source changes cannot own
+                or delete that selector.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          Repeated semantic mistakes are tolerable; being stuck is not. Operational recovery therefore
+          receives more engineering investment than speculative pre-activation judgment.
+        </p>
+      </section>
+
+      <section>
+        <h2>9. Package ownership and interfaces</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Module</th>
+              <th>Ownership after rearchitecture</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>packages/domain</code></td>
+              <td>
+                Capability, revision, binding, feedback, gate-request, and mutation-result schemas.
+                Preserve durable <code>schemaVersion: 1</code> shapes where already public.
+              </td>
+            </tr>
+            <tr>
+              <td><code>packages/capabilities</code></td>
+              <td>
+                Deep Capability lifecycle module: construct immutable revisions, validate lineage,
+                resolve materials, compare bindings, restore predecessors, and build read models.
+              </td>
+            </tr>
+            <tr>
+              <td><code>packages/learning</code></td>
+              <td>
+                Ambient reflector, specialized author adapters, and
+                <code>iterateOnFeedback</code>. No experiment or preflight orchestration.
+              </td>
+            </tr>
+            <tr>
+              <td><code>packages/workspace</code></td>
+              <td>
+                Sole SQLite authority for Capability definitions, revision metadata, bindings, feedback,
+                gates, activity, and cutover. Immutable source bytes remain file revisions.
+              </td>
+            </tr>
+            <tr>
+              <td><code>packages/runtime</code></td>
+              <td>
+                Schedule one reflection per terminal turn, wait only for the exact preceding job,
+                scope-filter and route active capabilities, freeze selections, apply truthful fallback,
+                and route TUI mutations through AuthorityBoundary.
+              </td>
+            </tr>
+            <tr>
+              <td><code>packages/evals</code></td>
+              <td>
+                Removed from production learning composition. Existing code and records remain available
+                until a separate real-evaluation design replaces or deletes them.
+              </td>
+            </tr>
+            <tr>
+              <td><code>apps/noesis</code></td>
+              <td>
+                Compose the module, learning role adapters, Capability read model, notification stream,
+                and TUI mutation adapter. Pi types remain in <code>packages/runtime-pi</code> only.
+              </td>
+            </tr>
+            <tr>
+              <td><code>packages/tui</code></td>
+              <td>
+                Render the two-column Pi TUI, transient notifications, natural-language change form, and
+                authoritative mutation results. Own no durable learning state.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>External learning interface</h3>
+        <pre><code>interface CapabilityLearningModule {
+  readonly reflectSettledTurn: (
+    turn: SettledTurnLearningInput,
+    signal: AbortSignal,
+  ) =&gt; Promise&lt;CapabilityReflectionResult&gt;;
+
+  readonly iterateOnFeedback: (
+    feedback: CapabilityFeedbackInput,
+    signal: AbortSignal,
+  ) =&gt; Promise&lt;CapabilityIterationResult&gt;;
+
+  readonly manage: (
+    intent: CapabilityManagementIntent,
+    signal: AbortSignal,
+  ) =&gt; Promise&lt;CapabilityManagementResult&gt;;
+}</code></pre>
+        <p>
+          Turn resolution remains in the turn-intelligence module, which consumes Capability bindings
+          and revisions. Do not make the learning module a second turn planner.
+        </p>
+      </section>
+
+      <section>
+        <h2>10. Persistence and cutover</h2>
+        <h3>New authoritative tables</h3>
+        <ul>
+          <li><code>capabilities</code> — stable identity and descriptive metadata;</li>
+          <li><code>capability_revisions</code> — immutable revision envelope and material refs;</li>
+          <li><code>capability_bindings</code> — one current scope/mode/state/revision per Capability;</li>
+          <li><code>capability_feedback</code> — evidence-bearing feedback that affected lifecycle;</li>
+          <li><code>capability_gate_requests</code> — immutable pending/settled user decisions.</li>
+        </ul>
+        <p>
+          Do not create a usage table. Do not reconstruct current bindings from activity history. Activity
+          remains provenance and diagnostics, not operational authority.
+        </p>
+
+        <h3>Migration strategy</h3>
+        <ol>
+          <li>Add the new tables, constraints, indexes, and immutable triggers in a new migration.</li>
+          <li>
+            Add one idempotent WorkspaceStore cutover operation guarded by a durable cutover row and one
+            transaction.
+          </li>
+          <li>
+            Materialize the currently activated genesis and Capability revisions into the new registry
+            without changing their immutable refs.
+          </li>
+          <li>
+            Convert each active WorkingAdjustment into one <code>instruction</code> Capability with a
+            global/<code>relevant</code> binding by default. Preserve its original project and evidence as
+            provenance; do not keep project scope merely because the old type required it.
+          </li>
+          <li>
+            Keep historical WorkingAdjustment, Experiment, trial, preflight, activation-operation,
+            observation, and outcome rows unchanged and readable in legacy audit sections.
+          </li>
+          <li>
+            Stop enqueueing <code>runtime.author_revision</code> and <code>runtime.preflight</code> jobs after
+            cutover. Let already-terminal jobs remain historical. Cancel or terminalize unfinished legacy
+            jobs with an explicit cutover reason rather than silently abandoning leases.
+          </li>
+          <li>
+            Switch turn planning to <code>capability_bindings</code> only after the cutover transaction is
+            complete.
+          </li>
+          <li>
+            Preserve import and decoder support for old rows. Do not dual-write old and new authorities.
+          </li>
+        </ol>
+        <p class="warning">
+          Cutover is one-way operationally but non-destructive historically. Rollback means running the
+          previous application binary against its still-readable old tables only if no new Capability
+          binding has been created; once new writes exist, restore from the pre-cutover SQLite backup.
+        </p>
+      </section>
+
+      <section>
+        <h2>11. Implementation work</h2>
+
+        <div class="task">
+          <span class="task-id">CAP-01</span><strong>Update doctrine and contracts</strong>
+          <p class="muted">
+            Replace narrow-first, recurrence-before-global, no-authority-expansion, and mandatory-preflight
+            language. Define global/relevant defaults, always-active behavior, the tiny consequence gate,
+            and recovery-first safety.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> AGENTS and all three product documents describe the same behavior;
+            historical plans are labelled historical rather than silently rewritten as current truth.
+          </p>
+        </div>
+
+        <div class="task">
+          <span class="task-id">CAP-02</span><strong>Introduce Capability lifecycle schemas</strong>
+          <p class="muted">
+            Evolve domain types around Capability, immutable revision, one binding, feedback, and gate
+            request. Remove evaluation-owned fields from the ordinary revision contract or make legacy
+            decoding explicit.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> strict unknown-data decoders, canonical digests, immutable lineage,
+            and no parallel Change type.
+          </p>
+        </div>
+
+        <div class="task">
+          <span class="task-id">CAP-03</span><strong>Add authoritative WorkspaceStore state</strong>
+          <p class="muted">
+            Add tables, constraints, indexes, immutable triggers, binding compare-and-swap, restore, pause,
+            scope/mode mutation, feedback, gate settlement, and the idempotent legacy cutover.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> crashes and retries cannot create two current bindings, overwrite a
+            newer decision, mutate a referenced revision, or infer state from activity.
+          </p>
+        </div>
+
+        <div class="task">
+          <span class="task-id">CAP-04</span><strong>Deepen <code>packages/capabilities</code></strong>
+          <p class="muted">
+            Replace activation-plus-research coupling with the small lifecycle interface. Materialize exact
+            predecessor and candidate bytes, validate adapters, preserve rollback, and expose read models.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> instruction, skill, tool, workflow, router, configuration, and
+            boot-safe core-update revisions exercise the same interface through real adapters.
+          </p>
+        </div>
+
+        <div class="task">
+          <span class="task-id">CAP-05</span><strong>Simplify the learning organ</strong>
+          <p class="muted">
+            Replace WorkingAdjustment and Experiment decisions with Capability decisions. Run the reflector
+            for every terminal turn. Ensure authoring receives exact predecessor materials and opened
+            evidence. Implement <code>iterateOnFeedback</code>.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> ordinary creation or revision uses at most reflection plus one author
+            call; <code>no_change</code> needs no second call; no scope verifier or preflight work is scheduled.
+          </p>
+        </div>
+
+        <div class="task">
+          <span class="task-id">CAP-06</span><strong>Replace coordinator pipeline</strong>
+          <p class="muted">
+            Retain one recoverable reflection/authoring job instead of reflection → author → preflight. Await
+            only the exact prior-turn job before the next same-session turn. Terminalize legacy queued work
+            at cutover.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> process restart resumes one Capability iteration idempotently, and a
+            failed learning job never changes the completed foreground turn.
+          </p>
+        </div>
+
+        <div class="task">
+          <span class="task-id">CAP-07</span><strong>Route relevant and always-active capabilities</strong>
+          <p class="muted">
+            Add deterministic scope eligibility, direct inclusion for <code>always</code>, semantic selection
+            for <code>relevant</code>, conflict validation, exact materialization, and frozen-plan pins.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> an always/global Capability is present on every turn; a relevant/global
+            Capability is selected only by the capable router; project/session scope cannot leak.
+          </p>
+        </div>
+
+        <div class="task">
+          <span class="task-id">CAP-08</span><strong>Implement automatic activation and the tiny gate</strong>
+          <p class="muted">
+            Bind ordinary revisions immediately. Gate only the exact recovery and irreversible-consequence
+            cases. Support approve, deny, and natural-language change with immutable pending refs.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> global tools and authority configuration can activate automatically;
+            a revision cannot erase its own audit or recovery; foreground intent does not produce duplicate
+            approval prompts.
+          </p>
+        </div>
+
+        <div class="task">
+          <span class="task-id">CAP-09</span><strong>Rebuild the learning read model</strong>
+          <p class="muted">
+            Make Capability the primary aggregate. Join exact revisions, predecessor diff, evidence,
+            feedback, binding, gate, diagnostics, and legacy audit records. Derive usage only on explicit
+            audit queries from frozen plans.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> the default list contains material capabilities and pending decisions;
+            routine reflection is one health summary; evidence is readable rather than an ID wall.
+          </p>
+        </div>
+
+        <div class="task">
+          <span class="task-id">CAP-10</span><strong>Make <code>/learning</code> the management TUI</strong>
+          <p class="muted">
+            Extend the existing Pi TUI master-detail explorer with activate mode, scope, pause/resume,
+            restore, approve/deny/change, exact diffs, notifications, and authoritative mutation settlement.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> all operations work without transcript messages or notes; narrow and
+            wide layouts remain usable; hostile terminal text is sanitized; shutdown truthfully settles or
+            cancels interactive work.
+          </p>
+        </div>
+
+        <div class="task">
+          <span class="task-id">CAP-11</span><strong>Remove the old production path</strong>
+          <p class="muted">
+            Remove new Experiment creation, dynamic preflight composition, protected-promotion scheduling,
+            continuous-feedback outcome orchestration, WorkingAdjustment envelopes, and their live runtime
+            dependencies. Retain historical decoding and audit projections.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> production has exactly one learning mutation path and no dormant job
+            runner can activate a legacy candidate after cutover.
+          </p>
+        </div>
+
+        <div class="task">
+          <span class="task-id">CAP-12</span><strong>Prove recovery and real feedback iteration</strong>
+          <p class="muted">
+            Add acceptance flows using Pi AgentHarness and controlled providers: global capability creation,
+            relevance selection, always-active override, user correction, child revision, restoration,
+            pending-gate change, process restart, and broken-capability fallback.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> the user can experience and correct a capability over consecutive turns,
+            and every visible claim can be reconstructed from SQLite, immutable revisions, and frozen plans.
+          </p>
+        </div>
+      </section>
+
+      <section>
+        <h2>12. Verification matrix</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Contract</th>
+              <th>Required proof</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Every terminal turn reflects</td>
+              <td>Completed, failed, and aborted acceptance turns each enqueue exactly one job.</td>
+            </tr>
+            <tr>
+              <td>No semantic pre-filter</td>
+              <td>A mundane turn reaches the reflector and produces durable aggregate <code>no_change</code>.</td>
+            </tr>
+            <tr>
+              <td>Global default</td>
+              <td>A new Capability created in project A is eligible in project B unless narrowed.</td>
+            </tr>
+            <tr>
+              <td>Relevant mode</td>
+              <td>Controlled capable router selects and omits the same Capability for two different intents.</td>
+            </tr>
+            <tr>
+              <td>Always mode</td>
+              <td>User mutation makes the Capability appear in every eligible frozen plan without routing.</td>
+            </tr>
+            <tr>
+              <td>No usage ledger</td>
+              <td>No new write occurs per selected Capability; an audit query derives turns from frozen plans.</td>
+            </tr>
+            <tr>
+              <td>Fast iteration</td>
+              <td>Turn A creates r1, Turn B uses it, feedback creates r2, and Turn C uses r2.</td>
+            </tr>
+            <tr>
+              <td>Restoration</td>
+              <td>Restore binds exact r1 bytes without reconstructing them from mutable files.</td>
+            </tr>
+            <tr>
+              <td>Powerful change</td>
+              <td>A global tool Capability activates automatically and enters the next frozen catalog.</td>
+            </tr>
+            <tr>
+              <td>Tiny gate</td>
+              <td>Recovery-kernel mutation waits; approve, deny, and natural-language change settle exactly once.</td>
+            </tr>
+            <tr>
+              <td>Truthful notification</td>
+              <td>Notification appears only after binding commit and never becomes transcript content.</td>
+            </tr>
+            <tr>
+              <td>Broken revision</td>
+              <td>
+                A known-invalid revision is paused exactly; an ambiguous composition failure produces a
+                genesis-only safe-mode turn without fabricating historical state.
+              </td>
+            </tr>
+            <tr>
+              <td>Crash safety</td>
+              <td>Fault injection around every binding/gate/cutover transaction yields one authoritative state.</td>
+            </tr>
+            <tr>
+              <td>Legacy history</td>
+              <td>Existing experiments, trials, preflights, activations, and adjustments remain inspectable.</td>
+            </tr>
+            <tr>
+              <td>Single live path</td>
+              <td>No production call site enqueues author-revision or preflight jobs after cutover.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>
+          After implementation run <code>pnpm format</code>, <code>pnpm lint</code>,
+          <code>pnpm typecheck</code>, and <code>pnpm test</code>. Paid credentials and network calls are not
+          required; semantic acceptance uses controlled capable-model providers through Pi AgentHarness.
+        </p>
+      </section>
+
+      <section>
+        <h2>13. Explicit deferrals</h2>
+        <ul>
+          <li>
+            <strong>Real evaluation system.</strong> No synthetic replacement is built here. A later design may
+            execute exact baseline and candidate revisions in evaluator-controlled isolation.
+          </li>
+          <li>
+            <strong>Training model weights.</strong> This loop adapts the harness and creates high-quality
+            preference data; it does not perform RLHF or fine-tuning.
+          </li>
+          <li>
+            <strong>Capability-use analytics.</strong> Frozen plans preserve derivability. Add a projection only
+            when a real query cannot be served acceptably.
+          </li>
+          <li>
+            <strong>Confidence scores.</strong> Do not invent a scalar standing in for ambiguous evidence.
+            Preserve evidence, feedback, and lifecycle decisions.
+          </li>
+          <li>
+            <strong>Automatic global narrowing from silence.</strong> Silence is not feedback. Scope changes
+            require model-interpreted evidence or direct user intent.
+          </li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>14. Definition of done</h2>
+        <ol>
+          <li>Capability is the only normal user-facing self-improvement abstraction.</li>
+          <li>Every terminal foreground turn runs one ambient reflection without a usefulness pre-classifier.</li>
+          <li>New capabilities default to global and relevant.</li>
+          <li>The user can make any eligible Capability always active.</li>
+          <li>The agent can autonomously activate global prompt, skill, tool, workflow, router, and configuration revisions.</li>
+          <li>Ordinary learning schedules no experiment, preflight, trial, blind judge, or outcome judge.</li>
+          <li>Explicit and ambient feedback can revise, pause, restore, re-scope, or change activation mode.</li>
+          <li>The TUI offers approve, deny, and natural-language change only for the tiny consequence gate.</li>
+          <li>Notifications are visible TUI chrome, not transcript messages or notes.</li>
+          <li>The Capability aggregate does not store per-turn usage; frozen plans retain exact attribution.</li>
+          <li>Previous revisions and a bootable recovery path remain available after every activation.</li>
+          <li>Legacy learning records remain inspectable, but no legacy pipeline can create new live behavior.</li>
+          <li>Current doctrine, implementation, tests, and <code>/learning</code> describe the same system.</li>
+        </ol>
+      </section>
+    </main>
+  </body>
 </html>

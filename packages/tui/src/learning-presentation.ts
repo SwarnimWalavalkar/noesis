@@ -39,6 +39,7 @@ export interface SettledTurnPresentation {
 }
 
 export function learningAuditFocusId(activity: TuiLearningActivitySummary): string {
+  if (activity.capabilityId) return `capability:${activity.capabilityId}`;
   if (activity.stage === "reflection" && (activity.status === "unapplied" || activity.status === "stale"))
     return `reflection:${activity.jobId}`;
   if (activity.adjustmentId) return `working_adjustment:${activity.adjustmentId}`;
@@ -48,6 +49,12 @@ export function learningAuditFocusId(activity: TuiLearningActivitySummary): stri
 }
 
 export function workingAdjustmentNotice(activity: TuiLearningActivitySummary): string | undefined {
+  if (activity.status === "activated") return `Capability active · ${activity.summary}`;
+  if (activity.status === "revised") return `Capability updated · ${activity.summary}`;
+  if (activity.status === "pending") return `Capability needs a decision · ${activity.summary}`;
+  if (activity.status === "paused") return `Capability paused · ${activity.summary}`;
+  if (activity.status === "restored") return `Capability restored · ${activity.summary}`;
+  if (activity.status === "binding_changed") return `Capability settings updated · ${activity.summary}`;
   if (activity.status === "adjusted" || activity.status === "replaced") {
     const strategy = activity.workingAdjustment?.strategy;
     return `adjusted · ${activity.summary}${strategy ? `\nstrategy · ${strategy}` : ""}`;
@@ -137,7 +144,12 @@ export async function settledTurnPresentation(
       { type: "system-message", text: "Turn interrupted." },
     );
   const learningNotice = workingAdjustmentNoticeForTurn(learning.activities, request.turnId);
-  if (learningNotice) actions.push({ type: "system-message", text: learningNotice });
+  if (learningNotice)
+    actions.push({
+      type: "notification-shown",
+      text: learningNotice,
+      tone: learningNotice.startsWith("Capability needs") ? "attention" : "success",
+    });
   const focusActivity = learning.activities.find(
     (activity) => activity.turnId === request.turnId && workingAdjustmentNotice(activity) !== undefined,
   );
@@ -178,7 +190,11 @@ export function reconcileSettledTurnPresentation(
           jobId: presentation.pendingReflectionJobId,
           onNotice: (notice, focusId) => {
             if (!host.isTrailCurrent()) return;
-            host.dispatch({ type: "system-message", text: notice });
+            host.dispatch({
+              type: "notification-shown",
+              text: notice,
+              tone: notice.startsWith("Capability needs") ? "attention" : "success",
+            });
             host.rememberLearningFocus?.(focusId);
             host.requestRender();
           },
@@ -192,7 +208,8 @@ export function reconcileSettledTurnPresentation(
       if (!currentTrail || !host.canApplySettledState()) {
         if (currentTrail && request.outcome === "completed") {
           for (const action of presentation.actions) {
-            if (action.type === "system-message") host.dispatch(action);
+            if (action.type === "system-message" || action.type === "notification-shown")
+              host.dispatch(action);
           }
           host.requestRender();
         }

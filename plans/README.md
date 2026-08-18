@@ -20,7 +20,10 @@ The core work described by these plans has shipped. Their preimplementation gap 
 
 Keep future plans in this directory. Add their status here when they are created, completed, superseded, or abandoned.
 
+## Active implementation plans
+
+- [Capability loop rearchitecture](noesis-learning-architecture-simplification.html)
+
 ## Open design workshops
 
 - [MCP integration](noesis-mcp-integration-design.html)
-- [Learning architecture simplification](noesis-learning-architecture-simplification.html)

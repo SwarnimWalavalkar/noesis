@@ -139,14 +139,41 @@ describe("turn intelligence", () => {
       const promptRevision = revision.promptModules[0];
       const skillRevision = revision.skills[0];
       if (!promptRevision || !skillRevision) throw new Error("Fixture revision is incomplete");
-      await protectedRuntime.activations.bootstrapGenesis({
-        capabilityRevision: reference,
-        activeDefinitions: Object.freeze({
-          [`${capability.capabilityId}:prompt`]: promptRevision,
-          [`${capability.capabilityId}:skill`]: skillRevision,
-          [`${capability.capabilityId}:router`]: revision.toolset.routerRevision,
-        }),
-      });
+      if (capability.capabilityId === "general")
+        await protectedRuntime.activations.bootstrapGenesis({
+          capabilityRevision: reference,
+          activeDefinitions: Object.freeze({
+            [`${capability.capabilityId}:prompt`]: promptRevision,
+            [`${capability.capabilityId}:skill`]: skillRevision,
+            [`${capability.capabilityId}:router`]: revision.toolset.routerRevision,
+          }),
+        });
+      else
+        await workspace.capabilities.create({
+          definition: Object.freeze({
+            capabilityId: capability.capabilityId,
+            name: capability.name,
+            kind: "instruction",
+            description: capability.intent,
+            applicability: capability.scope,
+            createdAt: "2026-07-24T00:00:00.000Z",
+          }),
+          revision: Object.freeze({
+            revision,
+            reference,
+            summary: "Keep research briefs concise",
+            rationale: "The user corrected overly broad research output",
+            anticipatedEffect: "Shorter research briefs",
+            createdAt: "2026-07-24T00:00:00.000Z",
+          }),
+          binding: Object.freeze({
+            capabilityId: capability.capabilityId,
+            revision: reference,
+            scope: Object.freeze({ kind: "global" as const }),
+            activationMode: "relevant",
+            state: "active",
+          }),
+        });
     }
     const resolver: TurnCapabilityResolver = Object.freeze({
       resolveCapability: async (capabilityId: string) => capabilities.get(capabilityId),
@@ -575,20 +602,19 @@ describe("turn intelligence", () => {
     });
     let routingCalls = 0;
     let admissionAttempts = 0;
-    const retryingProtectedRuntime = Object.freeze({
+    const observingProtectedRuntime = Object.freeze({
       ...protectedRuntime,
       activations: Object.freeze({
         ...protectedRuntime.activations,
         admitTurnPlan: async (plan: Parameters<typeof protectedRuntime.activations.admitTurnPlan>[0]) => {
           admissionAttempts += 1;
-          if (admissionAttempts === 1) throw workingAdjustmentAdmissionConflictError();
           return await protectedRuntime.activations.admitTurnPlan(plan);
         },
       }),
     });
     const planner = createTurnIntelligencePlanner({
       workspace,
-      protectedRuntime: retryingProtectedRuntime,
+      protectedRuntime: observingProtectedRuntime,
       project: PROJECT,
       capabilities: Object.freeze({
         resolveCapability: async () => capability,
@@ -614,13 +640,11 @@ describe("turn intelligence", () => {
     });
 
     expect(routingCalls).toBe(0);
-    expect(admissionAttempts).toBe(2);
+    expect(admissionAttempts).toBe(1);
     expect(plan.selectedCapabilities.map((item) => item.capabilityId)).toEqual(["general"]);
     expect(plan.project).toEqual(PROJECT);
-    expect(plan.workingAdjustmentId).toBe("adjustment_test");
-    expect(plan.renderedSystemPrompt).toContain("project-working-adjustment-v1");
-    expect(plan.renderedSystemPrompt).toContain("\\u003c/working-adjustment-data\\u003e");
-    expect(plan.renderedSystemPrompt.match(/<working-adjustment-data>/gu)).toHaveLength(1);
+    expect(plan.workingAdjustmentId).toBeUndefined();
+    expect(plan.renderedSystemPrompt).not.toContain("project-working-adjustment-v1");
     expect(plan.routing).toEqual({
       strategyId: "semantic-capability-router-v1",
       reason: "No narrow active capabilities required semantic routing",
