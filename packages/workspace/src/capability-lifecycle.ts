@@ -136,6 +136,30 @@ export function createCapabilityLifecycleStore(
   const getBinding: CapabilityLifecycleStore["getBinding"] = async (capabilityId) =>
     decodeBinding(db.prepare("SELECT * FROM capability_bindings WHERE capability_id = ?").get(capabilityId));
 
+  const assertBatchIds = (capabilityIds: readonly string[]): readonly string[] => {
+    const unique = Object.freeze([...new Set(capabilityIds)]);
+    if (unique.length > 1_000) throw new Error("Capability lifecycle batch lookup cannot exceed 1000 ids");
+    if (unique.some((capabilityId) => capabilityId.length === 0))
+      throw new Error("Capability lifecycle batch lookup requires non-empty ids");
+    return unique;
+  };
+
+  const getBindings: CapabilityLifecycleStore["getBindings"] = async (capabilityIds) => {
+    const ids = assertBatchIds(capabilityIds);
+    if (ids.length === 0) return Object.freeze([]);
+    const placeholders = ids.map(() => "?").join(", ");
+    return Object.freeze(
+      db
+        .prepare(`SELECT * FROM capability_bindings WHERE capability_id IN (${placeholders})`)
+        .all(...ids)
+        .map((row) => {
+          const value = decodeBinding(row);
+          if (!value) throw new Error("Capability binding row disappeared during decoding");
+          return value;
+        }),
+    );
+  };
+
   const assertRevision = (revision: CapabilityLifecycleRevision): CapabilityLifecycleRevision => {
     const parsed = normalizeLifecycleRevision(revision);
     if (parsed.revision.capabilityId !== parsed.reference.capabilityId)
@@ -430,6 +454,22 @@ export function createCapabilityLifecycleStore(
         .map((row) => CapabilityDefinitionSchema.parse(parseJson(requiredString(row, "definition_json")))),
     );
 
+  const getDefinitions: CapabilityLifecycleStore["getDefinitions"] = async (capabilityIds) => {
+    const ids = assertBatchIds(capabilityIds);
+    if (ids.length === 0) return Object.freeze([]);
+    const placeholders = ids.map(() => "?").join(", ");
+    return Object.freeze(
+      db
+        .prepare(`SELECT definition_json FROM capabilities WHERE capability_id IN (${placeholders})`)
+        .all(...ids)
+        .map((row) => {
+          const value = decodeDefinition(row);
+          if (!value) throw new Error("Capability definition row disappeared during decoding");
+          return value;
+        }),
+    );
+  };
+
   const listRevisions: CapabilityLifecycleStore["listRevisions"] = async (capabilityId, request) => {
     if (request) assertLimit(request.limit);
     const rows = request
@@ -477,8 +517,21 @@ export function createCapabilityLifecycleStore(
     Object.freeze(
       db
         .prepare(
-          `SELECT * FROM capability_bindings
-           WHERE state = 'active' AND ${scopedWhere}
+          `SELECT * FROM (
+             SELECT * FROM capability_bindings
+             WHERE state = 'active' AND json_extract(scope_json, '$.kind') = 'global'
+             UNION ALL
+             SELECT * FROM capability_bindings
+             WHERE state = 'active'
+               AND json_extract(scope_json, '$.kind') = 'project'
+               AND json_extract(scope_json, '$.project.projectId') = ?
+               AND json_extract(scope_json, '$.project.root') = ?
+             UNION ALL
+             SELECT * FROM capability_bindings
+             WHERE state = 'active'
+               AND json_extract(scope_json, '$.kind') = 'session'
+               AND json_extract(scope_json, '$.sessionId') = ?
+           )
            ORDER BY updated_at DESC, capability_id`,
         )
         .all(request.project.projectId, request.project.root, request.sessionId)
@@ -549,21 +602,35 @@ export function createCapabilityLifecycleStore(
       if (!binding) throw new Error(`Unknown capability ${gate.capabilityId}`);
       if (gate.expectedBindingRevision !== binding.revisionNumber)
         throw new Error("A staged capability gate must pin the current binding revision");
-      if (revision.revision.predecessorRevisionId !== binding.revision.capabilityRevisionId)
+      const supersededGate = request.supersedeGateRequestId
+        ? decodeGate(
+            db
+              .prepare("SELECT request_json FROM capability_gate_requests WHERE gate_request_id = ?")
+              .get(request.supersedeGateRequestId),
+          )
+        : undefined;
+      if (request.supersedeGateRequestId && !supersededGate)
+        throw new Error(`Unknown capability gate ${request.supersedeGateRequestId}`);
+      if (supersededGate && supersededGate.capabilityId !== gate.capabilityId)
+        throw new Error("A replacement gate cannot supersede another capability's request");
+      const expectedPredecessor =
+        supersededGate?.revision.capabilityRevisionId ?? binding.revision.capabilityRevisionId;
+      if (revision.revision.predecessorRevisionId !== expectedPredecessor)
         throw new Error("A gated capability revision must succeed the current bound revision");
       if (feedback && !sameCapabilityRevisionRef(feedback.revision, binding.revision))
-        throw new Error("Gated capability feedback must describe the current binding");
+        if (!request.supersedeGateRequestId)
+          throw new Error("Gated capability feedback must describe the current binding");
       insertRevision(revision);
-      if (feedback) insertFeedback(feedback);
-      if (request.supersedeGateRequestId) {
-        const current = decodeGate(
-          db
-            .prepare("SELECT request_json FROM capability_gate_requests WHERE gate_request_id = ?")
-            .get(request.supersedeGateRequestId),
-        );
-        if (!current) throw new Error(`Unknown capability gate ${request.supersedeGateRequestId}`);
-        settlePendingGate(current, "superseded", gate.instruction);
+      if (supersededGate) {
+        if (
+          feedback &&
+          !sameCapabilityRevisionRef(feedback.revision, binding.revision) &&
+          !sameCapabilityRevisionRef(feedback.revision, supersededGate.revision)
+        )
+          throw new Error("Replacement gate feedback must describe the binding or superseded revision");
+        settlePendingGate(supersededGate, "superseded", gate.instruction);
       }
+      if (feedback) insertFeedback(feedback);
       return insertGate(gate);
     });
   };
@@ -593,7 +660,7 @@ export function createCapabilityLifecycleStore(
         revision: revision.reference,
         scope: request.scope,
         activationMode: request.activationMode,
-        state: "active",
+        state: current.state,
       });
     });
   };
@@ -756,10 +823,12 @@ export function createCapabilityLifecycleStore(
     create,
     getDefinition,
     listDefinitions,
+    getDefinitions,
     getRevision,
     listRevisions,
     addRevision,
     getBinding,
+    getBindings,
     listBindings,
     listEligibleBindings,
     updateBinding,

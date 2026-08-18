@@ -183,7 +183,6 @@ export function createCapabilityCoordinator(
         async () => {
           controller.signal.throwIfAborted();
           const result = await options.learning.reflectSettledTurn(view.payload, controller.signal);
-          controller.signal.throwIfAborted();
           return toJsonValue(result);
         },
       );

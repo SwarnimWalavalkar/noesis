@@ -400,9 +400,7 @@ export function createCapabilityLearningModule(
         limit: 1_000,
       }),
     ]);
-    const definitions = (
-      await Promise.all(bindings.map((binding) => options.store.getDefinition(binding.capabilityId)))
-    ).filter((definition): definition is CapabilityDefinition => definition !== undefined);
+    const definitions = await options.store.getDefinitions(bindings.map((binding) => binding.capabilityId));
     const currentEvidence: ExactCitation = Object.freeze({
       source: Object.freeze({
         kind: "database_row" as const,
@@ -726,7 +724,7 @@ export function createCapabilityLearningModule(
         feedback: Object.freeze({
           feedbackId: nextId("capability_feedback"),
           capabilityId: gate.capabilityId,
-          revision: gate.revision,
+          revision: binding.revision,
           evidenceRefs: predecessor.revision.evidenceRefs,
           interpretation: intent.instruction,
           disposition: "correction",

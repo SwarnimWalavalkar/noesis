@@ -24,8 +24,8 @@ function lifecycleRevision(
   prompt: FileRevisionRef,
   router: FileRevisionRef,
   predecessorRevisionId?: string,
+  capabilityId = "capability_concise_research",
 ): CapabilityLifecycleRevision {
-  const capabilityId = "capability_concise_research";
   const revision: CapabilityRevision = Object.freeze({
     capabilityRevisionId,
     capabilityId,
@@ -212,5 +212,108 @@ describe("Capability lifecycle store", () => {
     });
     expect(await workspace.capabilities.listPendingGates()).toEqual([]);
     expect(await workspace.capabilities.listRevisions(binding.capabilityId)).toEqual([first, second]);
+
+    expect(await workspace.capabilities.getDefinitions([binding.capabilityId])).toEqual([
+      await workspace.capabilities.getDefinition(binding.capabilityId),
+    ]);
+    expect(await workspace.capabilities.getBindings([binding.capabilityId])).toEqual([
+      await workspace.capabilities.getBinding(binding.capabilityId),
+    ]);
+
+    const otherMaterial = await recordMaterial("other-revision-1");
+    const other = lifecycleRevision(
+      "other-revision-1",
+      otherMaterial[0],
+      otherMaterial[1],
+      undefined,
+      "capability_other",
+    );
+    await workspace.capabilities.create({
+      definition: Object.freeze({
+        capabilityId: other.reference.capabilityId,
+        name: "Other capability",
+        kind: "instruction",
+        description: "Another capability for gate isolation.",
+        applicability: "Other work.",
+        createdAt: other.createdAt,
+      }),
+      revision: other,
+      binding: Object.freeze({
+        capabilityId: other.reference.capabilityId,
+        revision: other.reference,
+        scope: Object.freeze({ kind: "global" as const }),
+        activationMode: "relevant",
+        state: "paused",
+      }),
+      gate: Object.freeze({
+        gateRequestId: "other-gate",
+        capabilityId: other.reference.capabilityId,
+        revision: other.reference,
+        expectedBindingRevision: 1,
+        proposedScope: Object.freeze({ kind: "global" as const }),
+        proposedActivationMode: "relevant",
+        consequence: "Other consequence",
+        status: "pending",
+        createdAt: "2026-08-18T04:00:00.000Z",
+      }),
+    });
+
+    const thirdMaterial = await recordMaterial("revision-3");
+    const third = lifecycleRevision(
+      "revision-3",
+      thirdMaterial[0],
+      thirdMaterial[1],
+      second.reference.capabilityRevisionId,
+    );
+    await expect(
+      workspace.capabilities.stageGatedRevision({
+        revision: third,
+        supersedeGateRequestId: "other-gate",
+        gate: Object.freeze({
+          gateRequestId: "gate-2",
+          capabilityId: binding.capabilityId,
+          revision: third.reference,
+          expectedBindingRevision: 3,
+          proposedScope: Object.freeze({ kind: "global" as const }),
+          proposedActivationMode: "relevant",
+          consequence: "A replacement must remain capability-local.",
+          status: "pending",
+          createdAt: "2026-08-18T05:00:00.000Z",
+        }),
+      }),
+    ).rejects.toThrow("cannot supersede another capability's request");
+    expect(await workspace.capabilities.getGate("other-gate")).toMatchObject({ status: "pending" });
+    expect(await workspace.capabilities.getGate("gate-2")).toBeUndefined();
+
+    expect(
+      await workspace.capabilities.updateBinding({
+        capabilityId: binding.capabilityId,
+        expectedRevisionNumber: 3,
+        state: "paused",
+      }),
+    ).toMatchObject({ status: "updated", binding: { state: "paused", revisionNumber: 4 } });
+    expect(
+      await workspace.capabilities.applyRevision({
+        revision: third,
+        feedback: Object.freeze({
+          feedbackId: "feedback-2",
+          capabilityId: binding.capabilityId,
+          revision: second.reference,
+          evidenceRefs: Object.freeze([
+            Object.freeze({
+              kind: "database_row" as const,
+              table: "messages" as const,
+              rowId: "message-feedback",
+            }),
+          ]),
+          interpretation: "Revise the instructions without resuming the paused capability.",
+          disposition: "correction",
+          createdAt: "2026-08-18T06:00:00.000Z",
+        }),
+        expectedBindingRevision: 4,
+        scope: Object.freeze({ kind: "global" as const }),
+        activationMode: "relevant",
+      }),
+    ).toMatchObject({ status: "updated", binding: { state: "paused", revisionNumber: 5 } });
   });
 });

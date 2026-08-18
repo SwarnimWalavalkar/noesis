@@ -1013,6 +1013,9 @@ export interface CapabilityLifecycleStore {
     capabilityId: string,
   ) => Promise<import("@noesis/domain").CapabilityDefinition | undefined>;
   readonly listDefinitions: () => Promise<readonly import("@noesis/domain").CapabilityDefinition[]>;
+  readonly getDefinitions: (
+    capabilityIds: readonly string[],
+  ) => Promise<readonly import("@noesis/domain").CapabilityDefinition[]>;
   readonly getRevision: (
     reference: import("@noesis/domain").CapabilityRevisionRef,
   ) => Promise<import("@noesis/domain").CapabilityLifecycleRevision | undefined>;
@@ -1026,6 +1029,9 @@ export interface CapabilityLifecycleStore {
   readonly getBinding: (
     capabilityId: string,
   ) => Promise<import("@noesis/domain").CapabilityBinding | undefined>;
+  readonly getBindings: (
+    capabilityIds: readonly string[],
+  ) => Promise<readonly import("@noesis/domain").CapabilityBinding[]>;
   readonly listBindings: (request?: {
     readonly project: import("@noesis/domain").ProjectRef;
     readonly sessionId: string;
@@ -1109,7 +1115,7 @@ export interface CapabilityLifecycleStore {
   >;
   readonly settleGate: (request: {
     readonly gateRequestId: string;
-    readonly status: "approved" | "denied" | "superseded";
+    readonly status: "denied" | "superseded";
     readonly instruction?: string;
   }) => Promise<import("@noesis/domain").CapabilityGateRequest>;
   readonly completeCutover: () => Promise<boolean>;

@@ -282,16 +282,19 @@ export function createTurnIntelligencePlanner(
       readonly baseline: FrozenBaselineRef;
     }[] = [];
     const legacyReferences = Object.values(activation.activeCapabilityRevisions);
-    const legacyWithoutLifecycleBinding = (
-      await Promise.all(
-        legacyReferences.map(async (reference) =>
-          reference.kind === "capability_revision" &&
-          (await options.workspace.capabilities.getBinding(reference.capabilityId)) === undefined
-            ? reference
-            : undefined,
-        ),
-      )
-    ).filter((reference): reference is CapabilityRevisionRef => reference !== undefined);
+    const legacyCapabilityReferences = legacyReferences.filter(
+      (reference): reference is CapabilityRevisionRef => reference.kind === "capability_revision",
+    );
+    const lifecycleCapabilityIds = new Set(
+      (
+        await options.workspace.capabilities.getBindings(
+          legacyCapabilityReferences.map((reference) => reference.capabilityId),
+        )
+      ).map((binding) => binding.capabilityId),
+    );
+    const legacyWithoutLifecycleBinding = legacyCapabilityReferences.filter(
+      (reference) => !lifecycleCapabilityIds.has(reference.capabilityId),
+    );
     const lifecycleModes = new Map(
       lifecycleBindings.map((binding) => [binding.capabilityId, binding.activationMode]),
     );

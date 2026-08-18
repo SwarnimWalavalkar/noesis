@@ -86,7 +86,7 @@ Useful changes should not require approval at every step. The user can still ins
 7. Make changes understandable and reversible. The user can see what changed, why it changed, where it applies, and how to undo it.
 8. Add only what strengthens the main promise. New models, tools, interfaces, and research methods should help the user and agent develop together.
 9. Let real use change the product. Evidence may revise the primary user, interaction patterns, learning reach, continuity choices, and defaults.
-10. Prefer recovery over ceremony. Ordinary instruction Capabilities activate immediately. The model can change project tools and workflows through the explicit foreground `adapt` path. Exact revisions, visible provenance, feedback, pause, and restore keep the learning loop recoverable; only a tiny set of irreversible consequences interrupts for approval.
+10. Prefer recovery over ceremony. Ordinary instruction Capabilities activate immediately. The model can publish project tools and workflows through the explicit foreground `execute` path; `adapt` only changes the direct-tool hotbar. Exact revisions, visible provenance, feedback, pause, and restore keep the learning loop recoverable; only a tiny set of irreversible consequences interrupts for approval.
 
 ## Non-goals
 

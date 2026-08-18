@@ -68,6 +68,15 @@ describe("Capability learning loop", () => {
       createdAt: "2026-08-18T00:00:00.000Z",
       metadata: Object.freeze({ turnId: "turn-1" }),
     });
+    await workspace.operational.messages.put({
+      messageId: "turn-2:user",
+      sessionId: "session-1",
+      role: "user",
+      content: "Teach recovery behavior, but do not apply it before I approve it.",
+      sensitivity: "normal",
+      createdAt: "2026-08-18T00:30:00.000Z",
+      metadata: Object.freeze({ turnId: "turn-2" }),
+    });
     const inference = createScriptedLearningInferencePort({
       steps: [
         Object.freeze({
@@ -87,6 +96,28 @@ describe("Capability learning loop", () => {
               activationMode: "relevant",
               consequence: "ordinary",
               consequenceDescription: "Only model instructions change.",
+              evidenceCitationIndexes: Object.freeze([0]),
+            }),
+          }),
+        }),
+        Object.freeze({
+          role: "reflector",
+          value: Object.freeze({
+            decision: "revise",
+            capabilityId: "capability-1",
+            proposal: Object.freeze({
+              name: "Concise research",
+              kind: "instruction",
+              description: "Keep research answers concise without dropping primary evidence.",
+              applicability: "Research and source-synthesis requests.",
+              summary: "Add explicit recovery guidance.",
+              rationale: "The user requested a recovery rule that requires approval.",
+              anticipatedEffect: "Recovery remains deliberate.",
+              instruction: "Prefer concise synthesis and explain recovery before acting.",
+              scope: "global",
+              activationMode: "relevant",
+              consequence: "recovery_control",
+              consequenceDescription: "This changes recovery control behavior.",
               evidenceCitationIndexes: Object.freeze([0]),
             }),
           }),
@@ -185,40 +216,54 @@ describe("Capability learning loop", () => {
       "evidence",
     ]);
 
-    const binding = await workspace.capabilities.getBinding("capability-1");
-    if (!binding) throw new Error("Expected the reflected Capability binding");
-    await workspace.capabilities.createGate({
-      gateRequestId: "gate-original",
-      capabilityId: binding.capabilityId,
-      revision: binding.revision,
-      expectedBindingRevision: binding.revisionNumber,
-      proposedScope: binding.scope,
-      proposedActivationMode: binding.activationMode,
-      consequence: "This changes recovery control behavior.",
-      status: "pending",
-      createdAt: "2026-08-18T01:00:00.000Z",
-    });
+    const pending = await module.reflectSettledTurn(
+      Object.freeze({
+        turn: Object.freeze({
+          sessionId: "session-1",
+          turnId: "turn-2",
+          userMessage: "Teach recovery behavior, but do not apply it before I approve it.",
+          assistantMessage: "Understood.",
+          outcome: "accepted",
+          servedWorkingAdjustmentOutcomes: [],
+          scope: "general",
+          sensitivity: "normal",
+          evidenceRefs: [
+            Object.freeze({
+              kind: "database_row" as const,
+              table: "messages" as const,
+              rowId: "turn-2:user",
+            }),
+          ],
+          telemetry: Object.freeze({ retryCount: 0, toolFailureCount: 0, aborted: false }),
+          occurredAt: "2026-08-18T00:30:00.000Z",
+        }),
+        project: Object.freeze({ projectId: "project-1", root }),
+        selectedCapabilities: Object.freeze([]),
+      }),
+      new AbortController().signal,
+    );
+    expect(pending).toMatchObject({ status: "pending", capabilityId: "capability-1" });
     const changed = await module.manage(
       {
         type: "change",
-        gateRequestId: "gate-original",
+        gateRequestId: "gate-1",
         instruction: "Keep recovery manual and explain the fallback.",
       },
       new AbortController().signal,
     );
     expect(changed).toMatchObject({ status: "pending", capabilityId: "capability-1" });
-    expect(await workspace.capabilities.getGate("gate-original")).toMatchObject({
+    expect(await workspace.capabilities.getGate("gate-1")).toMatchObject({
       status: "superseded",
       instruction: "Keep recovery manual and explain the fallback.",
     });
     expect(await workspace.capabilities.listPendingGates()).toMatchObject([
       {
-        gateRequestId: "gate-1",
+        gateRequestId: "gate-2",
         capabilityId: "capability-1",
-        revision: { capabilityRevisionId: "revision-2" },
+        revision: { capabilityRevisionId: "revision-3" },
         instruction: "Keep recovery manual and explain the fallback.",
       },
     ]);
-    expect(await workspace.capabilities.listRevisions("capability-1")).toHaveLength(2);
+    expect(await workspace.capabilities.listRevisions("capability-1")).toHaveLength(3);
   });
 });
