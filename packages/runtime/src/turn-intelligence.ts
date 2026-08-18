@@ -285,12 +285,15 @@ export function createTurnIntelligencePlanner(
     const legacyCapabilityReferences = legacyReferences.filter(
       (reference): reference is CapabilityRevisionRef => reference.kind === "capability_revision",
     );
+    const legacyBindingBatches: Promise<readonly import("@noesis/domain").CapabilityBinding[]>[] = [];
+    for (let offset = 0; offset < legacyCapabilityReferences.length; offset += 1_000)
+      legacyBindingBatches.push(
+        options.workspace.capabilities.getBindings(
+          legacyCapabilityReferences.slice(offset, offset + 1_000).map((reference) => reference.capabilityId),
+        ),
+      );
     const lifecycleCapabilityIds = new Set(
-      (
-        await options.workspace.capabilities.getBindings(
-          legacyCapabilityReferences.map((reference) => reference.capabilityId),
-        )
-      ).map((binding) => binding.capabilityId),
+      (await Promise.all(legacyBindingBatches)).flat().map((binding) => binding.capabilityId),
     );
     const legacyWithoutLifecycleBinding = legacyCapabilityReferences.filter(
       (reference) => !lifecycleCapabilityIds.has(reference.capabilityId),

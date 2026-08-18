@@ -1,22 +1,25 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createWorkspaceStore } from "@noesis/workspace";
+import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
 import { createCapabilityCoordinator } from "../src/capability-coordinator.ts";
 
-const roots: string[] = [];
+const opened: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
 
 afterEach(async () => {
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+  for (const item of opened.splice(0)) {
+    item.workspace.close();
+    await rm(item.root, { recursive: true, force: true });
+  }
 });
 
 describe("Capability coordinator", () => {
   test("settles a completed reflection when shutdown arrives after the lifecycle mutation", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-capability-coordinator-"));
-    roots.push(root);
     const workspace = await createWorkspaceStore(root);
+    opened.push({ root, workspace });
     const timestamp = "2026-08-19T00:00:00.000Z";
     await workspace.operational.sessions.put({
       sessionId: "session-1",
@@ -87,6 +90,5 @@ describe("Capability coordinator", () => {
       status: "completed",
       result: { status: "no_change", reason: "Lifecycle mutation committed" },
     });
-    workspace.close();
   });
 });

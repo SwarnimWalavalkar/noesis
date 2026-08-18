@@ -613,10 +613,16 @@ export function createCapabilityLifecycleStore(
         throw new Error(`Unknown capability gate ${request.supersedeGateRequestId}`);
       if (supersededGate && supersededGate.capabilityId !== gate.capabilityId)
         throw new Error("A replacement gate cannot supersede another capability's request");
+      if (supersededGate && supersededGate.expectedBindingRevision !== binding.revisionNumber)
+        throw new Error("A replacement gate cannot supersede a request for a stale binding");
       const expectedPredecessor =
         supersededGate?.revision.capabilityRevisionId ?? binding.revision.capabilityRevisionId;
       if (revision.revision.predecessorRevisionId !== expectedPredecessor)
-        throw new Error("A gated capability revision must succeed the current bound revision");
+        throw new Error(
+          supersededGate
+            ? "A replacement gate revision must succeed the superseded staged revision"
+            : "A gated capability revision must succeed the current bound revision",
+        );
       if (feedback && !sameCapabilityRevisionRef(feedback.revision, binding.revision))
         if (!request.supersedeGateRequestId)
           throw new Error("Gated capability feedback must describe the current binding");

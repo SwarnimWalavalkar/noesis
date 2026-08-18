@@ -285,6 +285,19 @@ describe("Capability lifecycle store", () => {
     expect(await workspace.capabilities.getGate("other-gate")).toMatchObject({ status: "pending" });
     expect(await workspace.capabilities.getGate("gate-2")).toBeUndefined();
 
+    await workspace.capabilities.createGate(
+      Object.freeze({
+        gateRequestId: "stale-gate",
+        capabilityId: binding.capabilityId,
+        revision: second.reference,
+        expectedBindingRevision: 3,
+        proposedScope: Object.freeze({ kind: "global" as const }),
+        proposedActivationMode: "relevant",
+        consequence: "This request will become stale.",
+        status: "pending",
+        createdAt: "2026-08-18T05:30:00.000Z",
+      }),
+    );
     expect(
       await workspace.capabilities.updateBinding({
         capabilityId: binding.capabilityId,
@@ -292,6 +305,25 @@ describe("Capability lifecycle store", () => {
         state: "paused",
       }),
     ).toMatchObject({ status: "updated", binding: { state: "paused", revisionNumber: 4 } });
+    await expect(
+      workspace.capabilities.stageGatedRevision({
+        revision: third,
+        supersedeGateRequestId: "stale-gate",
+        gate: Object.freeze({
+          gateRequestId: "gate-after-stale",
+          capabilityId: binding.capabilityId,
+          revision: third.reference,
+          expectedBindingRevision: 4,
+          proposedScope: Object.freeze({ kind: "global" as const }),
+          proposedActivationMode: "relevant",
+          consequence: "A stale request cannot replace a newer binding.",
+          status: "pending",
+          createdAt: "2026-08-18T05:45:00.000Z",
+        }),
+      }),
+    ).rejects.toThrow("cannot supersede a request for a stale binding");
+    expect(await workspace.capabilities.getGate("stale-gate")).toMatchObject({ status: "pending" });
+    expect(await workspace.capabilities.getGate("gate-after-stale")).toBeUndefined();
     expect(
       await workspace.capabilities.applyRevision({
         revision: third,
