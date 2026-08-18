@@ -29,6 +29,10 @@ export interface TurnSettlementOptions {
   readonly coordinator: Pick<CapabilityCoordinator, "observeSettledTurn">;
   readonly project: ProjectRef;
   readonly now?: () => string;
+  readonly onReflectionFailure?: (
+    error: unknown,
+    turn: Readonly<{ sessionId: string; turnId: string }>,
+  ) => void | Promise<void>;
 }
 
 export function createTurnSettlement(options: TurnSettlementOptions): TurnSettlement {
@@ -177,30 +181,42 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         settledAt: now(),
       });
       const outcomeId = `${request.turnId}:outcome`;
-      const reflection = await options.coordinator.observeSettledTurn({
-        turn: Object.freeze({
-          sessionId: request.sessionId,
-          turnId: request.turnId,
-          outcomeId,
-          project: options.project,
-          servedWorkingAdjustmentOutcomes: Object.freeze([]),
-          scope: "global",
-          userMessage: request.input,
-          ...(assistantMessage ? { assistantMessage } : {}),
-          outcome: status === "failed" ? "failed" : "unknown",
-          occurredAt: request.occurredAt,
-          evidenceRefs: [...evidenceRefs],
-          sensitivity: "normal" as const,
-          telemetry: Object.freeze({
-            retryCount: 0,
-            toolFailureCount,
-            aborted,
+      try {
+        const reflection = await options.coordinator.observeSettledTurn({
+          turn: Object.freeze({
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            outcomeId,
+            project: options.project,
+            servedWorkingAdjustmentOutcomes: Object.freeze([]),
+            scope: "global",
+            userMessage: request.input,
+            ...(assistantMessage ? { assistantMessage } : {}),
+            outcome: status === "failed" ? "failed" : "unknown",
+            occurredAt: request.occurredAt,
+            evidenceRefs: [...evidenceRefs],
+            sensitivity: "normal" as const,
+            telemetry: Object.freeze({
+              retryCount: 0,
+              toolFailureCount,
+              aborted,
+            }),
           }),
-        }),
-        project: options.project,
-        selectedCapabilities: serving,
-      });
-      return reflection.job.jobId;
+          project: options.project,
+          selectedCapabilities: serving,
+        });
+        return reflection.job.jobId;
+      } catch (error) {
+        try {
+          await options.onReflectionFailure?.(
+            error,
+            Object.freeze({ sessionId: request.sessionId, turnId: request.turnId }),
+          );
+        } catch {
+          // Reflection diagnostics must never rewrite an already-settled foreground result.
+        }
+        return undefined;
+      }
     };
 
     let result: TurnResult;
@@ -211,8 +227,14 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
       throw error;
     }
     if (result.outcome === "aborted") {
-      await record("failed", "Turn aborted", result.output, true, result.assistantMessages);
-      return Object.freeze({ result });
+      const reflectionJobId = await record(
+        "failed",
+        "Turn aborted",
+        result.output,
+        true,
+        result.assistantMessages,
+      );
+      return Object.freeze({ result, ...(reflectionJobId ? { reflectionJobId } : {}) });
     }
     const reflectionJobId = await record(
       "unknown",

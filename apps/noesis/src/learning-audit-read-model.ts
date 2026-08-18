@@ -7,11 +7,12 @@ import {
   type EvidenceRef,
   EvidenceRefSchema,
   type Experiment,
+  type ProjectRef,
   sha256,
   toJsonValue,
   type WorkingAdjustment,
 } from "@noesis/domain";
-import type { ContinuousFeedbackController } from "@noesis/runtime";
+import { CAPABILITY_REFLECTION_JOB_KIND, type ContinuousFeedbackController } from "@noesis/runtime";
 import type {
   TuiLearningAuditSnapshot,
   TuiLearningDetailSection,
@@ -29,6 +30,11 @@ const RAW_JSON_LIMIT = 64_000;
 const EVIDENCE_PREVIEW_LIMIT = 8;
 const CONSIDERED_PREVIEW_LIMIT = 8;
 const EVIDENCE_EXCERPT_LIMIT = 480;
+const LEGACY_REFLECTION_JOB_KIND = "runtime.reflect_turn";
+
+function isReflectionJob(job: DurableJobRecord): boolean {
+  return job.kind === CAPABILITY_REFLECTION_JOB_KIND || job.kind === LEGACY_REFLECTION_JOB_KIND;
+}
 
 interface LearningAuditSource {
   readonly workspace: NoesisWorkspaceStore;
@@ -51,7 +57,7 @@ interface LearningAuditSource {
         readonly intent: string;
       }>
     | undefined;
-  readonly projectId: string;
+  readonly project: ProjectRef;
   readonly now?: () => Date;
 }
 
@@ -410,12 +416,26 @@ async function listProjectReflectionJobs(
   workspace: NoesisWorkspaceStore,
   projectId: string,
 ): Promise<readonly DurableJobRecord[]> {
-  return await workspace.jobs.list({
-    kind: "runtime.reflect_turn",
-    payloadProjectId: projectId,
-    order: "newest",
-    limit: AUDIT_LIMIT,
-  });
+  const jobs = (
+    await Promise.all(
+      [CAPABILITY_REFLECTION_JOB_KIND, LEGACY_REFLECTION_JOB_KIND].map((kind) =>
+        workspace.jobs.list({
+          kind,
+          payloadProjectId: projectId,
+          order: "newest",
+          limit: AUDIT_LIMIT,
+        }),
+      ),
+    )
+  ).flat();
+  return Object.freeze(
+    [...new Map(jobs.map((job) => [job.jobId, job] as const)).values()]
+      .sort(
+        (left, right) =>
+          right.createdAt.localeCompare(left.createdAt) || right.jobId.localeCompare(left.jobId),
+      )
+      .slice(0, AUDIT_LIMIT),
+  );
 }
 
 async function listExperimentJobs(
@@ -509,40 +529,37 @@ function jobExperimentId(job: DurableJobRecord): string | undefined {
 function jobProjectId(job: DurableJobRecord): string | undefined {
   const direct = stringField(job.result, "projectId");
   if (direct) return direct;
-  if (job.kind !== "runtime.reflect_turn" || typeof job.payload !== "object" || job.payload === null)
-    return undefined;
+  if (!isReflectionJob(job) || typeof job.payload !== "object" || job.payload === null) return undefined;
   const turn = Reflect.get(job.payload, "turn");
   const project = typeof turn === "object" && turn !== null ? Reflect.get(turn, "project") : undefined;
   return stringField(project, "projectId");
 }
 
 function jobSessionId(job: DurableJobRecord): string | undefined {
-  if (job.kind === "runtime.reflect_turn" && typeof job.payload === "object" && job.payload !== null)
+  if (isReflectionJob(job) && typeof job.payload === "object" && job.payload !== null)
     return stringField(Reflect.get(job.payload, "turn"), "sessionId");
   return stringField(job.payload, "sourceSessionId");
 }
 
 function reflectionTurnId(job: DurableJobRecord): string | undefined {
-  if (job.kind !== "runtime.reflect_turn" || typeof job.payload !== "object" || job.payload === null)
-    return undefined;
+  if (!isReflectionJob(job) || typeof job.payload !== "object" || job.payload === null) return undefined;
   return stringField(Reflect.get(job.payload, "turn"), "turnId");
 }
 
 function jobSensitivity(job: DurableJobRecord): "normal" | "private" | "secret" {
-  if (job.kind !== "runtime.reflect_turn" || typeof job.payload !== "object" || job.payload === null)
-    return "normal";
+  if (!isReflectionJob(job) || typeof job.payload !== "object" || job.payload === null) return "normal";
   const turn = Reflect.get(job.payload, "turn");
   const value = stringField(turn, "sensitivity");
   return value === "private" || value === "secret" ? value : "normal";
 }
 
 function jobSummary(job: DurableJobRecord): string {
-  if (job.kind === "runtime.reflect_turn" && jobSensitivity(job) !== "normal")
+  if (isReflectionJob(job) && jobSensitivity(job) !== "normal")
     return "Sensitive reflection details are hidden because this TUI has no admitted grant for them.";
   if (job.status === "failed" || job.status === "budget_exhausted" || job.status === "cancelled")
     return job.lastError?.message ?? `Learning job ${job.status.replaceAll("_", " ")}`;
   if (job.status !== "completed") return `${job.kind} is ${job.status}`;
-  if (job.kind === "runtime.reflect_turn") return reflectionReason(job);
+  if (isReflectionJob(job)) return reflectionReason(job);
   const resultStatus = stringField(job.result, "status");
   return (
     stringField(job.result, "rationale") ??
@@ -614,7 +631,7 @@ async function jobPrimitive(
   const experimentId = jobExperimentId(job);
   const sessionId = jobSessionId(job);
   const projectId = jobProjectId(job);
-  const isReflection = job.kind === "runtime.reflect_turn";
+  const isReflection = isReflectionJob(job);
   const kind: TuiLearningPrimitiveKind = isReflection ? "reflection" : "job";
   const group: TuiLearningPrimitiveGroup = isReflection ? "reflection" : "operations";
   const adjustmentId = isReflection ? stringField(job.result, "adjustmentId") : undefined;
@@ -719,9 +736,9 @@ export async function loadLearningAuditSnapshot(
     allActivationOperations,
     allFeedbackSignals,
   ] = await Promise.all([
-    listProjectReflectionJobs(source.workspace, source.projectId),
+    listProjectReflectionJobs(source.workspace, source.project.projectId),
     source.workspace.workingAdjustments.list({
-      projectId: source.projectId,
+      projectId: source.project.projectId,
       limit: AUDIT_LIMIT,
     }),
     source.criteria.list(),
@@ -771,7 +788,7 @@ export async function loadLearningAuditSnapshot(
         .map((signal) => [signal.signalId, signal] as const),
     ).values(),
   ];
-  const activeAdjustment = await source.workspace.workingAdjustments.getActive(source.projectId);
+  const activeAdjustment = await source.workspace.workingAdjustments.getActive(source.project.projectId);
   const reflectionByTurnId = new Map(
     jobs
       .map((job) => {
@@ -1220,18 +1237,50 @@ export async function loadLearningAuditSnapshot(
 
   const [capabilityDefinitions, capabilityBindings, pendingGates] = await Promise.all([
     source.workspace.capabilities.listDefinitions(),
-    source.workspace.capabilities.listBindings(),
-    source.workspace.capabilities.listPendingGates(),
+    source.workspace.capabilities.listBindings({
+      project: source.project,
+      sessionId,
+      limit: AUDIT_LIMIT,
+    }),
+    source.workspace.capabilities.listPendingGates({
+      project: source.project,
+      sessionId,
+      limit: AUDIT_LIMIT,
+    }),
   ]);
   const capabilityDefinitionById = new Map(
     capabilityDefinitions.map((definition) => [definition.capabilityId, definition] as const),
   );
-  for (const binding of capabilityBindings) {
+  const perCapabilityLimit = Math.max(
+    1,
+    Math.min(50, Math.floor(AUDIT_LIMIT / Math.max(1, capabilityBindings.length))),
+  );
+  const capabilityHistory = await Promise.all(
+    capabilityBindings.map(async (binding) => {
+      const [listedRevisions, currentRevision, feedback] = await Promise.all([
+        source.workspace.capabilities.listRevisions(binding.capabilityId, {
+          limit: perCapabilityLimit,
+        }),
+        source.workspace.capabilities.getRevision(binding.revision),
+        source.workspace.capabilities.listFeedback(binding.capabilityId, {
+          limit: perCapabilityLimit,
+        }),
+      ]);
+      const revisions = Object.freeze(
+        [
+          ...new Map(
+            [...(currentRevision ? [currentRevision] : []), ...listedRevisions].map((revision) => [
+              revision.reference.capabilityRevisionId,
+              revision,
+            ]),
+          ).values(),
+        ].slice(0, perCapabilityLimit),
+      );
+      return Object.freeze({ binding, revisions, feedback });
+    }),
+  );
+  for (const { binding, revisions, feedback } of capabilityHistory) {
     const definition = capabilityDefinitionById.get(binding.capabilityId);
-    const [revisions, feedback] = await Promise.all([
-      source.workspace.capabilities.listRevisions(binding.capabilityId),
-      source.workspace.capabilities.listFeedback(binding.capabilityId),
-    ]);
     primitives.push(
       primitive({
         id: nativeId("capability", binding.capabilityId),
@@ -1343,9 +1392,7 @@ export async function loadLearningAuditSnapshot(
         occurredAt: gate.createdAt,
         capabilityId: gate.capabilityId,
         capabilityRevisionId: gate.revision.capabilityRevisionId,
-        ...(gate.expectedBindingRevision === null
-          ? {}
-          : { capabilityBindingRevision: gate.expectedBindingRevision }),
+        capabilityBindingRevision: gate.expectedBindingRevision,
         gateRequestId: gate.gateRequestId,
         relations: [
           relation("capability", "capability", gate.capabilityId),
@@ -1386,7 +1433,16 @@ export async function loadLearningAuditSnapshot(
     );
   }
 
-  const sorted = sortPrimitives(primitives);
+  const deduplicated = [...new Map(primitives.map((item) => [item.id, item] as const)).values()];
+  const isRoutineReflection = (item: TuiLearningPrimitive): boolean =>
+    item.kind === "reflection" && new Set(["no_change", "scheduled", "running"]).has(item.status);
+  const material = sortPrimitives(deduplicated.filter((item) => !isRoutineReflection(item))).slice(
+    0,
+    AUDIT_LIMIT,
+  );
+  const routineCapacity = Math.min(50, Math.max(0, AUDIT_LIMIT - material.length));
+  const routine = sortPrimitives(deduplicated.filter(isRoutineReflection)).slice(0, routineCapacity);
+  const sorted = sortPrimitives([...material, ...routine]);
   const titles = new Map(sorted.map((item) => [item.id, item.title] as const));
   const presented = Object.freeze(
     sorted.map((item) =>
@@ -1405,7 +1461,7 @@ export async function loadLearningAuditSnapshot(
     ),
   );
   return Object.freeze({
-    projectId: source.projectId,
+    projectId: source.project.projectId,
     sessionId,
     generatedAt: (source.now ?? (() => new Date()))().toISOString(),
     ...(activeAdjustment ? { activeAdjustmentId: activeAdjustment.adjustmentId } : {}),

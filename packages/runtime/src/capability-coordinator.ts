@@ -85,7 +85,14 @@ function decodeJob(job: DurableJobRecord): CapabilityReflectionJobView {
   });
 }
 
-function failureFrom(error: unknown): DurableJobFailure {
+function failureFrom(error: unknown, retryable = false): DurableJobFailure {
+  if (retryable)
+    return Object.freeze({
+      code: "capability_reflection_interrupted",
+      message: error instanceof Error ? error.message : String(error),
+      retryable: true,
+      ambiguous: false,
+    });
   return (
     durableJobFailureFromError(error) ??
     Object.freeze({
@@ -105,6 +112,12 @@ export function createCapabilityCoordinator(
   const active = new Map<string, AbortController>();
   let draining: Promise<void> | undefined;
   let stopping = false;
+
+  const runInBackground = (): void => {
+    queueMicrotask(() => {
+      void runAvailable().catch(() => undefined);
+    });
+  };
 
   const observeSettledTurn: CapabilityCoordinator["observeSettledTurn"] = async (input) => {
     const payload = CapabilityReflectionJobPayloadSchema.parse({
@@ -138,12 +151,11 @@ export function createCapabilityCoordinator(
       if (!existing || canonicalJson(existing.payload) !== canonicalJson(payload)) throw error;
       job = existing;
     }
-    queueMicrotask(() => void runAvailable());
+    runInBackground();
     return decodeJob(job);
   };
 
   const execute = async (job: DurableJobRecord): Promise<void> => {
-    const view = decodeJob(job);
     const leaseToken = job.leaseToken;
     if (!leaseToken) throw new Error(`Claimed job ${job.jobId} has no lease token`);
     const controller = new AbortController();
@@ -163,11 +175,17 @@ export function createCapabilityCoordinator(
     }, REFLECTION_HEARTBEAT_MS);
     heartbeat.unref();
     try {
+      const view = decodeJob(job);
       const scheduled = await runScheduledJob(
         options.authority,
         job,
         sha256(canonicalJson({ kind: job.kind, payload: job.payload })),
-        async () => toJsonValue(await options.learning.reflectSettledTurn(view.payload, controller.signal)),
+        async () => {
+          controller.signal.throwIfAborted();
+          const result = await options.learning.reflectSettledTurn(view.payload, controller.signal);
+          controller.signal.throwIfAborted();
+          return toJsonValue(result);
+        },
       );
       if (!scheduled.ok) {
         if (scheduled.originalError !== undefined) throw scheduled.originalError;
@@ -187,7 +205,7 @@ export function createCapabilityCoordinator(
         leaseToken,
         now: iso(now()),
         retryAt: iso(new Date(now().getTime() + Math.min(60_000, 1_000 * 2 ** (job.attempt - 1)))),
-        failure: failureFrom(error),
+        failure: failureFrom(error, controller.signal.aborted && stopping),
       });
     } finally {
       clearInterval(heartbeat);
@@ -195,7 +213,7 @@ export function createCapabilityCoordinator(
     }
   };
 
-  const drain = async (): Promise<void> => {
+  const drain = async (): Promise<boolean> => {
     for (let claimedCount = 0; !stopping && claimedCount < 24; claimedCount += 1) {
       const job = await options.workspace.jobs.claim({
         workerId,
@@ -204,17 +222,24 @@ export function createCapabilityCoordinator(
         maximumCost: 24 - claimedCount,
         kinds: Object.freeze([CAPABILITY_REFLECTION_JOB_KIND]),
       });
-      if (!job || stopping) return;
+      if (!job || stopping) return false;
       await execute(job);
     }
+    return !stopping;
   };
 
   function runAvailable(): Promise<void> {
     if (stopping) return Promise.resolve();
     if (draining) return draining;
-    const next = drain().finally(() => {
-      if (draining === next) draining = undefined;
-    });
+    let exhausted = false;
+    const next = drain()
+      .then((shouldContinue) => {
+        exhausted = shouldContinue;
+      })
+      .finally(() => {
+        if (draining === next) draining = undefined;
+        if (exhausted && !stopping) runInBackground();
+      });
     draining = next;
     return next;
   }
@@ -242,7 +267,7 @@ export function createCapabilityCoordinator(
     await draining;
   };
 
-  queueMicrotask(() => void runAvailable());
+  runInBackground();
   return Object.freeze({
     observeSettledTurn,
     runAvailable,

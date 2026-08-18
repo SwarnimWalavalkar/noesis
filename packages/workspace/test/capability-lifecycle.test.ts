@@ -19,18 +19,10 @@ afterEach(async () => {
   }
 });
 
-function fileRevision(name: string, byte: string): FileRevisionRef {
-  return Object.freeze({
-    kind: "file_revision",
-    revisionId: name,
-    workingPath: `capabilities/${name}`,
-    snapshotPath: `revisions/${name}`,
-    contentDigest: byte.repeat(64),
-  });
-}
-
 function lifecycleRevision(
   capabilityRevisionId: string,
+  prompt: FileRevisionRef,
+  router: FileRevisionRef,
   predecessorRevisionId?: string,
 ): CapabilityLifecycleRevision {
   const capabilityId = "capability_concise_research";
@@ -38,12 +30,12 @@ function lifecycleRevision(
     capabilityRevisionId,
     capabilityId,
     ...(predecessorRevisionId ? { predecessorRevisionId } : {}),
-    promptModules: Object.freeze([fileRevision(`${capabilityRevisionId}-prompt`, "a")]),
+    promptModules: Object.freeze([prompt]),
     skills: Object.freeze([]),
     tools: Object.freeze([]),
     toolset: Object.freeze({
       toolRevisionIds: Object.freeze([]),
-      routerRevision: fileRevision(`${capabilityRevisionId}-router`, "b"),
+      routerRevision: router,
       strategyId: "semantic-capability-router-v1",
     }),
     activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
@@ -96,7 +88,26 @@ describe("Capability lifecycle store", () => {
       createdAt: "2026-08-18T02:00:00.000Z",
       metadata: Object.freeze({}),
     });
-    const first = lifecycleRevision("revision-1");
+    const actor = Object.freeze({ actorId: "capability-test", kind: "system" as const });
+    const recordMaterial = async (revisionId: string) =>
+      await Promise.all([
+        workspace.definitions.recordWorkingDefinition({
+          workingPath: `capabilities/${revisionId}/instructions.md`,
+          bytes: new TextEncoder().encode(`instructions for ${revisionId}`),
+          actor,
+          reason: "Capability lifecycle test fixture",
+          provenanceRefs: Object.freeze([]),
+        }),
+        workspace.definitions.recordWorkingDefinition({
+          workingPath: `capabilities/${revisionId}/router.json`,
+          bytes: new TextEncoder().encode(`{"revision":"${revisionId}"}`),
+          actor,
+          reason: "Capability lifecycle test fixture",
+          provenanceRefs: Object.freeze([]),
+        }),
+      ]);
+    const firstMaterial = await recordMaterial("revision-1");
+    const first = lifecycleRevision("revision-1", firstMaterial[0], firstMaterial[1]);
     const binding = await workspace.capabilities.create({
       definition: Object.freeze({
         capabilityId: first.reference.capabilityId,
@@ -123,7 +134,13 @@ describe("Capability lifecycle store", () => {
       }),
     ).toEqual([binding]);
 
-    const second = lifecycleRevision("revision-2", first.reference.capabilityRevisionId);
+    const secondMaterial = await recordMaterial("revision-2");
+    const second = lifecycleRevision(
+      "revision-2",
+      secondMaterial[0],
+      secondMaterial[1],
+      first.reference.capabilityRevisionId,
+    );
     await workspace.capabilities.addRevision(second);
     const updated = await workspace.capabilities.updateBinding({
       capabilityId: binding.capabilityId,
@@ -173,6 +190,8 @@ describe("Capability lifecycle store", () => {
         capabilityId: binding.capabilityId,
         revision: second.reference,
         expectedBindingRevision: 2,
+        proposedScope: Object.freeze({ kind: "global" as const }),
+        proposedActivationMode: "relevant",
         consequence: "This would alter recovery control.",
         status: "pending",
         createdAt: "2026-08-18T03:00:00.000Z",
@@ -180,7 +199,17 @@ describe("Capability lifecycle store", () => {
     );
     expect(await workspace.capabilities.listFeedback(binding.capabilityId)).toHaveLength(1);
     expect(await workspace.capabilities.listPendingGates()).toHaveLength(1);
-    await workspace.capabilities.settleGate({ gateRequestId: "gate-1", status: "denied" });
+    expect(
+      await workspace.capabilities.decideGate({ gateRequestId: "gate-1", decision: "approve" }),
+    ).toMatchObject({
+      status: "updated",
+      gate: { status: "approved" },
+      binding: {
+        revisionNumber: 3,
+        scope: { kind: "global" },
+        activationMode: "relevant",
+      },
+    });
     expect(await workspace.capabilities.listPendingGates()).toEqual([]);
     expect(await workspace.capabilities.listRevisions(binding.capabilityId)).toEqual([first, second]);
   });

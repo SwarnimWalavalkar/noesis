@@ -166,7 +166,7 @@ describe("learning audit read model", () => {
         },
         resolveRevision: async () => undefined,
         resolveCapability: () => undefined,
-        projectId: "project-a",
+        project: Object.freeze({ projectId: "project-a", root: "/workspace/a" }),
       },
       "session-project-a",
     );
@@ -290,7 +290,7 @@ describe("learning audit read model", () => {
         },
         resolveRevision: async () => undefined,
         resolveCapability: () => undefined,
-        projectId: project.projectId,
+        project,
       },
       "session-readable",
     );
@@ -428,7 +428,7 @@ describe("learning audit read model", () => {
       Object.freeze({
         status: "unapplied",
         adjustmentId: adjustment.adjustmentId,
-        projectId: project.projectId,
+        project,
         reason: "The temporary strategy no longer has a credible future use.",
         evidenceRefs: Object.freeze([removalEvidence]),
       }),
@@ -481,7 +481,7 @@ describe("learning audit read model", () => {
         },
         resolveRevision: async () => undefined,
         resolveCapability: () => undefined,
-        projectId: project.projectId,
+        project,
       },
       "session-sensitive-unapply",
     );

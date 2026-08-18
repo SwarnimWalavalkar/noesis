@@ -508,6 +508,11 @@ describe("learning audit overlay", () => {
           Object.freeze({ ...snapshot, primitives: Object.freeze([capability]) }),
         manageCapability: async (intent) => {
           managed.push(intent);
+          return Object.freeze({
+            status: "binding_changed" as const,
+            capabilityId: capability.capabilityId ?? "concise-research",
+            message: "Capability updated",
+          });
         },
       },
       sessionId: "session-1",
@@ -564,6 +569,11 @@ describe("learning audit overlay", () => {
         inspectLearningAudit: async () => Object.freeze({ ...snapshot, primitives: Object.freeze([gate]) }),
         manageCapability: async (intent) => {
           managed.push(intent);
+          return Object.freeze({
+            status: "pending" as const,
+            capabilityId: "recovery-behavior",
+            message: "Capability update pending",
+          });
         },
       },
       sessionId: "session-1",

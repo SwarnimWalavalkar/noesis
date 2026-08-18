@@ -1180,8 +1180,9 @@ describe("Noesis TUI lifecycle", () => {
       }),
     );
     await vi.waitFor(() =>
-      expect(terminal.output).toContain("strategy · Verify observable state before claiming success."),
+      expect(terminal.output).toContain("◆ adjusted · Verify observable state before claiming success"),
     );
+    expect(terminal.output).not.toContain("\nstrategy ·");
     expect(waitedJobIds).toEqual(["job-late-adjustment"]);
 
     releaseSecondTurn?.();

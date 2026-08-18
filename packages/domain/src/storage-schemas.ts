@@ -277,34 +277,46 @@ export const CapabilityBindingSchema = z.strictObject({
   updatedAt: z.string().datetime(),
 });
 
-export const CapabilityFeedbackSchema = z.strictObject({
-  feedbackId: z.string().min(1),
-  capabilityId: z.string().min(1),
-  revision: CapabilityRevisionRefSchema,
-  evidenceRefs: z.array(EvidenceRefSchema).min(1).max(64),
-  interpretation: z.string().min(1).max(8_192),
-  disposition: z.enum([
-    "positive",
-    "correction",
-    "regression",
-    "scope_change",
-    "activation_change",
-    "restore_request",
-  ]),
-  createdAt: z.string().datetime(),
-});
+export const CapabilityFeedbackSchema = z
+  .strictObject({
+    feedbackId: z.string().min(1),
+    capabilityId: z.string().min(1),
+    revision: CapabilityRevisionRefSchema,
+    evidenceRefs: z.array(EvidenceRefSchema).min(1).max(64),
+    interpretation: z.string().min(1).max(8_192),
+    disposition: z.enum([
+      "positive",
+      "correction",
+      "regression",
+      "scope_change",
+      "activation_change",
+      "restore_request",
+    ]),
+    createdAt: z.string().datetime(),
+  })
+  .refine((feedback) => feedback.capabilityId === feedback.revision.capabilityId, {
+    message: "Capability feedback and revision identities must match",
+    path: ["revision", "capabilityId"],
+  });
 
-export const CapabilityGateRequestSchema = z.strictObject({
-  gateRequestId: z.string().min(1),
-  capabilityId: z.string().min(1),
-  revision: CapabilityRevisionRefSchema,
-  expectedBindingRevision: z.number().int().positive().nullable(),
-  consequence: z.string().min(1).max(8_192),
-  status: z.enum(["pending", "approved", "denied", "superseded"]),
-  instruction: z.string().min(1).max(8_192).optional(),
-  createdAt: z.string().datetime(),
-  settledAt: z.string().datetime().optional(),
-});
+export const CapabilityGateRequestSchema = z
+  .strictObject({
+    gateRequestId: z.string().min(1),
+    capabilityId: z.string().min(1),
+    revision: CapabilityRevisionRefSchema,
+    expectedBindingRevision: z.number().int().positive(),
+    proposedScope: CapabilityScopeSchema,
+    proposedActivationMode: z.enum(["relevant", "always"]),
+    consequence: z.string().min(1).max(8_192),
+    status: z.enum(["pending", "approved", "denied", "superseded"]),
+    instruction: z.string().min(1).max(8_192).optional(),
+    createdAt: z.string().datetime(),
+    settledAt: z.string().datetime().optional(),
+  })
+  .refine((gate) => gate.capabilityId === gate.revision.capabilityId, {
+    message: "Capability gate and revision identities must match",
+    path: ["revision", "capabilityId"],
+  });
 
 const ExperimentBaseShape = {
   experimentId: z.string().min(1),

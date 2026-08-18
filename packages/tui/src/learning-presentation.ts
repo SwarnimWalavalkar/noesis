@@ -49,18 +49,20 @@ export function learningAuditFocusId(activity: TuiLearningActivitySummary): stri
 }
 
 export function workingAdjustmentNotice(activity: TuiLearningActivitySummary): string | undefined {
-  if (activity.status === "activated") return `Capability active · ${activity.summary}`;
-  if (activity.status === "revised") return `Capability updated · ${activity.summary}`;
-  if (activity.status === "pending") return `Capability needs a decision · ${activity.summary}`;
-  if (activity.status === "paused") return `Capability paused · ${activity.summary}`;
-  if (activity.status === "restored") return `Capability restored · ${activity.summary}`;
-  if (activity.status === "binding_changed") return `Capability settings updated · ${activity.summary}`;
+  const summary = safeTerminalText(activity.summary).replaceAll(/\s+/g, " ").trim();
+  if (activity.status === "activated") return `Capability active · ${summary}`;
+  if (activity.status === "revised") return `Capability updated · ${summary}`;
+  if (activity.status === "pending") return `Capability needs a decision · ${summary}`;
+  if (activity.status === "paused") return `Capability paused · ${summary}`;
+  if (activity.status === "restored") return `Capability restored · ${summary}`;
+  if (activity.status === "binding_changed") return `Capability settings updated · ${summary}`;
   if (activity.status === "adjusted" || activity.status === "replaced") {
     const strategy = activity.workingAdjustment?.strategy;
-    return `adjusted · ${activity.summary}${strategy ? `\nstrategy · ${strategy}` : ""}`;
+    const strategySummary = strategy ? safeTerminalText(strategy).replaceAll(/\s+/g, " ").trim() : undefined;
+    return `adjusted · ${summary}${strategySummary ? ` · strategy · ${strategySummary}` : ""}`;
   }
-  if (activity.status === "unapplied") return `unapplied · ${activity.summary}`;
-  if (activity.status === "stale") return `unchanged · ${activity.summary}`;
+  if (activity.status === "unapplied") return `unapplied · ${summary}`;
+  if (activity.status === "stale") return `unchanged · ${summary}`;
   return undefined;
 }
 

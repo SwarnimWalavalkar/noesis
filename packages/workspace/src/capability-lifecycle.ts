@@ -14,6 +14,7 @@ import {
   canonicalJson,
   type EvidenceRef,
   sameCapabilityRevisionRef,
+  WorkingAdjustmentSchema,
 } from "@noesis/domain";
 import { parseJson, requiredNumber, requiredString, type WorkspaceDatabase } from "./database.ts";
 import type { CapabilityLifecycleStore } from "./types.ts";
@@ -101,6 +102,8 @@ function normalizeGate(value: unknown): CapabilityGateRequest {
     capabilityId: parsed.capabilityId,
     revision: Object.freeze(parsed.revision),
     expectedBindingRevision: parsed.expectedBindingRevision,
+    proposedScope: Object.freeze(parsed.proposedScope),
+    proposedActivationMode: parsed.proposedActivationMode,
     consequence: parsed.consequence,
     status: parsed.status,
     ...(parsed.instruction === undefined ? {} : { instruction: parsed.instruction }),
@@ -140,9 +143,36 @@ export function createCapabilityLifecycleStore(
     const expected = capabilityRevisionRef(parsed.revision);
     if (!sameCapabilityRevisionRef(expected, parsed.reference))
       throw new Error("Capability revision reference does not match its exact bundle");
-    for (const reference of parsed.revision.evidenceRefs) options.assertStoredReference(reference);
+    for (const reference of [
+      ...parsed.revision.promptModules,
+      ...parsed.revision.skills,
+      ...parsed.revision.tools,
+      parsed.revision.toolset.routerRevision,
+      ...(parsed.revision.dependencyLock ? [parsed.revision.dependencyLock] : []),
+      ...parsed.revision.sourceEvaluationDefinitions,
+      ...parsed.revision.evidenceRefs,
+    ])
+      options.assertStoredReference(reference);
     return parsed;
   };
+
+  const assertLimit = (limit: number): void => {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1_000)
+      throw new Error("Capability lifecycle list limit must be an integer between 1 and 1000");
+  };
+
+  const scopedWhere = `(
+    json_extract(scope_json, '$.kind') = 'global'
+    OR (
+      json_extract(scope_json, '$.kind') = 'project'
+      AND json_extract(scope_json, '$.project.projectId') = ?
+      AND json_extract(scope_json, '$.project.root') = ?
+    )
+    OR (
+      json_extract(scope_json, '$.kind') = 'session'
+      AND json_extract(scope_json, '$.sessionId') = ?
+    )
+  )`;
 
   const insertRevision = (revision: CapabilityLifecycleRevision): void => {
     const existing = db
@@ -179,6 +209,135 @@ export function createCapabilityLifecycleStore(
     );
   };
 
+  const insertFeedback = (feedback: CapabilityFeedback): CapabilityFeedback => {
+    const existing = decodeFeedback(
+      db
+        .prepare("SELECT feedback_json FROM capability_feedback WHERE feedback_id = ?")
+        .get(feedback.feedbackId),
+    );
+    if (existing) {
+      if (canonicalJson(existing) !== canonicalJson(feedback))
+        throw new Error(`Immutable capability feedback ${feedback.feedbackId} differs`);
+      return existing;
+    }
+    if (!storedRevisionExists(db, feedback.revision))
+      throw new Error(`Unknown capability revision ${feedback.revision.capabilityRevisionId}`);
+    db.prepare(
+      `INSERT INTO capability_feedback(
+        feedback_id, capability_id, revision_json, feedback_json, created_at
+      ) VALUES (?, ?, ?, ?, ?)`,
+    ).run(
+      feedback.feedbackId,
+      feedback.capabilityId,
+      canonicalJson(feedback.revision),
+      canonicalJson(feedback),
+      feedback.createdAt,
+    );
+    return feedback;
+  };
+
+  const insertGate = (gate: CapabilityGateRequest): CapabilityGateRequest => {
+    if (gate.status !== "pending") throw new Error("A new capability gate must be pending");
+    const existing = decodeGate(
+      db
+        .prepare("SELECT request_json FROM capability_gate_requests WHERE gate_request_id = ?")
+        .get(gate.gateRequestId),
+    );
+    if (existing) {
+      if (canonicalJson(existing) !== canonicalJson(gate))
+        throw new Error(`Immutable capability gate ${gate.gateRequestId} differs`);
+      return existing;
+    }
+    if (!storedRevisionExists(db, gate.revision))
+      throw new Error(`Unknown capability revision ${gate.revision.capabilityRevisionId}`);
+    db.prepare(
+      `INSERT INTO capability_gate_requests(
+        gate_request_id, capability_id, revision_json, request_json, status, created_at, settled_at
+      ) VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+    ).run(
+      gate.gateRequestId,
+      gate.capabilityId,
+      canonicalJson(gate.revision),
+      canonicalJson(gate),
+      gate.status,
+      gate.createdAt,
+    );
+    return gate;
+  };
+
+  const settlePendingGate = (
+    current: CapabilityGateRequest,
+    status: "approved" | "denied" | "superseded",
+    instruction?: string,
+  ): CapabilityGateRequest => {
+    if (current.status !== "pending")
+      throw new Error(`Capability gate ${current.gateRequestId} is already ${current.status}`);
+    const settled = normalizeGate({
+      ...current,
+      status,
+      ...(instruction ? { instruction } : {}),
+      settledAt: options.now(),
+    });
+    const result = db
+      .prepare(
+        `UPDATE capability_gate_requests
+         SET request_json = ?, status = ?, settled_at = ?
+         WHERE gate_request_id = ? AND status = 'pending'`,
+      )
+      .run(canonicalJson(settled), settled.status, settled.settledAt ?? null, settled.gateRequestId);
+    if (Number(result.changes) !== 1)
+      throw new Error(`Capability gate ${current.gateRequestId} changed concurrently`);
+    return settled;
+  };
+
+  const updateBindingRow = (request: {
+    readonly capabilityId: string;
+    readonly expectedRevisionNumber: number;
+    readonly revision?: import("@noesis/domain").CapabilityRevisionRef;
+    readonly scope?: import("@noesis/domain").CapabilityScope;
+    readonly activationMode?: import("@noesis/domain").CapabilityActivationMode;
+    readonly state?: import("@noesis/domain").CapabilityBindingState;
+  }) => {
+    const current = decodeBinding(
+      db.prepare("SELECT * FROM capability_bindings WHERE capability_id = ?").get(request.capabilityId),
+    );
+    if (!current) throw new Error(`Unknown capability binding ${request.capabilityId}`);
+    if (current.revisionNumber !== request.expectedRevisionNumber)
+      return Object.freeze({ status: "stale" as const, binding: current });
+    if (request.revision && request.revision.capabilityId !== request.capabilityId)
+      throw new Error("A capability binding cannot point at another capability's revision");
+    const next = CapabilityBindingSchema.parse({
+      ...current,
+      ...(request.revision ? { revision: request.revision } : {}),
+      ...(request.scope ? { scope: request.scope } : {}),
+      ...(request.activationMode ? { activationMode: request.activationMode } : {}),
+      ...(request.state ? { state: request.state } : {}),
+      revisionNumber: current.revisionNumber + 1,
+      updatedAt: options.now(),
+    });
+    if (!storedRevisionExists(db, next.revision))
+      throw new Error(`Unknown capability revision ${next.revision.capabilityRevisionId}`);
+    const result = db
+      .prepare(
+        `UPDATE capability_bindings SET
+          revision_json = ?, scope_json = ?, activation_mode = ?, state = ?,
+          binding_revision = ?, updated_at = ?
+         WHERE capability_id = ? AND binding_revision = ?`,
+      )
+      .run(
+        canonicalJson(next.revision),
+        canonicalJson(next.scope),
+        next.activationMode,
+        next.state,
+        next.revisionNumber,
+        next.updatedAt,
+        next.capabilityId,
+        current.revisionNumber,
+      );
+    if (Number(result.changes) !== 1) throw new Error("Capability binding compare-and-swap failed");
+    return Object.freeze({ status: "updated" as const, binding: next });
+  };
+
   const create: CapabilityLifecycleStore["create"] = async (request) => {
     const definition = CapabilityDefinitionSchema.parse(request.definition);
     const revision = assertRevision(request.revision);
@@ -194,6 +353,17 @@ export function createCapabilityLifecycleStore(
       revisionNumber: 1,
       updatedAt,
     });
+    const gate = request.gate ? normalizeGate(request.gate) : undefined;
+    if (
+      gate &&
+      (gate.capabilityId !== binding.capabilityId ||
+        !sameCapabilityRevisionRef(gate.revision, binding.revision) ||
+        gate.expectedBindingRevision !== binding.revisionNumber ||
+        canonicalJson(gate.proposedScope) !== canonicalJson(binding.scope) ||
+        gate.proposedActivationMode !== binding.activationMode ||
+        binding.state !== "paused")
+    )
+      throw new Error("A gated capability creation must bind the exact pending revision");
     return options.database.transaction(() => {
       const existing = db
         .prepare("SELECT definition_json FROM capabilities WHERE capability_id = ?")
@@ -217,6 +387,7 @@ export function createCapabilityLifecycleStore(
           current.state !== binding.state
         )
           throw new Error(`Capability ${definition.capabilityId} already has another binding`);
+        if (gate) insertGate(gate);
         return current;
       }
       db.prepare(
@@ -232,6 +403,7 @@ export function createCapabilityLifecycleStore(
         binding.revisionNumber,
         binding.updatedAt,
       );
+      if (gate) insertGate(gate);
       return binding;
     });
   };
@@ -258,25 +430,58 @@ export function createCapabilityLifecycleStore(
         .map((row) => CapabilityDefinitionSchema.parse(parseJson(requiredString(row, "definition_json")))),
     );
 
-  const listRevisions: CapabilityLifecycleStore["listRevisions"] = async (capabilityId) =>
+  const listRevisions: CapabilityLifecycleStore["listRevisions"] = async (capabilityId, request) => {
+    if (request) assertLimit(request.limit);
+    const rows = request
+      ? db
+          .prepare(
+            "SELECT revision_json FROM capability_revisions WHERE capability_id = ? ORDER BY created_at DESC, capability_revision_id DESC LIMIT ?",
+          )
+          .all(capabilityId, request.limit)
+      : db
+          .prepare(
+            "SELECT revision_json FROM capability_revisions WHERE capability_id = ? ORDER BY created_at, capability_revision_id",
+          )
+          .all(capabilityId);
+    return Object.freeze(
+      rows.map((row) => {
+        const value = decodeRevision(row);
+        if (!value) throw new Error("Capability revision row disappeared during decoding");
+        return value;
+      }),
+    );
+  };
+
+  const listBindings: CapabilityLifecycleStore["listBindings"] = async (request) => {
+    if (request) assertLimit(request.limit);
+    const rows = request
+      ? db
+          .prepare(
+            `SELECT * FROM capability_bindings
+             WHERE ${scopedWhere}
+             ORDER BY updated_at DESC, capability_id
+             LIMIT ?`,
+          )
+          .all(request.project.projectId, request.project.root, request.sessionId, request.limit)
+      : db.prepare("SELECT * FROM capability_bindings ORDER BY updated_at DESC, capability_id").all();
+    return Object.freeze(
+      rows.map((row) => {
+        const value = decodeBinding(row);
+        if (!value) throw new Error("Capability binding row disappeared during decoding");
+        return value;
+      }),
+    );
+  };
+
+  const listEligibleBindings: CapabilityLifecycleStore["listEligibleBindings"] = async (request) =>
     Object.freeze(
       db
         .prepare(
-          "SELECT revision_json FROM capability_revisions WHERE capability_id = ? ORDER BY created_at, capability_revision_id",
+          `SELECT * FROM capability_bindings
+           WHERE state = 'active' AND ${scopedWhere}
+           ORDER BY updated_at DESC, capability_id`,
         )
-        .all(capabilityId)
-        .map((row) => {
-          const value = decodeRevision(row);
-          if (!value) throw new Error("Capability revision row disappeared during decoding");
-          return value;
-        }),
-    );
-
-  const listBindings: CapabilityLifecycleStore["listBindings"] = async () =>
-    Object.freeze(
-      db
-        .prepare("SELECT * FROM capability_bindings ORDER BY updated_at DESC, capability_id")
-        .all()
+        .all(request.project.projectId, request.project.root, request.sessionId)
         .map((row) => {
           const value = decodeBinding(row);
           if (!value) throw new Error("Capability binding row disappeared during decoding");
@@ -284,130 +489,118 @@ export function createCapabilityLifecycleStore(
         }),
     );
 
-  const listEligibleBindings: CapabilityLifecycleStore["listEligibleBindings"] = async (request) =>
-    Object.freeze(
-      (await listBindings()).filter(
-        (binding) =>
-          binding.state === "active" &&
-          (binding.scope.kind === "global" ||
-            (binding.scope.kind === "project" &&
-              binding.scope.project.projectId === request.project.projectId &&
-              binding.scope.project.root === request.project.root) ||
-            (binding.scope.kind === "session" && binding.scope.sessionId === request.sessionId)),
-      ),
-    );
-
   const updateBinding: CapabilityLifecycleStore["updateBinding"] = async (request) =>
-    options.database.transaction(() => {
+    options.database.transaction(() => updateBindingRow(request));
+
+  const updateBindingWithFeedback: CapabilityLifecycleStore["updateBindingWithFeedback"] = async (
+    request,
+  ) => {
+    const feedback = CapabilityFeedbackSchema.parse(request.feedback);
+    for (const reference of feedback.evidenceRefs) options.assertStoredReference(reference);
+    return options.database.transaction(() => {
       const current = decodeBinding(
         db.prepare("SELECT * FROM capability_bindings WHERE capability_id = ?").get(request.capabilityId),
       );
       if (!current) throw new Error(`Unknown capability binding ${request.capabilityId}`);
       if (current.revisionNumber !== request.expectedRevisionNumber)
         return Object.freeze({ status: "stale" as const, binding: current });
-      const next = CapabilityBindingSchema.parse({
-        ...current,
-        ...(request.revision ? { revision: request.revision } : {}),
-        ...(request.scope ? { scope: request.scope } : {}),
-        ...(request.activationMode ? { activationMode: request.activationMode } : {}),
-        ...(request.state ? { state: request.state } : {}),
-        revisionNumber: current.revisionNumber + 1,
-        updatedAt: options.now(),
-      });
-      if (!awaitableRevisionExists(db, next.revision))
-        throw new Error(`Unknown capability revision ${next.revision.capabilityRevisionId}`);
-      const result = db
-        .prepare(
-          `UPDATE capability_bindings SET
-            revision_json = ?, scope_json = ?, activation_mode = ?, state = ?,
-            binding_revision = ?, updated_at = ?
-           WHERE capability_id = ? AND binding_revision = ?`,
-        )
-        .run(
-          canonicalJson(next.revision),
-          canonicalJson(next.scope),
-          next.activationMode,
-          next.state,
-          next.revisionNumber,
-          next.updatedAt,
-          next.capabilityId,
-          current.revisionNumber,
-        );
-      if (Number(result.changes) !== 1) throw new Error("Capability binding compare-and-swap failed");
-      return Object.freeze({ status: "updated" as const, binding: next });
+      if (!sameCapabilityRevisionRef(feedback.revision, current.revision))
+        throw new Error("Capability feedback must describe the binding being changed");
+      insertFeedback(feedback);
+      return updateBindingRow(request);
     });
+  };
 
   const addFeedback: CapabilityLifecycleStore["addFeedback"] = async (input) => {
     const feedback = CapabilityFeedbackSchema.parse(input);
     for (const reference of feedback.evidenceRefs) options.assertStoredReference(reference);
+    return options.database.transaction(() => insertFeedback(feedback));
+  };
+
+  const listFeedback: CapabilityLifecycleStore["listFeedback"] = async (capabilityId, request) => {
+    if (request) assertLimit(request.limit);
+    const rows = request
+      ? db
+          .prepare(
+            "SELECT feedback_json FROM capability_feedback WHERE capability_id = ? ORDER BY created_at DESC, feedback_id DESC LIMIT ?",
+          )
+          .all(capabilityId, request.limit)
+      : db
+          .prepare(
+            "SELECT feedback_json FROM capability_feedback WHERE capability_id = ? ORDER BY created_at DESC, feedback_id DESC",
+          )
+          .all(capabilityId);
+    return Object.freeze(
+      rows.map((row) => CapabilityFeedbackSchema.parse(parseJson(requiredString(row, "feedback_json")))),
+    );
+  };
+
+  const stageGatedRevision: CapabilityLifecycleStore["stageGatedRevision"] = async (request) => {
+    const revision = assertRevision(request.revision);
+    const gate = normalizeGate(request.gate);
+    const feedback = request.feedback ? CapabilityFeedbackSchema.parse(request.feedback) : undefined;
+    if (!sameCapabilityRevisionRef(gate.revision, revision.reference))
+      throw new Error("A capability gate must bind the exact staged revision");
+    if (feedback) for (const reference of feedback.evidenceRefs) options.assertStoredReference(reference);
     return options.database.transaction(() => {
-      const existing = decodeFeedback(
-        db
-          .prepare("SELECT feedback_json FROM capability_feedback WHERE feedback_id = ?")
-          .get(feedback.feedbackId),
+      const binding = decodeBinding(
+        db.prepare("SELECT * FROM capability_bindings WHERE capability_id = ?").get(gate.capabilityId),
       );
-      if (existing) {
-        if (canonicalJson(existing) !== canonicalJson(feedback))
-          throw new Error(`Immutable capability feedback ${feedback.feedbackId} differs`);
-        return existing;
+      if (!binding) throw new Error(`Unknown capability ${gate.capabilityId}`);
+      if (gate.expectedBindingRevision !== binding.revisionNumber)
+        throw new Error("A staged capability gate must pin the current binding revision");
+      if (revision.revision.predecessorRevisionId !== binding.revision.capabilityRevisionId)
+        throw new Error("A gated capability revision must succeed the current bound revision");
+      if (feedback && !sameCapabilityRevisionRef(feedback.revision, binding.revision))
+        throw new Error("Gated capability feedback must describe the current binding");
+      insertRevision(revision);
+      if (feedback) insertFeedback(feedback);
+      if (request.supersedeGateRequestId) {
+        const current = decodeGate(
+          db
+            .prepare("SELECT request_json FROM capability_gate_requests WHERE gate_request_id = ?")
+            .get(request.supersedeGateRequestId),
+        );
+        if (!current) throw new Error(`Unknown capability gate ${request.supersedeGateRequestId}`);
+        settlePendingGate(current, "superseded", gate.instruction);
       }
-      if (!awaitableRevisionExists(db, feedback.revision))
-        throw new Error(`Unknown capability revision ${feedback.revision.capabilityRevisionId}`);
-      db.prepare(
-        `INSERT INTO capability_feedback(
-          feedback_id, capability_id, revision_json, feedback_json, created_at
-        ) VALUES (?, ?, ?, ?, ?)`,
-      ).run(
-        feedback.feedbackId,
-        feedback.capabilityId,
-        canonicalJson(feedback.revision),
-        canonicalJson(feedback),
-        feedback.createdAt,
-      );
-      return feedback;
+      return insertGate(gate);
     });
   };
 
-  const listFeedback: CapabilityLifecycleStore["listFeedback"] = async (capabilityId) =>
-    Object.freeze(
-      db
-        .prepare(
-          "SELECT feedback_json FROM capability_feedback WHERE capability_id = ? ORDER BY created_at DESC, feedback_id DESC",
-        )
-        .all(capabilityId)
-        .map((row) => CapabilityFeedbackSchema.parse(parseJson(requiredString(row, "feedback_json")))),
-    );
+  const applyRevision: CapabilityLifecycleStore["applyRevision"] = async (request) => {
+    const revision = assertRevision(request.revision);
+    const feedback = CapabilityFeedbackSchema.parse(request.feedback);
+    for (const reference of feedback.evidenceRefs) options.assertStoredReference(reference);
+    return options.database.transaction(() => {
+      const current = decodeBinding(
+        db
+          .prepare("SELECT * FROM capability_bindings WHERE capability_id = ?")
+          .get(revision.reference.capabilityId),
+      );
+      if (!current) throw new Error(`Unknown capability ${revision.reference.capabilityId}`);
+      if (current.revisionNumber !== request.expectedBindingRevision)
+        return Object.freeze({ status: "stale" as const, binding: current });
+      if (!sameCapabilityRevisionRef(feedback.revision, current.revision))
+        throw new Error("Capability revision feedback must describe the current binding");
+      if (revision.revision.predecessorRevisionId !== current.revision.capabilityRevisionId)
+        throw new Error("A capability revision must succeed the current bound revision");
+      insertRevision(revision);
+      insertFeedback(feedback);
+      return updateBindingRow({
+        capabilityId: revision.reference.capabilityId,
+        expectedRevisionNumber: request.expectedBindingRevision,
+        revision: revision.reference,
+        scope: request.scope,
+        activationMode: request.activationMode,
+        state: "active",
+      });
+    });
+  };
 
   const createGate: CapabilityLifecycleStore["createGate"] = async (input) => {
     const gate = normalizeGate(input);
-    if (gate.status !== "pending") throw new Error("A new capability gate must be pending");
-    return options.database.transaction(() => {
-      const existing = decodeGate(
-        db
-          .prepare("SELECT request_json FROM capability_gate_requests WHERE gate_request_id = ?")
-          .get(gate.gateRequestId),
-      );
-      if (existing) {
-        if (canonicalJson(existing) !== canonicalJson(gate))
-          throw new Error(`Immutable capability gate ${gate.gateRequestId} differs`);
-        return existing;
-      }
-      if (!awaitableRevisionExists(db, gate.revision))
-        throw new Error(`Unknown capability revision ${gate.revision.capabilityRevisionId}`);
-      db.prepare(
-        `INSERT INTO capability_gate_requests(
-          gate_request_id, capability_id, revision_json, request_json, status, created_at, settled_at
-        ) VALUES (?, ?, ?, ?, ?, ?, NULL)`,
-      ).run(
-        gate.gateRequestId,
-        gate.capabilityId,
-        canonicalJson(gate.revision),
-        canonicalJson(gate),
-        gate.status,
-        gate.createdAt,
-      );
-      return gate;
-    });
+    return options.database.transaction(() => insertGate(gate));
   };
 
   const getGate: CapabilityLifecycleStore["getGate"] = async (gateRequestId) =>
@@ -417,15 +610,57 @@ export function createCapabilityLifecycleStore(
         .get(gateRequestId),
     );
 
-  const listPendingGates: CapabilityLifecycleStore["listPendingGates"] = async () =>
-    Object.freeze(
-      db
-        .prepare(
-          "SELECT request_json FROM capability_gate_requests WHERE status = 'pending' ORDER BY created_at, gate_request_id",
-        )
-        .all()
-        .map((row) => normalizeGate(parseJson(requiredString(row, "request_json")))),
-    );
+  const listPendingGates: CapabilityLifecycleStore["listPendingGates"] = async (request) => {
+    if (request) assertLimit(request.limit);
+    const rows = request
+      ? db
+          .prepare(
+            `SELECT gate.request_json
+             FROM capability_gate_requests AS gate
+             JOIN capability_bindings AS binding ON binding.capability_id = gate.capability_id
+             WHERE gate.status = 'pending' AND ${scopedWhere}
+             ORDER BY gate.created_at, gate.gate_request_id
+             LIMIT ?`,
+          )
+          .all(request.project.projectId, request.project.root, request.sessionId, request.limit)
+      : db
+          .prepare(
+            "SELECT request_json FROM capability_gate_requests WHERE status = 'pending' ORDER BY created_at, gate_request_id",
+          )
+          .all();
+    return Object.freeze(rows.map((row) => normalizeGate(parseJson(requiredString(row, "request_json")))));
+  };
+
+  const decideGate: CapabilityLifecycleStore["decideGate"] = async (request) =>
+    options.database.transaction(() => {
+      const gate = decodeGate(
+        db
+          .prepare("SELECT request_json FROM capability_gate_requests WHERE gate_request_id = ?")
+          .get(request.gateRequestId),
+      );
+      if (!gate) throw new Error(`Unknown capability gate ${request.gateRequestId}`);
+      if (gate.status !== "pending")
+        throw new Error(`Capability gate ${request.gateRequestId} is already ${gate.status}`);
+      const binding = decodeBinding(
+        db.prepare("SELECT * FROM capability_bindings WHERE capability_id = ?").get(gate.capabilityId),
+      );
+      if (!binding) throw new Error(`Unknown capability ${gate.capabilityId}`);
+      if (request.decision === "deny") {
+        const settled = settlePendingGate(gate, "denied");
+        return Object.freeze({ status: "updated" as const, gate: settled, binding });
+      }
+      const updated = updateBindingRow({
+        capabilityId: gate.capabilityId,
+        expectedRevisionNumber: gate.expectedBindingRevision,
+        revision: gate.revision,
+        scope: gate.proposedScope,
+        activationMode: gate.proposedActivationMode,
+        state: "active",
+      });
+      if (updated.status === "stale") return Object.freeze({ ...updated, gate });
+      const settled = settlePendingGate(gate, "approved");
+      return Object.freeze({ status: "updated" as const, gate: settled, binding: updated.binding });
+    });
 
   const settleGate: CapabilityLifecycleStore["settleGate"] = async (request) =>
     options.database.transaction(() => {
@@ -440,19 +675,48 @@ export function createCapabilityLifecycleStore(
           throw new Error(`Capability gate ${request.gateRequestId} is already ${current.status}`);
         return current;
       }
-      const settled = normalizeGate({
-        ...current,
-        status: request.status,
-        ...(request.instruction ? { instruction: request.instruction } : {}),
-        settledAt: options.now(),
-      });
-      db.prepare(
-        `UPDATE capability_gate_requests
-         SET request_json = ?, status = ?, settled_at = ?
-         WHERE gate_request_id = ? AND status = 'pending'`,
-      ).run(canonicalJson(settled), settled.status, settled.settledAt ?? null, settled.gateRequestId);
-      return settled;
+      return settlePendingGate(current, request.status, request.instruction);
     });
+
+  const listActiveLegacyAdjustments: CapabilityLifecycleStore["listActiveLegacyAdjustments"] = async () =>
+    Object.freeze(
+      db
+        .prepare(
+          `SELECT adjustment.data_json
+           FROM active_project_adjustments AS active
+           JOIN working_adjustments AS adjustment
+             ON adjustment.project_id = active.project_id
+            AND adjustment.adjustment_id = active.adjustment_id
+           ORDER BY active.project_id`,
+        )
+        .all()
+        .map((row) => WorkingAdjustmentSchema.parse(parseJson(requiredString(row, "data_json")))),
+    );
+
+  const recordCutoverFailure: CapabilityLifecycleStore["recordCutoverFailure"] = async (
+    adjustment,
+    failure,
+  ) => {
+    options.database.transaction(() => {
+      db.prepare(
+        `INSERT INTO capability_learning_cutover_failures(
+          source_project_id, source_adjustment_id, failure, occurred_at
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(source_project_id, source_adjustment_id) DO UPDATE SET
+          failure = excluded.failure,
+          occurred_at = excluded.occurred_at`,
+      ).run(adjustment.scope.projectId, adjustment.adjustmentId, failure.slice(0, 8_192), options.now());
+    });
+  };
+
+  const clearCutoverFailure: CapabilityLifecycleStore["clearCutoverFailure"] = async (adjustment) => {
+    options.database.transaction(() => {
+      db.prepare(
+        `DELETE FROM capability_learning_cutover_failures
+         WHERE source_project_id = ? AND source_adjustment_id = ?`,
+      ).run(adjustment.scope.projectId, adjustment.adjustmentId);
+    });
+  };
 
   const isCutoverComplete: CapabilityLifecycleStore["isCutoverComplete"] = async () =>
     db.prepare("SELECT 1 FROM capability_learning_cutovers WHERE cutover_version = 1").get() !== undefined;
@@ -461,6 +725,20 @@ export function createCapabilityLifecycleStore(
     options.database.transaction(() => {
       if (db.prepare("SELECT 1 FROM capability_learning_cutovers WHERE cutover_version = 1").get())
         return false;
+      db.prepare(
+        `DELETE FROM capability_learning_cutover_failures
+         WHERE NOT EXISTS (
+           SELECT 1
+           FROM active_project_adjustments AS active
+           JOIN working_adjustments AS adjustment
+             ON adjustment.project_id = active.project_id
+            AND adjustment.adjustment_id = active.adjustment_id
+           WHERE adjustment.project_id = capability_learning_cutover_failures.source_project_id
+             AND adjustment.adjustment_id = capability_learning_cutover_failures.source_adjustment_id
+         )`,
+      ).run();
+      if (db.prepare("SELECT 1 FROM capability_learning_cutover_failures LIMIT 1").get())
+        throw new Error("Capability learning cutover still has recorded failures");
       db.prepare("INSERT INTO capability_learning_cutovers(cutover_version, completed_at) VALUES (1, ?)").run(
         options.now(),
       );
@@ -485,18 +763,25 @@ export function createCapabilityLifecycleStore(
     listBindings,
     listEligibleBindings,
     updateBinding,
+    updateBindingWithFeedback,
     addFeedback,
     listFeedback,
+    stageGatedRevision,
+    applyRevision,
     createGate,
     getGate,
     listPendingGates,
+    decideGate,
     settleGate,
     completeCutover,
     isCutoverComplete,
+    listActiveLegacyAdjustments,
+    recordCutoverFailure,
+    clearCutoverFailure,
   });
 }
 
-function awaitableRevisionExists(
+function storedRevisionExists(
   db: WorkspaceDatabase["connection"],
   reference: import("@noesis/domain").CapabilityRevisionRef,
 ): boolean {

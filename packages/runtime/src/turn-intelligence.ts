@@ -22,7 +22,7 @@ import type {
   WorkingAdjustment,
 } from "@noesis/domain";
 import { canonicalJson, sha256 } from "@noesis/domain";
-import type { NoesisWorkspaceStore } from "@noesis/workspace";
+import { isCapabilityBindingAdmissionConflictError, type NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
 
 const decoder = new TextDecoder("utf8", { fatal: true });
@@ -282,18 +282,25 @@ export function createTurnIntelligencePlanner(
       readonly baseline: FrozenBaselineRef;
     }[] = [];
     const legacyReferences = Object.values(activation.activeCapabilityRevisions);
+    const legacyWithoutLifecycleBinding = (
+      await Promise.all(
+        legacyReferences.map(async (reference) =>
+          reference.kind === "capability_revision" &&
+          (await options.workspace.capabilities.getBinding(reference.capabilityId)) === undefined
+            ? reference
+            : undefined,
+        ),
+      )
+    ).filter((reference): reference is CapabilityRevisionRef => reference !== undefined);
     const lifecycleModes = new Map(
-      lifecycleBindings.map((binding) => [binding.revision.capabilityRevisionId, binding.activationMode]),
+      lifecycleBindings.map((binding) => [binding.capabilityId, binding.activationMode]),
     );
-    const references = [...legacyReferences, ...lifecycleBindings.map((binding) => binding.revision)].filter(
-      (reference, index, all) =>
-        reference.kind === "capability_revision" &&
-        all.findIndex(
-          (candidate) =>
-            candidate.kind === "capability_revision" &&
-            candidate.capabilityRevisionId === reference.capabilityRevisionId,
-        ) === index,
-    );
+    const referencesByCapabilityId = new Map<string, CapabilityRevisionRef>();
+    for (const reference of legacyWithoutLifecycleBinding)
+      referencesByCapabilityId.set(reference.capabilityId, reference);
+    for (const binding of lifecycleBindings)
+      referencesByCapabilityId.set(binding.capabilityId, binding.revision);
+    const references = [...referencesByCapabilityId.values()];
     for (const reference of references) {
       if (reference.kind !== "capability_revision") continue;
       const [capability, revision, baseline] = await Promise.all([
@@ -311,13 +318,12 @@ export function createTurnIntelligencePlanner(
     const general = resolved.filter((item) => item.baseline.kind === "genesis");
     const always = resolved.filter(
       (item) =>
-        item.baseline.kind !== "genesis" &&
-        lifecycleModes.get(item.reference.capabilityRevisionId) === "always",
+        item.baseline.kind !== "genesis" && lifecycleModes.get(item.reference.capabilityId) === "always",
     );
     const candidates = resolved.filter(
       (item) =>
         item.baseline.kind !== "genesis" &&
-        lifecycleModes.get(item.reference.capabilityRevisionId) === "relevant",
+        (lifecycleModes.get(item.reference.capabilityId) ?? "relevant") === "relevant",
     );
     const routing: TurnCapabilityRoutingDecision =
       candidates.length === 0
@@ -462,7 +468,12 @@ export function createTurnIntelligencePlanner(
   };
 
   const planAndAdmit = async (request: TurnPlanningRequest): Promise<FrozenTurnPlan> => {
-    return await planAndAdmitOnce(request);
+    try {
+      return await planAndAdmitOnce(request);
+    } catch (error) {
+      if (!isCapabilityBindingAdmissionConflictError(error)) throw error;
+      return await planAndAdmitOnce(request);
+    }
   };
 
   return Object.freeze({ planAndAdmit });

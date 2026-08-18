@@ -23,7 +23,10 @@ import type {
   WorkingAdjustmentApplyResult,
   WorkingAdjustmentUnapplyResult,
 } from "./types.ts";
-import { isWorkingAdjustmentAdmissionConflictError } from "./types.ts";
+import {
+  isCapabilityBindingAdmissionConflictError,
+  isWorkingAdjustmentAdmissionConflictError,
+} from "./types.ts";
 
 type ActivationMutation = Pick<
   ProtectedActivationStore,
@@ -258,7 +261,11 @@ async function runAuthorized<Result>(
     }
   });
   if (!decision.ok) {
-    if (isWorkingAdjustmentAdmissionConflictError(callbackError)) throw callbackError;
+    if (
+      isWorkingAdjustmentAdmissionConflictError(callbackError) ||
+      isCapabilityBindingAdmissionConflictError(callbackError)
+    )
+      throw callbackError;
     if (!callbackStarted || recoverCurrentFailure) {
       try {
         const recovered = await rehydrate();

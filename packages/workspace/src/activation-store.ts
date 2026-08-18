@@ -36,7 +36,7 @@ import type {
   ActivationRecord,
   ProtectedActivationStore,
 } from "./types.ts";
-import { workingAdjustmentAdmissionConflictError } from "./types.ts";
+import { capabilityBindingAdmissionConflictError, workingAdjustmentAdmissionConflictError } from "./types.ts";
 
 type RecordActivity = (
   actor: ActorRef,
@@ -801,14 +801,12 @@ export async function createProtectedActivationStore(
         const active = activation.activeCapabilityRevisions[selection.capabilityId];
         const legacyActive =
           active?.kind === "capability_revision" && sameCapabilityRevisionRef(active, selection.revision);
-        const bindingRow = legacyActive
-          ? undefined
-          : db
-              .prepare(
-                `SELECT revision_json, scope_json, state
-                 FROM capability_bindings WHERE capability_id = ?`,
-              )
-              .get(selection.capabilityId);
+        const bindingRow = db
+          .prepare(
+            `SELECT revision_json, scope_json, state
+             FROM capability_bindings WHERE capability_id = ?`,
+          )
+          .get(selection.capabilityId);
         const lifecycleActive = (() => {
           if (bindingRow === undefined || requiredString(bindingRow, "state") !== "active") return false;
           const reference = CapabilityRevisionRefSchema.parse(
@@ -829,10 +827,8 @@ export async function createProtectedActivationStore(
             Reflect.get(project, "root") === plan.project.root
           );
         })();
-        if (!legacyActive && !lifecycleActive)
-          throw new Error(
-            `Frozen turn plan selected inactive revision ${selection.revision.capabilityRevisionId}`,
-          );
+        if (!(bindingRow === undefined ? legacyActive : lifecycleActive))
+          throw capabilityBindingAdmissionConflictError();
       }
       const insertedPin = db
         .prepare(

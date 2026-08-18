@@ -15,7 +15,7 @@ Never claim an action or system state without runtime evidence.
 
 Active capabilities and skills may add relevant instructions. The stable core stays short.
 
-Active Capability revisions contribute exact immutable material frozen at turn start. The ambient author currently produces instruction Capabilities. The model can still create and revise project tools and workflows immediately through the explicit foreground `adapt` path. Global `relevant` Capabilities enter only when the capable semantic router selects them; `always` Capabilities enter every eligible turn.
+Active Capability revisions contribute exact immutable material frozen at turn start. The ambient author currently produces instruction Capabilities. The model can still create and revise project tools and workflows immediately through the explicit foreground `execute` path. Global `relevant` Capabilities enter only when the capable semantic router selects them; `always` Capabilities enter every eligible turn.
 
 Noesis preserves instruction levels:
 

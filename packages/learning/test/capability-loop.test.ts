@@ -192,6 +192,8 @@ describe("Capability learning loop", () => {
       capabilityId: binding.capabilityId,
       revision: binding.revision,
       expectedBindingRevision: binding.revisionNumber,
+      proposedScope: binding.scope,
+      proposedActivationMode: binding.activationMode,
       consequence: "This changes recovery control behavior.",
       status: "pending",
       createdAt: "2026-08-18T01:00:00.000Z",

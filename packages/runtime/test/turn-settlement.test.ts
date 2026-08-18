@@ -116,6 +116,7 @@ describe("turn settlement", () => {
       metadata: Object.freeze({}),
     });
     const observedSelections: (readonly CapabilityRevisionRef[])[] = [];
+    const reflectionFailures: string[] = [];
     const observedLearningTurns: {
       readonly outcome: string;
       readonly toolFailureCount: number;
@@ -137,6 +138,9 @@ describe("turn settlement", () => {
           return await Promise.reject(new Error("fixture stops after observing reflection"));
         },
       }),
+      onReflectionFailure: (error) => {
+        reflectionFailures.push(error instanceof Error ? error.message : String(error));
+      },
     });
     const context = compileContext([], {}, { maxTokens: 8, maxFragmentTokens: 8 });
     const plan = turnPlan(
@@ -217,7 +221,8 @@ describe("turn settlement", () => {
           };
         },
       }),
-    ).rejects.toThrow("fixture stops after observing reflection");
+    ).resolves.toMatchObject({ result: { outcome: "completed", output: "done" } });
+    expect(reflectionFailures).toEqual(["fixture stops after observing reflection"]);
     expect(observedSelections).toEqual([
       [revisionRef("general"), revisionRef("noesis-research"), revisionRef("review-style")],
     ]);
@@ -261,7 +266,7 @@ describe("turn settlement", () => {
           frozenTurnPlan: abortedPlan,
         }),
       }),
-    ).rejects.toThrow("fixture stops after observing reflection");
+    ).resolves.toMatchObject({ result: { outcome: "aborted", output: "partial" } });
     expect(observedLearningTurns.at(-1)?.outcome).toBe("failed");
     const outcomes = await workspace.operational.outcomes.listForSession("session-1");
     expect(outcomes).toHaveLength(2);
@@ -289,7 +294,10 @@ describe("turn settlement", () => {
           frozenTurnPlan: correctedPlan,
         }),
       }),
-    ).rejects.toThrow("fixture stops after observing reflection");
+    ).resolves.toMatchObject({
+      result: { outcome: "completed", output: "Corrected response with an exact primary source." },
+    });
+    expect(reflectionFailures).toHaveLength(3);
     expect(observedLearningTurns.at(-1)?.outcome).toBe("unknown");
     await workspace.operational.outcomes.classify({
       outcomeId: "turn-corrected:outcome",

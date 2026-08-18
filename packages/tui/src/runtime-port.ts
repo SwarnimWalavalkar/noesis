@@ -263,8 +263,14 @@ export type TuiCapabilityManagementIntent =
   | {
       readonly type: "set-scope";
       readonly capabilityId: string;
-      readonly scope: "global" | "project" | "session";
-      readonly sessionId?: string;
+      readonly scope: "global" | "project";
+      readonly expectedBindingRevision: number;
+    }
+  | {
+      readonly type: "set-scope";
+      readonly capabilityId: string;
+      readonly scope: "session";
+      readonly sessionId: string;
       readonly expectedBindingRevision: number;
     }
   | {
@@ -281,6 +287,12 @@ export type TuiCapabilityManagementIntent =
   | { readonly type: "approve"; readonly gateRequestId: string }
   | { readonly type: "deny"; readonly gateRequestId: string }
   | { readonly type: "change"; readonly gateRequestId: string; readonly instruction: string };
+
+export interface TuiCapabilityManagementResult {
+  readonly status: "activated" | "revised" | "pending" | "paused" | "restored" | "binding_changed" | "stale";
+  readonly capabilityId: string;
+  readonly message: string;
+}
 
 export type TuiMcpScope = "global" | "project";
 export type TuiMcpServerStatus =
@@ -448,7 +460,9 @@ export type NoesisTuiRuntime = Pick<
   readonly listLearningActivity?: (sessionId: string) => Promise<readonly TuiLearningActivitySummary[]>;
   readonly inspectLearning?: (sessionId: string) => Promise<TuiLearningInspection>;
   readonly inspectLearningAudit?: (sessionId: string) => Promise<TuiLearningAuditSnapshot>;
-  readonly manageCapability?: (intent: TuiCapabilityManagementIntent) => Promise<void>;
+  readonly manageCapability?: (
+    intent: TuiCapabilityManagementIntent,
+  ) => Promise<TuiCapabilityManagementResult>;
   readonly waitForLearningActivity?: (
     sessionId: string,
     jobId: string,

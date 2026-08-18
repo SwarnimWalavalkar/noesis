@@ -128,9 +128,12 @@ export function researchLoopControlledResponse(
   if (prompt.role === "reflector") {
     const settled = z.object({ userMessage: z.string() }).parse(parsedMessage(prompt, "settled_turn"));
     const current = z
-      .array(z.object({ definition: z.object({ capabilityId: z.string() }) }))
+      .object({
+        capabilities: z.array(z.object({ capabilityId: z.string() })),
+        omittedCount: z.number().int().nonnegative(),
+      })
       .parse(parsedMessage(prompt, "current_capabilities"));
-    const activeCapability = current[0]?.definition;
+    const activeCapability = current.capabilities[0];
     if (settled.userMessage.includes("revise this research brief") && activeCapability)
       return JSON.stringify({
         decision: "revise",
@@ -152,7 +155,7 @@ export function researchLoopControlledResponse(
           evidenceCitationIndexes: [0],
         },
       });
-    if (!settled.userMessage.includes("research brief") || current.length > 0)
+    if (!settled.userMessage.includes("research brief") || current.capabilities.length > 0)
       return JSON.stringify({
         decision: "no_change",
         reason: "No additional durable Capability is needed for this settled turn.",

@@ -35,9 +35,9 @@ const CapabilityProposalSchema = z.strictObject({
   rationale: z.string().min(1).max(4_096),
   anticipatedEffect: z.string().min(1).max(2_048),
   instruction: z.string().min(1).max(12_000),
-  scope: CapabilityScopeDecisionSchema.default("global"),
-  activationMode: z.enum(["relevant", "always"]).default("relevant"),
-  consequence: CapabilityConsequenceSchema.default("ordinary"),
+  scope: CapabilityScopeDecisionSchema.optional(),
+  activationMode: z.enum(["relevant", "always"]).optional(),
+  consequence: CapabilityConsequenceSchema,
   consequenceDescription: z.string().min(1).max(2_048),
   evidenceCitationIndexes: z.array(z.number().int().nonnegative()).min(1).max(16),
 });
@@ -188,6 +188,72 @@ function scopeDecision(scope: CapabilityScope): z.infer<typeof CapabilityScopeDe
   return "current_session";
 }
 
+function proposedScope(
+  proposal: z.infer<typeof CapabilityProposalSchema>,
+  input: CapabilityLearningTurn,
+  current?: CapabilityScope,
+): CapabilityScope {
+  return proposal.scope === undefined
+    ? (current ?? Object.freeze({ kind: "global" as const }))
+    : scopeFrom(proposal.scope, input);
+}
+
+function proposedActivationMode(
+  proposal: z.infer<typeof CapabilityProposalSchema>,
+  current?: CapabilityActivationMode,
+): CapabilityActivationMode {
+  return proposal.activationMode ?? current ?? "relevant";
+}
+
+const CURRENT_CAPABILITIES_MAX_CHARACTERS = 12_000;
+const CURRENT_CAPABILITIES_MAX_ITEMS = 64;
+
+function currentCapabilitiesMessage(
+  definitions: readonly CapabilityDefinition[],
+  bindings: readonly import("@noesis/domain").CapabilityBinding[],
+  selectedCapabilities: readonly CapabilityRevisionRef[],
+): string {
+  const bindingByCapabilityId = new Map(bindings.map((binding) => [binding.capabilityId, binding]));
+  const selectedIds = new Set(selectedCapabilities.map((reference) => reference.capabilityId));
+  const projected = definitions
+    .map((definition) => {
+      const binding = bindingByCapabilityId.get(definition.capabilityId);
+      return Object.freeze({
+        capabilityId: definition.capabilityId,
+        name: definition.name,
+        kind: definition.kind,
+        description: definition.description,
+        applicability: definition.applicability,
+        ...(binding
+          ? {
+              binding: Object.freeze({
+                revision: binding.revision,
+                scope: binding.scope,
+                activationMode: binding.activationMode,
+                state: binding.state,
+                revisionNumber: binding.revisionNumber,
+              }),
+            }
+          : {}),
+      });
+    })
+    .sort((left, right) => {
+      const selectedDelta =
+        Number(selectedIds.has(right.capabilityId)) - Number(selectedIds.has(left.capabilityId));
+      return selectedDelta || left.capabilityId.localeCompare(right.capabilityId);
+    })
+    .slice(0, CURRENT_CAPABILITIES_MAX_ITEMS);
+  while (projected.length > 0) {
+    const encoded = canonicalJson({
+      capabilities: projected,
+      omittedCount: Math.max(0, definitions.length - projected.length),
+    });
+    if (encoded.length <= CURRENT_CAPABILITIES_MAX_CHARACTERS) return encoded;
+    projected.pop();
+  }
+  return canonicalJson({ capabilities: [], omittedCount: definitions.length });
+}
+
 function citedEvidence(
   indexes: readonly number[],
   citations: readonly ExactCitation[],
@@ -315,7 +381,12 @@ export function createCapabilityLearningModule(
     signal: AbortSignal,
   ): Promise<CapabilityReflectionResult> => {
     signal.throwIfAborted();
-    const [history, definitions, bindings] = await Promise.all([
+    if (input.turn.sensitivity === "secret")
+      return Object.freeze({
+        status: "no_change",
+        reason: "Secret turns are excluded from ambient capability authoring",
+      });
+    const [history, bindings] = await Promise.all([
       options.history.search({
         query: input.feedback ?? input.turn.correction ?? input.turn.userMessage,
         sessionScope: Object.freeze({ kind: "previous", currentSessionId: input.turn.sessionId }),
@@ -323,9 +394,15 @@ export function createCapabilityLearningModule(
         maxExcerptChars: 800,
         signal,
       }),
-      options.store.listDefinitions(),
-      options.store.listBindings(),
+      options.store.listBindings({
+        project: input.project,
+        sessionId: input.turn.sessionId,
+        limit: 1_000,
+      }),
     ]);
+    const definitions = (
+      await Promise.all(bindings.map((binding) => options.store.getDefinition(binding.capabilityId)))
+    ).filter((definition): definition is CapabilityDefinition => definition !== undefined);
     const currentEvidence: ExactCitation = Object.freeze({
       source: Object.freeze({
         kind: "database_row" as const,
@@ -353,12 +430,7 @@ export function createCapabilityLearningModule(
       Object.freeze({
         role: "user" as const,
         name: "current_capabilities",
-        content: canonicalJson(
-          definitions.map((definition) => ({
-            definition,
-            binding: bindings.find((binding) => binding.capabilityId === definition.capabilityId),
-          })),
-        ),
+        content: currentCapabilitiesMessage(definitions, bindings, input.selectedCapabilities),
       }),
       Object.freeze({
         role: "user" as const,
@@ -383,16 +455,40 @@ export function createCapabilityLearningModule(
       ),
       CapabilityReflectionOutputSchema,
     );
+    signal.throwIfAborted();
     const decision = inferred.value;
+    const decisionEvidence = Object.freeze([
+      Object.freeze({
+        kind: "database_row" as const,
+        table: "messages" as const,
+        rowId: `${input.turn.turnId}:user`,
+      }),
+    ]);
+    const decisionFeedback = (
+      binding: import("@noesis/domain").CapabilityBinding,
+      interpretation: string,
+      disposition: CapabilityFeedback["disposition"],
+    ): CapabilityFeedback =>
+      Object.freeze({
+        feedbackId: nextId("capability_feedback"),
+        capabilityId: binding.capabilityId,
+        revision: binding.revision,
+        evidenceRefs: decisionEvidence,
+        interpretation,
+        disposition,
+        createdAt: now(),
+      });
     if (decision.decision === "no_change")
       return Object.freeze({ status: "no_change", reason: decision.reason });
     if (decision.decision === "pause") {
       const binding = await options.store.getBinding(decision.capabilityId);
       if (!binding) throw new Error(`Unknown capability ${decision.capabilityId}`);
-      const updated = await options.store.updateBinding({
+      signal.throwIfAborted();
+      const updated = await options.store.updateBindingWithFeedback({
         capabilityId: binding.capabilityId,
         expectedRevisionNumber: binding.revisionNumber,
         state: "paused",
+        feedback: decisionFeedback(binding, decision.reason, "correction"),
       });
       return Object.freeze({
         status: updated.status === "stale" ? "stale" : "paused",
@@ -410,11 +506,13 @@ export function createCapabilityLearningModule(
         (revision) => revision.reference.capabilityRevisionId === decision.capabilityRevisionId,
       );
       if (!target) throw new Error(`Unknown restorable revision ${decision.capabilityRevisionId}`);
-      const updated = await options.store.updateBinding({
+      signal.throwIfAborted();
+      const updated = await options.store.updateBindingWithFeedback({
         capabilityId: binding.capabilityId,
         expectedRevisionNumber: binding.revisionNumber,
         revision: target.reference,
         state: "active",
+        feedback: decisionFeedback(binding, decision.reason, "restore_request"),
       });
       return Object.freeze({
         status: updated.status === "stale" ? "stale" : "restored",
@@ -425,11 +523,17 @@ export function createCapabilityLearningModule(
     if (decision.decision === "change_binding") {
       const binding = await options.store.getBinding(decision.capabilityId);
       if (!binding) throw new Error(`Unknown capability ${decision.capabilityId}`);
-      const updated = await options.store.updateBinding({
+      signal.throwIfAborted();
+      const updated = await options.store.updateBindingWithFeedback({
         capabilityId: binding.capabilityId,
         expectedRevisionNumber: binding.revisionNumber,
         scope: scopeFrom(decision.scope, input),
         activationMode: decision.activationMode,
+        feedback: decisionFeedback(
+          binding,
+          decision.reason,
+          decision.activationMode !== binding.activationMode ? "activation_change" : "scope_change",
+        ),
       });
       return Object.freeze({
         status: updated.status === "stale" ? "stale" : "binding_changed",
@@ -451,70 +555,76 @@ export function createCapabilityLearningModule(
       ...(predecessor ? { predecessor } : {}),
     });
     const requiresGate = proposal.consequence !== "ordinary";
+    const nextScope = proposedScope(proposal, input, binding?.scope);
+    const nextActivationMode = proposedActivationMode(proposal, binding?.activationMode);
     if (!binding) {
-      const created = await options.store.create({
+      const gate = requiresGate
+        ? Object.freeze({
+            gateRequestId: nextId("capability_gate"),
+            capabilityId,
+            revision: authored.revision.reference,
+            expectedBindingRevision: 1,
+            proposedScope: nextScope,
+            proposedActivationMode: nextActivationMode,
+            consequence: proposal.consequenceDescription,
+            status: "pending" as const,
+            createdAt: now(),
+          })
+        : undefined;
+      signal.throwIfAborted();
+      await options.store.create({
         definition: authored.definition,
         revision: authored.revision,
         binding: Object.freeze({
           capabilityId,
           revision: authored.revision.reference,
-          scope: scopeFrom(proposal.scope, input),
-          activationMode: proposal.activationMode,
+          scope: nextScope,
+          activationMode: nextActivationMode,
           state: requiresGate ? "paused" : "active",
         }),
+        ...(gate ? { gate } : {}),
       });
-      if (requiresGate)
-        await options.store.createGate(
-          Object.freeze({
-            gateRequestId: nextId("capability_gate"),
-            capabilityId,
-            revision: authored.revision.reference,
-            expectedBindingRevision: created.revisionNumber,
-            consequence: proposal.consequenceDescription,
-            status: "pending",
-            createdAt: now(),
-          }),
-        );
       return Object.freeze({
         status: requiresGate ? "pending" : "activated",
         capabilityId,
         message: authored.revision.summary,
       });
     }
-    await options.store.addRevision(authored.revision);
-    if (input.feedback)
-      await options.store.addFeedback(
-        Object.freeze({
-          feedbackId: nextId("capability_feedback"),
-          capabilityId,
-          revision: binding.revision,
-          evidenceRefs,
-          interpretation: input.feedback,
-          disposition: "correction",
-          createdAt: now(),
-        }) satisfies CapabilityFeedback,
-      );
+    const feedback = Object.freeze({
+      feedbackId: nextId("capability_feedback"),
+      capabilityId,
+      revision: binding.revision,
+      evidenceRefs,
+      interpretation: input.feedback ?? input.turn.correction ?? proposal.rationale,
+      disposition: "correction" as const,
+      createdAt: now(),
+    }) satisfies CapabilityFeedback;
     if (requiresGate) {
-      await options.store.createGate(
-        Object.freeze({
+      signal.throwIfAborted();
+      await options.store.stageGatedRevision({
+        revision: authored.revision,
+        feedback,
+        gate: Object.freeze({
           gateRequestId: nextId("capability_gate"),
           capabilityId,
           revision: authored.revision.reference,
           expectedBindingRevision: binding.revisionNumber,
+          proposedScope: nextScope,
+          proposedActivationMode: nextActivationMode,
           consequence: proposal.consequenceDescription,
           status: "pending",
           createdAt: now(),
         }),
-      );
+      });
       return Object.freeze({ status: "pending", capabilityId, message: authored.revision.summary });
     }
-    const updated = await options.store.updateBinding({
-      capabilityId,
-      expectedRevisionNumber: binding.revisionNumber,
-      revision: authored.revision.reference,
-      scope: scopeFrom(proposal.scope, input),
-      activationMode: proposal.activationMode,
-      state: "active",
+    signal.throwIfAborted();
+    const updated = await options.store.applyRevision({
+      revision: authored.revision,
+      feedback,
+      expectedBindingRevision: binding.revisionNumber,
+      scope: nextScope,
+      activationMode: nextActivationMode,
     });
     return Object.freeze({
       status: updated.status === "stale" ? "stale" : "revised",
@@ -528,29 +638,26 @@ export function createCapabilityLearningModule(
     if (intent.type === "approve" || intent.type === "deny") {
       const gate = await options.store.getGate(intent.gateRequestId);
       if (!gate) throw new Error(`Unknown capability gate ${intent.gateRequestId}`);
+      if (gate.status !== "pending")
+        throw new Error(`Capability gate ${intent.gateRequestId} is already ${gate.status}`);
+      signal.throwIfAborted();
+      const decided = await options.store.decideGate({
+        gateRequestId: gate.gateRequestId,
+        decision: intent.type,
+      });
       if (intent.type === "deny") {
-        await options.store.settleGate({ gateRequestId: gate.gateRequestId, status: "denied" });
         return Object.freeze({
           status: "paused",
           capabilityId: gate.capabilityId,
           message: "Capability decision denied",
         });
       }
-      const binding = await options.store.getBinding(gate.capabilityId);
-      if (!binding) throw new Error(`Unknown capability ${gate.capabilityId}`);
-      const updated = await options.store.updateBinding({
-        capabilityId: gate.capabilityId,
-        expectedRevisionNumber: gate.expectedBindingRevision ?? binding.revisionNumber,
-        revision: gate.revision,
-        state: "active",
-      });
-      if (updated.status === "stale")
+      if (decided.status === "stale")
         return Object.freeze({
           status: "stale",
           capabilityId: gate.capabilityId,
           message: "Binding changed",
         });
-      await options.store.settleGate({ gateRequestId: gate.gateRequestId, status: "approved" });
       return Object.freeze({
         status: "activated",
         capabilityId: gate.capabilityId,
@@ -590,6 +697,7 @@ export function createCapabilityLearningModule(
         ),
         CapabilityGateChangeSchema,
       );
+      signal.throwIfAborted();
       const changed = inferred.value;
       const proposal: z.infer<typeof CapabilityProposalSchema> = Object.freeze({
         name: definition.name,
@@ -600,8 +708,8 @@ export function createCapabilityLearningModule(
         rationale: changed.rationale,
         anticipatedEffect: changed.anticipatedEffect,
         instruction: changed.instruction,
-        scope: scopeDecision(binding.scope),
-        activationMode: binding.activationMode,
+        scope: scopeDecision(gate.proposedScope),
+        activationMode: gate.proposedActivationMode,
         consequence: changed.consequence,
         consequenceDescription: changed.consequenceDescription,
         evidenceCitationIndexes: [0],
@@ -612,9 +720,10 @@ export function createCapabilityLearningModule(
         predecessor,
         evidenceRefs: predecessor.revision.evidenceRefs,
       });
-      await options.store.addRevision(authored.revision);
-      await options.store.addFeedback(
-        Object.freeze({
+      signal.throwIfAborted();
+      await options.store.stageGatedRevision({
+        revision: authored.revision,
+        feedback: Object.freeze({
           feedbackId: nextId("capability_feedback"),
           capabilityId: gate.capabilityId,
           revision: gate.revision,
@@ -623,24 +732,20 @@ export function createCapabilityLearningModule(
           disposition: "correction",
           createdAt: now(),
         }),
-      );
-      await options.store.settleGate({
-        gateRequestId: gate.gateRequestId,
-        status: "superseded",
-        instruction: intent.instruction,
-      });
-      await options.store.createGate(
-        Object.freeze({
+        supersedeGateRequestId: gate.gateRequestId,
+        gate: Object.freeze({
           gateRequestId: nextId("capability_gate"),
           capabilityId: gate.capabilityId,
           revision: authored.revision.reference,
           expectedBindingRevision: binding.revisionNumber,
+          proposedScope: gate.proposedScope,
+          proposedActivationMode: gate.proposedActivationMode,
           consequence: changed.consequenceDescription,
           status: "pending",
           instruction: intent.instruction,
           createdAt: now(),
         }),
-      );
+      });
       return Object.freeze({
         status: "pending",
         capabilityId: gate.capabilityId,
@@ -674,6 +779,7 @@ export function createCapabilityLearningModule(
                 expectedRevisionNumber: intent.expectedBindingRevision,
                 activationMode: intent.mode,
               };
+    signal.throwIfAborted();
     const updated = await options.store.updateBinding(request);
     return Object.freeze({
       status:

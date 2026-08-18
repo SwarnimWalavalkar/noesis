@@ -263,7 +263,9 @@ export interface CapabilityGateRequest {
   readonly gateRequestId: string;
   readonly capabilityId: string;
   readonly revision: CapabilityRevisionRef;
-  readonly expectedBindingRevision: number | null;
+  readonly expectedBindingRevision: number;
+  readonly proposedScope: CapabilityScope;
+  readonly proposedActivationMode: CapabilityActivationMode;
   readonly consequence: string;
   readonly status: CapabilityGateStatus;
   readonly instruction?: string;

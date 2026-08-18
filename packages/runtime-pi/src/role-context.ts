@@ -21,6 +21,8 @@ const isolatedRoleMessageNames = {
     "active_capabilities",
     "user_preferences",
     "working_adjustment_context",
+    "pending_capability",
+    "user_change_request",
   ],
   revision_author: ["hypothesis", "source_cases"],
   case_generator: ["behavioral_objective", "evidence", "user_criteria"],

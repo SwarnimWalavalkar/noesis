@@ -58,6 +58,7 @@ import {
   compactionSensitivity,
   contextCheckpointActivationRequestDigest,
   compareTrailRecency,
+  CAPABILITY_REFLECTION_JOB_KIND,
   createCapabilityCoordinator,
   type CapabilityCoordinator,
   createTurnIntelligencePlanner,
@@ -1658,94 +1659,111 @@ export async function createApplicationRuntimeComposition(
 
   const cutoverWorkingAdjustments = async (): Promise<void> => {
     if (await workspace.capabilities.isCutoverComplete()) return;
-    const adjustments = await workspace.workingAdjustments.list({ limit: 1_000 });
-    const projectIds = [...new Set(adjustments.map((adjustment) => adjustment.scope.projectId))];
-    for (const projectId of projectIds) {
-      const adjustment = await workspace.workingAdjustments.getActive(projectId);
-      if (!adjustment) continue;
+    const adjustments = await workspace.capabilities.listActiveLegacyAdjustments();
+    let failed = false;
+    for (const adjustment of adjustments) {
       const capabilityId = `legacy-adjustment-${adjustment.adjustmentId}`;
       const capabilityRevisionId = `${capabilityId}-r1`;
-      const sourceMessage = await workspace.operational.messages.get(`${adjustment.createdFromTurnId}:user`);
-      const createdAt = sourceMessage?.createdAt ?? "1970-01-01T00:00:00.000Z";
-      const actor = Object.freeze({ actorId: "capability-cutover", kind: "system" as const });
-      const [prompt, router] = await Promise.all([
-        workspace.definitions.recordWorkingDefinition({
-          workingPath: `capabilities/${capabilityId}/${capabilityRevisionId}/instructions.md`,
-          bytes: encoder.encode(`${adjustment.strategy.trim()}\n`),
-          actor,
-          reason: "Preserve the active legacy working adjustment as a Capability",
-          provenanceRefs: adjustment.evidenceRefs,
-        }),
-        workspace.definitions.recordWorkingDefinition({
-          workingPath: `capabilities/${capabilityId}/${capabilityRevisionId}/router.json`,
-          bytes: encoder.encode(
-            `${canonicalJson({ strategyId: `capability-${capabilityId}-v1`, scope: "general" })}\n`,
-          ),
-          actor,
-          reason: "Route the migrated working adjustment by semantic relevance",
-          provenanceRefs: adjustment.evidenceRefs,
-        }),
-      ]);
-      const capability = Object.freeze({
-        capabilityId,
-        name: `Migrated strategy for ${adjustment.scope.projectId}`,
-        scope: "general",
-        intent: adjustment.observation,
-      });
-      registry.registerCapability(capability);
-      const reference = registry.constructRevision({
-        definitionState: "candidate",
-        capabilityRevisionId,
-        capabilityId,
-        promptModules: Object.freeze([prompt]),
-        skills: Object.freeze([]),
-        tools: Object.freeze([]),
-        routerRevision: router,
-        routerStrategyId: `capability-${capabilityId}-v1`,
-        activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
-        permissionManifest: Object.freeze({
-          effects: Object.freeze([]),
-          resourcePatterns: Object.freeze([]),
-          credentialRefs: Object.freeze([]),
-        }),
-        evidenceRefs: adjustment.evidenceRefs,
-        sourceEvaluationDefinitions: Object.freeze([]),
-        requestedPermissionDelta: Object.freeze({
-          addedEffects: Object.freeze([]),
-          widenedResources: Object.freeze([]),
-          addedCredentialRefs: Object.freeze([]),
-        }),
-      });
-      const revision = registry.getRevision(reference);
-      if (!revision) throw new Error(`Cutover lost revision ${capabilityRevisionId}`);
-      await workspace.capabilities.create({
-        definition: Object.freeze({
+      try {
+        const existing = await workspace.capabilities.getBinding(capabilityId);
+        if (existing) {
+          await workspace.capabilities.clearCutoverFailure(adjustment);
+          continue;
+        }
+        if (await workspace.capabilities.getDefinition(capabilityId))
+          throw new Error(`Capability ${capabilityId} exists without its binding`);
+        const sourceMessage = await workspace.operational.messages.get(
+          `${adjustment.createdFromTurnId}:user`,
+        );
+        const createdAt = sourceMessage?.createdAt ?? "1970-01-01T00:00:00.000Z";
+        const actor = Object.freeze({ actorId: "capability-cutover", kind: "system" as const });
+        const [prompt, router] = await Promise.all([
+          workspace.definitions.recordWorkingDefinition({
+            workingPath: `capabilities/${capabilityId}/${capabilityRevisionId}/instructions.md`,
+            bytes: encoder.encode(`${adjustment.strategy.trim()}\n`),
+            actor,
+            reason: "Preserve the active legacy working adjustment as a Capability",
+            provenanceRefs: adjustment.evidenceRefs,
+          }),
+          workspace.definitions.recordWorkingDefinition({
+            workingPath: `capabilities/${capabilityId}/${capabilityRevisionId}/router.json`,
+            bytes: encoder.encode(
+              `${canonicalJson({ strategyId: `capability-${capabilityId}-v1`, scope: "general" })}\n`,
+            ),
+            actor,
+            reason: "Route the migrated working adjustment by semantic relevance",
+            provenanceRefs: adjustment.evidenceRefs,
+          }),
+        ]);
+        const capability = Object.freeze({
           capabilityId,
-          name: capability.name,
-          kind: "instruction",
-          description: adjustment.observation,
-          applicability: adjustment.successSignal,
-          createdAt,
-        }),
-        revision: Object.freeze({
-          revision,
-          reference,
-          summary: adjustment.observation,
-          rationale: adjustment.observation,
-          anticipatedEffect: adjustment.successSignal,
-          createdAt,
-        }),
-        binding: Object.freeze({
+          name: `Migrated strategy for ${adjustment.scope.projectId}`,
+          scope: "general",
+          intent: adjustment.observation,
+        });
+        registry.registerCapability(capability);
+        const reference = registry.constructRevision({
+          definitionState: "candidate",
+          capabilityRevisionId,
           capabilityId,
-          revision: reference,
-          scope: Object.freeze({ kind: "global" as const }),
-          activationMode: "relevant",
-          state: "active",
-        }),
-      });
+          promptModules: Object.freeze([prompt]),
+          skills: Object.freeze([]),
+          tools: Object.freeze([]),
+          routerRevision: router,
+          routerStrategyId: `capability-${capabilityId}-v1`,
+          activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
+          permissionManifest: Object.freeze({
+            effects: Object.freeze([]),
+            resourcePatterns: Object.freeze([]),
+            credentialRefs: Object.freeze([]),
+          }),
+          evidenceRefs: adjustment.evidenceRefs,
+          sourceEvaluationDefinitions: Object.freeze([]),
+          requestedPermissionDelta: Object.freeze({
+            addedEffects: Object.freeze([]),
+            widenedResources: Object.freeze([]),
+            addedCredentialRefs: Object.freeze([]),
+          }),
+        });
+        const revision = registry.getRevision(reference);
+        if (!revision) throw new Error(`Cutover lost revision ${capabilityRevisionId}`);
+        await workspace.capabilities.create({
+          definition: Object.freeze({
+            capabilityId,
+            name: capability.name,
+            kind: "instruction",
+            description: adjustment.observation,
+            applicability: adjustment.successSignal,
+            createdAt,
+          }),
+          revision: Object.freeze({
+            revision,
+            reference,
+            summary: adjustment.observation,
+            rationale: adjustment.observation,
+            anticipatedEffect: adjustment.successSignal,
+            createdAt,
+          }),
+          binding: Object.freeze({
+            capabilityId,
+            revision: reference,
+            scope: Object.freeze({ kind: "project" as const, project: adjustment.scope }),
+            activationMode: "relevant",
+            state: "active",
+          }),
+        });
+        await workspace.capabilities.clearCutoverFailure(adjustment);
+      } catch (error) {
+        failed = true;
+        await workspace.capabilities.recordCutoverFailure(
+          adjustment,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
     }
-    await workspace.capabilities.completeCutover();
+    if (!failed) await workspace.capabilities.completeCutover();
   };
+  await hydrateCapabilityLifecycle();
   await cutoverWorkingAdjustments();
   await hydrateCapabilityLifecycle();
 
@@ -4678,20 +4696,28 @@ export async function createApplicationRuntimeComposition(
     turn: z.looseObject({ sessionId: z.string(), turnId: z.string() }),
     project: z.looseObject({ projectId: z.string() }),
   });
+  const capabilityJobResultSchema = z.looseObject({
+    status: z.enum([
+      "no_change",
+      "activated",
+      "revised",
+      "pending",
+      "paused",
+      "restored",
+      "binding_changed",
+      "stale",
+    ]),
+    message: z.string().optional(),
+    reason: z.string().optional(),
+    capabilityId: z.string().optional(),
+  });
   const capabilityActivity = (job: import("@noesis/domain").DurableJobRecord): TuiLearningActivitySummary => {
     const payload = capabilityJobPayloadSchema.parse(job.payload);
-    const result =
-      typeof job.result === "object" && job.result !== null && !Array.isArray(job.result)
-        ? job.result
-        : undefined;
-    const statusValue = result ? Reflect.get(result, "status") : undefined;
-    const messageValue = result ? Reflect.get(result, "message") : undefined;
-    const reasonValue = result ? Reflect.get(result, "reason") : undefined;
-    const capabilityValue = result ? Reflect.get(result, "capabilityId") : undefined;
-    const resultStatus = typeof statusValue === "string" ? statusValue : undefined;
-    const resultMessage = typeof messageValue === "string" ? messageValue : undefined;
-    const resultReason = typeof reasonValue === "string" ? reasonValue : undefined;
-    const capabilityId = typeof capabilityValue === "string" ? capabilityValue : undefined;
+    const result = capabilityJobResultSchema.safeParse(job.result);
+    const resultStatus = result.success ? result.data.status : undefined;
+    const resultMessage = result.success ? result.data.message : undefined;
+    const resultReason = result.success ? result.data.reason : undefined;
+    const capabilityId = result.success ? result.data.capabilityId : undefined;
     const projectedStatus: TuiLearningActivitySummary["status"] =
       job.status === "scheduled"
         ? "queued"
@@ -4709,7 +4735,7 @@ export async function createApplicationRuntimeComposition(
                 "binding_changed",
                 "stale",
               ].includes(resultStatus)
-            ? (resultStatus as TuiLearningActivitySummary["status"])
+            ? resultStatus
             : job.status === "completed"
               ? "completed"
               : "failed";
@@ -4735,7 +4761,7 @@ export async function createApplicationRuntimeComposition(
     Object.freeze(
       (
         await workspace.jobs.list({
-          kind: "runtime.reflect_capability",
+          kind: CAPABILITY_REFLECTION_JOB_KIND,
           payloadSessionId: sessionId,
           order: "newest",
           limit: 1_000,
@@ -4754,7 +4780,7 @@ export async function createApplicationRuntimeComposition(
         feedback: protectedRuntime.feedback,
         resolveRevision,
         resolveCapability: (capabilityId) => registry.getCapability(capabilityId),
-        projectId: project.projectId,
+        project,
       },
       sessionId,
     );
@@ -4766,21 +4792,26 @@ export async function createApplicationRuntimeComposition(
         ? Object.freeze({
             ...intent,
             scope:
-              intent.scope === "global"
-                ? Object.freeze({ kind: "global" as const })
+              intent.scope === "session"
+                ? Object.freeze({
+                    kind: "session" as const,
+                    sessionId: intent.sessionId,
+                  })
                 : intent.scope === "project"
                   ? Object.freeze({ kind: "project" as const, project })
-                  : Object.freeze({
-                      kind: "session" as const,
-                      sessionId:
-                        intent.sessionId ??
-                        (() => {
-                          throw new Error("A session-scoped capability needs an exact session");
-                        })(),
-                    }),
+                  : Object.freeze({ kind: "global" as const }),
           })
         : intent;
-    await capabilityLearning.manage(mapped, new AbortController().signal);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error("Capability management timed out")), 120_000);
+    try {
+      const result = await capabilityLearning.manage(mapped, controller.signal);
+      if (result.status === "no_change")
+        throw new Error("Capability management unexpectedly returned no change");
+      return result;
+    } finally {
+      clearTimeout(timeout);
+    }
   };
   const waitForLearningActivity: NonNullable<NoesisTuiRuntime["waitForLearningActivity"]> = async (
     sessionId,

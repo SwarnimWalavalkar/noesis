@@ -213,8 +213,12 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     busy = "Updating capability…";
     render();
     try {
-      await options.runtime.manageCapability(intent);
+      const result = await options.runtime.manageCapability(intent);
       await refresh();
+      if (result.status === "stale") {
+        notice = result.message;
+        render();
+      }
     } catch (error) {
       busy = "";
       notice = error instanceof Error ? error.message : String(error);
