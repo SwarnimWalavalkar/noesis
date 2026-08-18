@@ -15,7 +15,7 @@ Never claim an action or system state without runtime evidence.
 
 Active capabilities and skills may add relevant instructions. The stable core stays short.
 
-When reflection applies a temporary project strategy, the host places it inside a protected envelope. The envelope names the exact adjustment and treats its free-form strategy as tentative data. The strategy may offer project guidance that fits the current request. It cannot change tools, permissions, credentials, models, budgets, or lasting activation.
+Active Capability revisions contribute exact immutable material frozen at turn start. The ambient author currently produces instruction Capabilities. The model can still create and revise project tools and workflows immediately through the explicit foreground `execute` path. Global `relevant` Capabilities enter only when the capable semantic router selects them; `always` Capabilities enter every eligible turn.
 
 Noesis preserves instruction levels:
 
@@ -35,19 +35,20 @@ The default context budget is 160,000 tokens and is configurable as `context.tok
 
 Use a capable model when a decision depends on meaning. Do not use keywords or regular expressions to decide whether a message is a correction, preference, learning request, change of intent, or useful adaptation.
 
-After a suitable turn completes, the reflector receives the turn, runtime facts, and a small set of related evidence. It first decides whether the turn contains a correction or reusable preference. It then chooses one outcome:
+After every admitted foreground turn settles, the reflector receives the turn, runtime facts, active exact Capability references, and a small set of related cross-session evidence. It chooses one outcome:
 
 - `no_change`
-- apply, replace, or remove one temporary project strategy
-- propose a narrow experiment.
+- create or revise one Capability
+- pause or restore a Capability
+- change a Capability's global, project, or session scope and its relevant or always selection mode.
 
-A temporary strategy becomes active only after protected code checks its evidence and confirms that the project state has not changed since reflection began. The strategy remains easy to inspect and reverse. Only the experiment and activation path can turn the idea into a broader lasting change.
+An ordinary exact revision becomes active after SQLite validates its evidence and compare-and-swap binding. User feedback may produce a successor immediately. Recovery or boot control, credential export, and irreversible external actions without foreground intent create a pending gate instead; `/learning` offers approve, deny, and change.
 
 Code may record facts such as a failed tool, cancellation, latency, or direct tool call. It must not treat words such as "always," "never," or "actually" as proof of meaning.
 
-An experiment states when it should help, why the evidence supports its current reach, and what would make it outdated or wrong. A single observation cannot become a global rule. Broader reach requires repeated evidence from distinct settings.
+A Capability states when it should help, why the evidence supports it, what behavior changes, and its anticipated effect. New Capabilities are globally eligible and relevant by default. This does not inject them everywhere; semantic routing decides when they apply. The user may narrow scope or make one always active.
 
-The `remember` tool records a direct lasting instruction from the user. Ambient reflection may propose broader learning. Protected evaluation and activation control broader learned behavior. They do not control an explicit project program published during the current task.
+The `remember` tool records a direct lasting instruction from the user. Ambient reflection can consolidate experience into versioned Capabilities. Existing experiment and preflight records remain readable historical evidence, but no new speculative evaluation pipeline blocks ordinary learning. A future evaluation system is a separate design.
 
 ## Direct tools
 
@@ -100,7 +101,7 @@ On the next turn, each saved workflow also receives a typed, project-specific ca
 
 The editable definition remains an ordinary file. Each execution records the exact immutable revision it used. The user can inspect, edit, or replace the definition while Noesis keeps the earlier revisions.
 
-Reflection observes workflow results and user feedback. The experiment and protected activation path applies only when evidence supports a broader learned or global change. A project program cannot change permissions, evaluation, activation, rollback, or any other protected rule.
+Reflection observes workflow results and user feedback. It may consolidate them into a Capability. Exact turn plans, AuthorityBoundary, EffectGateway, and the Broker still prevent generated content from fabricating execution receipts or silently bypassing operational controls.
 
 ## Current standard
 

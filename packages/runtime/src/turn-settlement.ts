@@ -1,8 +1,7 @@
 import type { FrozenTurnPlan } from "@noesis/agent-types";
-import type { Capability, CapabilityRevisionRef, EvidenceRef } from "@noesis/domain";
+import type { EvidenceRef, ProjectRef } from "@noesis/domain";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
-import type { ContinuousFeedbackController } from "./continuous-feedback.ts";
-import type { RuntimeControlPlane } from "./control-plane.ts";
+import type { CapabilityCoordinator } from "./capability-coordinator.ts";
 import type { TurnResult } from "./index.ts";
 
 export interface TurnSettlementRequest {
@@ -27,10 +26,13 @@ export interface TurnSettlementResult {
 
 export interface TurnSettlementOptions {
   readonly workspace: NoesisWorkspaceStore;
-  readonly feedback: ContinuousFeedbackController;
-  readonly controlPlane: Pick<RuntimeControlPlane, "observeCompletedTurn">;
-  readonly resolveCapability: (capabilityId: string) => Capability | undefined;
+  readonly coordinator: Pick<CapabilityCoordinator, "observeSettledTurn">;
+  readonly project: ProjectRef;
   readonly now?: () => string;
+  readonly onReflectionFailure?: (
+    error: unknown,
+    turn: Readonly<{ sessionId: string; turnId: string }>,
+  ) => void | Promise<void>;
 }
 
 export function createTurnSettlement(options: TurnSettlementOptions): TurnSettlement {
@@ -178,110 +180,43 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         status: aborted ? "aborted" : status === "failed" ? "failed" : "completed",
         settledAt: now(),
       });
-      if (aborted || serving.length === 0) return undefined;
       const outcomeId = `${request.turnId}:outcome`;
-      await options.feedback.observeTurnOutcome({
-        sessionId: request.sessionId,
-        turnId: request.turnId,
-        outcomeId,
-        status,
-        summary,
-        sensitivity: "normal",
-        usedCapabilityIds: serving.map((reference) => reference.capabilityId),
-        evidenceRefs,
-        metrics: Object.freeze({ failed: status === "failed" }),
-      });
-      const learningAttribution = request.plan.routing.learningAttribution;
-      const routedSelection = learningAttribution
-        ? request.plan.selectedCapabilities.find(
-            (selection) => selection.capabilityId === learningAttribution.capabilityId,
-          )
-        : request.plan.selectedCapabilities.find((selection) => selection.baseline.kind === "genesis");
-      if (learningAttribution && !routedSelection)
-        throw new Error(
-          `Frozen turn plan ${request.plan.planId} attributes learning to unselected capability ${learningAttribution.capabilityId}`,
-        );
-      if (!routedSelection) return undefined;
-      const baseline = routedSelection.revision;
-      const capability = options.resolveCapability(routedSelection.capabilityId);
-      if (!capability) return undefined;
-      const admittedProject = request.plan.project;
-      const admittedAdjustmentId = request.plan.workingAdjustmentId;
-      const servedWorkingAdjustmentOutcomes =
-        admittedProject && admittedAdjustmentId
-          ? Object.freeze(
-              (
-                await Promise.all(
-                  (
-                    await options.workspace.workingAdjustments.listSettledEvidence({
-                      projectId: admittedProject.projectId,
-                      adjustmentId: admittedAdjustmentId,
-                      limit: 9,
-                    })
-                  )
-                    .filter(
-                      (served) => served.sessionId !== request.sessionId || served.turnId !== request.turnId,
-                    )
-                    .slice(0, 8)
-                    .map(async (served) => {
-                      const outcome = await options.workspace.operational.outcomes.get(served.outcomeId);
-                      if (!outcome) return undefined;
-                      return Object.freeze({
-                        adjustmentId: admittedAdjustmentId,
-                        planId: served.planId,
-                        sessionId: served.sessionId,
-                        turnId: served.turnId,
-                        outcomeId: served.outcomeId,
-                        outcome: outcome.status,
-                        summary: outcome.summary,
-                        settledAt: served.settledAt,
-                        evidenceRefs: Object.freeze([
-                          Object.freeze({
-                            kind: "database_row" as const,
-                            table: "outcomes" as const,
-                            rowId: served.outcomeId,
-                          }),
-                        ]),
-                      });
-                    }),
-                )
-              ).filter((served) => served !== undefined),
-            )
-          : Object.freeze([]);
-      const reflection = await options.controlPlane.observeCompletedTurn({
-        turn: Object.freeze({
-          sessionId: request.sessionId,
-          turnId: request.turnId,
-          outcomeId,
-          ...(admittedProject
-            ? {
-                project: admittedProject,
-                expectedActiveAdjustmentId: admittedAdjustmentId ?? null,
-              }
-            : {}),
-          servedWorkingAdjustmentOutcomes,
-          scope: capability.scope,
-          userMessage: request.input,
-          ...(assistantMessage ? { assistantMessage } : {}),
-          outcome: status === "failed" ? "failed" : "unknown",
-          occurredAt: request.occurredAt,
-          evidenceRefs: [...evidenceRefs],
-          sensitivity: "normal" as const,
-          telemetry: Object.freeze({
-            retryCount: 0,
-            toolFailureCount,
-            aborted: false,
+      try {
+        const reflection = await options.coordinator.observeSettledTurn({
+          turn: Object.freeze({
+            sessionId: request.sessionId,
+            turnId: request.turnId,
+            outcomeId,
+            project: options.project,
+            servedWorkingAdjustmentOutcomes: Object.freeze([]),
+            scope: "global",
+            userMessage: request.input,
+            ...(assistantMessage ? { assistantMessage } : {}),
+            outcome: status === "failed" ? "failed" : "unknown",
+            occurredAt: request.occurredAt,
+            evidenceRefs: [...evidenceRefs],
+            sensitivity: "normal" as const,
+            telemetry: Object.freeze({
+              retryCount: 0,
+              toolFailureCount,
+              aborted,
+            }),
           }),
-        }),
-        baselineRevision: baseline,
-        capability,
-        activeCapabilities: serving.flatMap((reference: CapabilityRevisionRef) => {
-          const active = options.resolveCapability(reference.capabilityId);
-          return active ? [active] : [];
-        }),
-        routingStrategyId: request.plan.routing.strategyId,
-      });
-      return reflection.job.jobId;
+          project: options.project,
+          selectedCapabilities: serving,
+        });
+        return reflection.job.jobId;
+      } catch (error) {
+        try {
+          await options.onReflectionFailure?.(
+            error,
+            Object.freeze({ sessionId: request.sessionId, turnId: request.turnId }),
+          );
+        } catch {
+          // Reflection diagnostics must never rewrite an already-settled foreground result.
+        }
+        return undefined;
+      }
     };
 
     let result: TurnResult;
@@ -292,8 +227,14 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
       throw error;
     }
     if (result.outcome === "aborted") {
-      await record("failed", "Turn aborted", result.output, true, result.assistantMessages);
-      return Object.freeze({ result });
+      const reflectionJobId = await record(
+        "failed",
+        "Turn aborted",
+        result.output,
+        true,
+        result.assistantMessages,
+      );
+      return Object.freeze({ result, ...(reflectionJobId ? { reflectionJobId } : {}) });
     }
     const reflectionJobId = await record(
       "unknown",

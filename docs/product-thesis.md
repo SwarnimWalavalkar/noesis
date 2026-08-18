@@ -81,21 +81,21 @@ Useful changes should not require approval at every step. The user can still ins
 2. Judge the whole collaboration. A feature matters when it improves how the user and agent understand, decide, make, learn, or return to work.
 3. Match the user's intent. Unclear intellectual work should default to working together. A clear request for execution should default to doing the work. A correction from the user overrides the guess.
 4. Preserve what connects one kind of work to another. Keep the artifacts, reasons, questions, criteria, and feedback that let learning change a build or reflection change a decision.
-5. Keep lasting learning selective. Each retained lesson names the future situation it should improve. It starts with the narrowest useful reach and broadens only after repeated evidence.
+5. Keep lasting learning specific. Each Capability names the future situation it should improve. It is globally eligible by default, selected only when relevant, and can be narrowed or made always active by the user.
 6. Accept no change. Reflection should run quietly, but it should not create a memory, rule, or ability from every session.
 7. Make changes understandable and reversible. The user can see what changed, why it changed, where it applies, and how to undo it.
 8. Add only what strengthens the main promise. New models, tools, interfaces, and research methods should help the user and agent develop together.
 9. Let real use change the product. Evidence may revise the primary user, interaction patterns, learning reach, continuity choices, and defaults.
-10. Keep authority outside generated behavior. Generated content may publish project scripts and workflows with current permissions. Permission, evaluation, activation, promotion, and rollback remain protected.
+10. Prefer recovery over ceremony. Ordinary instruction Capabilities activate immediately. The model can publish project tools and workflows through the explicit foreground `execute` path; `adapt` only changes the direct-tool hotbar. Exact revisions, visible provenance, feedback, pause, and restore keep the learning loop recoverable; only a tiny set of irreversible consequences interrupts for approval.
 
 ## Non-goals
 
 - It is not a generic agent built to support the most isolated tasks. Breadth matters when it strengthens a real collaboration or tests a useful idea.
 - It is not a warehouse of sessions, memories, prompts, and generated code. Storing more does not prove that either side has developed.
-- It is not an opaque self-rewriter. Project programs must record their source and remain reversible. Broader changes also need a clear future use and an evaluation.
+- It is not an opaque self-rewriter. Every Capability records exact source, evidence, scope, selection mode, and revision history, and any prior revision can be restored.
 - It is not a research demo detached from daily value. Novelty does not replace repeated use, better work, stronger understanding, or less repeated explanation.
 - It is not a productivity system that removes the user from the work. Execution that weakens judgment or learning conflicts with the product promise.
 - It does not force every session through four modes. A session may use one kind of work, blend several, or simply finish a task.
 - It is not defined by the TUI. The TUI is the first direct interface, not the product thesis.
-- It should not turn ordinary work into approval dialogs. Conversation, reflection, and low-risk learning should stay quiet. Only a real increase in authority should interrupt the user for approval.
+- It should not turn ordinary work into approval dialogs. Reflection and ordinary Capability activation stay quiet. Only recovery or boot control, credential export, or an irreversible external action without foreground intent interrupts for approval.
 - Trust should not make the system rigid. Records and protected permissions can coexist with prompts, strategies, evaluators, and experiments that are easy to change.

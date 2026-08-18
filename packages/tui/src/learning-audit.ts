@@ -1,4 +1,4 @@
-import { type Component, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type Component, Input, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
   type AuditFilter,
   canExpandEvidence,
@@ -64,6 +64,12 @@ type AuditScreen =
       readonly recordId: string;
       readonly back: AuditScreen;
       readonly raw: boolean;
+    }
+  | {
+      readonly kind: "change";
+      readonly gateRequestId: string;
+      readonly input: Input;
+      readonly back: Extract<AuditScreen, { readonly kind: "detail" }>;
     };
 
 export interface LearningAuditOverlay extends Component {
@@ -73,7 +79,8 @@ export interface LearningAuditOverlay extends Component {
 }
 
 export interface CreateLearningAuditOverlayOptions {
-  readonly runtime: Required<Pick<NoesisTuiRuntime, "inspectLearningAudit">>;
+  readonly runtime: Pick<NoesisTuiRuntime, "inspectLearningAudit" | "manageCapability"> &
+    Required<Pick<NoesisTuiRuntime, "inspectLearningAudit">>;
   readonly sessionId: string;
   readonly colorEnabled: boolean;
   readonly height: () => number;
@@ -193,6 +200,55 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       notice = error instanceof Error ? error.message : String(error);
       render();
     }
+  };
+
+  const mutateCapability = async (
+    intent: Parameters<NonNullable<NoesisTuiRuntime["manageCapability"]>>[0],
+  ): Promise<void> => {
+    if (!options.runtime.manageCapability) {
+      notice = "Capability management is unavailable in this runtime.";
+      render();
+      return;
+    }
+    busy = "Updating capability…";
+    render();
+    try {
+      const result = await options.runtime.manageCapability(intent);
+      await refresh();
+      if (result.status === "stale") {
+        notice = result.message;
+        render();
+      }
+    } catch (error) {
+      busy = "";
+      notice = error instanceof Error ? error.message : String(error);
+      render();
+    }
+  };
+
+  const openGateChange = (
+    gateRequestId: string,
+    back: Extract<AuditScreen, { readonly kind: "detail" }>,
+  ): void => {
+    const input = new Input();
+    input.focused = true;
+    input.onEscape = () => {
+      screen = back;
+      render();
+    };
+    input.onSubmit = (value) => {
+      const instruction = value.trim();
+      if (!instruction) {
+        notice = "Describe what should change before submitting.";
+        render();
+        return;
+      }
+      screen = back;
+      void mutateCapability({ type: "change", gateRequestId, instruction });
+    };
+    screen = { kind: "change", gateRequestId, input, back };
+    notice = undefined;
+    render();
   };
 
   const moveList = (delta: number): void => {
@@ -319,6 +375,87 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       render();
       return;
     }
+    if (record?.kind === "capability" && record.capabilityId && record.capabilityBindingRevision) {
+      if (data === "p") {
+        void mutateCapability({
+          type: record.capabilityState === "paused" ? "resume" : "pause",
+          capabilityId: record.capabilityId,
+          expectedBindingRevision: record.capabilityBindingRevision,
+        });
+        return;
+      }
+      if (data === "m") {
+        void mutateCapability({
+          type: "set-activation-mode",
+          capabilityId: record.capabilityId,
+          mode: record.capabilityActivationMode === "always" ? "relevant" : "always",
+          expectedBindingRevision: record.capabilityBindingRevision,
+        });
+        return;
+      }
+      if (data === "g") {
+        const nextScope =
+          record.capabilityScope === "global"
+            ? "project"
+            : record.capabilityScope === "project"
+              ? "session"
+              : "global";
+        const sessionId = snapshot?.sessionId;
+        if (nextScope === "session") {
+          if (!sessionId) return;
+          void mutateCapability({
+            type: "set-scope",
+            capabilityId: record.capabilityId,
+            scope: nextScope,
+            sessionId,
+            expectedBindingRevision: record.capabilityBindingRevision,
+          });
+        } else
+          void mutateCapability({
+            type: "set-scope",
+            capabilityId: record.capabilityId,
+            scope: nextScope,
+            expectedBindingRevision: record.capabilityBindingRevision,
+          });
+        return;
+      }
+    }
+    if (
+      record?.kind === "capability_revision" &&
+      record.status === "superseded" &&
+      record.capabilityId &&
+      record.capabilityRevisionId &&
+      record.capabilityBundleDigest &&
+      record.capabilityBindingRevision &&
+      data === "v"
+    ) {
+      void mutateCapability({
+        type: "restore",
+        capabilityId: record.capabilityId,
+        target: {
+          kind: "capability_revision",
+          capabilityId: record.capabilityId,
+          capabilityRevisionId: record.capabilityRevisionId,
+          bundleDigest: record.capabilityBundleDigest,
+        },
+        expectedBindingRevision: record.capabilityBindingRevision,
+      });
+      return;
+    }
+    if (record?.kind === "capability_gate" && record.gateRequestId) {
+      if (data === "y") {
+        void mutateCapability({ type: "approve", gateRequestId: record.gateRequestId });
+        return;
+      }
+      if (data === "n") {
+        void mutateCapability({ type: "deny", gateRequestId: record.gateRequestId });
+        return;
+      }
+      if (data === "c") {
+        openGateChange(record.gateRequestId, detail);
+        return;
+      }
+    }
     if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
       if (record && !detail.raw)
         detailFocus = cycleDetailFocus(record, detailFocus, matchesKey(data, "shift+tab"));
@@ -378,14 +515,22 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
   };
 
   const detailHint = (record: TuiLearningPrimitive | undefined): string => {
+    const management =
+      record?.kind === "capability"
+        ? " · p pause/resume · m relevant/always · g scope"
+        : record?.kind === "capability_revision" && record.status === "superseded"
+          ? " · v restore"
+          : record?.kind === "capability_gate"
+            ? " · y approve · n deny · c change"
+            : "";
     const stops = record ? interactableStops(record) : [];
     if (detailFocus === "evidence")
-      return `↑/↓ · Enter ${evidenceExpanded ? "hides" : "expands"} · Tab next · Space raw · Esc`;
+      return `↑/↓ · Enter ${evidenceExpanded ? "hides" : "expands"} · Tab next · Space raw${management} · Esc`;
     if (detailFocus === "inputs")
-      return `↑/↓ · Enter ${inputsExpanded ? "hides" : "expands"} · Tab next · Space raw · Esc`;
-    if (detailFocus === "related") return "↑/↓ · Enter open · Tab next · Space raw · Esc";
-    if (stops.length > 0) return "↑/↓ · Tab next · Space raw · Esc";
-    return "↑/↓ · Space raw · Esc";
+      return `↑/↓ · Enter ${inputsExpanded ? "hides" : "expands"} · Tab next · Space raw${management} · Esc`;
+    if (detailFocus === "related") return `↑/↓ · Enter open · Tab next · Space raw${management} · Esc`;
+    if (stops.length > 0) return `↑/↓ · Tab next · Space raw${management} · Esc`;
+    return `↑/↓ · Space raw${management} · Esc`;
   };
 
   const component: LearningAuditOverlay = {
@@ -408,6 +553,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
         if (matchesKey(data, "escape")) options.close();
         return;
       }
+      if (screen.kind === "change") return screen.input.handleInput(data);
       if (screen.kind === "list") return handleList(data);
       return handleDetail(data, screen);
     },
@@ -422,6 +568,17 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       if (busy) body = [styled(options.colorEnabled, ANSI.cyan, busy)];
       else if (!snapshot)
         body = [styled(options.colorEnabled, ANSI.red, "The learning ledger is unavailable.")];
+      else if (screen.kind === "change")
+        body = [
+          styled(options.colorEnabled, ANSI.bold, "How should this Capability change?"),
+          styled(
+            options.colorEnabled,
+            ANSI.dim,
+            "Describe the correction in natural language. Noesis will author a new exact revision and keep it pending for review.",
+          ),
+          "",
+          ...screen.input.render(width),
+        ];
       else {
         const records = visibleRecords();
         const scoped = scopedRecords();
@@ -566,8 +723,15 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       const subtitle =
         screen.kind === "list"
           ? "project evolution"
-          : safeScalar(detailRecord()?.kind ?? "record").replaceAll("_", " ");
-      const hint = screen.kind === "list" ? listHint() : detailHint(detailRecord());
+          : screen.kind === "change"
+            ? "change capability"
+            : safeScalar(detailRecord()?.kind ?? "record").replaceAll("_", " ");
+      const hint =
+        screen.kind === "list"
+          ? listHint()
+          : screen.kind === "change"
+            ? "Enter submit · Esc back"
+            : detailHint(detailRecord());
       return [
         overlayRule(outerWidth, options.colorEnabled, "╭", "╮"),
         overlayRow(

@@ -10,6 +10,7 @@ export type {
   ActivationRecord,
   BackupReport,
   CanonicalSearchSource,
+  CapabilityLifecycleStore,
   ClassifyExperimentObservationsRequest,
   ClassifyOutcomeRequest,
   CodeExecutionRecord,
@@ -63,5 +64,7 @@ export type {
 } from "./types.ts";
 export {
   isWorkingAdjustmentAdmissionConflictError,
+  isCapabilityBindingAdmissionConflictError,
+  capabilityBindingAdmissionConflictError,
   workingAdjustmentAdmissionConflictError,
 } from "./types.ts";

@@ -333,7 +333,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       const { home, output, result } = await runPtyExit(action);
       const workspace = await createWorkspaceStore(home);
       const reflectionJobs = await workspace.jobs.list({
-        kind: "runtime.reflect_turn",
+        kind: "runtime.reflect_capability",
         limit: 10,
       });
       workspace.close();

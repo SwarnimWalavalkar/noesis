@@ -51,6 +51,7 @@ import { createProtectedActivationStore } from "./activation-store.ts";
 import { createWorkspaceAuthorityBoundary } from "./authority-state.ts";
 import { createBackup, inspectWorkspaceIntegrity } from "./backup.ts";
 import { createCompoundingMeasurementStore } from "./compounding-measurements.ts";
+import { createCapabilityLifecycleStore } from "./capability-lifecycle.ts";
 import {
   openWorkspaceDatabase,
   optionalString,
@@ -252,6 +253,11 @@ const PRIMARY_KEY_BY_TABLE: Readonly<Record<DatabaseTable, string>> = {
   search_configuration: "configuration_id",
   activity_log: "activity_id",
   file_revisions: "revision_id",
+  capabilities: "capability_id",
+  capability_revisions: "capability_revision_id",
+  capability_bindings: "capability_id",
+  capability_feedback: "feedback_id",
+  capability_gate_requests: "gate_request_id",
 };
 
 function assertStoredReference(
@@ -310,6 +316,11 @@ export async function createWorkspaceStore(
   const db = database.connection;
   const authority = createWorkspaceAuthorityBoundary(database, now);
   const mcpConnectionCycles = createMcpConnectionCycleAllocator(database, now);
+  const capabilities = createCapabilityLifecycleStore({
+    database,
+    now,
+    assertStoredReference: (reference) => assertStoredReference(db, reference),
+  });
   const runtimeOwnerId = options.recoverInterruptedOperations
     ? (options.runtimeOwnerId ?? createId("runtime_owner"))
     : undefined;
@@ -1392,6 +1403,7 @@ export async function createWorkspaceStore(
 
   const workspace: NoesisWorkspaceStore = Object.freeze({
     paths,
+    capabilities,
     reads: Object.freeze({
       readDatabaseRow,
       readWorkingFile: async (workingPath: string) => {

@@ -1,9 +1,4 @@
-import {
-  type CapabilityRevisionRef,
-  CapabilityRevisionRefSchema,
-  type EvidenceRef,
-  EvidenceRefSchema,
-} from "@noesis/domain";
+import { CapabilityRevisionRefSchema } from "@noesis/domain";
 import { z } from "zod";
 import {
   type ControlledPiPrompt,
@@ -11,16 +6,7 @@ import {
 } from "../../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 
 const RolePromptSchema = z.object({
-  role: z.enum([
-    "capability_router",
-    "history_reranker",
-    "reflector",
-    "revision_author",
-    "revision_agent",
-    "case_generator",
-    "trial",
-    "judge_critic",
-  ]),
+  role: z.enum(["capability_router", "history_reranker", "reflector"]),
   messages: z.array(z.object({ name: z.string().optional(), content: z.string() })),
   capabilityRevisions: z.array(CapabilityRevisionRefSchema),
 });
@@ -47,22 +33,6 @@ function structuredPayload(content: string): unknown {
   return JSON.parse(payload);
 }
 
-function sourceEvidence(prompt: RolePrompt): EvidenceRef {
-  const cases = z
-    .array(z.object({ evidenceRefs: z.array(EvidenceRefSchema).min(1) }))
-    .min(1)
-    .parse(parsedMessage(prompt, "evidence"));
-  const reference = cases[0]?.evidenceRefs[0];
-  if (!reference) throw new Error("Controlled case generator received no source evidence");
-  return reference;
-}
-
-function trialRevision(prompt: RolePrompt): CapabilityRevisionRef {
-  const revision = prompt.capabilityRevisions[0];
-  if (!revision) throw new Error("Controlled trial received no pinned capability revision");
-  return revision;
-}
-
 export function researchLoopControlledResponse(
   input: ControlledPiPrompt,
 ): string | ReturnType<typeof controlledToolCallResponse> {
@@ -84,21 +54,6 @@ export function researchLoopControlledResponse(
     return `Controlled Pi completion for: ${input.lastUserText}`;
   }
   const prompt = parseRolePrompt(input.lastUserText);
-  if (input.systemPrompt.includes("role: outcome_judge")) {
-    const comparisonMessage = prompt.messages.some((message) => message.name === "outcome_comparison")
-      ? "outcome_comparison"
-      : "relevant_traces";
-    const observationIds = [
-      ...namedMessage(prompt, comparisonMessage).matchAll(/"observationId"\s*:\s*"([^"]+)"/gu),
-    ].flatMap((match) => (match[1] ? [match[1]] : []));
-    if (observationIds.length === 0)
-      throw new Error("Controlled outcome judge received no experiment observations");
-    return JSON.stringify({
-      proposal: "revert",
-      citedObservationIds: [...new Set(observationIds)],
-      summary: "The controlled correction evidence requests a protected revert.",
-    });
-  }
   if (prompt.role === "history_reranker") {
     const candidates = prompt.messages
       .filter((message) => message.name === "candidates")
@@ -171,164 +126,57 @@ export function researchLoopControlledResponse(
     });
   }
   if (prompt.role === "reflector") {
-    const scopeEvidence = namedMessage(prompt, "evidence").split("\n\nReturn JSON only.", 1)[0];
-    if (!scopeEvidence) throw new Error("Controlled scope verifier received no scope evidence");
-    const scopeVerification = z
+    const settled = z.object({ userMessage: z.string() }).parse(parsedMessage(prompt, "settled_turn"));
+    const current = z
       .object({
-        currentScope: z.string(),
-        proposedScope: z.string(),
-        scopeRationale: z.string(),
+        capabilities: z.array(z.object({ capabilityId: z.string() })),
+        omittedCount: z.number().int().nonnegative(),
       })
-      .safeParse(JSON.parse(scopeEvidence));
-    if (scopeVerification.success) {
-      const { currentScope, proposedScope } = scopeVerification.data;
+      .parse(parsedMessage(prompt, "current_capabilities"));
+    const activeCapability = current.capabilities[0];
+    if (settled.userMessage.includes("revise this research brief") && activeCapability)
       return JSON.stringify({
-        relationship: currentScope === proposedScope ? "same" : "narrower",
-        reason:
-          currentScope === proposedScope
-            ? "The proposed scope is the current research-brief scope."
-            : "A research brief is semantically narrower than the general collaboration scope.",
+        decision: "revise",
+        capabilityId: activeCapability.capabilityId,
+        proposal: {
+          name: "Evidence-grounded research briefs",
+          kind: "instruction",
+          description: "Separate cited evidence from inference in research briefs.",
+          applicability: "Research briefs and evidence-grounded source synthesis.",
+          summary: "Research briefs now label uncertainty as well as inference.",
+          rationale: "The user requested a more precise version of the active Capability.",
+          anticipatedEffect: "Research briefs expose uncertainty more consistently.",
+          instruction:
+            "Produce concise research briefs with explicit sections for cited evidence, inference, and uncertainty.",
+          scope: "global",
+          activationMode: "relevant",
+          consequence: "ordinary",
+          consequenceDescription: "Only the model instruction changes.",
+          evidenceCitationIndexes: [0],
+        },
       });
-    }
-    const active = z
-      .object({ capabilities: z.array(z.object({ scope: z.string() })) })
-      .parse(parsedMessage(prompt, "active_capabilities"));
-    const sameScope = active.capabilities.some((capability) => capability.scope === "research brief");
+    if (!settled.userMessage.includes("research brief") || current.capabilities.length > 0)
+      return JSON.stringify({
+        decision: "no_change",
+        reason: "No additional durable Capability is needed for this settled turn.",
+      });
     return JSON.stringify({
-      observation: {
-        kind: "correction",
-        reason: "The user corrects how research briefs should distinguish evidence from inference.",
+      decision: "create",
+      proposal: {
+        name: "Evidence-grounded research briefs",
+        kind: "instruction",
+        description: "Separate cited evidence from inference in research briefs.",
+        applicability: "Research briefs and evidence-grounded source synthesis.",
+        summary: "Research briefs now distinguish cited evidence from inference.",
+        rationale: "The user explicitly corrected how research briefs should present evidence.",
+        anticipatedEffect: "Future research briefs are easier to audit and trust.",
+        instruction: "Produce concise research briefs with explicit evidence, inference, and uncertainty.",
+        scope: "global",
+        activationMode: "relevant",
+        consequence: "ordinary",
+        consequenceDescription: "Only the model instruction changes.",
+        evidenceCitationIndexes: [0],
       },
-      decision: "experiment",
-      title: "Evidence-grounded research briefs",
-      hypothesis: "Research briefs improve when cited evidence is separated from inference",
-      scope: "research brief",
-      anticipatedFutureUse: "When the user requests another evidence-grounded research brief.",
-      scopeRelationship: sameScope ? "same" : "narrower",
-      scopeRationale: sameScope
-        ? "The correction remains within the already-active research-brief scope."
-        : "The observed correction is specific to research briefs rather than all collaboration.",
-      staleOrContradictionConditions: [
-        "The user requests a format where evidence and inference should intentionally be blended.",
-      ],
-      capabilityName: "Research brief evidence",
-      capabilityIntent: "Separate cited evidence from inference in research briefs",
-      sourceCases: [
-        {
-          title: "Prepare an evidence-grounded brief",
-          input: "Prepare a research brief about the current question.",
-          expectedBehavior: "Clearly separate cited evidence from inference.",
-        },
-      ],
-    });
-  }
-  if (prompt.role === "revision_author" || prompt.role === "revision_agent")
-    return JSON.stringify({
-      promptModules: [
-        {
-          path: "evidence.md",
-          content: "For research briefs, clearly label sourced evidence and distinguish it from inference.",
-        },
-      ],
-      skills: [
-        {
-          path: "SKILL.md",
-          content: "Produce concise research briefs with explicit evidence, inference, and uncertainty.",
-        },
-      ],
-      tools: [
-        {
-          path: "session-tools.json",
-          content: JSON.stringify({
-            kind: "noesis_session_tools",
-            tools: [
-              "search_sessions",
-              "open_session_evidence",
-              "find_corrections",
-              "find_similar_tasks",
-              "prior_experiment_outcomes",
-            ],
-          }),
-        },
-      ],
-      router: {
-        path: "router.json",
-        content: JSON.stringify({ allTerms: ["research", "brief"] }),
-        strategyId: "research-brief-scope-v1",
-      },
-      activationPolicy: { mode: "automatic_low_risk", scope: "research brief" },
-      permissionManifest: { effects: [], resourcePatterns: [], credentialRefs: [] },
-      sourceEvaluationDefinitions: [
-        {
-          path: "source-case.json",
-          content: JSON.stringify({
-            behavior: "Separate cited evidence from inference in a research brief",
-          }),
-        },
-      ],
-      requestedPermissionDelta: {
-        addedEffects: [],
-        widenedResources: [],
-        addedCredentialRefs: [],
-      },
-    });
-  if (prompt.role === "case_generator")
-    return JSON.stringify({
-      cases: [
-        {
-          caseId: "research-brief-transfer",
-          kind: "generated_transfer",
-          instruction: "Transfer the evidence/inference distinction to another research brief.",
-          input: "Prepare a research brief on a related topic.",
-          sourceEvidenceRefs: [sourceEvidence(prompt)],
-          criterionRefs: [],
-        },
-      ],
-    });
-  if (prompt.role === "trial") {
-    const revision = trialRevision(prompt);
-    const candidate = revision.capabilityId.startsWith("learned-");
-    return JSON.stringify({
-      content: candidate
-        ? "Candidate adaptation: cited evidence is separate from explicit inference."
-        : "Baseline response: a concise research summary.",
-      valid: true,
-      invalidArtifacts: [],
-      unexpectedEffects: [],
-      sourceAssertions: [
-        {
-          assertionId: "evidence-inference-separation",
-          passed: true,
-          evidence: candidate
-            ? "The candidate explicitly separates evidence and inference."
-            : "The baseline remains a valid comparison artifact.",
-        },
-      ],
-      identity: {
-        capabilityId: revision.capabilityId,
-        capabilityRevisionId: revision.capabilityRevisionId,
-        bundleDigest: revision.bundleDigest,
-      },
-    });
-  }
-  if (prompt.role === "judge_critic") {
-    const armA = z.object({ content: z.string() }).parse(parsedMessage(prompt, "arm_A"));
-    const rubric = z
-      .object({
-        criteria: z.array(
-          z.object({ criterionId: z.string().min(1), revision: z.number().int().positive() }),
-        ),
-      })
-      .parse(parsedMessage(prompt, "rubric"));
-    return JSON.stringify({
-      winner: armA.content.startsWith("Candidate adaptation:") ? "A" : "B",
-      confidence: 0.99,
-      reasons: ["The candidate explicitly satisfies the bounded behavioral objective."],
-      violations: [],
-      appliedCriteria: rubric.criteria.map(({ criterionId, revision }) => ({
-        criterionId,
-        revision,
-      })),
     });
   }
   throw new Error(`No controlled response for role ${prompt.role}`);

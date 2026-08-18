@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import { compileContext } from "@noesis/context";
-import type { Capability, CapabilityRevisionRef } from "@noesis/domain";
+import type { CapabilityRevisionRef } from "@noesis/domain";
 import {
   createDeterministicEmbeddingPort,
   createDeterministicRerankPort,
@@ -14,11 +14,7 @@ import {
 } from "@noesis/intelligence";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
-import {
-  type ContinuousFeedbackController,
-  createTurnSettlement,
-  type TurnOutcomeObservationInput,
-} from "../src/index.ts";
+import { createTurnSettlement } from "../src/index.ts";
 
 const homes: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
 
@@ -104,7 +100,7 @@ function turnPlan(
 }
 
 describe("turn settlement", () => {
-  test("records one canonical outcome, uses explicit learning attribution, and excludes aborts", async () => {
+  test("records canonical outcomes and reflects every settled turn", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-turn-settlement-"));
     const workspace = await createWorkspaceStore(root);
     homes.push({ root, workspace });
@@ -119,67 +115,19 @@ describe("turn settlement", () => {
       updatedAt: "2026-07-25T00:00:00.000Z",
       metadata: Object.freeze({}),
     });
-    const feedbackInputs: TurnOutcomeObservationInput[] = [];
-    const feedback: ContinuousFeedbackController = Object.freeze({
-      observeTurnOutcome: async (input: TurnOutcomeObservationInput) => {
-        feedbackInputs.push(input);
-        return Object.freeze([]);
-      },
-      classifyTurnObservations: async () =>
-        Object.freeze({ status: "unchanged" as const, observations: Object.freeze([]) }),
-      evaluateExperiment: async () => undefined,
-      experimentComparison: async () => {
-        throw new Error("unused");
-      },
-      capabilityHealth: async () => {
-        throw new Error("unused");
-      },
-      runAvailable: async () => undefined,
-      cancel: async () => undefined,
-      stop: async () => undefined,
-    });
-    const observedBaselines: CapabilityRevisionRef[] = [];
+    const observedSelections: (readonly CapabilityRevisionRef[])[] = [];
+    const reflectionFailures: string[] = [];
     const observedLearningTurns: {
       readonly outcome: string;
       readonly toolFailureCount: number;
       readonly evidenceTables: readonly string[];
     }[] = [];
-    const capabilities = new Map<string, Capability>([
-      [
-        "general",
-        Object.freeze({
-          capabilityId: "general",
-          name: "General",
-          scope: "general",
-          intent: "baseline",
-        }),
-      ],
-      [
-        "noesis-research",
-        Object.freeze({
-          capabilityId: "noesis-research",
-          name: "Noesis research",
-          scope: "project/noesis/research",
-          intent: "narrow",
-        }),
-      ],
-      [
-        "review-style",
-        Object.freeze({
-          capabilityId: "review-style",
-          name: "Review style",
-          scope: "project/noesis/research/review-only-writing-style",
-          intent: "A longer competing scope that must not own attribution",
-        }),
-      ],
-    ]);
     const settlement = createTurnSettlement({
       workspace,
-      feedback,
-      resolveCapability: (capabilityId) => capabilities.get(capabilityId),
-      controlPlane: Object.freeze({
-        observeCompletedTurn: async (input) => {
-          observedBaselines.push(input.baselineRevision);
+      project: Object.freeze({ projectId: "project_test", root: "/workspace/noesis" }),
+      coordinator: Object.freeze({
+        observeSettledTurn: async (input) => {
+          observedSelections.push(input.selectedCapabilities);
           observedLearningTurns.push({
             outcome: input.turn.outcome,
             toolFailureCount: input.turn.telemetry.toolFailureCount,
@@ -187,9 +135,12 @@ describe("turn settlement", () => {
               reference.kind === "database_row" ? reference.table : reference.kind,
             ),
           });
-          return await Promise.reject(new Error("fixture stops after observing attribution"));
+          return await Promise.reject(new Error("fixture stops after observing reflection"));
         },
       }),
+      onReflectionFailure: (error) => {
+        reflectionFailures.push(error instanceof Error ? error.message : String(error));
+      },
     });
     const context = compileContext([], {}, { maxTokens: 8, maxFragmentTokens: 8 });
     const plan = turnPlan(
@@ -270,11 +221,11 @@ describe("turn settlement", () => {
           };
         },
       }),
-    ).rejects.toThrow("fixture stops after observing attribution");
-    expect(feedbackInputs).toHaveLength(1);
-    expect(feedbackInputs[0]?.outcomeId).toBe("turn-accepted:outcome");
-    expect(feedbackInputs[0]?.status).toBe("unknown");
-    expect(observedBaselines).toEqual([revisionRef("noesis-research")]);
+    ).resolves.toMatchObject({ result: { outcome: "completed", output: "done" } });
+    expect(reflectionFailures).toEqual(["fixture stops after observing reflection"]);
+    expect(observedSelections).toEqual([
+      [revisionRef("general"), revisionRef("noesis-research"), revisionRef("review-style")],
+    ]);
     expect(observedLearningTurns).toEqual([
       {
         outcome: "unknown",
@@ -315,8 +266,8 @@ describe("turn settlement", () => {
           frozenTurnPlan: abortedPlan,
         }),
       }),
-    ).resolves.toMatchObject({ result: { outcome: "aborted" } });
-    expect(feedbackInputs).toHaveLength(1);
+    ).resolves.toMatchObject({ result: { outcome: "aborted", output: "partial" } });
+    expect(observedLearningTurns.at(-1)?.outcome).toBe("failed");
     const outcomes = await workspace.operational.outcomes.listForSession("session-1");
     expect(outcomes).toHaveLength(2);
     expect(outcomes.find((outcome) => outcome.turnId === "turn-aborted")).toMatchObject({
@@ -343,8 +294,10 @@ describe("turn settlement", () => {
           frozenTurnPlan: correctedPlan,
         }),
       }),
-    ).rejects.toThrow("fixture stops after observing attribution");
-    expect(feedbackInputs.at(-1)?.status).toBe("unknown");
+    ).resolves.toMatchObject({
+      result: { outcome: "completed", output: "Corrected response with an exact primary source." },
+    });
+    expect(reflectionFailures).toHaveLength(3);
     expect(observedLearningTurns.at(-1)?.outcome).toBe("unknown");
     await workspace.operational.outcomes.classify({
       outcomeId: "turn-corrected:outcome",

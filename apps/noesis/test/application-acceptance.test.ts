@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 describe("credential-free Pi application acceptance", () => {
-  test("activates, scopes, serves, and reverts exact durable revisions through AgentHarness", async () => {
+  test("creates, routes, revises, pauses, and restores exact Capabilities through AgentHarness", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-controlled-pi-loop-"));
     homes.push(home);
     const config = await resolveNoesisConfig({
@@ -51,22 +51,23 @@ describe("credential-free Pi application acceptance", () => {
         "No, for every research brief separate cited evidence from inference.",
       );
       await runtime.controlPlane.idle();
-      const experiments = await runtime.debug.workspace.research.experiments.listExperiments({
-        limit: 100,
+      const [definition] = await runtime.debug.workspace.capabilities.listDefinitions();
+      if (!definition)
+        throw new Error(
+          `Expected one reflected Capability: ${JSON.stringify(await runtime.debug.workspace.jobs.list({ limit: 10 }))}`,
+        );
+      expect(definition).toMatchObject({
+        name: "Evidence-grounded research briefs",
+        kind: "instruction",
       });
-      const experiment = experiments.find(
-        (candidate) =>
-          candidate.status === "observing" &&
-          candidate.scope === "research brief" &&
-          candidate.activatedRevision !== undefined,
-      );
-      expect(experiment?.activatedRevision).toBeDefined();
-      if (!experiment?.activatedRevision) return;
-      const candidateRevision = experiment.activatedRevision;
-
-      const activated = await runtime.debug.adaptations.activations.current();
-      expect(activated?.activeCapabilityRevisions[candidateRevision.capabilityId]).toEqual(candidateRevision);
-      expect(experiment.preflightRef).toBeDefined();
+      const firstBinding = await runtime.debug.workspace.capabilities.getBinding(definition.capabilityId);
+      expect(firstBinding).toMatchObject({
+        scope: { kind: "global" },
+        activationMode: "relevant",
+        state: "active",
+      });
+      if (!firstBinding) throw new Error("Expected an active Capability binding");
+      const firstRevision = firstBinding.revision;
 
       const relatedSession = await runtime.startTrail({ title: "Related return" });
       const related = await runtime.debug.runTurn(
@@ -74,9 +75,9 @@ describe("credential-free Pi application acceptance", () => {
         "Prepare a research brief about continual learning.",
       );
       const relatedSelection = related.frozenTurnPlan?.selectedCapabilities.find(
-        (selection) => selection.capabilityId === candidateRevision.capabilityId,
+        (selection) => selection.capabilityId === definition.capabilityId,
       );
-      expect(relatedSelection?.revision).toEqual(candidateRevision);
+      expect(relatedSelection?.revision).toEqual(firstRevision);
       expect(related.frozenTurnPlan?.canonicalDigest).toMatch(/^[a-f0-9]{64}$/u);
       expect(related.output).toBe(
         "Served immutable research-brief behavior through the pinned search_sessions tool.",
@@ -130,39 +131,47 @@ describe("credential-free Pi application acceptance", () => {
       const unrelated = await runtime.debug.runTurn(unrelatedSession.trailId, "Draft a meeting agenda.");
       expect(
         unrelated.frozenTurnPlan?.selectedCapabilities.some(
-          (selection) => selection.capabilityId === candidateRevision.capabilityId,
+          (selection) => selection.capabilityId === definition.capabilityId,
         ),
       ).toBe(false);
 
-      for (const input of [
-        "No, revise this research brief and keep evidence distinct from inference.",
-        "No, undo that adaptation for this research brief.",
-      ])
-        await runtime.debug.runTurn(relatedSession.trailId, input);
+      await runtime.debug.runTurn(
+        relatedSession.trailId,
+        "No, revise this research brief and label uncertainty explicitly.",
+      );
       await runtime.controlPlane.idle();
+      const revisedBinding = await runtime.debug.workspace.capabilities.getBinding(definition.capabilityId);
+      expect(revisedBinding?.revision.capabilityRevisionId).not.toBe(firstRevision.capabilityRevisionId);
+      expect(await runtime.debug.workspace.capabilities.listRevisions(definition.capabilityId)).toHaveLength(
+        2,
+      );
+      if (!revisedBinding) throw new Error("Expected the revised Capability binding");
 
-      const outcome = await runtime.debug.adaptations.feedback.getOutcome(experiment.experimentId);
-      const origin = activated
-        ? await runtime.debug.adaptations.feedback.operationForActivation(activated.activationId)
-        : undefined;
-      expect(origin?.binding.experimentId).toBe(experiment.experimentId);
-      expect(outcome).toMatchObject({
-        decision: "revert",
-        restoreSourceActivationId: origin?.previousActivationId,
-        restoredActivationId: expect.any(String),
+      await runtime.manageCapability?.({
+        type: "pause",
+        capabilityId: definition.capabilityId,
+        expectedBindingRevision: revisedBinding.revisionNumber,
       });
-      expect(
-        await runtime.debug.workspace.research.experiments.getExperiment(experiment.experimentId),
-      ).toMatchObject({
-        status: "completed",
-        outcome: "revert",
+      const paused = await runtime.debug.workspace.capabilities.getBinding(definition.capabilityId);
+      expect(paused?.state).toBe("paused");
+      if (!paused) throw new Error("Expected a paused Capability binding");
+
+      await runtime.manageCapability?.({
+        type: "restore",
+        capabilityId: definition.capabilityId,
+        target: firstRevision,
+        expectedBindingRevision: paused.revisionNumber,
+      });
+      expect(await runtime.debug.workspace.capabilities.getBinding(definition.capabilityId)).toMatchObject({
+        revision: firstRevision,
+        state: "active",
       });
 
       const storedOutcomes = await runtime.debug.workspace.operational.outcomes.listForSession(
         relatedSession.trailId,
       );
-      expect(storedOutcomes).toHaveLength(3);
-      expect(controlled.provider.state.callCount).toBeGreaterThan(6);
+      expect(storedOutcomes).toHaveLength(2);
+      expect(controlled.provider.state.callCount).toBeGreaterThan(4);
     } finally {
       await runtime.shutdown();
     }

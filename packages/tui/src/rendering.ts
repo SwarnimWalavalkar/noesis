@@ -164,7 +164,25 @@ const safeTerminalQueueText = (text: string): string =>
 
 export function renderBottomChrome(state: NoesisTuiState, width: number, height = 30): string[] {
   const safeWidth = Math.max(0, Math.floor(width));
+  const notificationColor =
+    state.notification?.tone === "success"
+      ? ANSI.green
+      : state.notification?.tone === "attention"
+        ? ANSI.yellow
+        : ANSI.cyan;
   return [
+    ...(state.notification
+      ? [
+          elideText(
+            styled(
+              state.colorEnabled,
+              `${ANSI.bold}${notificationColor}`,
+              `◆ ${safeTerminalText(state.notification.text)}`,
+            ),
+            safeWidth,
+          ),
+        ]
+      : []),
     elideText(styled(state.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), safeWidth),
     renderStatusLine(state, safeWidth, height),
     ...(height >= 8 ? [elideText(styled(state.colorEnabled, ANSI.dim, helpHint(state)), safeWidth)] : []),
@@ -293,12 +311,35 @@ export function createRunInspectorOverlay(
   };
 }
 
-export function createInputLabelView(colorEnabled: boolean, height: () => number): Component {
+export function createInputLabelView(view: NoesisView, height: () => number): Component {
   return {
     invalidate() {},
     render(width) {
       if (height() < 6) return [];
-      return [elideText(styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), width)];
+      const notification = view.state.notification;
+      const color =
+        notification?.tone === "success"
+          ? ANSI.green
+          : notification?.tone === "attention"
+            ? ANSI.yellow
+            : ANSI.cyan;
+      return [
+        ...(notification
+          ? safeTerminalText(notification.text)
+              .split("\n")
+              .map((line, index) =>
+                elideText(
+                  styled(
+                    view.state.colorEnabled,
+                    `${ANSI.bold}${color}`,
+                    `${index === 0 ? "◆ " : "  "}${line}`,
+                  ),
+                  Math.max(0, width),
+                ),
+              )
+          : []),
+        elideText(styled(view.state.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), width),
+      ];
     },
   };
 }
