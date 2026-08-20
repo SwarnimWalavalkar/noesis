@@ -15,6 +15,8 @@ const isolatedRoleMessageNames = {
   reflector: [
     "settled_turn",
     "current_capabilities",
+    "current_capability_materials",
+    "available_saved_programs",
     "current_turn",
     "signals",
     "evidence",

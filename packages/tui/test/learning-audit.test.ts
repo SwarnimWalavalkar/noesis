@@ -46,6 +46,120 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
   generatedAt: "2026-08-14T00:00:00.000Z",
   primitives: Object.freeze([
     record({
+      id: "capability:adaptation-path",
+      kind: "capability",
+      group: "capabilities",
+      status: "active · relevant",
+      tone: "active",
+      title: "Use the existing adaptation path instead of editing protected files.",
+      summary: "The correction establishes a reusable constraint.",
+      occurredAt: "2026-08-14T00:00:02.000Z",
+      sessionId: "session-1",
+      capabilityId: "adaptation-path",
+      capabilityRevisionId: "revision-1",
+      capabilityBundleDigest: "a".repeat(64),
+      capabilityBindingRevision: 1,
+      capabilityFacets: Object.freeze(["instruction"]),
+      capabilityState: "active",
+      capabilityActivationMode: "relevant",
+      capabilityScope: "global",
+      evidence: Object.freeze([
+        "messages:message-1",
+        "messages:message-2",
+        "messages:message-3",
+        "messages:message-4",
+        "messages:message-5",
+      ]),
+      evidencePreviews: Object.freeze([
+        Object.freeze({
+          identity: "messages:message-1",
+          label: "USER",
+          excerpt: "Please propose the capability through adapt.",
+          occurredAt: "2026-08-14T00:00:00.000Z",
+          redacted: false,
+        }),
+        Object.freeze({
+          identity: "messages:message-2",
+          label: "ASSISTANT",
+          excerpt: "The existing adaptation path already covers this request.",
+          occurredAt: "2026-08-14T00:00:00.250Z",
+          redacted: false,
+        }),
+        Object.freeze({
+          identity: "messages:message-3",
+          label: "USER",
+          excerpt: "Keep the change on the existing adaptation path.",
+          occurredAt: "2026-08-14T00:00:00.500Z",
+          redacted: false,
+        }),
+      ]),
+      consideredEvidenceCount: 25,
+      consideredEvidencePreviews: Object.freeze([
+        Object.freeze({
+          identity: "messages:message-considered",
+          label: "TOOL",
+          excerpt: "files.list completed with the project tree.",
+          occurredAt: "2026-08-14T00:00:01.000Z",
+          redacted: false,
+        }),
+        Object.freeze({
+          identity: "messages:message-considered-2",
+          label: "ASSISTANT",
+          excerpt: "Listed the project files before proposing the change.",
+          occurredAt: "2026-08-14T00:00:01.500Z",
+          redacted: false,
+        }),
+        Object.freeze({
+          identity: "tool_calls:call-considered-3",
+          label: "TOOL",
+          excerpt: "search.query returned the existing adaptation skill.",
+          occurredAt: "2026-08-14T00:00:01.750Z",
+          redacted: false,
+        }),
+      ]),
+      detailSections: Object.freeze([
+        Object.freeze({
+          title: "WHAT CHANGED",
+          entries: Object.freeze([
+            Object.freeze({ label: "effects", value: "instruction" }),
+            Object.freeze({
+              label: "instruction",
+              value: "capabilities/adaptation-path/instructions.md\nUse adapt for self-extension requests.",
+            }),
+            Object.freeze({ label: "materials", value: "1 instruction" }),
+          ]),
+        }),
+        Object.freeze({
+          title: "BEHAVIOR",
+          entries: Object.freeze([
+            Object.freeze({ label: "scope", value: "Global" }),
+            Object.freeze({ label: "selection", value: "Selected when semantically relevant" }),
+            Object.freeze({ label: "state", value: "Active" }),
+          ]),
+        }),
+        Object.freeze({
+          title: "WHY",
+          entries: Object.freeze([
+            Object.freeze({ label: "reason", value: "The correction establishes a reusable constraint." }),
+            Object.freeze({ label: "expected effect", value: "Protected files remain unchanged." }),
+          ]),
+        }),
+        Object.freeze({
+          title: "PROVENANCE",
+          entries: Object.freeze([
+            Object.freeze({ label: "origin", value: "Ambient reflection after a settled foreground turn" }),
+          ]),
+        }),
+      ]),
+      relations: Object.freeze([
+        {
+          label: "authored by reflection",
+          targetId: "reflection:reflection-1",
+          targetTitle: "Use the existing adaptation path instead of editing protected files.",
+        },
+      ]),
+    }),
+    record({
       id: "reflection:reflection-1",
       kind: "reflection",
       group: "reflection",
@@ -174,7 +288,7 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
     record({
       id: "experiment:experiment-1",
       kind: "experiment",
-      group: "changes",
+      group: "history",
       status: "observing",
       title: "Use narrower research first",
       summary: "A project experiment",
@@ -247,7 +361,7 @@ describe("learning audit overlay", () => {
     expect(terminal.output).not.toContain("LEARNING · audit ledger");
 
     terminal.type("/learning\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("LEARNING · project evolution"));
+    await vi.waitFor(() => expect(terminal.output).toContain("LEARNING · capabilities"));
     expect(terminal.output).toContain("Use the existing adaptation path");
     expect(terminal.output).toContain("1 routine");
     terminal.send(ESCAPE);
@@ -258,34 +372,32 @@ describe("learning audit overlay", () => {
     await running;
   });
 
-  test("shows noteworthy activity by default and keeps routine reflection auditable", async () => {
+  test("shows Capabilities by default and keeps reflection history auditable", async () => {
     const harness = createHarness();
-    await vi.waitFor(() => expect(harness.output()).toContain("LEARNING · project evolution"));
+    await vi.waitFor(() => expect(harness.output()).toContain("LEARNING · capabilities"));
     expect(harness.output()).toContain(
       "Use the existing adaptation path instead of editing protected files.",
     );
+    expect(harness.output()).toContain("[Instruction]");
     expect(harness.output()).not.toContain("No lasting change");
     expect(harness.output()).not.toContain("baseline trial");
     expect(harness.output()).toContain("1 routine hidden");
-    expect(harness.output()).toContain("1 failed · x shows");
-    expect(harness.output()).toContain("◇ reflection");
-    expect(harness.output()).toContain("◆ changes");
+    expect(harness.output()).not.toContain("◇ reflection");
+    expect(harness.output()).not.toContain("◌ history");
     expect(harness.output()).not.toContain("Reflection failed");
-    expect(harness.output()).toContain("Use narrower research first");
+    expect(harness.output()).not.toContain("Use narrower research first");
     expect(harness.output()).toContain("12h ago");
     expect(harness.output()).toContain("r refresh");
     expect(harness.output()).not.toContain("\u001b]");
-
-    harness.component.handleInput?.("x");
-    expect(harness.output()).toContain("Reflection failed");
-    expect(harness.output()).toContain("× failed");
-    harness.component.handleInput?.("x");
-    expect(harness.output()).not.toContain("Reflection failed");
 
     harness.component.handleInput?.("a");
     expect(harness.output()).toContain("No lasting change");
     expect(harness.output()).toContain("baseline trial");
     expect(harness.output()).not.toContain("Reflection failed");
+    expect(harness.output()).toContain("1 failed · x shows");
+    harness.component.handleInput?.("x");
+    expect(harness.output()).toContain("Reflection failed");
+    expect(harness.output()).toContain("× failed");
 
     harness.component.handleInput?.("a");
     harness.component.handleInput?.("s");
@@ -298,7 +410,7 @@ describe("learning audit overlay", () => {
     expect(harness.output()).not.toContain("Use the existing adaptation path");
   });
 
-  test("explains a decision with cited evidence and keeps identities in raw authority", async () => {
+  test("explains a Capability with cited evidence and keeps identities in raw authority", async () => {
     const harness = createHarness();
     await vi.waitFor(() => expect(harness.output()).toContain("Use the existing adaptation path"));
     harness.component.handleInput?.(ENTER);
@@ -306,7 +418,6 @@ describe("learning audit overlay", () => {
     expect(harness.output()).toContain("Use adapt for self-extension requests.");
     expect(harness.output()).toContain("USER");
     expect(harness.output()).toContain("Please propose the capability through adapt.");
-    expect(harness.output()).toContain("adjusted INJECTED STATUS ROW");
     expect(harness.output()).toContain("2026-08-14 00:00:02 UTC");
     expect(harness.output()).not.toContain("\nINJECTED STATUS ROW");
     expect(harness.output()).toContain("EVIDENCE CITED · 5");
@@ -332,7 +443,7 @@ describe("learning audit overlay", () => {
     expect(harness.output()).toContain("Enter hides");
     harness.component.handleInput?.(TAB);
     expect(harness.output()).toContain("Enter expands");
-    expect(harness.output()).toContain("25 inputs were reviewed; 5 were cited");
+    expect(harness.output()).toContain("25 inputs were reviewed; 5 were cited.");
     expect(harness.output()).toContain("files.list completed with the project tree.");
     expect(harness.output()).toContain("Listed the project files before proposing the change.");
     expect(harness.output()).not.toContain("search.query returned the existing adaptation skill.");
@@ -345,16 +456,16 @@ describe("learning audit overlay", () => {
     harness.component.handleInput?.(TAB);
     expect(harness.output()).toContain("Enter opens");
     harness.component.handleInput?.(TAB);
-    expect(harness.output()).toContain("LEARNING · reflection");
+    expect(harness.output()).toContain("LEARNING · capability");
     expect(harness.output()).toContain("Enter hides");
     expect(harness.output()).not.toContain("Tab decision");
     harness.component.handleInput?.(TAB);
     harness.component.handleInput?.(TAB);
     expect(harness.output()).toContain("Enter opens");
     harness.component.handleInput?.(ENTER);
-    expect(harness.output()).toContain("Use narrower research first");
+    expect(harness.output()).toContain("LEARNING · reflection");
     harness.component.handleInput?.(" ");
-    expect(harness.output()).toContain('"hypothesis"');
+    expect(harness.output()).toContain('"schemaVersion"');
     harness.component.handleInput?.(ESCAPE);
     expect(harness.output()).toContain("Use the existing adaptation path");
   });
@@ -364,7 +475,8 @@ describe("learning audit overlay", () => {
     await vi.waitFor(() => expect(harness.output()).toContain("Use the existing adaptation path"));
     harness.component.handleInput?.(DOWN);
     harness.component.handleInput?.(ENTER);
-    expect(harness.output()).toContain("Use narrower research first");
+    expect(harness.output()).toContain("WHAT CHANGED");
+    expect(harness.output()).toContain("Instruction capability");
     harness.component.handleInput?.(ESCAPE);
     harness.component.handleInput?.(ESCAPE);
     expect(harness.closes).toBe(1);
@@ -372,7 +484,7 @@ describe("learning audit overlay", () => {
 
   test("closes the overlay frame on every row", async () => {
     const harness = createHarness();
-    await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · project evolution"));
+    await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · capabilities"));
     const rows = harness.component.render(160);
     const plain = (line: string): string =>
       Object.values(ANSI).reduce((text, code) => text.replaceAll(code, ""), line);
@@ -393,9 +505,9 @@ describe("learning audit overlay", () => {
 
   test("renders responsive master-detail panes at wide terminal widths", async () => {
     const harness = createHarness();
-    await vi.waitFor(() => expect(harness.output(160)).toContain("▸ ACTIVITY"));
+    await vi.waitFor(() => expect(harness.output(160)).toContain("▸ CAPABILITIES"));
     const wide = harness.output(160);
-    expect(wide).toContain("DECISION");
+    expect(wide).toContain("CAPABILITY");
     expect(wide).toContain("Use the existing adaptation path");
     expect(wide).toContain("WHAT CHANGED");
     expect(wide).toContain("Enter opens");
@@ -404,21 +516,22 @@ describe("learning audit overlay", () => {
 
     const narrow = harness.output(90);
     expect(narrow).toContain("Use the existing adaptation path");
-    expect(narrow).not.toContain("▸ DECISION");
+    expect(narrow).not.toContain("▸ CAPABILITY");
     expect(narrow).not.toContain("WHAT CHANGED");
 
     harness.component.handleInput?.(ENTER);
+    harness.component.handleInput?.(TAB);
     const focused = harness.output(160);
-    expect(focused).toContain("▸ DECISION");
+    expect(focused).toContain("LEARNING · capability");
     expect(focused).toContain("EVIDENCE CITED");
-    expect(focused).toContain("2026-08-14 00:00:02 UTC");
+    expect(focused).toContain("Please propose the capability through adapt.");
   });
 
   test("focuses related records with tab and up/down instead of left/right", async () => {
     const harness = createHarness();
     await vi.waitFor(() => expect(harness.output(160)).toContain("Use the existing adaptation path"));
     harness.component.handleInput?.(ENTER);
-    expect(harness.output(160)).toContain("LEARNING · reflection");
+    expect(harness.output(160)).toContain("LEARNING · capability");
     expect(harness.output(160)).toContain("Tab next");
     harness.component.handleInput?.(TAB);
     expect(harness.output(160)).toContain("Enter expands");
@@ -428,26 +541,26 @@ describe("learning audit overlay", () => {
     expect(harness.output(160)).toContain("Enter opens");
     expect(harness.output(160)).toContain("Enter open");
     harness.component.handleInput?.(TAB);
-    expect(harness.output(160)).toContain("LEARNING · reflection");
+    expect(harness.output(160)).toContain("LEARNING · capability");
     expect(harness.output(160)).toContain("Enter expands");
     expect(harness.output(160)).not.toContain("Tab decision");
     harness.component.handleInput?.(TAB);
     harness.component.handleInput?.(TAB);
     expect(harness.output(160)).toContain("Enter opens");
     harness.component.handleInput?.(ENTER);
-    expect(harness.output(160)).toContain("Use narrower research first");
+    expect(harness.output(160)).toContain("LEARNING · reflection");
   });
 
   test("opens /learning onto a remembered decision", async () => {
     const harness = createHarness("experiment:experiment-1");
     await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · experiment"));
     expect(harness.output(160)).toContain("Use narrower research first");
-    expect(harness.output(160)).toContain("▸ DECISION");
+    expect(harness.output(160)).toContain("▸ RECORD");
   });
 
   test("finishes loading when a remembered record is outside the bounded snapshot", async () => {
     const harness = createHarness("experiment:outside-bounded-snapshot");
-    await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · project evolution"));
+    await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · capabilities"));
     expect(harness.output(160)).not.toContain("Refreshing the learning ledger");
     expect(harness.output(160)).toContain("Use the existing adaptation path");
   });
@@ -481,15 +594,15 @@ describe("learning audit overlay", () => {
       close: () => undefined,
       now: () => NOW,
     });
-    await vi.waitFor(() => expect(component.render(110).join("\n")).toContain("No lasting changes yet"));
-    expect(component.render(110).join("\n")).toContain("Ambient reflection is running.");
+    await vi.waitFor(() => expect(component.render(110).join("\n")).toContain("No Capabilities yet"));
+    expect(component.render(110).join("\n")).toContain("Ambient reflection is still running.");
   });
 
   test("manages the live Capability binding from the detail pane", async () => {
     const capability = record({
       id: "capability:concise-research",
       kind: "capability",
-      group: "changes",
+      group: "capabilities",
       status: "active · relevant",
       tone: "active",
       title: "Concise research",
@@ -557,7 +670,7 @@ describe("learning audit overlay", () => {
     const gate = record({
       id: "capability-gate:gate-1",
       kind: "capability_gate",
-      group: "changes",
+      group: "activation",
       status: "pending",
       tone: "pending",
       title: "Recovery behavior needs approval",

@@ -192,6 +192,20 @@
             </span>
           </div>
           <div class="card">
+            <strong>Effects, not mechanism kinds</strong>
+            <span class="muted">
+              A Capability describes an ability. Its revision carries exact instruction, skill,
+              saved-script, and saved-workflow effects. Mixed abilities need no composite subtype.
+            </span>
+          </div>
+          <div class="card">
+            <strong>One program primitive</strong>
+            <span class="muted">
+              Script and workflow effects pin the ordinary saved project definition. Capability
+              storage never duplicates source, phases, execution state, or resume behavior.
+            </span>
+          </div>
+          <div class="card">
             <strong>Global by default</strong>
             <span class="muted">
               New capabilities are globally eligible unless the model or user chooses a project or
@@ -246,10 +260,11 @@
       <section>
         <h2>2. Product contract</h2>
         <p class="decision">
-          Noesis may autonomously change meaningful parts of its harness, including prompts, skills,
-          tools, workflows, routing, model configuration, and authority configuration. The ordinary
-          safety mechanism is visible provenance plus fast iteration and exact restoration—not a
-          mandatory speculative evaluation pipeline.
+          Noesis may autonomously create and revise meaningful abilities. A Capability revision says
+          exactly how an ability is delivered through instructions, progressively loaded skills, or
+          references to existing saved project scripts and workflows. The ordinary safety mechanism is
+          visible provenance plus fast iteration and exact restoration—not a mandatory speculative
+          evaluation pipeline.
         </p>
         <ul>
           <li>A Capability can become active as soon as its exact revision is recorded and validated.</li>
@@ -305,8 +320,9 @@
   → reflector returns no_change | create | revise | restore | pause | change_binding
 
 create or revise
-  → simple revision returned directly, or specialized author materializes exact bytes
-  → validate definition, dependencies, predecessor, and recovery information
+  → reflector proposes one or more concrete effects
+  → author records exact instruction or skill bytes and resolves saved programs to immutable revisions
+  → validate effects, dependencies, predecessor, project authority, and recovery information
   → consequence gate says automatic | user_decision
 
 automatic
@@ -325,7 +341,8 @@ user_decision
 later work
   → scope filter determines eligibility
   → “always” capabilities mount directly
-  → capable router selects among “relevant” capabilities
+  → central capable router selects among “relevant” capabilities
+  → compiler mounts instructions, skill descriptors, and exact saved-program adapters
   → FrozenTurnPlan pins exact selected revisions
   → user feedback or ambient reflection keeps, iterates, pauses, or restores</code></pre>
 
@@ -365,23 +382,16 @@ later work
         <pre><code>interface Capability {
   readonly capabilityId: string;
   readonly name: string;
-  readonly kind:
-    | "instruction"
-    | "skill"
-    | "tool"
-    | "workflow"
-    | "router"
-    | "model_configuration"
-    | "harness_configuration"
-    | "core_update"
-    | "composite";
   readonly description: string;
   readonly applicability: string;
   readonly createdAt: string;
 }</code></pre>
         <p>
           <code>applicability</code> is a concise semantic description of when the Capability helps. It
-          is used by the capable router. It is not a regex, tag match, or keyword classifier.
+          is used by the capable router. It is not a regex, tag match, or keyword classifier. A
+          Capability describes an ability, so it has no mechanism kind. The current revision's effects
+          are the only source of truth for whether it uses instructions, skills, scripts, workflows, or
+          a combination of them.
         </p>
 
         <h3>CapabilityRevision</h3>
@@ -392,16 +402,25 @@ later work
   readonly summary: string;
   readonly rationale: string;
   readonly anticipatedEffect: string;
-  readonly materials: readonly CapabilityMaterialRef[];
+  readonly effects: readonly (
+    | { kind: "instruction"; material: FileRevisionRef }
+    | { kind: "skill"; name: string; description: string; material: FileRevisionRef }
+    | { kind: "script"; name: string; project: ProjectRef; definitionRevision: FileRevisionRef }
+    | { kind: "workflow"; name: string; project: ProjectRef; definitionRevision: FileRevisionRef }
+  )[];
   readonly dependencyLock?: FileRevisionRef;
   readonly permissionManifest: PermissionManifest;
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly createdAt: string;
 }</code></pre>
         <p>
-          A revision contains or references the exact implementation that can be mounted. Authoring
-          always receives the complete predecessor materials. The revision is immutable once any
-          binding or frozen turn references it.
+          A revision contains or references the exact implementation that can be mounted. Instructions
+          and skills own immutable material revisions. Script and workflow effects point to the same
+          immutable saved definitions used by <code>scripts.run</code> and <code>workflows.run</code>;
+          they do not copy source, phases, or run state into Capability storage. Because saved programs
+          are project authority, these effects require the matching project scope. Authoring always
+          receives the complete predecessor materials. The revision is immutable once any binding or
+          frozen turn references it.
         </p>
 
         <h3>CapabilityBinding</h3>
@@ -476,7 +495,8 @@ later work
           <li>explicit conversational feedback from the current turn;</li>
           <li>bounded, opened cross-session evidence chosen for relevance;</li>
           <li>active Capability descriptors and likely conflicts or overlaps;</li>
-          <li>the current binding and complete predecessor for any proposed revision;</li>
+          <li>the current binding and complete exact predecessor materials for any proposed revision;</li>
+          <li>the bounded catalog of saved project scripts and workflows that may be referenced;</li>
           <li>the user’s direct remembered criteria when relevant.</li>
         </ul>
         <p>Its structured decision is:</p>
@@ -491,22 +511,24 @@ change_binding</code></pre>
           The host rejects nonexistent, unauthorized, or sensitivity-incompatible citations.
         </p>
 
-        <h3>Specialized author</h3>
+        <h3>Effect author</h3>
         <p>
-          A simple instruction revision may be complete in the reflection result. Tools, skills,
-          workflows, routers, and configuration use a specialized author with:
+          The reflection result declares concrete effects. Instruction and skill effects contain
+          authored material; script and workflow effects name an already-saved project program. The
+          author receives:
         </p>
         <ul>
           <li>the exact predecessor bytes and manifest;</li>
           <li>the exact requested target and user amendment;</li>
           <li>opened evidence excerpts rather than opaque evidence IDs;</li>
-          <li>available catalog, schemas, dependencies, and runtime constraints;</li>
+          <li>available saved program names, immutable revisions, and runtime constraints;</li>
           <li>related active capabilities and known conflicts;</li>
-          <li>the required output schema for that Capability kind.</li>
+          <li>the required output schema for the effect union.</li>
         </ul>
         <p>
-          The author returns exact declarative materials. It never returns a digest standing in for
-          behavior it has not seen.
+          The author returns exact declarative materials or an exact reference resolved by the host. It
+          never invents a second workflow representation or returns a digest standing in for behavior
+          it has not seen.
         </p>
 
         <h3>Capability router</h3>
@@ -557,8 +579,9 @@ change_activation_mode</code></pre>
           <li>revision-agent successor experiment creation.</li>
         </ul>
         <p>
-          A normal turn therefore produces one reflection call and, only when necessary, one
-          specialized authoring call. JSON repair remains bounded and explicit.
+          A normal turn therefore produces one reflection call. The current effect authoring is part of
+          that structured reflection result; future material-specific author calls may be added only
+          when they have a concrete consumer. JSON repair remains bounded and explicit.
         </p>
       </section>
 
@@ -571,21 +594,18 @@ change_activation_mode</code></pre>
         </p>
 
         <h3>Automatic activation</h3>
-        <p>Automatic activation covers reversible capability changes, including:</p>
+        <p>Automatic activation covers ordinary reversible Capability effects:</p>
         <div>
-          <span class="pill">prompts</span>
+          <span class="pill">instructions</span>
           <span class="pill">skills</span>
-          <span class="pill">tools</span>
+          <span class="pill">saved scripts</span>
           <span class="pill">workflows</span>
-          <span class="pill">routing</span>
-          <span class="pill">model configuration</span>
-          <span class="pill">harness configuration</span>
-          <span class="pill">authority configuration</span>
         </div>
         <p>
-          A tool is not gated merely because it is a tool. A global revision is not gated merely because
-          it is global. A permission change is not gated merely because an older architecture labeled it
-          protected.
+          A Capability is not gated merely because it is global. The same central semantic router serves
+          every relevant Capability; individual revisions do not install competing router or
+          configuration subsystems. New executable definitions are still published explicitly through
+          foreground <code>execute</code>, after which a Capability may reference the exact saved revision.
         </p>
 
         <h3>User decision</h3>
@@ -669,6 +689,10 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
         <p>The normal view prioritizes:</p>
         <ol>
           <li>what the Capability does;</li>
+          <li>
+            its concrete effects, labelled as Instruction, Skill, Script, or Workflow, with exact
+            material or saved-definition content;
+          </li>
           <li>what changed from the predecessor;</li>
           <li>why Noesis created or revised it;</li>
           <li>readable cited evidence with links to exact records;</li>
@@ -783,8 +807,9 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
             <tr>
               <td><code>packages/learning</code></td>
               <td>
-                Ambient reflector, specialized author adapters, and
-                <code>iterateOnFeedback</code>. No experiment or preflight orchestration.
+                Ambient reflector, exact effect authoring, and <code>iterateOnFeedback</code>. Saved
+                programs are resolved through a narrow canonical program-library port. No experiment
+                or preflight orchestration.
               </td>
             </tr>
             <tr>
@@ -952,8 +977,9 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
             predecessor and candidate bytes, validate adapters, preserve rollback, and expose read models.
           </p>
           <p>
-            <strong>Acceptance:</strong> instruction, skill, tool, workflow, router, configuration, and
-            boot-safe core-update revisions exercise the same interface through real adapters.
+            <strong>Acceptance:</strong> instruction, skill, saved-script, and saved-workflow effects
+            exercise one revision interface. Program effects pin the existing project definition and
+            use its ordinary runner rather than introducing parallel executable state.
           </p>
         </div>
 
@@ -965,8 +991,8 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
             evidence. Implement <code>iterateOnFeedback</code>.
           </p>
           <p>
-            <strong>Acceptance:</strong> ordinary creation or revision uses at most reflection plus one author
-            call; <code>no_change</code> needs no second call; no scope verifier or preflight work is scheduled.
+            <strong>Acceptance:</strong> ordinary creation or revision uses the structured reflection result;
+            <code>no_change</code> needs no second call; no scope verifier or preflight work is scheduled.
           </p>
         </div>
 
@@ -1002,9 +1028,9 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
             cases. Support approve, deny, and natural-language change with immutable pending refs.
           </p>
           <p>
-            <strong>Acceptance:</strong> global tools and authority configuration can activate automatically;
-            a revision cannot erase its own audit or recovery; foreground intent does not produce duplicate
-            approval prompts.
+            <strong>Acceptance:</strong> ordinary effect revisions can activate automatically; a revision
+            cannot erase its own audit or recovery; foreground intent does not produce duplicate approval
+            prompts.
           </p>
         </div>
 
@@ -1081,7 +1107,11 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
             </tr>
             <tr>
               <td>Global default</td>
-              <td>A new Capability created in project A is eligible in project B unless narrowed.</td>
+              <td>
+                A new portable instruction or skill Capability created in project A is eligible in project B
+                unless narrowed. A saved-program effect is project-scoped because its definition is project
+                authority.
+              </td>
             </tr>
             <tr>
               <td>Relevant mode</td>
@@ -1104,8 +1134,18 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
               <td>Restore binds exact r1 bytes without reconstructing them from mutable files.</td>
             </tr>
             <tr>
-              <td>Powerful change</td>
-              <td>A global tool Capability activates automatically and enters the next frozen catalog.</td>
+              <td>Effects-first compilation</td>
+              <td>
+                A mixed instruction and skill revision freezes exact materials, injects only the instruction,
+                and exposes the skill through progressive disclosure.
+              </td>
+            </tr>
+            <tr>
+              <td>One workflow primitive</td>
+              <td>
+                A Capability workflow effect pins an existing saved manifest and invokes the ordinary workflow
+                runner; no Capability-owned phase or run record is created.
+              </td>
             </tr>
             <tr>
               <td>Tiny gate</td>
@@ -1176,7 +1216,8 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
           <li>Every terminal foreground turn runs one ambient reflection without a usefulness pre-classifier.</li>
           <li>New capabilities default to global and relevant.</li>
           <li>The user can make any eligible Capability always active.</li>
-          <li>The agent can autonomously activate global prompt, skill, tool, workflow, router, and configuration revisions.</li>
+          <li>Capability revisions express concrete instruction, skill, saved-script, and saved-workflow effects.</li>
+          <li>Saved-program effects use the same immutable definitions and runners as ordinary project programs.</li>
           <li>Ordinary learning schedules no experiment, preflight, trial, blind judge, or outcome judge.</li>
           <li>Explicit and ambient feedback can revise, pause, restore, re-scope, or change activation mode.</li>
           <li>The TUI offers approve, deny, and natural-language change only for the tiny consequence gate.</li>

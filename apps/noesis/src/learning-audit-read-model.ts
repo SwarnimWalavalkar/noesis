@@ -1,12 +1,17 @@
+import { capabilityEffectKinds, capabilityEffects } from "@noesis/capabilities";
 import type { UserCriterionRepository } from "@noesis/config";
 import {
+  type CapabilityDefinition,
+  type CapabilityLifecycleRevision,
   type CapabilityRevision,
   type CapabilityRevisionRef,
+  type CapabilityScope,
   canonicalJson,
   type DurableJobRecord,
   type EvidenceRef,
   EvidenceRefSchema,
   type Experiment,
+  type FileRevisionRef,
   type ProjectRef,
   sha256,
   toJsonValue,
@@ -14,6 +19,7 @@ import {
 } from "@noesis/domain";
 import { CAPABILITY_REFLECTION_JOB_KIND, type ContinuousFeedbackController } from "@noesis/runtime";
 import type {
+  TuiCapabilityFacet,
   TuiLearningAuditSnapshot,
   TuiLearningDetailSection,
   TuiLearningEvidencePreview,
@@ -30,6 +36,7 @@ const RAW_JSON_LIMIT = 64_000;
 const EVIDENCE_PREVIEW_LIMIT = 8;
 const CONSIDERED_PREVIEW_LIMIT = 8;
 const EVIDENCE_EXCERPT_LIMIT = 480;
+const MATERIAL_PREVIEW_LIMIT = 2_400;
 const LEGACY_REFLECTION_JOB_KIND = "runtime.reflect_turn";
 
 function isReflectionJob(job: DurableJobRecord): boolean {
@@ -324,6 +331,126 @@ function detailSection(
 ): TuiLearningDetailSection | undefined {
   const present = entries.filter(defined);
   return present.length > 0 ? Object.freeze({ title, entries: Object.freeze(present) }) : undefined;
+}
+
+function capabilityScopeLabel(scope: CapabilityScope): string {
+  if (scope.kind === "global") return "Global";
+  if (scope.kind === "project") return `Project · ${scope.project.root}`;
+  return `Session · ${scope.sessionId}`;
+}
+
+function capabilitySelectionLabel(mode: "relevant" | "always"): string {
+  return mode === "always" ? "Always active" : "Selected when semantically relevant";
+}
+
+function legacyMaterialCounts(revision: CapabilityRevision): string {
+  return [
+    `${String(revision.promptModules.length)} prompt${revision.promptModules.length === 1 ? "" : "s"}`,
+    `${String(revision.skills.length)} skill${revision.skills.length === 1 ? "" : "s"}`,
+    `${String(revision.tools.length)} tool${revision.tools.length === 1 ? "" : "s"}`,
+    "1 router",
+  ].join(" · ");
+}
+
+function capabilityFacets(revision: CapabilityRevision | undefined): readonly TuiCapabilityFacet[] {
+  return revision ? capabilityEffectKinds(revision) : Object.freeze([]);
+}
+
+function facetCountLabel(revision: CapabilityRevision): string {
+  const effects = capabilityEffects(revision);
+  if (effects.length === 0) return `Legacy bundle · ${legacyMaterialCounts(revision)}`;
+  const counts = new Map<TuiCapabilityFacet, number>();
+  for (const effect of effects) counts.set(effect.kind, (counts.get(effect.kind) ?? 0) + 1);
+  return [...counts.entries()]
+    .map(([kind, count]) => `${String(count)} ${kind}${count === 1 ? "" : "s"}`)
+    .join(" · ");
+}
+
+function boundedMaterial(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.length <= MATERIAL_PREVIEW_LIMIT
+    ? trimmed
+    : `${trimmed.slice(0, MATERIAL_PREVIEW_LIMIT - 1)}…`;
+}
+
+async function materialEntry(
+  workspace: NoesisWorkspaceStore,
+  label: string,
+  reference: FileRevisionRef,
+): Promise<ReturnType<typeof detailEntry>> {
+  try {
+    const content = boundedMaterial(new TextDecoder().decode(await workspace.reads.readRevision(reference)));
+    return detailEntry(label, `${reference.workingPath}\n${content || "(empty material)"}`);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return detailEntry(label, `${reference.workingPath}\nUnavailable: ${boundedExcerpt(reason)}`);
+  }
+}
+
+async function capabilityMaterialEntries(
+  workspace: NoesisWorkspaceStore,
+  definition: CapabilityDefinition | undefined,
+  lifecycle: CapabilityLifecycleRevision | undefined,
+): Promise<readonly (ReturnType<typeof detailEntry> | undefined)[]> {
+  if (!lifecycle)
+    return Object.freeze([
+      detailEntry(
+        "effects",
+        definition?.kind ? `Legacy ${definition.kind.replaceAll("_", " ")} capability` : undefined,
+      ),
+    ]);
+  const revision = lifecycle.revision;
+  const effects = capabilityEffects(revision);
+  if (effects.length > 0) {
+    const kindCounts = new Map<string, number>();
+    const effectTotals = new Map<string, number>();
+    for (const effect of effects) effectTotals.set(effect.kind, (effectTotals.get(effect.kind) ?? 0) + 1);
+    const effectEntries = await Promise.all(
+      effects.map(async (effect) => {
+        const count = (kindCounts.get(effect.kind) ?? 0) + 1;
+        kindCounts.set(effect.kind, count);
+        const suffix = (effectTotals.get(effect.kind) ?? 0) > 1 ? ` ${String(count)}` : "";
+        if (effect.kind === "instruction")
+          return await materialEntry(workspace, `instruction${suffix}`, effect.material);
+        if (effect.kind === "skill") {
+          const entry = await materialEntry(workspace, `skill · ${effect.name}`, effect.material);
+          return entry ? detailEntry(entry.label, `${effect.description}\n${entry.value}`) : entry;
+        }
+        return await materialEntry(workspace, `${effect.kind} · ${effect.name}`, effect.definitionRevision);
+      }),
+    );
+    return Object.freeze([
+      detailEntry("effects", capabilityEffectKinds(revision).join(" + ")),
+      detailEntry("change", lifecycle.summary),
+      ...effectEntries,
+      detailEntry("materials", facetCountLabel(revision)),
+    ]);
+  }
+  const materialEntries = await Promise.all([
+    ...revision.promptModules.map(
+      async (reference, index) =>
+        await materialEntry(
+          workspace,
+          definition?.kind === "instruction" && index === 0 ? "instruction" : `prompt ${String(index + 1)}`,
+          reference,
+        ),
+    ),
+    ...revision.skills.map(
+      async (reference, index) => await materialEntry(workspace, `skill ${String(index + 1)}`, reference),
+    ),
+    ...revision.tools.map(
+      async (reference, index) => await materialEntry(workspace, `tool ${String(index + 1)}`, reference),
+    ),
+  ]);
+  return Object.freeze([
+    detailEntry(
+      "effects",
+      definition?.kind ? `Legacy ${definition.kind.replaceAll("_", " ")} bundle` : "Legacy capability bundle",
+    ),
+    detailEntry("change", lifecycle.summary),
+    ...materialEntries,
+    detailEntry("materials", legacyMaterialCounts(revision)),
+  ]);
 }
 
 function reflectionStatusLabel(status: string): string {
@@ -797,6 +924,12 @@ export async function loadLearningAuditSnapshot(
       })
       .filter(defined),
   );
+  const reflectionByCapabilityId = new Map<string, DurableJobRecord>();
+  for (const job of jobs) {
+    const capabilityId = stringField(job.result, "capabilityId");
+    if (capabilityId && !reflectionByCapabilityId.has(capabilityId))
+      reflectionByCapabilityId.set(capabilityId, job);
+  }
   const adjustmentsById = new Map(
     adjustments.map((adjustment) => [adjustment.adjustmentId, adjustment] as const),
   );
@@ -840,7 +973,7 @@ export async function loadLearningAuditSnapshot(
       primitive({
         id: nativeId("working_adjustment", adjustment.adjustmentId),
         kind: "working_adjustment",
-        group: "changes",
+        group: "history",
         status: active ? "active" : "inactive",
         tone: active ? "active" : "neutral",
         title: adjustment.strategy,
@@ -881,7 +1014,7 @@ export async function loadLearningAuditSnapshot(
       primitive({
         id: nativeId("experiment", experiment.experimentId),
         kind: "experiment",
-        group: "changes",
+        group: "history",
         status: experiment.status === "completed" ? `completed · ${experiment.outcome}` : experiment.status,
         tone:
           experiment.status !== "completed"
@@ -1140,7 +1273,7 @@ export async function loadLearningAuditSnapshot(
       primitive({
         id: nativeId("capability_revision", reference.capabilityRevisionId),
         kind: "capability_revision",
-        group: "changes",
+        group: "history",
         status: activeRevision ? "active" : "recorded",
         tone: activeRevision ? "active" : "neutral",
         title: capability?.name ?? reference.capabilityId,
@@ -1276,56 +1409,96 @@ export async function loadLearningAuditSnapshot(
           ).values(),
         ].slice(0, perCapabilityLimit),
       );
-      return Object.freeze({ binding, revisions, feedback });
+      return Object.freeze({ binding, currentRevision, revisions, feedback });
     }),
   );
-  for (const { binding, revisions, feedback } of capabilityHistory) {
+  for (const { binding, currentRevision, revisions, feedback } of capabilityHistory) {
     const definition = capabilityDefinitionById.get(binding.capabilityId);
+    const sourceReflection = reflectionByCapabilityId.get(binding.capabilityId);
+    const sourceSessionId = sourceReflection ? jobSessionId(sourceReflection) : undefined;
+    const consideredEvidence =
+      sourceReflection && jobSensitivity(sourceReflection) === "normal" ? sourceReflection.payloadRefs : [];
+    const currentMaterialEntries = await capabilityMaterialEntries(
+      source.workspace,
+      definition,
+      currentRevision,
+    );
+    const currentFacets = capabilityFacets(currentRevision?.revision);
     primitives.push(
       primitive({
         id: nativeId("capability", binding.capabilityId),
         kind: "capability",
-        group: "changes",
+        group: "capabilities",
         status: `${binding.state} · ${binding.activationMode}`,
         tone: binding.state === "active" ? "active" : "neutral",
         title: definition?.name ?? binding.capabilityId,
         summary: definition?.description ?? "Durable capability",
         occurredAt: binding.updatedAt,
+        ...(sourceSessionId ? { sessionId: sourceSessionId } : {}),
         ...(binding.scope.kind === "project" ? { projectId: binding.scope.project.projectId } : {}),
         capabilityId: binding.capabilityId,
         capabilityRevisionId: binding.revision.capabilityRevisionId,
         capabilityBundleDigest: binding.revision.bundleDigest,
         capabilityBindingRevision: binding.revisionNumber,
+        ...(currentFacets.length > 0 ? { capabilityFacets: currentFacets } : {}),
+        ...(definition?.kind ? { capabilityKind: definition.kind } : {}),
         capabilityState: binding.state,
         capabilityActivationMode: binding.activationMode,
         capabilityScope: binding.scope.kind,
         relations: [
-          relation("current revision", "capability_revision", binding.revision.capabilityRevisionId),
-          ...revisions.map((revision) =>
-            relation("revision", "capability_revision", revision.reference.capabilityRevisionId),
-          ),
+          relation("authored by reflection", "reflection", sourceReflection?.jobId),
+          ...revisions
+            .filter(
+              (revision) => revision.reference.capabilityRevisionId !== binding.revision.capabilityRevisionId,
+            )
+            .map((revision) =>
+              relation("previous revision", "capability_revision", revision.reference.capabilityRevisionId),
+            ),
         ].filter(defined),
         detailSections: [
+          detailSection("WHAT CHANGED", currentMaterialEntries),
           detailSection("BEHAVIOR", [
             detailEntry("applies when", definition?.applicability),
-            detailEntry("scope", canonicalJson(binding.scope)),
-            detailEntry("selection", binding.activationMode),
-            detailEntry("state", binding.state),
+            detailEntry("scope", capabilityScopeLabel(binding.scope)),
+            detailEntry("selection", capabilitySelectionLabel(binding.activationMode)),
+            detailEntry("state", binding.state === "active" ? "Active" : "Paused"),
+          ]),
+          detailSection("WHY", [
+            detailEntry("reason", currentRevision?.rationale),
+            detailEntry("expected effect", currentRevision?.anticipatedEffect),
+          ]),
+          detailSection("PROVENANCE", [
+            detailEntry(
+              "origin",
+              sourceReflection
+                ? "Ambient reflection after a settled foreground turn"
+                : "Recorded Capability lifecycle",
+            ),
+            detailEntry("current revision", currentRevision?.summary),
           ]),
           detailSection("HISTORY", [
             detailEntry("revisions", String(revisions.length)),
             detailEntry("feedback", String(feedback.length)),
           ]),
         ].filter(defined),
-        raw: { definition, binding },
+        evidence: currentRevision?.revision.evidenceRefs ?? [],
+        evidencePreviews: await resolveEvidencePreviews(currentRevision?.revision.evidenceRefs ?? []),
+        consideredEvidenceCount: consideredEvidence.length,
+        consideredEvidencePreviews: await resolveEvidencePreviews(
+          consideredEvidence,
+          CONSIDERED_PREVIEW_LIMIT,
+        ),
+        raw: { definition, binding, currentRevision },
       }),
     );
-    for (const revision of revisions)
+    for (const revision of revisions) {
+      const revisionFacets = capabilityFacets(revision.revision);
+      const revisionMaterialEntries = await capabilityMaterialEntries(source.workspace, definition, revision);
       primitives.push(
         primitive({
           id: nativeId("capability_revision", revision.reference.capabilityRevisionId),
           kind: "capability_revision",
-          group: "changes",
+          group: "history",
           status:
             revision.reference.capabilityRevisionId === binding.revision.capabilityRevisionId
               ? "current"
@@ -1341,23 +1514,28 @@ export async function loadLearningAuditSnapshot(
           capabilityRevisionId: revision.reference.capabilityRevisionId,
           capabilityBundleDigest: revision.reference.bundleDigest,
           capabilityBindingRevision: binding.revisionNumber,
+          ...(revisionFacets.length > 0 ? { capabilityFacets: revisionFacets } : {}),
+          ...(definition?.kind ? { capabilityKind: definition.kind } : {}),
           capabilityState: binding.state,
           capabilityActivationMode: binding.activationMode,
           capabilityScope: binding.scope.kind,
           evidence: revision.revision.evidenceRefs,
+          evidencePreviews: await resolveEvidencePreviews(revision.revision.evidenceRefs),
           relations: [
             relation("capability", "capability", binding.capabilityId),
             relation("predecessor", "capability_revision", revision.revision.predecessorRevisionId),
           ].filter(defined),
           detailSections: [
-            detailSection("DECISION", [
-              detailEntry("why", revision.rationale),
+            detailSection("WHAT CHANGED", revisionMaterialEntries),
+            detailSection("WHY", [
+              detailEntry("reason", revision.rationale),
               detailEntry("expected effect", revision.anticipatedEffect),
             ]),
           ].filter(defined),
           raw: revision,
         }),
       );
+    }
     for (const item of feedback)
       primitives.push(
         primitive({

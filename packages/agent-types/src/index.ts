@@ -102,6 +102,24 @@ export interface FrozenRevisionMaterial {
   readonly content: string;
 }
 
+export type FrozenCapabilityEffect =
+  | {
+      readonly kind: "instruction";
+      readonly material: FrozenRevisionMaterial;
+    }
+  | {
+      readonly kind: "skill";
+      readonly name: string;
+      readonly description: string;
+      readonly material: FrozenRevisionMaterial;
+    }
+  | {
+      readonly kind: "script" | "workflow";
+      readonly name: string;
+      readonly project: ProjectRef;
+      readonly definition: FrozenRevisionMaterial;
+    };
+
 export interface FrozenCapabilitySelection {
   readonly capabilityId: string;
   readonly name: string;
@@ -109,6 +127,8 @@ export interface FrozenCapabilitySelection {
   readonly selectionReason: string;
   readonly revision: CapabilityRevisionRef;
   readonly baseline: FrozenBaselineRef;
+  /** Present on effects-first revisions. Legacy frozen plans omit it. */
+  readonly effects?: readonly FrozenCapabilityEffect[] | undefined;
   readonly promptModules: readonly FrozenRevisionMaterial[];
   readonly skills: readonly FrozenRevisionMaterial[];
   readonly tools: readonly FrozenRevisionMaterial[];
@@ -217,6 +237,30 @@ const FrozenRevisionMaterialSchema = z.strictObject({
   revision: FileRevisionRefSchema,
   content: z.string(),
 });
+const FrozenCapabilityEffectSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("instruction"),
+    material: FrozenRevisionMaterialSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("skill"),
+    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+    description: z.string().min(1).max(2_048),
+    material: FrozenRevisionMaterialSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("script"),
+    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+    project: ProjectRefSchema,
+    definition: FrozenRevisionMaterialSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("workflow"),
+    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+    project: ProjectRefSchema,
+    definition: FrozenRevisionMaterialSchema,
+  }),
+]);
 const FrozenBaselineRefSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("genesis") }),
   z.strictObject({ kind: z.literal("unknown_legacy") }),
@@ -233,6 +277,7 @@ const FrozenCapabilitySelectionSchema = z.strictObject({
   selectionReason: z.string().min(1),
   revision: CapabilityRevisionRefSchema,
   baseline: FrozenBaselineRefSchema,
+  effects: z.array(FrozenCapabilityEffectSchema).min(1).max(32).optional(),
   promptModules: z.array(FrozenRevisionMaterialSchema),
   skills: z.array(FrozenRevisionMaterialSchema),
   tools: z.array(FrozenRevisionMaterialSchema),
@@ -338,7 +383,16 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     }),
   }) satisfies FrozenTurnPlan;
   for (const selection of plan.selectedCapabilities) {
-    const materials = [...selection.promptModules, ...selection.skills, ...selection.tools, selection.router];
+    const effectMaterials = (selection.effects ?? []).map((effect) =>
+      effect.kind === "instruction" || effect.kind === "skill" ? effect.material : effect.definition,
+    );
+    const materials = [
+      ...selection.promptModules,
+      ...selection.skills,
+      ...selection.tools,
+      selection.router,
+      ...effectMaterials,
+    ];
     for (const material of materials) {
       if (sha256(material.content) !== material.revision.contentDigest)
         throw new Error(

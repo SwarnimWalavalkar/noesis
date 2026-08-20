@@ -30,7 +30,7 @@ import {
 import { createPiSelfTools, type PiSelfToolAdapter } from "./self-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
 import { resolvePiSkillInvocation } from "./skill-invocation.ts";
-import type { PiSkillLibrary } from "./skill-library.ts";
+import type { PiSkillLibrary, PiSkillResource } from "./skill-library.ts";
 
 export type {
   AgentCompletedStopReason,
@@ -108,8 +108,53 @@ function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | und
           `Frozen turn plan ${plan.planId} does not serve prompt material ${prompt.revision.revisionId}`,
         );
     }
+    for (const effect of selection.effects ?? []) {
+      if (effect.kind !== "instruction") continue;
+      const content = effect.material.content.trim();
+      if (content && !plan.renderedSystemPrompt.includes(content))
+        throw new Error(
+          `Frozen turn plan ${plan.planId} does not serve instruction effect ${effect.material.revision.revisionId}`,
+        );
+    }
   }
   return plan;
+}
+
+function capabilitySkillResources(plan: FrozenTurnPlan | undefined): readonly PiSkillResource[] {
+  if (!plan) return Object.freeze([]);
+  return Object.freeze(
+    plan.selectedCapabilities.flatMap((selection) =>
+      (selection.effects ?? []).flatMap((effect) =>
+        effect.kind === "skill"
+          ? [
+              Object.freeze({
+                name: effect.name,
+                description: effect.description,
+                content: effect.material.content,
+                filePath: effect.material.revision.workingPath,
+                contentDigest: effect.material.revision.contentDigest,
+                capabilityRevision: effect.material.revision,
+                disableModelInvocation: false,
+              }),
+            ]
+          : [],
+      ),
+    ),
+  );
+}
+
+function mergeSkillResources(
+  discovered: readonly PiSkillResource[],
+  capability: readonly PiSkillResource[],
+): readonly PiSkillResource[] {
+  const merged = new Map(discovered.map((skill) => [skill.name, skill]));
+  for (const skill of capability) {
+    const existing = merged.get(skill.name);
+    if (existing && existing.contentDigest !== skill.contentDigest)
+      throw new Error(`Capability skill ${skill.name} conflicts with another frozen skill`);
+    merged.set(skill.name, skill);
+  }
+  return Object.freeze([...merged.values()].sort((left, right) => left.name.localeCompare(right.name)));
 }
 
 function historyForRequest(
@@ -353,11 +398,15 @@ export function createPiAgentRuntime(
       const pinnedSkillSnapshot = plan ? options.skills?.claimPinnedSnapshot(plan.planId) : undefined;
       if (plan && options.skills && options.requirePinnedSkillSnapshot && !pinnedSkillSnapshot)
         throw new Error(`Frozen turn plan ${plan.planId} has no skill snapshot pinned at admission`);
-      const skillSnapshot =
+      const discoveredSkillSnapshot =
         pinnedSkillSnapshot ??
         (options.skills
           ? await options.skills.snapshot(execution.controller.signal)
           : Object.freeze({ skills: Object.freeze([]), diagnostics: Object.freeze([]) }));
+      const skillSnapshot = Object.freeze({
+        skills: mergeSkillResources(discoveredSkillSnapshot.skills, capabilitySkillResources(plan)),
+        diagnostics: discoveredSkillSnapshot.diagnostics,
+      });
       const preparedCode =
         plan && options.codeExecution
           ? await options.codeExecution.prepare(plan, execution.controller.signal, {

@@ -648,6 +648,76 @@ describe("agent runtime factories", () => {
     expect(snapshotReads).toBe(0);
   });
 
+  test("serves a Capability skill through Pi progressive disclosure without injecting its body", async () => {
+    const base = frozenPlan();
+    const capabilitySkill = material(
+      "capability-skill-v1",
+      "capabilities/evidence-synthesis/skills/evidence-synthesis/SKILL.md",
+      "PRIVATE CAPABILITY SKILL BODY: inspect every cited source before synthesis.",
+    );
+    const selected = base.selectedCapabilities[0];
+    if (!selected) throw new Error("Frozen plan fixture has no capability");
+    const { canonicalDigest: _baseDigest, ...baseUnsigned } = base;
+    const unsigned: Omit<FrozenTurnPlan, "canonicalDigest"> = Object.freeze({
+      ...baseUnsigned,
+      selectedCapabilities: Object.freeze([
+        Object.freeze({
+          ...selected,
+          effects: Object.freeze([
+            Object.freeze({
+              kind: "skill" as const,
+              name: "evidence-synthesis",
+              description: "Inspect cited sources before producing a synthesis.",
+              material: capabilitySkill,
+            }),
+          ]),
+          promptModules: Object.freeze([]),
+          skills: Object.freeze([]),
+        }),
+      ]),
+      renderedSystemPrompt: "Noesis protected kernel.",
+    });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const controlled = createControlledPiModels({
+      respond: ({ systemPrompt }) => {
+        expect(systemPrompt).toContain("evidence-synthesis");
+        expect(systemPrompt).toContain("Inspect cited sources before producing a synthesis.");
+        expect(systemPrompt).not.toContain("PRIVATE CAPABILITY SKILL BODY");
+        return "Capability skill is discoverable.";
+      },
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      codeExecution: controlledCodeExecution(
+        {
+          resolve: async (received) =>
+            Object.freeze({
+              planId: received.planId,
+              canonicalDigest: received.canonicalDigest,
+              consumedMaterials: frozenPlanMaterialUses(received),
+              definitions: definitions("unused"),
+            }),
+        },
+        "unused",
+      ),
+    });
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "Synthesize the cited sources.",
+          activeCapabilities: Object.freeze([]),
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).resolves.toMatchObject({ text: "Capability skill is discoverable." });
+  });
+
   test("budgets the expanded explicit skill prompt before model inference", async () => {
     const base = frozenPlan();
     const { canonicalDigest: _digest, ...baseUnsigned } = base;

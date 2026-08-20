@@ -167,6 +167,11 @@ export interface CapabilityRevision {
   readonly capabilityRevisionId: string;
   readonly capabilityId: string;
   readonly predecessorRevisionId?: string;
+  /**
+   * Exact, behavior-bearing materials mounted by the current Capability runtime.
+   * Absent only on revisions written by the legacy prompt/toolset bundle model.
+   */
+  readonly effects?: readonly CapabilityEffect[] | undefined;
   readonly promptModules: readonly FileRevisionRef[];
   readonly skills: readonly FileRevisionRef[];
   readonly tools: readonly FileRevisionRef[];
@@ -179,7 +184,46 @@ export interface CapabilityRevision {
   readonly requestedPermissionDelta: PermissionDelta;
 }
 
-/** Immutable identity for the complete coupled prompt, skill, tool, router, policy, and permission bundle. */
+/** One exact instruction layer injected into the selected turn's system prompt. */
+export interface CapabilityInstructionEffect {
+  readonly kind: "instruction";
+  readonly material: FileRevisionRef;
+}
+
+/** One progressively disclosed skill. Its body is loaded only when the model asks for it. */
+export interface CapabilitySkillEffect {
+  readonly kind: "skill";
+  readonly name: string;
+  readonly description: string;
+  readonly material: FileRevisionRef;
+}
+
+/** One immutable revision of the ordinary project script primitive. */
+export interface CapabilityScriptEffect {
+  readonly kind: "script";
+  readonly name: string;
+  readonly project: ProjectRef;
+  readonly definitionRevision: FileRevisionRef;
+}
+
+/** One immutable revision of the ordinary project workflow primitive. */
+export interface CapabilityWorkflowEffect {
+  readonly kind: "workflow";
+  readonly name: string;
+  readonly project: ProjectRef;
+  readonly definitionRevision: FileRevisionRef;
+}
+
+export type CapabilityEffect =
+  | CapabilityInstructionEffect
+  | CapabilitySkillEffect
+  | CapabilityScriptEffect
+  | CapabilityWorkflowEffect;
+
+export const CAPABILITY_EFFECT_KINDS = ["instruction", "skill", "script", "workflow"] as const;
+export type CapabilityEffectKind = (typeof CAPABILITY_EFFECT_KINDS)[number];
+
+/** Immutable identity for the complete Capability revision, including current effects or its legacy bundle. */
 export interface CapabilityRevisionRef {
   readonly kind: "capability_revision";
   readonly capabilityId: string;
@@ -204,7 +248,8 @@ export type CapabilityKind = (typeof CAPABILITY_KINDS)[number];
 export interface CapabilityDefinition {
   readonly capabilityId: string;
   readonly name: string;
-  readonly kind: CapabilityKind;
+  /** Legacy authoring label. Current presentation derives facets from revision effects. */
+  readonly kind?: CapabilityKind | undefined;
   readonly description: string;
   readonly applicability: string;
   readonly createdAt: string;

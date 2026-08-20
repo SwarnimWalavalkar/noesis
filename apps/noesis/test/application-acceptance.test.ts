@@ -58,8 +58,8 @@ describe("credential-free Pi application acceptance", () => {
         );
       expect(definition).toMatchObject({
         name: "Evidence-grounded research briefs",
-        kind: "instruction",
       });
+      expect(definition.kind).toBeUndefined();
       const firstBinding = await runtime.debug.workspace.capabilities.getBinding(definition.capabilityId);
       expect(firstBinding).toMatchObject({
         scope: { kind: "global" },
@@ -68,6 +68,8 @@ describe("credential-free Pi application acceptance", () => {
       });
       if (!firstBinding) throw new Error("Expected an active Capability binding");
       const firstRevision = firstBinding.revision;
+      const firstLifecycleRevision = await runtime.debug.workspace.capabilities.getRevision(firstRevision);
+      expect(firstLifecycleRevision?.revision.effects).toMatchObject([{ kind: "instruction" }]);
 
       const relatedSession = await runtime.startTrail({ title: "Related return" });
       const related = await runtime.debug.runTurn(

@@ -208,10 +208,38 @@ export const CapabilitySchema = z.strictObject({
   intent: z.string().min(1),
 }) satisfies z.ZodType<Capability>;
 
+const CapabilityProgramNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u);
+
+export const CapabilityEffectSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("instruction"),
+    material: FileRevisionRefSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("skill"),
+    name: CapabilityProgramNameSchema,
+    description: z.string().min(1).max(2_048),
+    material: FileRevisionRefSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("script"),
+    name: CapabilityProgramNameSchema,
+    project: ProjectRefSchema,
+    definitionRevision: FileRevisionRefSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("workflow"),
+    name: CapabilityProgramNameSchema,
+    project: ProjectRefSchema,
+    definitionRevision: FileRevisionRefSchema,
+  }),
+]);
+
 export const CapabilityRevisionSchema = z.strictObject({
   capabilityRevisionId: z.string().min(1),
   capabilityId: z.string().min(1),
   predecessorRevisionId: z.string().min(1).optional(),
+  effects: z.array(CapabilityEffectSchema).min(1).max(32).optional(),
   promptModules: z.array(FileRevisionRefSchema),
   skills: z.array(FileRevisionRefSchema),
   tools: z.array(FileRevisionRefSchema),
@@ -246,7 +274,7 @@ export const CapabilityKindSchema = z.enum([
 export const CapabilityDefinitionSchema = z.strictObject({
   capabilityId: z.string().min(1),
   name: z.string().min(1),
-  kind: CapabilityKindSchema,
+  kind: CapabilityKindSchema.optional(),
   description: z.string().min(1),
   applicability: z.string().min(1),
   createdAt: z.string().datetime(),

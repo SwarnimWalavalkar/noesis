@@ -20,7 +20,7 @@ describe("Capability coordinator", () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-capability-coordinator-"));
     const workspace = await createWorkspaceStore(root);
     opened.push({ root, workspace });
-    const timestamp = "2026-08-19T00:00:00.000Z";
+    const timestamp = new Date().toISOString();
     await workspace.operational.sessions.put({
       sessionId: "session-1",
       title: "Capability reflection",

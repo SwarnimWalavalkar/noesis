@@ -9,7 +9,7 @@ Noesis follows one broad loop, but it does not force every session through every
 3. Produce something useful now, such as an artifact, decision, explanation, sharper question, or experiment.
 4. Reflect quietly after every settled foreground turn. Look for corrections, friction, outcomes, and repeated patterns without interrupting the conversation.
 5. Return `no_change`, or create, revise, pause, restore, or retarget one exact Capability.
-6. Activate ordinary instruction Capability revisions immediately. The agent still creates project tools and workflows directly through `execute`. Pause only the small class of autonomous changes with irreversible consequences for an approve, deny, or change decision.
+6. Activate ordinary Capability revisions immediately. A revision may contribute instructions, progressively loaded skills, or exact saved project scripts and workflows. New project programs are still created directly through `execute`. Pause only the small class of autonomous changes with irreversible consequences for an approve, deny, or change decision.
 7. Select globally eligible Capabilities by semantic relevance on later turns, unless the user has made one always active. Keep every reason and exact revision inspectable.
 
 The current interaction must be useful on its own. Development over time is an added benefit, not a cost charged to every conversation.
@@ -69,12 +69,12 @@ Routine background work does not interrupt the conversation. A request for more 
 
 Improvement may feel effortless, but it should never be hidden.
 
-Each Capability has a history that the user can inspect. It connects:
+Each Capability has a history that the user can inspect. A Capability describes an ability; its exact effects show how that ability is delivered. It connects:
 
 - the observation and exact evidence
 - the intended future use and where the change applies
 - the old behavior and proposed change
-- the prompt, skill, tool, router, or permission revision involved
+- the exact instruction, skill, saved script, or saved workflow revision involved
 - its immediate activation or pending consequence decision
 - the exact version frozen into any turn, derivable from that turn plan
 - later feedback and successor revisions
@@ -82,11 +82,11 @@ Each Capability has a history that the user can inspect. It connects:
 
 The main interaction remains conversational. A user can ask, "Why did you work with me instead of doing it?", "What have you learned about this project?", "Why did you use this ability?", or "Undo that change." Commands and detailed views can offer precise inspection, but they are not the only way to use the system.
 
-`/learning` opens an interactive explorer built with the same terminal primitives as the rest of Noesis. Its default view highlights lasting changes, experiments, protected decisions, feedback, and failures. Activity is grouped by type. Failed reflections stay in a quiet expandable section so they do not crowd lasting changes. Routine `no_change` reflections appear as a bounded recent summary instead of flooding the timeline; durable job history remains authoritative for deeper diagnostics. Wide terminals show activity and decision detail together, while narrow terminals use a focused drill-down. Enter opens the highlighted record, or a related record only once Tab has moved focus there. Tab cycles expandable sections inside the open record — evidence cited, inputs considered, and related records — and wraps to the first of those sections. Escape leaves the record, one level back. Evidence cited and inputs considered show a few readable previews by default; Enter expands a larger bounded set, and the remainder stays in the raw audit view. Each record keeps its exact identity, readable bounded evidence, typed relationships, and a sensitivity-aware raw projection. The interface is a read model; it does not become another authority for learning state.
+`/learning` opens an interactive explorer built with the same terminal primitives as the rest of Noesis. Its default view highlights active and recently revised Capabilities, protected decisions, feedback, and failures. Each Capability is labelled by its concrete Instruction, Skill, Script, and Workflow effects, and the detail pane opens the exact material or saved definition behind those effects. Historical experiments remain available in the audit view, but do not compete with the current Capability lifecycle. Failed reflections stay in a quiet expandable section so they do not crowd lasting changes. Routine `no_change` reflections appear as a bounded recent summary instead of flooding the timeline; durable job history remains authoritative for deeper diagnostics. Wide terminals show activity and decision detail together, while narrow terminals use a focused drill-down. Enter opens the highlighted record, or a related record only once Tab has moved focus there. Tab cycles expandable sections inside the open record — evidence cited, inputs considered, and related records — and wraps to the first of those sections. Escape leaves the record, one level back. Evidence cited and inputs considered show a few readable previews by default; Enter expands a larger bounded set, and the remainder stays in the raw audit view. Each record keeps its exact identity, readable bounded evidence, typed relationships, and a sensitivity-aware raw projection. The interface is a read model; it does not become another authority for learning state.
 
 Challenging a lesson does not erase history. Noesis records the correction and may narrow or retire the current revision. It keeps the evidence behind the earlier behavior. A revert restores the prior complete version instead of rebuilding it from files that may have changed.
 
-Generated reflection may activate an ordinary exact instruction Capability revision immediately. The user can inspect, pause, retarget, revise, or restore it from `/learning`. Project tool and workflow authoring remains available to the model through the direct `execute` path. Recovery or boot control, credential export, and irreversible external actions without foreground intent pause for an explicit approve, deny, or natural-language change decision. Workspace integrity and exact restoration remain protected code.
+Generated reflection may activate an ordinary exact Capability revision immediately. The user can inspect its concrete effects, pause it, retarget it, revise it, or restore it from `/learning`. Project script and workflow authoring remains available to the model through the direct `execute` path. A Capability that uses one of those programs points to the same immutable definition revision rather than creating a parallel program. Recovery or boot control, credential export, and irreversible external actions without foreground intent pause for an explicit approve, deny, or natural-language change decision. Workspace integrity and exact restoration remain protected code.
 
 ## Representative user flows
 

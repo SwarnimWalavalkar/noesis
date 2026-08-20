@@ -51,14 +51,14 @@ export function resolvePiSkillInvocation(
     filePath: skill.filePath,
     content: skill.content,
     contentDigest: skill.contentDigest,
-    revision: skill.admittedRevision ?? null,
+    revision: skill.admittedRevision ?? skill.capabilityRevision ?? null,
     invocation: "explicit",
   });
   const authority = toJsonValue({
     name: skill.name,
     filePath: skill.filePath,
     contentDigest: skill.contentDigest,
-    revision: skill.admittedRevision ?? null,
+    revision: skill.admittedRevision ?? skill.capabilityRevision ?? null,
     invocation: "explicit",
   });
   return Object.freeze({

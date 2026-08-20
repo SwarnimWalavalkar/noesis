@@ -3394,13 +3394,12 @@ describe("apps/noesis production control-plane composition", () => {
             decision: "create",
             proposal: {
               name: "Verified completion claims",
-              kind: "instruction",
               description: "Verify observable state before reporting completion.",
               applicability: "Work that reports a concrete completion state.",
               summary: "Completion claims now require observable verification.",
               rationale: "The settled turn established a reusable verification preference.",
               anticipatedEffect: "Future completion reports are evidence grounded.",
-              instruction: strategy,
+              effects: [{ kind: "instruction", content: strategy }],
               scope: "global",
               activationMode: "relevant",
               consequence: "ordinary",
@@ -3430,7 +3429,11 @@ describe("apps/noesis production control-plane composition", () => {
     await first.controlPlane.idle();
     if (!source.frozenTurnPlan) throw new Error("Expected the source turn to retain its frozen plan");
     const [definition] = await first.debug.workspace.capabilities.listDefinitions();
-    if (!definition) throw new Error("Expected the source reflection to create a Capability");
+    if (!definition)
+      throw new Error(
+        `Expected the source reflection to create a Capability: ${JSON.stringify(await first.debug.workspace.jobs.list({ limit: 10 }))}`,
+      );
+    expect(definition.kind).toBeUndefined();
     createdCapabilityId = definition.capabilityId;
     const active = await first.debug.workspace.capabilities.getBinding(definition.capabilityId);
     expect(active).toMatchObject({

@@ -9,7 +9,7 @@
 - New learned Capabilities default to global eligibility and semantic relevance. The model or user may narrow them to a project or session, or make them always active.
 - Run reflection ambiently after every settled foreground turn, including failed and aborted work. `no_change` is a valid result.
 - Keep every adaptation inspectable, contestable, and revertible. Normal workflows stay conversational instead of becoming approval dialogs.
-- An explicit foreground task may publish a project-local script or workflow and use it immediately through `execute` under the current authority. Do not force this path through reflection or evaluation. Reflection observes the result; ambient learning currently authors instruction Capabilities rather than executable definitions.
+- An explicit foreground task may publish a project-local script or workflow and use it immediately through `execute` under the current authority. Do not force this path through reflection or evaluation. Reflection observes the result; ambient learning may author instruction and skill effects or attach an exact already-saved project script or workflow to a Capability, but it does not create a parallel executable definition.
 - Generated content may author exact Capability materials. Credential export, recovery and audit control, and irreversible external actions without foreground user intent remain behind the small capability gate.
 - Keep durable product doctrine under `docs/`. Keep implementation plans under `plans/`.
 
@@ -40,7 +40,7 @@
 - Reserve grant use and cost durably in authoritative operational state before execution. Rehydrate reservations and completions from SQLite and fail closed when a reservation has no unambiguous outcome.
 - Effectful retries require stable operation identities and idempotency keys bound to principal, effect class, resource, and request identity. Never retry an incomplete effect by assuming it failed.
 - Background jobs receive scheduler-specific grants that cannot widen themselves.
-- Capability revisions bind every exact material they contain plus their evidence. Ambient authoring currently creates instruction Capabilities; the model publishes project tools and workflows through the explicit foreground `execute` path. Existing experiment and preflight records remain readable history; a future evaluation system must execute real candidate behavior before making comparative claims.
+- Capability revisions bind every exact effect and its evidence. Instruction and skill effects own immutable material revisions. Script and workflow effects reference the same immutable project definitions used by their ordinary runners; the model publishes new project programs through the explicit foreground `execute` path. Existing experiment and preflight records remain readable history; a future evaluation system must execute real candidate behavior before making comparative claims.
 
 ## Local workflow
 

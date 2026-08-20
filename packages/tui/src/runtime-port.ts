@@ -180,13 +180,28 @@ export type TuiLearningPrimitiveKind =
   | "job";
 
 export type TuiLearningPrimitiveGroup =
+  | "capabilities"
   | "memory"
   | "reflection"
-  | "changes"
+  | "history"
   | "evaluation"
   | "activation"
   | "feedback"
   | "operations";
+
+export type TuiCapabilityKind =
+  | "instruction"
+  | "skill"
+  | "tool"
+  | "workflow"
+  | "router"
+  | "model_configuration"
+  | "harness_configuration"
+  | "core_update"
+  | "composite";
+
+/** Exact mechanisms produced by the current Capability revision. */
+export type TuiCapabilityFacet = "instruction" | "skill" | "script" | "workflow";
 
 export interface TuiLearningRelation {
   readonly label: string;
@@ -228,6 +243,9 @@ export interface TuiLearningPrimitive {
   readonly capabilityRevisionId?: string;
   readonly capabilityBundleDigest?: string;
   readonly capabilityBindingRevision?: number;
+  readonly capabilityFacets?: readonly TuiCapabilityFacet[];
+  /** Historical authoring label. Current records use capabilityFacets. */
+  readonly capabilityKind?: TuiCapabilityKind;
   readonly capabilityState?: "active" | "paused";
   readonly capabilityActivationMode?: "relevant" | "always";
   readonly capabilityScope?: "global" | "project" | "session";

@@ -4,6 +4,7 @@ import {
   canExpandEvidence,
   canExpandInputs,
   cycleDetailFocus,
+  detailPaneLabel,
   type DetailFocus,
   detailDocument,
   emptyListMessage,
@@ -97,7 +98,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
   let busy = "Loading the learning ledger…";
   let notice: string | undefined;
   let screen: AuditScreen = { kind: "list" };
-  let filter: AuditFilter = "noteworthy";
+  let filter: AuditFilter = "capabilities";
   let currentSessionOnly = false;
   let failedExpanded = false;
   let cursor = 0;
@@ -153,7 +154,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     if (currentSessionOnly && record.sessionId !== snapshot?.sessionId) currentSessionOnly = false;
     if (isQuietFailure(record) && collapseFailures()) failedExpanded = true;
     if (visibleRecords().some((candidate) => candidate.id === record.id)) return;
-    filter = isNoteworthy(record) ? "noteworthy" : "all";
+    filter = record.group;
     if (visibleRecords().some((candidate) => candidate.id === record.id)) return;
     filter = "all";
   };
@@ -510,7 +511,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
   const listHint = (): string => {
     const failed = failedCount() > 0 ? " · x failed" : "";
     return wideLayout
-      ? `↑/↓ · Enter open · Tab decision · a all · f group · s session${failed} · r refresh · Esc`
+      ? `↑/↓ · Enter open · Tab details · a all · f group · s session${failed} · r refresh · Esc`
       : `↑/↓ · Enter open · a all · f group · s session${failed} · r refresh · Esc`;
   };
 
@@ -604,8 +605,13 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
           const rightWidth = Math.max(24, width - leftWidth - 3);
           const empty = emptyListMessage(filter, records.length, scoped.length, routineCount, failedCount());
           const leftPrefix = [
-            paneRule("activity", screen.kind === "list", leftWidth, options.colorEnabled),
-            ...(filter === "noteworthy" && routineCount > 0
+            paneRule(
+              filter === "capabilities" ? "capabilities" : "activity",
+              screen.kind === "list",
+              leftWidth,
+              options.colorEnabled,
+            ),
+            ...((filter === "capabilities" || filter === "noteworthy") && routineCount > 0
               ? [
                   styled(
                     options.colorEnabled,
@@ -633,14 +639,14 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
           let right: readonly string[];
           if (!selected)
             right = [
-              paneRule("decision", false, rightWidth, options.colorEnabled),
+              paneRule("details", false, rightWidth, options.colorEnabled),
               styled(options.colorEnabled, ANSI.dim, empty ?? "Select a record."),
             ];
           else {
             const focused = screen.kind === "detail";
             const document = wrapDocument(
               [
-                paneRule("decision", focused, rightWidth, options.colorEnabled),
+                paneRule(detailPaneLabel(selected), focused, rightWidth, options.colorEnabled),
                 ...(focused && screen.kind === "detail"
                   ? detailDocument(
                       selected,
@@ -673,7 +679,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
           const empty = emptyListMessage(filter, records.length, scoped.length, routineCount, failedCount());
           body = [
             ...overview,
-            ...(filter === "noteworthy" && routineCount > 0
+            ...((filter === "capabilities" || filter === "noteworthy") && routineCount > 0
               ? [
                   styled(
                     options.colorEnabled,
@@ -687,7 +693,12 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
               records,
               cursor,
               width,
-              Math.max(1, bodyRows - overview.length - (routineCount > 0 && filter === "noteworthy" ? 2 : 0)),
+              Math.max(
+                1,
+                bodyRows -
+                  overview.length -
+                  (routineCount > 0 && (filter === "capabilities" || filter === "noteworthy") ? 2 : 0),
+              ),
               options.colorEnabled,
               clock,
               empty,
@@ -722,7 +733,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
       }
       const subtitle =
         screen.kind === "list"
-          ? "project evolution"
+          ? "capabilities"
           : screen.kind === "change"
             ? "change capability"
             : safeScalar(detailRecord()?.kind ?? "record").replaceAll("_", " ");

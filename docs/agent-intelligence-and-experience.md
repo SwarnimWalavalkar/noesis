@@ -15,7 +15,7 @@ Never claim an action or system state without runtime evidence.
 
 Active capabilities and skills may add relevant instructions. The stable core stays short.
 
-Active Capability revisions contribute exact immutable material frozen at turn start. The ambient author currently produces instruction Capabilities. The model can still create and revise project tools and workflows immediately through the explicit foreground `execute` path. Global `relevant` Capabilities enter only when the capable semantic router selects them; `always` Capabilities enter every eligible turn.
+Active Capability revisions contribute exact immutable effects frozen at turn start. An effect may add an instruction, expose a progressively loaded skill, or attach an exact saved project script or workflow. Scripts and workflows are not copied into a second learning format: the Capability pins the same immutable manifest revision used by their ordinary runners. The model still creates and revises project programs through the explicit foreground `execute` path; ambient reflection may later make an existing saved program part of a broader Capability. Global `relevant` Capabilities enter only when the central capable semantic router selects them; `always` Capabilities enter every eligible turn.
 
 Noesis preserves instruction levels:
 
@@ -46,7 +46,7 @@ An ordinary exact revision becomes active after SQLite validates its evidence an
 
 Code may record facts such as a failed tool, cancellation, latency, or direct tool call. It must not treat words such as "always," "never," or "actually" as proof of meaning.
 
-A Capability states when it should help, why the evidence supports it, what behavior changes, and its anticipated effect. New Capabilities are globally eligible and relevant by default. This does not inject them everywhere; semantic routing decides when they apply. The user may narrow scope or make one always active.
+A Capability states when an ability should help, why the evidence supports it, what behavior changes, and its anticipated effect. Its revision contains one or more exact effects rather than a mechanism label. New Capabilities are globally eligible and relevant by default. This does not inject them everywhere; semantic routing decides when they apply. The user may narrow scope or make one always active.
 
 The `remember` tool records a direct lasting instruction from the user. Ambient reflection can consolidate experience into versioned Capabilities. Existing experiment and preflight records remain readable historical evidence, but no new speculative evaluation pipeline blocks ordinary learning. A future evaluation system is a separate design.
 
@@ -102,6 +102,8 @@ On the next turn, each saved workflow also receives a typed, project-specific ca
 The editable definition remains an ordinary file. Each execution records the exact immutable revision it used. The user can inspect, edit, or replace the definition while Noesis keeps the earlier revisions.
 
 Reflection observes workflow results and user feedback. It may consolidate them into a Capability. Exact turn plans, AuthorityBoundary, EffectGateway, and the Broker still prevent generated content from fabricating execution receipts or silently bypassing operational controls.
+
+When a Capability includes a script or workflow effect, it references the exact immutable saved definition revision. The Capability owns applicability, activation, feedback, and restoration; the project program continues to own its editable definition, immutable revision history, execution records, workflow phases, and resume behavior. Selecting the Capability adds a frozen adapter for that exact program to the same Tool Catalog and Broker used by `execute`. There is no parallel workflow implementation.
 
 ## Current standard
 

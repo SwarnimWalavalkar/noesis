@@ -4,7 +4,7 @@ import {
   DefaultResourceLoader,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { type EvidenceRevisionRef, sha256 } from "@noesis/domain";
+import { type EvidenceRevisionRef, type FileRevisionRef, sha256 } from "@noesis/domain";
 
 export interface PiSkillResource {
   readonly name: string;
@@ -13,6 +13,8 @@ export interface PiSkillResource {
   readonly filePath: string;
   readonly contentDigest: string;
   readonly admittedRevision?: EvidenceRevisionRef<"input">;
+  /** Exact immutable Capability material; already pinned by the FrozenTurnPlan. */
+  readonly capabilityRevision?: FileRevisionRef;
   readonly disableModelInvocation: boolean;
 }
 

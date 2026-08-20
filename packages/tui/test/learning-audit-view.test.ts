@@ -65,7 +65,7 @@ describe("learning audit view helpers", () => {
         record({
           id: "working_adjustment:active",
           kind: "working_adjustment",
-          group: "changes",
+          group: "history",
           title: "Keep review constraints",
           tone: "active",
         }),
@@ -76,7 +76,7 @@ describe("learning audit view helpers", () => {
         record({
           id: "working_adjustment:old",
           kind: "working_adjustment",
-          group: "changes",
+          group: "history",
           title: "Old strategy",
         }),
       ),
@@ -116,11 +116,11 @@ describe("learning audit view helpers", () => {
 
   test("separates all-activity toggle from group cycling", () => {
     expect(toggleAllActivity("noteworthy")).toBe("all");
-    expect(toggleAllActivity("all")).toBe("noteworthy");
-    expect(toggleAllActivity("memory")).toBe("noteworthy");
-    expect(nextGroupFilter("noteworthy")).toBe("memory");
-    expect(nextGroupFilter("memory")).toBe("reflection");
-    expect(nextGroupFilter("operations")).toBe("memory");
+    expect(toggleAllActivity("all")).toBe("capabilities");
+    expect(toggleAllActivity("memory")).toBe("all");
+    expect(nextGroupFilter("noteworthy")).toBe("capabilities");
+    expect(nextGroupFilter("capabilities")).toBe("feedback");
+    expect(nextGroupFilter("operations")).toBe("capabilities");
   });
 
   test("tucks failed reflections behind a quiet expandable section", () => {
@@ -143,7 +143,7 @@ describe("learning audit view helpers", () => {
     const experiment = record({
       id: "experiment:1",
       kind: "experiment",
-      group: "changes",
+      group: "history",
       title: "Prefer narrow research",
       occurredAt: "2026-08-14T00:00:01.000Z",
     });
@@ -171,8 +171,8 @@ describe("learning audit view helpers", () => {
   });
 
   test("uses singular grammar for a single cited input", () => {
-    expect(citedCountSentence(25, 1)).toBe("25 inputs were reviewed; 1 was cited for the decision.");
-    expect(citedCountSentence(1, 1)).toBe("1 input was reviewed; 1 was cited for the decision.");
+    expect(citedCountSentence(25, 1)).toBe("25 inputs were reviewed; 1 was cited.");
+    expect(citedCountSentence(1, 1)).toBe("1 input was reviewed; 1 was cited.");
   });
 
   test("teaches status glyphs and marks the active filter", () => {
@@ -180,11 +180,12 @@ describe("learning audit view helpers", () => {
       headlineStats(
         [
           record({
-            id: "working_adjustment:1",
-            kind: "working_adjustment",
-            group: "changes",
+            id: "capability:1",
+            kind: "capability",
+            group: "capabilities",
             title: "Keep review constraints",
             tone: "active",
+            capabilityState: "active",
           }),
           record({
             id: "reflection:quiet",
@@ -204,9 +205,33 @@ describe("learning audit view helpers", () => {
         false,
       ),
     ).toBe("◆ 1 active   — 1 routine");
-    expect(filterChips("noteworthy", false)).toContain("[noteworthy]");
-    expect(filterChips("noteworthy", false)).toContain("all");
+    expect(filterChips("capabilities", false)).toContain("[capabilities]");
+    expect(filterChips("capabilities", false)).toContain("all");
     expect(filterChips("all", false)).toContain("[all]");
+  });
+
+  test("describes capabilities by their concrete effects instead of a mechanism kind", () => {
+    const capability = record({
+      id: "capability:mixed",
+      kind: "capability",
+      group: "capabilities",
+      title: "Research and synthesize",
+      capabilityFacets: Object.freeze(["skill", "workflow"]),
+    });
+    const document = detailDocument(
+      capability,
+      false,
+      0,
+      80,
+      false,
+      new Date("2026-08-14T12:00:00.000Z"),
+      "document",
+      false,
+      false,
+    ).join("\n");
+
+    expect(document).toContain("Skill + Workflow capability");
+    expect(document).not.toContain("composite");
   });
 
   test("keeps the selected grouped record visible in one- and two-row viewports", () => {
@@ -220,7 +245,7 @@ describe("learning audit view helpers", () => {
       record({
         id: "experiment:1",
         kind: "experiment",
-        group: "changes",
+        group: "history",
         title: "Selected experiment",
         summary: "Selected experiment detail",
       }),
@@ -234,11 +259,11 @@ describe("learning audit view helpers", () => {
 
     const oneRow = listViewport(records, 1, 80, 1, false, now, undefined, options);
     expect(oneRow).toHaveLength(1);
-    expect(oneRow[0]).toContain("› ◆ Selected experiment");
+    expect(oneRow[0]).toContain("› ◌ Selected experiment");
 
     const twoRows = listViewport(records, 1, 80, 2, false, now, undefined, options);
     expect(twoRows).toHaveLength(2);
-    expect(twoRows[0]).toContain("› ◆ Selected experiment");
+    expect(twoRows[0]).toContain("› ◌ Selected experiment");
     expect(twoRows[1]).toContain("Selected experiment detail");
   });
 
@@ -249,7 +274,7 @@ describe("learning audit view helpers", () => {
         record({
           id: "experiment:1",
           kind: "experiment",
-          group: "changes",
+          group: "history",
           title: "Prefer narrow research",
           rawJson: '{"hypothesis":"Use narrower research first"}',
         }),

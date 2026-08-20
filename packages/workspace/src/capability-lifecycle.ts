@@ -10,8 +10,9 @@ import {
   type CapabilityLifecycleRevision,
   CapabilityLifecycleRevisionSchema,
   CapabilityRevisionSchema,
-  capabilityRevisionRef,
+  type CapabilityScope,
   canonicalJson,
+  capabilityRevisionRef,
   type EvidenceRef,
   sameCapabilityRevisionRef,
   WorkingAdjustmentSchema,
@@ -74,6 +75,7 @@ function normalizeLifecycleRevision(value: unknown): CapabilityLifecycleRevision
     ...(bundle.predecessorRevisionId === undefined
       ? {}
       : { predecessorRevisionId: bundle.predecessorRevisionId }),
+    ...(bundle.effects === undefined ? {} : { effects: Object.freeze(bundle.effects) }),
     promptModules: Object.freeze(bundle.promptModules),
     skills: Object.freeze(bundle.skills),
     tools: Object.freeze(bundle.tools),
@@ -110,6 +112,20 @@ function normalizeGate(value: unknown): CapabilityGateRequest {
     createdAt: parsed.createdAt,
     ...(parsed.settledAt === undefined ? {} : { settledAt: parsed.settledAt }),
   });
+}
+
+function assertRevisionSupportsScope(revision: CapabilityLifecycleRevision, scope: CapabilityScope): void {
+  for (const effect of revision.revision.effects ?? []) {
+    if (effect.kind !== "script" && effect.kind !== "workflow") continue;
+    if (
+      scope.kind !== "project" ||
+      scope.project.projectId !== effect.project.projectId ||
+      scope.project.root !== effect.project.root
+    )
+      throw new Error(
+        `Capability ${effect.kind} ${effect.name} must remain bound to project ${effect.project.projectId}`,
+      );
+  }
 }
 
 export function createCapabilityLifecycleStore(
@@ -168,6 +184,11 @@ export function createCapabilityLifecycleStore(
     if (!sameCapabilityRevisionRef(expected, parsed.reference))
       throw new Error("Capability revision reference does not match its exact bundle");
     for (const reference of [
+      ...(parsed.revision.effects ?? []).map((effect) =>
+        effect.kind === "instruction" || effect.kind === "skill"
+          ? effect.material
+          : effect.definitionRevision,
+      ),
       ...parsed.revision.promptModules,
       ...parsed.revision.skills,
       ...parsed.revision.tools,
@@ -272,8 +293,9 @@ export function createCapabilityLifecycleStore(
         throw new Error(`Immutable capability gate ${gate.gateRequestId} differs`);
       return existing;
     }
-    if (!storedRevisionExists(db, gate.revision))
-      throw new Error(`Unknown capability revision ${gate.revision.capabilityRevisionId}`);
+    const revision = readStoredRevision(db, gate.revision);
+    if (!revision) throw new Error(`Unknown capability revision ${gate.revision.capabilityRevisionId}`);
+    assertRevisionSupportsScope(revision, gate.proposedScope);
     db.prepare(
       `INSERT INTO capability_gate_requests(
         gate_request_id, capability_id, revision_json, request_json, status, created_at, settled_at
@@ -339,8 +361,9 @@ export function createCapabilityLifecycleStore(
       revisionNumber: current.revisionNumber + 1,
       updatedAt: options.now(),
     });
-    if (!storedRevisionExists(db, next.revision))
-      throw new Error(`Unknown capability revision ${next.revision.capabilityRevisionId}`);
+    const storedRevision = readStoredRevision(db, next.revision);
+    if (!storedRevision) throw new Error(`Unknown capability revision ${next.revision.capabilityRevisionId}`);
+    assertRevisionSupportsScope(storedRevision, next.scope);
     const result = db
       .prepare(
         `UPDATE capability_bindings SET
@@ -377,6 +400,7 @@ export function createCapabilityLifecycleStore(
       revisionNumber: 1,
       updatedAt,
     });
+    assertRevisionSupportsScope(revision, binding.scope);
     const gate = request.gate ? normalizeGate(request.gate) : undefined;
     if (
       gate &&
@@ -856,15 +880,22 @@ export function createCapabilityLifecycleStore(
   });
 }
 
-function storedRevisionExists(
+function readStoredRevision(
   db: WorkspaceDatabase["connection"],
   reference: import("@noesis/domain").CapabilityRevisionRef,
-): boolean {
+): CapabilityLifecycleRevision | undefined {
   const row = db
     .prepare(
       "SELECT revision_json FROM capability_revisions WHERE capability_revision_id = ? AND capability_id = ?",
     )
     .get(reference.capabilityRevisionId, reference.capabilityId);
   const revision = decodeRevision(row);
-  return revision !== undefined && sameCapabilityRevisionRef(revision.reference, reference);
+  return revision && sameCapabilityRevisionRef(revision.reference, reference) ? revision : undefined;
+}
+
+function storedRevisionExists(
+  db: WorkspaceDatabase["connection"],
+  reference: import("@noesis/domain").CapabilityRevisionRef,
+): boolean {
+  return readStoredRevision(db, reference) !== undefined;
 }

@@ -14,19 +14,18 @@ The aim is for you and Noesis to develop together. Noesis adapts as your goals a
 
 Noesis treats your ongoing collaboration with it as the core product loop. It can act now, learn from the work, and change how it helps.
 
-It can search previous sessions when their context may help. It can preserve an effective project strategy across sessions. It can turn useful code into a project script or workflow. When evidence supports a broader change, it can evaluate that change against the current behavior before activation.
+It can search previous sessions when their context may help. It can turn useful code into a project script or workflow. After every settled turn, quiet reflection may create or revise an inspectable Capability that changes how Noesis helps.
 
 Noesis is built for people who move between open questions and direct execution. It can think with you when the problem is unclear. When the outcome is clear, it can do the work. You can change this balance through ordinary conversation.
 
-## Three paths for improvement
+## Two paths for improvement
 
-Noesis uses three paths to improve:
+Noesis uses two direct paths to improve:
 
 1. It can save a project script or workflow and use it at once with its current permissions.
-2. It can apply a temporary strategy to the current project. Further use shows whether to keep, replace, or remove it.
-3. It can test a broader change as an experiment before protected code activates it.
+2. It can create or revise a Capability with exact instruction, skill, saved-script, or saved-workflow effects. Ordinary revisions become active immediately and remain visible, reversible, and open to feedback.
 
-All three paths use the same records, tools, and permissions. They do not create hidden execution systems.
+A Capability that uses a script or workflow references the same immutable saved definition used by the ordinary runner. It does not create a second program or execution system.
 
 ## What is available today
 
@@ -40,18 +39,19 @@ Noesis currently includes:
 - `execute` for combining tools with JavaScript
 - local and remote MCP servers with OAuth, project overrides, and TUI management
 - project scripts and durable workflows with immutable execution revisions
-- ambient reflection and temporary project strategies
-- experiments, evaluation, activation, feedback, and rollback for broader learned changes
-- an interactive `/learning` audit ledger for inspecting every self-improvement primitive and its evidence
+- ambient reflection after every settled foreground turn
+- versioned Capabilities with exact instruction, skill, saved-script, and saved-workflow effects
+- immediate activation, feedback, pause, scope changes, and exact restoration
+- an interactive `/learning` explorer for inspecting each Capability, its concrete effects, evidence, and history
 - SQLite storage for operational state, with ordinary files for editable definitions and artifacts.
 
 Noesis is an early research preview. Its interfaces and internal design will change as we use it.
 
 ## Trust and control
 
-Generated code can use the permissions already granted to the current turn. It can create project scripts and workflows. It cannot grant itself more access or change the protected control plane.
+Generated code can use the permissions already granted to the current turn. It can create project scripts and workflows, and reflection may attach an exact saved program to a Capability. Credential export, recovery and audit control, and irreversible external actions without foreground user intent remain protected.
 
-Protected code controls permissions, durable state, evaluation, activation, and rollback. Each turn and execution records the exact revision it used. Later inspection does not depend on files that may have changed.
+Protected code controls durable state, effect settlement, recovery, and exact restoration. Each turn and execution records the exact revision it used. Later inspection does not depend on files that may have changed. The ordinary learning loop does not wait for speculative evaluation; a future evaluation system can be added when it executes real candidate behavior.
 
 Changes remain attributable and reversible. The user can inspect what changed, why it changed, where it applies, and which evidence supported it.
 

@@ -11,6 +11,11 @@ import {
   MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
   validateFrozenTurnPlan,
 } from "@noesis/agent-types";
+import {
+  assertCapabilityEffectsEligible,
+  capabilityEffects,
+  validateCapabilityEffects,
+} from "@noesis/capabilities";
 import type {
   Capability,
   CapabilityRevision,
@@ -301,6 +306,9 @@ export function createTurnIntelligencePlanner(
     const lifecycleModes = new Map(
       lifecycleBindings.map((binding) => [binding.capabilityId, binding.activationMode]),
     );
+    const lifecycleScopes = new Map(
+      lifecycleBindings.map((binding) => [binding.capabilityId, binding.scope]),
+    );
     const referencesByCapabilityId = new Map<string, CapabilityRevisionRef>();
     for (const reference of legacyWithoutLifecycleBinding)
       referencesByCapabilityId.set(reference.capabilityId, reference);
@@ -413,12 +421,34 @@ export function createTurnIntelligencePlanner(
     ];
     const selections: FrozenCapabilitySelection[] = [];
     for (const { reference, capability, revision, baseline, selectionReason } of selectedResolved) {
+      const currentEffects = capabilityEffects(revision);
+      if (currentEffects.length > 0) {
+        validateCapabilityEffects(currentEffects);
+        const scope = lifecycleScopes.get(reference.capabilityId);
+        if (!scope)
+          throw new Error(`Effects-first capability ${reference.capabilityId} has no lifecycle binding`);
+        assertCapabilityEffectsEligible({ effects: currentEffects, scope, project: options.project });
+      }
       const [promptModules, skills, tools, router] = await Promise.all([
         Promise.all(revision.promptModules.map(async (item) => await materialize(options.workspace, item))),
         Promise.all(revision.skills.map(async (item) => await materialize(options.workspace, item))),
         Promise.all(revision.tools.map(async (item) => await materialize(options.workspace, item))),
         materialize(options.workspace, revision.toolset.routerRevision),
       ]);
+      const effects = await Promise.all(
+        currentEffects.map(async (effect) =>
+          effect.kind === "instruction" || effect.kind === "skill"
+            ? Object.freeze({
+                ...effect,
+                material: await materialize(options.workspace, effect.material),
+              })
+            : Object.freeze({
+                ...effect,
+                project: Object.freeze({ ...effect.project }),
+                definition: await materialize(options.workspace, effect.definitionRevision),
+              }),
+        ),
+      );
       selections.push(
         Object.freeze({
           capabilityId: capability.capabilityId,
@@ -427,6 +457,7 @@ export function createTurnIntelligencePlanner(
           selectionReason,
           revision: reference,
           baseline,
+          ...(effects.length === 0 ? {} : { effects: Object.freeze(effects) }),
           promptModules: Object.freeze(promptModules),
           skills: Object.freeze(skills),
           tools: Object.freeze(tools),
@@ -436,8 +467,14 @@ export function createTurnIntelligencePlanner(
       );
     }
     const promptLayers = selections.flatMap((selection) => [
-      ...selection.promptModules.map((material) => material.content.trim()),
-      ...selection.skills.map((material) => material.content.trim()),
+      ...(selection.effects
+        ? selection.effects.flatMap((effect) =>
+            effect.kind === "instruction" ? [effect.material.content.trim()] : [],
+          )
+        : [
+            ...selection.promptModules.map((material) => material.content.trim()),
+            ...selection.skills.map((material) => material.content.trim()),
+          ]),
     ]);
     const unsigned = Object.freeze({
       schemaVersion: 1 as const,

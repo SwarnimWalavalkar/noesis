@@ -64,6 +64,86 @@ function lifecycleRevision(
 }
 
 describe("Capability lifecycle store", () => {
+  test("keeps saved program effects bound to their authoritative project", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-capability-program-scope-"));
+    const workspace = await createWorkspaceStore(root);
+    opened.push({ root, workspace });
+    const actor = Object.freeze({ actorId: "capability-test", kind: "system" as const });
+    const project = Object.freeze({ projectId: "project-a", root: "/a" });
+    const materials: readonly (readonly [string, string])[] = Object.freeze([
+      ["capabilities/program/instructions.md", "instructions"],
+      ["capabilities/program/router.json", '{"strategy":"central"}'],
+      ["workflows/evidence-synthesis/workflow.json", '{"name":"evidence-synthesis"}'],
+    ]);
+    const [prompt, router, workflow] = await Promise.all(
+      materials.map(
+        async ([workingPath, content]) =>
+          await workspace.definitions.recordWorkingDefinition({
+            workingPath,
+            bytes: new TextEncoder().encode(content),
+            actor,
+            reason: "Capability program scope fixture",
+            provenanceRefs: Object.freeze([]),
+          }),
+      ),
+    );
+    if (!prompt || !router || !workflow) throw new Error("Capability fixture revisions are missing");
+    const base = lifecycleRevision("revision-program", prompt, router);
+    const revision: CapabilityRevision = Object.freeze({
+      ...base.revision,
+      effects: Object.freeze([
+        Object.freeze({
+          kind: "workflow" as const,
+          name: "evidence-synthesis",
+          project,
+          definitionRevision: workflow,
+        }),
+      ]),
+    });
+    const lifecycle = Object.freeze({ ...base, revision, reference: capabilityRevisionRef(revision) });
+    const definition = Object.freeze({
+      capabilityId: revision.capabilityId,
+      name: "Evidence synthesis",
+      description: "Run the saved evidence synthesis workflow.",
+      applicability: "Evidence synthesis requests.",
+      createdAt: base.createdAt,
+    });
+
+    await expect(
+      workspace.capabilities.create({
+        definition,
+        revision: lifecycle,
+        binding: Object.freeze({
+          capabilityId: revision.capabilityId,
+          revision: lifecycle.reference,
+          scope: Object.freeze({ kind: "global" as const }),
+          activationMode: "relevant",
+          state: "active",
+        }),
+      }),
+    ).rejects.toThrow("must remain bound to project project-a");
+
+    const binding = await workspace.capabilities.create({
+      definition,
+      revision: lifecycle,
+      binding: Object.freeze({
+        capabilityId: revision.capabilityId,
+        revision: lifecycle.reference,
+        scope: Object.freeze({ kind: "project" as const, project }),
+        activationMode: "relevant",
+        state: "active",
+      }),
+    });
+    await expect(
+      workspace.capabilities.updateBinding({
+        capabilityId: binding.capabilityId,
+        expectedRevisionNumber: binding.revisionNumber,
+        scope: Object.freeze({ kind: "global" as const }),
+      }),
+    ).rejects.toThrow("must remain bound to project project-a");
+    expect(await workspace.capabilities.getBinding(binding.capabilityId)).toEqual(binding);
+  });
+
   test("owns immutable revisions, scoped activation, feedback, gates, and CAS updates", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-capability-lifecycle-"));
     const workspace = await createWorkspaceStore(root);

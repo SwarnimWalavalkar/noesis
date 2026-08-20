@@ -1,6 +1,11 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  type CapabilityLifecycleRevision,
+  type CapabilityRevision,
+  capabilityRevisionRef,
+} from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { describe, expect, test } from "vitest";
 import { loadLearningAuditSnapshot } from "../src/learning-audit-read-model.ts";
@@ -324,6 +329,240 @@ describe("learning audit read model", () => {
         redacted: false,
       }),
     ]);
+    workspace.close();
+  });
+
+  test("presents the active Capability as an exact, evidence-backed product change", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-learning-capability-"));
+    const workspace = await createWorkspaceStore(home);
+    const project = Object.freeze({ projectId: "project-capability", root: "/workspace/capability" });
+    await workspace.operational.sessions.put({
+      sessionId: "session-capability",
+      title: "Capability authoring",
+      status: "idle",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-08-18T00:00:00.000Z",
+      updatedAt: "2026-08-18T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    await workspace.operational.messages.put({
+      messageId: "message-capability",
+      sessionId: "session-capability",
+      role: "user",
+      content: "Use the existing adaptation path instead of editing protected files.",
+      sensitivity: "normal",
+      createdAt: "2026-08-18T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const evidence = Object.freeze({
+      kind: "database_row" as const,
+      table: "messages" as const,
+      rowId: "message-capability",
+    });
+    await workspace.jobs.enqueue({
+      jobId: "reflection-capability",
+      kind: "runtime.reflect_turn",
+      payload: Object.freeze({
+        turn: Object.freeze({
+          project,
+          sessionId: "session-capability",
+          turnId: "turn-capability",
+          sensitivity: "normal",
+        }),
+      }),
+      payloadRefs: Object.freeze([evidence]),
+      operationId: "operation-capability-reflection",
+      idempotencyKey: "operation-capability-reflection",
+      notBefore: "2026-08-18T00:00:01.000Z",
+      maxAttempts: 1,
+      estimatedCost: 0,
+      budget: 1,
+    });
+    const claimed = await workspace.jobs.claim({
+      workerId: "worker-capability",
+      now: "2026-08-18T00:00:02.000Z",
+      leaseUntil: "2026-08-18T00:01:00.000Z",
+      maximumCost: 1,
+      kinds: Object.freeze(["runtime.reflect_turn"]),
+    });
+    if (!claimed?.leaseToken) throw new Error("Expected the Capability reflection job to be claimed");
+    await workspace.jobs.complete({
+      jobId: claimed.jobId,
+      leaseToken: claimed.leaseToken,
+      now: "2026-08-18T00:00:03.000Z",
+      result: Object.freeze({
+        status: "activated",
+        capabilityId: "capability-adaptation-path",
+        rationale: "The correction is likely to recur.",
+      }),
+    });
+    const actor = Object.freeze({ actorId: "learning-audit-test", kind: "system" as const });
+    const [prompt, router] = await Promise.all([
+      workspace.definitions.recordWorkingDefinition({
+        workingPath: "capabilities/adaptation-path/instructions.md",
+        bytes: new TextEncoder().encode(
+          "Use the existing adaptation path for self-extension requests instead of editing protected files.",
+        ),
+        actor,
+        reason: "Capability audit fixture",
+        provenanceRefs: Object.freeze([evidence]),
+      }),
+      workspace.definitions.recordWorkingDefinition({
+        workingPath: "capabilities/adaptation-path/router.json",
+        bytes: new TextEncoder().encode('{"appliesWhen":"self-extension requests"}'),
+        actor,
+        reason: "Capability audit fixture",
+        provenanceRefs: Object.freeze([evidence]),
+      }),
+    ]);
+    const exactRevision: CapabilityRevision = Object.freeze({
+      capabilityRevisionId: "capability-adaptation-path-r1",
+      capabilityId: "capability-adaptation-path",
+      effects: Object.freeze([Object.freeze({ kind: "instruction" as const, material: prompt })]),
+      promptModules: Object.freeze([prompt]),
+      skills: Object.freeze([]),
+      tools: Object.freeze([]),
+      toolset: Object.freeze({
+        toolRevisionIds: Object.freeze([]),
+        routerRevision: router,
+        strategyId: "semantic-capability-router-v1",
+      }),
+      activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
+      permissionManifest: Object.freeze({
+        effects: Object.freeze([]),
+        resourcePatterns: Object.freeze([]),
+        credentialRefs: Object.freeze([]),
+      }),
+      evidenceRefs: Object.freeze([evidence]),
+      sourceEvaluationDefinitions: Object.freeze([]),
+      requestedPermissionDelta: Object.freeze({
+        addedEffects: Object.freeze([]),
+        widenedResources: Object.freeze([]),
+        addedCredentialRefs: Object.freeze([]),
+      }),
+    });
+    const lifecycleRevision: CapabilityLifecycleRevision = Object.freeze({
+      revision: exactRevision,
+      reference: capabilityRevisionRef(exactRevision),
+      summary: "Use the established adaptation path",
+      rationale: "The correction is likely to recur across future self-extension requests.",
+      anticipatedEffect: "Noesis proposes inspectable Capabilities instead of bypassing its control plane.",
+      createdAt: "2026-08-18T00:00:03.000Z",
+    });
+    await workspace.capabilities.create({
+      definition: Object.freeze({
+        capabilityId: exactRevision.capabilityId,
+        name: "Use the established adaptation path",
+        description: "Keep self-extension work inside the inspectable adaptation flow.",
+        applicability: "Requests to extend or modify Noesis itself.",
+        createdAt: lifecycleRevision.createdAt,
+      }),
+      revision: lifecycleRevision,
+      binding: Object.freeze({
+        capabilityId: exactRevision.capabilityId,
+        revision: lifecycleRevision.reference,
+        scope: Object.freeze({ kind: "global" as const }),
+        activationMode: "relevant" as const,
+        state: "active" as const,
+      }),
+    });
+
+    const snapshot = await loadLearningAuditSnapshot(
+      {
+        workspace,
+        criteria: { list: async () => ({ ok: true, value: Object.freeze([]) }) },
+        activations: {
+          current: async () => undefined,
+          listOperations: async () => Object.freeze([]),
+          getApproval: async () => undefined,
+        },
+        feedback: {
+          listObservations: async () => Object.freeze([]),
+          listResearchRuns: async () => Object.freeze([]),
+          getOutcome: async () => undefined,
+          getSuccessorInput: async () => undefined,
+        },
+        continuousFeedback: {
+          experimentComparison: async () => {
+            throw new Error("No preflight comparison should be loaded in this fixture");
+          },
+        },
+        resolveRevision: async () => undefined,
+        resolveCapability: () => undefined,
+        project,
+      },
+      "session-capability",
+    );
+    const capability = snapshot.primitives.find(
+      (primitive) => primitive.id === "capability:capability-adaptation-path",
+    );
+    expect(capability).toMatchObject({
+      kind: "capability",
+      group: "capabilities",
+      capabilityFacets: ["instruction"],
+      sessionId: "session-capability",
+      capabilityScope: "global",
+      capabilityActivationMode: "relevant",
+      capabilityState: "active",
+      consideredEvidenceCount: 1,
+      evidence: ["messages:message-capability"],
+    });
+    expect(capability?.evidencePreviews).toEqual([
+      expect.objectContaining({
+        label: "USER",
+        excerpt: "Use the existing adaptation path instead of editing protected files.",
+      }),
+    ]);
+    expect(capability?.detailSections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          title: "WHAT CHANGED",
+          entries: expect.arrayContaining([
+            expect.objectContaining({ label: "effects", value: "instruction" }),
+            expect.objectContaining({
+              label: "instruction",
+              value: expect.stringContaining("Use the existing adaptation path for self-extension requests"),
+            }),
+          ]),
+        }),
+        expect.objectContaining({
+          title: "BEHAVIOR",
+          entries: expect.arrayContaining([
+            expect.objectContaining({ label: "scope", value: "Global" }),
+            expect.objectContaining({
+              label: "selection",
+              value: "Selected when semantically relevant",
+            }),
+          ]),
+        }),
+        expect.objectContaining({
+          title: "WHY",
+          entries: expect.arrayContaining([
+            expect.objectContaining({
+              label: "expected effect",
+              value: "Noesis proposes inspectable Capabilities instead of bypassing its control plane.",
+            }),
+          ]),
+        }),
+      ]),
+    );
+    expect(capability?.relations).toEqual([
+      expect.objectContaining({
+        label: "authored by reflection",
+        targetId: "reflection:reflection-capability",
+      }),
+    ]);
+    expect(capability?.rawJson).toContain('"currentRevision"');
+    const revision = snapshot.primitives.find(
+      (primitive) => primitive.id === "capability_revision:capability-adaptation-path-r1",
+    );
+    expect(revision).toMatchObject({
+      group: "history",
+      capabilityFacets: ["instruction"],
+      evidence: ["messages:message-capability"],
+    });
     workspace.close();
   });
 

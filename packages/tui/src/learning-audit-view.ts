@@ -16,12 +16,13 @@ export const PAGE_STEP = 8;
 export const WIDE_LAYOUT_MIN = 110;
 export const COLLAPSED_PREVIEW = 2;
 export const GROUP_FILTERS: readonly TuiLearningPrimitiveGroup[] = Object.freeze([
-  "memory",
-  "reflection",
-  "changes",
-  "evaluation",
-  "activation",
+  "capabilities",
   "feedback",
+  "activation",
+  "reflection",
+  "history",
+  "evaluation",
+  "memory",
   "operations",
 ]);
 
@@ -34,7 +35,11 @@ const SUPPORTING_KINDS: ReadonlySet<TuiLearningPrimitiveKind> = new Set([
   "outcome_research",
 ]);
 
-const CHIP_ORDER: readonly AuditFilter[] = Object.freeze(["noteworthy", "all", ...GROUP_FILTERS]);
+const CHIP_ORDER: readonly AuditFilter[] = Object.freeze([
+  "capabilities",
+  "all",
+  ...GROUP_FILTERS.filter((group) => group !== "capabilities"),
+]);
 
 const TONE_PRESENTATION = Object.freeze({
   neutral: Object.freeze({ glyph: "—", color: ANSI.dim }),
@@ -52,9 +57,10 @@ export function pad(line: string, width: number): string {
 }
 
 const GROUP_GLYPH: Readonly<Record<TuiLearningPrimitiveGroup, string>> = Object.freeze({
+  capabilities: "◆",
   memory: "○",
   reflection: "◇",
-  changes: "◆",
+  history: "◌",
   evaluation: "□",
   activation: "▹",
   feedback: "↻",
@@ -118,11 +124,13 @@ export function nextGroupFilter(current: AuditFilter): TuiLearningPrimitiveGroup
 }
 
 export function toggleAllActivity(current: AuditFilter): AuditFilter {
-  return current === "all" ? "noteworthy" : current === "noteworthy" ? "all" : "noteworthy";
+  return current === "all" ? "capabilities" : "all";
 }
 
 export function headlineStats(records: readonly TuiLearningPrimitive[], colorEnabled: boolean): string {
-  const active = records.filter((record) => record.tone === "active").length;
+  const active = records.filter(
+    (record) => record.kind === "capability" && record.capabilityState === "active",
+  ).length;
   const evaluating = records.filter(
     (record) => record.tone === "pending" && record.group !== "operations",
   ).length;
@@ -151,6 +159,26 @@ export function filterChips(filter: AuditFilter, colorEnabled: boolean): string 
   }).join("  ");
 }
 
+function titleCase(value: string): string {
+  const normalized = value.replaceAll("_", " ");
+  return `${normalized.slice(0, 1).toUpperCase()}${normalized.slice(1)}`;
+}
+
+function capabilityFacetLabel(record: TuiLearningPrimitive): string | undefined {
+  if (record.capabilityFacets && record.capabilityFacets.length > 0)
+    return record.capabilityFacets.map(titleCase).join(" + ");
+  return record.capabilityKind ? `Legacy ${titleCase(record.capabilityKind)}` : undefined;
+}
+
+export function detailPaneLabel(record: TuiLearningPrimitive | undefined): string {
+  if (!record) return "details";
+  if (record.kind === "capability") return "capability";
+  if (record.kind === "capability_revision") return "revision";
+  if (record.kind === "reflection") return "reflection";
+  if (record.kind === "capability_gate") return "approval";
+  return "record";
+}
+
 export function formatRelativeTime(value: string | undefined, now: Date): string | undefined {
   if (!value) return undefined;
   const parsed = new Date(value);
@@ -177,7 +205,7 @@ export function formatExactTime(value: string | undefined): string | undefined {
 export function citedCountSentence(considered: number, cited: number): string {
   const reviewed = considered === 1 ? "1 input was reviewed" : `${String(considered)} inputs were reviewed`;
   const citedPart = cited === 1 ? "1 was cited" : `${String(cited)} were cited`;
-  return `${reviewed}; ${citedPart} for the decision.`;
+  return `${reviewed}; ${citedPart}.`;
 }
 
 export function canExpandEvidence(record: TuiLearningPrimitive): boolean {
@@ -244,6 +272,8 @@ export function emptyListMessage(
 ): string | undefined {
   if (visibleCount > 0 || failedCount > 0) return undefined;
   if (scopedCount === 0) return "No learning activity recorded for this project yet.";
+  if (filter === "capabilities" && routineCount > 0)
+    return "No Capabilities yet. Ambient reflection is still running.";
   if (filter === "noteworthy" && routineCount > 0)
     return "No lasting changes yet. Ambient reflection is running.";
   return "Nothing in this view.";
@@ -280,7 +310,12 @@ function buildListLines(
       selected ? `${ANSI.bold}${ANSI.cyan}` : ANSI.dim,
       selected ? "›" : " ",
     );
-    const title = styled(colorEnabled, selected ? ANSI.bold : "", safeScalar(record.title));
+    const type = record.kind === "capability" ? capabilityFacetLabel(record) : undefined;
+    const title = styled(
+      colorEnabled,
+      selected ? ANSI.bold : "",
+      `${type ? `[${type}] ` : ""}${safeScalar(record.title)}`,
+    );
     const relative = formatRelativeTime(record.occurredAt, now);
     const summary = safeScalar(record.summary);
     const context = (grouped ? [relative] : [safeScalar(record.kind).replaceAll("_", " "), relative])
@@ -426,9 +461,7 @@ function evidenceLines(
       styled(
         colorEnabled,
         ANSI.dim,
-        total === 0
-          ? "No evidence was cited for this decision."
-          : "Exact references remain available in the raw audit view.",
+        total === 0 ? "No evidence was cited." : "Exact references remain available in the raw audit view.",
       ),
     ];
   return [
@@ -452,12 +485,17 @@ function recordHeading(
   const time = exactTime ? formatExactTime(record.occurredAt) : formatRelativeTime(record.occurredAt, now);
   const summary = safeTerminalText(record.summary);
   const title = safeTerminalText(record.title);
+  const type = capabilityFacetLabel(record);
+  const kind =
+    record.kind === "capability" && type
+      ? `${type} capability`
+      : safeScalar(record.kind).replaceAll("_", " ");
   return [
     `${recordGlyph(record, colorEnabled)} ${styled(colorEnabled, ANSI.bold, title)}`,
     styled(
       colorEnabled,
       ANSI.dim,
-      [safeScalar(record.kind).replaceAll("_", " "), safeScalar(record.status).replaceAll("_", " "), time]
+      [kind, safeScalar(record.status).replaceAll("_", " "), time]
         .filter((value): value is string => value !== undefined)
         .join(" · "),
     ),
@@ -527,10 +565,14 @@ export function detailDocument(
     record.consideredEvidenceCount,
     inputsExpanded,
   );
+  const supportingSections = record.detailSections.filter((section) =>
+    ["provenance", "history"].includes(section.title.toLowerCase()),
+  );
+  const primarySections = record.detailSections.filter((section) => !supportingSections.includes(section));
   return [
     ...recordHeading(record, colorEnabled, now, true),
     "",
-    ...record.detailSections.flatMap((section) => [
+    ...primarySections.flatMap((section) => [
       rule(section.title, width, colorEnabled),
       ...labeledEntries(section.entries, colorEnabled),
       "",
@@ -563,6 +605,11 @@ export function detailDocument(
           ...evidenceLines(considered.previews, considered.total, colorEnabled),
         ]
       : []),
+    ...supportingSections.flatMap((section) => [
+      "",
+      rule(section.title, width, colorEnabled),
+      ...labeledEntries(section.entries, colorEnabled),
+    ]),
     ...(record.relations.length > 0
       ? [
           "",

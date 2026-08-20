@@ -49,6 +49,7 @@ import {
   type RerankRequest,
 } from "@noesis/intelligence";
 import {
+  type CapabilityProgramLibrary,
   createCapabilityLearningModule,
   createWorkspaceLearningCandidateManifestStore,
 } from "@noesis/learning";
@@ -328,6 +329,10 @@ const WorkflowSaveResultSchema = z.strictObject({
 
 function savedWorkflowToolName(project: ProjectRef, workflowName: string): string {
   return projectWorkflowToolName(project.projectId, workflowName);
+}
+
+function capabilityProgramToolName(capabilityId: string, kind: "script" | "workflow", name: string): string {
+  return `capability_${sha256(`${capabilityId}:${kind}:${name}`).slice(0, 12)}_${kind}_${name}`;
 }
 
 export interface ProjectHotbarSelection {
@@ -759,6 +764,66 @@ async function listStoredWorkflows(
 async function reconcileStoredWorkflows(workspace: NoesisWorkspaceStore, project: ProjectRef): Promise<void> {
   const workflows = await listStoredWorkflows(workspace, project);
   for (const workflow of workflows) await reconcileStoredWorkflow(workspace, project, workflow.manifest.name);
+}
+
+function createCapabilityProgramLibrary(
+  workspace: NoesisWorkspaceStore,
+  activeProject: ProjectRef,
+): CapabilityProgramLibrary {
+  return Object.freeze({
+    list: async (project: ProjectRef) => {
+      if (project.projectId !== activeProject.projectId || project.root !== activeProject.root)
+        throw new Error(`Capability program library cannot cross project ${activeProject.projectId}`);
+      const [scripts, workflows] = await Promise.all([
+        listStoredScripts(workspace, project),
+        listStoredWorkflows(workspace, project),
+      ]);
+      return Object.freeze([
+        ...scripts.map((script) =>
+          Object.freeze({
+            kind: "script" as const,
+            name: script.name,
+            description: script.description,
+            revision: script.revision,
+          }),
+        ),
+        ...workflows.map(({ manifest }) =>
+          Object.freeze({
+            kind: "workflow" as const,
+            name: manifest.name,
+            description: manifest.description,
+            revision: manifest.revision,
+          }),
+        ),
+      ]);
+    },
+    resolve: async (kind: "script" | "workflow", name: string, project: ProjectRef) => {
+      if (project.projectId !== activeProject.projectId || project.root !== activeProject.root)
+        throw new Error(`Capability program library cannot cross project ${activeProject.projectId}`);
+      const current = await currentDefinition(workspace, kind, project, name);
+      if (!current) return undefined;
+      const bytes = await workspace.reads.readRevision(current.metadata.definitionRevision);
+      const decoded = JSON.parse(decoder.decode(bytes));
+      if (kind === "script") {
+        const manifest = ScriptManifestSchema.parse(decoded);
+        if (manifest.name !== name) throw new Error(`Saved script ${name} has mismatched identity`);
+        return Object.freeze({
+          kind: "script" as const,
+          name,
+          project: Object.freeze({ ...project }),
+          definitionRevision: current.metadata.definitionRevision,
+        });
+      }
+      const manifest = WorkflowManifestSchema.parse(decoded);
+      if (manifest.name !== name) throw new Error(`Saved workflow ${name} has mismatched identity`);
+      return Object.freeze({
+        kind: "workflow" as const,
+        name,
+        project: Object.freeze({ ...project }),
+        definitionRevision: current.metadata.definitionRevision,
+      });
+    },
+  });
 }
 
 function withoutWorkflowTerminalFields(
@@ -1276,8 +1341,11 @@ function rolePrompt(name: RoleName): string {
       "Noesis protected role: reflector.",
       "Return only the requested structured JSON.",
       "Examine every settled foreground turn, including failures and aborts. no_change is valid.",
-      "When durable behavior can improve, create or revise one concrete instruction Capability immediately.",
+      "When durable behavior can improve, create or revise one concrete Capability immediately.",
+      "Describe the exact effects that implement the ability: instruction text, a progressively disclosed skill, or an exact saved project script/workflow from the supplied list.",
+      "A Capability may combine effects. Prefer a skill for substantial reusable guidance and an instruction only for concise always-visible behavior. Never describe a script or workflow without referencing its real saved primitive.",
       "New Capabilities default to global scope and relevant selection; choose always only when every turn needs it.",
+      "A Capability containing a saved script or workflow is project-scoped because that program is project authority.",
       "Prefer revising an existing Capability over creating a duplicate. Cite exact supplied evidence indexes.",
       "Use the tiny consequence gate only for recovery or boot control, credential export, or an irreversible external action the user did not request in the foreground.",
       "Do not invent an evaluation or preflight stage. State what changes, why, when it applies, and its anticipated effect.",
@@ -1377,6 +1445,7 @@ function registerRevision(
     capabilityId: revision.capabilityId,
     definitionState: "candidate",
     ...(revision.predecessorRevisionId ? { predecessorRevisionId: revision.predecessorRevisionId } : {}),
+    ...(revision.effects ? { effects: revision.effects } : {}),
     promptModules: revision.promptModules,
     skills: revision.skills,
     tools: revision.tools,
@@ -2566,17 +2635,114 @@ export async function createApplicationRuntimeComposition(
         });
       }),
     );
+    const capabilityProgramTools = Object.freeze(
+      plan.selectedCapabilities.flatMap((selection) =>
+        (selection.effects ?? []).flatMap((effect) => {
+          if (effect.kind !== "script" && effect.kind !== "workflow") return [];
+          if (effect.project.projectId !== project.projectId || effect.project.root !== project.root)
+            throw new Error(`Capability program ${effect.name} belongs to another project`);
+          const toolName = capabilityProgramToolName(selection.capabilityId, effect.kind, effect.name);
+          if (effect.kind === "script") {
+            const manifest = ScriptManifestSchema.parse(JSON.parse(effect.definition.content));
+            if (manifest.name !== effect.name)
+              throw new Error(`Capability script ${effect.name} has mismatched definition identity`);
+            const inputAdapter = savedWorkflowInputAdapter(manifest.inputSchema);
+            return [
+              defineTool({
+                name: toolName,
+                label: `${selection.name} · ${manifest.name}`,
+                description: manifest.description,
+                visibility: "codemode_only",
+                identityMaterial: toJsonValue({
+                  adapterRevision: "capability-script-effect-v1",
+                  capabilityRevision: selection.revision,
+                  definitionRevisionId: effect.definition.revision.revisionId,
+                  definitionDigest: effect.definition.revision.contentDigest,
+                  sourceRevisionId: manifest.sourceRevision.revisionId,
+                  sourceDigest: manifest.sourceRevision.contentDigest,
+                }),
+                inputSchema: inputAdapter.schema,
+                outputSchema: savedWorkflowValueSchema(manifest.outputSchema),
+                effect: () => ({
+                  effect: "execute",
+                  resource: `${scriptResource(manifest.name)}:run`,
+                  estimatedCost: 1,
+                }),
+                execute: async (input, context) => {
+                  if (!runRecordedCode) throw new Error("Script runtime is not initialized");
+                  for (const requiredTool of manifest.requiredTools)
+                    if (!activeBroker?.describe(requiredTool))
+                      throw new Error(`Script revision requires unavailable tool ${requiredTool}`);
+                  const source = decoder.decode(await workspace.reads.readRevision(manifest.sourceRevision));
+                  const result = await runRecordedCode(
+                    {
+                      source,
+                      input: inputAdapter.unwrap(JsonValueSchema.parse(input)),
+                      sessionId: plan.sessionId,
+                      turnId: plan.turnId,
+                      signal: context.signal,
+                    },
+                    context.parentExecutionId,
+                  );
+                  return savedWorkflowValueSchema(manifest.outputSchema).parse(result.value);
+                },
+              }),
+            ];
+          }
+          const manifest = WorkflowManifestSchema.parse(JSON.parse(effect.definition.content));
+          if (manifest.name !== effect.name)
+            throw new Error(`Capability workflow ${effect.name} has mismatched definition identity`);
+          const inputAdapter = savedWorkflowInputAdapter(manifest.inputSchema);
+          const stored = Object.freeze({
+            manifest,
+            definitionRevision: effect.definition.revision,
+          });
+          return [
+            defineTool({
+              name: toolName,
+              label: `${selection.name} · ${manifest.name}`,
+              description: manifest.description,
+              visibility: "codemode_only",
+              identityMaterial: toJsonValue({
+                adapterRevision: "capability-workflow-effect-v1",
+                capabilityRevision: selection.revision,
+                definitionRevisionId: effect.definition.revision.revisionId,
+                definitionDigest: effect.definition.revision.contentDigest,
+              }),
+              inputSchema: inputAdapter.schema,
+              outputSchema: savedWorkflowValueSchema(manifest.outputSchema),
+              effect: () => ({
+                effect: "execute",
+                resource: `${workflowResource(manifest.name)}:run`,
+                estimatedCost: 1,
+              }),
+              execute: async (input, context) => {
+                if (!runWorkflow) throw new Error("Workflow runtime is not initialized");
+                const result = await runWorkflow(
+                  stored,
+                  inputAdapter.unwrap(JsonValueSchema.parse(input)),
+                  context,
+                );
+                return result.value;
+              },
+            }),
+          ];
+        }),
+      ),
+    );
     const savedWorkflowToolNames = new Set(savedWorkflowTools.map((tool) => tool.name));
     const skillLoadTool = defineTool({
       name: "skills.load",
       label: "Load skill",
       description: "Load the full frozen instructions for one skill from this turn's skill snapshot.",
       visibility: "codemode_only",
-      identityMaterial: (resources?.skills ?? []).map((skill) => ({
-        name: skill.name,
-        contentDigest: skill.contentDigest,
-        ...(skill.admittedRevision ? { revisionId: skill.admittedRevision.revisionId } : {}),
-      })),
+      identityMaterial: toJsonValue(
+        (resources?.skills ?? []).map((skill) => ({
+          name: skill.name,
+          contentDigest: skill.contentDigest,
+          revisionId: skill.admittedRevision?.revisionId ?? skill.capabilityRevision?.revisionId ?? null,
+        })),
+      ),
       inputSchema: z.strictObject({ name: z.string().trim().min(1).max(256) }),
       outputSchema: z.union([
         z.null(),
@@ -2586,7 +2752,7 @@ export async function createApplicationRuntimeComposition(
           content: z.string(),
           filePath: z.string(),
           contentDigest: z.string(),
-          revision: EvidenceRevisionRefSchema.nullable(),
+          revision: z.union([EvidenceRevisionRefSchema, FileRevisionRefSchema]).nullable(),
         }),
       ]),
       effect: ({ name }) => ({
@@ -2597,14 +2763,14 @@ export async function createApplicationRuntimeComposition(
       execute: async ({ name }) => {
         const skill = resources?.skills.find((candidate) => candidate.name === name);
         return skill
-          ? toJsonValue({
+          ? {
               name: skill.name,
               description: skill.description,
               content: skill.content,
               filePath: skill.filePath,
               contentDigest: skill.contentDigest,
-              revision: skill.admittedRevision ?? null,
-            })
+              revision: skill.admittedRevision ?? skill.capabilityRevision ?? null,
+            }
           : null;
       },
     });
@@ -2635,6 +2801,7 @@ export async function createApplicationRuntimeComposition(
         ...scriptTools,
         ...workflowTools,
         ...savedWorkflowTools,
+        ...capabilityProgramTools,
         ...mcpTools,
         ...sessionDefinitionsForBroker(sessionDefinitions, { workspace, history }),
       ]),
@@ -3597,6 +3764,7 @@ export async function createApplicationRuntimeComposition(
     history,
     inference,
     registry,
+    programs: createCapabilityProgramLibrary(workspace, project),
     reflector: Object.freeze({
       variant: roles.reflector.variant,
       promptRevision: configurationPrompt(roles.reflector),

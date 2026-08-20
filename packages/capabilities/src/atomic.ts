@@ -4,6 +4,7 @@ import {
   ok,
   type ActivationPolicy,
   type Capability,
+  type CapabilityEffect,
   type CapabilityActivationReadModel,
   type CapabilityRevision,
   type CapabilityRevisionRef,
@@ -27,6 +28,7 @@ export interface CapabilityRevisionConstruction {
   readonly capabilityRevisionId: string;
   readonly capabilityId: string;
   readonly predecessorRevisionId?: string;
+  readonly effects?: readonly CapabilityEffect[];
   readonly promptModules: readonly FileRevisionRef[];
   readonly skills: readonly FileRevisionRef[];
   readonly tools: readonly FileRevisionRef[];
@@ -281,6 +283,23 @@ function freezeRevision(construction: CapabilityRevisionConstruction): Capabilit
     capabilityId: construction.capabilityId,
     ...(construction.predecessorRevisionId
       ? { predecessorRevisionId: construction.predecessorRevisionId }
+      : {}),
+    ...(construction.effects
+      ? {
+          effects: Object.freeze(
+            construction.effects.map((effect) =>
+              Object.freeze(
+                effect.kind === "instruction" || effect.kind === "skill"
+                  ? { ...effect, material: cloneFileRevision(effect.material) }
+                  : {
+                      ...effect,
+                      project: Object.freeze({ ...effect.project }),
+                      definitionRevision: cloneFileRevision(effect.definitionRevision),
+                    },
+              ),
+            ),
+          ),
+        }
       : {}),
     promptModules: Object.freeze(construction.promptModules.map(cloneFileRevision)),
     skills: Object.freeze(construction.skills.map(cloneFileRevision)),

@@ -2,12 +2,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAtomicCapabilityRegistry } from "@noesis/capabilities";
-import type { FileRevisionRef } from "@noesis/domain";
+import type { FileRevisionRef, ProjectRef } from "@noesis/domain";
 import { sha256 } from "@noesis/domain";
 import type { HistoryPort } from "@noesis/intelligence";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
-import { createCapabilityLearningModule } from "../src/capability-loop.ts";
+import { type CapabilityProgramLibrary, createCapabilityLearningModule } from "../src/capability-loop.ts";
 import { createScriptedLearningInferencePort } from "./support/scripted-learning-inference.ts";
 
 const opened: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
@@ -69,6 +69,26 @@ describe("Capability learning loop", () => {
       metadata: Object.freeze({ turnId: "turn-1" }),
     });
     await workspace.operational.messages.put({
+      messageId: "turn-1:assistant:1",
+      sessionId: "session-1",
+      role: "assistant",
+      content: "I kept the research summary concise and cited the primary source.",
+      sensitivity: "normal",
+      createdAt: "2026-08-18T00:00:01.000Z",
+      metadata: Object.freeze({ turnId: "turn-1" }),
+    });
+    await workspace.operational.toolCalls.put({
+      toolCallId: "turn-1:tool:1",
+      sessionId: "session-1",
+      toolName: "web.search",
+      request: Object.freeze({ query: "primary source" }),
+      response: Object.freeze({ result: "official documentation" }),
+      status: "completed",
+      sensitivity: "normal",
+      createdAt: "2026-08-18T00:00:00.500Z",
+      completedAt: "2026-08-18T00:00:00.750Z",
+    });
+    await workspace.operational.messages.put({
       messageId: "turn-2:user",
       sessionId: "session-1",
       role: "user",
@@ -85,18 +105,28 @@ describe("Capability learning loop", () => {
             decision: "create",
             proposal: Object.freeze({
               name: "Concise research",
-              kind: "instruction",
               description: "Keep research answers concise without dropping primary evidence.",
               applicability: "Research and source-synthesis requests.",
               summary: "Prefer concise, evidence-dense research answers.",
               rationale: "The user explicitly asked for concise future research answers.",
               anticipatedEffect: "Research responses become easier to scan.",
-              instruction: "Prefer concise synthesis. Preserve exact primary-source citations.",
+              effects: Object.freeze([
+                Object.freeze({
+                  kind: "instruction",
+                  content: "Prefer concise synthesis.",
+                }),
+                Object.freeze({
+                  kind: "skill",
+                  name: "concise-evidence-synthesis",
+                  description: "Synthesize primary evidence into a concise answer.",
+                  instructions: "Load primary evidence, retain exact citations, then compress the prose.",
+                }),
+              ]),
               scope: "global",
               activationMode: "relevant",
               consequence: "ordinary",
               consequenceDescription: "Only model instructions change.",
-              evidenceCitationIndexes: Object.freeze([0]),
+              evidenceCitationIndexes: Object.freeze([0, 1, 2]),
             }),
           }),
         }),
@@ -107,13 +137,17 @@ describe("Capability learning loop", () => {
             capabilityId: "capability-1",
             proposal: Object.freeze({
               name: "Concise research",
-              kind: "instruction",
               description: "Keep research answers concise without dropping primary evidence.",
               applicability: "Research and source-synthesis requests.",
               summary: "Add explicit recovery guidance.",
               rationale: "The user requested a recovery rule that requires approval.",
               anticipatedEffect: "Recovery remains deliberate.",
-              instruction: "Prefer concise synthesis and explain recovery before acting.",
+              effects: Object.freeze([
+                Object.freeze({
+                  kind: "instruction",
+                  content: "Prefer concise synthesis and explain recovery before acting.",
+                }),
+              ]),
               scope: "global",
               activationMode: "relevant",
               consequence: "recovery_control",
@@ -128,7 +162,12 @@ describe("Capability learning loop", () => {
             summary: "Keep recovery manual and explain the fallback.",
             rationale: "The user amended the pending recovery Capability.",
             anticipatedEffect: "Recovery remains explicit and understandable.",
-            instruction: "Never recover automatically. Explain the fallback before acting.",
+            effects: Object.freeze([
+              Object.freeze({
+                kind: "instruction",
+                content: "Never recover automatically. Explain the fallback before acting.",
+              }),
+            ]),
             consequence: "recovery_control",
             consequenceDescription: "This changes recovery control behavior.",
           }),
@@ -189,6 +228,16 @@ describe("Capability learning loop", () => {
               table: "messages" as const,
               rowId: "turn-1:user",
             }),
+            Object.freeze({
+              kind: "database_row" as const,
+              table: "tool_calls" as const,
+              rowId: "turn-1:tool:1",
+            }),
+            Object.freeze({
+              kind: "database_row" as const,
+              table: "messages" as const,
+              rowId: "turn-1:assistant:1",
+            }),
           ],
           telemetry: Object.freeze({
             retryCount: 0,
@@ -210,11 +259,28 @@ describe("Capability learning loop", () => {
       state: "active",
     });
     expect(await workspace.capabilities.listRevisions("capability-1")).toHaveLength(1);
+    expect(await workspace.capabilities.getDefinition("capability-1")).not.toHaveProperty("kind");
+    expect((await workspace.capabilities.listRevisions("capability-1"))[0]).toMatchObject({
+      revision: {
+        effects: [{ kind: "instruction" }, { kind: "skill", name: "concise-evidence-synthesis" }],
+        evidenceRefs: [
+          { table: "messages", rowId: "turn-1:user" },
+          { table: "tool_calls", rowId: "turn-1:tool:1" },
+          { table: "messages", rowId: "turn-1:assistant:1" },
+        ],
+      },
+    });
     expect(inference.requests()[0]?.messages.map((message) => message.name)).toEqual([
       "settled_turn",
       "current_capabilities",
+      "current_capability_materials",
+      "available_saved_programs",
       "evidence",
     ]);
+    expect(inference.requests()[0]?.messages.at(-1)?.content).toContain("web.search");
+    expect(inference.requests()[0]?.messages.at(-1)?.content).toContain(
+      "I kept the research summary concise",
+    );
 
     const pending = await module.reflectSettledTurn(
       Object.freeze({
@@ -265,5 +331,148 @@ describe("Capability learning loop", () => {
       },
     ]);
     expect(await workspace.capabilities.listRevisions("capability-1")).toHaveLength(3);
+  });
+
+  test("attaches a saved workflow by its exact canonical revision instead of authoring a parallel workflow", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-capability-workflow-"));
+    const workspace = await createWorkspaceStore(root);
+    opened.push({ root, workspace });
+    const project = Object.freeze({ projectId: "project-workflow", root });
+    await workspace.operational.sessions.put({
+      sessionId: "session-workflow",
+      title: "Workflow capability",
+      status: "idle",
+      provider: "fake",
+      model: "fake",
+      runtime: "fake",
+      createdAt: "2026-08-18T00:00:00.000Z",
+      updatedAt: "2026-08-18T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    await workspace.operational.messages.put({
+      messageId: "turn-workflow:user",
+      sessionId: "session-workflow",
+      role: "user",
+      content: "Reuse the saved evidence synthesis workflow when this comes up again.",
+      sensitivity: "normal",
+      createdAt: "2026-08-18T00:00:00.000Z",
+      metadata: Object.freeze({ turnId: "turn-workflow" }),
+    });
+    const definitionRevision = await workspace.definitions.recordWorkingDefinition({
+      workingPath: "workflows/evidence-synthesis/workflow.json",
+      bytes: new TextEncoder().encode('{"kind":"noesis_workflow","name":"evidence-synthesis"}\n'),
+      actor: Object.freeze({ actorId: "fixture", kind: "system" as const }),
+      reason: "Saved workflow fixture",
+    });
+    const inference = createScriptedLearningInferencePort({
+      steps: [
+        Object.freeze({
+          role: "reflector",
+          value: Object.freeze({
+            decision: "create",
+            proposal: Object.freeze({
+              name: "Evidence synthesis",
+              description: "Reuse the saved evidence synthesis workflow.",
+              applicability: "Requests that need the same evidence synthesis procedure.",
+              summary: "Attach the saved evidence synthesis workflow.",
+              rationale: "The user explicitly asked to reuse this saved program.",
+              anticipatedEffect: "The proven procedure is available on relevant turns.",
+              effects: Object.freeze([Object.freeze({ kind: "workflow", name: "evidence-synthesis" })]),
+              activationMode: "relevant",
+              consequence: "ordinary",
+              consequenceDescription: "This activates an existing saved workflow.",
+              evidenceCitationIndexes: Object.freeze([0]),
+            }),
+          }),
+        }),
+      ],
+    });
+    const programs: CapabilityProgramLibrary = Object.freeze({
+      list: async () =>
+        Object.freeze([
+          Object.freeze({
+            kind: "workflow" as const,
+            name: "evidence-synthesis",
+            description: "Synthesize evidence.",
+            revision: 1,
+          }),
+        ]),
+      resolve: async (kind: "script" | "workflow", name: string, requestedProject: ProjectRef) =>
+        kind === "workflow" &&
+        name === "evidence-synthesis" &&
+        requestedProject.projectId === project.projectId
+          ? Object.freeze({
+              kind: "workflow" as const,
+              name,
+              project,
+              definitionRevision,
+            })
+          : undefined,
+    });
+    const module = createCapabilityLearningModule({
+      workspace,
+      store: workspace.capabilities,
+      registry: createAtomicCapabilityRegistry(),
+      history: emptyHistory,
+      inference,
+      reflector: Object.freeze({
+        variant: Object.freeze({
+          variantId: "reflector-v1",
+          axis: "role",
+          configurationRefs: Object.freeze([promptRevision]),
+        }),
+        promptRevision,
+        model: "controlled",
+        reasoning: "high",
+      }),
+      programs,
+      now: () => "2026-08-18T01:00:00.000Z",
+      nextId: (prefix) => `${prefix}-workflow`,
+    });
+
+    await expect(
+      module.reflectSettledTurn(
+        Object.freeze({
+          turn: Object.freeze({
+            sessionId: "session-workflow",
+            turnId: "turn-workflow",
+            userMessage: "Reuse the saved evidence synthesis workflow when this comes up again.",
+            outcome: "accepted",
+            servedWorkingAdjustmentOutcomes: [],
+            scope: "general",
+            sensitivity: "normal",
+            evidenceRefs: [
+              Object.freeze({
+                kind: "database_row" as const,
+                table: "messages" as const,
+                rowId: "turn-workflow:user",
+              }),
+            ],
+            telemetry: Object.freeze({ retryCount: 0, toolFailureCount: 0, aborted: false }),
+            occurredAt: "2026-08-18T00:00:00.000Z",
+          }),
+          project,
+          selectedCapabilities: Object.freeze([]),
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ status: "activated" });
+
+    const [binding] = await workspace.capabilities.listBindings({
+      project,
+      sessionId: "session-workflow",
+      limit: 10,
+    });
+    expect(binding).toMatchObject({ scope: { kind: "project", project } });
+    const current = binding ? await workspace.capabilities.getRevision(binding.revision) : undefined;
+    expect(current?.revision.effects).toEqual([
+      {
+        kind: "workflow",
+        name: "evidence-synthesis",
+        project,
+        definitionRevision,
+      },
+    ]);
+    expect(await workspace.definitionMetadata.listCurrent("workflow:project-workflow")).toEqual([]);
   });
 });
