@@ -344,7 +344,7 @@ describe("research role isolation", () => {
   test("restricts capability routing to the current turn payload", () => {
     const policy = createRestrictedRoleContextPolicy("capability_router");
 
-    expect(policy.allowedMessageNames).toEqual(["turn", "prior_conversation"]);
+    expect(policy.allowedMessageNames).toEqual(["turn", "prior_conversation", "output_contract"]);
     expect(policy.maxTools).toBe(0);
   });
 
@@ -354,7 +354,13 @@ describe("research role isolation", () => {
       maxMessages: 12,
     });
 
-    expect(policy.allowedMessageNames).toEqual(["rubric", "arm_A", "arm_B", "relevant_traces"]);
+    expect(policy.allowedMessageNames).toEqual([
+      "rubric",
+      "arm_A",
+      "arm_B",
+      "relevant_traces",
+      "output_contract",
+    ]);
     expect(policy.includeCapabilityRevisions).toBe(false);
     expect(policy.maxMessages).toBe(12);
     expect(() =>
@@ -454,6 +460,53 @@ describe("research role isolation", () => {
     expect(rendered).not.toHaveProperty("authority");
     expect(rendered).not.toHaveProperty("hiddenCases");
     expect(result.trace.capabilityRevisions).toEqual([capabilityRevision]);
+  });
+
+  test("keeps a large structured-output contract separate from reflector evidence", async () => {
+    let capturedPrompt = "";
+    const backend = createScriptedRoleModelBackend({
+      respond(backendRequest) {
+        capturedPrompt = backendRequest.prompt;
+        return { text: '{"answer":"ok"}' };
+      },
+    });
+    const base = configuration("reflector", "reflect-contract-v1");
+    const runner = createAgentRoleRunner({
+      backend,
+      variants: [
+        {
+          ...base,
+          contextPolicy: createRestrictedRoleContextPolicy("reflector", {
+            policyId: "reflector-contract-bounded-v1",
+            maxMessages: 12,
+            maxCharactersPerMessage: 12_000,
+            maxTotalCharacters: 48_000,
+          }),
+        },
+      ],
+    });
+    const structured = createStructuredInferencePort({ runner, maxRepairAttempts: 0 });
+    const evidence = "e".repeat(10_000);
+
+    await expect(
+      structured.run(
+        request("reflector", "reflect-contract-v1", [
+          { role: "user", name: "settled_turn", content: "s".repeat(7_000) },
+          { role: "user", name: "current_capabilities", content: "c".repeat(7_000) },
+          { role: "user", name: "current_capability_materials", content: "m".repeat(7_000) },
+          { role: "user", name: "available_saved_programs", content: "p".repeat(4_000) },
+          { role: "user", name: "evidence", content: evidence },
+        ]),
+        z.strictObject({ answer: z.string().describe("x".repeat(5_000)) }),
+      ),
+    ).resolves.toMatchObject({ value: { answer: "ok" } });
+
+    const rendered = z
+      .object({ messages: z.array(z.object({ name: z.string(), content: z.string() })) })
+      .parse(JSON.parse(capturedPrompt));
+    expect(rendered.messages.at(-2)).toEqual({ name: "evidence", content: evidence });
+    expect(rendered.messages.at(-1)).toMatchObject({ name: "output_contract" });
+    expect(rendered.messages.at(-1)?.content).toContain("Return JSON only");
   });
 
   test("rejects undeclared revision-author context", async () => {

@@ -342,15 +342,17 @@ function decodeStructured<T>(text: string, schema: z.ZodType<T>): T {
 
 function addOutputContract(request: AgentRunRequest, schema: z.ZodType<unknown>): AgentRunRequest {
   const contract = JSON.stringify(z.toJSONSchema(schema));
-  const messages = request.messages.map((message, index) =>
-    index === request.messages.length - 1
-      ? {
-          ...message,
-          content: `${message.content}\n\nReturn JSON only. The JSON must match this schema:\n${contract}`,
-        }
-      : message,
-  );
-  return { ...request, messages };
+  return {
+    ...request,
+    messages: Object.freeze([
+      ...request.messages,
+      Object.freeze({
+        role: "user" as const,
+        name: "output_contract",
+        content: `Return JSON only. The JSON must match this schema:\n${contract}`,
+      }),
+    ]),
+  };
 }
 
 function repairRequest(

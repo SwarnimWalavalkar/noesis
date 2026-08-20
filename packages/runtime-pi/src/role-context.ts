@@ -44,7 +44,11 @@ export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPoli
     maxTotalCharacters: compactor ? 4_000_000 : DEFAULT_TOTAL_CHARACTERS,
     maxEvidenceRefs: DEFAULT_EVIDENCE_REFS,
     maxTools: foreground ? 32 : 0,
-    ...(foreground ? {} : { allowedMessageNames: isolatedRoleMessageNames[role] }),
+    ...(foreground
+      ? {}
+      : {
+          allowedMessageNames: Object.freeze([...isolatedRoleMessageNames[role], "output_contract"]),
+        }),
     includeCapabilityRevisions: role !== "judge_critic",
   });
 }
