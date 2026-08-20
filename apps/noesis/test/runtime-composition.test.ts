@@ -11,7 +11,6 @@ import {
 } from "@noesis/agent-types";
 import { resolveNoesisConfig } from "@noesis/config";
 import {
-  ArtifactFileRefSchema,
   canonicalJson,
   EvidenceRevisionRefSchema,
   eventChecksum,
@@ -671,7 +670,7 @@ describe("apps/noesis production control-plane composition", () => {
     expect(closes).toBe(1);
   });
 
-  test("stages an oversized MCP artifact before primary settlement and replays it after restart", async () => {
+  test("persists and replays a large MCP result without host projection", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-mcp-large-result-"));
     const projectRoot = join(home, "project");
     const executionMarker = join(home, "large-result-calls");
@@ -744,7 +743,7 @@ describe("apps/noesis production control-plane composition", () => {
                 return Object.freeze({
                   outcome: "completed" as const,
                   stopReason: "stop" as const,
-                  text: "MCP large result materialized.",
+                  text: "MCP large result returned.",
                   provider: request.provider,
                   model: request.model,
                 });
@@ -772,10 +771,14 @@ describe("apps/noesis production control-plane composition", () => {
 
     await invokeOnce("Large MCP result before restart");
     expect(returned).toHaveLength(1);
-    expect(returned[0]).toMatchObject({
-      truncated: true,
-      artifact: { artifactId: expect.any(String) },
-    });
+    const returnedResult = z
+      .strictObject({
+        content: z.array(z.strictObject({ type: z.string(), text: z.string() })),
+        isError: z.boolean().optional(),
+      })
+      .passthrough()
+      .parse(returned[0]);
+    expect(returnedResult.content[0]?.text).toHaveLength(307_200);
     expect(await readFile(executionMarker, "utf8")).toBe("called\n");
 
     const workspace = await createWorkspaceStore(home);
@@ -803,19 +806,15 @@ describe("apps/noesis production control-plane composition", () => {
               .get(),
           );
         const resultJson = toolOperation.result_json;
-        expect(Buffer.byteLength(resultJson, "utf8")).toBeLessThan(256 * 1024);
+        expect(Buffer.byteLength(resultJson, "utf8")).toBeGreaterThan(307_200);
         const durableResult = z
           .strictObject({
-            content: z.array(z.unknown()),
-            artifact: ArtifactFileRefSchema,
-            truncated: z.literal(true),
-            isError: z.literal(true).optional(),
+            content: z.array(z.strictObject({ type: z.string(), text: z.string() })),
+            isError: z.boolean().optional(),
           })
+          .passthrough()
           .parse(JSON.parse(resultJson));
-        expect((await workspace.reads.readArtifact(durableResult.artifact)).byteLength).toBeGreaterThan(
-          307_200,
-        );
-        expect(resultJson).not.toContain("x".repeat(1_024));
+        expect(durableResult.content[0]?.text).toHaveLength(307_200);
 
         let replayExecutions = 0;
         const replay = await createWorkspaceRuntimeInternals(workspace).authority.runForeground(
@@ -846,8 +845,8 @@ describe("apps/noesis production control-plane composition", () => {
              WHERE idempotency_key LIKE 'mcp-artifact:%' AND status = 'completed'`,
             )
             .get(),
-        ).toMatchObject({ count: 1 });
-        expect(database.prepare("SELECT COUNT(*) AS count FROM artifacts").get()).toMatchObject({ count: 1 });
+        ).toMatchObject({ count: 0 });
+        expect(database.prepare("SELECT COUNT(*) AS count FROM artifacts").get()).toMatchObject({ count: 0 });
       } finally {
         database.close();
       }
@@ -3064,6 +3063,8 @@ describe("apps/noesis production control-plane composition", () => {
     expect(deliveredPlan).toEqual(storedPlan);
     expect(result.frozenTurnPlan).toEqual(storedPlan);
     expect(requests[0]?.systemPrompt).toBe(storedPlan?.renderedSystemPrompt);
+    expect(storedPlan?.permissionSnapshot.resourcePatterns).toContain("file-read:*");
+    expect(storedPlan?.permissionSnapshot.resourcePatterns).not.toContain("file:*");
     expect(storedPlan).toMatchObject({
       schemaVersion: 1,
       sessionId: trail.trailId,

@@ -355,13 +355,13 @@ describe("codemode runtime", () => {
     ).rejects.toThrow("cancelled");
   });
 
-  it("bounds values before sending them across the child-process boundary", async () => {
+  it("returns large values across the child-process boundary", async () => {
     await expect(
       runtime().execute({
-        source: 'return "x".repeat(300 * 1024);',
+        source: 'return "x".repeat(2 * 1024 * 1024);',
         sessionId: "session-1",
       }),
-    ).rejects.toThrow("Codemode result exceeds");
+    ).resolves.toMatchObject({ value: "x".repeat(2 * 1024 * 1024) });
   });
 
   it("bounds SDK inputs and failure frames before sending them over IPC", async () => {
@@ -425,12 +425,12 @@ describe("codemode runtime", () => {
     await expect(
       runtime().execute({
         source: `
-          process.send({ type: "result", value: "x".repeat(300 * 1024), storeMutations: [] });
-          return null;
+          process.send({ type: "result", value: "x".repeat(2 * 1024 * 1024), storeMutations: [] });
+          await new Promise(() => undefined);
         `,
         sessionId: "raw-result",
       }),
-    ).rejects.toThrow("Codemode result exceeds");
+    ).resolves.toMatchObject({ value: "x".repeat(2 * 1024 * 1024) });
 
     await expect(
       runtime().execute({

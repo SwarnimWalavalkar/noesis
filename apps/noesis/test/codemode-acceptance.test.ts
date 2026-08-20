@@ -77,6 +77,56 @@ describe("production codemode journey", () => {
     await runtime.shutdown();
   });
 
+  test("the production read grant admits an explicitly named file outside the project", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-external-read-"));
+    const outside = await mkdtemp(join(tmpdir(), "noesis-external-file-"));
+    const path = join(outside, "skill.md");
+    await writeFile(path, "External skill instructions.\n", "utf8");
+    roots.push(home, outside);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context }) =>
+        context.messages.at(-1)?.role === "toolResult"
+          ? "External file read."
+          : controlledToolCallResponse("file_read", { path }, "call-external-file-read"),
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "External read acceptance" });
+
+    await expect(runtime.debug.runTurn(trail.trailId, "Read an external skill file.")).resolves.toMatchObject(
+      {
+        output: "External file read.",
+      },
+    );
+    expect(
+      (await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId))[0],
+    ).toMatchObject({
+      toolName: "files.read",
+      status: "completed",
+      response: { output: { content: "External skill instructions." } },
+    });
+    await runtime.shutdown();
+  });
+
   test("direct saved-code hotbar calls do not persist synthetic codemode parents", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-direct-saved-code-"));
     roots.push(home);

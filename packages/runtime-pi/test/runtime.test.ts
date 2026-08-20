@@ -1041,7 +1041,9 @@ describe("agent runtime factories", () => {
     if (!inspect || !remember) throw new Error("Expected direct self tools");
     expect(tools.map((tool) => tool.name)).toEqual(["inspect_self", "remember"]);
 
-    await expect(inspect.execute("inspect", {})).rejects.toThrow("result exceeds");
+    await expect(inspect.execute("inspect", {})).resolves.toMatchObject({
+      content: [{ type: "text", text: JSON.stringify("x".repeat(70_000)) }],
+    });
     expect(observedSignal).toBeDefined();
 
     const toolCall = new AbortController();

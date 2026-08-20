@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAtomicCapabilityRegistry } from "@noesis/capabilities";
-import type { FileRevisionRef, ProjectRef } from "@noesis/domain";
+import type { EvidenceRef, FileRevisionRef, ProjectRef } from "@noesis/domain";
 import { sha256 } from "@noesis/domain";
 import type { HistoryPort } from "@noesis/intelligence";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
@@ -331,6 +331,198 @@ describe("Capability learning loop", () => {
       },
     ]);
     expect(await workspace.capabilities.listRevisions("capability-1")).toHaveLength(3);
+  });
+
+  test("reflects a tool-dense turn within bounded messages and can attach the saved improvement", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-capability-dense-turn-"));
+    const workspace = await createWorkspaceStore(root);
+    opened.push({ root, workspace });
+    const project = Object.freeze({ projectId: "project-dense", root });
+    const occurredAt = "2026-08-20T19:45:00.000Z";
+    await workspace.operational.sessions.put({
+      sessionId: "session-dense",
+      title: "Dense research turn",
+      status: "idle",
+      provider: "fake",
+      model: "fake",
+      runtime: "fake",
+      createdAt: occurredAt,
+      updatedAt: occurredAt,
+      metadata: Object.freeze({}),
+    });
+    await workspace.operational.messages.put({
+      messageId: "turn-dense:user",
+      sessionId: "session-dense",
+      role: "user",
+      content: "Research several providers and improve how you perform this work next time.",
+      sensitivity: "normal",
+      createdAt: occurredAt,
+      metadata: Object.freeze({ turnId: "turn-dense" }),
+    });
+    const assistantContent = `Research completed.\n${"evidence ".repeat(2_000)}`;
+    await workspace.operational.messages.put({
+      messageId: "turn-dense:assistant:1",
+      sessionId: "session-dense",
+      role: "assistant",
+      content: assistantContent,
+      sensitivity: "normal",
+      createdAt: "2026-08-20T19:50:00.000Z",
+      metadata: Object.freeze({ turnId: "turn-dense" }),
+    });
+    const evidenceRefs: EvidenceRef[] = [
+      Object.freeze({ kind: "database_row" as const, table: "messages" as const, rowId: "turn-dense:user" }),
+      Object.freeze({
+        kind: "database_row" as const,
+        table: "messages" as const,
+        rowId: "turn-dense:assistant:1",
+      }),
+    ];
+    for (let index = 0; index < 40; index += 1) {
+      const toolCallId = `turn-dense:search:${String(index)}`;
+      await workspace.operational.toolCalls.put({
+        toolCallId,
+        sessionId: "session-dense",
+        toolName: "mcp.exa.web_search_exa",
+        request: Object.freeze({ query: `provider ${String(index)} ${"q".repeat(1_000)}` }),
+        response: Object.freeze({ results: [{ title: `Source ${String(index)}`, text: "x".repeat(2_000) }] }),
+        status: "completed",
+        sensitivity: "normal",
+        createdAt: `2026-08-20T19:4${String(index % 10)}:00.000Z`,
+        completedAt: `2026-08-20T19:4${String(index % 10)}:01.000Z`,
+      });
+      evidenceRefs.push(
+        Object.freeze({ kind: "database_row" as const, table: "tool_calls" as const, rowId: toolCallId }),
+      );
+    }
+    for (const [suffix, toolName] of [
+      ["save", "scripts.save"],
+      ["run", "scripts.run"],
+    ] as const) {
+      const toolCallId = `turn-dense:${suffix}`;
+      await workspace.operational.toolCalls.put({
+        toolCallId,
+        sessionId: "session-dense",
+        toolName,
+        request: Object.freeze({ name: "comparative-research-scout" }),
+        response: Object.freeze({ status: "completed", sources: 14 }),
+        status: "completed",
+        sensitivity: "normal",
+        createdAt: suffix === "save" ? "2026-08-20T19:51:00.000Z" : "2026-08-20T19:52:00.000Z",
+        completedAt: suffix === "save" ? "2026-08-20T19:51:01.000Z" : "2026-08-20T19:52:01.000Z",
+      });
+      evidenceRefs.push(
+        Object.freeze({ kind: "database_row" as const, table: "tool_calls" as const, rowId: toolCallId }),
+      );
+    }
+    const definitionRevision = await workspace.definitions.recordWorkingDefinition({
+      workingPath: "scripts/comparative-research-scout/index.mjs",
+      bytes: new TextEncoder().encode("export default async function scout() { return []; }\n"),
+      actor: Object.freeze({ actorId: "fixture", kind: "system" as const }),
+      reason: "Saved research scout fixture",
+    });
+    const inference = createScriptedLearningInferencePort({
+      steps: [
+        Object.freeze({
+          role: "reflector",
+          value: Object.freeze({
+            decision: "create",
+            proposal: Object.freeze({
+              name: "Comparative research scout",
+              description: "Reuse the saved comparative research scout.",
+              applicability: "Broad comparisons that require several independent sources.",
+              summary: "Attach the research scout proven in this turn.",
+              rationale: "The saved scout completed the same research pattern successfully.",
+              anticipatedEffect: "Future comparisons can reuse the working program.",
+              effects: Object.freeze([Object.freeze({ kind: "script", name: "comparative-research-scout" })]),
+              activationMode: "relevant",
+              consequence: "ordinary",
+              consequenceDescription: "This activates an existing saved project script.",
+              evidenceCitationIndexes: Object.freeze([0]),
+            }),
+          }),
+        }),
+      ],
+    });
+    const programs: CapabilityProgramLibrary = Object.freeze({
+      list: async () =>
+        Object.freeze([
+          Object.freeze({
+            kind: "script" as const,
+            name: "comparative-research-scout",
+            description: "Run bounded comparative research.",
+            revision: 1,
+          }),
+        ]),
+      resolve: async (kind: "script" | "workflow", name: string, requestedProject: ProjectRef) =>
+        kind === "script" &&
+        name === "comparative-research-scout" &&
+        requestedProject.projectId === project.projectId
+          ? Object.freeze({ kind: "script" as const, name, project, definitionRevision })
+          : undefined,
+    });
+    const module = createCapabilityLearningModule({
+      workspace,
+      store: workspace.capabilities,
+      registry: createAtomicCapabilityRegistry(),
+      history: emptyHistory,
+      inference,
+      reflector: Object.freeze({
+        variant: Object.freeze({
+          variantId: "reflector-v1",
+          axis: "role",
+          configurationRefs: Object.freeze([promptRevision]),
+        }),
+        promptRevision,
+        model: "controlled",
+        reasoning: "high",
+      }),
+      programs,
+      now: () => "2026-08-20T20:00:00.000Z",
+      nextId: (prefix) => `${prefix}-dense`,
+    });
+
+    await expect(
+      module.reflectSettledTurn(
+        Object.freeze({
+          turn: Object.freeze({
+            sessionId: "session-dense",
+            turnId: "turn-dense",
+            userMessage: "Research several providers and improve how you perform this work next time.",
+            assistantMessage: assistantContent,
+            outcome: "accepted",
+            servedWorkingAdjustmentOutcomes: [],
+            scope: "global",
+            sensitivity: "normal",
+            evidenceRefs: [...evidenceRefs],
+            telemetry: Object.freeze({ retryCount: 0, toolFailureCount: 0, aborted: false }),
+            occurredAt,
+          }),
+          project,
+          selectedCapabilities: Object.freeze([]),
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ status: "activated" });
+
+    const request = inference.requests()[0];
+    expect(request?.messages.every((message) => message.content.length <= 10_000)).toBe(true);
+    const evidence = request?.messages.find((message) => message.name === "evidence")?.content ?? "";
+    expect(evidence).toContain('"count":40');
+    expect(evidence).toContain("scripts.save");
+    expect(evidence).toContain("scripts.run");
+    expect(evidence).toContain("mcp.exa.web_search_exa");
+    expect((await workspace.capabilities.listRevisions("capability-dense"))[0]).toMatchObject({
+      revision: {
+        effects: [
+          {
+            kind: "script",
+            name: "comparative-research-scout",
+            project,
+            definitionRevision,
+          },
+        ],
+      },
+    });
   });
 
   test("attaches a saved workflow by its exact canonical revision instead of authoring a parallel workflow", async () => {

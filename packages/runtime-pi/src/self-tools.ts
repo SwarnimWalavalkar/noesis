@@ -4,7 +4,6 @@ import { type JsonValue, JsonValueSchema } from "@noesis/domain";
 import { z } from "zod";
 import type { PiFrozenToolCatalog } from "./execute-tool.ts";
 
-const MAX_DIRECT_TOOL_RESULT_BYTES = 64 * 1024;
 const inspectInput = z.strictObject({
   section: z.enum(["overview", "context", "capabilities", "memory", "experiments", "tools"]).optional(),
   tool: z.string().trim().min(1).max(128).optional(),
@@ -95,8 +94,6 @@ function directTool<Parameters extends z.ZodType>(input: {
         input.signal.removeEventListener("abort", abortTurn);
         toolSignal?.removeEventListener("abort", abortTool);
       }
-      if (new TextEncoder().encode(serialized).byteLength > MAX_DIRECT_TOOL_RESULT_BYTES)
-        throw new Error(`${input.name} result exceeds ${String(MAX_DIRECT_TOOL_RESULT_BYTES)} bytes`);
       return {
         content: [{ type: "text", text: serialized }],
         details: { semantic: true },

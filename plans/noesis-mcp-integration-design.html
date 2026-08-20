@@ -88,7 +88,7 @@
 
   <section><h2>Schema and result handling</h2>
     <p>Keep MCP JSON Schema as JSON Schema. Do not build a lossy JSON-Schema-to-Zod compiler. The protocol SDK validates MCP envelopes; the Broker accepts a JSON object at its runtime boundary and publishes the server's original input schema to the model. This follows OpenCode's practical approach of adapting native MCP schemas directly, while Hermes likewise registers discovered schemas without introducing a second type system.</p>
-    <p>Return the native MCP result shape: content blocks, structured content, resource links, and embedded resources. Text renders as text; images and other content remain typed blocks; large payloads use Noesis's existing artifact storage automatically. There is no MCP-specific result format.</p>
+    <p>Return and persist the native MCP result shape: content blocks, structured content, resource links, and embedded resources. Text renders as text; images and other content remain typed blocks. Noesis does not replace a valid large result with a host-authored artifact reference or impose a generic byte ceiling. The server owns a context-sensitive result contract, while Noesis may project older results only when constructing a later bounded model request.</p>
   </section>
 
   <section><h2>Names and execution identity</h2>

@@ -8,7 +8,6 @@ const DEFAULT_MAX_CALLS = 128;
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_MAX_PROGRESS_BYTES = 256 * 1024;
 const DEFAULT_MAX_PROGRESS_VALUE_BYTES = 64 * 1024;
-const DEFAULT_MAX_RESULT_BYTES = 256 * 1024;
 const DEFAULT_MAX_SDK_REQUEST_BYTES = 256 * 1024;
 const DEFAULT_MAX_CHILD_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_MAX_CHILD_IPC_BYTES = 8 * 1024 * 1024;
@@ -488,14 +487,16 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
         child.on("message", (raw: unknown) => {
           try {
             const frameBytes = jsonBytes(raw);
-            if (frameBytes > DEFAULT_MAX_CHILD_FRAME_BYTES) {
+            const terminalResultFrame =
+              typeof raw === "object" && raw !== null && Reflect.get(raw, "type") === "result";
+            if (!terminalResultFrame && frameBytes > DEFAULT_MAX_CHILD_FRAME_BYTES) {
               finishFailure(
                 new Error(`Codemode IPC frame exceeds ${String(DEFAULT_MAX_CHILD_FRAME_BYTES)} bytes`),
               );
               return;
             }
-            childIpcBytes += frameBytes;
-            if (childIpcBytes > DEFAULT_MAX_CHILD_IPC_BYTES) {
+            if (!terminalResultFrame) childIpcBytes += frameBytes;
+            if (!terminalResultFrame && childIpcBytes > DEFAULT_MAX_CHILD_IPC_BYTES) {
               finishFailure(
                 new Error(`Codemode IPC output exceeds ${String(DEFAULT_MAX_CHILD_IPC_BYTES)} bytes`),
               );
@@ -533,10 +534,6 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               recordProgress(message.value);
               notify({ type: "progress", executionId, value: message.value });
             } else if (message.type === "result") {
-              if (jsonBytes(message.value) > DEFAULT_MAX_RESULT_BYTES) {
-                finishFailure(new Error(`Codemode result exceeds ${String(DEFAULT_MAX_RESULT_BYTES)} bytes`));
-                return;
-              }
               if (message.storeMutations.length > DEFAULT_MAX_STORE_ENTRIES) {
                 finishFailure(
                   new Error(`Codemode store mutations exceed ${String(DEFAULT_MAX_STORE_ENTRIES)} entries`),

@@ -272,9 +272,10 @@ function proposedActivationMode(
   return proposal.activationMode ?? current ?? "relevant";
 }
 
-const CURRENT_CAPABILITIES_MAX_CHARACTERS = 12_000;
+const REFLECTOR_MESSAGE_MAX_CHARACTERS = 10_000;
+const CURRENT_CAPABILITIES_MAX_CHARACTERS = REFLECTOR_MESSAGE_MAX_CHARACTERS;
 const CURRENT_CAPABILITIES_MAX_ITEMS = 64;
-const CURRENT_MATERIALS_MAX_CHARACTERS = 16_000;
+const CURRENT_MATERIALS_MAX_CHARACTERS = REFLECTOR_MESSAGE_MAX_CHARACTERS;
 const CURRENT_MATERIAL_EXCERPT_CHARACTERS = 4_000;
 const AVAILABLE_PROGRAMS_MAX_CHARACTERS = 8_000;
 const AVAILABLE_PROGRAMS_MAX_ITEMS = 64;
@@ -294,6 +295,7 @@ function currentCapabilitiesMessage(
       return Object.freeze({
         capabilityId: definition.capabilityId,
         name: definition.name,
+        selectedForSettledTurn: selectedIds.has(definition.capabilityId),
         effects: lifecycle ? capabilityEffectKinds(lifecycle.revision) : Object.freeze([]),
         ...(!lifecycle && definition.kind ? { legacyKind: definition.kind } : {}),
         description: definition.description,
@@ -348,7 +350,55 @@ function citedEvidence(
   return Object.freeze([...selected.values()]);
 }
 
-const CURRENT_TURN_CITATION_CHARACTERS = 1_200;
+const CURRENT_TURN_CITATION_CHARACTERS = 800;
+const MINIMUM_CITATION_CHARACTERS = 96;
+const MAX_REFLECTION_CITATIONS = 32;
+
+interface ReflectionCitationCandidate {
+  readonly citation: ExactCitation;
+  readonly kind: "message" | "tool_call" | "outcome" | "history";
+  readonly priority: number;
+  readonly toolName?: string;
+  readonly toolStatus?: string;
+}
+
+function boundedText(value: string, maximumCharacters: number): string | Readonly<Record<string, unknown>> {
+  if (value.length <= maximumCharacters) return value;
+  const markerCharacters = 160;
+  const retainedCharacters = Math.max(0, maximumCharacters - markerCharacters);
+  const leadingCharacters = Math.ceil(retainedCharacters * 0.7);
+  const trailingCharacters = retainedCharacters - leadingCharacters;
+  return Object.freeze({
+    excerpt: `${value.slice(0, leadingCharacters)}\n… omitted ${String(value.length - retainedCharacters)} characters …\n${value.slice(value.length - trailingCharacters)}`,
+    contentDigest: sha256(value),
+    originalCharacters: value.length,
+    truncated: true,
+  });
+}
+
+function settledTurnMessage(input: CapabilityLearningTurn & { readonly feedback?: string }): string {
+  const encoded = canonicalJson({
+    sessionId: input.turn.sessionId,
+    turnId: input.turn.turnId,
+    ...(input.turn.outcomeId ? { outcomeId: input.turn.outcomeId } : {}),
+    scope: input.turn.scope,
+    userMessage: boundedText(input.turn.userMessage, 3_000),
+    ...(input.turn.assistantMessage
+      ? { assistantMessage: boundedText(input.turn.assistantMessage, 3_000) }
+      : {}),
+    ...(input.turn.correction ? { correction: boundedText(input.turn.correction, 1_000) } : {}),
+    ...(input.feedback ? { explicitFeedback: boundedText(input.feedback, 1_000) } : {}),
+    outcome: input.turn.outcome,
+    occurredAt: input.turn.occurredAt,
+    sensitivity: input.turn.sensitivity,
+    telemetry: input.turn.telemetry,
+    evidenceRefCount: input.turn.evidenceRefs.length,
+    priorAdjustmentOutcomeCount: input.turn.servedWorkingAdjustmentOutcomes.length,
+  });
+  if (encoded.length > REFLECTOR_MESSAGE_MAX_CHARACTERS)
+    throw new Error("Bounded settled turn exceeds the reflector message budget");
+  return encoded;
+}
 
 function exactCitation(source: ExactCitation["source"], occurredAt: string, content: string): ExactCitation {
   const excerpt = content.slice(0, CURRENT_TURN_CITATION_CHARACTERS);
@@ -365,24 +415,28 @@ function exactCitation(source: ExactCitation["source"], occurredAt: string, cont
 async function currentTurnCitations(
   workspace: NoesisWorkspaceStore,
   turn: LearningTurnInput,
-): Promise<readonly ExactCitation[]> {
-  const citations: ExactCitation[] = [];
+): Promise<readonly ReflectionCitationCandidate[]> {
+  const citations: ReflectionCitationCandidate[] = [];
   for (const reference of turn.evidenceRefs) {
     if (reference.kind !== "database_row") continue;
     if (reference.table === "messages") {
       const message = await workspace.operational.messages.get(reference.rowId);
       if (!message || message.sensitivity !== "normal") continue;
       citations.push(
-        exactCitation(
-          Object.freeze({
-            kind: "database_row",
-            table: "messages",
-            rowId: message.messageId,
-            field: "content",
-          }),
-          message.createdAt,
-          message.content,
-        ),
+        Object.freeze({
+          citation: exactCitation(
+            Object.freeze({
+              kind: "database_row",
+              table: "messages",
+              rowId: message.messageId,
+              field: "content",
+            }),
+            message.createdAt,
+            message.content,
+          ),
+          kind: "message",
+          priority: message.role === "user" ? 0 : 1,
+        }),
       );
       continue;
     }
@@ -395,16 +449,22 @@ async function currentTurnCitations(
         canonicalJson(call.response ?? call.update ?? null),
       ].join("\n");
       citations.push(
-        exactCitation(
-          Object.freeze({
-            kind: "database_row",
-            table: "tool_calls",
-            rowId: call.toolCallId,
-            field: "trace",
-          }),
-          call.createdAt,
-          content,
-        ),
+        Object.freeze({
+          citation: exactCitation(
+            Object.freeze({
+              kind: "database_row",
+              table: "tool_calls",
+              rowId: call.toolCallId,
+              field: "trace",
+            }),
+            call.createdAt,
+            [call.toolName, call.status, content].join("\n"),
+          ),
+          kind: "tool_call",
+          priority: call.status === "completed" ? 2 : 0,
+          toolName: call.toolName,
+          toolStatus: call.status,
+        }),
       );
       continue;
     }
@@ -412,32 +472,144 @@ async function currentTurnCitations(
       const outcome = await workspace.operational.outcomes.get(reference.rowId);
       if (!outcome || outcome.sensitivity !== "normal") continue;
       citations.push(
-        exactCitation(
-          Object.freeze({
-            kind: "database_row",
-            table: "outcomes",
-            rowId: outcome.outcomeId,
-            field: "summary",
-          }),
-          outcome.createdAt,
-          outcome.summary,
-        ),
+        Object.freeze({
+          citation: exactCitation(
+            Object.freeze({
+              kind: "database_row",
+              table: "outcomes",
+              rowId: outcome.outcomeId,
+              field: "summary",
+            }),
+            outcome.createdAt,
+            outcome.summary,
+          ),
+          kind: "outcome",
+          priority: 0,
+        }),
       );
     }
   }
   if (citations.length > 0) return Object.freeze(citations);
   return Object.freeze([
-    exactCitation(
-      Object.freeze({
-        kind: "database_row",
-        table: "messages",
-        rowId: `${turn.turnId}:user`,
-        field: "content",
-      }),
-      turn.occurredAt,
-      turn.userMessage,
-    ),
+    Object.freeze({
+      citation: exactCitation(
+        Object.freeze({
+          kind: "database_row",
+          table: "messages",
+          rowId: `${turn.turnId}:user`,
+          field: "content",
+        }),
+        turn.occurredAt,
+        turn.userMessage,
+      ),
+      kind: "message",
+      priority: 0,
+    }),
   ]);
+}
+
+function resizeCitation(citation: ExactCitation, maximumCharacters: number): ExactCitation {
+  const excerpt = citation.excerpt.slice(0, maximumCharacters);
+  return Object.freeze({
+    ...citation,
+    excerpt,
+    endOffset: citation.startOffset + excerpt.length,
+  });
+}
+
+function representativeCurrentTurnCitations(
+  candidates: readonly ReflectionCitationCandidate[],
+): readonly ReflectionCitationCandidate[] {
+  const direct = candidates.filter((candidate) => candidate.kind !== "tool_call");
+  const groups = new Map<string, ReflectionCitationCandidate[]>();
+  for (const candidate of candidates) {
+    if (candidate.kind !== "tool_call") continue;
+    const key = `${candidate.toolName ?? "unknown"}\u0000${candidate.toolStatus ?? "unknown"}`;
+    const group = groups.get(key);
+    if (group) group.push(candidate);
+    else groups.set(key, [candidate]);
+  }
+  const tools = [...groups.values()].flatMap((group) => {
+    const first = group[0];
+    const last = group.at(-1);
+    if (!first) return [];
+    return last && canonicalJson(last.citation.source) !== canonicalJson(first.citation.source)
+      ? [first, last]
+      : [first];
+  });
+  return Object.freeze([...direct, ...tools]);
+}
+
+function reflectionEvidencePacket(
+  currentCandidates: readonly ReflectionCitationCandidate[],
+  historyCitations: readonly ExactCitation[],
+): { readonly citations: readonly ExactCitation[]; readonly content: string } {
+  const current = representativeCurrentTurnCitations(currentCandidates);
+  const selectedCurrent = [...current]
+    .sort(
+      (left, right) =>
+        left.priority - right.priority ||
+        left.citation.occurredAt.localeCompare(right.citation.occurredAt) ||
+        canonicalJson(left.citation.source).localeCompare(canonicalJson(right.citation.source)),
+    )
+    .slice(0, MAX_REFLECTION_CITATIONS)
+    .sort(
+      (left, right) =>
+        left.citation.occurredAt.localeCompare(right.citation.occurredAt) ||
+        canonicalJson(left.citation.source).localeCompare(canonicalJson(right.citation.source)),
+    );
+  const candidates = [
+    ...selectedCurrent,
+    ...historyCitations
+      .slice(0, Math.max(0, MAX_REFLECTION_CITATIONS - selectedCurrent.length))
+      .map((citation) => Object.freeze({ citation, kind: "history" as const, priority: 3 })),
+  ];
+  const toolGroups = [
+    ...new Map(
+      currentCandidates
+        .filter((candidate) => candidate.kind === "tool_call")
+        .map((candidate) => {
+          const key = `${candidate.toolName ?? "unknown"}\u0000${candidate.toolStatus ?? "unknown"}`;
+          return [key, { name: candidate.toolName ?? "unknown", status: candidate.toolStatus ?? "unknown" }];
+        }),
+    ).entries(),
+  ]
+    .map(([key, value]) => ({
+      ...value,
+      count: currentCandidates.filter(
+        (candidate) =>
+          candidate.kind === "tool_call" &&
+          `${candidate.toolName ?? "unknown"}\u0000${candidate.toolStatus ?? "unknown"}` === key,
+      ).length,
+    }))
+    .slice(0, 32);
+  let excerptCharacters = CURRENT_TURN_CITATION_CHARACTERS;
+  const retained = [...candidates];
+  while (retained.length > 0) {
+    const citations = retained.map((candidate) => resizeCitation(candidate.citation, excerptCharacters));
+    const content = canonicalJson({
+      coverage: {
+        currentTurnSources: currentCandidates.length,
+        representedCurrentTurnSources: retained.filter((candidate) => candidate.kind !== "history").length,
+        priorSessionSources: historyCitations.length,
+        toolGroups,
+      },
+      citations: citations.map((citation, index) => ({
+        index,
+        source: citation.source,
+        occurredAt: citation.occurredAt,
+        excerpt: citation.excerpt,
+      })),
+    });
+    if (content.length <= REFLECTOR_MESSAGE_MAX_CHARACTERS)
+      return Object.freeze({ citations: Object.freeze(citations), content });
+    if (excerptCharacters > MINIMUM_CITATION_CHARACTERS) {
+      excerptCharacters = Math.max(MINIMUM_CITATION_CHARACTERS, excerptCharacters - 64);
+      continue;
+    }
+    retained.pop();
+  }
+  throw new Error("Reflector evidence packet cannot fit its message budget");
 }
 
 async function currentCapabilityMaterialsMessage(
@@ -726,16 +898,16 @@ export function createCapabilityLearningModule(
     for (const revision of currentRevisions)
       if (revision) revisionsByCapabilityId.set(revision.reference.capabilityId, revision);
     const currentEvidence = await currentTurnCitations(options.workspace, input.turn);
-    const citations = Object.freeze([...currentEvidence, ...history.hits.map((hit) => hit.citation)]);
+    const evidence = reflectionEvidencePacket(
+      currentEvidence,
+      history.hits.map((hit) => hit.citation),
+    );
+    const citations = evidence.citations;
     const messages: readonly AgentMessage[] = Object.freeze([
       Object.freeze({
         role: "user" as const,
         name: "settled_turn",
-        content: canonicalJson({
-          ...input.turn,
-          selectedCapabilities: input.selectedCapabilities,
-          ...(input.feedback ? { explicitFeedback: input.feedback } : {}),
-        }),
+        content: settledTurnMessage(input),
       }),
       Object.freeze({
         role: "user" as const,
@@ -764,14 +936,7 @@ export function createCapabilityLearningModule(
       Object.freeze({
         role: "user" as const,
         name: "evidence",
-        content: canonicalJson(
-          citations.map((citation, index) => ({
-            index,
-            source: citation.source,
-            occurredAt: citation.occurredAt,
-            excerpt: citation.excerpt,
-          })),
-        ),
+        content: evidence.content,
       }),
     ]);
     const inferred = await options.inference.run(

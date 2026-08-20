@@ -487,7 +487,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     }),
     effect: ({ path }) => ({
       effect: "read",
-      resource: `file:${resolvedPath(cwd, path)}`,
+      resource: `file-read:${resolvedPath(cwd, path)}`,
       estimatedCost: 0,
     }),
     execute: async ({ path, startLine = 1, endLine }) => {

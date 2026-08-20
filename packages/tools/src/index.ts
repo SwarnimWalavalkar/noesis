@@ -16,7 +16,6 @@ import {
   inspectEffectExecutionFailure,
 } from "@noesis/policy";
 import { z } from "zod";
-import { MAX_TOOL_RESULT_BYTES } from "./limits.ts";
 
 const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_.-]{0,127}$/u;
 const MAX_TOOL_NAME_CHARACTERS = 128;
@@ -377,17 +376,6 @@ export interface CreateToolBrokerOptions {
   readonly permission: PermissionManifest;
   readonly recorder?: ToolInvocationRecorder;
   readonly now?: () => Date;
-  /**
-   * Produces the bounded value committed as the primary effect result. It runs after tool output
-   * validation and before primary authority settlement. Any I/O it performs must cross its own
-   * authority operation so recoverable storage settles before the original bytes are discarded.
-   * Returning undefined leaves the validated result unchanged.
-   */
-  readonly prepareResultForPersistence?: (
-    name: string,
-    value: JsonValue,
-    context: ToolExecutionContext,
-  ) => Promise<JsonValue | undefined>;
 }
 
 export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
@@ -560,40 +548,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
                 : String(error);
           throw createEffectExecutionFailure("invalid_output", `Tool returned invalid output: ${detail}`);
         }
-        const requireBoundedResult = (value: JsonValue): JsonValue => {
-          if (Buffer.byteLength(JSON.stringify(value), "utf8") > MAX_TOOL_RESULT_BYTES)
-            throw createEffectExecutionFailure(
-              "result_too_large",
-              `Tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`,
-            );
-          return value;
-        };
-        if (!options.prepareResultForPersistence) return requireBoundedResult(output);
-        let prepared: JsonValue | undefined;
-        try {
-          prepared = await options.prepareResultForPersistence(name, output, context);
-        } catch (error) {
-          throw new Error(
-            `Tool result persistence preparation failed: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-        if (prepared === undefined) return requireBoundedResult(output);
-        let projected: JsonValue;
-        try {
-          projected = JsonValueSchema.parse(prepared);
-        } catch (error) {
-          const detail =
-            error instanceof z.ZodError
-              ? z.prettifyError(error)
-              : error instanceof Error
-                ? error.message
-                : String(error);
-          throw createEffectExecutionFailure(
-            "invalid_output",
-            `Tool result persistence projection is invalid: ${detail}`,
-          );
-        }
-        return requireBoundedResult(projected);
+        return output;
       },
     });
     const decision = await options.authority.runForeground(request, permission);
@@ -617,14 +572,6 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
       return result;
     }
     const completedValue = decision.value;
-    if (Buffer.byteLength(JSON.stringify(completedValue), "utf8") > MAX_TOOL_RESULT_BYTES) {
-      const message = `Tool result exceeds ${MAX_TOOL_RESULT_BYTES} bytes`;
-      if (!recordedIsTerminal)
-        await options.recorder?.record(
-          Object.freeze({ ...baseRecord, status: "failed" as const, completedAt, error: message }),
-        );
-      return failure("result_too_large", message);
-    }
     const reportedFailure = entry.definition.reportedFailure?.(completedValue);
     if (reportedFailure) {
       if (!recordedIsTerminal)

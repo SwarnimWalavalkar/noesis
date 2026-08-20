@@ -15,7 +15,15 @@ import {
 
 const permission = Object.freeze({
   effects: Object.freeze(["read", "write", "execute", "network"]),
-  resourcePatterns: Object.freeze(["file:*", "directory:*", "search:*", "shell:*", "url:*", "artifact:*"]),
+  resourcePatterns: Object.freeze([
+    "file-read:*",
+    "file:*",
+    "directory:*",
+    "search:*",
+    "shell:*",
+    "url:*",
+    "artifact:*",
+  ]),
   credentialRefs: Object.freeze([]),
 });
 
@@ -105,6 +113,20 @@ describe("local work tools", () => {
     )
       throw new Error("files.read returned an unexpected value");
     expect(Buffer.byteLength(result["content"], "utf8")).toBeLessThanOrEqual(MAX_TOOL_TEXT_BYTES);
+  });
+
+  it("uses a read-only resource namespace distinct from file writes", () => {
+    const read = tool(toolsAt("/workspace"), "files.read");
+    const write = tool(toolsAt("/workspace"), "files.write");
+
+    expect(read.effect({ path: "/outside/notes.md" }, context())).toMatchObject({
+      effect: "read",
+      resource: "file-read:/outside/notes.md",
+    });
+    expect(write.effect({ path: "/outside/notes.md", content: "changed" }, context())).toMatchObject({
+      effect: "write",
+      resource: "file:/outside/notes.md",
+    });
   });
 
   it("does not invent a trailing line for newline-terminated or empty files", async () => {

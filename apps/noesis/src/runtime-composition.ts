@@ -110,7 +110,6 @@ import {
   createLocalWorkTools,
   createToolBroker,
   defineTool,
-  MAX_TOOL_RESULT_BYTES,
   type ToolBroker,
   type ToolDefinition,
   type ToolInvocationRecord,
@@ -2811,51 +2810,6 @@ export async function createApplicationRuntimeComposition(
         status: recordedToolInvocationStatus,
       }),
       permission: plan.permissionSnapshot,
-      prepareResultForPersistence: async (toolName, result, context) => {
-        if (!toolName.startsWith("mcp.")) return undefined;
-        const bytes = encoder.encode(JSON.stringify(result));
-        if (bytes.length <= MAX_TOOL_RESULT_BYTES) return result;
-        const resultDigest = sha256(bytes);
-        const path = `mcp/${sha256(`${plan.turnId}:${toolName}:${resultDigest}`).slice(0, 32)}.json`;
-        const operationId = `operation_${sha256(`mcp-artifact:${context.callId}:${resultDigest}`)}`;
-        const decision = await authority.runForeground(
-          {
-            operationId,
-            effect: "write",
-            resource: `artifact:${path}`,
-            estimatedCost: 0,
-            idempotencyKey: `mcp-artifact:${context.callId}:${resultDigest}`,
-            requestDigest: sha256(canonicalJson({ path, resultDigest })),
-            execute: async () =>
-              toJsonValue(
-                await workspace.artifacts.writeArtifact({
-                  path,
-                  mediaType: "application/json",
-                  bytes,
-                  actor: Object.freeze({ actorId: "noesis-mcp", kind: "noesis" as const }),
-                  relationshipRefs: Object.freeze([foregroundEvidence(plan)]),
-                }),
-              ),
-          },
-          plan.permissionSnapshot,
-        );
-        if (!decision.ok)
-          throw new Error(`MCP result artifact was not stored: ${decision.code}: ${decision.reason}`);
-        const artifact = z.strictObject({ artifactId: z.string() }).passthrough().parse(decision.value);
-        return toJsonValue({
-          content: [
-            {
-              type: "text",
-              text: `MCP result was ${String(bytes.length)} bytes and is available as artifact ${artifact.artifactId}.`,
-            },
-          ],
-          ...(typeof result === "object" && result !== null && Reflect.get(result, "isError") === true
-            ? { isError: true }
-            : {}),
-          artifact,
-          truncated: true,
-        });
-      },
     });
     const scriptAwareBroker: ToolBroker = Object.freeze({
       catalogId: broker.catalogId,
@@ -3801,6 +3755,7 @@ export async function createApplicationRuntimeComposition(
   const basePermissionManifest = Object.freeze({
     effects: Object.freeze(["read", "write", "execute", "network"] as const),
     resourcePatterns: Object.freeze([
+      "file-read:*",
       `file:${project.root}/*`,
       `directory:${project.root}`,
       `directory:${project.root}/*`,

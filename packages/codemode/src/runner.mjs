@@ -2,7 +2,6 @@ import process from "node:process";
 
 const pending = new Map();
 let sequence = 0;
-const MAX_RESULT_BYTES = 256 * 1024;
 const MAX_SDK_INPUT_BYTES = 256 * 1024;
 const MAX_STORE_VALUE_BYTES = 64 * 1024;
 const MAX_STORE_BYTES = 256 * 1024;
@@ -23,13 +22,14 @@ function rawSend(message) {
 function send(message) {
   const serialized = JSON.stringify(message);
   const frameBytes = Buffer.byteLength(serialized, "utf8");
-  if (frameBytes > MAX_CHILD_FRAME_BYTES) {
+  const terminalResultFrame = message?.type === "result";
+  if (!terminalResultFrame && frameBytes > MAX_CHILD_FRAME_BYTES) {
     throw new Error(`Codemode IPC frame exceeds ${MAX_CHILD_FRAME_BYTES} bytes`);
   }
-  if (childIpcBytes + frameBytes > MAX_CHILD_IPC_BYTES) {
+  if (!terminalResultFrame && childIpcBytes + frameBytes > MAX_CHILD_IPC_BYTES) {
     throw new Error(`Codemode IPC output exceeds ${MAX_CHILD_IPC_BYTES} bytes`);
   }
-  childIpcBytes += frameBytes;
+  if (!terminalResultFrame) childIpcBytes += frameBytes;
   rawSend(message);
 }
 
@@ -62,6 +62,10 @@ function boundedJsonSafe(value, maximum, label) {
     throw new Error(`${label} exceeds ${maximum} bytes`);
   }
   return JSON.parse(serialized);
+}
+
+function jsonSafe(value) {
+  return JSON.parse(JSON.stringify(value === undefined ? null : value));
 }
 
 function delegate(kind, payload) {
@@ -171,7 +175,7 @@ process.on("message", async (message) => {
     const value = await execute(tools, noesis, emit, notify, store, load, message.input ?? null);
     send({
       type: "result",
-      value: boundedJsonSafe(value, MAX_RESULT_BYTES, "Codemode result"),
+      value: jsonSafe(value),
       storeMutations: [...storeMutations.entries()],
     });
   } catch (error) {

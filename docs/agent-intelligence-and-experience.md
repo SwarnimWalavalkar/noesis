@@ -37,6 +37,8 @@ Use a capable model when a decision depends on meaning. Do not use keywords or r
 
 After every admitted foreground turn settles, the reflector receives the turn, runtime facts, active exact Capability references, and a small set of related cross-session evidence. It chooses one outcome:
 
+Tool-dense turns are projected structurally before reflection: repeated calls are counted and represented by their first and last exact citations, while user and assistant messages, outcomes, and failed calls receive priority. Every reflector message stays within its protected context policy. This projection does not decide what should be learned; the capable reflector still makes that semantic judgment and may attach an exact saved program produced by the turn.
+
 - `no_change`
 - create or revise one Capability
 - pause or restore a Capability
@@ -66,6 +68,10 @@ The default direct tool set also contains:
 - `shell`, backed by `shell.run`
 - `workflows_run`, backed by `workflows.run`
 - `search_sessions`, backed by `history.search_sessions`.
+
+`files.read` may read an explicitly named file anywhere the Noesis process can read. This does not widen file writes, directory traversal, or search: those remain bound to their declared project resources. A skill may still load progressively through `skills.load`, but its ordinary instruction file is not hidden from an explicit file read.
+
+The Broker does not impose a generic byte ceiling on a valid tool result. Each tool definition or MCP server owns the shape and context sensitivity of its result. Complete successful results remain authoritative and inspectable; the turn context allocator may project older results only when constructing a later model request.
 
 Normal cross-session search is available without requesting private history. Private retrieval is limited to one exact authorized session. Search snippets and exact evidence opening share one small, hard-bounded retrieval allowance, with a portion reserved for opening a citation so a successful search cannot make its own evidence impossible to inspect.
 

@@ -290,7 +290,7 @@ describe("tool broker", () => {
     expect(outputTransforms).toBe(1);
   });
 
-  it("preserves cancelled, invalid-output, and result-too-large failures", async () => {
+  it("preserves cancelled and invalid-output failures while accepting large valid results", async () => {
     const controller = new AbortController();
     const records: ToolInvocationRecord[] = [];
     const cancelling = defineTool({
@@ -345,15 +345,12 @@ describe("tool broker", () => {
       code: "invalid_output",
     });
     await expect(broker.invoke("test.oversized", {}, invocationContext())).resolves.toMatchObject({
-      ok: false,
-      code: "result_too_large",
+      ok: true,
+      value: "x".repeat(300 * 1024),
     });
     expect(
       records.filter((record) => record.toolName === "test.oversized").map((record) => record.status),
-    ).toEqual(["requested", "running", "failed"]);
-    expect(records.filter((record) => record.toolName === "test.oversized").at(-1)?.error).toContain(
-      "Tool result exceeds",
-    );
+    ).toEqual(["requested", "running", "completed"]);
   });
 
   it("records an effect-derivation exception as a terminal failure", async () => {
@@ -486,51 +483,7 @@ describe("tool broker", () => {
     expect(Object.isFrozen(broker.describe("mcp.docs.search")?.inputSchema)).toBe(true);
   });
 
-  it("prepares recoverable storage before settling the bounded primary result", async () => {
-    const original = toJsonValue({ content: [{ type: "text", text: "x".repeat(300 * 1024) }] });
-    const materialized = toJsonValue({ artifact: { artifactId: "artifact-1" }, truncated: true });
-    const sequence: string[] = [];
-    let persisted: JsonValue | undefined;
-    const authority: Pick<AuthorityBoundary, "runForeground"> = Object.freeze({
-      runForeground: async <T extends JsonValue>(
-        request: Parameters<AuthorityBoundary["runForeground"]>[0],
-      ): Promise<EffectDecision<T>> => {
-        const value = (await request.execute(receiptFor(request))) as T;
-        persisted = value;
-        sequence.push("primary-settled");
-        return Object.freeze({ ok: true, value, replayed: false });
-      },
-    });
-    const definition = defineTool({
-      name: "test.projected-result",
-      label: "Projected result",
-      description: "Returns an oversized result",
-      visibility: "codemode_only",
-      inputSchema: z.strictObject({}),
-      outputSchema: z.json(),
-      effect: () => ({ effect: "read", resource: "test:projected-result", estimatedCost: 0 }),
-      execute: async () => original,
-    });
-    const broker = createToolBroker({
-      definitions: [definition],
-      authority,
-      permission,
-      prepareResultForPersistence: async (_name, value) => {
-        expect(value).toEqual(original);
-        sequence.push("artifact-settled");
-        return materialized;
-      },
-    });
-
-    await expect(broker.invoke("test.projected-result", {}, invocationContext())).resolves.toMatchObject({
-      ok: true,
-      value: materialized,
-    });
-    expect(persisted).toEqual(materialized);
-    expect(sequence).toEqual(["artifact-settled", "primary-settled"]);
-  });
-
-  it("never hands an oversized unprepared result to durable authority persistence", async () => {
+  it("persists large valid results through durable authority without host projection", async () => {
     const persisted: JsonValue[] = [];
     const authority: Pick<AuthorityBoundary, "runForeground"> = Object.freeze({
       runForeground: async <T extends JsonValue>(
@@ -568,18 +521,18 @@ describe("tool broker", () => {
       ],
       authority,
       permission,
-      prepareResultForPersistence: async () => undefined,
     });
 
+    const large = "x".repeat(300 * 1024);
     await expect(broker.invoke("test.unprepared-large", {}, invocationContext())).resolves.toMatchObject({
-      ok: false,
-      code: "result_too_large",
+      ok: true,
+      value: large,
     });
     await expect(broker.invoke("test.unprepared-small", {}, invocationContext())).resolves.toMatchObject({
       ok: true,
       value: "small",
     });
-    expect(persisted).toEqual(["small"]);
+    expect(persisted).toEqual([large, "small"]);
   });
 
   it("settles a valid effect before reporting a protocol-owned tool failure", async () => {
@@ -612,15 +565,10 @@ describe("tool broker", () => {
     });
   });
 
-  it("reports the bounded materialized result instead of original failure details", async () => {
+  it("replays complete large protocol failure details", async () => {
     const original = toJsonValue({
       isError: true,
       content: [{ type: "text", text: "x".repeat(300 * 1024) }],
-    });
-    const materialized = toJsonValue({
-      isError: true,
-      truncated: true,
-      artifact: { artifactId: "artifact-1" },
     });
     let durableResult: JsonValue | undefined;
     let executions = 0;
@@ -655,7 +603,6 @@ describe("tool broker", () => {
       definitions: [definition],
       authority,
       permission,
-      prepareResultForPersistence: async () => materialized,
     });
 
     const context = Object.freeze({ ...invocationContext(), callId: "materialized-failure-call" });
@@ -664,9 +611,9 @@ describe("tool broker", () => {
         ok: false,
         code: "failed",
         message: "remote tool failed",
-        details: materialized,
+        details: original,
       });
-    expect(durableResult).toEqual(materialized);
+    expect(durableResult).toEqual(original);
     expect(executions).toBe(1);
   });
 });
