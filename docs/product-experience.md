@@ -144,6 +144,8 @@ The user asks Noesis to investigate a repository, change files, run commands, se
 
 The conversation gets the final result. The user can still inspect each tool call and revision.
 
+For analysis that benefits from more history than the foreground prompt should carry, `execute` can inspect the complete pre-turn session as a lazy immutable document. It may give one selected slice to an isolated model and combine the answer with local code or other tools. This keeps the ordinary prompt bounded without reducing the programmable surface to a short transcript tail.
+
 When a program has a clear use in the project, the user or the agent may save it directly. One reusable computation becomes a typed script. A multi-phase program with durable progress becomes a workflow. A workflow can pause for corrections and resume later.
 
 Skills provide portable instructions. They do not install executable access.

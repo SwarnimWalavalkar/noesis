@@ -40,7 +40,7 @@ export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPoli
   return Object.freeze(
     createConditionalObject({
       policyId: foreground ? "foreground-bounded-v1" : `${role}-isolated-v1`,
-      maxMessages: compactor ? 1 : DEFAULT_MAX_MESSAGES,
+      maxMessages: compactor ? 2 : DEFAULT_MAX_MESSAGES,
       maxCharactersPerMessage: compactor ? 4000000 : DEFAULT_MESSAGE_CHARACTERS,
       maxTotalCharacters: compactor ? 4000000 : DEFAULT_TOTAL_CHARACTERS,
       maxEvidenceRefs: DEFAULT_EVIDENCE_REFS,

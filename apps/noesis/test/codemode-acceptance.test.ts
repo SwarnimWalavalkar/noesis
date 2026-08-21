@@ -2,7 +2,7 @@ import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveNoesisConfig } from "@noesis/config";
-import { createPiAgentRuntime, projectWorkflowToolName } from "@noesis/runtime-pi";
+import { createPiAgentRuntime, type PiModelQueryRequest, projectWorkflowToolName } from "@noesis/runtime-pi";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   CONTROLLED_PI_MODEL,
@@ -20,6 +20,99 @@ afterEach(async () => {
 });
 
 describe("production codemode journey", () => {
+  test("codemode queries the frozen pre-turn context through the canonical Broker path", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-model-query-acceptance-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const nestedRequests: PiModelQueryRequest[] = [];
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText }) => {
+        if (lastUserText.includes("Seed")) return "The durable seed is cobalt.";
+        if (context.messages.at(-1)?.role === "toolResult") return "The nested analysis is complete.";
+        return controlledToolCallResponse(
+          "execute",
+          {
+            source: [
+              "const selected = context.slice(0);",
+              'const answer = await models.query("Return the durable seed word.", selected);',
+              "return { contextLength: context.length, answer };",
+            ].join("\n"),
+          },
+          "call-query-context",
+        );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      modelQuery: Object.freeze({
+        query: async (request: PiModelQueryRequest) => {
+          nestedRequests.push(request);
+          return Object.freeze({
+            text: "cobalt",
+            provider: request.provider,
+            model: request.model,
+            thinkingLevel: request.thinkingLevel,
+            stopReason: "stop" as const,
+            usage: Object.freeze({
+              inputTokens: 23,
+              outputTokens: 1,
+              totalTokens: 24,
+              estimatedCost: 0,
+            }),
+          });
+        },
+      }),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Nested model query acceptance" });
+
+    await runtime.debug.runTurn(trail.trailId, "Seed the session with cobalt.");
+    const result = await runtime.debug.runTurn(
+      trail.trailId,
+      "Use codemode to ask a model about the previous session context.",
+    );
+
+    expect(result.output).toBe("The nested analysis is complete.");
+    expect(nestedRequests).toHaveLength(1);
+    const nested = nestedRequests[0];
+    if (!nested) throw new Error("Expected one nested model request");
+    expect(nested.prompt).toBe("Return the durable seed word.");
+    expect(nested.context).toHaveLength(1);
+    expect(nested.context[0]).toContain("Seed the session with cobalt.");
+    expect(nested.context[0]).toContain("The durable seed is cobalt.");
+    expect(nested.context[0]).not.toContain("Use codemode to ask a model");
+    const modelCalls = await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId);
+    expect(modelCalls).toMatchObject([
+      {
+        status: "completed",
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        usage: { inputTokens: 23, outputTokens: 1, totalTokens: 24, estimatedCost: 0 },
+        requestArtifactId: expect.any(String),
+        outputArtifactId: expect.any(String),
+      },
+    ]);
+    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    expect(calls.map((call) => call.toolName)).toEqual(["execute", "models.query"]);
+    await runtime.shutdown();
+  });
+
   test("a direct hotbar read records one Broker action without a codemode execution", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-hotbar-acceptance-"));
     roots.push(home);

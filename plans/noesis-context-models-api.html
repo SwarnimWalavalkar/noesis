@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Noesis codemode context and models API</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #090b10;
+        --panel: #11151d;
+        --text: #eef2f7;
+        --muted: #9aa7b8;
+        --line: #2a3442;
+        --accent: #a99cff;
+        --green: #9ee6b3;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 15px;
+        line-height: 1.6;
+      }
+      header,
+      main,
+      footer {
+        width: min(calc(100% - 2rem), 76rem);
+        margin-inline: auto;
+      }
+      header {
+        padding: 5rem 0 2rem;
+      }
+      main {
+        padding-bottom: 4rem;
+      }
+      footer {
+        padding: 2rem 0 4rem;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+      }
+      h1,
+      h2 {
+        line-height: 1.15;
+        text-wrap: balance;
+      }
+      h1 {
+        max-width: 15ch;
+        margin: 0;
+        font-size: clamp(2.5rem, 7vw, 5.5rem);
+        letter-spacing: -0.06em;
+      }
+      h2 {
+        margin-top: 0;
+      }
+      p,
+      li {
+        max-width: 78ch;
+      }
+      section {
+        margin-top: 1rem;
+        padding: clamp(1rem, 3vw, 2rem);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+      }
+      code {
+        color: var(--green);
+      }
+      pre {
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        background: #07090d;
+        overflow-x: auto;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 0.7rem;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+      th,
+      .eyebrow {
+        color: var(--accent);
+      }
+      .eyebrow {
+        font-weight: 700;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+      .lede,
+      .muted {
+        color: var(--muted);
+      }
+      .decision {
+        border-left: 3px solid var(--green);
+        padding-left: 1rem;
+      }
+      .scroll {
+        overflow-x: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="eyebrow">Noesis · shipped design record</div>
+      <h1>Context and models in codemode</h1>
+      <p class="lede">
+        Give generated programs a complete session document and one way to ask a
+        model about selected parts of it, without enlarging every foreground
+        prompt or creating a second execution system.
+      </p>
+    </header>
+
+    <main>
+      <section>
+        <h2>Decision</h2>
+        <p class="decision">
+          Codemode receives two globals: a lazy immutable <code>context</code>
+          view and <code>models.query(prompt, context?)</code>. The latter is an
+          ergonomic alias for an ordinary tool in the frozen Tool Catalog and
+          Broker.
+        </p>
+        <pre><code>const recent = context.slice(-20000);
+const answer = await models.query(
+  "List unresolved decisions and cite the supporting lines.",
+  recent
+);
+return answer;</code></pre>
+      </section>
+
+      <section>
+        <h2>Why this shape</h2>
+        <p>
+          A bounded foreground prompt is good for conversation but a poor
+          programmable data boundary. Codemode should be able to inspect a long
+          session, partition it, run local transformations, delegate only the
+          useful pieces, and combine the results. Passing the whole transcript
+          into every model step would spend context before the program knows what
+          matters.
+        </p>
+        <p>
+          The smallest useful API is therefore a document plus one model call.
+          Search, map-reduce, batching, model selection, and summarization helpers
+          can be written in ordinary JavaScript if real use proves they recur.
+        </p>
+      </section>
+
+      <section>
+        <h2>API contract</h2>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Surface</th>
+                <th>Contract</th>
+                <th>Important property</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>context.length</code></td>
+                <td>JavaScript character length of the frozen document.</td>
+                <td>Does not read the artifact.</td>
+              </tr>
+              <tr>
+                <td><code>context.slice(start?, end?)</code></td>
+                <td>Returns another immutable view with ordinary slice indexes.</td>
+                <td>Composes without copying text.</td>
+              </tr>
+              <tr>
+                <td><code>await context.text()</code></td>
+                <td>Reads the selected range as text.</td>
+                <td>Verifies digest and lengths before use.</td>
+              </tr>
+              <tr>
+                <td><code>models.query(prompt, context?)</code></td>
+                <td>Accepts text, a context view, or an array of either.</td>
+                <td>Isolated, tool-free, cancellable, and route-pinned.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>The frozen document</h2>
+        <p>
+          Every admitted turn pins an immutable JSONL artifact representing the
+          complete session before the current request. It contains visible user
+          and assistant messages plus recorded tool calls, code executions,
+          nested model calls, and workflow runs. It excludes the system prompt,
+          current request, credentials, and internal background jobs.
+        </p>
+        <p>
+          The artifact reference, format, byte length, character length, and
+          digest live in the frozen turn plan. The child receives only the
+          verified path and identity. A resumed workflow restores the document
+          pinned when that workflow run started; it does not silently switch to
+          a newer session snapshot.
+        </p>
+      </section>
+
+      <section>
+        <h2>One invocation path</h2>
+        <pre>codemode JavaScript
+  └─ models.query(prompt, ContextView)
+       └─ SDK invoke envelope
+            └─ frozen Tool Broker: models.query
+                 ├─ validate handle against active execution
+                 ├─ expand the selected immutable range
+                 ├─ reserve network effect under current authority
+                 ├─ run tool-free model on frozen route
+                 └─ record request, output, usage, latency, and lineage</pre>
+        <p>
+          The child has no provider client. It cannot choose a hidden model,
+          bypass permissions, or create an unrecorded nested call. Scripts,
+          workflow phases, and ad hoc codemode all use the same globals and the
+          same Broker definition.
+        </p>
+      </section>
+
+      <section>
+        <h2>Durable authority</h2>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Datum</th>
+                <th>Authority</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Session timeline facts</td>
+                <td>Existing SQLite operational rows and message records.</td>
+              </tr>
+              <tr>
+                <td>Frozen context bytes</td>
+                <td>Ordinary artifact file with SQLite metadata.</td>
+              </tr>
+              <tr>
+                <td>Turn context identity</td>
+                <td>Immutable <code>FrozenTurnPlan</code> reference.</td>
+              </tr>
+              <tr>
+                <td>Workflow context identity</td>
+                <td>Immutable columns on the workflow run.</td>
+              </tr>
+              <tr>
+                <td>Nested query status and lineage</td>
+                <td><code>model_calls</code> operational rows.</td>
+              </tr>
+              <tr>
+                <td>Exact nested request and output</td>
+                <td>Artifact files referenced by the model call.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Alternatives not chosen</h2>
+        <ul>
+          <li>
+            Injecting the full transcript into the foreground prompt couples
+            analytical reach to conversational context cost.
+          </li>
+          <li>
+            Giving codemode a provider SDK creates a second route, permission,
+            cancellation, and telemetry path.
+          </li>
+          <li>
+            Adding <code>search</code>, <code>queryMany</code>, or
+            <code>mapReduce</code> now guesses at abstractions JavaScript can
+            already express.
+          </li>
+          <li>
+            Letting resumed workflows see the newest session context makes a
+            durable run depend on bytes it never started with.
+          </li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Acceptance</h2>
+        <ul>
+          <li>The document contains prior visible and operational activity but not the current request.</li>
+          <li>Context views remain lazy, immutable, composable, and digest-verified.</li>
+          <li>A nested call expands only a handle from its active execution.</li>
+          <li>The nested model has no tools and uses the frozen foreground route.</li>
+          <li>Cancellation settles the model call and parent execution truthfully.</li>
+          <li>Request, output, usage, latency, and parent lineage survive restart.</li>
+          <li>Workflow resume uses the original context document and fails closed if it is unavailable.</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer>
+      This record extends the shipped tools, codemode, scripts, and workflows
+      architecture. Current behavior belongs in <code>docs/</code>; this file
+      preserves the reasoning behind the API.
+    </footer>
+  </body>
+</html>

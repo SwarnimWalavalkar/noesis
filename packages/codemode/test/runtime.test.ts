@@ -1,4 +1,7 @@
-import { createConditionalObject } from "@noesis/domain";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createConditionalObject, sha256, toJsonValue } from "@noesis/domain";
 import type { JsonValue } from "@noesis/domain";
 import type { AuthorityBoundary, EffectDecision } from "@noesis/policy";
 import {
@@ -12,9 +15,27 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { type CodeExecutionEvent, type CodeModeRuntime, createCodeModeRuntime } from "../src/index.ts";
 const runtimes = new Set<CodeModeRuntime>();
+const roots = new Set<string>();
+type ControlledModelQueryContext =
+  | string
+  | Readonly<{
+      __noesisContext: Readonly<{ documentId: string; start: number; end: number }>;
+    }>
+  | readonly (
+      | string
+      | Readonly<{
+          __noesisContext: Readonly<{ documentId: string; start: number; end: number }>;
+        }>
+    )[];
+interface ControlledModelQueryInput {
+  readonly prompt: string;
+  readonly context?: ControlledModelQueryContext | undefined;
+}
 afterEach(async () => {
   await Promise.all([...runtimes].map(async (code) => await code.shutdown()));
   runtimes.clear();
+  await Promise.all([...roots].map(async (root) => await rm(root, { recursive: true, force: true })));
+  roots.clear();
 });
 function authority(): Pick<AuthorityBoundary, "runForeground"> {
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
@@ -39,15 +60,17 @@ function runtime(
     readonly beforeDouble?: () => Promise<void>;
     readonly doubleProgress?: JsonValue;
     readonly overrideInvocationResult?: ToolInvocationResult;
+    readonly queryModel?: (input: ControlledModelQueryInput) => Promise<string>;
   } = {},
 ) {
+  const queryModel = options.queryModel;
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const broker = createToolBroker(
     createConditionalObject({
       authority: authority(),
       permission: Object.freeze({
         effects: Object.freeze(["read"]),
-        resourcePatterns: Object.freeze(["math:"]),
+        resourcePatterns: Object.freeze(["math:", "model:"]),
         credentialRefs: Object.freeze([]),
       }),
       definitions: [
@@ -65,6 +88,46 @@ function runtime(
             return { value: value * 2 };
           },
         }),
+        ...(queryModel
+          ? [
+              defineTool({
+                name: "models.query",
+                label: "Query model",
+                description: "Controlled nested model query",
+                visibility: "codemode_only",
+                inputSchema: z.strictObject({
+                  prompt: z.string(),
+                  context: z
+                    .union([
+                      z.string(),
+                      z.strictObject({
+                        __noesisContext: z.strictObject({
+                          documentId: z.string(),
+                          start: z.number().int(),
+                          end: z.number().int(),
+                        }),
+                      }),
+                      z.array(
+                        z.union([
+                          z.string(),
+                          z.strictObject({
+                            __noesisContext: z.strictObject({
+                              documentId: z.string(),
+                              start: z.number().int(),
+                              end: z.number().int(),
+                            }),
+                          }),
+                        ]),
+                      ),
+                    ])
+                    .optional(),
+                }),
+                outputSchema: z.string(),
+                effect: () => ({ effect: "read", resource: "model:query", estimatedCost: 0 }),
+                execute: async (input) => await queryModel(input),
+              }),
+            ]
+          : []),
       ],
     } as const)
       .addOptional(options.recorder ? { recorder: options.recorder } : undefined)
@@ -79,6 +142,60 @@ function runtime(
   return code;
 }
 describe("codemode runtime", () => {
+  it("exposes a lazy immutable context view and the models.query alias", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-codemode-context-"));
+    roots.add(root);
+    const content = '{"type":"message","content":"first"}\n{"type":"message","content":"second"}\n';
+    const path = join(root, "context.jsonl");
+    await writeFile(path, content);
+    const queries: JsonValue[] = [];
+    const contentDigest = sha256(content);
+    const documentId = `context_document_${contentDigest}`;
+    const code = runtime({
+      queryModel: async (input) => {
+        queries.push(toJsonValue(input));
+        return "nested answer";
+      },
+    });
+    const result = await code.execute({
+      source: `
+        const selected = context.slice(-40);
+        return {
+          length: context.length,
+          selected: await selected.text(),
+          answer: await models.query("Summarize the last entry", [selected, "Be concise"])
+        };
+      `,
+      sessionId: "session-context",
+      contextDocument: Object.freeze({
+        documentId,
+        path,
+        characterLength: content.length,
+        byteLength: Buffer.byteLength(content, "utf8"),
+        contentDigest,
+      }),
+    });
+    expect(result.value).toEqual({
+      length: content.length,
+      selected: content.slice(-40),
+      answer: "nested answer",
+    });
+    expect(queries).toEqual([
+      {
+        prompt: "Summarize the last entry",
+        context: [
+          {
+            __noesisContext: {
+              documentId,
+              start: content.length - 40,
+              end: content.length,
+            },
+          },
+          "Be concise",
+        ],
+      },
+    ]);
+  });
   it("runs ordinary JavaScript and composes sequential and parallel SDK calls", async () => {
     const events: CodeExecutionEvent[] = [];
     const result = await runtime().execute(

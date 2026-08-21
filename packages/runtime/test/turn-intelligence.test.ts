@@ -317,6 +317,21 @@ describe("turn intelligence", () => {
         contentDigest: sha256(priorAssistant.content),
       },
     ]);
+    const contextDocument = related.contextDocument;
+    if (!contextDocument) throw new Error("Expected a frozen context document");
+    const contextText = new TextDecoder().decode(
+      await workspace.reads.readArtifact(contextDocument.artifact),
+    );
+    expect(contextDocument).toMatchObject({
+      documentId: `context_document_${sha256(contextText)}`,
+      format: "noesis-session-context-v1",
+      characterLength: contextText.length,
+      byteLength: Buffer.byteLength(contextText, "utf8"),
+      contentDigest: sha256(contextText),
+    });
+    expect(contextText).toContain("Prepare a research brief about the current repository");
+    expect(contextText).toContain("I will implement the proposed changes.");
+    expect(contextText).not.toContain("No, keep it review-only");
     expect(related.permissionSnapshot).toEqual({
       effects: ["read", "execute"],
       resourcePatterns: ["*"],

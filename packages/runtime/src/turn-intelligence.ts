@@ -3,6 +3,7 @@ import {
   type FrozenBaselineRef,
   type FrozenCapabilitySelection,
   type FrozenContextCheckpoint,
+  type FrozenContextDocument,
   type FrozenRevisionMaterial,
   type FrozenTurnPlan,
   frozenTurnPlanDigest,
@@ -26,7 +27,7 @@ import type {
   ProjectRef,
   WorkingAdjustment,
 } from "@noesis/domain";
-import { createConditionalObject, canonicalJson, sha256 } from "@noesis/domain";
+import { createConditionalObject, canonicalJson, sha256, toJsonValue } from "@noesis/domain";
 import { isCapabilityBindingAdmissionConflictError, type NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
 const decoder = new TextDecoder("utf8", { fatal: true });
@@ -73,6 +74,201 @@ async function freezeContextCheckpoint(
     sourceDigest: checkpoint.sourceDigest,
     sensitivity: checkpoint.sensitivity,
     createdAt: checkpoint.createdAt,
+  });
+}
+interface ContextDocumentLine {
+  readonly occurredAt: string;
+  readonly stableId: string;
+  readonly kindOrder: number;
+  readonly value: import("@noesis/domain").JsonValue;
+}
+function optionalJsonFields(
+  value: Readonly<Record<string, import("@noesis/domain").JsonValue | undefined>>,
+): Readonly<Record<string, import("@noesis/domain").JsonValue>> {
+  const present: Record<string, import("@noesis/domain").JsonValue> = {};
+  for (const [key, item] of Object.entries(value)) if (item !== undefined) present[key] = item;
+  return Object.freeze(present);
+}
+async function freezeContextDocument(
+  workspace: NoesisWorkspaceStore,
+  sessionId: string,
+): Promise<FrozenContextDocument> {
+  const [session, messages, toolCalls, codeExecutions, modelCalls, workflowRuns] = await Promise.all([
+    workspace.operational.sessions.get(sessionId),
+    workspace.operational.messages.listForSession(sessionId),
+    workspace.operational.toolCalls.listForSession(sessionId),
+    workspace.operational.codeExecutions.listForSession(sessionId),
+    workspace.operational.modelCalls.listForSession(sessionId),
+    workspace.operational.workflows.listRunsForSession(sessionId),
+  ]);
+  const lines: ContextDocumentLine[] = [];
+  for (const message of messages) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
+    lines.push(
+      Object.freeze({
+        occurredAt: message.createdAt,
+        stableId: message.messageId,
+        kindOrder: 0,
+        value: toJsonValue({
+          type: "message",
+          messageId: message.messageId,
+          sessionId,
+          role: message.role,
+          content: message.content,
+          sensitivity: message.sensitivity,
+          createdAt: message.createdAt,
+          ...optionalJsonFields({
+            timelineSequence: message.timelineSequence,
+            turnId: message.metadata["turnId"],
+          }),
+        }),
+      }),
+    );
+  }
+  for (const call of toolCalls)
+    lines.push(
+      Object.freeze({
+        occurredAt: call.createdAt,
+        stableId: call.toolCallId,
+        kindOrder: 1,
+        value: toJsonValue({
+          type: "tool_call",
+          toolCallId: call.toolCallId,
+          sessionId,
+          toolName: call.toolName,
+          request: toJsonValue(call.request),
+          status: call.status,
+          sensitivity: call.sensitivity,
+          createdAt: call.createdAt,
+          ...optionalJsonFields({
+            turnId: call.turnId,
+            messageId: call.messageId,
+            parentToolCallId: call.parentToolCallId,
+            executionId: call.executionId,
+            sequence: call.sequence,
+            timelineSequence: call.timelineSequence,
+            update: call.update === undefined ? undefined : toJsonValue(call.update),
+            response: call.response === undefined ? undefined : toJsonValue(call.response),
+            completedAt: call.completedAt,
+          }),
+        }),
+      }),
+    );
+  for (const execution of codeExecutions)
+    lines.push(
+      Object.freeze({
+        occurredAt: execution.startedAt,
+        stableId: execution.executionId,
+        kindOrder: 2,
+        value: toJsonValue({
+          type: "code_execution",
+          executionId: execution.executionId,
+          logicalExecutionId: execution.logicalExecutionId,
+          sessionId,
+          catalogId: execution.catalogId,
+          catalogDigest: execution.catalogDigest,
+          sourceDigest: execution.sourceDigest,
+          status: execution.status,
+          callCount: execution.callCount,
+          startedAt: execution.startedAt,
+          ...optionalJsonFields({
+            parentExecutionId: execution.parentExecutionId,
+            turnId: execution.turnId,
+            sourceArtifactId: execution.sourceArtifactId,
+            stdoutArtifactId: execution.stdoutArtifactId,
+            stderrArtifactId: execution.stderrArtifactId,
+            result: execution.result,
+            error: execution.error,
+            completedAt: execution.completedAt,
+          }),
+        }),
+      }),
+    );
+  for (const call of modelCalls)
+    lines.push(
+      Object.freeze({
+        occurredAt: call.startedAt,
+        stableId: call.modelCallId,
+        kindOrder: 3,
+        value: toJsonValue({
+          type: "model_call",
+          modelCallId: call.modelCallId,
+          parentExecutionId: call.parentExecutionId,
+          sessionId,
+          provider: call.provider,
+          model: call.model,
+          thinkingLevel: call.thinkingLevel,
+          requestArtifactId: call.requestArtifactId,
+          contextRefs: call.contextRefs,
+          status: call.status,
+          startedAt: call.startedAt,
+          ...optionalJsonFields({
+            turnId: call.turnId,
+            contextArtifactId: call.contextArtifactId,
+            outputArtifactId: call.outputArtifactId,
+            usage: call.usage ? toJsonValue(call.usage) : undefined,
+            latencyMs: call.latencyMs,
+            error: call.error,
+            completedAt: call.completedAt,
+          }),
+        }),
+      }),
+    );
+  for (const run of workflowRuns)
+    lines.push(
+      Object.freeze({
+        occurredAt: run.createdAt,
+        stableId: run.runId,
+        kindOrder: 4,
+        value: toJsonValue({
+          type: "workflow_run",
+          runId: run.runId,
+          workflowName: run.workflowName,
+          workflowRevision: run.workflowRevision,
+          definitionRevisionId: run.definitionRevisionId,
+          sessionId,
+          status: run.status,
+          currentPhase: run.currentPhase,
+          input: run.input,
+          createdAt: run.createdAt,
+          updatedAt: run.updatedAt,
+          ...optionalJsonFields({
+            projectId: run.projectId,
+            turnId: run.turnId,
+            output: run.output,
+            error: run.error,
+            completedAt: run.completedAt,
+          }),
+        }),
+      }),
+    );
+  lines.sort(
+    (left, right) =>
+      left.occurredAt.localeCompare(right.occurredAt) ||
+      left.kindOrder - right.kindOrder ||
+      left.stableId.localeCompare(right.stableId),
+  );
+  const content = lines.length === 0 ? "" : `${lines.map((line) => canonicalJson(line.value)).join("\n")}\n`;
+  const bytes = new TextEncoder().encode(content);
+  const contentDigest = sha256(bytes);
+  const artifact = await workspace.artifacts.writeArtifact({
+    path: `context-documents/${sha256(sessionId).slice(0, 32)}/${contentDigest}.jsonl`,
+    mediaType: "application/x-ndjson",
+    bytes,
+    actor: Object.freeze({ actorId: "turn-context", kind: "system" as const }),
+    relationshipRefs: session
+      ? Object.freeze([
+          Object.freeze({ kind: "database_row" as const, table: "sessions" as const, rowId: sessionId }),
+        ])
+      : Object.freeze([]),
+  });
+  return Object.freeze({
+    documentId: `context_document_${contentDigest}`,
+    artifact: Object.freeze({ ...artifact, mediaType: "application/x-ndjson" as const }),
+    format: "noesis-session-context-v1",
+    characterLength: content.length,
+    byteLength: bytes.length,
+    contentDigest,
   });
 }
 export interface TurnIntelligencePlanner {
@@ -261,9 +457,10 @@ export function createTurnIntelligencePlanner(
       }),
     ]);
     if (!activation) throw new Error("A frozen turn plan requires an active genesis baseline");
-    const [conversationHistory, contextCheckpoint] = await Promise.all([
+    const [conversationHistory, contextCheckpoint, contextDocument] = await Promise.all([
       freezeConversationHistory(options.workspace, request.sessionId, request.priorHistory ?? []),
       freezeContextCheckpoint(options.workspace, request.sessionId, request.contextCheckpointId),
+      freezeContextDocument(options.workspace, request.sessionId),
     ]);
     const resolved: {
       readonly reference: CapabilityRevisionRef;
@@ -481,6 +678,7 @@ export function createTurnIntelligencePlanner(
         activationRevision: activation.revision,
         selectedCapabilities: Object.freeze(selections),
         conversationHistory,
+        contextDocument,
       } as const)
         .addOptional(contextCheckpoint ? { contextCheckpoint } : undefined)
         .addOptional(

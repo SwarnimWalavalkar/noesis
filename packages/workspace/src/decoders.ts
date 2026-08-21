@@ -20,6 +20,7 @@ import type {
   ActivationRecord,
   CanonicalSearchSource,
   CodeExecutionRecord,
+  ModelCallRecord,
   MessageRecord,
   OutcomeRecord,
   SearchConfiguration,
@@ -55,6 +56,7 @@ const UserIntentStatusSchema = z.enum([
 const UserIntentSteerOriginSchema = z.enum(["explicit", "queued"]);
 const ToolCallStatusSchema = z.enum(["requested", "running", "completed", "failed", "denied", "ambiguous"]);
 const CodeExecutionStatusSchema = z.enum(["running", "completed", "failed", "cancelled", "interrupted"]);
+const ModelCallStatusSchema = z.enum(["running", "completed", "failed", "cancelled"]);
 const WorkflowRunStatusSchema = z.enum(["running", "paused", "completed", "failed", "cancelled"]);
 const WorkflowPhaseStatusSchema = z.enum(["pending", "running", "completed", "failed", "cancelled"]);
 const OutcomeStatusSchema = z.enum(["accepted", "corrected", "failed", "unknown"]);
@@ -261,6 +263,57 @@ export function decodeCodeExecution(row: DatabaseRow | undefined): CodeExecution
     .addOptional(!(completedAt === undefined) ? { completedAt } : undefined)
     .finish();
 }
+export function decodeModelCall(row: DatabaseRow | undefined): ModelCallRecord {
+  const turnId = optionalString(row, "turn_id");
+  const contextArtifactId = optionalString(row, "context_artifact_id");
+  const outputArtifactId = optionalString(row, "output_artifact_id");
+  const inputTokens = row?.["input_tokens"] ?? null;
+  const outputTokens = row?.["output_tokens"] ?? null;
+  const totalTokens = row?.["total_tokens"] ?? null;
+  const estimatedCost = row?.["estimated_cost"] ?? null;
+  const latencyMs = row?.["latency_ms"] ?? null;
+  const error = optionalString(row, "error");
+  const completedAt = optionalString(row, "completed_at");
+  const usage =
+    inputTokens === null || outputTokens === null || totalTokens === null || estimatedCost === null
+      ? undefined
+      : Object.freeze({
+          inputTokens: z.number().int().nonnegative().parse(inputTokens),
+          outputTokens: z.number().int().nonnegative().parse(outputTokens),
+          totalTokens: z.number().int().nonnegative().parse(totalTokens),
+          estimatedCost: z.number().nonnegative().parse(estimatedCost),
+        });
+  return createConditionalObject({
+    modelCallId: requiredString(row, "model_call_id"),
+    parentExecutionId: requiredString(row, "parent_execution_id"),
+    sessionId: requiredString(row, "session_id"),
+  } as const)
+    .addOptional(!(turnId === undefined) ? { turnId } : undefined)
+    .addOptional(!(contextArtifactId === undefined) ? { contextArtifactId } : undefined)
+    .add({
+      requestArtifactId: requiredString(row, "request_artifact_id"),
+    } as const)
+    .addOptional(!(outputArtifactId === undefined) ? { outputArtifactId } : undefined)
+    .add({
+      provider: requiredString(row, "provider"),
+      model: requiredString(row, "model"),
+      thinkingLevel: z
+        .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+        .parse(requiredString(row, "thinking_level")),
+      contextRefs: JsonValueSchema.parse(parseJson(requiredString(row, "context_refs_json"))),
+      status: ModelCallStatusSchema.parse(requiredString(row, "status")),
+    } as const)
+    .addOptional(!(usage === undefined) ? { usage } : undefined)
+    .addOptional(
+      !(latencyMs === null || latencyMs === undefined)
+        ? { latencyMs: z.number().int().nonnegative().parse(latencyMs) }
+        : undefined,
+    )
+    .addOptional(!(error === undefined) ? { error } : undefined)
+    .add({ startedAt: requiredString(row, "started_at") } as const)
+    .addOptional(!(completedAt === undefined) ? { completedAt } : undefined)
+    .finish();
+}
 export function decodeWorkflowRun(row: DatabaseRow | undefined): WorkflowRunRecord {
   const projectId = optionalString(row, "project_id");
   const turnId = optionalString(row, "turn_id");
@@ -271,6 +324,10 @@ export function decodeWorkflowRun(row: DatabaseRow | undefined): WorkflowRunReco
   const provider = optionalString(row, "provider");
   const model = optionalString(row, "model");
   const thinkingLevel = optionalString(row, "thinking_level");
+  const contextArtifactId = optionalString(row, "context_artifact_id");
+  const contextDigest = optionalString(row, "context_digest");
+  const contextCharacterLength = row?.["context_character_length"] ?? null;
+  const contextByteLength = row?.["context_byte_length"] ?? null;
   const output = optionalString(row, "output_json");
   const error = optionalString(row, "error");
   const completedAt = optionalString(row, "completed_at");
@@ -303,6 +360,20 @@ export function decodeWorkflowRun(row: DatabaseRow | undefined): WorkflowRunReco
               .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
               .parse(thinkingLevel),
           }
+        : undefined,
+    )
+    .addOptional(!(contextArtifactId === undefined) ? { contextArtifactId } : undefined)
+    .addOptional(
+      !(contextDigest === undefined) ? { contextDigest: DigestSchema.parse(contextDigest) } : undefined,
+    )
+    .addOptional(
+      !(contextCharacterLength === null || contextCharacterLength === undefined)
+        ? { contextCharacterLength: z.number().int().nonnegative().parse(contextCharacterLength) }
+        : undefined,
+    )
+    .addOptional(
+      !(contextByteLength === null || contextByteLength === undefined)
+        ? { contextByteLength: z.number().int().nonnegative().parse(contextByteLength) }
         : undefined,
     )
     .add({

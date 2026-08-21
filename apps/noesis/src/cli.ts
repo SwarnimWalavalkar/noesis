@@ -16,6 +16,7 @@ import {
   createPiAgentRoleRunner,
   createPiAgentRuntime,
   createPiMcpSamplingPort,
+  createPiModelQueryRunner,
   createPiModelServices,
   createPiSkillLibrary,
   NOESIS_PROVIDER_IDS,
@@ -348,6 +349,7 @@ async function createRuntime(
             ),
           createRoleRunner: (configurations) =>
             createPiAgentRoleRunner(project.root, services.models, configurations),
+          modelQuery: createPiModelQueryRunner(project.root, services.models),
           resolveModelContext: (provider, model) => {
             preparePiModelSelection(services.models, Object.freeze({ provider, model }));
             const selected = services.models.getModel(provider, model);
@@ -359,7 +361,11 @@ async function createRuntime(
           },
         } satisfies Pick<
           ApplicationRuntimeCompositionOptions,
-          "recoverInterruptedOperations" | "createAgent" | "createRoleRunner" | "resolveModelContext"
+          | "recoverInterruptedOperations"
+          | "createAgent"
+          | "createRoleRunner"
+          | "modelQuery"
+          | "resolveModelContext"
         >)
         .finish(),
     );

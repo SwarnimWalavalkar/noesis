@@ -1,4 +1,5 @@
 import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 import type {
   AgentActionEvent,
   AgentRuntimeEvent,
@@ -10,6 +11,7 @@ import { renderFrozenConversationHistoryContent } from "@noesis/agent-types";
 import { createAtomicCapabilityRegistry, createWorkspaceCapabilityControlStore } from "@noesis/capabilities";
 import {
   type CodeExecutionEvent,
+  type CodeExecutionContextDocument,
   type CodeExecutionRequest,
   type CodeExecutionResult,
   type CodeModeRuntime,
@@ -96,6 +98,7 @@ import {
   isProjectWorkflowToolForProject,
   isProjectWorkflowToolName,
   type PiCodeExecutionAdapter,
+  type PiModelQueryRunner,
   type PiSelfToolAdapter,
   type PiSkillLibrary,
   type PiSkillSnapshot,
@@ -869,6 +872,7 @@ export interface ApplicationRuntimeCompositionOptions {
   readonly createRoleRunner: (
     configurations: readonly RoleVariantConfiguration[],
   ) => RuntimePiAgentRoleRunner;
+  readonly modelQuery?: PiModelQueryRunner;
   readonly resolveModelContext?: (
     provider: string,
     model: string,
@@ -1392,7 +1396,7 @@ async function roleConfigurations(
         systemPrompt: rolePrompt(name),
         contextPolicy: createRestrictedRoleContextPolicy(name, {
           policyId: `noesis-${name}-bounded-v1`,
-          maxMessages: name === "session_compactor" ? 1 : name === "capability_router" ? 24 : 12,
+          maxMessages: name === "session_compactor" ? 2 : name === "capability_router" ? 24 : 12,
           maxCharactersPerMessage:
             name === "session_compactor" ? 4000000 : name === "capability_router" ? 16000 : 12000,
           maxTotalCharacters:
@@ -2142,6 +2146,74 @@ export async function createApplicationRuntimeComposition(
           })),
         }),
       );
+    type FrozenExecutionContextDocument = NonNullable<FrozenTurnPlan["contextDocument"]>;
+    interface RuntimeExecutionContextDocument {
+      readonly frozen: FrozenExecutionContextDocument;
+      readonly request: CodeExecutionContextDocument;
+      readonly read: () => Promise<string>;
+    }
+    const contextDocuments = new Map<string, RuntimeExecutionContextDocument>();
+    const activeExecutionContexts = new Map<string, RuntimeExecutionContextDocument>();
+    const registerContextDocument = (
+      frozen: FrozenExecutionContextDocument,
+    ): RuntimeExecutionContextDocument => {
+      const existing = contextDocuments.get(frozen.documentId);
+      if (existing) return existing;
+      let cached: Promise<string> | undefined;
+      const read = async (): Promise<string> => {
+        cached ??= workspace.reads.readArtifact(frozen.artifact).then((bytes) => {
+          const content = decoder.decode(bytes);
+          if (sha256(bytes) !== frozen.contentDigest)
+            throw new Error(`Context document ${frozen.documentId} failed digest verification`);
+          if (bytes.length !== frozen.byteLength)
+            throw new Error(`Context document ${frozen.documentId} changed byte length`);
+          if (content.length !== frozen.characterLength)
+            throw new Error(`Context document ${frozen.documentId} changed character length`);
+          return content;
+        });
+        return await cached;
+      };
+      const document = Object.freeze({
+        frozen,
+        request: Object.freeze({
+          documentId: frozen.documentId,
+          path: resolve(workspace.paths.root, frozen.artifact.path),
+          characterLength: frozen.characterLength,
+          byteLength: frozen.byteLength,
+          contentDigest: frozen.contentDigest,
+        }),
+        read,
+      });
+      contextDocuments.set(frozen.documentId, document);
+      return document;
+    };
+    const planContextDocument = plan.contextDocument
+      ? registerContextDocument(plan.contextDocument)
+      : undefined;
+    const restoreWorkflowContextDocument = async (
+      run: WorkflowRunRecord,
+    ): Promise<RuntimeExecutionContextDocument> => {
+      if (
+        !run.contextArtifactId ||
+        !run.contextDigest ||
+        run.contextCharacterLength === undefined ||
+        run.contextByteLength === undefined
+      )
+        throw new Error(`Workflow run ${run.runId} has no frozen context document pin`);
+      const artifact = await workspace.getArtifactMetadata(run.contextArtifactId);
+      if (!artifact || artifact.mediaType !== "application/x-ndjson")
+        throw new Error(`Workflow run ${run.runId} has an unavailable context document`);
+      return registerContextDocument(
+        Object.freeze({
+          documentId: `context_document_${run.contextDigest}`,
+          artifact: Object.freeze({ ...artifact, mediaType: "application/x-ndjson" as const }),
+          format: "noesis-session-context-v1",
+          characterLength: run.contextCharacterLength,
+          byteLength: run.contextByteLength,
+          contentDigest: run.contextDigest,
+        }),
+      );
+    };
     const scriptScope = projectDefinitionScope("script", project);
     const workflowScope = projectDefinitionScope("workflow", project);
     const scriptResource = (name: string): string => `${scriptScope.namespace}:${name}`;
@@ -2845,6 +2917,149 @@ export async function createApplicationRuntimeComposition(
           : null;
       },
     });
+    const contextHandleSchema = z.strictObject({
+      __noesisContext: z.strictObject({
+        documentId: z.string().min(1),
+        start: z.number().int().nonnegative(),
+        end: z.number().int().nonnegative(),
+      }),
+    });
+    const modelQueryContextSchema = z.union([
+      z.string(),
+      contextHandleSchema,
+      z.array(z.union([z.string(), contextHandleSchema])),
+    ]);
+    const modelQueryInputSchema = z.strictObject({
+      prompt: z.string().trim().min(1),
+      context: modelQueryContextSchema.optional(),
+    });
+    type ModelQueryContextPart = string | z.infer<typeof contextHandleSchema>;
+    const modelQueryContextParts = (
+      value: z.infer<typeof modelQueryContextSchema> | undefined,
+    ): readonly ModelQueryContextPart[] =>
+      value === undefined ? Object.freeze([]) : Object.freeze(Array.isArray(value) ? value : [value]);
+    const modelsQueryTool = defineTool({
+      name: "models.query",
+      label: "Query model",
+      description:
+        "Run one isolated, tool-free model query on the frozen foreground route. Pass context as text, a ContextView, or an array of either.",
+      visibility: "codemode_only",
+      identityMaterial: toJsonValue({
+        adapterRevision: "models-query-v1",
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+      }),
+      inputSchema: modelQueryInputSchema,
+      outputSchema: z.string(),
+      effect: () => ({
+        effect: "network",
+        resource: `model:${plan.provider}/${plan.model}`,
+        estimatedCost: 1,
+      }),
+      execute: async (input, context) => {
+        if (!options.modelQuery) throw new Error("Nested model queries are unavailable in this runtime");
+        const activeContext = activeExecutionContexts.get(context.executionId);
+        const refs = modelQueryContextParts(input.context);
+        const expanded: string[] = [];
+        for (const ref of refs) {
+          if (typeof ref === "string") {
+            expanded.push(ref);
+            continue;
+          }
+          if (!activeContext)
+            throw new Error("ContextView can only be used from an active codemode execution");
+          const handle = ref.__noesisContext;
+          if (handle.documentId !== activeContext.frozen.documentId)
+            throw new Error("ContextView does not belong to this codemode execution");
+          if (handle.start > handle.end || handle.end > activeContext.frozen.characterLength)
+            throw new Error("ContextView range is outside the frozen context document");
+          expanded.push((await activeContext.read()).slice(handle.start, handle.end));
+        }
+        const startedAt = new Date().toISOString();
+        const artifactDirectory = `model-calls/${sha256(context.callId).slice(0, 32)}`;
+        const actor = Object.freeze({ actorId: "noesis-model-query", kind: "noesis" as const });
+        const relationshipRefs = Object.freeze([foregroundEvidence(plan)]);
+        const requestArtifact = await workspace.artifacts.writeArtifact({
+          path: `${artifactDirectory}/request.json`,
+          mediaType: "application/json",
+          bytes: encoder.encode(
+            canonicalJson({
+              schemaVersion: 1,
+              prompt: input.prompt,
+              context: input.context ?? null,
+              contextDocumentId: activeContext?.frozen.documentId ?? null,
+              provider: plan.provider,
+              model: plan.model,
+              thinkingLevel: plan.thinkingLevel,
+            }),
+          ),
+          actor,
+          relationshipRefs,
+        });
+        const base = Object.freeze(
+          createConditionalObject({
+            modelCallId: context.callId,
+            parentExecutionId: context.executionId,
+            sessionId: plan.sessionId,
+            turnId: plan.turnId,
+          } as const)
+            .addOptional(
+              activeContext ? { contextArtifactId: activeContext.frozen.artifact.artifactId } : undefined,
+            )
+            .add({
+              requestArtifactId: requestArtifact.artifactId,
+              provider: plan.provider,
+              model: plan.model,
+              thinkingLevel: plan.thinkingLevel,
+              contextRefs: toJsonValue(input.context ?? []),
+              startedAt,
+            } as const)
+            .finish(),
+        );
+        await workspace.operational.modelCalls.put({ ...base, status: "running" });
+        const started = Date.now();
+        try {
+          const result = await options.modelQuery.query({
+            callId: context.callId,
+            provider: plan.provider,
+            model: plan.model,
+            thinkingLevel: plan.thinkingLevel,
+            prompt: input.prompt,
+            context: Object.freeze(expanded),
+            signal: context.signal,
+          });
+          if (result.provider !== plan.provider || result.model !== plan.model)
+            throw new Error("Nested model query returned on a route other than its frozen route");
+          const outputArtifact = await workspace.artifacts.writeArtifact({
+            path: `${artifactDirectory}/output.txt`,
+            mediaType: "text/plain",
+            bytes: encoder.encode(result.text),
+            actor,
+            relationshipRefs,
+          });
+          await workspace.operational.modelCalls.put({
+            ...base,
+            outputArtifactId: outputArtifact.artifactId,
+            status: "completed",
+            usage: result.usage,
+            latencyMs: Date.now() - started,
+            completedAt: new Date().toISOString(),
+          });
+          return result.text;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          await workspace.operational.modelCalls.put({
+            ...base,
+            status: context.signal.aborted ? "cancelled" : "failed",
+            latencyMs: Date.now() - started,
+            error: message,
+            completedAt: new Date().toISOString(),
+          });
+          throw error;
+        }
+      },
+    });
     const broker = createToolBroker({
       definitions: Object.freeze([
         ...createLocalWorkTools({
@@ -2869,6 +3084,7 @@ export async function createApplicationRuntimeComposition(
           },
         }),
         skillLoadTool,
+        modelsQueryTool,
         ...scriptTools,
         ...workflowTools,
         ...savedWorkflowTools,
@@ -2937,6 +3153,11 @@ export async function createApplicationRuntimeComposition(
     ) => {
       const executionId = request.executionId ?? createId("execution");
       const logicalExecutionId = request.logicalExecutionId ?? executionId;
+      const executionContext = request.contextDocument
+        ? contextDocuments.get(request.contextDocument.documentId)
+        : planContextDocument;
+      if (request.contextDocument && !executionContext)
+        throw new Error(`Unknown execution context document ${request.contextDocument.documentId}`);
       const startedAt = new Date().toISOString();
       const artifactDirectory = `codemode/${sha256(executionId).slice(0, 32)}`;
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -3020,9 +3241,17 @@ export async function createApplicationRuntimeComposition(
         status: "running",
         callCount,
       });
+      if (executionContext) activeExecutionContexts.set(executionId, executionContext);
       try {
         await onPrepared(executionId);
-        const result = await codeRuntime.execute({ ...request, executionId, logicalExecutionId }, (event) => {
+        const executionRequest = createConditionalObject({
+          ...request,
+          executionId,
+          logicalExecutionId,
+        } as const)
+          .addOptional(executionContext ? { contextDocument: executionContext.request } : undefined)
+          .finish();
+        const result = await codeRuntime.execute(executionRequest, (event) => {
           if (event.type === "tool-start" || event.type === "tool-end")
             callCount = Math.max(callCount, event.callIndex);
           if (event.type === "stdout") capturedStdout += event.text;
@@ -3052,6 +3281,8 @@ export async function createApplicationRuntimeComposition(
           completedAt: new Date().toISOString(),
         });
         throw error;
+      } finally {
+        activeExecutionContexts.delete(executionId);
       }
     };
     runWorkflow = async (stored, input, context, existingRunId, resumeValue) => {
@@ -3114,6 +3345,8 @@ export async function createApplicationRuntimeComposition(
           existing.thinkingLevel !== plan.thinkingLevel)
       )
         throw new Error(`Workflow run ${existing.runId} is pinned to different model routing`);
+      const workflowContext = existing ? await restoreWorkflowContextDocument(existing) : planContextDocument;
+      if (!workflowContext) throw new Error("A new workflow run requires a frozen context document");
       const runId = existingRunId ?? createId("workflow_run");
       const createdAt = existing?.createdAt ?? new Date().toISOString();
       const completedPhases = existingRunId
@@ -3133,6 +3366,10 @@ export async function createApplicationRuntimeComposition(
           provider: plan.provider,
           model: plan.model,
           thinkingLevel: plan.thinkingLevel,
+          contextArtifactId: workflowContext.frozen.artifact.artifactId,
+          contextDigest: workflowContext.frozen.contentDigest,
+          contextCharacterLength: workflowContext.frozen.characterLength,
+          contextByteLength: workflowContext.frozen.byteLength,
           sessionId: plan.sessionId,
           turnId: plan.turnId,
           status: "running",
@@ -3222,6 +3459,7 @@ export async function createApplicationRuntimeComposition(
               sessionId: plan.sessionId,
               turnId: plan.turnId,
               signal: context.signal,
+              contextDocument: workflowContext.request,
             },
             context.parentExecutionId,
             undefined,
@@ -3900,6 +4138,7 @@ export async function createApplicationRuntimeComposition(
       "skill:*",
       "noesis-history:*",
       "mcp:*",
+      "model:*",
       `session-compaction:${project.projectId}:*`,
     ]),
     credentialRefs: Object.freeze([]),
