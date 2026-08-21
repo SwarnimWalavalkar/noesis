@@ -162,9 +162,9 @@ export function createRuntimeCoordinatorComposition(
           classification: observed.observation.kind,
         });
         if (classified.status !== "already_bound")
-          for (const experimentId of [
-            ...new Set(classified.observations.map((observation) => observation.experimentId)),
-          ])
+          for (const experimentId of new Set(
+            classified.observations.map((observation) => observation.experimentId),
+          ))
             await options.continuousFeedback.evaluateExperiment(experimentId);
       }
       if (observed.status === "no_change")

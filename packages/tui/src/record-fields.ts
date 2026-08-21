@@ -1,5 +1,3 @@
-// biome-ignore-all lint/complexity/useLiteralKeys: unknown durable data requires bracket access under noPropertyAccessFromIndexSignature.
-
 export function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

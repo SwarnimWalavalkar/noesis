@@ -602,7 +602,7 @@ export async function updateToolHotbar(
     const path = noesisConfigPath(home);
     const current = loaded.value.config ?? DEFAULT_NOESIS_CONFIG;
     const rawGlobal = current.tools?.hotbar ?? BUILT_IN_TOOL_DEFAULTS.hotbar;
-    const projectHotbars = { ...(current.tools?.projectHotbars ?? {}) };
+    const projectHotbars = { ...current.tools?.projectHotbars };
     const legacyGlobal = new Set(update.legacyGlobalProjectTools);
     const legacyActive = new Set(update.legacyActiveProjectTools);
     const global = Object.freeze([

@@ -746,22 +746,25 @@ describe("Noesis transcript rendering", () => {
   test.each([
     ["backtick", "```", "````"],
     ["tilde", "~~~", "~~~~"],
-  ] as const)("requires a CommonMark-valid closer for a %s code fence", (_kind, openingFence, closingFence) => {
-    const source = [
-      `${openingFence}text`,
-      "before",
-      `${closingFence}not-a-closer`,
-      "$$still code$$",
-      `${closingFence} \t`,
-      "$$display math$$",
-    ].join("\n");
-    const rendered = stripAnsi(renderRichText(source, 80, true).join("\n"));
+  ] as const)(
+    "requires a CommonMark-valid closer for a %s code fence",
+    (_kind, openingFence, closingFence) => {
+      const source = [
+        `${openingFence}text`,
+        "before",
+        `${closingFence}not-a-closer`,
+        "$$still code$$",
+        `${closingFence} \t`,
+        "$$display math$$",
+      ].join("\n");
+      const rendered = stripAnsi(renderRichText(source, 80, true).join("\n"));
 
-    expect(rendered).toContain(`${closingFence}not-a-closer`);
-    expect(rendered).toContain("$$still code$$");
-    expect(rendered.match(/╭─ math/gu)).toHaveLength(1);
-    expect(rendered).toContain("│ $$display math$$");
-  });
+      expect(rendered).toContain(`${closingFence}not-a-closer`);
+      expect(rendered).toContain("$$still code$$");
+      expect(rendered.match(/╭─ math/gu)).toHaveLength(1);
+      expect(rendered).toContain("│ $$display math$$");
+    },
+  );
 
   test("closes fenced code blocks under CRLF line endings", () => {
     const source = ["```text", "$$still code$$", "```", "$$display math$$"].join("\r\n");
@@ -899,29 +902,28 @@ describe("Noesis transcript rendering", () => {
     }
   });
 
-  test.each([
-    "user",
-    "assistant",
-    "system",
-  ] as const)("keeps every line of a long %s message reachable", (role) => {
-    const state = {
-      ...initialTuiState("fake"),
-      timeline: [
-        {
-          kind: "message" as const,
-          role,
-          text: Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n"),
-        },
-      ],
-    };
-    const rendered = createTranscriptRenderer().render(state, 22);
-    const expectedLabel = role === "user" ? "YOU" : role === "assistant" ? "NOESIS" : "NOTE";
+  test.each(["user", "assistant", "system"] as const)(
+    "keeps every line of a long %s message reachable",
+    (role) => {
+      const state = {
+        ...initialTuiState("fake"),
+        timeline: [
+          {
+            kind: "message" as const,
+            role,
+            text: Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n"),
+          },
+        ],
+      };
+      const rendered = createTranscriptRenderer().render(state, 22);
+      const expectedLabel = role === "user" ? "YOU" : role === "assistant" ? "NOESIS" : "NOTE";
 
-    expect(rendered[0]).toBe(expectedLabel);
-    expect(rendered.join("\n")).toContain("line 0");
-    expect(rendered.join("\n")).toContain("line 29");
-    expect(rendered.every((line) => visibleWidth(line) <= 22)).toBe(true);
-  });
+      expect(rendered[0]).toBe(expectedLabel);
+      expect(rendered.join("\n")).toContain("line 0");
+      expect(rendered.join("\n")).toContain("line 29");
+      expect(rendered.every((line) => visibleWidth(line) <= 22)).toBe(true);
+    },
+  );
 
   test("bounds an expanded codemode program to the visible screen", () => {
     const state = {

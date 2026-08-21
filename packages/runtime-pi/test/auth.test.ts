@@ -200,31 +200,29 @@ describe("Pi authentication", () => {
       providerFactory: opencodeProvider,
       expected: "OPENCODE_API_KEY",
     },
-  ])("fails before $provider execution with actionable authentication guidance", async ({
-    provider,
-    model,
-    providerFactory,
-    expected,
-  }) => {
-    const models = createModels({ authContext: emptyAuthContext });
-    models.setProvider(providerFactory());
-    const runtime = createPiAgentRuntime(process.cwd(), models);
+  ])(
+    "fails before $provider execution with actionable authentication guidance",
+    async ({ provider, model, providerFactory, expected }) => {
+      const models = createModels({ authContext: emptyAuthContext });
+      models.setProvider(providerFactory());
+      const runtime = createPiAgentRuntime(process.cwd(), models);
 
-    await expect(
-      runtime.run(
-        {
-          trailId: `trail-missing-${provider}`,
-          provider,
-          model,
-          thinkingLevel: "off",
-          systemPrompt: "test",
-          prompt: "must not reach the network",
-          activeCapabilities: [],
-        },
-        () => undefined,
-      ),
-    ).rejects.toThrow(expected);
-  });
+      await expect(
+        runtime.run(
+          {
+            trailId: `trail-missing-${provider}`,
+            provider,
+            model,
+            thinkingLevel: "off",
+            systemPrompt: "test",
+            prompt: "must not reach the network",
+            activeCapabilities: [],
+          },
+          () => undefined,
+        ),
+      ).rejects.toThrow(expected);
+    },
+  );
 
   test("reuses the Pi provider and auth lifecycle for isolated roles without reaching the network", async () => {
     const models = createModels({ authContext: emptyAuthContext });

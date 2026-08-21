@@ -466,16 +466,16 @@ export function createTurnIntelligencePlanner(
         }),
       );
     }
-    const promptLayers = selections.flatMap((selection) => [
-      ...(selection.effects
+    const promptLayers = selections.flatMap((selection) =>
+      selection.effects
         ? selection.effects.flatMap((effect) =>
             effect.kind === "instruction" ? [effect.material.content.trim()] : [],
           )
         : [
             ...selection.promptModules.map((material) => material.content.trim()),
             ...selection.skills.map((material) => material.content.trim()),
-          ]),
-    ]);
+          ],
+    );
     const unsigned = Object.freeze({
       schemaVersion: 1 as const,
       planId: createPlanId(request.turnId),

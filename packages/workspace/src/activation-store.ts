@@ -923,11 +923,11 @@ export async function createProtectedActivationStore(
       if (identity.activationId !== previousActivationId || identity.revision !== (current?.revision ?? 0))
         throw new Error("Activation snapshot changed during genesis bootstrap (CAS conflict)");
       const definitions = Object.freeze({
-        ...(current?.activeDefinitions ?? {}),
+        ...current?.activeDefinitions,
         ...activeDefinitions,
       });
       const revisions = Object.freeze({
-        ...(current?.activeCapabilityRevisions ?? {}),
+        ...current?.activeCapabilityRevisions,
         [capabilityRevision.capabilityId]: capabilityRevision,
       });
       db.prepare(

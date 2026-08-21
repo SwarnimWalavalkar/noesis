@@ -1,4 +1,3 @@
-// biome-ignore-all lint/complexity/useLiteralKeys: unknown durable job results require bracket access under noPropertyAccessFromIndexSignature.
 import type { WorkingAdjustment, WorkingAdjustmentReadPort } from "@noesis/domain";
 import type {
   CoordinatorEvidenceRef,

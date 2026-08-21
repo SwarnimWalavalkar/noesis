@@ -114,8 +114,9 @@ export interface DefinitionWriteRequest {
   readonly provenanceRefs?: readonly EvidenceRef[];
 }
 
-export interface EvidenceWriteRequest<Kind extends EvidenceKind = EvidenceKind>
-  extends DefinitionWriteRequest {
+export interface EvidenceWriteRequest<
+  Kind extends EvidenceKind = EvidenceKind,
+> extends DefinitionWriteRequest {
   readonly evidenceKind: Kind;
   readonly supersedesRevisionId?: string;
 }

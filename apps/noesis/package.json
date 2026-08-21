@@ -2,26 +2,26 @@
   "name": "@noesis/app",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
   "bin": {
     "noesis": "./src/cli.ts"
   },
+  "type": "module",
   "dependencies": {
     "@noesis/agent-types": "workspace:*",
     "@noesis/capabilities": "workspace:*",
-    "@noesis/config": "workspace:*",
     "@noesis/codemode": "workspace:*",
+    "@noesis/config": "workspace:*",
     "@noesis/context": "workspace:*",
     "@noesis/domain": "workspace:*",
     "@noesis/evals": "workspace:*",
+    "@noesis/intelligence": "workspace:*",
     "@noesis/learning": "workspace:*",
     "@noesis/mcp": "workspace:*",
-    "@noesis/intelligence": "workspace:*",
     "@noesis/policy": "workspace:*",
     "@noesis/runtime": "workspace:*",
     "@noesis/runtime-pi": "workspace:*",
-    "@noesis/tui": "workspace:*",
     "@noesis/tools": "workspace:*",
+    "@noesis/tui": "workspace:*",
     "@noesis/workspace": "workspace:*",
     "zod": "4.4.3"
   }

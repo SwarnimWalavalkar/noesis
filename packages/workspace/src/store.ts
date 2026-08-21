@@ -4656,12 +4656,10 @@ function createSearchIndex(
           ...sourceScope,
         );
       return rows
-        .map(
-          (row): SearchCandidate => ({
-            ...decodeSearchDocument(row),
-            semanticScore: cosineSimilarity(request.vector, decodeVector(requiredString(row, "vector_json"))),
-          }),
-        )
+        .map((row): SearchCandidate => ({
+          ...decodeSearchDocument(row),
+          semanticScore: cosineSimilarity(request.vector, decodeVector(requiredString(row, "vector_json"))),
+        }))
         .sort(
           (left, right) =>
             (right.semanticScore ?? 0) - (left.semanticScore ?? 0) ||

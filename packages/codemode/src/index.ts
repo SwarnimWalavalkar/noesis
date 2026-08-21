@@ -262,7 +262,7 @@ async function waitForPendingSdkCalls(
   pendingSdkCalls: ReadonlySet<Promise<void>>,
   maximumWaitMs?: number,
 ): Promise<boolean> {
-  const drained = Promise.allSettled([...pendingSdkCalls]).then(() => true);
+  const drained = Promise.allSettled(pendingSdkCalls).then(() => true);
   if (maximumWaitMs === undefined) return await drained;
   return await settleWithin(drained, maximumWaitMs, false);
 }

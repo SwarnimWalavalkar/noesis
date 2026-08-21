@@ -1083,31 +1083,31 @@ describe("automatic runtime coordinator", () => {
     f.workspace.close();
   });
 
-  test.each([
-    "authoring",
-    "completed",
-  ] as const)("does not enqueue duplicate author work for an authoritative deduped %s experiment", async (status) => {
-    const f = await fixture();
-    f.setDedupedStatus(status);
-    const coordinator = createRuntimeCoordinator({
-      workspace: f.workspace,
-      authority: f.authority,
-      workingAdjustments: f.workingAdjustments,
-      research: f.research,
-      config: config(),
-    });
+  test.each(["authoring", "completed"] as const)(
+    "does not enqueue duplicate author work for an authoritative deduped %s experiment",
+    async (status) => {
+      const f = await fixture();
+      f.setDedupedStatus(status);
+      const coordinator = createRuntimeCoordinator({
+        workspace: f.workspace,
+        authority: f.authority,
+        workingAdjustments: f.workingAdjustments,
+        research: f.research,
+        config: config(),
+      });
 
-    const observed = await coordinator.observeCompletedTurn(f.turn(`turn-deduped-${status}`));
-    await coordinator.idle();
+      const observed = await coordinator.observeCompletedTurn(f.turn(`turn-deduped-${status}`));
+      await coordinator.idle();
 
-    expect((await coordinator.getJob(observed.job.jobId))?.job.result).toMatchObject({
-      status: "deduped",
-      telemetry: { existingExperimentStatus: status },
-    });
-    expect(await coordinator.listJobs({ kind: "runtime.author_revision" })).toEqual([]);
-    expect(f.counts()).toMatchObject({ reflectCalls: 1, authorCalls: 0, preflightCalls: 0 });
-    f.workspace.close();
-  });
+      expect((await coordinator.getJob(observed.job.jobId))?.job.result).toMatchObject({
+        status: "deduped",
+        telemetry: { existingExperimentStatus: status },
+      });
+      expect(await coordinator.listJobs({ kind: "runtime.author_revision" })).toEqual([]);
+      expect(f.counts()).toMatchObject({ reflectCalls: 1, authorCalls: 0, preflightCalls: 0 });
+      f.workspace.close();
+    },
+  );
 
   test("bounds concurrency and budget and propagates cancellation", async () => {
     const f = await fixture();

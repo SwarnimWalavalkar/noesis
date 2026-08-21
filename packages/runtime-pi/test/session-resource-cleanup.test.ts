@@ -234,13 +234,13 @@ describe("Pi session resource ownership", () => {
       releaseSessionSetup = resolve;
     });
     const originalGetMetadata = Session.prototype.getMetadata;
-    const getMetadata = vi.spyOn(Session.prototype, "getMetadata").mockImplementationOnce(async function (
-      this: Session,
-    ) {
-      markSessionSetupStarted?.();
-      await sessionSetupGate;
-      return originalGetMetadata.call(this);
-    });
+    const getMetadata = vi
+      .spyOn(Session.prototype, "getMetadata")
+      .mockImplementationOnce(async function (this: Session) {
+        markSessionSetupStarted?.();
+        await sessionSetupGate;
+        return originalGetMetadata.call(this);
+      });
     const controller = new AbortController();
     const backend = createPiRoleModelBackend(process.cwd(), models);
 
@@ -291,13 +291,13 @@ describe("Pi session resource ownership", () => {
       releaseSessionSetup = resolve;
     });
     const originalGetMetadata = Session.prototype.getMetadata;
-    const getMetadata = vi.spyOn(Session.prototype, "getMetadata").mockImplementationOnce(async function (
-      this: Session,
-    ) {
-      markSessionSetupStarted?.();
-      await sessionSetupGate;
-      return originalGetMetadata.call(this);
-    });
+    const getMetadata = vi
+      .spyOn(Session.prototype, "getMetadata")
+      .mockImplementationOnce(async function (this: Session) {
+        markSessionSetupStarted?.();
+        await sessionSetupGate;
+        return originalGetMetadata.call(this);
+      });
     const runtime = createPiAgentRuntime(process.cwd(), models);
 
     try {

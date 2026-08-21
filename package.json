@@ -3,26 +3,28 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10.29.3",
-  "engines": {
-    "node": ">=22.19.0"
-  },
   "scripts": {
     "build": "tsc --noEmit",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
-    "format": "biome format --write .",
-    "format:check": "biome format .",
-    "lint": "biome lint .",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint .",
     "start": "tsx apps/noesis/src/cli.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.4.10",
+    "@oxlint/plugins": "1.79.0",
     "@types/node": "24.10.1",
+    "oxfmt": "0.64.0",
+    "oxlint": "1.79.0",
     "tsx": "4.23.0",
     "typescript": "5.9.3",
     "vite": "7.3.6",
     "vitest": "4.1.8"
-  }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "pnpm@10.29.3"
 }

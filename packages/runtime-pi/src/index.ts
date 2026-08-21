@@ -53,10 +53,7 @@ export type {
   FrozenSessionToolResolution,
   FrozenSessionToolResolver,
 } from "./frozen-session-tools.ts";
-export {
-  frozenPlanMaterialUses,
-  resolveFrozenSessionToolDefinitions,
-} from "./frozen-session-tools.ts";
+export { frozenPlanMaterialUses, resolveFrozenSessionToolDefinitions } from "./frozen-session-tools.ts";
 export * from "./hotbar-tools.ts";
 export * from "./model-selection.ts";
 export * from "./mcp-sampling.ts";
@@ -529,15 +526,13 @@ export function createPiAgentRuntime(
             })
           : Object.freeze([]);
       const directToolNames = new Set(hotbarTools.map((tool) => tool.name));
-      const piSkills = skillSnapshot.skills.map(
-        (skill): Skill => ({
-          name: skill.name,
-          description: skill.description,
-          content: skill.content,
-          filePath: skill.filePath,
-          disableModelInvocation: skill.disableModelInvocation,
-        }),
-      );
+      const piSkills = skillSnapshot.skills.map((skill): Skill => ({
+        name: skill.name,
+        description: skill.description,
+        content: skill.content,
+        filePath: skill.filePath,
+        disableModelInvocation: skill.disableModelInvocation,
+      }));
       const explicitSkill = resolvePiSkillInvocation(request.prompt, skillSnapshot.skills);
       if (explicitSkill) {
         const actionId = `skill-load:${plan?.turnId ?? request.trailId}:${explicitSkill.name}`;

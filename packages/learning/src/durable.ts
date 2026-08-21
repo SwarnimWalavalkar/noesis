@@ -379,11 +379,10 @@ export function createWorkspaceLearningCandidateManifestStore(
   return Object.freeze({ persist, rehydrate });
 }
 
-export interface DurableAutomaticLearningOrganOptions
-  extends Omit<
-    AutomaticLearningOrganOptions,
-    "briefs" | "candidateDefinitions" | "experiments" | "feedbackSignals" | "candidateManifests"
-  > {
+export interface DurableAutomaticLearningOrganOptions extends Omit<
+  AutomaticLearningOrganOptions,
+  "briefs" | "candidateDefinitions" | "experiments" | "feedbackSignals" | "candidateManifests"
+> {
   readonly workspace: DurableWorkspace;
 }
 

@@ -1,4 +1,3 @@
-// biome-ignore-all lint/complexity/useLiteralKeys: unknown durable data requires bracket access under noPropertyAccessFromIndexSignature.
 import { isRecord, numberField, stringField } from "./record-fields.ts";
 
 export interface PresentedTool {

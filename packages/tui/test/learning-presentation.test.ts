@@ -153,66 +153,67 @@ describe("working-adjustment notice presentation", () => {
     );
   });
 
-  test.each([
-    "idle",
-    "thinking",
-  ] as const)("keeps a %s foreground state intact while surfacing an auxiliary learning read failure", async (foregroundState) => {
-    const failure = new Error("learning read failed\u001b[31m\nplease retry");
-    let state = initialTuiState("test", {
-      provider: "test",
-      model: "test",
-      reasoningLevel: "off",
-      colorEnabled: false,
-    });
-    state = reduceTui(state, { type: "trail-selected", trail: settledTrail });
-    if (foregroundState === "thinking") state = reduceTui(state, { type: "prompt-submitted", text: "newer" });
-    const reported: unknown[] = [];
-    reconcileSettledTurnPresentation(
-      {
-        getTranscript: async () =>
-          Object.freeze([
-            Object.freeze({
-              kind: "message" as const,
-              messageId: "message-1",
-              role: "assistant" as const,
-              text: "hi",
-              createdAt: "2026-08-01T00:00:00.000Z",
-            }),
-          ]),
-        getTrail: async () => settledTrail,
-        listLearningActivity: async () => await Promise.reject(failure),
-      },
-      {
-        trailId: "trail-1",
-        turnId: "turn-1",
-        outcome: "completed",
-        contextUsage: undefined,
-      },
-      {
-        isTrailCurrent: () => true,
-        canApplySettledState: () => foregroundState === "idle",
-        dispatch: (action) => {
-          state = reduceTui(state, action);
+  test.each(["idle", "thinking"] as const)(
+    "keeps a %s foreground state intact while surfacing an auxiliary learning read failure",
+    async (foregroundState) => {
+      const failure = new Error("learning read failed\u001b[31m\nplease retry");
+      let state = initialTuiState("test", {
+        provider: "test",
+        model: "test",
+        reasoningLevel: "off",
+        colorEnabled: false,
+      });
+      state = reduceTui(state, { type: "trail-selected", trail: settledTrail });
+      if (foregroundState === "thinking")
+        state = reduceTui(state, { type: "prompt-submitted", text: "newer" });
+      const reported: unknown[] = [];
+      reconcileSettledTurnPresentation(
+        {
+          getTranscript: async () =>
+            Object.freeze([
+              Object.freeze({
+                kind: "message" as const,
+                messageId: "message-1",
+                role: "assistant" as const,
+                text: "hi",
+                createdAt: "2026-08-01T00:00:00.000Z",
+              }),
+            ]),
+          getTrail: async () => settledTrail,
+          listLearningActivity: async () => await Promise.reject(failure),
         },
-        requestRender: () => undefined,
-        reportDiagnostic: (error) => {
-          state = reduceTui(state, { type: "system-message", text: learningDiagnosticNotice(error) });
+        {
+          trailId: "trail-1",
+          turnId: "turn-1",
+          outcome: "completed",
+          contextUsage: undefined,
         },
-        reportFailure: (error) => reported.push(error),
-      },
-    );
+        {
+          isTrailCurrent: () => true,
+          canApplySettledState: () => foregroundState === "idle",
+          dispatch: (action) => {
+            state = reduceTui(state, action);
+          },
+          requestRender: () => undefined,
+          reportDiagnostic: (error) => {
+            state = reduceTui(state, { type: "system-message", text: learningDiagnosticNotice(error) });
+          },
+          reportFailure: (error) => reported.push(error),
+        },
+      );
 
-    await waitForAsyncPresentation();
+      await waitForAsyncPresentation();
 
-    expect(state.execution).toBe(foregroundState);
-    expect(state.error).toBeUndefined();
-    expect(state.timeline.at(-1)).toMatchObject({
-      kind: "message",
-      role: "system",
-      text: "learning · unavailable · learning read failed [31m please retry",
-    });
-    expect(reported).toEqual([]);
-  });
+      expect(state.execution).toBe(foregroundState);
+      expect(state.error).toBeUndefined();
+      expect(state.timeline.at(-1)).toMatchObject({
+        kind: "message",
+        role: "system",
+        text: "learning · unavailable · learning read failed [31m please retry",
+      });
+      expect(reported).toEqual([]);
+    },
+  );
 
   test.each([
     Object.create(null),

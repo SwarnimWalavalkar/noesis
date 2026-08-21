@@ -131,6 +131,8 @@ pnpm check
 
 The check formats, lints, type-checks, and tests the repository. Tests use controlled providers and do not require paid credentials.
 
+The checked-in VS Code workspace recommends the Oxc extension. `Format Document` uses Oxfmt, while saving runs Oxfmt followed by Oxlint's safe fixes. Both read the same repository configuration as `pnpm check`.
+
 ## Documentation
 
 [Product documentation](docs/README.md) describes the current product and architecture. [Implementation plans](plans/README.md) record the decisions behind shipped systems. You do not need the plans to use Noesis.

@@ -648,65 +648,68 @@ describe("Noesis TUI lifecycle", () => {
   test.each([
     ["/quit", "/quit\r"],
     ["Ctrl+C", "\u0003"],
-  ] as const)("releases the terminal immediately and settles an active compact before %s shutdown completes", async (_exit, exitInput) => {
-    let releaseCompact: (() => void) | undefined;
-    const compactGate = new Promise<void>((resolve) => {
-      releaseCompact = resolve;
-    });
-    let compactStarted = false;
-    let compactFinished = false;
-    const base = await createRuntime({
-      name: "command-shutdown-scripted",
-      async run(request) {
-        return {
-          text: request.prompt,
-          provider: request.provider,
-          model: request.model,
-          outcome: "completed",
-          stopReason: "stop",
-        };
-      },
-      steer: consumeSteer,
-      async abort() {},
-    });
-    const runtime = Object.freeze({
-      ...base,
-      compact: async () => {
-        compactStarted = true;
-        await compactGate;
-        compactFinished = true;
-      },
-    });
-    const terminal = createTestTerminal();
-    const running = startNoesisTui(runtime, {}, terminal);
-    let shutdownCompleted = false;
-    void running.then(() => {
-      shutdownCompleted = true;
-    });
-    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+  ] as const)(
+    "releases the terminal immediately and settles an active compact before %s shutdown completes",
+    async (_exit, exitInput) => {
+      let releaseCompact: (() => void) | undefined;
+      const compactGate = new Promise<void>((resolve) => {
+        releaseCompact = resolve;
+      });
+      let compactStarted = false;
+      let compactFinished = false;
+      const base = await createRuntime({
+        name: "command-shutdown-scripted",
+        async run(request) {
+          return {
+            text: request.prompt,
+            provider: request.provider,
+            model: request.model,
+            outcome: "completed",
+            stopReason: "stop",
+          };
+        },
+        steer: consumeSteer,
+        async abort() {},
+      });
+      const runtime = Object.freeze({
+        ...base,
+        compact: async () => {
+          compactStarted = true;
+          await compactGate;
+          compactFinished = true;
+        },
+      });
+      const terminal = createTestTerminal();
+      const running = startNoesisTui(runtime, {}, terminal);
+      let shutdownCompleted = false;
+      void running.then(() => {
+        shutdownCompleted = true;
+      });
+      await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
-    terminal.type("/compact\r");
-    await vi.waitFor(() => expect(compactStarted).toBe(true));
-    terminal.type("survive shutdown\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1 · paused"));
-    const trailId = runtime.listTrails()[0]?.trailId;
-    if (!trailId) throw new Error("Expected an active trail");
-    terminal.type(exitInput);
-    await vi.waitFor(() => expect(terminal.stops).toBe(1));
-    expect(shutdownCompleted).toBe(false);
-    await new Promise<void>((resolve) => setTimeout(resolve, 300));
-    expect(shutdownCompleted).toBe(false);
+      terminal.type("/compact\r");
+      await vi.waitFor(() => expect(compactStarted).toBe(true));
+      terminal.type("survive shutdown\r");
+      await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1 · paused"));
+      const trailId = runtime.listTrails()[0]?.trailId;
+      if (!trailId) throw new Error("Expected an active trail");
+      terminal.type(exitInput);
+      await vi.waitFor(() => expect(terminal.stops).toBe(1));
+      expect(shutdownCompleted).toBe(false);
+      await new Promise<void>((resolve) => setTimeout(resolve, 300));
+      expect(shutdownCompleted).toBe(false);
 
-    releaseCompact?.();
-    await running;
-    expect(compactFinished).toBe(true);
-    expect(terminal.output).not.toContain("Context compacted");
-    expect(terminal.stops).toBe(1);
-    await expect(runtime.inspectInteraction(trailId)).resolves.toMatchObject({
-      queuePaused: true,
-      pending: [expect.objectContaining({ text: "survive shutdown" })],
-    });
-  });
+      releaseCompact?.();
+      await running;
+      expect(compactFinished).toBe(true);
+      expect(terminal.output).not.toContain("Context compacted");
+      expect(terminal.stops).toBe(1);
+      await expect(runtime.inspectInteraction(trailId)).resolves.toMatchObject({
+        queuePaused: true,
+        pending: [expect.objectContaining({ text: "survive shutdown" })],
+      });
+    },
+  );
 
   test("queues prompts submitted during a turn and drains them in FIFO order", async () => {
     let releaseTurn: (() => void) | undefined;

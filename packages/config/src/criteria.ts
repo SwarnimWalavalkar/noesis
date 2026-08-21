@@ -735,17 +735,16 @@ export function createUserCriterionRepository(
           isRelevant(definition.scope, input.scope) &&
           (selected.size === 0 || selected.has(definition.criterionId)),
       )
-      .map(
-        ({ definition, metadata }): RelevantCriterionSnapshot =>
-          Object.freeze({
-            criterionId: definition.criterionId,
-            revision: definition.revision,
-            scope: definition.scope,
-            evaluatorInstruction: definition.evaluatorInstruction,
-            evidenceRefs: Object.freeze(definition.evidenceRefs.map((ref) => Object.freeze({ ...ref }))),
-            promptOwnership: Object.freeze({ ...definition.promptOwnership }),
-            definitionRevision: Object.freeze({ ...metadata.definitionRevision }),
-          }),
+      .map(({ definition, metadata }): RelevantCriterionSnapshot =>
+        Object.freeze({
+          criterionId: definition.criterionId,
+          revision: definition.revision,
+          scope: definition.scope,
+          evaluatorInstruction: definition.evaluatorInstruction,
+          evidenceRefs: Object.freeze(definition.evidenceRefs.map((ref) => Object.freeze({ ...ref }))),
+          promptOwnership: Object.freeze({ ...definition.promptOwnership }),
+          definitionRevision: Object.freeze({ ...metadata.definitionRevision }),
+        }),
       );
     const selectedCriterionIds = Object.freeze(criteria.map((criterion) => criterion.criterionId));
     const digestInput = {

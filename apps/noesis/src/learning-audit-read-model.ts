@@ -68,18 +68,17 @@ interface LearningAuditSource {
   readonly now?: () => Date;
 }
 
-interface PrimitiveInput
-  extends Omit<
-    TuiLearningPrimitive,
-    | "evidence"
-    | "evidencePreviews"
-    | "consideredEvidenceCount"
-    | "consideredEvidencePreviews"
-    | "relations"
-    | "detailSections"
-    | "rawJson"
-    | "tone"
-  > {
+interface PrimitiveInput extends Omit<
+  TuiLearningPrimitive,
+  | "evidence"
+  | "evidencePreviews"
+  | "consideredEvidenceCount"
+  | "consideredEvidencePreviews"
+  | "relations"
+  | "detailSections"
+  | "rawJson"
+  | "tone"
+> {
   readonly evidence?: readonly EvidenceRef[];
   readonly evidencePreviews?: readonly TuiLearningEvidencePreview[];
   readonly consideredEvidenceCount?: number;
@@ -938,11 +937,9 @@ export async function loadLearningAuditSnapshot(
     experiments.map((experiment) => [experiment.experimentId, experiment.hypothesis] as const),
   );
   const resolveEvidencePreviews = createEvidencePreviewResolver(source.workspace);
-  const primitives: TuiLearningPrimitive[] = [
-    ...(await Promise.all(
-      jobs.map(async (job) => await jobPrimitive(job, adjustmentsById, resolveEvidencePreviews)),
-    )),
-  ];
+  const primitives: TuiLearningPrimitive[] = await Promise.all(
+    jobs.map(async (job) => await jobPrimitive(job, adjustmentsById, resolveEvidencePreviews)),
+  );
 
   for (const criterion of criteriaResult.value) {
     const definition = criterion.definition;

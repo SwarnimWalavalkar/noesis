@@ -70,12 +70,10 @@ export async function createBackup(
     ...(await walkFiles(paths.evidence, paths.root)),
     ...(await walkFiles(paths.artifacts, paths.root)),
   ]);
-  const expected = [
-    ...database
-      .prepare("SELECT snapshot_path AS path FROM file_revisions UNION ALL SELECT path FROM artifacts")
-      .all()
-      .map((row) => requiredString(row, "path")),
-  ];
+  const expected = database
+    .prepare("SELECT snapshot_path AS path FROM file_revisions UNION ALL SELECT path FROM artifacts")
+    .all()
+    .map((row) => requiredString(row, "path"));
   for (const path of expected) candidates.add(path);
 
   database.exec("PRAGMA wal_checkpoint(FULL); BEGIN IMMEDIATE;");

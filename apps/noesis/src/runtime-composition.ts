@@ -231,12 +231,6 @@ const HistoryRerankItemSchema = z.strictObject({
   reason: z.string().min(1).max(512),
 });
 
-const OutcomeProposalSchema = z.strictObject({
-  proposal: z.enum(["keep", "revise", "revert"]),
-  citedObservationIds: z.array(z.string().min(1)).min(1),
-  summary: z.string().min(1),
-});
-
 const ContextCheckpointSummarySchema = z.strictObject({
   goal: z.string().min(1).max(4_096),
   constraints: z.array(z.string().min(1).max(2_048)).max(32),
@@ -2399,9 +2393,7 @@ export async function createApplicationRuntimeComposition(
         execute: async () =>
           (
             await Promise.all(
-              (
-                await workspace.operational.workflows.listRunsForSession(plan.sessionId)
-              ).map(async (run) =>
+              (await workspace.operational.workflows.listRunsForSession(plan.sessionId)).map(async (run) =>
                 (await workflowRunVisibleInProject(workspace, project, run)) ? run : undefined,
               ),
             )
@@ -5029,6 +5021,8 @@ export async function createApplicationRuntimeComposition(
     compactionsClosing = true;
     for (const controller of activeCompactions.values())
       controller.abort(contextCompactionInterrupted("Context compaction stopped during shutdown"));
+    // Snapshot the active tails so shutdown does not adopt compactions created after it starts.
+    // oxlint-disable-next-line unicorn/no-useless-spread
     await Promise.all([...compactionTails.values()]);
   };
   const shutdown = (): Promise<void> => {

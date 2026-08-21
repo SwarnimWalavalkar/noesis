@@ -477,9 +477,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       );
     await enqueuePreflight({
       experimentId: payload.experimentId,
-      sourceSessionIds: Object.freeze([
-        ...new Set([...(payload.sourceSessionId ? [payload.sourceSessionId] : [])]),
-      ]),
+      sourceSessionIds: Object.freeze([...new Set(payload.sourceSessionId ? [payload.sourceSessionId] : [])]),
       parentJobId,
       candidate,
       retrievalStrategyId: payload.retrievalStrategyId,
@@ -788,7 +786,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
 
   const stop = async (): Promise<void> => {
     stopping = true;
-    for (const jobId of [...heartbeats.keys()]) clearHeartbeat(jobId);
+    for (const jobId of heartbeats.keys()) clearHeartbeat(jobId);
     for (const controller of active.values()) controller.abort("worker_stopped");
     await draining;
   };

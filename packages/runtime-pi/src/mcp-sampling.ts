@@ -581,13 +581,11 @@ function samplingSystemPrompt(request: PiMcpSamplingRequest): string | undefined
 function outputContent(message: AssistantMessage): readonly (PiMcpTextContent | PiMcpToolUseContent)[] {
   const visible = message.content.flatMap((part): readonly (PiMcpTextContent | PiMcpToolUseContent)[] => {
     if (part.type === "text") {
-      const meta = outputMeta({ ...(part.textSignature ? { textSignature: part.textSignature } : {}) });
+      const meta = outputMeta(part.textSignature ? { textSignature: part.textSignature } : {});
       return [Object.freeze({ type: "text", text: part.text, ...(meta ? { _meta: meta } : {}) })];
     }
     if (part.type === "toolCall") {
-      const meta = outputMeta({
-        ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
-      });
+      const meta = outputMeta(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {});
       return [
         Object.freeze({
           type: "tool_use",

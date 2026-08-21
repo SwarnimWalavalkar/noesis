@@ -38,7 +38,7 @@ export function paginateInspectorText(heading: string, text: string): readonly s
   const safeText = safeTerminalText(text);
   const contentLimit = INSPECTOR_PREVIEW_CHARACTERS - INSPECTOR_PAGE_HEADER_RESERVE;
   const chunks: string[] = [];
-  for (let start = 0; start < safeText.length; ) {
+  for (let start = 0; start < safeText.length;) {
     const end = pageBreak(safeText, start, contentLimit);
     chunks.push(safeText.slice(start, end));
     start = end;

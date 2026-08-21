@@ -10,11 +10,7 @@ import {
   type FileRevisionRef,
   sha256,
 } from "@noesis/domain";
-import {
-  createWorkspaceStore,
-  type NoesisWorkspaceStore,
-  workingAdjustmentAdmissionConflictError,
-} from "@noesis/workspace";
+import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
 import {

@@ -159,30 +159,29 @@ describe("adapter-neutral role runner", () => {
     });
   });
 
-  test.each([
-    "stop",
-    "length",
-    "toolUse",
-  ] satisfies readonly RoleStopReason[])("preserves successful %s stop reason and reported usage", async (stopReason) => {
-    const reportedUsage = usage(30, 9, 0.42);
-    const backend = createScriptedRoleModelBackend({
-      respond: () => ({ text: "done", stopReason, usage: reportedUsage }),
-    });
-    const runner = createAgentRoleRunner({
-      backend,
-      variants: [configuration("foreground", `foreground-${stopReason}`)],
-    });
+  test.each(["stop", "length", "toolUse"] satisfies readonly RoleStopReason[])(
+    "preserves successful %s stop reason and reported usage",
+    async (stopReason) => {
+      const reportedUsage = usage(30, 9, 0.42);
+      const backend = createScriptedRoleModelBackend({
+        respond: () => ({ text: "done", stopReason, usage: reportedUsage }),
+      });
+      const runner = createAgentRoleRunner({
+        backend,
+        variants: [configuration("foreground", `foreground-${stopReason}`)],
+      });
 
-    const result = await runner.run(
-      request("foreground", `foreground-${stopReason}`, [
-        { role: "user", content: "complete foreground work" },
-      ]),
-    );
+      const result = await runner.run(
+        request("foreground", `foreground-${stopReason}`, [
+          { role: "user", content: "complete foreground work" },
+        ]),
+      );
 
-    expect(result.text).toBe("done");
-    expect(result.trace.usage).toEqual(reportedUsage);
-    expect(result.trace.telemetry).toMatchObject({ stopReason, status: "completed" });
-  });
+      expect(result.text).toBe("done");
+      expect(result.trace.usage).toEqual(reportedUsage);
+      expect(result.trace.telemetry).toMatchObject({ stopReason, status: "completed" });
+    },
+  );
 
   test("surfaces provider errors with stop, usage, and failure telemetry", async () => {
     const reportedUsage = usage(6, 2, 0.04);

@@ -1040,7 +1040,7 @@ export function createContinuousFeedbackController(
 
   const stop = async (): Promise<void> => {
     stopping = true;
-    for (const jobId of [...heartbeats.keys()]) clearHeartbeat(jobId);
+    for (const jobId of heartbeats.keys()) clearHeartbeat(jobId);
     for (const controller of active.values()) controller.abort("worker_stopped");
     await draining;
   };

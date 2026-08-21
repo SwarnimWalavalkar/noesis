@@ -1187,7 +1187,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     await Promise.all(authentications.map(async (authentication) => await authentication.settled));
     await Promise.all([...connections.keys()].map(disconnect));
     await Promise.all([...connectionAttempts].map(closeConnectionAttempt));
-    await Promise.allSettled([...inFlightConnects]);
+    await Promise.allSettled(inFlightConnects);
     await Promise.all(
       [...pendingOAuthTransports.keys()].map(async (name) => await closePendingOAuthTransport(name)),
     );
@@ -1705,7 +1705,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
           undefined,
           {
             ...requestOptions(options.signal, connection.server.config.timeout),
-            task: { ...(options.ttl == null ? {} : { ttl: options.ttl }) },
+            task: options.ttl == null ? {} : { ttl: options.ttl },
           },
         )) {
           if (message.type === "error") throw message.error;

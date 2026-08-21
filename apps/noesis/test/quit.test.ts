@@ -252,26 +252,27 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
 
-  test.each([
-    "quit-lf",
-    "ctrl-c",
-  ] as const)("--continue renders the latest history and %s cleanup exits cleanly", async (action) => {
-    const { output, result } = await runPtyExit(action, async (home) => {
-      const runtime = await createTestRuntime(home);
-      const older = await runtime.startTrail({ title: "older continue" });
-      await runtime.debug.runTurn(older.trailId, "older continue PTY history");
-      const selected = await runtime.startTrail({
-        title: "latest continue",
+  test.each(["quit-lf", "ctrl-c"] as const)(
+    "--continue renders the latest history and %s cleanup exits cleanly",
+    async (action) => {
+      const { output, result } = await runPtyExit(action, async (home) => {
+        const runtime = await createTestRuntime(home);
+        const older = await runtime.startTrail({ title: "older continue" });
+        await runtime.debug.runTurn(older.trailId, "older continue PTY history");
+        const selected = await runtime.startTrail({
+          title: "latest continue",
+        });
+        await runtime.debug.runTurn(selected.trailId, "latest continue PTY history");
+        await runtime.shutdown();
+        return ["--continue"];
       });
-      await runtime.debug.runTurn(selected.trailId, "latest continue PTY history");
-      await runtime.shutdown();
-      return ["--continue"];
-    });
 
-    expect(output).toContain("latest continue PTY history");
-    expect(output).not.toContain("older continue PTY history");
-    expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+      expect(output).toContain("latest continue PTY history");
+      expect(output).not.toContain("older continue PTY history");
+      expect(result).toEqual({ code: 0, signal: null });
+    },
+    7_000,
+  );
 
   test("direct resume restores one exact session and picker cancellation exits cleanly", async () => {
     const direct = await runPtyExit("quit-lf", async (home) => {

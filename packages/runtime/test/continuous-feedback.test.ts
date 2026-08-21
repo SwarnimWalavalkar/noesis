@@ -679,25 +679,28 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
         },
       },
     ],
-  ] as const)("%s-transaction failure exposes neither outcome nor partial restore", async (_name, storeOptions) => {
-    const fixture = await createFixture({ storeOptions });
-    const candidateActivation = await fixture.protectedRuntime.activations.current();
-    await pinTurn(fixture, `turn-${_name}`);
-    await expect(
-      controller(fixture).observeTurnOutcome(
-        observationInput(fixture, `turn-${_name}`, {
-          status: "failed",
-          summary: "failure",
-          metrics: Object.freeze({ failed: true, protectedRailViolation: true }),
-        }),
-      ),
-    ).rejects.toThrow();
-    expect(await fixture.protectedRuntime.feedback.getOutcome(fixture.experimentId)).toBeUndefined();
-    expect(await fixture.protectedRuntime.activations.current()).toEqual(candidateActivation);
-    expect(await fixture.workspace.research.experiments.getExperiment(fixture.experimentId)).toMatchObject({
-      status: "observing",
-    });
-  });
+  ] as const)(
+    "%s-transaction failure exposes neither outcome nor partial restore",
+    async (_name, storeOptions) => {
+      const fixture = await createFixture({ storeOptions });
+      const candidateActivation = await fixture.protectedRuntime.activations.current();
+      await pinTurn(fixture, `turn-${_name}`);
+      await expect(
+        controller(fixture).observeTurnOutcome(
+          observationInput(fixture, `turn-${_name}`, {
+            status: "failed",
+            summary: "failure",
+            metrics: Object.freeze({ failed: true, protectedRailViolation: true }),
+          }),
+        ),
+      ).rejects.toThrow();
+      expect(await fixture.protectedRuntime.feedback.getOutcome(fixture.experimentId)).toBeUndefined();
+      expect(await fixture.protectedRuntime.activations.current()).toEqual(candidateActivation);
+      expect(await fixture.workspace.research.experiments.getExperiment(fixture.experimentId)).toMatchObject({
+        status: "observing",
+      });
+    },
+  );
 
   test("post-transaction failure is recovered as one committed restoration", async () => {
     const fixture = await createFixture({
