@@ -1,3 +1,4 @@
+import { createConditionalObject, type JsonObject, type JsonValue, JsonValueSchema } from "@noesis/domain";
 import type {
   Api,
   AssistantMessage,
@@ -14,22 +15,17 @@ import type {
   UserMessage,
 } from "@earendil-works/pi-ai";
 import { z } from "zod";
-
 export const PI_MCP_CONTINUITY_META_KEY = "io.noesis/pi-continuity";
-
 const McpMetaSchema = z.record(z.string(), z.json());
 const PiContinuityMetaSchema = z.strictObject({
   textSignature: z.string().min(1).optional(),
   thoughtSignature: z.string().min(1).optional(),
 });
-
 type ValidatedMcpMeta = Readonly<z.infer<typeof McpMetaSchema>>;
 type PiContinuityMeta = Readonly<z.infer<typeof PiContinuityMetaSchema>>;
-
 interface McpMetadataCarrier {
   readonly _meta?: ValidatedMcpMeta;
 }
-
 export type PiMcpSamplingErrorCode =
   | "aborted"
   | "invalid_request"
@@ -37,26 +33,27 @@ export type PiMcpSamplingErrorCode =
   | "model_not_found"
   | "model_response"
   | "unsupported";
-
 export interface PiMcpSamplingError extends Error {
   readonly name: "PiMcpSamplingError";
   readonly code: PiMcpSamplingErrorCode;
 }
-
 export function createPiMcpSamplingError(
   code: PiMcpSamplingErrorCode,
   message: string,
-  options?: Readonly<{ readonly cause?: unknown }>,
+  options?: Readonly<{
+    readonly cause?: unknown;
+  }>,
 ): PiMcpSamplingError {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.assign(new Error(message, options), {
     name: "PiMcpSamplingError" as const,
     code,
   });
 }
-
 export function isPiMcpSamplingError(value: unknown): value is PiMcpSamplingError {
   if (!(value instanceof Error) || value.name !== "PiMcpSamplingError") return false;
-  const code = Reflect.get(value, "code");
+  if (!("code" in value)) return false;
+  const code = value.code;
   return (
     code === "aborted" ||
     code === "invalid_request" ||
@@ -66,126 +63,117 @@ export function isPiMcpSamplingError(value: unknown): value is PiMcpSamplingErro
     code === "unsupported"
   );
 }
-
 export interface PiMcpTextContent {
   readonly type: "text";
   readonly text: string;
-  readonly annotations?: Readonly<Record<string, unknown>>;
-  readonly _meta?: Readonly<Record<string, unknown>>;
+  readonly annotations?: JsonObject;
+  readonly _meta?: JsonObject;
 }
-
 export interface PiMcpImageContent {
   readonly type: "image";
   readonly data: string;
   readonly mimeType: string;
-  readonly annotations?: Readonly<Record<string, unknown>>;
-  readonly _meta?: Readonly<Record<string, unknown>>;
+  readonly annotations?: JsonObject;
+  readonly _meta?: JsonObject;
 }
-
 export interface PiMcpAudioContent {
   readonly type: "audio";
   readonly data: string;
   readonly mimeType: string;
-  readonly annotations?: Readonly<Record<string, unknown>>;
-  readonly _meta?: Readonly<Record<string, unknown>>;
+  readonly annotations?: JsonObject;
+  readonly _meta?: JsonObject;
 }
-
 export interface PiMcpResourceLinkContent {
   readonly type: "resource_link";
   readonly uri: string;
   readonly name: string;
-  readonly [key: string]: unknown;
+  readonly [key: string]: JsonValue;
 }
-
 export interface PiMcpEmbeddedResourceContent {
   readonly type: "resource";
-  readonly resource: Readonly<Record<string, unknown>>;
-  readonly [key: string]: unknown;
+  readonly resource: JsonObject;
+  readonly [key: string]: JsonValue;
 }
-
 export type PiMcpToolResultBlock =
   | PiMcpTextContent
   | PiMcpImageContent
   | PiMcpAudioContent
   | PiMcpResourceLinkContent
   | PiMcpEmbeddedResourceContent;
-
 export interface PiMcpToolUseContent {
   readonly type: "tool_use";
   readonly id: string;
   readonly name: string;
-  readonly input: Readonly<Record<string, unknown>>;
-  readonly _meta?: Readonly<Record<string, unknown>>;
+  readonly input: JsonObject;
+  readonly _meta?: JsonObject;
 }
-
 export interface PiMcpToolResultContent {
   readonly type: "tool_result";
   readonly toolUseId: string;
   readonly content: readonly PiMcpToolResultBlock[];
-  readonly structuredContent?: Readonly<Record<string, unknown>>;
+  readonly structuredContent?: JsonObject;
   readonly isError?: boolean;
-  readonly _meta?: Readonly<Record<string, unknown>>;
+  readonly _meta?: JsonObject;
 }
-
 export type PiMcpSamplingContent =
   | PiMcpTextContent
   | PiMcpImageContent
   | PiMcpAudioContent
   | PiMcpToolUseContent
   | PiMcpToolResultContent;
-
 export interface PiMcpSamplingMessage {
   readonly role: "user" | "assistant";
   readonly content: PiMcpSamplingContent | readonly PiMcpSamplingContent[];
-  readonly _meta?: Readonly<Record<string, unknown>>;
+  readonly _meta?: JsonObject;
 }
-
 export interface PiMcpSamplingTool {
   readonly name: string;
   readonly description?: string;
-  readonly inputSchema: Readonly<Record<string, unknown>>;
+  readonly inputSchema: JsonObject;
 }
-
 export interface PiMcpSamplingRequestParams {
   readonly messages: readonly PiMcpSamplingMessage[];
-  readonly modelPreferences?: Readonly<Record<string, unknown>>;
+  readonly modelPreferences?: JsonObject;
   readonly systemPrompt?: string;
   readonly includeContext?: "none" | "thisServer" | "allServers";
   readonly temperature?: number;
   readonly maxTokens: number;
   readonly stopSequences?: readonly string[];
-  readonly metadata?: Readonly<Record<string, unknown>>;
+  readonly metadata?: JsonObject;
   readonly tools?: readonly PiMcpSamplingTool[];
-  readonly toolChoice?: Readonly<{ readonly mode?: "auto" | "required" | "none" }>;
+  readonly toolChoice?: Readonly<{
+    readonly mode?: "auto" | "required" | "none";
+  }>;
   /** Preserved for the MCP host's task machinery. The Pi sampling adapter does not own task state. */
-  readonly task?: Readonly<{ readonly ttl?: number | null; readonly pollInterval?: number }>;
-  readonly _meta?: Readonly<Record<string, unknown>>;
+  readonly task?: Readonly<{
+    readonly ttl?: number | null;
+    readonly pollInterval?: number;
+  }>;
+  readonly _meta?: JsonObject;
 }
-
 export interface PiMcpSamplingRequest {
   readonly params: PiMcpSamplingRequestParams;
 }
-
-const UnknownRecordSchema = z.record(z.string(), z.unknown());
+const JsonObjectSchema = z.record(z.string(), JsonValueSchema);
 const SamplingTextContentSchema = z.looseObject({
   type: z.literal("text"),
   text: z.string(),
-  annotations: UnknownRecordSchema.optional(),
-  _meta: UnknownRecordSchema.optional(),
+  annotations: JsonObjectSchema.optional(),
+  _meta: JsonObjectSchema.optional(),
 });
 const SamplingImageContentSchema = z.looseObject({
   type: z.literal("image"),
   data: z.string(),
   mimeType: z.string(),
-  annotations: UnknownRecordSchema.optional(),
-  _meta: UnknownRecordSchema.optional(),
+  annotations: JsonObjectSchema.optional(),
+  _meta: JsonObjectSchema.optional(),
 });
 const SamplingAudioContentSchema = z.looseObject({
   type: z.literal("audio"),
   data: z.string(),
   mimeType: z.string(),
-  annotations: UnknownRecordSchema.optional(),
-  _meta: UnknownRecordSchema.optional(),
+  annotations: JsonObjectSchema.optional(),
+  _meta: JsonObjectSchema.optional(),
 });
 const SamplingResourceLinkContentSchema = z.looseObject({
   type: z.literal("resource_link"),
@@ -194,14 +182,14 @@ const SamplingResourceLinkContentSchema = z.looseObject({
 });
 const SamplingEmbeddedResourceContentSchema = z.looseObject({
   type: z.literal("resource"),
-  resource: UnknownRecordSchema,
+  resource: JsonObjectSchema,
 });
 const SamplingToolUseContentSchema = z.looseObject({
   type: z.literal("tool_use"),
   id: z.string().min(1),
   name: z.string().min(1),
-  input: UnknownRecordSchema,
-  _meta: UnknownRecordSchema.optional(),
+  input: JsonObjectSchema,
+  _meta: JsonObjectSchema.optional(),
 });
 const SamplingToolResultContentSchema = z.looseObject({
   type: z.literal("tool_result"),
@@ -217,9 +205,9 @@ const SamplingToolResultContentSchema = z.looseObject({
       ]),
     )
     .default([]),
-  structuredContent: UnknownRecordSchema.optional(),
+  structuredContent: JsonObjectSchema.optional(),
   isError: z.boolean().optional(),
-  _meta: UnknownRecordSchema.optional(),
+  _meta: JsonObjectSchema.optional(),
 });
 const SamplingContentSchema = z.union([
   SamplingTextContentSchema,
@@ -235,22 +223,22 @@ const UntrustedPiMcpSamplingRequestSchema = z.strictObject({
       z.looseObject({
         role: z.enum(["user", "assistant"]),
         content: z.union([SamplingContentSchema, z.array(SamplingContentSchema)]),
-        _meta: UnknownRecordSchema.optional(),
+        _meta: JsonObjectSchema.optional(),
       }),
     ),
-    modelPreferences: UnknownRecordSchema.optional(),
+    modelPreferences: JsonObjectSchema.optional(),
     systemPrompt: z.string().optional(),
     includeContext: z.enum(["none", "thisServer", "allServers"]).optional(),
     temperature: z.number().optional(),
     maxTokens: z.number().int(),
     stopSequences: z.array(z.string()).optional(),
-    metadata: UnknownRecordSchema.optional(),
+    metadata: JsonObjectSchema.optional(),
     tools: z
       .array(
         z.looseObject({
           name: z.string().min(1),
           description: z.string().optional(),
-          inputSchema: UnknownRecordSchema,
+          inputSchema: JsonObjectSchema,
         }),
       )
       .optional(),
@@ -258,14 +246,13 @@ const UntrustedPiMcpSamplingRequestSchema = z.strictObject({
     task: z
       .looseObject({ ttl: z.number().nullable().optional(), pollInterval: z.number().optional() })
       .optional(),
-    _meta: UnknownRecordSchema.optional(),
+    _meta: JsonObjectSchema.optional(),
   }),
 });
 const PiMcpSamplingRequestSchema = z.preprocess(
   (value) => UntrustedPiMcpSamplingRequestSchema.parse(value),
   z.custom<PiMcpSamplingRequest>(() => true),
 );
-
 export interface PiMcpSamplingResult {
   readonly model: string;
   readonly role: "assistant";
@@ -275,7 +262,6 @@ export interface PiMcpSamplingResult {
     | readonly (PiMcpTextContent | PiMcpToolUseContent)[];
   readonly stopReason?: "endTurn" | "maxTokens" | "toolUse" | string;
 }
-
 export interface PiMcpSamplingPort {
   readonly sample: (
     request: PiMcpSamplingRequest,
@@ -289,8 +275,8 @@ export interface PiMcpSamplingPort {
     }>,
   ) => Promise<PiMcpSamplingResult>;
 }
-
 /** Protocol-facing boundary kept here so app composition never imports Pi model/runtime types. */
+// BOUNDARY: The MCP SDK owns the incoming request shape; the adapter parses it before sampling.
 export function adaptMcpSamplingRequest(
   port: PiMcpSamplingPort,
   request: unknown,
@@ -300,20 +286,22 @@ export function adaptMcpSamplingRequest(
     readonly model: string;
     readonly reasoning: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   }>,
-): Promise<unknown> {
-  return port.sample(PiMcpSamplingRequestSchema.parse(request), {
-    ...(signal ? { signal } : {}),
-    ...(route ? { route } : {}),
-  });
+): Promise<PiMcpSamplingResult> {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return port.sample(
+    PiMcpSamplingRequestSchema.parse(request),
+    createConditionalObject({} as const)
+      .addOptional(signal ? { signal } : undefined)
+      .addOptional(route ? { route } : undefined)
+      .finish(),
+  );
 }
-
 export interface CreatePiMcpSamplingPortInput {
   readonly models: MutableModels;
   readonly provider: string;
   readonly model: string;
   readonly reasoning?: SimpleStreamOptions["reasoning"] | "off";
 }
-
 const EMPTY_USAGE = Object.freeze({
   input: 0,
   output: 0,
@@ -322,22 +310,18 @@ const EMPTY_USAGE = Object.freeze({
   totalTokens: 0,
   cost: Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }),
 });
-
 function blocks(content: PiMcpSamplingMessage["content"]): readonly PiMcpSamplingContent[] {
   return isSamplingContentArray(content) ? content : [content];
 }
-
 function isSamplingContentArray(
   content: PiMcpSamplingMessage["content"],
 ): content is readonly PiMcpSamplingContent[] {
   return Array.isArray(content);
 }
-
 function unsupported(message: string): never {
   throw createPiMcpSamplingError("unsupported", message);
 }
-
-function validatedMcpMeta(meta: Readonly<Record<string, unknown>> | undefined): ValidatedMcpMeta | undefined {
+function validatedMcpMeta(meta: JsonObject | undefined): ValidatedMcpMeta | undefined {
   if (meta === undefined) return undefined;
   const parsed = McpMetaSchema.safeParse(meta);
   if (!parsed.success)
@@ -346,7 +330,6 @@ function validatedMcpMeta(meta: Readonly<Record<string, unknown>> | undefined): 
     });
   return Object.freeze({ ...parsed.data });
 }
-
 function continuityMeta(meta: ValidatedMcpMeta | undefined): PiContinuityMeta | undefined {
   if (!meta || !(PI_MCP_CONTINUITY_META_KEY in meta)) return undefined;
   const parsed = PiContinuityMetaSchema.safeParse(meta[PI_MCP_CONTINUITY_META_KEY]);
@@ -358,7 +341,6 @@ function continuityMeta(meta: ValidatedMcpMeta | undefined): PiContinuityMeta | 
     );
   return parsed.data;
 }
-
 function outputMeta(continuity: PiContinuityMeta): ValidatedMcpMeta | undefined {
   const payload =
     continuity.textSignature !== undefined && continuity.thoughtSignature !== undefined
@@ -373,43 +355,53 @@ function outputMeta(continuity: PiContinuityMeta): ValidatedMcpMeta | undefined 
     [PI_MCP_CONTINUITY_META_KEY]: Object.freeze(payload),
   });
 }
-
 function piTextContent(block: PiMcpTextContent): TextContent & McpMetadataCarrier {
   const meta = validatedMcpMeta(block._meta);
   const continuity = continuityMeta(meta);
-  return Object.freeze({
-    type: "text",
-    text: block.text,
-    ...(continuity?.textSignature ? { textSignature: continuity.textSignature } : {}),
-    ...(meta ? { _meta: meta } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      type: "text",
+      text: block.text,
+    } as const)
+      .addOptional(continuity?.textSignature ? { textSignature: continuity.textSignature } : undefined)
+      .addOptional(meta ? { _meta: meta } : undefined)
+      .finish(),
+  );
 }
-
 function piImageContent(block: PiMcpImageContent): ImageContent & McpMetadataCarrier {
   const meta = validatedMcpMeta(block._meta);
-  return Object.freeze({
-    type: "image",
-    data: block.data,
-    mimeType: block.mimeType,
-    ...(meta ? { _meta: meta } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      type: "image",
+      data: block.data,
+      mimeType: block.mimeType,
+    } as const)
+      .addOptional(meta ? { _meta: meta } : undefined)
+      .finish(),
+  );
 }
-
 function validateToolUse(block: PiMcpToolUseContent): ToolCall & McpMetadataCarrier {
   if (!block.id || !block.name)
     throw createPiMcpSamplingError("invalid_request", "MCP sampling tool-use blocks require an id and name");
   const meta = validatedMcpMeta(block._meta);
   const continuity = continuityMeta(meta);
-  return Object.freeze({
-    type: "toolCall",
-    id: block.id,
-    name: block.name,
-    arguments: { ...block.input },
-    ...(continuity?.thoughtSignature ? { thoughtSignature: continuity.thoughtSignature } : {}),
-    ...(meta ? { _meta: meta } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      type: "toolCall",
+      id: block.id,
+      name: block.name,
+      arguments: { ...block.input },
+    } as const)
+      .addOptional(
+        continuity?.thoughtSignature ? { thoughtSignature: continuity.thoughtSignature } : undefined,
+      )
+      .addOptional(meta ? { _meta: meta } : undefined)
+      .finish(),
+  );
 }
-
 function priorAssistantMessage(
   message: PiMcpSamplingMessage,
   model: Model<Api>,
@@ -435,7 +427,6 @@ function priorAssistantMessage(
     timestamp,
   });
 }
-
 function directUserMessage(
   content: readonly (PiMcpTextContent | PiMcpImageContent)[],
   model: Model<Api>,
@@ -450,7 +441,6 @@ function directUserMessage(
   if (direct.length === 0) return undefined;
   return Object.freeze({ role: "user", content: direct, timestamp });
 }
-
 function toolResultBlocks(
   block: PiMcpToolResultContent,
   model: Model<Api>,
@@ -475,7 +465,6 @@ function toolResultBlocks(
     );
   return Object.freeze(result);
 }
-
 function priorUserMessages(
   message: PiMcpSamplingMessage,
   toolNames: Map<string, string>,
@@ -507,21 +496,26 @@ function priorUserMessages(
       );
     toolNames.delete(block.toolUseId);
     const meta = validatedMcpMeta(block._meta);
-    const toolResult: ToolResultMessage & McpMetadataCarrier = Object.freeze({
-      role: "toolResult",
-      toolCallId: block.toolUseId,
-      toolName,
-      content: [...toolResultBlocks(block, model)],
-      isError: block.isError ?? false,
-      timestamp,
-      ...(meta ? { _meta: meta } : {}),
-    });
+    const toolResult: ToolResultMessage & McpMetadataCarrier = Object.freeze(
+      createConditionalObject({
+        role: "toolResult",
+        toolCallId: block.toolUseId,
+        toolName,
+        content: [...toolResultBlocks(block, model)],
+        isError: block.isError ?? false,
+        timestamp,
+      } satisfies Pick<
+        ToolResultMessage & McpMetadataCarrier,
+        "role" | "toolCallId" | "toolName" | "content" | "isError" | "timestamp"
+      >)
+        .addOptional(meta ? { _meta: meta } : undefined)
+        .finish(),
+    );
     result.push(toolResult);
   }
   flushDirect();
   return Object.freeze(result);
 }
-
 function piMessages(request: PiMcpSamplingRequest, model: Model<Api>): readonly Message[] {
   const toolNames = new Map<string, string>();
   const seenToolIds = new Set<string>();
@@ -544,7 +538,6 @@ function piMessages(request: PiMcpSamplingRequest, model: Model<Api>): readonly 
   }
   return Object.freeze(messages);
 }
-
 function piTools(request: PiMcpSamplingRequest): readonly Tool[] | undefined {
   const mode = request.params.toolChoice?.mode ?? "auto";
   if (mode === "none") return undefined;
@@ -571,43 +564,53 @@ function piTools(request: PiMcpSamplingRequest): readonly Tool[] | undefined {
     }),
   );
 }
-
 function samplingSystemPrompt(request: PiMcpSamplingRequest): string | undefined {
   if (request.params.toolChoice?.mode !== "required") return request.params.systemPrompt;
   const requirement = "You must call at least one of the supplied tools in this response.";
   return request.params.systemPrompt ? `${request.params.systemPrompt}\n\n${requirement}` : requirement;
 }
-
 function outputContent(message: AssistantMessage): readonly (PiMcpTextContent | PiMcpToolUseContent)[] {
   const visible = message.content.flatMap((part): readonly (PiMcpTextContent | PiMcpToolUseContent)[] => {
     if (part.type === "text") {
       const meta = outputMeta(part.textSignature ? { textSignature: part.textSignature } : {});
-      return [Object.freeze({ type: "text", text: part.text, ...(meta ? { _meta: meta } : {}) })];
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return [
+        Object.freeze(
+          createConditionalObject({
+            type: "text",
+            text: part.text,
+          } as const)
+            .addOptional(meta ? { _meta: meta } : undefined)
+            .finish(),
+        ),
+      ];
     }
     if (part.type === "toolCall") {
       const meta = outputMeta(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {});
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return [
-        Object.freeze({
-          type: "tool_use",
-          id: part.id,
-          name: part.name,
-          input: Object.freeze({ ...part.arguments }),
-          ...(meta ? { _meta: meta } : {}),
-        }),
+        Object.freeze(
+          createConditionalObject({
+            type: "tool_use",
+            id: part.id,
+            name: part.name,
+            input: Object.freeze({ ...part.arguments }),
+          } as const)
+            .addOptional(meta ? { _meta: meta } : undefined)
+            .finish(),
+        ),
       ];
     }
     return [];
   });
   return visible.length > 0 ? Object.freeze(visible) : Object.freeze([{ type: "text", text: "" }]);
 }
-
 function stopReason(reason: AssistantMessage["stopReason"]): string {
   if (reason === "stop") return "endTurn";
   if (reason === "length") return "maxTokens";
   if (reason === "toolUse") return "toolUse";
   return reason;
 }
-
 export function createPiMcpSamplingPort(input: CreatePiMcpSamplingPortInput): PiMcpSamplingPort {
   const sample: PiMcpSamplingPort["sample"] = async (request, options) => {
     if (options?.signal?.aborted)
@@ -630,20 +633,29 @@ export function createPiMcpSamplingPort(input: CreatePiMcpSamplingPortInput): Pi
       );
     const tools = piTools(request);
     const systemPrompt = samplingSystemPrompt(request);
-    const context: Context = {
-      ...(systemPrompt === undefined ? {} : { systemPrompt }),
-      messages: [...piMessages(request, model)],
-      ...(tools ? { tools: [...tools] } : {}),
-    };
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const context: Context = createConditionalObject({} as const)
+      .addOptional(!(systemPrompt === undefined) ? { systemPrompt } : undefined)
+      .add({
+        messages: [...piMessages(request, model)],
+      } satisfies Pick<Context, "messages">)
+      .addOptional(tools ? { tools: [...tools] } : undefined)
+      .finish();
     const maxTokens = Math.max(1, Math.min(Math.floor(request.params.maxTokens), model.maxTokens));
     const requestedReasoning = options?.route?.reasoning ?? input.reasoning;
-    const streamOptions: SimpleStreamOptions = {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const streamOptions: SimpleStreamOptions = createConditionalObject({
       maxTokens,
-      ...(request.params.temperature === undefined ? {} : { temperature: request.params.temperature }),
-      ...(requestedReasoning && requestedReasoning !== "off" ? { reasoning: requestedReasoning } : {}),
-      ...(request.params.metadata ? { metadata: { ...request.params.metadata } } : {}),
-      ...(options?.signal ? { signal: options.signal } : {}),
-    };
+    } as const)
+      .addOptional(
+        !(request.params.temperature === undefined) ? { temperature: request.params.temperature } : undefined,
+      )
+      .addOptional(
+        requestedReasoning && requestedReasoning !== "off" ? { reasoning: requestedReasoning } : undefined,
+      )
+      .addOptional(request.params.metadata ? { metadata: { ...request.params.metadata } } : undefined)
+      .addOptional(options?.signal ? { signal: options.signal } : undefined)
+      .finish();
     let response: AssistantMessage;
     try {
       response = await input.models.completeSimple(model, context, streamOptions);

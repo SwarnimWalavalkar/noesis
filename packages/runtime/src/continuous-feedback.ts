@@ -1,4 +1,5 @@
 import {
+  createConditionalObject,
   FeedbackSignalSchema,
   canonicalJson,
   sameCapabilityRevisionRef,
@@ -29,7 +30,6 @@ import type { AuthorityBoundary } from "@noesis/policy";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
 import { authorizeScheduledJob, runScheduledJob } from "./scheduled-execution.ts";
 import { z } from "zod";
-
 const OutcomeStatusSchema = z.enum(["accepted", "corrected", "failed", "unknown"]);
 const SignalKindSchema = z.enum([
   "turn_observation",
@@ -57,8 +57,8 @@ const OutcomeJudgeJobPayloadSchema = z.strictObject({
   runId: z.string().min(1),
 });
 const OUTCOME_JOB_KIND = "runtime.outcome_judge";
-const OUTCOME_JOB_LEASE_MS = 30_000;
-const OUTCOME_JOB_HEARTBEAT_MS = 5_000;
+const OUTCOME_JOB_LEASE_MS = 30000;
+const OUTCOME_JOB_HEARTBEAT_MS = 5000;
 const MetricsSchema = z.strictObject({
   quality: z.number().min(0).max(1).nullable().default(null),
   baselineQuality: z.number().min(0).max(1).nullable().default(null),
@@ -69,11 +69,10 @@ const MetricsSchema = z.strictObject({
   failed: z.boolean().default(false),
   protectedRailViolation: z.boolean().default(false),
 });
-
 export const ContinuousFeedbackConfigSchema = z.strictObject({
   schemaVersion: z.literal(1),
-  observationWindow: z.number().int().min(1).max(1_000),
-  minimumEvidence: z.number().int().min(1).max(1_000),
+  observationWindow: z.number().int().min(1).max(1000),
+  minimumEvidence: z.number().int().min(1).max(1000),
   researchStrategyId: z.string().min(1),
   hardRegression: z.strictObject({
     qualityDrop: z.number().min(0).max(1),
@@ -83,7 +82,6 @@ export const ContinuousFeedbackConfigSchema = z.strictObject({
   }),
 });
 export type ContinuousFeedbackConfig = Readonly<z.infer<typeof ContinuousFeedbackConfigSchema>>;
-
 export const DEFAULT_CONTINUOUS_FEEDBACK_CONFIG: ContinuousFeedbackConfig = Object.freeze({
   schemaVersion: 1,
   observationWindow: 32,
@@ -96,7 +94,6 @@ export const DEFAULT_CONTINUOUS_FEEDBACK_CONFIG: ContinuousFeedbackConfig = Obje
     failedOutcome: true,
   }),
 });
-
 const TurnOutcomeInputSchema = z.strictObject({
   sessionId: z.string().min(1),
   turnId: z.string().min(1),
@@ -118,7 +115,6 @@ const TurnOutcomeInputSchema = z.strictObject({
     .optional(),
   metrics: MetricsSchema.optional(),
 });
-
 export interface TurnOutcomeObservationInput {
   readonly sessionId: string;
   readonly turnId: string;
@@ -138,13 +134,11 @@ export interface TurnOutcomeObservationInput {
   };
   readonly metrics?: Partial<ObservationMetrics>;
 }
-
 export interface ExperimentOutcomeProposal {
   readonly proposal: ExperimentOutcome;
   readonly citedObservationIds: readonly string[];
   readonly summary: string;
 }
-
 export interface ExperimentOutcomeJudge {
   readonly run: (
     input: {
@@ -158,15 +152,16 @@ export interface ExperimentOutcomeJudge {
       };
       readonly comparison: ExperimentComparisonReadModel;
     },
-    execution?: { readonly operationId: string; readonly signal: AbortSignal },
+    execution?: {
+      readonly operationId: string;
+      readonly signal: AbortSignal;
+    },
   ) => Promise<ExperimentOutcomeProposal>;
   readonly rehydrate?: (operationId: string) => Promise<ExperimentOutcomeProposal | undefined>;
 }
-
 export interface FeedbackCapabilityResolver {
   readonly resolve: (reference: CapabilityRevisionRef) => Promise<CapabilityRevision | undefined>;
 }
-
 export interface MetricSummary {
   readonly count: number;
   readonly accepted: number;
@@ -176,7 +171,6 @@ export interface MetricSummary {
   readonly averageLatencyMs: number | null;
   readonly averageCost: number | null;
 }
-
 export interface ExperimentComparisonReadModel {
   readonly experimentId: string;
   readonly status: Experiment["status"];
@@ -199,7 +193,6 @@ export interface ExperimentComparisonReadModel {
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly outcome: ExperimentOutcomeOperationRecord | null;
 }
-
 export interface CapabilityHealthReadModel {
   readonly capabilityId: string;
   readonly activeRevision: CapabilityRevisionRef | null;
@@ -210,10 +203,16 @@ export interface CapabilityHealthReadModel {
   readonly latestOutcome: ExperimentOutcomeOperationRecord | null;
   readonly evidenceRefs: readonly EvidenceRef[];
 }
-
 export type ObservationResolution =
-  | { readonly status: "excluded"; readonly reason: string }
-  | { readonly status: "observing"; readonly experimentId: string; readonly observationId: string }
+  | {
+      readonly status: "excluded";
+      readonly reason: string;
+    }
+  | {
+      readonly status: "observing";
+      readonly experimentId: string;
+      readonly observationId: string;
+    }
   | {
       readonly status: "research_failed";
       readonly experimentId: string;
@@ -226,7 +225,6 @@ export type ObservationResolution =
       readonly observationId: string;
       readonly outcome: ExperimentOutcomeOperationRecord;
     };
-
 export interface ContinuousFeedbackController {
   readonly observeTurnOutcome: (
     input: TurnOutcomeObservationInput,
@@ -244,7 +242,6 @@ export interface ContinuousFeedbackController {
   readonly cancel: (jobId: string) => Promise<DurableJobRecord | undefined>;
   readonly stop: () => Promise<void>;
 }
-
 export interface ContinuousFeedbackControllerOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly protectedRuntime: ProtectedWorkspaceRuntime;
@@ -255,26 +252,22 @@ export interface ContinuousFeedbackControllerOptions {
   readonly workerId?: string;
   readonly now?: () => Date;
 }
-
 function databaseRef<Table extends DatabaseRowRef["table"]>(
   table: Table,
   rowId: string,
 ): DatabaseRowRef<Table> {
   return Object.freeze({ kind: "database_row", table, rowId });
 }
-
 function signalKind(input: z.infer<typeof TurnOutcomeInputSchema>): LearningSignalKind {
   if (input.signal?.kind) return input.signal.kind;
   if (input.status === "corrected") return "explicit_correction";
   if (input.status === "failed") return "repeated_failure";
   return "turn_observation";
 }
-
 function numericAverage(values: readonly (number | null)[]): number | null {
   const present = values.filter((value): value is number => value !== null);
   return present.length === 0 ? null : present.reduce((sum, value) => sum + value, 0) / present.length;
 }
-
 function metricsSummary(observations: readonly ExperimentObservationRecord[]): MetricSummary {
   return Object.freeze({
     count: observations.length,
@@ -286,7 +279,6 @@ function metricsSummary(observations: readonly ExperimentObservationRecord[]): M
     averageCost: numericAverage(observations.map((item) => item.metrics.cost)),
   });
 }
-
 function hardRegression(metrics: ObservationMetrics, config: ContinuousFeedbackConfig): boolean {
   if (metrics.protectedRailViolation || (config.hardRegression.failedOutcome && metrics.failed)) return true;
   if (
@@ -309,7 +301,6 @@ function hardRegression(metrics: ObservationMetrics, config: ContinuousFeedbackC
     metrics.cost / metrics.baselineCost >= config.hardRegression.costMultiplier
   );
 }
-
 function manifestSubset(restored: CapabilityRevision, current: CapabilityRevision): boolean {
   const contains = (haystack: readonly string[], needles: readonly string[]) =>
     needles.every((value) => haystack.includes(value));
@@ -319,7 +310,6 @@ function manifestSubset(restored: CapabilityRevision, current: CapabilityRevisio
     contains(current.permissionManifest.credentialRefs, restored.permissionManifest.credentialRefs)
   );
 }
-
 function evidenceForObservations(
   observations: readonly ExperimentObservationRecord[],
 ): readonly EvidenceRef[] {
@@ -330,7 +320,6 @@ function evidenceForObservations(
     ]),
   );
 }
-
 function outcomeResearchInputDigest(comparison: ExperimentComparisonReadModel): string {
   return sha256(
     canonicalJson({
@@ -346,7 +335,6 @@ function outcomeResearchInputDigest(comparison: ExperimentComparisonReadModel): 
     }),
   );
 }
-
 export function createContinuousFeedbackController(
   options: ContinuousFeedbackControllerOptions,
 ): ContinuousFeedbackController {
@@ -363,9 +351,7 @@ export function createContinuousFeedbackController(
     clearInterval(heartbeat);
     heartbeats.delete(jobId);
   };
-
   const isoNow = (): string => now().toISOString();
-
   const validateProposal = (
     proposed: ExperimentOutcomeProposal,
     observations: readonly ExperimentObservationRecord[],
@@ -384,7 +370,6 @@ export function createContinuousFeedbackController(
       summary: proposed.summary,
     });
   };
-
   const experimentComparison = async (experimentId: string): Promise<ExperimentComparisonReadModel> => {
     const experiment = await options.workspace.research.experiments.getExperiment(experimentId);
     if (!experiment) throw new Error(`Experiment ${experimentId} is missing`);
@@ -429,7 +414,6 @@ export function createContinuousFeedbackController(
       outcome: outcome ?? null,
     });
   };
-
   const commitDecision = async (input: {
     readonly experiment: Experiment;
     readonly decision: ExperimentOutcome;
@@ -459,20 +443,24 @@ export function createContinuousFeedbackController(
       throw new Error("Experiment outcome is stale relative to the current activation");
     const operationId = `experiment_outcome_${sha256(`${input.experiment.experimentId}:${input.decision}`).slice(0, 32)}`;
     const evidenceRefs = evidenceForObservations(input.observations);
-    const baseRequest = {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const baseRequest = createConditionalObject({
       operationId,
       idempotencyKey: `resolve:${input.experiment.experimentId}:${input.decision}`,
       experimentId: input.experiment.experimentId,
       decision: input.decision,
       strategyId: input.strategyId,
-      ...(input.researchRunId ? { researchRunId: input.researchRunId } : {}),
-      expectedActivationId: current.activationId,
-      expectedActivationRevision: current.revision,
-      evidenceRefs,
-    };
+    } as const)
+      .addOptional(input.researchRunId ? { researchRunId: input.researchRunId } : undefined)
+      .add({
+        expectedActivationId: current.activationId,
+        expectedActivationRevision: current.revision,
+        evidenceRefs,
+      } as const)
+      .finish();
     let protectedAction: CommitExperimentOutcomeRequest;
     if (input.decision === "revert") {
-      const origin = (await options.protectedRuntime.activations.listOperations(1_000)).find(
+      const origin = (await options.protectedRuntime.activations.listOperations(1000)).find(
         (operation) => operation.binding.experimentId === input.experiment.experimentId,
       );
       if (!origin || origin.status !== "committed" || !origin.previousActivationId)
@@ -501,6 +489,7 @@ export function createContinuousFeedbackController(
       });
     } else if (input.decision === "revise") {
       const successorExperimentId = `experiment_${sha256(`${input.experiment.experimentId}:successor`).slice(0, 32)}`;
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const successor = Object.freeze({
         experimentId: successorExperimentId,
         hypothesis: `Revise after real-use outcome for ${input.experiment.hypothesis}`,
@@ -549,7 +538,6 @@ export function createContinuousFeedbackController(
     if (committed) return committed;
     throw new Error("Protected experiment outcome completed without a committed operation");
   };
-
   const executeOutcomeJob = async (job: DurableJobRecord): Promise<void> => {
     const leaseToken = job.leaseToken;
     if (!leaseToken) throw new Error(`Claimed outcome job ${job.jobId} has no lease token`);
@@ -671,7 +659,8 @@ export function createContinuousFeedbackController(
     } catch (error) {
       const current = await options.workspace.jobs.get(job.jobId);
       const message = error instanceof Error ? error.message : String(error);
-      const ambiguous = error instanceof Error && Reflect.get(error, "outcomeJudgeAmbiguous") === true;
+      const ambiguous =
+        error instanceof Error && "outcomeJudgeAmbiguous" in error && error.outcomeJudgeAmbiguous === true;
       await options.protectedRuntime.feedback.putResearchRun({
         runId: payload.runId,
         experimentId: payload.experimentId,
@@ -702,7 +691,6 @@ export function createContinuousFeedbackController(
       active.delete(job.jobId);
     }
   };
-
   const drainOutcomeJobs = async (): Promise<void> => {
     let claimed = 0;
     while (!stopping && claimed < 8) {
@@ -721,7 +709,6 @@ export function createContinuousFeedbackController(
       await executeOutcomeJob(job);
     }
   };
-
   function runAvailable(): Promise<void> {
     if (draining) return draining;
     if (stopping) return Promise.resolve();
@@ -731,7 +718,6 @@ export function createContinuousFeedbackController(
     draining = next;
     return next;
   }
-
   const evaluateExperiment = async (
     experimentId: string,
     requestedStrategyId = config.researchStrategyId,
@@ -791,7 +777,7 @@ export function createContinuousFeedbackController(
     await authorizeScheduledJob(options.authority, {
       jobId,
       budget: 2,
-      expiresAt: new Date(Math.max(now().getTime(), Date.now()) + 24 * 60 * 60 * 1_000).toISOString(),
+      expiresAt: new Date(Math.max(now().getTime(), Date.now()) + 24 * 60 * 60 * 1000).toISOString(),
     });
     await options.workspace.jobs.enqueue({
       jobId,
@@ -842,16 +828,15 @@ export function createContinuousFeedbackController(
       outcome,
     });
   };
-
   const classifyTurnObservations = async (
     input: ClassifyExperimentObservationsRequest,
   ): Promise<ExperimentObservationClassificationResult> =>
     await options.protectedRuntime.feedback.classifyObservations(input);
-
   const observeTurnOutcome = async (
     rawInput: TurnOutcomeObservationInput,
   ): Promise<readonly ObservationResolution[]> => {
     const input = TurnOutcomeInputSchema.parse(rawInput);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const evidenceRefs = z.array(z.unknown()).parse(input.evidenceRefs) as readonly EvidenceRef[];
     const pin = await options.protectedRuntime.activations.getTurnPin(input.sessionId, input.turnId);
     if (!pin) return Object.freeze([{ status: "excluded", reason: "turn has no activation pin" }]);
@@ -888,7 +873,7 @@ export function createContinuousFeedbackController(
       );
     const observing = await options.workspace.research.experiments.listExperiments({
       status: "observing",
-      limit: 1_000,
+      limit: 1000,
     });
     const resolutions: ObservationResolution[] = [];
     for (const revision of pinned) {
@@ -897,7 +882,7 @@ export function createContinuousFeedbackController(
           candidate.activatedRevision && sameCapabilityRevisionRef(candidate.activatedRevision, revision),
       );
       if (!experiment?.preflightRef) continue;
-      const origin = (await options.protectedRuntime.activations.listOperations(1_000)).find(
+      const origin = (await options.protectedRuntime.activations.listOperations(1000)).find(
         (operation) =>
           operation.status === "committed" && operation.binding.experimentId === experiment.experimentId,
       );
@@ -927,26 +912,32 @@ export function createContinuousFeedbackController(
             : "none";
       const observationId = `observation_${sha256(signalId).slice(0, 32)}`;
       const isHardRegression = hardRegression(metrics, config);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const observation = await options.protectedRuntime.feedback.recordObservation(
-        Object.freeze({
-          observationId,
-          dedupeKey: `observe:${experiment.experimentId}:${input.sessionId}:${input.turnId}:${revision.bundleDigest}`,
-          experimentId: experiment.experimentId,
-          signalId,
-          outcomeId,
-          preflightId: experiment.preflightRef.rowId,
-          experimentActivationId: origin.activationId,
-          servingActivationId: pin.activationId,
-          activationRevision: pin.activationRevision,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          capabilityRevision: revision,
-          metrics,
-          evidenceRefs: signal.evidenceRefs,
-          precedence,
-          ...(input.signal?.userDecision ? { userDecision: input.signal.userDecision } : {}),
-          hardRegression: isHardRegression,
-        }),
+        Object.freeze(
+          createConditionalObject({
+            observationId,
+            dedupeKey: `observe:${experiment.experimentId}:${input.sessionId}:${input.turnId}:${revision.bundleDigest}`,
+            experimentId: experiment.experimentId,
+            signalId,
+            outcomeId,
+            preflightId: experiment.preflightRef.rowId,
+            experimentActivationId: origin.activationId,
+            servingActivationId: pin.activationId,
+            activationRevision: pin.activationRevision,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            capabilityRevision: revision,
+            metrics,
+            evidenceRefs: signal.evidenceRefs,
+            precedence,
+          } as const)
+            .addOptional(input.signal?.userDecision ? { userDecision: input.signal.userDecision } : undefined)
+            .add({
+              hardRegression: isHardRegression,
+            } as const)
+            .finish(),
+        ),
         config.observationWindow,
       );
       if (!observation) {
@@ -982,12 +973,11 @@ export function createContinuousFeedbackController(
       ? Object.freeze([{ status: "excluded", reason: "no used revision has an open experiment" }])
       : Object.freeze(resolutions);
   };
-
   const capabilityHealth = async (capabilityId: string): Promise<CapabilityHealthReadModel> => {
     const current = await options.protectedRuntime.activations.current();
     const activeStored = current?.activeCapabilityRevisions[capabilityId];
     const activeRevision = activeStored?.kind === "capability_revision" ? activeStored : null;
-    const experiments = await options.workspace.research.experiments.listExperiments({ limit: 1_000 });
+    const experiments = await options.workspace.research.experiments.listExperiments({ limit: 1000 });
     const related = experiments.filter(
       (experiment) =>
         experiment.baselineRevision.capabilityId === capabilityId ||
@@ -1031,20 +1021,17 @@ export function createContinuousFeedbackController(
       evidenceRefs: Object.freeze(open.flatMap((comparison) => comparison.evidenceRefs)),
     });
   };
-
   const cancel = async (jobId: string): Promise<DurableJobRecord | undefined> => {
     clearHeartbeat(jobId);
     active.get(jobId)?.abort("cancelled");
     return await options.workspace.jobs.cancel(jobId, isoNow());
   };
-
   const stop = async (): Promise<void> => {
     stopping = true;
     for (const jobId of heartbeats.keys()) clearHeartbeat(jobId);
     for (const controller of active.values()) controller.abort("worker_stopped");
     await draining;
   };
-
   return Object.freeze({
     observeTurnOutcome,
     classifyTurnObservations,

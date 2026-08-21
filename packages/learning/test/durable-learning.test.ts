@@ -113,11 +113,13 @@ describe("durable automatic-learning handoff", () => {
       rowId: "message-correction",
     };
     const baseline = capabilityRevisionRef(revision("capability-r1", fileRef("baseline"), [evidence]));
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const priorExperimentRef = Object.freeze({
       kind: "database_row" as const,
       table: "experiments" as const,
       rowId: "experiment-prior-completed",
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await workspace.research.experiments.putExperiment(
       Object.freeze({
         experimentId: priorExperimentRef.rowId,
@@ -132,6 +134,7 @@ describe("durable automatic-learning handoff", () => {
       }),
     );
     const priorExperimentExcerpt = "The citation experiment completed with outcome keep";
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const priorExperimentCitation = Object.freeze({
       source: Object.freeze({
         kind: "database_row" as const,

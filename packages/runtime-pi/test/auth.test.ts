@@ -11,6 +11,7 @@ import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-code
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { isJsonObject, JsonValueSchema } from "@noesis/domain";
 import { describe, expect, test } from "vitest";
 import {
   credentialFileMode,
@@ -175,6 +176,7 @@ describe("Pi authentication", () => {
     const models = createModels({ authContext: emptyAuthContext });
     models.setProvider(openrouterProvider());
     const runtime = createPiAgentRuntime(process.cwd(), models);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = {
       trailId: "trail-missing-auth",
       provider: "openrouter",
@@ -276,6 +278,7 @@ describe("Pi authentication", () => {
     const models = createModels({ credentials, authContext: emptyAuthContext });
     models.setProvider(openrouterProvider());
     const runtime = createPiAgentRuntime(process.cwd(), models);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = {
       trailId: "trail-concurrent-pi",
       provider: "openrouter",
@@ -367,7 +370,8 @@ describe("Pi authentication", () => {
         store.modify(`provider-${index}`, async () => ({ type: "api_key", key: `secret-${index}` })),
       ),
     );
-    const persisted = JSON.parse(await readFile(piAuthPath(home), "utf8")) as Record<string, unknown>;
+    const persisted = JsonValueSchema.parse(JSON.parse(await readFile(piAuthPath(home), "utf8")));
+    if (!isJsonObject(persisted)) throw new Error("Expected credential file to contain a JSON object");
     expect(Object.keys(persisted)).toHaveLength(8);
   });
 

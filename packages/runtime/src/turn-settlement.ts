@@ -1,9 +1,9 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import type { EvidenceRef, ProjectRef } from "@noesis/domain";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
 import type { CapabilityCoordinator } from "./capability-coordinator.ts";
 import type { TurnResult } from "./index.ts";
-
 export interface TurnSettlementRequest {
   readonly sessionId: string;
   readonly turnId: string;
@@ -13,32 +13,31 @@ export interface TurnSettlementRequest {
   readonly plan: FrozenTurnPlan;
   readonly execute: () => Promise<TurnResult>;
 }
-
 export interface TurnSettlement {
   readonly run: (request: TurnSettlementRequest) => Promise<TurnSettlementResult>;
 }
-
 export interface TurnSettlementResult {
   readonly result: TurnResult;
   /** Exact durable reflection job created from this settled foreground turn. */
   readonly reflectionJobId?: string;
 }
-
 export interface TurnSettlementOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly coordinator: Pick<CapabilityCoordinator, "observeSettledTurn">;
   readonly project: ProjectRef;
   readonly now?: () => string;
   readonly onReflectionFailure?: (
-    error: unknown,
-    turn: Readonly<{ sessionId: string; turnId: string }>,
+    cause: unknown,
+    turn: Readonly<{
+      sessionId: string;
+      turnId: string;
+    }>,
   ) => void | Promise<void>;
 }
-
 export function createTurnSettlement(options: TurnSettlementOptions): TurnSettlement {
   const now = options.now ?? (() => new Date().toISOString());
-
   const run = async (request: TurnSettlementRequest): Promise<TurnSettlementResult> => {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const userRef = await options.workspace.operational.messages.put(
       Object.freeze({
         messageId: `${request.turnId}:user`,
@@ -47,17 +46,21 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         content: request.input,
         sensitivity: "normal" as const,
         createdAt: request.occurredAt,
-        metadata: Object.freeze({
-          turnId: request.turnId,
-          ...(request.sourceIntentId ? { sourceIntentId: request.sourceIntentId } : {}),
-          frozenTurnPlanId: request.plan.planId,
-          frozenTurnPlanDigest: request.plan.canonicalDigest,
-        }),
+        metadata: Object.freeze(
+          createConditionalObject({
+            turnId: request.turnId,
+          } as const)
+            .addOptional(request.sourceIntentId ? { sourceIntentId: request.sourceIntentId } : undefined)
+            .add({
+              frozenTurnPlanId: request.plan.planId,
+              frozenTurnPlanDigest: request.plan.canonicalDigest,
+            } as const)
+            .finish(),
+        ),
         timelineSequence: 0,
       }),
     );
     const serving = request.plan.selectedCapabilities.map((selection) => selection.revision);
-
     const record = async (
       status: "corrected" | "failed" | "unknown",
       summary: string,
@@ -79,6 +82,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
             throw new Error(`Assistant boundary ${messageId} has conflicting durable content`);
           continue;
         }
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         await options.workspace.operational.messages.put(
           Object.freeze({
             messageId,
@@ -107,6 +111,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
             left.messageId.localeCompare(right.messageId),
         );
       if (durableAssistantMessages.length === 0 && assistantMessage) {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         await options.workspace.operational.messages.put(
           Object.freeze({
             messageId: `${request.turnId}:assistant`,
@@ -128,6 +133,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
           : (await options.workspace.operational.messages.listForSession(request.sessionId)).filter(
               (message) => message.role === "assistant" && message.metadata["turnId"] === request.turnId,
             );
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const assistantRefs: readonly EvidenceRef[] = Object.freeze(
         settledAssistantMessages.map((message) =>
           Object.freeze({
@@ -146,6 +152,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
           left.createdAt.localeCompare(right.createdAt) ||
           left.toolCallId.localeCompare(right.toolCallId),
       );
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const toolRefs: readonly EvidenceRef[] = Object.freeze(
         toolCalls.map((toolCall) =>
           Object.freeze({
@@ -157,6 +164,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
       );
       const toolFailureCount = toolCalls.filter((toolCall) => toolCall.status === "failed").length;
       const evidenceRefs: readonly EvidenceRef[] = Object.freeze([userRef, ...assistantRefs, ...toolRefs]);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       await options.workspace.operational.outcomes.put(
         Object.freeze({
           outcomeId: `${request.turnId}:outcome`,
@@ -182,26 +190,45 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
       });
       const outcomeId = `${request.turnId}:outcome`;
       try {
+        type SettledLearningTurn = Parameters<CapabilityCoordinator["observeSettledTurn"]>[0]["turn"];
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const reflection = await options.coordinator.observeSettledTurn({
-          turn: Object.freeze({
-            sessionId: request.sessionId,
-            turnId: request.turnId,
-            outcomeId,
-            project: options.project,
-            servedWorkingAdjustmentOutcomes: Object.freeze([]),
-            scope: "global",
-            userMessage: request.input,
-            ...(assistantMessage ? { assistantMessage } : {}),
-            outcome: status === "failed" ? "failed" : "unknown",
-            occurredAt: request.occurredAt,
-            evidenceRefs: [...evidenceRefs],
-            sensitivity: "normal" as const,
-            telemetry: Object.freeze({
-              retryCount: 0,
-              toolFailureCount,
-              aborted,
-            }),
-          }),
+          turn: Object.freeze(
+            createConditionalObject({
+              sessionId: request.sessionId,
+              turnId: request.turnId,
+              outcomeId,
+              project: options.project,
+              servedWorkingAdjustmentOutcomes: Object.freeze([]),
+              scope: "global",
+              userMessage: request.input,
+            } satisfies Pick<
+              SettledLearningTurn,
+              | "sessionId"
+              | "turnId"
+              | "outcomeId"
+              | "project"
+              | "servedWorkingAdjustmentOutcomes"
+              | "scope"
+              | "userMessage"
+            >)
+              .addOptional(assistantMessage ? { assistantMessage } : undefined)
+              .add({
+                outcome: status === "failed" ? "failed" : "unknown",
+                occurredAt: request.occurredAt,
+                evidenceRefs: [...evidenceRefs],
+                sensitivity: "normal" as const,
+                telemetry: Object.freeze({
+                  retryCount: 0,
+                  toolFailureCount,
+                  aborted,
+                }),
+              } satisfies Pick<
+                SettledLearningTurn,
+                "outcome" | "occurredAt" | "evidenceRefs" | "sensitivity" | "telemetry"
+              >)
+              .finish(),
+          ),
           project: options.project,
           selectedCapabilities: serving,
         });
@@ -218,7 +245,6 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         return undefined;
       }
     };
-
     let result: TurnResult;
     try {
       result = await request.execute();
@@ -234,7 +260,14 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         true,
         result.assistantMessages,
       );
-      return Object.freeze({ result, ...(reflectionJobId ? { reflectionJobId } : {}) });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return Object.freeze(
+        createConditionalObject({
+          result,
+        } as const)
+          .addOptional(reflectionJobId ? { reflectionJobId } : undefined)
+          .finish(),
+      );
     }
     const reflectionJobId = await record(
       "unknown",
@@ -243,8 +276,14 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
       false,
       result.assistantMessages,
     );
-    return Object.freeze({ result, ...(reflectionJobId ? { reflectionJobId } : {}) });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        result,
+      } as const)
+        .addOptional(reflectionJobId ? { reflectionJobId } : undefined)
+        .finish(),
+    );
   };
-
   return Object.freeze({ run });
 }

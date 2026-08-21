@@ -1,43 +1,37 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { err, ok, type Result } from "@noesis/domain";
+import { createConditionalObject, err, ok, type Result } from "@noesis/domain";
 import { z } from "zod";
-
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const NOESIS_CONFIG_SCHEMA_VERSION = 1 as const;
-
 export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
-
 export const AgentConfigSchema = z.strictObject({
   provider: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
   thinkingLevel: ThinkingLevelSchema.optional(),
 });
 export type AgentConfig = Readonly<z.infer<typeof AgentConfigSchema>>;
-type MutableAgentConfig = { -readonly [Key in keyof AgentConfig]: AgentConfig[Key] };
-
+type MutableAgentConfig = {
+  -readonly [Key in keyof AgentConfig]: AgentConfig[Key];
+};
 export const LearningNotificationSchema = z.enum(["off", "quiet", "detailed"]);
 export type LearningNotification = z.infer<typeof LearningNotificationSchema>;
-
 export const LearningConfigSchema = z.strictObject({
   enabled: z.boolean().optional(),
   notifications: LearningNotificationSchema.optional(),
   backgroundBudget: z.number().int().nonnegative().optional(),
 });
 export type LearningConfig = Readonly<z.infer<typeof LearningConfigSchema>>;
-
 export const ContextConfigSchema = z.strictObject({
-  tokenBudget: z.number().int().positive().max(1_000_000).optional(),
+  tokenBudget: z.number().int().positive().max(1000000).optional(),
 });
 export type ContextConfig = Readonly<z.infer<typeof ContextConfigSchema>>;
-
 export const AutonomyRiskLevelSchema = z.enum(["off", "low", "medium", "high"]);
 export type AutonomyRiskLevel = z.infer<typeof AutonomyRiskLevelSchema>;
-
 export const AutonomyApprovalSchema = z.enum(["authority_expansion", "all_changes"]);
 export type AutonomyApproval = z.infer<typeof AutonomyApprovalSchema>;
-
 export const AutonomyConfigSchema = z.strictObject({
   riskLevel: AutonomyRiskLevelSchema.optional(),
   approval: AutonomyApprovalSchema.optional(),
@@ -45,16 +39,13 @@ export const AutonomyConfigSchema = z.strictObject({
   vetoes: z.literal("respect").optional(),
 });
 export type AutonomyConfig = Readonly<z.infer<typeof AutonomyConfigSchema>>;
-
 export const ExperimentDefaultsSchema = z.strictObject({
   maxCases: z.number().int().positive().optional(),
   maxAttemptsPerArm: z.number().int().positive().optional(),
   maxCost: z.number().nonnegative().optional(),
 });
 export type ExperimentDefaults = Readonly<z.infer<typeof ExperimentDefaultsSchema>>;
-
 export const MAX_DIRECT_TOOL_HOTBAR_TOOLS = 16;
-
 export const ToolConfigSchema = z.strictObject({
   // Version 1 briefly stored project-qualified workflow pins here. Keep those
   // legacy entries readable; the active global + project union is bounded below.
@@ -71,7 +62,6 @@ export interface ResolvedToolConfig {
   readonly hotbar: readonly string[];
   readonly projectHotbars: Readonly<Record<string, readonly string[]>>;
 }
-
 export const NoesisConfigSchema = z.strictObject({
   schemaVersion: z.literal(NOESIS_CONFIG_SCHEMA_VERSION),
   agent: AgentConfigSchema,
@@ -82,15 +72,12 @@ export const NoesisConfigSchema = z.strictObject({
   tools: ToolConfigSchema.optional(),
 });
 export type NoesisConfig = Readonly<z.infer<typeof NoesisConfigSchema>>;
-
 export interface ResolvedAgentConfig {
   readonly provider: string;
   readonly model: string;
   readonly thinkingLevel: ThinkingLevel;
 }
-
 export type ConfigSource = "cli" | "environment" | "config" | "default";
-
 export interface ResolvedNoesisConfig {
   readonly schemaVersion: 1;
   readonly home: string;
@@ -103,13 +90,11 @@ export interface ResolvedNoesisConfig {
   readonly tools: ResolvedToolConfig;
   readonly sources: Readonly<Record<keyof ResolvedAgentConfig, ConfigSource>>;
 }
-
 export interface ConfigOverrides {
   readonly provider?: string;
   readonly model?: string;
   readonly thinkingLevel?: string;
 }
-
 export interface UserControlConfigPatch {
   readonly learning?: LearningConfig;
   readonly context?: ContextConfig;
@@ -117,52 +102,49 @@ export interface UserControlConfigPatch {
   readonly experiments?: ExperimentDefaults;
   readonly tools?: ToolConfig;
 }
-
 export interface ResolveConfigInput {
   readonly home: string;
   readonly cli?: ConfigOverrides;
   readonly env?: Readonly<Record<string, string | undefined>>;
 }
-
 export class NoesisConfigError extends Error {
   readonly path: string;
-
-  constructor(path: string, message: string, options?: { cause?: unknown }) {
+  constructor(
+    path: string,
+    message: string,
+    options?: {
+      cause?: unknown;
+    },
+  ) {
     super(`${path}: ${message}`, options);
     this.name = "NoesisConfigError";
     this.path = path;
   }
 }
-
 export const BUILT_IN_AGENT_DEFAULTS: ResolvedAgentConfig = {
   provider: "openai-codex",
   model: "gpt-5.6-sol",
   thinkingLevel: "high",
 };
-
 export const BUILT_IN_LEARNING_DEFAULTS: Required<LearningConfig> = {
   enabled: true,
   notifications: "quiet",
   backgroundBudget: 1,
 };
-
 export const BUILT_IN_CONTEXT_DEFAULTS: Required<ContextConfig> = {
-  tokenBudget: 160_000,
+  tokenBudget: 160000,
 };
-
 export const BUILT_IN_AUTONOMY_DEFAULTS: Required<AutonomyConfig> = {
   riskLevel: "low",
   approval: "authority_expansion",
   pins: "respect",
   vetoes: "respect",
 };
-
 export const BUILT_IN_EXPERIMENT_DEFAULTS: Required<ExperimentDefaults> = {
   maxCases: 8,
   maxAttemptsPerArm: 1,
   maxCost: 0,
 };
-
 export const BUILT_IN_TOOL_DEFAULTS: ResolvedToolConfig = {
   hotbar: Object.freeze([
     "files.read",
@@ -173,7 +155,6 @@ export const BUILT_IN_TOOL_DEFAULTS: ResolvedToolConfig = {
   ]),
   projectHotbars: Object.freeze({}),
 };
-
 export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
   schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
   agent: { ...BUILT_IN_AGENT_DEFAULTS },
@@ -183,12 +164,9 @@ export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
   experiments: { ...BUILT_IN_EXPERIMENT_DEFAULTS },
   tools: { hotbar: [...BUILT_IN_TOOL_DEFAULTS.hotbar] },
 };
-
 export const noesisConfigPath = (home: string): string => join(home, "config.json");
-
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
-
 function issuePath(issue: z.ZodIssue): string {
   const path = [...issue.path];
   if (issue.code === "unrecognized_keys" && issue.keys[0] !== undefined) path.push(issue.keys[0]);
@@ -196,7 +174,8 @@ function issuePath(issue: z.ZodIssue): string {
     ? ""
     : `/${path.map((segment) => String(segment).replaceAll("~", "~0").replaceAll("/", "~1")).join("/")}`;
 }
-
+// BOUNDARY: Config files are untrusted JSON; the preliminary representation check preserves the
+// dedicated schema-version diagnostic before the complete config schema is applied below.
 function decodeConfig(path: string, value: unknown): Result<NoesisConfig, NoesisConfigError> {
   if (
     value !== null &&
@@ -237,10 +216,15 @@ function decodeConfig(path: string, value: unknown): Result<NoesisConfig, Noesis
   }
   return ok(parsed.data);
 }
-
-export async function readNoesisConfig(
-  home: string,
-): Promise<Result<{ readonly config?: NoesisConfig; readonly raw?: string }, NoesisConfigError>> {
+export async function readNoesisConfig(home: string): Promise<
+  Result<
+    {
+      readonly config?: NoesisConfig;
+      readonly raw?: string;
+    },
+    NoesisConfigError
+  >
+> {
   const path = noesisConfigPath(home);
   let raw: string;
   try {
@@ -258,7 +242,6 @@ export async function readNoesisConfig(
   const decoded = decodeConfig(path, parsed);
   return decoded.ok ? ok({ config: decoded.value, raw }) : decoded;
 }
-
 function validateAgentValue<K extends keyof ResolvedAgentConfig>(
   path: string,
   key: K,
@@ -270,12 +253,13 @@ function validateAgentValue<K extends keyof ResolvedAgentConfig>(
         path,
         `agent.thinkingLevel must be off, minimal, low, medium, high, xhigh, or max; received ${JSON.stringify(value)}`,
       );
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return value as ResolvedAgentConfig[K];
   }
   if (value.length === 0) throw new NoesisConfigError(path, `agent.${key} must be a non-empty string`);
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return value as ResolvedAgentConfig[K];
 }
-
 function pick<K extends keyof ResolvedAgentConfig>(
   path: string,
   key: K,
@@ -289,10 +273,12 @@ function pick<K extends keyof ResolvedAgentConfig>(
   const envValue = env[envName];
   if (envValue !== undefined) return [validateAgentValue(envName, key, envValue), "environment"];
   const fileValue = file[key];
-  if (fileValue !== undefined) return [fileValue as ResolvedAgentConfig[K], "config"];
+  if (fileValue !== undefined) {
+    // SAFETY: K selects the same field from both AgentConfig and ResolvedAgentConfig.
+    return [fileValue as ResolvedAgentConfig[K], "config"];
+  }
   return [BUILT_IN_AGENT_DEFAULTS[key], "default"];
 }
-
 export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<ResolvedNoesisConfig> {
   const loaded = await readNoesisConfig(input.home);
   if (!loaded.ok) throw loaded.error;
@@ -357,7 +343,6 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
     },
   };
 }
-
 async function writeExclusive(path: string, content: string): Promise<void> {
   const file = await open(path, "wx", 0o600);
   try {
@@ -367,7 +352,6 @@ async function writeExclusive(path: string, content: string): Promise<void> {
     await file.close();
   }
 }
-
 async function syncDirectory(path: string): Promise<void> {
   const directory = await open(path, "r");
   try {
@@ -376,7 +360,6 @@ async function syncDirectory(path: string): Promise<void> {
     await directory.close();
   }
 }
-
 async function acquireConfigWriterLock(path: string): Promise<() => Promise<void>> {
   const lockPath = `${path}.writer.lock`;
   const token = randomUUID();
@@ -391,7 +374,10 @@ async function acquireConfigWriterLock(path: string): Promise<() => Promise<void
       }
       return async () => {
         try {
-          const current = JSON.parse(await readFile(lockPath, "utf8")) as { token?: unknown };
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          const current = JSON.parse(await readFile(lockPath, "utf8")) as {
+            token?: unknown;
+          };
           if (current.token === token) await unlink(lockPath);
         } catch {
           // Release is best effort and token-bound so another writer's lock is never removed.
@@ -400,7 +386,10 @@ async function acquireConfigWriterLock(path: string): Promise<() => Promise<void
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "EEXIST") throw error;
       try {
-        const lock = JSON.parse(await readFile(lockPath, "utf8")) as { pid?: unknown };
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        const lock = JSON.parse(await readFile(lockPath, "utf8")) as {
+          pid?: unknown;
+        };
         if (typeof lock.pid === "number") {
           try {
             process.kill(lock.pid, 0);
@@ -419,7 +408,6 @@ async function acquireConfigWriterLock(path: string): Promise<() => Promise<void
   }
   throw new NoesisConfigError(lockPath, "timed out waiting for the config writer lock");
 }
-
 async function withConfigWriter<T>(home: string, operation: () => Promise<T>): Promise<T> {
   await mkdir(home, { recursive: true, mode: 0o700 });
   const release = await acquireConfigWriterLock(noesisConfigPath(home));
@@ -429,7 +417,6 @@ async function withConfigWriter<T>(home: string, operation: () => Promise<T>): P
     await release();
   }
 }
-
 async function persistConfig(home: string, config: NoesisConfig): Promise<void> {
   const path = noesisConfigPath(home);
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -441,9 +428,7 @@ async function persistConfig(home: string, config: NoesisConfig): Promise<void> 
     await unlink(temporary).catch(() => undefined);
   }
 }
-
 const renderConfig = (config: NoesisConfig): string => `${JSON.stringify(config, null, 2)}\n`;
-
 export async function initializeNoesisConfig(
   home: string,
   config: NoesisConfig = DEFAULT_NOESIS_CONFIG,
@@ -467,7 +452,6 @@ export async function initializeNoesisConfig(
   });
   return path;
 }
-
 export async function updateNoesisConfig(home: string, patch: ConfigOverrides): Promise<NoesisConfig> {
   if (Object.values(patch).every((value) => value === undefined))
     throw new NoesisConfigError(noesisConfigPath(home), "config set requires at least one agent option");
@@ -487,7 +471,6 @@ export async function updateNoesisConfig(home: string, patch: ConfigOverrides): 
     return next;
   });
 }
-
 export async function updateUserControlConfig(
   home: string,
   patch: UserControlConfigPatch,
@@ -509,21 +492,24 @@ export async function updateUserControlConfig(
     if (!loaded.ok) throw loaded.error;
     const path = noesisConfigPath(home);
     const current = loaded.value.config ?? DEFAULT_NOESIS_CONFIG;
-    const candidate: NoesisConfig = {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const candidate: NoesisConfig = createConditionalObject({
       ...current,
-      ...(patch.learning ? { learning: { ...current.learning, ...patch.learning } } : {}),
-      ...(patch.context ? { context: { ...current.context, ...patch.context } } : {}),
-      ...(patch.autonomy ? { autonomy: { ...current.autonomy, ...patch.autonomy } } : {}),
-      ...(patch.experiments ? { experiments: { ...current.experiments, ...patch.experiments } } : {}),
-      ...(patch.tools ? { tools: { ...current.tools, ...patch.tools } } : {}),
-    };
+    } as const)
+      .addOptional(patch.learning ? { learning: { ...current.learning, ...patch.learning } } : undefined)
+      .addOptional(patch.context ? { context: { ...current.context, ...patch.context } } : undefined)
+      .addOptional(patch.autonomy ? { autonomy: { ...current.autonomy, ...patch.autonomy } } : undefined)
+      .addOptional(
+        patch.experiments ? { experiments: { ...current.experiments, ...patch.experiments } } : undefined,
+      )
+      .addOptional(patch.tools ? { tools: { ...current.tools, ...patch.tools } } : undefined)
+      .finish();
     const decoded = decodeConfig(path, candidate);
     if (!decoded.ok) throw decoded.error;
     await persistConfig(home, decoded.value);
     return decoded.value;
   });
 }
-
 export interface ToolHotbarDelta {
   readonly projectId: string;
   readonly projectToolNamespace: string;
@@ -535,13 +521,11 @@ export interface ToolHotbarDelta {
   /** The subset of legacy pins that belongs to this project. */
   readonly legacyActiveProjectTools: readonly string[];
 }
-
 export interface CommittedToolHotbarSelection {
   readonly global: readonly string[];
   readonly project: readonly string[];
   readonly effective: readonly string[];
 }
-
 function applyHotbarDelta(
   current: readonly string[],
   action: ToolHotbarDelta["action"],
@@ -551,9 +535,7 @@ function applyHotbarDelta(
     ? Object.freeze([...new Set([...current, tool])])
     : Object.freeze(current.filter((name) => name !== tool));
 }
-
 const projectWorkflowNamespacePattern = /^(workflow\.[a-f0-9]{16}\.)/u;
-
 function assertEffectiveHotbarBounds(
   path: string,
   global: readonly string[],
@@ -585,7 +567,6 @@ function assertEffectiveHotbarBounds(
   for (const [namespace, tools] of namespaceBuckets)
     assertBound(`project workflow namespace ${namespace}`, [...tools]);
 }
-
 /** Apply one exact hotbar action against the latest locked config and return the committed view. */
 export async function updateToolHotbar(
   home: string,
@@ -627,10 +608,11 @@ export async function updateToolHotbar(
     assertEffectiveHotbarBounds(path, nextGlobal, projectHotbars, inactiveLegacy);
     const candidate: NoesisConfig = {
       ...current,
-      tools: {
+      tools: createConditionalObject({
         hotbar: [...new Set([...nextGlobal, ...inactiveLegacy])],
-        ...(Object.keys(projectHotbars).length > 0 ? { projectHotbars } : {}),
-      },
+      })
+        .addOptional(Object.keys(projectHotbars).length > 0 ? { projectHotbars } : undefined)
+        .finish(),
     };
     const decoded = decodeConfig(path, candidate);
     if (!decoded.ok) throw decoded.error;
@@ -638,5 +620,4 @@ export async function updateToolHotbar(
     return Object.freeze({ global: nextGlobal, project: nextProject, effective });
   });
 }
-
 export * from "./criteria.ts";

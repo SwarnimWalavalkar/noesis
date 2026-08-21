@@ -5,7 +5,14 @@ import {
   type FrozenTurnPlan,
   frozenTurnPlanDigest,
 } from "@noesis/agent-types";
-import { canonicalJson, type FileRevisionRef, type JsonValue, sha256, toJsonValue } from "@noesis/domain";
+import {
+  canonicalJson,
+  type FileRevisionRef,
+  isJsonObject,
+  type JsonValue,
+  sha256,
+  toJsonValue,
+} from "@noesis/domain";
 import type { SessionToolDefinition, SessionToolName } from "@noesis/intelligence";
 import { describe, expect, test, vi } from "vitest";
 import { z } from "zod";
@@ -39,6 +46,7 @@ import {
   createControlledPiModels,
 } from "./support/controlled-pi-models.ts";
 
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const sessionToolNames = [
   "search_sessions",
   "open_session_evidence",
@@ -68,6 +76,7 @@ function frozenPlan(
     "capabilities/grounded-router.json",
     JSON.stringify({ strategyId: "session-search.fts-only.v1" }),
   );
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const unsigned: Omit<FrozenTurnPlan, "canonicalDigest"> = Object.freeze({
     schemaVersion: 1,
     planId: "plan-runtime-tools",
@@ -120,6 +129,7 @@ function frozenPlan(
 }
 
 function definitions(marker: string): readonly SessionToolDefinition[] {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return sessionToolNames.map((name) =>
     Object.freeze({
       name,
@@ -381,6 +391,7 @@ describe("agent runtime factories", () => {
     });
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
 
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const result = await runtime.run(
       {
         trailId: "history-roles",
@@ -404,6 +415,7 @@ describe("agent runtime factories", () => {
 
   test("serves only frozen conversation history and rejects a divergent runtime copy", async () => {
     const createdAt = "2026-07-25T00:00:00.000Z";
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const conversationHistory = Object.freeze([
       Object.freeze({
         messageId: "history-user",
@@ -451,6 +463,7 @@ describe("agent runtime factories", () => {
         "unused",
       ),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = {
       trailId: plan.sessionId,
       provider: plan.provider,
@@ -470,6 +483,7 @@ describe("agent runtime factories", () => {
     await expect(runtime.run(request, () => undefined)).resolves.toMatchObject({
       text: "Frozen history served.",
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await expect(
       runtime.run(
         {
@@ -486,6 +500,7 @@ describe("agent runtime factories", () => {
   test("labels visible messages from unsuccessful turns as unfinished model context", async () => {
     const createdAt = "2026-07-25T00:00:00.000Z";
     const content = "Finish the repository audit.";
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const plan = frozenPlan(
       Object.freeze([
         Object.freeze({
@@ -658,6 +673,7 @@ describe("agent runtime factories", () => {
     const selected = base.selectedCapabilities[0];
     if (!selected) throw new Error("Frozen plan fixture has no capability");
     const { canonicalDigest: _baseDigest, ...baseUnsigned } = base;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const unsigned: Omit<FrozenTurnPlan, "canonicalDigest"> = Object.freeze({
       ...baseUnsigned,
       selectedCapabilities: Object.freeze([
@@ -822,6 +838,7 @@ describe("agent runtime factories", () => {
   test("bounds explicit skill action evidence while preserving its immutable revision", () => {
     const content = "x".repeat(300 * 1024);
     const contentDigest = sha256(content);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const revision = Object.freeze({
       kind: "evidence_revision" as const,
       revisionId: "evidence-large-skill",
@@ -1055,6 +1072,7 @@ describe("agent runtime factories", () => {
 
   test("passes the exact frozen tool catalog through inspect_self", async () => {
     const plan = frozenPlan();
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const catalog = Object.freeze({
       catalogId: "catalog-inspection",
       catalogDigest: sha256("catalog-inspection"),
@@ -1783,9 +1801,8 @@ describe("agent runtime factories", () => {
       (event): event is Extract<AgentRuntimeEvent, { readonly type: "tool-update" }> =>
         event.type === "tool-update" &&
         event.actionId === "tool_call_nested-visible" &&
-        typeof event.update === "object" &&
-        event.update !== null &&
-        Reflect.get(event.update, "truncated") === true,
+        isJsonObject(event.update) &&
+        event.update["truncated"] === true,
     );
     expect(
       new TextEncoder().encode(JSON.stringify(boundedNestedProgress?.update)).byteLength,
@@ -1856,6 +1873,7 @@ describe("agent runtime factories", () => {
     await responseStarted.promise;
 
     const receipt = runtime.steer("trail-steer-consumed", "change direction");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const beforeConsumption = await Promise.race([
       receipt.then(() => "settled" as const),
       new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
@@ -1973,6 +1991,7 @@ describe("agent runtime factories", () => {
       timelineSequence: 2,
       consumedAt: "2026-01-01T00:00:00.000Z",
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const secondBeforeItsTurn = await Promise.race([
       second.then(() => "settled" as const),
       new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
@@ -2005,6 +2024,7 @@ describe("agent runtime factories", () => {
       canonicalDigest: undefined,
     });
     const { canonicalDigest: _ignored, ...unsigned } = sabotagedUnsigned;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const sabotaged = Object.freeze({
       ...unsigned,
       canonicalDigest: frozenTurnPlanDigest(unsigned),

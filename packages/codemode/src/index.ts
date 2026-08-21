@@ -1,9 +1,15 @@
 import { type ChildProcess, fork } from "node:child_process";
-import { createId, type JsonValue, JsonValueSchema, sha256, toJsonValue } from "@noesis/domain";
+import {
+  createConditionalObject,
+  createId,
+  type JsonValue,
+  JsonValueSchema,
+  sha256,
+  toJsonValue,
+} from "@noesis/domain";
 import type { ToolBroker, ToolInvocationResult } from "@noesis/tools";
 import { z } from "zod";
-
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 120000;
 const DEFAULT_MAX_CALLS = 128;
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_MAX_PROGRESS_BYTES = 256 * 1024;
@@ -21,7 +27,6 @@ const DEFAULT_MAX_TOOL_ERROR_DETAIL_DEPTH = 6;
 const DEFAULT_MAX_TOOL_ERROR_DETAIL_ITEMS = 50;
 const DEFAULT_MAX_TOOL_ERROR_DETAIL_NODES = 200;
 const PENDING_SDK_ABORT_GRACE_MS = 500;
-
 const childMessageSchema = z.union([
   z.strictObject({ type: z.literal("ready") }),
   z.strictObject({
@@ -59,13 +64,41 @@ const childMessageSchema = z.union([
     stack: z.string().optional(),
   }),
 ]);
-
 type ChildMessage = z.infer<typeof childMessageSchema>;
-
+type ParentMessage =
+  | {
+      readonly type: "run";
+      readonly source: string;
+      readonly storeEntries: readonly (readonly [string, JsonValue])[];
+      readonly input?: JsonValue;
+    }
+  | {
+      readonly type: "sdk-result";
+      readonly requestId: string;
+      readonly ok: true;
+      readonly value: JsonValue;
+    }
+  | {
+      readonly type: "sdk-result";
+      readonly requestId: string;
+      readonly ok: false;
+      readonly error: string;
+    };
 export type CodeExecutionEvent =
-  | { readonly type: "started"; readonly executionId: string }
-  | { readonly type: "stdout"; readonly executionId: string; readonly text: string }
-  | { readonly type: "stderr"; readonly executionId: string; readonly text: string }
+  | {
+      readonly type: "started";
+      readonly executionId: string;
+    }
+  | {
+      readonly type: "stdout";
+      readonly executionId: string;
+      readonly text: string;
+    }
+  | {
+      readonly type: "stderr";
+      readonly executionId: string;
+      readonly text: string;
+    }
   | {
       readonly type: "progress";
       readonly executionId: string;
@@ -103,7 +136,6 @@ export type CodeExecutionEvent =
       readonly executionId: string;
       readonly error: string;
     };
-
 export interface CodeExecutionRequest {
   readonly executionId?: string;
   readonly logicalExecutionId?: string;
@@ -114,7 +146,6 @@ export interface CodeExecutionRequest {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
 }
-
 export interface CodeExecutionResult {
   readonly executionId: string;
   readonly value: JsonValue;
@@ -123,7 +154,6 @@ export interface CodeExecutionResult {
   readonly calls: number;
   readonly durationMs: number;
 }
-
 export interface CodeModeRuntime {
   readonly execute: (
     request: CodeExecutionRequest,
@@ -132,51 +162,67 @@ export interface CodeModeRuntime {
   readonly terminate: (executionId: string) => Promise<void>;
   readonly shutdown: () => Promise<void>;
 }
-
 export interface CreateCodeModeRuntimeOptions {
   readonly cwd: string;
   readonly broker: ToolBroker;
   readonly maxCalls?: number;
   readonly maxOutputBytes?: number;
 }
-
 interface ActiveExecution {
   readonly child: ChildProcess;
   readonly controller: AbortController;
   readonly closed: Promise<void>;
   readonly settled: Promise<void>;
 }
-
+// BOUNDARY: SDK messages arrive as parsed protocol values and are measured through JSON serialization.
 function jsonBytes(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
-
-function sdkRequestPayload(message: Extract<ChildMessage, { readonly type: "sdk-call" }>): JsonValue {
+function sdkRequestPayload(
+  message: Extract<
+    ChildMessage,
+    {
+      readonly type: "sdk-call";
+    }
+  >,
+): JsonValue {
   if (message.kind === "search") {
-    return Object.freeze({
-      query: message.query,
-      ...(message.limit === undefined ? {} : { limit: message.limit }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        query: message.query,
+      } as const)
+        .addOptional(!(message.limit === undefined) ? { limit: message.limit } : undefined)
+        .finish(),
+    );
   }
   if (message.kind === "describe") return Object.freeze({ name: message.name });
   return Object.freeze({ name: message.name, input: message.input });
 }
-
-function sdkActionInput(message: Extract<ChildMessage, { readonly type: "sdk-call" }>): JsonValue {
+function sdkActionInput(
+  message: Extract<
+    ChildMessage,
+    {
+      readonly type: "sdk-call";
+    }
+  >,
+): JsonValue {
   if (message.kind === "search") {
-    return Object.freeze({
-      query: message.query,
-      ...(message.limit === undefined ? {} : { limit: message.limit }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        query: message.query,
+      } as const)
+        .addOptional(!(message.limit === undefined) ? { limit: message.limit } : undefined)
+        .finish(),
+    );
   }
   if (message.kind === "describe") return Object.freeze({ name: message.name });
   return message.input;
 }
-
 function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
   return Array.isArray(value);
 }
-
 function invocationValue(result: ToolInvocationResult): JsonValue {
   if (result.ok) return result.value;
   const boundedDetailValue = (value: JsonValue): JsonValue => {
@@ -231,7 +277,6 @@ function invocationValue(result: ToolInvocationResult): JsonValue {
         : `\n[Tool error details omitted because they exceed ${String(DEFAULT_MAX_TOOL_ERROR_DETAILS_BYTES)} bytes]`;
   throw new Error(`${result.code}: ${result.message}${boundedDetails}`);
 }
-
 async function terminateChild(child: ChildProcess, closed: Promise<void>): Promise<void> {
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
   const closedAfterTerm = await settleWithin(
@@ -242,7 +287,6 @@ async function terminateChild(child: ChildProcess, closed: Promise<void>): Promi
   if (!closedAfterTerm && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   await closed;
 }
-
 async function settleWithin<T, F>(pending: Promise<T>, maximumWaitMs: number, fallback: F): Promise<T | F> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -257,7 +301,6 @@ async function settleWithin<T, F>(pending: Promise<T>, maximumWaitMs: number, fa
     if (timer) clearTimeout(timer);
   }
 }
-
 async function waitForPendingSdkCalls(
   pendingSdkCalls: ReadonlySet<Promise<void>>,
   maximumWaitMs?: number,
@@ -266,13 +309,11 @@ async function waitForPendingSdkCalls(
   if (maximumWaitMs === undefined) return await drained;
   return await settleWithin(drained, maximumWaitMs, false);
 }
-
 export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): CodeModeRuntime {
   const active = new Map<string, ActiveExecution>();
   const sessionStores = new Map<string, ReadonlyMap<string, JsonValue>>();
   const maxCalls = options.maxCalls ?? DEFAULT_MAX_CALLS;
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-
   const execute: CodeModeRuntime["execute"] = async (request, emit = () => undefined) => {
     if (!request.source.trim()) throw new Error("Codemode source must not be empty");
     if (Buffer.byteLength(request.source, "utf8") > 128 * 1024)
@@ -311,7 +352,6 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
         // Event callbacks are observers and must not change execution lifecycle.
       }
     };
-
     const appendOutput = (kind: "stdout" | "stderr", chunk: string): void => {
       if (!chunk || outputBytes >= maxOutputBytes) return;
       const remaining = maxOutputBytes - outputBytes;
@@ -321,7 +361,6 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
       outputBytes += Buffer.byteLength(accepted, "utf8");
       if (accepted) notify({ type: kind, executionId, text: accepted });
     };
-
     const abort = (): void => {
       if (controller.signal.aborted) return;
       controller.abort();
@@ -331,7 +370,6 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     if (request.signal?.aborted) abort();
     child.stdout?.on("data", (chunk: Buffer | string) => appendOutput("stdout", String(chunk)));
     child.stderr?.on("data", (chunk: Buffer | string) => appendOutput("stderr", String(chunk)));
-
     try {
       return await new Promise<CodeExecutionResult>((resolve, reject) => {
         notify({ type: "started", executionId });
@@ -384,7 +422,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
           finishFailure(new Error("Codemode execution was cancelled"), true);
           return;
         }
-        const respond = (message: object): void => {
+        const respond = (message: ParentMessage): void => {
           if (!child.connected) {
             finishFailure(new Error("Codemode IPC channel closed before a response could be sent"));
             return;
@@ -408,7 +446,12 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
             throw new Error(`Codemode progress exceeds ${String(DEFAULT_MAX_PROGRESS_BYTES)} bytes`);
         };
         const handleSdkCall = async (
-          message: Extract<ChildMessage, { readonly type: "sdk-call" }>,
+          message: Extract<
+            ChildMessage,
+            {
+              readonly type: "sdk-call";
+            }
+          >,
         ): Promise<void> => {
           calls += 1;
           if (calls > maxCalls) {
@@ -438,32 +481,40 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
             input: sdkActionInput(message),
           });
           try {
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             const value = toJsonValue(
               message.kind === "search"
                 ? options.broker.search(message.query, message.limit)
                 : message.kind === "describe"
                   ? (options.broker.describe(message.name) ?? null)
                   : invocationValue(
-                      await options.broker.invoke(message.name, message.input, {
-                        executionId,
-                        parentExecutionId: executionId,
-                        logicalExecutionId,
-                        callId,
-                        sessionId: request.sessionId,
-                        ...(request.turnId ? { turnId: request.turnId } : {}),
-                        signal: controller.signal,
-                        emitUpdate: (update) => {
-                          recordProgress(update);
-                          notify({
-                            type: "progress",
-                            executionId,
-                            value: update,
-                            callId,
-                            name,
-                            callIndex,
-                          });
-                        },
-                      }),
+                      await options.broker.invoke(
+                        message.name,
+                        message.input,
+                        createConditionalObject({
+                          executionId,
+                          parentExecutionId: executionId,
+                          logicalExecutionId,
+                          callId,
+                          sessionId: request.sessionId,
+                        } as const)
+                          .addOptional(request.turnId ? { turnId: request.turnId } : undefined)
+                          .add({
+                            signal: controller.signal,
+                            emitUpdate: (update: JsonValue) => {
+                              recordProgress(update);
+                              notify({
+                                type: "progress",
+                                executionId,
+                                value: update,
+                                callId,
+                                name,
+                                callIndex,
+                              });
+                            },
+                          } as const)
+                          .finish(),
+                      ),
                     ),
             );
             respond({
@@ -487,8 +538,8 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
         child.on("message", (raw: unknown) => {
           try {
             const frameBytes = jsonBytes(raw);
-            const terminalResultFrame =
-              typeof raw === "object" && raw !== null && Reflect.get(raw, "type") === "result";
+            const parsedFrame = childMessageSchema.safeParse(raw);
+            const terminalResultFrame = parsedFrame.success && parsedFrame.data.type === "result";
             if (!terminalResultFrame && frameBytes > DEFAULT_MAX_CHILD_FRAME_BYTES) {
               finishFailure(
                 new Error(`Codemode IPC frame exceeds ${String(DEFAULT_MAX_CHILD_FRAME_BYTES)} bytes`),
@@ -514,12 +565,16 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                 return;
               }
               ready = true;
-              respond({
-                type: "run",
-                source: request.source,
-                storeEntries: [...(sessionStores.get(request.sessionId) ?? new Map()).entries()],
-                ...(request.input === undefined ? {} : { input: request.input }),
-              });
+              // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+              respond(
+                createConditionalObject({
+                  type: "run",
+                  source: request.source,
+                  storeEntries: [...(sessionStores.get(request.sessionId) ?? new Map()).entries()],
+                } as const)
+                  .addOptional(!(request.input === undefined) ? { input: request.input } : undefined)
+                  .finish(),
+              );
             } else if (message.type === "sdk-call") {
               if (jsonBytes(sdkRequestPayload(message)) > DEFAULT_MAX_SDK_REQUEST_BYTES) {
                 finishFailure(
@@ -605,7 +660,6 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
       settleActive?.();
     }
   };
-
   const terminate = async (executionId: string): Promise<void> => {
     const execution = active.get(executionId);
     if (!execution) return;
@@ -614,7 +668,6 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
       execution.child.kill("SIGTERM");
     await execution.settled;
   };
-
   const shutdown = async (): Promise<void> => {
     const executions = [...active.values()];
     for (const execution of executions) {
@@ -624,6 +677,5 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     }
     await Promise.all(executions.map(async (execution) => await execution.settled));
   };
-
   return Object.freeze({ execute, terminate, shutdown });
 }

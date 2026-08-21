@@ -15,6 +15,7 @@ function createProcess() {
 }
 
 describe("browser OAuth URL opening", () => {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["darwin", "open", ["https://auth.example/callback?state=abc"]],
     ["win32", "rundll32", ["url.dll,FileProtocolHandler", "https://auth.example/callback?state=abc"]],
@@ -86,8 +87,9 @@ describe("browser OAuth URL opening", () => {
       throw new Error("Missing error listener");
     };
     const child = {
-      once: (_event: "error", listener: () => void) => {
+      once(_event: "error", listener: () => void) {
         onError = listener;
+        return this;
       },
       unref: vi.fn(),
     };

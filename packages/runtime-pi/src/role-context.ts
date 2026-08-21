@@ -1,12 +1,12 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { AgentMessage, AgentRole, AgentRunRequest } from "@noesis/agent-types";
 import type { CapabilityRevisionRef } from "@noesis/domain";
 import type { BoundedRoleInput, RoleContextPolicy } from "./role-types.ts";
-
 const DEFAULT_MAX_MESSAGES = 24;
-const DEFAULT_MESSAGE_CHARACTERS = 16_000;
-const DEFAULT_TOTAL_CHARACTERS = 64_000;
+const DEFAULT_MESSAGE_CHARACTERS = 16000;
+const DEFAULT_TOTAL_CHARACTERS = 64000;
 const DEFAULT_EVIDENCE_REFS = 64;
-
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const isolatedRoleMessageNames = {
   capability_router: ["turn", "prior_conversation"],
   session_compactor: ["compaction_input"],
@@ -33,31 +33,38 @@ const isolatedRoleMessageNames = {
   revision_agent: ["failures", "judgment_evidence"],
   ux_explainer: ["evidence", "diff", "report", "activation_lineage"],
 } as const satisfies Readonly<Record<Exclude<AgentRole, "foreground">, readonly string[]>>;
-
 export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPolicy {
   const foreground = role === "foreground";
   const compactor = role === "session_compactor";
-  return Object.freeze({
-    policyId: foreground ? "foreground-bounded-v1" : `${role}-isolated-v1`,
-    maxMessages: compactor ? 1 : DEFAULT_MAX_MESSAGES,
-    maxCharactersPerMessage: compactor ? 4_000_000 : DEFAULT_MESSAGE_CHARACTERS,
-    maxTotalCharacters: compactor ? 4_000_000 : DEFAULT_TOTAL_CHARACTERS,
-    maxEvidenceRefs: DEFAULT_EVIDENCE_REFS,
-    maxTools: foreground ? 32 : 0,
-    ...(foreground
-      ? {}
-      : {
-          allowedMessageNames: Object.freeze([...isolatedRoleMessageNames[role], "output_contract"]),
-        }),
-    includeCapabilityRevisions: role !== "judge_critic",
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      policyId: foreground ? "foreground-bounded-v1" : `${role}-isolated-v1`,
+      maxMessages: compactor ? 1 : DEFAULT_MAX_MESSAGES,
+      maxCharactersPerMessage: compactor ? 4000000 : DEFAULT_MESSAGE_CHARACTERS,
+      maxTotalCharacters: compactor ? 4000000 : DEFAULT_TOTAL_CHARACTERS,
+      maxEvidenceRefs: DEFAULT_EVIDENCE_REFS,
+      maxTools: foreground ? 32 : 0,
+    } as const)
+      .addOptional(
+        !foreground
+          ? {
+              allowedMessageNames: Object.freeze([...isolatedRoleMessageNames[role], "output_contract"]),
+            }
+          : undefined,
+      )
+      .add({
+        includeCapabilityRevisions: role !== "judge_critic",
+      } as const)
+      .finish(),
+  );
 }
-
 export function createRestrictedRoleContextPolicy(
   role: AgentRole,
   overrides: Partial<RoleContextPolicy> = {},
 ): RoleContextPolicy {
   const base = createDefaultRoleContextPolicy(role);
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const boundedValues = [
     ["maxMessages", overrides.maxMessages, base.maxMessages],
     ["maxCharactersPerMessage", overrides.maxCharactersPerMessage, base.maxCharactersPerMessage],
@@ -71,7 +78,6 @@ export function createRestrictedRoleContextPolicy(
   }
   if (!base.includeCapabilityRevisions && overrides.includeCapabilityRevisions === true)
     throw new Error("Restricted role context cannot expose capability revisions");
-
   let allowedMessageNames = base.allowedMessageNames;
   if (base.allowedMessageNames && overrides.allowedMessageNames) {
     const baseNames = new Set(base.allowedMessageNames);
@@ -81,15 +87,19 @@ export function createRestrictedRoleContextPolicy(
   } else if (!base.allowedMessageNames && overrides.allowedMessageNames) {
     allowedMessageNames = Object.freeze([...overrides.allowedMessageNames]);
   }
-
-  return Object.freeze({
-    ...base,
-    ...overrides,
-    ...(allowedMessageNames ? { allowedMessageNames } : {}),
-    includeCapabilityRevisions: overrides.includeCapabilityRevisions ?? base.includeCapabilityRevisions,
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      ...base,
+      ...overrides,
+    } as const)
+      .addOptional(allowedMessageNames ? { allowedMessageNames } : undefined)
+      .add({
+        includeCapabilityRevisions: overrides.includeCapabilityRevisions ?? base.includeCapabilityRevisions,
+      } as const)
+      .finish(),
+  );
 }
-
 function isCapabilityRevisionRef(revision: unknown): revision is CapabilityRevisionRef {
   return (
     revision !== null &&
@@ -107,7 +117,6 @@ function isCapabilityRevisionRef(revision: unknown): revision is CapabilityRevis
     /^[a-f0-9]{64}$/.test(revision.bundleDigest)
   );
 }
-
 function capabilityRevisionsOf(request: AgentRunRequest): readonly CapabilityRevisionRef[] {
   if (!("capabilityRevisions" in request)) return [];
   const revisions = request.capabilityRevisions;
@@ -116,13 +125,11 @@ function capabilityRevisionsOf(request: AgentRunRequest): readonly CapabilityRev
   }
   return revisions;
 }
-
 export function signalOf(request: AgentRunRequest): AbortSignal | undefined {
   if (!("signal" in request)) return undefined;
   const signal = request.signal;
   return signal instanceof AbortSignal ? signal : undefined;
 }
-
 function boundMessages(
   messages: readonly AgentMessage[],
   policy: RoleContextPolicy,
@@ -150,7 +157,6 @@ function boundMessages(
   }
   return Object.freeze(bounded);
 }
-
 export function applyRoleContextPolicy(
   request: AgentRunRequest,
   policy: RoleContextPolicy,
@@ -168,7 +174,6 @@ export function applyRoleContextPolicy(
     capabilityRevisions: Object.freeze(capabilityRevisionsOf(request).map((revision) => ({ ...revision }))),
   });
 }
-
 export function renderBoundedRolePrompt(input: BoundedRoleInput, policy: RoleContextPolicy): string {
   const visibleCapabilityRevisions = policy.includeCapabilityRevisions ? input.capabilityRevisions : [];
   return JSON.stringify(

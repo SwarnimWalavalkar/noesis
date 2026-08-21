@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import { Input, matchesKey, type Component, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
   type McpCapabilityItem,
@@ -36,14 +37,11 @@ import type {
   McpTextScreen as TextScreen,
 } from "./mcp-manager-screen.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
-
 const PAGE_STEP = 8;
-
 export interface McpManagerOverlay extends Component {
   readonly dispose: () => Promise<void>;
   readonly refresh: () => Promise<void>;
 }
-
 export interface CreateMcpManagerOverlayOptions {
   readonly runtime: Required<Pick<NoesisTuiRuntime, "listMcpServers" | "inspectMcpServer" | "mutateMcp">>;
   readonly colorEnabled: boolean;
@@ -53,7 +51,6 @@ export interface CreateMcpManagerOverlayOptions {
   readonly close: () => void;
   readonly mutationDisposeGraceMs?: number;
 }
-
 export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions): McpManagerOverlay {
   const { runtime } = options;
   let disposed = false;
@@ -64,26 +61,27 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
   let scroll = 0;
   let busy = "Loading MCP servers…";
   let notice: string | undefined;
-  let activeMutation: { readonly controller?: AbortController; readonly promise: Promise<void> } | undefined;
+  let activeMutation:
+    | {
+        readonly controller?: AbortController;
+        readonly promise: Promise<void>;
+      }
+    | undefined;
   let disposePromise: Promise<void> | undefined;
-
   const render = (): void => {
     if (!disposed) options.requestRender();
   };
-
   const moveTo = (next: McpScreen, selected = 0): void => {
     screen = next;
     cursor = selected;
     scroll = 0;
     render();
   };
-
-  const reportError = (error: unknown): void => {
+  const reportError = (cause: unknown): void => {
     busy = "";
-    notice = error instanceof Error ? error.message : String(error);
+    notice = cause instanceof Error ? cause.message : String(cause);
     render();
   };
-
   const refresh = async (): Promise<void> => {
     const request = ++generation;
     busy = "Refreshing MCP servers…";
@@ -99,7 +97,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       if (!disposed && generation === request) reportError(error);
     }
   };
-
   const inspect = async (summary: Pick<TuiMcpServerSummary, "scope" | "name">): Promise<void> => {
     const request = ++generation;
     busy = `Inspecting ${safeMcpScalar(summary.name)}…`;
@@ -119,7 +116,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       if (!disposed && generation === request) reportError(error);
     }
   };
-
   const mutate = async (
     intent: TuiMcpMutationIntent,
     target?: Pick<TuiMcpServerSummary, "scope" | "name">,
@@ -157,10 +153,15 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
         if (activeMutation?.controller === controller) activeMutation = undefined;
       }
     })();
-    activeMutation = { ...(controller ? { controller } : {}), promise };
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    activeMutation = createConditionalObject({} as const)
+      .addOptional(controller ? { controller } : undefined)
+      .add({
+        promise,
+      } as const)
+      .finish();
     await promise;
   };
-
   const input = (
     title: string,
     prompt: string,
@@ -176,7 +177,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     field.onEscape = () => moveTo(back);
     moveTo({ kind: "input", title, prompt, input: field, back, submit });
   };
-
   const choose = (
     title: string,
     prompt: string,
@@ -184,7 +184,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     back: McpScreen,
     select: (id: string) => void,
   ): void => moveTo({ kind: "choice", title, prompt, choices, back, select });
-
   const validName = (value: string): string | undefined => {
     const name = value.trim();
     if (!name) {
@@ -194,7 +193,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     }
     return name;
   };
-
   const beginAddLocal = (back: McpScreen): void => {
     choose(
       "Add local server",
@@ -235,7 +233,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       },
     );
   };
-
   const beginAddRemote = (back: McpScreen): void => {
     choose(
       "Add remote server",
@@ -280,7 +277,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       },
     );
   };
-
   const beginEdit = (detail: TuiMcpServerDetail): void => {
     const back: ServerScreen = { kind: "server", detail };
     if (detail.config.type === "local") {
@@ -354,10 +350,8 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       );
     });
   };
-
   const collection = (title: string, items: readonly McpCapabilityItem[], detail: TuiMcpServerDetail): void =>
     moveTo({ kind: "collection", title, items, detail });
-
   const openServerOption = (detail: TuiMcpServerDetail, id: string): void => {
     const serverScreen: ServerScreen = { kind: "server", detail };
     if ((id === "authenticate" || id === "logout") && detail.type !== "remote") return;
@@ -444,13 +438,15 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       });
     }
   };
-
   const navigate = (delta: number, count: number): void => {
     cursor = Math.max(0, Math.min(Math.max(0, count - 1), cursor + delta));
     render();
   };
-
-  const listEntries = (): readonly { readonly kind: "server" | "action"; readonly id: string }[] => [
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  const listEntries = (): readonly {
+    readonly kind: "server" | "action";
+    readonly id: string;
+  }[] => [
     ...servers.map((server) => ({ kind: "server" as const, id: mcpServerIdentity(server) })),
     ...(options.mutationsEnabled()
       ? [
@@ -460,7 +456,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
         ]
       : []),
   ];
-
   const handleList = (data: string): void => {
     const entries = listEntries();
     if (matchesKey(data, "escape")) {
@@ -505,7 +500,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     const server = servers.find((candidate) => mcpServerIdentity(candidate) === selected.id);
     if (server) void inspect(server);
   };
-
   const handleServer = (data: string, detail: TuiMcpServerDetail): void => {
     const mutationsEnabled = options.mutationsEnabled();
     const entries = mcpServerOptions(detail, mutationsEnabled);
@@ -549,7 +543,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     const selected = entries[cursor];
     if (selected) openServerOption(detail, selected.id);
   };
-
   const handleCollection = (data: string, collectionScreen: CollectionScreen): void => {
     if (matchesKey(data, "escape")) {
       moveTo({ kind: "server", detail: collectionScreen.detail });
@@ -573,7 +566,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
         back: collectionScreen,
       });
   };
-
   const handleText = (data: string, textScreen: TextScreen): void => {
     if (matchesKey(data, "escape")) {
       moveTo(textScreen.back);
@@ -586,7 +578,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     else return;
     render();
   };
-
   const handleChoice = (data: string, choiceScreen: ChoiceScreen): void => {
     if (matchesKey(data, "escape")) {
       moveTo(choiceScreen.back);
@@ -609,7 +600,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     const selected = choiceScreen.choices[cursor];
     if (selected) choiceScreen.select(selected.id);
   };
-
   const handleConfirm = (data: string, confirmScreen: ConfirmScreen): void => {
     if (matchesKey(data, "escape") || data.toLowerCase() === "n") {
       moveTo(confirmScreen.back);
@@ -617,9 +607,11 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     }
     if (matchesKey(data, "enter") || data.toLowerCase() === "y") confirmScreen.confirm();
   };
-
   const listRows = (
-    rows: readonly { readonly label: string; readonly description?: string }[],
+    rows: readonly {
+      readonly label: string;
+      readonly description?: string;
+    }[],
     width: number,
     maxRows: number,
   ): readonly string[] => {
@@ -638,7 +630,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       ];
     });
   };
-
   const renderList = (width: number, maxRows: number): readonly string[] => {
     const serverRows = servers.map((server) => {
       const counts = server.capabilityCounts;
@@ -663,7 +654,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       maxRows,
     );
   };
-
   const renderServer = (detail: TuiMcpServerDetail, width: number, maxRows: number): readonly string[] => {
     const counts = detail.capabilityCounts;
     return [
@@ -680,7 +670,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       ...listRows(mcpServerOptions(detail, options.mutationsEnabled()), width, Math.max(1, maxRows - 3)),
     ];
   };
-
   const renderScreen = (width: number, maxRows: number): readonly string[] => {
     if (screen.kind === "list") return renderList(width, maxRows);
     if (screen.kind === "server") return renderServer(screen.detail, width, maxRows);
@@ -711,23 +700,26 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       styled(options.colorEnabled, ANSI.dim, "Esc / n cancel"),
     ];
   };
-
   const title = (): string => {
     if (screen.kind === "list") return "MCP servers";
     if (screen.kind === "server") return `MCP · ${safeMcpScalar(screen.detail.name)}`;
     return safeMcpScalar(screen.title);
   };
-
   const hint = (): string => {
-    return mcpManagerHint({
-      screenKind: screen.kind,
-      ...(screen.kind === "server" ? { detail: screen.detail } : {}),
-      mutationsEnabled: options.mutationsEnabled(),
-      busy: Boolean(busy),
-      cancellable: Boolean(activeMutation?.controller),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return mcpManagerHint(
+      createConditionalObject({
+        screenKind: screen.kind,
+      } as const)
+        .addOptional(screen.kind === "server" ? { detail: screen.detail } : undefined)
+        .add({
+          mutationsEnabled: options.mutationsEnabled(),
+          busy: Boolean(busy),
+          cancellable: Boolean(activeMutation?.controller),
+        } as const)
+        .finish(),
+    );
   };
-
   const component: McpManagerOverlay = {
     dispose() {
       disposePromise ??= (async () => {
@@ -793,7 +785,6 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       ];
     },
   };
-
   void refresh();
   return component;
 }

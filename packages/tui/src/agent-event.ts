@@ -1,20 +1,28 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { AgentActionEvent, AgentRuntimeEvent } from "@noesis/agent-types";
 import type { NoesisTuiAction } from "./state.ts";
 import { safeTerminalText } from "./theme.ts";
-
 /** Runtime action identities are already durable and must survive transcript hydration unchanged. */
 export function actionIdentityForView(event: AgentActionEvent): {
   readonly actionId: string;
   readonly parentActionId?: string;
 } {
-  return Object.freeze({
-    actionId: event.actionId,
-    ...(event.parentActionId ? { parentActionId: event.parentActionId } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      actionId: event.actionId,
+    } as const)
+      .addOptional(event.parentActionId ? { parentActionId: event.parentActionId } : undefined)
+      .finish(),
+  );
 }
-
 export function tuiActionForAgentEvent(
-  event: Exclude<AgentRuntimeEvent, { readonly type: "delta" }>,
+  event: Exclude<
+    AgentRuntimeEvent,
+    {
+      readonly type: "delta";
+    }
+  >,
   at = Date.now(),
 ): NoesisTuiAction | undefined {
   if (event.type === "tool-start") {

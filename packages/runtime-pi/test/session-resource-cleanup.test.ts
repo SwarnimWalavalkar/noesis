@@ -35,6 +35,7 @@ function diagnostics(): {
   readonly handles: readonly unknown[];
   readonly requests: readonly unknown[];
 } {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const processDiagnostics = process as typeof process & ProcessDiagnostics;
   return Object.freeze({
     handles: Object.freeze([...processDiagnostics._getActiveHandles()]),
@@ -100,7 +101,7 @@ function registerTrackedSessionCleanup(): void {
   );
 }
 
-function createRealShapedModels() {
+function createRepresentativeModels() {
   const models = createModels();
   const provider = fauxProvider({
     provider: "local-session-resource",
@@ -132,7 +133,7 @@ afterEach(async () => {
 describe("Pi session resource ownership", () => {
   test("a completed foreground AgentHarness turn releases its provider session resources", async () => {
     registerTrackedSessionCleanup();
-    const { models } = createRealShapedModels();
+    const { models } = createRepresentativeModels();
     const runtime = createPiAgentRuntime(process.cwd(), models);
 
     await runtime.run(
@@ -168,7 +169,7 @@ describe("Pi session resource ownership", () => {
 
   test("a completed ambient role AgentHarness run releases its provider session resources", async () => {
     registerTrackedSessionCleanup();
-    const { models } = createRealShapedModels();
+    const { models } = createRepresentativeModels();
     const runner = createPiAgentRoleRunner(process.cwd(), models, [
       {
         variant: { variantId: "local-reflector", axis: "role", configurationRefs: [] },
@@ -209,7 +210,7 @@ describe("Pi session resource ownership", () => {
   });
 
   test("an abort during asynchronous session setup prevents the ambient provider prompt", async () => {
-    const { models, provider } = createRealShapedModels();
+    const { models, provider } = createRepresentativeModels();
     let providerPrompts = 0;
     provider.setResponses([
       () => {
@@ -268,7 +269,7 @@ describe("Pi session resource ownership", () => {
   });
 
   test("a foreground abort during asynchronous session setup releases the session without prompting", async () => {
-    const { models, provider } = createRealShapedModels();
+    const { models, provider } = createRepresentativeModels();
     let providerPrompts = 0;
     provider.setResponses([
       () => {
@@ -333,8 +334,9 @@ describe("Pi session resource ownership", () => {
 
   test("releases session resources and active ownership even when another cleanup rejects", async () => {
     registerTrackedSessionCleanup();
-    const { models, provider } = createRealShapedModels();
+    const { models, provider } = createRepresentativeModels();
     const runtime = createPiAgentRuntime(process.cwd(), models);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = {
       trailId: "exceptional-session-cleanup",
       provider: "local-session-resource",
@@ -366,8 +368,9 @@ describe("Pi session resource ownership", () => {
 
   test("releases session resources and active ownership even when waitForIdle rejects", async () => {
     registerTrackedSessionCleanup();
-    const { models, provider } = createRealShapedModels();
+    const { models, provider } = createRepresentativeModels();
     const runtime = createPiAgentRuntime(process.cwd(), models);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = {
       trailId: "exceptional-wait-for-idle",
       provider: "local-session-resource",

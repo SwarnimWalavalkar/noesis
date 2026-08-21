@@ -7,6 +7,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { type JsonValue, JsonValueSchema } from "@noesis/domain";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { loadMcpConfig, writeMcpServer } from "../src/config.ts";
 import { createMcpHostManager } from "../src/host.ts";
@@ -22,10 +23,10 @@ afterEach(
     ),
 );
 
-async function body(request: IncomingMessage): Promise<unknown> {
+async function body(request: IncomingMessage): Promise<JsonValue> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  return JsonValueSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
 }
 
 function controlledServer(): McpServer {
@@ -318,6 +319,7 @@ describe("remote MCP transports", () => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await protocol.connect(transport as never);
     const serverPort = await listen((request, response) => {
       if (request.url !== "/mcp") return void response.writeHead(404).end();
@@ -377,6 +379,7 @@ describe("remote MCP transports", () => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await protocol.connect(transport as never);
     const serverPort = await listen((request, response) => {
       if (request.url !== "/mcp") return void response.writeHead(404).end();
@@ -403,6 +406,7 @@ describe("remote MCP transports", () => {
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await protocol.connect(transport as never);
     const port = await listen((request, response) => {
       if (request.url !== "/mcp") return void response.writeHead(404).end();

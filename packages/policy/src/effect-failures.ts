@@ -28,6 +28,7 @@ function isFailureCode(value: unknown): value is EffectExecutionFailureCode {
 }
 
 export function createEffectExecutionFailure(code: EffectExecutionFailureCode, message: string): Error {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const error = new Error(message) as BrandedEffectExecutionFailure;
   Object.defineProperty(error, failureBrand, {
     configurable: false,
@@ -43,6 +44,7 @@ export function createEffectExecutionFailure(code: EffectExecutionFailureCode, m
  * this reservation for retry; ordinary execution failures remain terminal.
  */
 export function createPreEffectExecutionFailure(code: EffectExecutionFailureCode, message: string): Error {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const error = createEffectExecutionFailure(code, message) as BrandedPreEffectExecutionFailure;
   Object.defineProperty(error, preEffectFailureBrand, {
     configurable: false,
@@ -53,7 +55,9 @@ export function createPreEffectExecutionFailure(code: EffectExecutionFailureCode
   return error;
 }
 
+// BOUNDARY: Authority callers may provide arbitrary thrown values; only the private brand is inspected.
 export function inspectPreEffectExecutionFailure(value: unknown): EffectExecutionFailureDetails | undefined {
+  // SAFETY: The Error instance is inspected only for this module's private symbol brand.
   if (
     !(value instanceof Error) ||
     (value as Partial<BrandedPreEffectExecutionFailure>)[preEffectFailureBrand] !== true
@@ -62,23 +66,28 @@ export function inspectPreEffectExecutionFailure(value: unknown): EffectExecutio
   return inspectEffectExecutionFailure(value);
 }
 
+// BOUNDARY: Authority callers may provide arbitrary thrown values; only the private brand is inspected.
 export function inspectEffectExecutionFailure(value: unknown): EffectExecutionFailureDetails | undefined {
+  // SAFETY: The Error instance is inspected only for this module's private symbol brand.
   if (
     !(value instanceof Error) ||
     !isFailureCode((value as Partial<BrandedEffectExecutionFailure>)[failureBrand])
   )
     return undefined;
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     code: (value as BrandedEffectExecutionFailure)[failureBrand],
     message: value.message,
   });
 }
 
+// BOUNDARY: Effect execution may throw arbitrary values; serialization creates the durable error contract.
 export function serializeEffectExecutionFailure(value: unknown): string | undefined {
   const failure = inspectEffectExecutionFailure(value);
   return failure ? `${durablePrefix}${JSON.stringify({ kind: "typed", ...failure })}` : undefined;
 }
 
+// BOUNDARY: Effect execution may throw arbitrary values; serialization creates the durable error contract.
 export function serializeEffectExecutionError(value: unknown): string {
   return (
     serializeEffectExecutionFailure(value) ??

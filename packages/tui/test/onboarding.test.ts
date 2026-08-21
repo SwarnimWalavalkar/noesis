@@ -10,6 +10,7 @@ const DOWN = "\u001b[B";
 const ENTER = "\r";
 const CTRL_C = "\u0003";
 
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const PROVIDERS = [
   {
     id: "openai-codex",

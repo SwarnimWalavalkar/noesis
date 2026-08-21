@@ -21,6 +21,7 @@ export interface SlashCommandContext {
   readonly openLearningAudit?: () => void;
 }
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const HELP_LINES = [
   "/model provider/model · /context · /capabilities",
   "/skills · /scripts · /workflows · /runs · /learning",

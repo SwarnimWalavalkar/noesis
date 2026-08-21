@@ -35,7 +35,7 @@ export const FileRevisionRefSchema = z.strictObject({
   contentDigest: ContentDigestSchema,
 });
 
-const EvidenceRevisionRefShape = {
+const EvidenceRevisionRefFields = {
   kind: z.literal("evidence_revision"),
   revisionId: z.string().min(1),
   workingPath: StoredPathSchema,
@@ -44,7 +44,7 @@ const EvidenceRevisionRefShape = {
 };
 
 export const EvidenceRevisionRefSchema = z.strictObject({
-  ...EvidenceRevisionRefShape,
+  ...EvidenceRevisionRefFields,
   evidenceKind: z.enum(["input", "output", "tool_trace", "judgment", "report"]),
 });
 
@@ -54,7 +54,7 @@ export const evidenceRevisionRefSchema = <
   evidenceKind: Kind,
 ) =>
   z.strictObject({
-    ...EvidenceRevisionRefShape,
+    ...EvidenceRevisionRefFields,
     evidenceKind: z.literal(evidenceKind),
   });
 
@@ -110,7 +110,7 @@ const CorrectionExposureSchema = z.strictObject({
   servedRevisions: z.array(CapabilityRevisionRefSchema),
 });
 
-const CompoundingReplayRecordBaseShape = {
+const CompoundingReplayRecordBaseFields = {
   replayId: z.string().min(1),
   planId: z.string().min(1),
   sessionId: z.string().min(1),
@@ -126,7 +126,7 @@ const CompoundingReplayRecordBaseShape = {
 
 export const CompoundingReplayRecordSchema = z.discriminatedUnion("status", [
   z.strictObject({
-    ...CompoundingReplayRecordBaseShape,
+    ...CompoundingReplayRecordBaseFields,
     status: z.literal("excluded"),
     exclusionReason: z.enum([
       "unsettled_outcome",
@@ -145,7 +145,7 @@ export const CompoundingReplayRecordSchema = z.discriminatedUnion("status", [
     exclusionDetail: z.string().min(1),
   }),
   z.strictObject({
-    ...CompoundingReplayRecordBaseShape,
+    ...CompoundingReplayRecordBaseFields,
     status: z.literal("paired"),
     winner: z.enum(["served", "baseline", "tie", "inconclusive"]),
     railsPassed: z.boolean(),
@@ -346,7 +346,7 @@ export const CapabilityGateRequestSchema = z
     path: ["revision", "capabilityId"],
   });
 
-const ExperimentBaseShape = {
+const ExperimentBaseFields = {
   experimentId: z.string().min(1),
   hypothesis: z.string().min(1),
   scope: z.string().min(1),
@@ -362,11 +362,11 @@ const ExperimentBaseShape = {
 
 export const ExperimentSchema = z.discriminatedUnion("status", [
   z.strictObject({
-    ...ExperimentBaseShape,
+    ...ExperimentBaseFields,
     status: z.enum(["hypothesis", "authoring", "preflight", "observing"]),
   }),
   z.strictObject({
-    ...ExperimentBaseShape,
+    ...ExperimentBaseFields,
     status: z.literal("completed"),
     outcome: z.enum(["keep", "revise", "revert"]),
   }),

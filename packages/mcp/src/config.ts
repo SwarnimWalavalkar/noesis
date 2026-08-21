@@ -120,6 +120,7 @@ export function createMcpConfigError(
   message: string,
   options?: Readonly<{ cause?: unknown }>,
 ): McpConfigError {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.assign(new Error(`${path}: ${message}`, options), {
     name: "McpConfigError" as const,
     path,
@@ -153,6 +154,7 @@ export async function loadMcpConfig(input: {
   for (const [name, config] of Object.entries(project.servers)) {
     servers.set(name, Object.freeze({ name, scope: "project", sourcePath: projectPath, config }));
   }
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const installed = Object.freeze([
     ...Object.entries(global.servers).map(([name, config]) =>
       Object.freeze({

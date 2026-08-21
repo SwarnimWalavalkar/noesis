@@ -1,11 +1,19 @@
-import { SelectList, type Component, type SelectListTheme } from "@earendil-works/pi-tui";
+import {
+  type Container,
+  SelectList,
+  type Component,
+  type SelectListTheme,
+  type Terminal,
+  type TUI,
+} from "@earendil-works/pi-tui";
 import {
   compareTrailRecency,
   type RuntimeAgentDefaults,
   type TrailState,
   type TrailSummary,
 } from "@noesis/runtime";
-import { elideText } from "./theme.ts";
+import { createStaticLineView } from "./rendering.ts";
+import { ANSI, elideText, styled } from "./theme.ts";
 import type { TuiMcpInteractionBridge } from "./mcp-interaction.ts";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
 
@@ -24,6 +32,22 @@ export interface TuiStartOptions {
     | { readonly mode: "pick" }
     | { readonly mode: "continue" }
     | { readonly mode: "resume"; readonly trailId: string };
+}
+
+type TuiSessionRequest = NonNullable<TuiStartOptions["session"]>;
+export type ResolvedTuiSessionRequest = Exclude<TuiSessionRequest, { readonly mode: "continue" }>;
+
+export function resolveTuiSessionRequest(
+  runtime: NoesisTuiRuntime,
+  requested: TuiSessionRequest = { mode: "new" },
+): ResolvedTuiSessionRequest {
+  if (requested.mode !== "continue") return requested;
+  const latest = runtime.listTrailSummaries()[0];
+  if (!latest)
+    throw new Error(
+      `No saved sessions were found in ${runtime.home ?? "the configured Noesis home"}. Start a new session with noesis (without --continue).`,
+    );
+  return { mode: "resume", trailId: latest.trailId };
 }
 
 export interface SessionPickerItem {
@@ -112,6 +136,54 @@ export function createResponsiveSessionPicker(
     picker = next;
   };
   return responsive;
+}
+
+export async function selectSessionTrailId(input: {
+  readonly runtime: NoesisTuiRuntime;
+  readonly tui: TUI;
+  readonly root: Container;
+  readonly terminal: Terminal;
+  readonly theme: SelectListTheme;
+  readonly colorEnabled: boolean;
+  readonly registerCancel: (cancel: () => void) => void;
+  readonly onCancel: () => void;
+}): Promise<string | undefined> {
+  const items = createSessionPickerItems(input.runtime.listTrailSummaries());
+  if (items.length === 0)
+    throw new Error(
+      `No saved sessions were found in ${input.runtime.home ?? "the configured Noesis home"}. Start a new session with noesis (without --resume).`,
+    );
+  const picker = createResponsiveSessionPicker(items, () => input.terminal.rows, input.theme);
+  const selected = new Promise<string | undefined>((resolve) => {
+    let settled = false;
+    const finish = (trailId: string | undefined): void => {
+      if (settled) return;
+      settled = true;
+      resolve(trailId);
+    };
+    input.registerCancel(() => finish(undefined));
+    picker.onSelect = (item) => finish(item.value);
+    picker.onCancel = () => {
+      finish(undefined);
+      input.onCancel();
+    };
+  });
+  input.root.addChild(
+    createStaticLineView(
+      `${styled(input.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "NOESIS")}  ${styled(input.colorEnabled, ANSI.dim, "resume a session")}`,
+      () => input.terminal.rows >= 2,
+    ),
+  );
+  input.root.addChild(
+    createStaticLineView(
+      styled(input.colorEnabled, ANSI.dim, "↑/↓ navigate · Enter resume · Esc cancel"),
+      () => input.terminal.rows >= 3,
+    ),
+  );
+  input.root.addChild(picker);
+  input.tui.setFocus(picker);
+  input.tui.start();
+  return await selected;
 }
 
 export async function resumableTrail(runtime: NoesisTuiRuntime, trailId: string): Promise<TrailState> {

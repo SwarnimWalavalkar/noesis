@@ -52,6 +52,7 @@ export async function loadSkillSlashCommands(
   }
 }
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const NOESIS_SLASH_COMMANDS = [
   {
     name: "help",

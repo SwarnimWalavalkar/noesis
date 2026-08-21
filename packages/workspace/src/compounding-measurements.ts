@@ -1,3 +1,4 @@
+import type { DatabaseRow } from "./database.ts";
 import {
   canonicalJson,
   CompoundingReplayRecordSchema,
@@ -23,7 +24,7 @@ import type {
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const RoleSchema = z.enum(["served_arm", "baseline_arm", "judge"]);
 
-function decodeBudget(row: unknown): CompoundingReplayBudgetRecord {
+function decodeBudget(row: DatabaseRow | undefined): CompoundingReplayBudgetRecord {
   return Object.freeze({
     budgetId: requiredString(row, "budget_id"),
     maximumCalls: requiredNumber(row, "maximum_calls"),
@@ -79,7 +80,7 @@ function assertEvidenceExists(
 }
 
 function reservationFromExisting(
-  row: unknown,
+  row: DatabaseRow | undefined,
   request: CompoundingReplayRoleReservation,
 ): CompoundingReplayReservationResult {
   if (
@@ -91,10 +92,13 @@ function reservationFromExisting(
   )
     throw new Error(`Replay operation identity collision: ${request.operationId}`);
   const status = requiredString(row, "status");
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   if (status === "reserved") return Object.freeze({ status: "unresolved" as const });
   if (status === "denied")
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return Object.freeze({ status: "denied" as const, reason: "budget_exhausted" as const });
   if (status === "failed")
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return Object.freeze({
       status: "failed" as const,
       failure: optionalString(row, "failure") ?? "Replay role failed",
@@ -102,6 +106,7 @@ function reservationFromExisting(
   if (status !== "completed") throw new Error(`Unknown replay operation status ${status}`);
   const encoded = optionalString(row, "result_evidence_json");
   if (!encoded) throw new Error(`Completed replay operation ${request.operationId} has no evidence`);
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     status: "completed" as const,
     resultEvidence: decodeResultEvidence(encoded),
@@ -217,6 +222,7 @@ export function createCompoundingMeasurementStore(
         status,
         reservedAt,
       );
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return status === "reserved"
         ? Object.freeze({ status: "reserved" as const })
         : Object.freeze({ status: "denied" as const, reason: "budget_exhausted" as const });

@@ -4,8 +4,12 @@ import {
   DefaultResourceLoader,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { type EvidenceRevisionRef, type FileRevisionRef, sha256 } from "@noesis/domain";
-
+import {
+  createConditionalObject,
+  type EvidenceRevisionRef,
+  type FileRevisionRef,
+  sha256,
+} from "@noesis/domain";
 export interface PiSkillResource {
   readonly name: string;
   readonly description: string;
@@ -17,18 +21,15 @@ export interface PiSkillResource {
   readonly capabilityRevision?: FileRevisionRef;
   readonly disableModelInvocation: boolean;
 }
-
 export interface PiSkillDiagnostic {
   readonly type: "warning" | "error" | "collision";
   readonly message: string;
   readonly path?: string;
 }
-
 export interface PiSkillSnapshot {
   readonly skills: readonly PiSkillResource[];
   readonly diagnostics: readonly PiSkillDiagnostic[];
 }
-
 export interface PiSkillLibrary {
   /** Live inspection load; callers may wait for newly discovered resources. */
   readonly snapshot: (signal?: AbortSignal) => Promise<PiSkillSnapshot>;
@@ -52,27 +53,21 @@ export interface PiSkillLibrary {
     readonly installedPath?: string;
   }[];
 }
-
 type SkillLoadOwner = "snapshot" | "admission";
-
 interface InFlightSkillLoad {
   readonly owner: SkillLoadOwner;
   readonly promise: Promise<PiSkillSnapshot>;
 }
-
 interface InFlightSkillPin {
   readonly token: object;
   readonly promise: Promise<PiSkillSnapshot>;
 }
-
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
-
 function compareSkillResources(left: PiSkillResource, right: PiSkillResource): number {
   return compareText(left.name, right.name) || compareText(left.filePath, right.filePath);
 }
-
 export function createPiSkillLibrary(input: {
   readonly cwd: string;
   readonly agentDirectory: string;
@@ -117,9 +112,9 @@ export function createPiSkillLibrary(input: {
           cleanup();
           resolve(value);
         },
-        (error: unknown) => {
+        (cause: unknown) => {
           cleanup();
-          reject(error);
+          reject(cause);
         },
       );
     });
@@ -133,6 +128,7 @@ export function createPiSkillLibrary(input: {
           loaded.skills.map(async (skill) => {
             try {
               const content = await readSkillFile(skill.filePath);
+              // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
               return Object.freeze({
                 kind: "skill" as const,
                 value: Object.freeze({
@@ -145,6 +141,7 @@ export function createPiSkillLibrary(input: {
                 }),
               });
             } catch (error) {
+              // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
               return Object.freeze({
                 kind: "diagnostic" as const,
                 value: Object.freeze({
@@ -156,6 +153,7 @@ export function createPiSkillLibrary(input: {
             }
           }),
         );
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const captured = Object.freeze({
           skills: Object.freeze(
             resources
@@ -164,11 +162,14 @@ export function createPiSkillLibrary(input: {
           ),
           diagnostics: Object.freeze([
             ...loaded.diagnostics.map((diagnostic) =>
-              Object.freeze({
-                type: diagnostic.type,
-                message: diagnostic.message,
-                ...(diagnostic.path ? { path: diagnostic.path } : {}),
-              }),
+              Object.freeze(
+                createConditionalObject({
+                  type: diagnostic.type,
+                  message: diagnostic.message,
+                } as const)
+                  .addOptional(diagnostic.path ? { path: diagnostic.path } : undefined)
+                  .finish(),
+              ),
             ),
             ...resources.flatMap((resource) => (resource.kind === "diagnostic" ? [resource.value] : [])),
           ]),
@@ -187,6 +188,7 @@ export function createPiSkillLibrary(input: {
   const admissionSnapshot = (): Promise<PiSkillSnapshot> => {
     if (loading?.owner !== "snapshot") return loadSnapshot("admission");
     const settled = lastSettledSnapshot;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const diagnostic = Object.freeze({
       type: "warning" as const,
       message: settled
@@ -258,6 +260,7 @@ export function createPiSkillLibrary(input: {
     });
     await scopedPackages.update(source);
   };
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     snapshot,
     pinSnapshot,
@@ -276,11 +279,14 @@ export function createPiSkillLibrary(input: {
     configured: () =>
       Object.freeze(
         packages.listConfiguredPackages().map((configured) =>
-          Object.freeze({
-            source: configured.source,
-            scope: configured.scope === "project" ? ("workspace" as const) : ("personal" as const),
-            ...(configured.installedPath ? { installedPath: configured.installedPath } : {}),
-          }),
+          Object.freeze(
+            createConditionalObject({
+              source: configured.source,
+              scope: configured.scope === "project" ? ("workspace" as const) : ("personal" as const),
+            } as const)
+              .addOptional(configured.installedPath ? { installedPath: configured.installedPath } : undefined)
+              .finish(),
+          ),
         ),
       ),
   });

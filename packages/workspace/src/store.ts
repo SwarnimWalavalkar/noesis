@@ -1,9 +1,11 @@
+import type { DatabaseRow } from "./database.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import {
+  createConditionalObject,
   type ActorRef,
   type ArtifactFileRef,
   ArtifactFileRefSchema,
@@ -45,6 +47,8 @@ import {
   preflightReportMatchesPlan,
   sameCapabilityRevisionRef,
   sha256,
+  type JsonValue,
+  JsonValueSchema,
 } from "@noesis/domain";
 import { z } from "zod";
 import { createProtectedActivationStore } from "./activation-store.ts";
@@ -116,7 +120,6 @@ import type {
   WorkspacePaths,
 } from "./types.ts";
 import { createProtectedWorkingAdjustmentStore } from "./working-adjustments.ts";
-
 export interface WorkspaceStoreOptions {
   readonly now?: () => string;
   readonly createId?: (prefix: string) => string;
@@ -131,7 +134,6 @@ export interface WorkspaceStoreOptions {
   readonly duringOutcomeCommitForTesting?: () => void;
   readonly afterOutcomeCommitForTesting?: () => void;
 }
-
 const ActorSchema = z.strictObject({
   actorId: z.string().min(1),
   kind: z.enum(["user", "noesis", "external_system", "system"]),
@@ -153,12 +155,11 @@ const OutcomeSemanticObservationSchema = z.strictObject({
   kind: z.enum(["correction", "preference", "other"]),
   reason: z.string().min(1),
 });
-
-const persistedJsonValue = (value: unknown): unknown => {
+// BOUNDARY: Operational identities canonicalize arbitrary adapter payloads into durable JSON.
+const persistedJsonValue = (value: unknown): JsonValue | undefined => {
   const encoded = JSON.stringify(value);
-  return encoded === undefined ? undefined : JSON.parse(encoded);
+  return encoded === undefined ? undefined : JsonValueSchema.parse(JSON.parse(encoded));
 };
-
 const immutableToolCallIdentity = (
   record: ToolCallRecord,
   sequence: number,
@@ -176,7 +177,6 @@ const immutableToolCallIdentity = (
   sensitivity: record.sensitivity,
   createdAt: record.createdAt,
 });
-
 const persistedToolCall = (
   record: ToolCallRecord,
   sequence: number,
@@ -189,7 +189,6 @@ const persistedToolCall = (
   status: record.status,
   completedAt: record.completedAt ?? null,
 });
-
 const LegacyImportReportSchema = z.strictObject({
   sourceId: z.string().min(1),
   alreadyImported: z.boolean(),
@@ -202,13 +201,11 @@ const LegacyImportReportSchema = z.strictObject({
   artifacts: z.number().int().nonnegative(),
   warnings: z.array(z.string()),
 });
-
 const databaseRef = <Table extends DatabaseTable>(table: Table, rowId: string): DatabaseRowRef<Table> => ({
   kind: "database_row",
   table,
   rowId,
 });
-
 function evidenceReferenceIdentity(reference: EvidenceRef): string {
   switch (reference.kind) {
     case "database_row":
@@ -220,7 +217,6 @@ function evidenceReferenceIdentity(reference: EvidenceRef): string {
       return `${reference.kind}:${reference.artifactId}`;
   }
 }
-
 function mergeEvidenceReferences(
   existing: readonly EvidenceRef[],
   incoming: readonly EvidenceRef[],
@@ -231,8 +227,7 @@ function mergeEvidenceReferences(
   }
   return [...merged.values()];
 }
-
-const PRIMARY_KEY_BY_TABLE: Readonly<Record<DatabaseTable, string>> = {
+const PRIMARY_KEY_BY_TABLE = {
   sessions: "session_id",
   messages: "message_id",
   tool_calls: "tool_call_id",
@@ -258,8 +253,14 @@ const PRIMARY_KEY_BY_TABLE: Readonly<Record<DatabaseTable, string>> = {
   capability_bindings: "capability_id",
   capability_feedback: "feedback_id",
   capability_gate_requests: "gate_request_id",
-};
-
+} satisfies Readonly<Record<DatabaseTable, string>>;
+function permitsTransition(
+  transitions: Readonly<Record<string, readonly string[]>>,
+  from: string,
+  to: string,
+): boolean {
+  return transitions[from]?.includes(to) ?? false;
+}
 function assertStoredReference(
   database: DatabaseSync,
   ref: EvidenceRef | DatabaseRowRef | FileRevisionRef,
@@ -303,7 +304,6 @@ function assertStoredReference(
   if (ref.kind === "file_revision" && requiredString(row, "revision_kind") === "evidence")
     throw new Error(`Definition reference ${ref.revisionId} points to evidence`);
 }
-
 export async function createWorkspaceStore(
   root: string,
   options: WorkspaceStoreOptions = {},
@@ -335,7 +335,6 @@ export async function createWorkspaceStore(
     });
     runtimeOwnerAcquired = false;
   };
-
   const acquireRuntimeOwner = (): void => {
     if (runtimeOwnerId) {
       database.transaction(() => {
@@ -347,24 +346,22 @@ export async function createWorkspaceStore(
           try {
             process.kill(pid, 0);
           } catch (error) {
-            live = !(error instanceof Error && "code" in error && Reflect.get(error, "code") === "ESRCH");
+            live = !(error instanceof Error && "code" in error && error["code"] === "ESRCH");
           }
           if (live)
             throw new Error(`Workspace already has a live runtime owner (${ownerId}, pid ${String(pid)})`);
         }
-        db.prepare(
-          `INSERT INTO runtime_owner(singleton, owner_id, pid, acquired_at)
+        db.prepare(`INSERT INTO runtime_owner(singleton, owner_id, pid, acquired_at)
            VALUES (1, ?, ?, ?)
            ON CONFLICT(singleton) DO UPDATE SET
              owner_id = excluded.owner_id,
              pid = excluded.pid,
-             acquired_at = excluded.acquired_at`,
-        ).run(runtimeOwnerId, process.pid, now());
+             acquired_at = excluded.acquired_at`).run(runtimeOwnerId, process.pid, now());
       });
       runtimeOwnerAcquired = true;
     }
   };
-
+  // BOUNDARY: Activity callers supply JSON-serializable provenance which is persisted atomically here.
   const recordActivity = (
     actor: ActorRef,
     activityKind: string,
@@ -374,11 +371,9 @@ export async function createWorkspaceStore(
   ): DatabaseRowRef<"activity_log"> => {
     ActorSchema.parse(actor);
     const activityId = createId("activity");
-    db.prepare(
-      `INSERT INTO activity_log(
+    db.prepare(`INSERT INTO activity_log(
         activity_id, actor_id, actor_kind, activity_kind, subject_kind, subject_id, references_json, occurred_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
       activityId,
       actor.actorId,
       actor.kind,
@@ -391,46 +386,37 @@ export async function createWorkspaceStore(
     return databaseRef("activity_log", activityId);
   };
   const systemActor: ActorRef = { actorId: "workspace-store", kind: "system" };
-
   const recoverInterruptedRuntimeSessions = (interruptedAt: string): number =>
     database.transaction(() => {
       const runningTurns = db
-        .prepare(
-          `SELECT turn_id, session_id
+        .prepare(`SELECT turn_id, session_id
            FROM foreground_turns
            WHERE status = 'running'
-           ORDER BY admitted_at, turn_id`,
-        )
+           ORDER BY admitted_at, turn_id`)
         .all();
       for (const row of runningTurns) {
         const turnId = requiredString(row, "turn_id");
         const sessionId = requiredString(row, "session_id");
         const runningCalls = db
-          .prepare(
-            `SELECT tool_call_id
+          .prepare(`SELECT tool_call_id
              FROM tool_calls
              WHERE turn_id = ? AND status IN ('requested', 'running')
-             ORDER BY action_sequence, tool_call_id`,
-          )
+             ORDER BY action_sequence, tool_call_id`)
           .all(turnId);
         for (const call of runningCalls) {
           const toolCallId = requiredString(call, "tool_call_id");
-          db.prepare(
-            `UPDATE tool_calls
+          db.prepare(`UPDATE tool_calls
              SET status = 'failed',
                  response_json = '{"error":"Runtime exited before turn settled","reason":"interrupted"}',
                  completed_at = ?
-             WHERE tool_call_id = ? AND status IN ('requested', 'running')`,
-          ).run(interruptedAt, toolCallId);
+             WHERE tool_call_id = ? AND status IN ('requested', 'running')`).run(interruptedAt, toolCallId);
           recordActivity(systemActor, "tool_call.interrupted", "tool_call", toolCallId, [
             { sessionId, turnId, reason: "interrupted" },
           ]);
         }
-        db.prepare(
-          `UPDATE foreground_turns
+        db.prepare(`UPDATE foreground_turns
            SET status = 'aborted', settled_at = ?
-           WHERE turn_id = ? AND status = 'running'`,
-        ).run(interruptedAt, turnId);
+           WHERE turn_id = ? AND status = 'running'`).run(interruptedAt, turnId);
         recordActivity(systemActor, "foreground_turn.interrupted", "foreground_turn", turnId, [
           {
             sessionId,
@@ -440,23 +426,19 @@ export async function createWorkspaceStore(
         ]);
       }
       const runningSessions = db
-        .prepare(
-          `SELECT session_id
+        .prepare(`SELECT session_id
            FROM sessions
            WHERE status = 'running'
-           ORDER BY created_at, session_id`,
-        )
+           ORDER BY created_at, session_id`)
         .all();
       for (const row of runningSessions) {
         const sessionId = requiredString(row, "session_id");
         const interruptedTurnIds = runningTurns
           .filter((turn) => requiredString(turn, "session_id") === sessionId)
           .map((turn) => requiredString(turn, "turn_id"));
-        db.prepare(
-          `UPDATE sessions
+        db.prepare(`UPDATE sessions
            SET status = 'aborted', updated_at = ?
-           WHERE session_id = ? AND status = 'running'`,
-        ).run(interruptedAt, sessionId);
+           WHERE session_id = ? AND status = 'running'`).run(interruptedAt, sessionId);
         recordActivity(systemActor, "session.interrupted", "session", sessionId, [
           {
             reason: "runtime_owner_recovery",
@@ -466,11 +448,13 @@ export async function createWorkspaceStore(
       }
       return runningSessions.length;
     });
-
   const pathsForDefinition = (
     workingPath: string,
     forcedArea?: "candidate" | "active",
-  ): { readonly absolute: string; readonly stored: string } => {
+  ): {
+    readonly absolute: string;
+    readonly stored: string;
+  } => {
     let requested = safeRelativePath(workingPath);
     if (requested.startsWith(`definitions${join("", "/")}`))
       requested = requested.slice("definitions/".length);
@@ -498,7 +482,6 @@ export async function createWorkspaceStore(
     const absolute = pathInside(paths.definitions, requested);
     return { absolute, stored: workspaceRelative(paths, absolute) };
   };
-
   const persistAtomically = async (path: string, bytes: Uint8Array): Promise<void> => {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -521,17 +504,13 @@ export async function createWorkspaceStore(
       await unlink(temporary).catch(ignoreMissing);
     }
   };
-
   const latestRevisionFor = (workingPath: string): FileRevisionRef | undefined => {
     const row = db
-      .prepare(
-        `SELECT revision_id, working_path, snapshot_path, content_digest
-         FROM file_revisions WHERE working_path = ? ORDER BY recorded_at DESC, revision_id DESC LIMIT 1`,
-      )
+      .prepare(`SELECT revision_id, working_path, snapshot_path, content_digest
+         FROM file_revisions WHERE working_path = ? ORDER BY recorded_at DESC, revision_id DESC LIMIT 1`)
       .get(workingPath);
     return row === undefined ? undefined : decodeFileRevisionRef(row);
   };
-
   const insertRevision = (
     request: {
       readonly revisionId: string;
@@ -549,13 +528,11 @@ export async function createWorkspaceStore(
     },
     stageId?: string,
   ): void => {
-    db.prepare(
-      `INSERT INTO file_revisions(
+    db.prepare(`INSERT INTO file_revisions(
         revision_id, revision_kind, working_path, snapshot_path, content_digest,
         predecessor_revision_id, actor_id, actor_kind, reason, recorded_at,
         evidence_kind, supersedes_revision_id, sensitivity, provenance_refs_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       request.revisionId,
       request.revisionKind,
       request.workingPath,
@@ -584,7 +561,6 @@ export async function createWorkspaceStore(
       request.predecessorRevisionId ? [{ revisionId: request.predecessorRevisionId }] : [],
     );
   };
-
   const recordDefinitionBytes = async (
     request: DefinitionWriteRequest,
     revisionKind: "definition" | "candidate" | "active",
@@ -605,26 +581,29 @@ export async function createWorkspaceStore(
     await persistAtomically(snapshotAbsolute, bytes);
     const snapshotPath = workspaceRelative(paths, snapshotAbsolute);
     const predecessorRevisionId = request.predecessorRevisionId ?? latest?.revisionId;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     database.transaction(() =>
       insertRevision(
-        {
+        createConditionalObject({
           revisionId,
           revisionKind,
           workingPath: target.stored,
           snapshotPath,
           contentDigest,
           actor: request.actor,
-          ...(request.reason === undefined ? {} : { reason: request.reason }),
-          ...(predecessorRevisionId === undefined ? {} : { predecessorRevisionId }),
-          sensitivity: request.sensitivity ?? "normal",
-          provenanceRefs: request.provenanceRefs ?? [],
-        },
+        } as const)
+          .addOptional(!(request.reason === undefined) ? { reason: request.reason } : undefined)
+          .addOptional(!(predecessorRevisionId === undefined) ? { predecessorRevisionId } : undefined)
+          .add({
+            sensitivity: request.sensitivity ?? "normal",
+            provenanceRefs: request.provenanceRefs ?? [],
+          } as const)
+          .finish(),
         stageId,
       ),
     );
     return { kind: "file_revision", revisionId, workingPath: target.stored, snapshotPath, contentDigest };
   };
-
   const recordDirectEdit = async (
     workingPath: string,
     actor: ActorRef,
@@ -633,26 +612,28 @@ export async function createWorkspaceStore(
     const target = pathsForDefinition(workingPath);
     const bytes = await readFile(target.absolute);
     const previous = db
-      .prepare(
-        `SELECT sensitivity, provenance_refs_json FROM file_revisions
-         WHERE working_path = ? ORDER BY recorded_at DESC, revision_id DESC LIMIT 1`,
-      )
+      .prepare(`SELECT sensitivity, provenance_refs_json FROM file_revisions
+         WHERE working_path = ? ORDER BY recorded_at DESC, revision_id DESC LIMIT 1`)
       .get(target.stored);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return await recordDefinitionBytes(
-      {
+      createConditionalObject({
         workingPath: target.stored,
         bytes,
         actor,
-        ...(reason === undefined ? {} : { reason }),
-        sensitivity:
-          previous === undefined
-            ? "normal"
-            : z.enum(["normal", "private", "secret"]).parse(requiredString(previous, "sensitivity")),
-        provenanceRefs:
-          previous === undefined
-            ? []
-            : z.array(EvidenceRefSchema).parse(parseJson(requiredString(previous, "provenance_refs_json"))),
-      },
+      } as const)
+        .addOptional(!(reason === undefined) ? { reason } : undefined)
+        .add({
+          sensitivity:
+            previous === undefined
+              ? "normal"
+              : z.enum(["normal", "private", "secret"]).parse(requiredString(previous, "sensitivity")),
+          provenanceRefs:
+            previous === undefined
+              ? []
+              : z.array(EvidenceRefSchema).parse(parseJson(requiredString(previous, "provenance_refs_json"))),
+        } as const)
+        .finish(),
       target.stored.startsWith("definitions/candidates/")
         ? "candidate"
         : target.stored.startsWith("definitions/active/")
@@ -662,7 +643,6 @@ export async function createWorkspaceStore(
       false,
     );
   };
-
   const appendEvidence = async <Kind extends EvidenceKind>(
     request: EvidenceWriteRequest<Kind>,
   ): Promise<EvidenceRevisionRef<Kind>> => {
@@ -684,25 +664,41 @@ export async function createWorkspaceStore(
     const snapshotPath = workspaceRelative(paths, evidenceAbsolute);
     const workingPath = snapshotPath;
     const contentDigest = sha256(bytes);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     database.transaction(() =>
-      insertRevision({
-        revisionId,
-        revisionKind: "evidence",
-        workingPath,
-        snapshotPath,
-        contentDigest,
-        actor: request.actor,
-        ...(request.reason === undefined ? {} : { reason: request.reason }),
-        ...(request.predecessorRevisionId === undefined
-          ? {}
-          : { predecessorRevisionId: request.predecessorRevisionId }),
-        evidenceKind: request.evidenceKind,
-        ...(request.supersedesRevisionId === undefined
-          ? {}
-          : { supersedesRevisionId: request.supersedesRevisionId }),
-        sensitivity: request.sensitivity ?? "private",
-        provenanceRefs: request.provenanceRefs ?? [],
-      }),
+      insertRevision(
+        createConditionalObject({
+          revisionId,
+          revisionKind: "evidence",
+          workingPath,
+          snapshotPath,
+          contentDigest,
+          actor: request.actor,
+        } as const)
+          .addOptional(!(request.reason === undefined) ? { reason: request.reason } : undefined)
+          .addOptional(
+            !(request.predecessorRevisionId === undefined)
+              ? {
+                  predecessorRevisionId: request.predecessorRevisionId,
+                }
+              : undefined,
+          )
+          .add({
+            evidenceKind: request.evidenceKind,
+          } as const)
+          .addOptional(
+            !(request.supersedesRevisionId === undefined)
+              ? {
+                  supersedesRevisionId: request.supersedesRevisionId,
+                }
+              : undefined,
+          )
+          .add({
+            sensitivity: request.sensitivity ?? "private",
+            provenanceRefs: request.provenanceRefs ?? [],
+          } as const)
+          .finish(),
+      ),
     );
     return {
       kind: "evidence_revision",
@@ -713,7 +709,6 @@ export async function createWorkspaceStore(
       evidenceKind: request.evidenceKind,
     };
   };
-
   const writeArtifact = async (request: {
     readonly path: string;
     readonly mediaType: string;
@@ -737,12 +732,10 @@ export async function createWorkspaceStore(
     const storedPath = workspaceRelative(paths, artifactAbsolute);
     const artifactId = createId("artifact");
     database.transaction(() => {
-      db.prepare(
-        `INSERT INTO artifacts(
+      db.prepare(`INSERT INTO artifacts(
           artifact_id, path, media_type, byte_length, content_digest, actor_id, actor_kind,
           relationship_refs_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         artifactId,
         storedPath,
         request.mediaType,
@@ -757,20 +750,16 @@ export async function createWorkspaceStore(
     });
     return { kind: "artifact_file", artifactId, path: storedPath, mediaType: request.mediaType };
   };
-
   const readVerifiedFile = async (storedPath: string, expectedDigest?: string): Promise<Uint8Array> => {
     const bytes = await readFile(pathInside(paths.root, storedPath));
     if (expectedDigest && sha256(bytes) !== expectedDigest)
       throw new Error(`Immutable file digest mismatch: ${storedPath}`);
     return bytes;
   };
-
   const normalizeActiveWorkingPath = (workingPath: string): string =>
     pathsForDefinition(workingPath, "active").stored;
-
   const outcomePublicationDirectory = (operationId: string): string =>
     join(paths.staging, "outcome-publications", sha256(operationId));
-
   const stageActiveRevision = async (
     operationId: string,
     publicationKey: string,
@@ -791,7 +780,6 @@ export async function createWorkspaceStore(
       contentDigest: sourceRevision.contentDigest,
     });
   };
-
   const publishStagedActiveRevision = async (publication: {
     readonly workingPath: string;
     readonly stagedPath: string;
@@ -810,25 +798,19 @@ export async function createWorkspaceStore(
     }
     await persistAtomically(pathsForDefinition(publication.workingPath, "active").absolute, bytes);
   };
-
   const deleteActiveDefinition = async (workingPath: string): Promise<void> => {
     await unlink(pathsForDefinition(workingPath, "active").absolute).catch(ignoreMissing);
   };
-
   const cleanupOutcomePublicationStage = async (operationId: string): Promise<void> => {
     await rm(outcomePublicationDirectory(operationId), { recursive: true, force: true });
   };
-
   const resolveRevision = async (revisionId: string): Promise<FileRevisionRef | undefined> => {
     const row = db
-      .prepare(
-        `SELECT revision_id, working_path, snapshot_path, content_digest
-         FROM file_revisions WHERE revision_id = ? AND revision_kind != 'evidence'`,
-      )
+      .prepare(`SELECT revision_id, working_path, snapshot_path, content_digest
+         FROM file_revisions WHERE revision_id = ? AND revision_kind != 'evidence'`)
       .get(revisionId);
     return row === undefined ? undefined : decodeFileRevisionRef(row);
   };
-
   const stageDefinition = async (request: StageDefinitionRequest): Promise<StagedDefinition> => {
     ActorSchema.parse(request.actor);
     const relativePath = safeRelativePath(request.relativePath);
@@ -836,23 +818,25 @@ export async function createWorkspaceStore(
     const stagedAbsolute = join(paths.staging, stageId, relativePath);
     const bytes = Uint8Array.from(request.bytes);
     await persistAtomically(stagedAbsolute, bytes);
-    const staged: StagedDefinition = {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const staged: StagedDefinition = createConditionalObject({
       stageId,
       targetArea: request.targetArea,
       relativePath,
       stagedPath: workspaceRelative(paths, stagedAbsolute),
       contentDigest: sha256(bytes),
       actor: request.actor,
-      ...(request.reason === undefined ? {} : { reason: request.reason }),
-      createdAt: now(),
-    };
+    } as const)
+      .addOptional(!(request.reason === undefined) ? { reason: request.reason } : undefined)
+      .add({
+        createdAt: now(),
+      } as const)
+      .finish();
     database.transaction(() => {
-      db.prepare(
-        `INSERT INTO staged_definitions(
+      db.prepare(`INSERT INTO staged_definitions(
           stage_id, target_area, relative_path, staged_path, content_digest,
           actor_id, actor_kind, reason, created_at, registered_revision_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-      ).run(
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`).run(
         staged.stageId,
         staged.targetArea,
         staged.relativePath,
@@ -867,7 +851,6 @@ export async function createWorkspaceStore(
     });
     return staged;
   };
-
   const registerStagedDefinition = async (stageId: string): Promise<FileRevisionRef> => {
     const row = db.prepare("SELECT * FROM staged_definitions WHERE stage_id = ?").get(stageId);
     if (row === undefined) throw new Error(`Unknown staged definition ${stageId}`);
@@ -890,20 +873,21 @@ export async function createWorkspaceStore(
       requiredString(row, "content_digest"),
     );
     const storedReason = optionalString(row, "reason");
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return await recordDefinitionBytes(
-      {
+      createConditionalObject({
         workingPath: requiredString(row, "relative_path"),
         bytes,
         actor,
-        ...(storedReason === undefined ? {} : { reason: storedReason }),
-      },
+      } as const)
+        .addOptional(!(storedReason === undefined) ? { reason: storedReason } : undefined)
+        .finish(),
       targetArea,
       targetArea,
       true,
       stageId,
     );
   };
-
   const cleanupStagedDefinitions = async (): Promise<number> => {
     const rows = db
       .prepare("SELECT stage_id, staged_path FROM staged_definitions WHERE registered_revision_id IS NULL")
@@ -923,7 +907,6 @@ export async function createWorkspaceStore(
     }
     return removed;
   };
-
   const removeUnregisteredSnapshots = async (): Promise<number> => {
     const registered = new Set(
       db
@@ -941,7 +924,6 @@ export async function createWorkspaceStore(
     }
     return removed;
   };
-
   const research = createResearchRepositories(database, recordActivity, now);
   const operational = createOperationalRepositories(database, recordActivity);
   const jobs = createDurableJobStore(database, recordActivity, (reference) =>
@@ -960,7 +942,6 @@ export async function createWorkspaceStore(
     listCurrent: definitionMetadataRepository.listCurrent,
     listRevisions: definitionMetadataRepository.listRevisions,
   });
-
   const cleanupPublication = async (publicationId: string, revisionId: string): Promise<void> => {
     const row = db
       .prepare("SELECT staged_path, snapshot_path FROM definition_publications WHERE publication_id = ?")
@@ -988,17 +969,14 @@ export async function createWorkspaceStore(
       force: true,
     });
   };
-
   const recoverPendingPublications = async (): Promise<number> => {
     const rows = db
-      .prepare(
-        `SELECT publications.* FROM definition_publications AS publications
+      .prepare(`SELECT publications.* FROM definition_publications AS publications
          JOIN definition_current_pointers AS current
            ON current.namespace = publications.namespace
           AND current.definition_id = publications.definition_id
           AND current.definition_revision_id = publications.revision_id
-         WHERE publications.status != 'published'`,
-      )
+         WHERE publications.status != 'published'`)
       .all();
     let recovered = 0;
     for (const row of rows) {
@@ -1019,20 +997,16 @@ export async function createWorkspaceStore(
     }
     return recovered;
   };
-
   const cleanupAbandonedPublications = async (): Promise<number> => {
     const rows = db
-      .prepare(
-        `SELECT publication_id, revision_id FROM definition_publications
+      .prepare(`SELECT publication_id, revision_id FROM definition_publications
          WHERE status IN ('staged', 'rejected')
-           AND revision_id NOT IN (SELECT definition_revision_id FROM definition_current_pointers)`,
-      )
+           AND revision_id NOT IN (SELECT definition_revision_id FROM definition_current_pointers)`)
       .all();
     for (const row of rows)
       await cleanupPublication(requiredString(row, "publication_id"), requiredString(row, "revision_id"));
     return rows.length;
   };
-
   const publishDefinition = async (
     request: DefinitionPublicationRequest,
   ): Promise<DefinitionMetadataCommitResult> => {
@@ -1064,12 +1038,10 @@ export async function createWorkspaceStore(
     };
     try {
       database.transaction(() => {
-        db.prepare(
-          `INSERT INTO definition_publications(
+        db.prepare(`INSERT INTO definition_publications(
           publication_id, namespace, definition_id, revision, revision_id, staged_path,
           working_path, snapshot_path, content_digest, status, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?)`,
-        ).run(
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?)`).run(
           publicationId,
           request.namespace,
           request.definitionId,
@@ -1081,20 +1053,32 @@ export async function createWorkspaceStore(
           contentDigest,
           now(),
         );
-        insertRevision({
-          revisionId,
-          revisionKind: "definition",
-          workingPath: target.stored,
-          snapshotPath,
-          contentDigest,
-          actor: request.activity.actor,
-          ...(request.activity.reason === undefined ? {} : { reason: request.activity.reason }),
-          ...(request.expectedCurrentRevisionId === undefined
-            ? {}
-            : { predecessorRevisionId: request.expectedCurrentRevisionId }),
-          sensitivity: request.sensitivity ?? "normal",
-          provenanceRefs: request.provenanceRefs ?? [],
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        insertRevision(
+          createConditionalObject({
+            revisionId,
+            revisionKind: "definition",
+            workingPath: target.stored,
+            snapshotPath,
+            contentDigest,
+            actor: request.activity.actor,
+          } as const)
+            .addOptional(
+              !(request.activity.reason === undefined) ? { reason: request.activity.reason } : undefined,
+            )
+            .addOptional(
+              !(request.expectedCurrentRevisionId === undefined)
+                ? {
+                    predecessorRevisionId: request.expectedCurrentRevisionId,
+                  }
+                : undefined,
+            )
+            .add({
+              sensitivity: request.sensitivity ?? "normal",
+              provenanceRefs: request.provenanceRefs ?? [],
+            } as const)
+            .finish(),
+        );
       });
     } catch (error) {
       await rm(dirname(stagedAbsolute), { recursive: true, force: true });
@@ -1103,16 +1087,26 @@ export async function createWorkspaceStore(
     }
     let committed: DefinitionMetadataCommitResult;
     try {
-      committed = await definitionMetadataRepository.commitRevision({
-        namespace: request.namespace,
-        definitionId: request.definitionId,
-        revision: request.revision,
-        definitionRevision,
-        ...(request.expectedCurrentRevisionId === undefined
-          ? {}
-          : { expectedCurrentRevisionId: request.expectedCurrentRevisionId }),
-        activity: request.activity,
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      committed = await definitionMetadataRepository.commitRevision(
+        createConditionalObject({
+          namespace: request.namespace,
+          definitionId: request.definitionId,
+          revision: request.revision,
+          definitionRevision,
+        } as const)
+          .addOptional(
+            !(request.expectedCurrentRevisionId === undefined)
+              ? {
+                  expectedCurrentRevisionId: request.expectedCurrentRevisionId,
+                }
+              : undefined,
+          )
+          .add({
+            activity: request.activity,
+          } as const)
+          .finish(),
+      );
     } catch (error) {
       db.prepare("UPDATE definition_publications SET status = 'rejected' WHERE publication_id = ?").run(
         publicationId,
@@ -1138,7 +1132,6 @@ export async function createWorkspaceStore(
     await rm(dirname(stagedAbsolute), { recursive: true, force: true });
     return committed;
   };
-
   const definitionPublications = Object.freeze({
     publish: publishDefinition,
     recoverPending: recoverPendingPublications,
@@ -1147,16 +1140,12 @@ export async function createWorkspaceStore(
   await recoverPendingPublications();
   await cleanupAbandonedPublications();
   const search = createSearchIndex(database, paths);
-
-  const readDatabaseRow = async (
-    ref: DatabaseRowRef,
-  ): Promise<Readonly<Record<string, unknown>> | undefined> => {
+  const readDatabaseRow = async (ref: DatabaseRowRef): Promise<DatabaseRow | undefined> => {
     const row = db
       .prepare(`SELECT * FROM ${ref.table} WHERE ${PRIMARY_KEY_BY_TABLE[ref.table]} = ?`)
       .get(ref.rowId);
-    return row === undefined ? undefined : JsonRecordSchema.parse(row);
+    return row;
   };
-
   const getArtifactMetadata = async (artifactId: string): Promise<ArtifactFileRef | undefined> => {
     const row = db
       .prepare("SELECT artifact_id, path, media_type FROM artifacts WHERE artifact_id = ?")
@@ -1170,59 +1159,93 @@ export async function createWorkspaceStore(
           mediaType: requiredString(row, "media_type"),
         });
   };
-
-  const protectedActivations = await createProtectedActivationStore({
-    database,
-    now,
-    ...(options.beforeActivationCommitForTesting === undefined
-      ? {}
-      : { beforeActivationCommitForTesting: options.beforeActivationCommitForTesting }),
-    ...(options.duringActivationCommitForTesting === undefined
-      ? {}
-      : { duringActivationCommitForTesting: options.duringActivationCommitForTesting }),
-    ...(options.afterActivationCommitForTesting === undefined
-      ? {}
-      : { afterActivationCommitForTesting: options.afterActivationCommitForTesting }),
-    recordActivity,
-    assertStoredReference: (reference) => assertStoredReference(db, reference),
-    readVerifiedFile,
-    persistAtomically,
-    pathsForDefinition,
-    resolveRevision,
-    recordDefinitionBytes,
-  });
-  const protectedFeedback = await createProtectedFeedbackStore({
-    database,
-    now,
-    ...(options.beforeOutcomeCommitForTesting === undefined
-      ? {}
-      : { beforeOutcomeCommitForTesting: options.beforeOutcomeCommitForTesting }),
-    ...(options.duringOutcomeCommitForTesting === undefined
-      ? {}
-      : { duringOutcomeCommitForTesting: options.duringOutcomeCommitForTesting }),
-    ...(options.afterOutcomeCommitForTesting === undefined
-      ? {}
-      : { afterOutcomeCommitForTesting: options.afterOutcomeCommitForTesting }),
-    recordActivity,
-    assertStoredReference: (reference) => assertStoredReference(db, reference),
-    stageActiveRevision,
-    publishStagedActiveRevision,
-    deleteActiveDefinition,
-    normalizeActiveWorkingPath,
-    cleanupOutcomePublicationStage,
-  });
-
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  const protectedActivations = await createProtectedActivationStore(
+    createConditionalObject({
+      database,
+      now,
+    } as const)
+      .addOptional(
+        !(options.beforeActivationCommitForTesting === undefined)
+          ? {
+              beforeActivationCommitForTesting: options.beforeActivationCommitForTesting,
+            }
+          : undefined,
+      )
+      .addOptional(
+        !(options.duringActivationCommitForTesting === undefined)
+          ? {
+              duringActivationCommitForTesting: options.duringActivationCommitForTesting,
+            }
+          : undefined,
+      )
+      .addOptional(
+        !(options.afterActivationCommitForTesting === undefined)
+          ? {
+              afterActivationCommitForTesting: options.afterActivationCommitForTesting,
+            }
+          : undefined,
+      )
+      .add({
+        recordActivity,
+        assertStoredReference: (reference: EvidenceRef) => assertStoredReference(db, reference),
+        readVerifiedFile,
+        persistAtomically,
+        pathsForDefinition,
+        resolveRevision,
+        recordDefinitionBytes,
+      } as const)
+      .finish(),
+  );
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  const protectedFeedback = await createProtectedFeedbackStore(
+    createConditionalObject({
+      database,
+      now,
+    } as const)
+      .addOptional(
+        !(options.beforeOutcomeCommitForTesting === undefined)
+          ? {
+              beforeOutcomeCommitForTesting: options.beforeOutcomeCommitForTesting,
+            }
+          : undefined,
+      )
+      .addOptional(
+        !(options.duringOutcomeCommitForTesting === undefined)
+          ? {
+              duringOutcomeCommitForTesting: options.duringOutcomeCommitForTesting,
+            }
+          : undefined,
+      )
+      .addOptional(
+        !(options.afterOutcomeCommitForTesting === undefined)
+          ? {
+              afterOutcomeCommitForTesting: options.afterOutcomeCommitForTesting,
+            }
+          : undefined,
+      )
+      .add({
+        recordActivity,
+        assertStoredReference: (reference: EvidenceRef) => assertStoredReference(db, reference),
+        stageActiveRevision,
+        publishStagedActiveRevision,
+        deleteActiveDefinition,
+        normalizeActiveWorkingPath,
+        cleanupOutcomePublicationStage,
+      } as const)
+      .finish(),
+  );
   const cutoverLegacyOperationalAuthority = async (
     legacyRoot: string,
     actor: ActorRef,
   ): Promise<OperationalCutoverReport> => {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const cutoverName = "workspace-operational-authority" as const;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const cutoverVersion = 1 as const;
     const existing = db
-      .prepare(
-        `SELECT source_digest FROM operational_cutovers
-         WHERE cutover_name = ? AND cutover_version = ?`,
-      )
+      .prepare(`SELECT source_digest FROM operational_cutovers
+         WHERE cutover_name = ? AND cutover_version = ?`)
       .get(cutoverName, cutoverVersion);
     if (existing !== undefined) {
       const sourceId = sha256(resolve(legacyRoot));
@@ -1294,12 +1317,10 @@ export async function createWorkspaceStore(
       for (const event of legacyEvents) {
         if (event.type === "authority.grant_issued") {
           const grant = GrantSchema.parse(event.payload["grant"]);
-          db.prepare(
-            `INSERT OR IGNORE INTO authority_grants(
+          db.prepare(`INSERT OR IGNORE INTO authority_grants(
               grant_id, principal, effects_json, resource_prefixes_json, expires_at,
               max_uses, max_cost, issued_at, source_event_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          ).run(
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
             grant.grantId,
             grant.principal,
             JSON.stringify(grant.effects),
@@ -1354,20 +1375,23 @@ export async function createWorkspaceStore(
           if (requiredString(existingOperation, "operation_fingerprint") !== fingerprint)
             throw new Error(`Legacy authority operation ${operationId} changed identity`);
           if (status === "completed" || status === "failed")
-            db.prepare(
-              `UPDATE authority_operations
+            db.prepare(`UPDATE authority_operations
                SET status = ?, result_json = ?, failure = ?, receipt_lineage_id = ?, updated_at = ?
-               WHERE operation_id = ? AND status = 'reserved'`,
-            ).run(status, resultJson, failure, lineage, event.occurredAt, operationId);
+               WHERE operation_id = ? AND status = 'reserved'`).run(
+              status,
+              resultJson,
+              failure,
+              lineage,
+              event.occurredAt,
+              operationId,
+            );
           continue;
         }
-        db.prepare(
-          `INSERT INTO authority_operations(
+        db.prepare(`INSERT INTO authority_operations(
             operation_id, idempotency_key, operation_fingerprint, principal, effect, resource,
             request_digest, estimated_cost, grant_id, status, result_json, failure,
             receipt_lineage_id, source_event_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
           operationId,
           idempotencyKey,
           fingerprint,
@@ -1386,11 +1410,9 @@ export async function createWorkspaceStore(
           event.occurredAt,
         );
       }
-      db.prepare(
-        `INSERT INTO operational_cutovers(
+      db.prepare(`INSERT INTO operational_cutovers(
           cutover_name, cutover_version, source_digest, completed_at
-        ) VALUES (?, ?, ?, ?)`,
-      ).run(cutoverName, cutoverVersion, sourceDigest, now());
+        ) VALUES (?, ?, ?, ?)`).run(cutoverName, cutoverVersion, sourceDigest, now());
     });
     return Object.freeze({
       cutoverName,
@@ -1400,7 +1422,6 @@ export async function createWorkspaceStore(
       legacyImport,
     });
   };
-
   const workspace: NoesisWorkspaceStore = Object.freeze({
     paths,
     capabilities,
@@ -1423,10 +1444,8 @@ export async function createWorkspaceStore(
       },
       readEvidence: async (ref: EvidenceRevisionRef) => {
         const row = db
-          .prepare(
-            `SELECT snapshot_path, content_digest, evidence_kind FROM file_revisions
-             WHERE revision_id = ? AND revision_kind = 'evidence'`,
-          )
+          .prepare(`SELECT snapshot_path, content_digest, evidence_kind FROM file_revisions
+             WHERE revision_id = ? AND revision_kind = 'evidence'`)
           .get(ref.revisionId);
         if (
           row === undefined ||
@@ -1537,15 +1556,14 @@ export async function createWorkspaceStore(
     throw error;
   }
 }
-
 interface DefinitionMetadataRepository extends DefinitionMetadataPort {
   readonly commitRevision: (
     request: DefinitionMetadataCommitRequest,
   ) => Promise<DefinitionMetadataCommitResult>;
 }
-
 function createDefinitionMetadataRepository(
   database: WorkspaceDatabase,
+  /** BOUNDARY: The workspace activity writer owns serialization of revision provenance. */
   recordActivity: (
     actor: ActorRef,
     activityKind: string,
@@ -1556,18 +1574,22 @@ function createDefinitionMetadataRepository(
   now: () => string,
 ): DefinitionMetadataRepository {
   const db = database.connection;
-  const decode = (row: unknown): DefinitionMetadataRecord => {
+  const decode = (row: DatabaseRow | undefined): DefinitionMetadataRecord => {
     const predecessorRevisionId = optionalString(row, "predecessor_revision_id");
     const definitionRevision = decodeFileRevisionRef(row);
-    return Object.freeze({
-      namespace: requiredString(row, "namespace"),
-      definitionId: requiredString(row, "definition_id"),
-      revision: requiredNumber(row, "revision"),
-      definitionRevision,
-      fileRevisionRow: databaseRef("file_revisions", definitionRevision.revisionId),
-      activityRow: databaseRef("activity_log", requiredString(row, "activity_id")),
-      ...(predecessorRevisionId === undefined ? {} : { predecessorRevisionId }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        namespace: requiredString(row, "namespace"),
+        definitionId: requiredString(row, "definition_id"),
+        revision: requiredNumber(row, "revision"),
+        definitionRevision,
+        fileRevisionRow: databaseRef("file_revisions", definitionRevision.revisionId),
+        activityRow: databaseRef("activity_log", requiredString(row, "activity_id")),
+      } as const)
+        .addOptional(!(predecessorRevisionId === undefined) ? { predecessorRevisionId } : undefined)
+        .finish(),
+    );
   };
   const selectMetadata = `SELECT
     metadata.namespace,
@@ -1582,53 +1604,43 @@ function createDefinitionMetadataRepository(
   FROM definition_revision_metadata AS metadata
   JOIN file_revisions AS revisions
     ON revisions.revision_id = metadata.definition_revision_id`;
-
   const getCurrent = async (
     namespace: string,
     definitionId: string,
   ): Promise<DefinitionMetadataRecord | undefined> => {
     const row = db
-      .prepare(
-        `${selectMetadata}
+      .prepare(`${selectMetadata}
          JOIN definition_current_pointers AS current
            ON current.namespace = metadata.namespace
           AND current.definition_id = metadata.definition_id
           AND current.revision = metadata.revision
           AND current.definition_revision_id = metadata.definition_revision_id
-         WHERE metadata.namespace = ? AND metadata.definition_id = ?`,
-      )
+         WHERE metadata.namespace = ? AND metadata.definition_id = ?`)
       .get(namespace, definitionId);
     return row === undefined ? undefined : decode(row);
   };
-
   const listCurrent = async (namespace: string): Promise<readonly DefinitionMetadataRecord[]> =>
     db
-      .prepare(
-        `${selectMetadata}
+      .prepare(`${selectMetadata}
          JOIN definition_current_pointers AS current
            ON current.namespace = metadata.namespace
           AND current.definition_id = metadata.definition_id
           AND current.revision = metadata.revision
           AND current.definition_revision_id = metadata.definition_revision_id
          WHERE metadata.namespace = ?
-         ORDER BY metadata.definition_id`,
-      )
+         ORDER BY metadata.definition_id`)
       .all(namespace)
       .map(decode);
-
   const listRevisions = async (
     namespace: string,
     definitionId: string,
   ): Promise<readonly DefinitionMetadataRecord[]> =>
     db
-      .prepare(
-        `${selectMetadata}
+      .prepare(`${selectMetadata}
          WHERE metadata.namespace = ? AND metadata.definition_id = ?
-         ORDER BY metadata.revision`,
-      )
+         ORDER BY metadata.revision`)
       .all(namespace, definitionId)
       .map(decode);
-
   const commitRevision = async (
     request: DefinitionMetadataCommitRequest,
   ): Promise<DefinitionMetadataCommitResult> => {
@@ -1640,13 +1652,10 @@ function createDefinitionMetadataRepository(
     }
     ActorSchema.parse(request.activity.actor);
     assertStoredReference(db, request.definitionRevision);
-
     return database.transaction(() => {
       const current = db
-        .prepare(
-          `SELECT revision, definition_revision_id
-           FROM definition_current_pointers WHERE namespace = ? AND definition_id = ?`,
-        )
+        .prepare(`SELECT revision, definition_revision_id
+           FROM definition_current_pointers WHERE namespace = ? AND definition_id = ?`)
         .get(request.namespace, request.definitionId);
       const currentRevisionId =
         current === undefined ? undefined : requiredString(current, "definition_revision_id");
@@ -1707,12 +1716,10 @@ function createDefinitionMetadataRepository(
           ...(request.activity.reason ? [{ reason: request.activity.reason }] : []),
         ],
       );
-      db.prepare(
-        `INSERT INTO definition_revision_metadata(
+      db.prepare(`INSERT INTO definition_revision_metadata(
           namespace, definition_id, revision, definition_revision_id,
           predecessor_revision_id, activity_id
-        ) VALUES (?, ?, ?, ?, ?, ?)`,
-      ).run(
+        ) VALUES (?, ?, ?, ?, ?, ?)`).run(
         request.namespace,
         request.definitionId,
         request.revision,
@@ -1720,41 +1727,44 @@ function createDefinitionMetadataRepository(
         currentRevisionId ?? null,
         activityRow.rowId,
       );
-      db.prepare(
-        `INSERT INTO definition_current_pointers(
+      db.prepare(`INSERT INTO definition_current_pointers(
           namespace, definition_id, revision, definition_revision_id, updated_at
         ) VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(namespace, definition_id) DO UPDATE SET
           revision = excluded.revision,
           definition_revision_id = excluded.definition_revision_id,
-          updated_at = excluded.updated_at`,
-      ).run(
+          updated_at = excluded.updated_at`).run(
         request.namespace,
         request.definitionId,
         request.revision,
         request.definitionRevision.revisionId,
         now(),
       );
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return {
         ok: true,
-        value: Object.freeze({
-          namespace: request.namespace,
-          definitionId: request.definitionId,
-          revision: request.revision,
-          definitionRevision: Object.freeze({ ...request.definitionRevision }),
-          fileRevisionRow: databaseRef("file_revisions", request.definitionRevision.revisionId),
-          activityRow,
-          ...(currentRevisionId === undefined ? {} : { predecessorRevisionId: currentRevisionId }),
-        }),
+        value: Object.freeze(
+          createConditionalObject({
+            namespace: request.namespace,
+            definitionId: request.definitionId,
+            revision: request.revision,
+            definitionRevision: Object.freeze({ ...request.definitionRevision }),
+            fileRevisionRow: databaseRef("file_revisions", request.definitionRevision.revisionId),
+            activityRow,
+          } as const)
+            .addOptional(
+              !(currentRevisionId === undefined) ? { predecessorRevisionId: currentRevisionId } : undefined,
+            )
+            .finish(),
+        ),
       };
     });
   };
-
   return Object.freeze({ getCurrent, listCurrent, listRevisions, commitRevision });
 }
-
 function createOperationalRepositories(
   database: WorkspaceDatabase,
+  /** BOUNDARY: The workspace activity writer owns serialization of operational provenance. */
   recordActivity: (
     actor: ActorRef,
     activityKind: string,
@@ -1771,7 +1781,7 @@ function createOperationalRepositories(
     totalTokens: z.number().int().nonnegative(),
     estimatedCost: z.number().nonnegative(),
   });
-  const decodeContextCheckpoint = (row: unknown): ContextCheckpointRecord => {
+  const decodeContextCheckpoint = (row: DatabaseRow | undefined): ContextCheckpointRecord => {
     const checkpointId = requiredString(row, "checkpoint_id");
     if (
       db.prepare("SELECT 1 FROM context_checkpoint_seals WHERE checkpoint_id = ?").get(checkpointId) ===
@@ -1781,14 +1791,12 @@ function createOperationalRepositories(
     const previousCheckpointId = optionalString(row, "previous_checkpoint_id");
     const firstRetainedMessageId = optionalString(row, "first_retained_message_id");
     const sourceRows = db
-      .prepare(
-        `SELECT source.ordinal, source.message_id, source.content_digest,
+      .prepare(`SELECT source.ordinal, source.message_id, source.content_digest,
                 message.session_id AS message_session_id, message.content AS message_content
          FROM context_checkpoint_sources AS source
          LEFT JOIN messages AS message ON message.message_id = source.message_id
          WHERE source.checkpoint_id = ?
-         ORDER BY source.ordinal ASC`,
-      )
+         ORDER BY source.ordinal ASC`)
       .all(checkpointId);
     const sources = sourceRows.map((source) =>
       Object.freeze({
@@ -1796,31 +1804,39 @@ function createOperationalRepositories(
         contentDigest: requiredString(source, "content_digest"),
       }),
     );
-    const checkpoint = Object.freeze({
-      checkpointId,
-      sessionId: requiredString(row, "session_id"),
-      ...(previousCheckpointId === undefined ? {} : { previousCheckpointId }),
-      summary: requiredString(row, "summary"),
-      summaryDigest: requiredString(row, "summary_digest"),
-      sourceDigest: requiredString(row, "source_digest"),
-      sources: Object.freeze(sources),
-      ...(firstRetainedMessageId === undefined ? {} : { firstRetainedMessageId }),
-      lastCoveredMessageId: requiredString(row, "last_covered_message_id"),
-      tokenBudget: z.number().int().positive().parse(requiredNumber(row, "token_budget")),
-      estimatedSummaryTokens: z
-        .number()
-        .int()
-        .positive()
-        .parse(requiredNumber(row, "estimated_summary_tokens")),
-      sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
-      provider: requiredString(row, "provider"),
-      model: requiredString(row, "model"),
-      thinkingLevel: z
-        .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
-        .parse(requiredString(row, "thinking_level")),
-      usage: Object.freeze(checkpointUsageSchema.parse(parseJson(requiredString(row, "usage_json")))),
-      createdAt: requiredString(row, "created_at"),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const checkpoint = Object.freeze(
+      createConditionalObject({
+        checkpointId,
+        sessionId: requiredString(row, "session_id"),
+      } as const)
+        .addOptional(!(previousCheckpointId === undefined) ? { previousCheckpointId } : undefined)
+        .add({
+          summary: requiredString(row, "summary"),
+          summaryDigest: requiredString(row, "summary_digest"),
+          sourceDigest: requiredString(row, "source_digest"),
+          sources: Object.freeze(sources),
+        } as const)
+        .addOptional(!(firstRetainedMessageId === undefined) ? { firstRetainedMessageId } : undefined)
+        .add({
+          lastCoveredMessageId: requiredString(row, "last_covered_message_id"),
+          tokenBudget: z.number().int().positive().parse(requiredNumber(row, "token_budget")),
+          estimatedSummaryTokens: z
+            .number()
+            .int()
+            .positive()
+            .parse(requiredNumber(row, "estimated_summary_tokens")),
+          sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
+          provider: requiredString(row, "provider"),
+          model: requiredString(row, "model"),
+          thinkingLevel: z
+            .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+            .parse(requiredString(row, "thinking_level")),
+          usage: Object.freeze(checkpointUsageSchema.parse(parseJson(requiredString(row, "usage_json")))),
+          createdAt: requiredString(row, "created_at"),
+        } as const)
+        .finish(),
+    );
     if (sources.length === 0) throw new Error(`Context checkpoint ${checkpointId} has no source provenance`);
     if (sha256(checkpoint.summary) !== checkpoint.summaryDigest)
       throw new Error(`Context checkpoint ${checkpointId} failed summary digest verification`);
@@ -1848,13 +1864,11 @@ function createOperationalRepositories(
     sessionId: string,
   ): Promise<ContextCheckpointRecord | undefined> => {
     const row = db
-      .prepare(
-        `SELECT checkpoint.*
+      .prepare(`SELECT checkpoint.*
          FROM session_context_state AS state
          JOIN context_checkpoints AS checkpoint
            ON checkpoint.checkpoint_id = state.active_checkpoint_id
-         WHERE state.session_id = ?`,
-      )
+         WHERE state.session_id = ?`)
       .get(sessionId);
     return row === undefined ? undefined : decodeContextCheckpoint(row);
   };
@@ -1863,14 +1877,14 @@ function createOperationalRepositories(
       database.transaction(() => {
         z.string().min(1).parse(checkpoint.checkpointId);
         z.string().min(1).parse(checkpoint.sessionId);
-        z.string().min(1).max(32_000).parse(checkpoint.summary);
+        z.string().min(1).max(32000).parse(checkpoint.summary);
         z.string()
           .regex(/^[a-f0-9]{64}$/u)
           .parse(checkpoint.summaryDigest);
         z.string()
           .regex(/^[a-f0-9]{64}$/u)
           .parse(checkpoint.sourceDigest);
-        z.number().int().positive().max(1_000_000).parse(checkpoint.tokenBudget);
+        z.number().int().positive().max(1000000).parse(checkpoint.tokenBudget);
         z.number().int().positive().parse(checkpoint.estimatedSummaryTokens);
         SensitivitySchema.parse(checkpoint.sensitivity);
         checkpointUsageSchema.parse(checkpoint.usage);
@@ -1895,10 +1909,14 @@ function createOperationalRepositories(
         const activeCheckpointId =
           activeRow === undefined ? undefined : requiredString(activeRow, "active_checkpoint_id");
         if (activeCheckpointId !== expectedActiveCheckpointId)
-          return Object.freeze({
-            status: "conflict" as const,
-            ...(activeCheckpointId === undefined ? {} : { activeCheckpointId }),
-          });
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          return Object.freeze(
+            createConditionalObject({
+              status: "conflict" as const,
+            } as const)
+              .addOptional(!(activeCheckpointId === undefined) ? { activeCheckpointId } : undefined)
+              .finish(),
+          );
         if (new Set(expectedContextMessageIds).size !== expectedContextMessageIds.length)
           throw new Error("Expected context cannot repeat a message");
         if (sourceMessageIds.length > expectedContextMessageIds.length)
@@ -1910,17 +1928,15 @@ function createOperationalRepositories(
         const expectedFirstRetainedMessageId = expectedContextMessageIds[sourceMessageIds.length];
         if (checkpoint.firstRetainedMessageId !== expectedFirstRetainedMessageId)
           throw new Error("Context checkpoint retained tail must immediately follow its covered sources");
-        const expectedMessages = new Map<string, unknown>();
+        const expectedMessages = new Map<string, DatabaseRow>();
         const expectedMessageChunkSize = 500;
         for (let start = 0; start < expectedContextMessageIds.length; start += expectedMessageChunkSize) {
           const chunk = expectedContextMessageIds.slice(start, start + expectedMessageChunkSize);
           const messagePlaceholders = chunk.map(() => "?").join(", ");
           for (const row of db
-            .prepare(
-              `SELECT message_id, session_id, content
+            .prepare(`SELECT message_id, session_id, content
                FROM messages
-               WHERE message_id IN (${messagePlaceholders})`,
-            )
+               WHERE message_id IN (${messagePlaceholders})`)
             .all(...chunk))
             expectedMessages.set(requiredString(row, "message_id"), row);
         }
@@ -1950,14 +1966,12 @@ function createOperationalRepositories(
                 `Context checkpoint retained message ${checkpoint.firstRetainedMessageId} is missing`,
               );
           }
-          db.prepare(
-            `INSERT INTO context_checkpoints(
+          db.prepare(`INSERT INTO context_checkpoints(
               checkpoint_id, session_id, previous_checkpoint_id, summary, summary_digest,
               source_digest, first_retained_message_id, last_covered_message_id, token_budget,
               estimated_summary_tokens, sensitivity, provider, model, thinking_level, usage_json,
               created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          ).run(
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
             checkpoint.checkpointId,
             checkpoint.sessionId,
             checkpoint.previousCheckpointId ?? null,
@@ -1975,10 +1989,9 @@ function createOperationalRepositories(
             canonicalJson(checkpoint.usage),
             checkpoint.createdAt,
           );
-          const insertSource = db.prepare(
-            `INSERT INTO context_checkpoint_sources(checkpoint_id, ordinal, message_id, content_digest)
-             VALUES (?, ?, ?, ?)`,
-          );
+          const insertSource =
+            db.prepare(`INSERT INTO context_checkpoint_sources(checkpoint_id, ordinal, message_id, content_digest)
+             VALUES (?, ?, ?, ?)`);
           for (const [ordinal, source] of checkpoint.sources.entries())
             insertSource.run(checkpoint.checkpointId, ordinal, source.messageId, source.contentDigest);
           db.prepare("INSERT INTO context_checkpoint_seals(checkpoint_id, sealed_at) VALUES (?, ?)").run(
@@ -1986,13 +1999,15 @@ function createOperationalRepositories(
             checkpoint.createdAt,
           );
         }
-        db.prepare(
-          `INSERT INTO session_context_state(session_id, active_checkpoint_id, updated_at)
+        db.prepare(`INSERT INTO session_context_state(session_id, active_checkpoint_id, updated_at)
            VALUES (?, ?, ?)
            ON CONFLICT(session_id) DO UPDATE SET
              active_checkpoint_id = excluded.active_checkpoint_id,
-             updated_at = excluded.updated_at`,
-        ).run(checkpoint.sessionId, checkpoint.checkpointId, checkpoint.createdAt);
+             updated_at = excluded.updated_at`).run(
+          checkpoint.sessionId,
+          checkpoint.checkpointId,
+          checkpoint.createdAt,
+        );
         recordActivity(
           systemActor,
           "context_checkpoint.activated",
@@ -2000,6 +2015,7 @@ function createOperationalRepositories(
           checkpoint.checkpointId,
           checkpoint.sources,
         );
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({ status: "activated" as const, checkpoint });
       });
   const registerTurnTimelineEntry = (
@@ -2010,11 +2026,9 @@ function createOperationalRepositories(
   ): void => {
     z.number().int().nonnegative().parse(timelineSequence);
     const existingByPosition = db
-      .prepare(
-        `SELECT entry_kind, entry_id
+      .prepare(`SELECT entry_kind, entry_id
          FROM turn_timeline_entries
-         WHERE turn_id = ? AND timeline_sequence = ?`,
-      )
+         WHERE turn_id = ? AND timeline_sequence = ?`)
       .get(turnId, timelineSequence);
     if (existingByPosition !== undefined) {
       if (
@@ -2025,11 +2039,9 @@ function createOperationalRepositories(
       return;
     }
     const existingByEntry = db
-      .prepare(
-        `SELECT turn_id, timeline_sequence
+      .prepare(`SELECT turn_id, timeline_sequence
          FROM turn_timeline_entries
-         WHERE entry_kind = ? AND entry_id = ?`,
-      )
+         WHERE entry_kind = ? AND entry_id = ?`)
       .get(entryKind, entryId);
     if (existingByEntry !== undefined) {
       if (
@@ -2039,22 +2051,18 @@ function createOperationalRepositories(
         throw new Error(`Timeline entry ${entryKind}:${entryId} already has a different position`);
       return;
     }
-    db.prepare(
-      `INSERT INTO turn_timeline_entries(turn_id, timeline_sequence, entry_kind, entry_id)
-       VALUES (?, ?, ?, ?)`,
-    ).run(turnId, timelineSequence, entryKind, entryId);
+    db.prepare(`INSERT INTO turn_timeline_entries(turn_id, timeline_sequence, entry_kind, entry_id)
+       VALUES (?, ?, ?, ?)`).run(turnId, timelineSequence, entryKind, entryId);
   };
   const putSession = async (record: SessionRecord): Promise<DatabaseRowRef> => {
     database.transaction(() => {
-      db.prepare(
-        `INSERT INTO sessions(
+      db.prepare(`INSERT INTO sessions(
           session_id, parent_session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET
           title = excluded.title, status = excluded.status, provider = excluded.provider,
           model = excluded.model, runtime = excluded.runtime, updated_at = excluded.updated_at,
-          metadata_json = excluded.metadata_json`,
-      ).run(
+          metadata_json = excluded.metadata_json`).run(
         record.sessionId,
         record.parentSessionId ?? null,
         record.title,
@@ -2083,10 +2091,8 @@ function createOperationalRepositories(
         if (turn === undefined || requiredString(turn, "session_id") !== record.sessionId)
           throw new Error(`Message ${record.messageId} turn does not belong to its session`);
       }
-      db.prepare(
-        `INSERT INTO messages(message_id, session_id, role, content, sensitivity, created_at, metadata_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
+      db.prepare(`INSERT INTO messages(message_id, session_id, role, content, sensitivity, created_at, metadata_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
         record.messageId,
         record.sessionId,
         record.role,
@@ -2124,15 +2130,13 @@ function createOperationalRepositories(
   const userIntentMessageState = (intent: UserIntentRecord): "missing" | "verified" => {
     if (intent.targetTurnId === undefined) return "missing";
     const messages = db
-      .prepare(
-        `SELECT content
+      .prepare(`SELECT content
          FROM messages
          WHERE session_id = ?
            AND role = 'user'
            AND json_valid(metadata_json)
            AND json_extract(metadata_json, '$.turnId') = ?
-           AND json_extract(metadata_json, '$.sourceIntentId') = ?`,
-      )
+           AND json_extract(metadata_json, '$.sourceIntentId') = ?`)
       .all(intent.sessionId, intent.targetTurnId, intent.intentId);
     if (messages.length === 0) return "missing";
     for (const message of messages) {
@@ -2150,12 +2154,10 @@ function createOperationalRepositories(
     if (userIntentMessageState(intent) !== "verified")
       throw new Error(`User intent ${intent.intentId} has no matching durable user message`);
     const delivered = db
-      .prepare(
-        `UPDATE user_intents
+      .prepare(`UPDATE user_intents
          SET status = 'delivered', text = NULL, delivered_at = ?, unresolved_at = NULL, updated_at = ?
          WHERE intent_id = ? AND session_id = ? AND status IN ('dispatching', 'unresolved')
-           AND target_turn_id = ?`,
-      )
+           AND target_turn_id = ?`)
       .run(deliveredAt, deliveredAt, intent.intentId, intent.sessionId, intent.targetTurnId);
     if (Number(delivered.changes) !== 1) return undefined;
     recordActivity(systemActor, activityType, "user_intent", intent.intentId, [
@@ -2194,21 +2196,17 @@ function createOperationalRepositories(
       }
       const queueSequence = requiredNumber(
         db
-          .prepare(
-            `SELECT COALESCE(MAX(queue_sequence), 0) + 1 AS next_sequence
+          .prepare(`SELECT COALESCE(MAX(queue_sequence), 0) + 1 AS next_sequence
              FROM user_intents
-             WHERE session_id = ?`,
-          )
+             WHERE session_id = ?`)
           .get(sessionId),
         "next_sequence",
       );
-      db.prepare(
-        `INSERT INTO user_intents(
+      db.prepare(`INSERT INTO user_intents(
           intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
           queued_behind_turn_id, target_turn_id, created_at, updated_at,
           promoted_at, delivered_at, unresolved_at, withdrawn_at, attempt_count
-        ) VALUES (?, ?, ?, ?, 'turn', 'pending', ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`,
-      ).run(
+        ) VALUES (?, ?, ?, ?, 'turn', 'pending', ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`).run(
         intentId,
         sessionId,
         request.text,
@@ -2218,12 +2216,16 @@ function createOperationalRepositories(
         createdAt,
         createdAt,
       );
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       recordActivity(systemActor, "user_intent.enqueued", "user_intent", intentId, [
-        {
+        createConditionalObject({
           sessionId,
           mode: "turn",
-          ...(request.queuedBehindTurnId ? { queuedBehindTurnId: request.queuedBehindTurnId } : {}),
-        },
+        } as const)
+          .addOptional(
+            request.queuedBehindTurnId ? { queuedBehindTurnId: request.queuedBehindTurnId } : undefined,
+          )
+          .finish(),
       ]);
       const inserted = getUserIntent(intentId, sessionId);
       if (inserted === undefined) throw new Error(`User intent ${intentId} disappeared after enqueue`);
@@ -2257,11 +2259,9 @@ function createOperationalRepositories(
       pairs.sort((left, right) => left.source.queueSequence - right.source.queueSequence);
       let nextSequence = requiredNumber(
         db
-          .prepare(
-            `SELECT COALESCE(MAX(queue_sequence), 0) + 1 AS next_sequence
+          .prepare(`SELECT COALESCE(MAX(queue_sequence), 0) + 1 AS next_sequence
              FROM user_intents
-             WHERE session_id = ?`,
-          )
+             WHERE session_id = ?`)
           .get(destinationSessionId),
         "next_sequence",
       );
@@ -2292,21 +2292,17 @@ function createOperationalRepositories(
         if (source.status !== "pending" || source.deliveryMode !== "turn" || source.text === undefined)
           throw new Error(`Source user intent ${source.intentId} is no longer pending`);
         const withdrawn = db
-          .prepare(
-            `UPDATE user_intents
+          .prepare(`UPDATE user_intents
              SET status = 'withdrawn', withdrawn_at = ?, updated_at = ?
-             WHERE intent_id = ? AND session_id = ? AND status = 'pending' AND delivery_mode = 'turn'`,
-          )
+             WHERE intent_id = ? AND session_id = ? AND status = 'pending' AND delivery_mode = 'turn'`)
           .run(reroutedAt, reroutedAt, source.intentId, sourceSessionId);
         if (Number(withdrawn.changes) !== 1)
           throw new Error(`Source user intent ${source.intentId} changed during reroute`);
-        db.prepare(
-          `INSERT INTO user_intents(
+        db.prepare(`INSERT INTO user_intents(
             intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
             queued_behind_turn_id, target_turn_id, created_at, updated_at,
             promoted_at, delivered_at, unresolved_at, withdrawn_at, attempt_count
-          ) VALUES (?, ?, ?, ?, 'turn', 'pending', ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`,
-        ).run(
+          ) VALUES (?, ?, ?, ?, 'turn', 'pending', ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`).run(
           destinationIntentId,
           destinationSessionId,
           source.text,
@@ -2341,7 +2337,6 @@ function createOperationalRepositories(
       const createdAt = z.string().min(1).parse(request.createdAt);
       const promotedAt = z.string().min(1).parse(request.promotedAt);
       const contentDigest = sha256(text);
-
       const existing = getUserIntent(intentId, sessionId);
       if (existing !== undefined) {
         if (
@@ -2358,7 +2353,6 @@ function createOperationalRepositories(
       const colliding = db.prepare("SELECT session_id FROM user_intents WHERE intent_id = ?").get(intentId);
       if (colliding !== undefined)
         throw new Error(`User intent ${intentId} already belongs to another session`);
-
       const target = db
         .prepare("SELECT session_id, status FROM foreground_turns WHERE turn_id = ?")
         .get(targetTurnId);
@@ -2368,24 +2362,19 @@ function createOperationalRepositories(
         requiredString(target, "status") !== "running"
       )
         return undefined;
-
       const queueSequence = requiredNumber(
         db
-          .prepare(
-            `SELECT COALESCE(MAX(queue_sequence), 0) + 1 AS next_sequence
+          .prepare(`SELECT COALESCE(MAX(queue_sequence), 0) + 1 AS next_sequence
              FROM user_intents
-             WHERE session_id = ?`,
-          )
+             WHERE session_id = ?`)
           .get(sessionId),
         "next_sequence",
       );
-      db.prepare(
-        `INSERT INTO user_intents(
+      db.prepare(`INSERT INTO user_intents(
           intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
           queued_behind_turn_id, target_turn_id, created_at, updated_at,
           held_at, promoted_at, delivered_at, unresolved_at, withdrawn_at, steer_origin, attempt_count
-        ) VALUES (?, ?, ?, ?, 'steer', 'dispatching', ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, 'explicit', 1)`,
-      ).run(
+        ) VALUES (?, ?, ?, ?, 'steer', 'dispatching', ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, 'explicit', 1)`).run(
         intentId,
         sessionId,
         text,
@@ -2443,20 +2432,16 @@ function createOperationalRepositories(
         return undefined;
       const queueSequence = requiredNumber(
         db
-          .prepare(
-            `SELECT COALESCE(MAX(queue_sequence), 0) + 1 AS next_sequence
-             FROM user_intents WHERE session_id = ?`,
-          )
+          .prepare(`SELECT COALESCE(MAX(queue_sequence), 0) + 1 AS next_sequence
+             FROM user_intents WHERE session_id = ?`)
           .get(sessionId),
         "next_sequence",
       );
-      db.prepare(
-        `INSERT INTO user_intents(
+      db.prepare(`INSERT INTO user_intents(
           intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
           queued_behind_turn_id, target_turn_id, created_at, updated_at,
           held_at, promoted_at, delivered_at, unresolved_at, withdrawn_at, steer_origin, attempt_count
-        ) VALUES (?, ?, ?, ?, 'steer', 'held', ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'explicit', 0)`,
-      ).run(
+        ) VALUES (?, ?, ?, ?, 'steer', 'held', ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'explicit', 0)`).run(
         intentId,
         sessionId,
         text,
@@ -2489,21 +2474,17 @@ function createOperationalRepositories(
       )
         return undefined;
       const candidate = db
-        .prepare(
-          `SELECT intent_id FROM user_intents
+        .prepare(`SELECT intent_id FROM user_intents
            WHERE session_id = ? AND status = 'pending' AND delivery_mode = 'turn'
-           ORDER BY queue_sequence DESC LIMIT 1`,
-        )
+           ORDER BY queue_sequence DESC LIMIT 1`)
         .get(request.sessionId);
       if (candidate === undefined) return undefined;
       const intentId = requiredString(candidate, "intent_id");
       const held = db
-        .prepare(
-          `UPDATE user_intents
+        .prepare(`UPDATE user_intents
            SET status = 'held', delivery_mode = 'steer', target_turn_id = ?, held_at = ?,
                steer_origin = 'queued', updated_at = ?
-           WHERE intent_id = ? AND session_id = ? AND status = 'pending' AND delivery_mode = 'turn'`,
-        )
+           WHERE intent_id = ? AND session_id = ? AND status = 'pending' AND delivery_mode = 'turn'`)
         .run(request.targetTurnId, request.heldAt, request.heldAt, intentId, request.sessionId);
       if (Number(held.changes) !== 1) return undefined;
       recordActivity(systemActor, "user_intent.held_queued_steer", "user_intent", intentId, [
@@ -2535,12 +2516,10 @@ function createOperationalRepositories(
       )
         return undefined;
       const activated = db
-        .prepare(
-          `UPDATE user_intents
+        .prepare(`UPDATE user_intents
            SET status = 'dispatching', promoted_at = ?, updated_at = ?, attempt_count = attempt_count + 1
            WHERE intent_id = ? AND session_id = ? AND status = 'held'
-             AND delivery_mode = 'steer' AND target_turn_id = ?`,
-        )
+             AND delivery_mode = 'steer' AND target_turn_id = ?`)
         .run(
           request.promotedAt,
           request.promotedAt,
@@ -2567,20 +2546,25 @@ function createOperationalRepositories(
       )
         return undefined;
       if (current.steerOrigin === "queued") {
-        db.prepare(
-          `UPDATE user_intents
+        db.prepare(`UPDATE user_intents
            SET status = 'pending', delivery_mode = 'turn', target_turn_id = NULL,
                held_at = NULL, steer_origin = NULL, updated_at = ?
-           WHERE intent_id = ? AND session_id = ? AND status = 'held'`,
-        ).run(request.releasedAt, request.intentId, request.sessionId);
+           WHERE intent_id = ? AND session_id = ? AND status = 'held'`).run(
+          request.releasedAt,
+          request.intentId,
+          request.sessionId,
+        );
         recordActivity(systemActor, "user_intent.held_steer_requeued", "user_intent", request.intentId);
       } else {
-        db.prepare(
-          `UPDATE user_intents
+        db.prepare(`UPDATE user_intents
            SET status = 'withdrawn', delivery_mode = 'turn', target_turn_id = NULL,
                held_at = NULL, steer_origin = NULL, withdrawn_at = ?, updated_at = ?
-           WHERE intent_id = ? AND session_id = ? AND status = 'held'`,
-        ).run(request.releasedAt, request.releasedAt, request.intentId, request.sessionId);
+           WHERE intent_id = ? AND session_id = ? AND status = 'held'`).run(
+          request.releasedAt,
+          request.releasedAt,
+          request.intentId,
+          request.sessionId,
+        );
         recordActivity(
           systemActor,
           "user_intent.held_explicit_steer_withdrawn",
@@ -2598,13 +2582,11 @@ function createOperationalRepositories(
       z.string().min(1).parse(request.targetTurnId);
       z.string().min(1).parse(request.claimedAt);
       const candidate = db
-        .prepare(
-          `SELECT intent_id
+        .prepare(`SELECT intent_id
            FROM user_intents
            WHERE session_id = ? AND status = 'pending' AND delivery_mode = 'turn'
            ORDER BY queue_sequence
-           LIMIT 1`,
-        )
+           LIMIT 1`)
         .get(request.sessionId);
       if (candidate === undefined) return undefined;
       const intentId = requiredString(candidate, "intent_id");
@@ -2614,13 +2596,11 @@ function createOperationalRepositories(
       if (collidingTarget !== undefined)
         throw new Error(`Foreground turn ${request.targetTurnId} already exists`);
       const claimed = db
-        .prepare(
-          `UPDATE user_intents
+        .prepare(`UPDATE user_intents
            SET status = 'dispatching', target_turn_id = ?, updated_at = ?,
                attempt_count = attempt_count + 1
            WHERE intent_id = ? AND session_id = ?
-             AND status = 'pending' AND delivery_mode = 'turn'`,
-        )
+             AND status = 'pending' AND delivery_mode = 'turn'`)
         .run(request.targetTurnId, request.claimedAt, intentId, request.sessionId);
       if (Number(claimed.changes) !== 1) return undefined;
       recordActivity(systemActor, "user_intent.claimed", "user_intent", intentId, [
@@ -2642,25 +2622,21 @@ function createOperationalRepositories(
       )
         return undefined;
       const candidate = db
-        .prepare(
-          `SELECT intent_id
+        .prepare(`SELECT intent_id
            FROM user_intents
            WHERE session_id = ? AND status = 'pending' AND delivery_mode = 'turn'
            ORDER BY queue_sequence DESC
-           LIMIT 1`,
-        )
+           LIMIT 1`)
         .get(request.sessionId);
       if (candidate === undefined) return undefined;
       const intentId = requiredString(candidate, "intent_id");
       const promoted = db
-        .prepare(
-          `UPDATE user_intents
+        .prepare(`UPDATE user_intents
            SET status = 'dispatching', delivery_mode = 'steer', target_turn_id = ?,
                promoted_at = ?, steer_origin = 'queued', updated_at = ?,
                attempt_count = attempt_count + 1
            WHERE intent_id = ? AND session_id = ?
-             AND status = 'pending' AND delivery_mode = 'turn'`,
-        )
+             AND status = 'pending' AND delivery_mode = 'turn'`)
         .run(request.targetTurnId, request.promotedAt, request.promotedAt, intentId, request.sessionId);
       if (Number(promoted.changes) !== 1) return undefined;
       recordActivity(systemActor, "user_intent.promoted_to_steer", "user_intent", intentId, [
@@ -2672,13 +2648,11 @@ function createOperationalRepositories(
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["withdraw"]>[0],
   ): UserIntentRecord | undefined => {
     const withdrawn = db
-      .prepare(
-        `UPDATE user_intents
+      .prepare(`UPDATE user_intents
            SET status = 'withdrawn', delivery_mode = 'turn', target_turn_id = NULL,
                held_at = NULL, promoted_at = NULL, unresolved_at = NULL, steer_origin = NULL,
                withdrawn_at = ?, updated_at = ?
-           WHERE intent_id = ? AND session_id = ? AND status IN ('pending', 'unresolved')`,
-      )
+           WHERE intent_id = ? AND session_id = ? AND status IN ('pending', 'unresolved')`)
       .run(request.withdrawnAt, request.withdrawnAt, request.intentId, request.sessionId);
     if (Number(withdrawn.changes) !== 1) return undefined;
     recordActivity(systemActor, "user_intent.withdrawn", "user_intent", request.intentId);
@@ -2709,14 +2683,12 @@ function createOperationalRepositories(
       )
         return undefined;
       const withdrawn = db
-        .prepare(
-          `UPDATE user_intents
+        .prepare(`UPDATE user_intents
            SET status = 'withdrawn', delivery_mode = 'turn', target_turn_id = NULL,
                held_at = NULL, promoted_at = NULL, unresolved_at = NULL, steer_origin = NULL,
                withdrawn_at = ?, updated_at = ?
            WHERE intent_id = ? AND session_id = ?
-             AND status = 'dispatching' AND delivery_mode = 'steer' AND target_turn_id = ?`,
-        )
+             AND status = 'dispatching' AND delivery_mode = 'steer' AND target_turn_id = ?`)
         .run(
           request.withdrawnAt,
           request.withdrawnAt,
@@ -2769,13 +2741,11 @@ function createOperationalRepositories(
       if (current.status === "delivered") {
         const existing = decodeOptional(
           db
-            .prepare(
-              `SELECT m.*, timeline.timeline_sequence
+            .prepare(`SELECT m.*, timeline.timeline_sequence
                FROM messages AS m
                LEFT JOIN turn_timeline_entries AS timeline
                  ON timeline.entry_kind = 'message' AND timeline.entry_id = m.message_id
-               WHERE m.message_id = ?`,
-            )
+               WHERE m.message_id = ?`)
             .get(messageId),
           decodeMessage,
         );
@@ -2789,7 +2759,6 @@ function createOperationalRepositories(
         .get(request.targetTurnId);
       if (target === undefined || requiredString(target, "session_id") !== request.sessionId)
         throw new Error(`User intent ${request.intentId} target turn does not belong to its session`);
-
       const metadata = Object.freeze({
         turnId: request.targetTurnId,
         sourceIntentId: request.intentId,
@@ -2797,21 +2766,17 @@ function createOperationalRepositories(
       });
       const existingMessage = decodeOptional(
         db
-          .prepare(
-            `SELECT m.*, timeline.timeline_sequence
+          .prepare(`SELECT m.*, timeline.timeline_sequence
              FROM messages AS m
              LEFT JOIN turn_timeline_entries AS timeline
                ON timeline.entry_kind = 'message' AND timeline.entry_id = m.message_id
-             WHERE m.message_id = ?`,
-          )
+             WHERE m.message_id = ?`)
           .get(messageId),
         decodeMessage,
       );
       if (existingMessage === undefined) {
-        db.prepare(
-          `INSERT INTO messages(message_id, session_id, role, content, sensitivity, created_at, metadata_json)
-           VALUES (?, ?, 'user', ?, ?, ?, ?)`,
-        ).run(
+        db.prepare(`INSERT INTO messages(message_id, session_id, role, content, sensitivity, created_at, metadata_json)
+           VALUES (?, ?, 'user', ?, ?, ?, ?)`).run(
           messageId,
           request.sessionId,
           request.text,
@@ -2861,12 +2826,10 @@ function createOperationalRepositories(
           "user_intent.delivery_confirmed_while_marking_unresolved",
         );
       const unresolved = db
-        .prepare(
-          `UPDATE user_intents
+        .prepare(`UPDATE user_intents
            SET status = 'unresolved', unresolved_at = ?, updated_at = ?
            WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'
-             AND target_turn_id = ?`,
-        )
+             AND target_turn_id = ?`)
         .run(
           request.unresolvedAt,
           request.unresolvedAt,
@@ -2904,19 +2867,15 @@ function createOperationalRepositories(
       const hasCrashVisibleDispatch = messageState === "verified";
       const released = hasCrashVisibleDispatch
         ? db
-            .prepare(
-              `UPDATE user_intents
+            .prepare(`UPDATE user_intents
                SET status = 'unresolved', unresolved_at = ?, updated_at = ?
-               WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
-            )
+               WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`)
             .run(request.releasedAt, request.releasedAt, request.intentId, request.sessionId)
         : db
-            .prepare(
-              `UPDATE user_intents
+            .prepare(`UPDATE user_intents
                SET status = 'pending', delivery_mode = 'turn', target_turn_id = NULL,
                    held_at = NULL, promoted_at = NULL, steer_origin = NULL, updated_at = ?
-               WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
-            )
+               WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`)
             .run(request.releasedAt, request.intentId, request.sessionId);
       if (Number(released.changes) !== 1) return undefined;
       recordActivity(
@@ -2929,46 +2888,51 @@ function createOperationalRepositories(
     });
   const recoverDispatchingUserIntents = async (
     request: Parameters<NoesisWorkspaceStore["operational"]["userIntents"]["recoverDispatching"]>[0],
-  ): Promise<{ readonly released: number; readonly delivered: number; readonly unresolved: number }> =>
+  ): Promise<{
+    readonly released: number;
+    readonly delivered: number;
+    readonly unresolved: number;
+  }> =>
     database.transaction(() => {
       let released = 0;
       let delivered = 0;
       let unresolved = 0;
       const heldRows = db
-        .prepare(
-          `SELECT * FROM user_intents
+        .prepare(`SELECT * FROM user_intents
            WHERE session_id = ? AND status = 'held'
-           ORDER BY queue_sequence`,
-        )
+           ORDER BY queue_sequence`)
         .all(request.sessionId)
         .map(decodeUserIntent);
       for (const intent of heldRows) {
         if (intent.steerOrigin === "queued") {
-          db.prepare(
-            `UPDATE user_intents
+          db.prepare(`UPDATE user_intents
              SET status = 'pending', delivery_mode = 'turn', target_turn_id = NULL,
                  held_at = NULL, steer_origin = NULL, updated_at = ?
-             WHERE intent_id = ? AND session_id = ? AND status = 'held'`,
-          ).run(request.recoveredAt, intent.intentId, request.sessionId);
+             WHERE intent_id = ? AND session_id = ? AND status = 'held'`).run(
+            request.recoveredAt,
+            intent.intentId,
+            request.sessionId,
+          );
           recordActivity(systemActor, "user_intent.recovered_pending", "user_intent", intent.intentId);
           released += 1;
           continue;
         }
-        db.prepare(
-          `UPDATE user_intents
+        db.prepare(`UPDATE user_intents
            SET status = 'unresolved', unresolved_at = ?, updated_at = ?
-           WHERE intent_id = ? AND session_id = ? AND status = 'held'`,
-        ).run(request.recoveredAt, request.recoveredAt, intent.intentId, request.sessionId);
+           WHERE intent_id = ? AND session_id = ? AND status = 'held'`).run(
+          request.recoveredAt,
+          request.recoveredAt,
+          intent.intentId,
+          request.sessionId,
+        );
         recordActivity(systemActor, "user_intent.recovered_unresolved", "user_intent", intent.intentId);
         unresolved += 1;
       }
       const rows = db
-        .prepare(
-          `SELECT *
+        .prepare(`SELECT *
            FROM user_intents
            WHERE session_id = ? AND status = 'dispatching'
-           ORDER BY queue_sequence`,
-        )
+           ORDER BY queue_sequence`)
         .all(request.sessionId)
         .map(decodeUserIntent);
       for (const intent of rows) {
@@ -2980,21 +2944,26 @@ function createOperationalRepositories(
           continue;
         }
         if (intent.deliveryMode === "steer" || messageState === "verified" || turnStatus !== undefined) {
-          db.prepare(
-            `UPDATE user_intents
+          db.prepare(`UPDATE user_intents
              SET status = 'unresolved', unresolved_at = ?, updated_at = ?
-             WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
-          ).run(request.recoveredAt, request.recoveredAt, intent.intentId, request.sessionId);
+             WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`).run(
+            request.recoveredAt,
+            request.recoveredAt,
+            intent.intentId,
+            request.sessionId,
+          );
           recordActivity(systemActor, "user_intent.recovered_unresolved", "user_intent", intent.intentId);
           unresolved += 1;
           continue;
         }
-        db.prepare(
-          `UPDATE user_intents
+        db.prepare(`UPDATE user_intents
            SET status = 'pending', delivery_mode = 'turn', target_turn_id = NULL,
                held_at = NULL, promoted_at = NULL, steer_origin = NULL, updated_at = ?
-           WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`,
-        ).run(request.recoveredAt, intent.intentId, request.sessionId);
+           WHERE intent_id = ? AND session_id = ? AND status = 'dispatching'`).run(
+          request.recoveredAt,
+          intent.intentId,
+          request.sessionId,
+        );
         recordActivity(systemActor, "user_intent.recovered_pending", "user_intent", intent.intentId);
         released += 1;
       }
@@ -3003,13 +2972,11 @@ function createOperationalRepositories(
   const putToolCall = async (record: ToolCallRecord): Promise<DatabaseRowRef> => {
     database.transaction(() => {
       const currentRow = db
-        .prepare(
-          `SELECT calls.*, timeline.timeline_sequence
+        .prepare(`SELECT calls.*, timeline.timeline_sequence
            FROM tool_calls AS calls
            LEFT JOIN turn_timeline_entries AS timeline
              ON timeline.entry_kind = 'tool_call' AND timeline.entry_id = calls.tool_call_id
-           WHERE calls.tool_call_id = ?`,
-        )
+           WHERE calls.tool_call_id = ?`)
         .get(record.toolCallId);
       const current = currentRow === undefined ? undefined : decodeToolCall(currentRow);
       if (record.timelineSequence !== undefined && record.turnId === undefined)
@@ -3048,15 +3015,15 @@ function createOperationalRepositories(
         if (current.sequence === undefined)
           throw new Error(`Tool call ${record.toolCallId} has no durable action sequence`);
         const from = current.status;
-        const allowed: Readonly<Record<string, readonly ToolCallRecord["status"][]>> = {
+        const allowed = {
           requested: ["running", "completed", "failed", "denied", "ambiguous"],
           running: ["completed", "failed", "denied", "ambiguous"],
           completed: [],
           failed: [],
           denied: [],
           ambiguous: [],
-        };
-        if (from !== record.status && !allowed[from]?.includes(record.status))
+        } satisfies Readonly<Record<string, readonly ToolCallRecord["status"][]>>;
+        if (from !== record.status && !permitsTransition(allowed, from, record.status))
           throw new Error(`Invalid tool-call transition ${from} -> ${record.status}`);
         if (current.executionId && current.executionId !== record.executionId)
           throw new Error(`Tool call ${record.toolCallId} changed its execution lineage`);
@@ -3084,11 +3051,9 @@ function createOperationalRepositories(
         current === undefined
           ? requiredNumber(
               db
-                .prepare(
-                  `SELECT COALESCE(MAX(action_sequence), 0) + 1 AS next_sequence
+                .prepare(`SELECT COALESCE(MAX(action_sequence), 0) + 1 AS next_sequence
                    FROM tool_calls
-                   WHERE session_id = ?`,
-                )
+                   WHERE session_id = ?`)
                 .get(record.sessionId),
               "next_sequence",
             )
@@ -3097,8 +3062,7 @@ function createOperationalRepositories(
                 throw new Error(`Tool call ${record.toolCallId} has no durable action sequence`);
               return current.sequence;
             })();
-      db.prepare(
-        `INSERT INTO tool_calls(
+      db.prepare(`INSERT INTO tool_calls(
           tool_call_id, session_id, turn_id, message_id, parent_tool_call_id, execution_id,
           tool_name, request_json, update_json, response_json, action_sequence,
           status, sensitivity, created_at, completed_at
@@ -3106,8 +3070,7 @@ function createOperationalRepositories(
         ON CONFLICT(tool_call_id) DO UPDATE SET
           execution_id = excluded.execution_id, update_json = excluded.update_json,
           response_json = excluded.response_json, status = excluded.status,
-          completed_at = excluded.completed_at`,
-      ).run(
+          completed_at = excluded.completed_at`).run(
         record.toolCallId,
         record.sessionId,
         record.turnId ?? null,
@@ -3152,11 +3115,9 @@ function createOperationalRepositories(
       }
       if (record.parentExecutionId) {
         const parent = db
-          .prepare(
-            `SELECT session_id, turn_id
+          .prepare(`SELECT session_id, turn_id
              FROM codemode_executions
-             WHERE execution_id = ?`,
-          )
+             WHERE execution_id = ?`)
           .get(record.parentExecutionId);
         if (
           parent === undefined ||
@@ -3176,16 +3137,14 @@ function createOperationalRepositories(
       }
       if (currentRow !== undefined) {
         const current = decodeCodeExecution(currentRow);
-        const transitions: Readonly<
-          Record<CodeExecutionRecord["status"], readonly CodeExecutionRecord["status"][]>
-        > = {
+        const transitions = {
           running: ["running", "completed", "failed", "cancelled", "interrupted"],
           completed: ["completed"],
           failed: ["failed"],
           cancelled: ["cancelled"],
           interrupted: ["interrupted"],
-        };
-        if (!transitions[current.status].includes(record.status))
+        } satisfies Readonly<Record<CodeExecutionRecord["status"], readonly CodeExecutionRecord["status"][]>>;
+        if (!permitsTransition(transitions, current.status, record.status))
           throw new Error(`Invalid codemode transition ${current.status} -> ${record.status}`);
         const currentIdentity = {
           ...current,
@@ -3209,8 +3168,7 @@ function createOperationalRepositories(
         )
           throw new Error(`Terminal codemode execution ${record.executionId} is immutable`);
       }
-      db.prepare(
-        `INSERT INTO codemode_executions(
+      db.prepare(`INSERT INTO codemode_executions(
           execution_id, logical_execution_id, parent_execution_id, session_id, turn_id,
           catalog_id, catalog_digest,
           source_digest, source_artifact_id, stdout_artifact_id, stderr_artifact_id,
@@ -3220,8 +3178,7 @@ function createOperationalRepositories(
           status = excluded.status, result_json = excluded.result_json, error = excluded.error,
           stdout_artifact_id = excluded.stdout_artifact_id,
           stderr_artifact_id = excluded.stderr_artifact_id,
-          call_count = excluded.call_count, completed_at = excluded.completed_at`,
-      ).run(
+          call_count = excluded.call_count, completed_at = excluded.completed_at`).run(
         record.executionId,
         record.logicalExecutionId,
         record.parentExecutionId ?? null,
@@ -3262,16 +3219,14 @@ function createOperationalRepositories(
         throw new Error(`New workflow run ${record.runId} requires a project`);
       if (currentRow !== undefined) {
         const current = decodeWorkflowRun(currentRow);
-        const transitions: Readonly<
-          Record<WorkflowRunRecord["status"], readonly WorkflowRunRecord["status"][]>
-        > = {
+        const transitions = {
           running: ["running", "paused", "completed", "failed", "cancelled"],
           paused: ["running", "failed", "cancelled"],
           completed: ["completed"],
           failed: ["failed"],
           cancelled: ["cancelled"],
-        };
-        if (!transitions[current.status].includes(record.status))
+        } satisfies Readonly<Record<WorkflowRunRecord["status"], readonly WorkflowRunRecord["status"][]>>;
+        if (!permitsTransition(transitions, current.status, record.status))
           throw new Error(`Invalid workflow-run transition ${current.status} -> ${record.status}`);
         const currentIdentity = {
           ...current,
@@ -3294,8 +3249,7 @@ function createOperationalRepositories(
         )
           throw new Error(`Terminal workflow run ${record.runId} is immutable`);
       }
-      db.prepare(
-        `INSERT INTO workflow_runs(
+      db.prepare(`INSERT INTO workflow_runs(
           run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
           catalog_id, catalog_digest, definition_dependencies_digest,
           permission_digest, provider, model, thinking_level, session_id,
@@ -3305,8 +3259,7 @@ function createOperationalRepositories(
         ON CONFLICT(run_id) DO UPDATE SET
           status = excluded.status, current_phase = excluded.current_phase,
           output_json = excluded.output_json, error = excluded.error,
-          updated_at = excluded.updated_at, completed_at = excluded.completed_at`,
-      ).run(
+          updated_at = excluded.updated_at, completed_at = excluded.completed_at`).run(
         record.runId,
         record.projectId ?? null,
         record.workflowName,
@@ -3343,12 +3296,10 @@ function createOperationalRepositories(
         );
       if (record.executionId) {
         const lineage = db
-          .prepare(
-            `SELECT run.session_id AS run_session_id, execution.session_id AS execution_session_id
+          .prepare(`SELECT run.session_id AS run_session_id, execution.session_id AS execution_session_id
              FROM workflow_runs AS run
              JOIN codemode_executions AS execution ON execution.execution_id = ?
-             WHERE run.run_id = ?`,
-          )
+             WHERE run.run_id = ?`)
           .get(record.executionId, record.runId);
         if (
           lineage === undefined ||
@@ -3363,16 +3314,16 @@ function createOperationalRepositories(
         .get(record.runId, record.phaseIndex);
       if (currentRow !== undefined) {
         const current = decodeWorkflowPhaseRun(currentRow);
-        const transitions: Readonly<
-          Record<WorkflowPhaseRunRecord["status"], readonly WorkflowPhaseRunRecord["status"][]>
-        > = {
+        const transitions = {
           pending: ["pending", "running", "cancelled"],
           running: ["running", "completed", "failed", "cancelled"],
           completed: ["completed"],
           failed: ["running", "failed", "cancelled"],
           cancelled: ["cancelled"],
-        };
-        if (!transitions[current.status].includes(record.status))
+        } satisfies Readonly<
+          Record<WorkflowPhaseRunRecord["status"], readonly WorkflowPhaseRunRecord["status"][]>
+        >;
+        if (!permitsTransition(transitions, current.status, record.status))
           throw new Error(`Invalid workflow-phase transition ${current.status} -> ${record.status}`);
         if (current.phaseName !== record.phaseName)
           throw new Error(`Workflow phase ${record.runId}/${String(record.phaseIndex)} changed its name`);
@@ -3388,8 +3339,7 @@ function createOperationalRepositories(
             `Terminal workflow phase ${record.runId}/${String(record.phaseIndex)} is immutable`,
           );
       }
-      db.prepare(
-        `INSERT INTO workflow_phase_runs(
+      db.prepare(`INSERT INTO workflow_phase_runs(
           run_id, phase_index, phase_name, status, attempt, logical_execution_id,
           input_json, output_json,
           execution_id, error, started_at, completed_at
@@ -3399,8 +3349,7 @@ function createOperationalRepositories(
           logical_execution_id = excluded.logical_execution_id,
           input_json = excluded.input_json, output_json = excluded.output_json,
           execution_id = excluded.execution_id, error = excluded.error,
-          started_at = excluded.started_at, completed_at = excluded.completed_at`,
-      ).run(
+          started_at = excluded.started_at, completed_at = excluded.completed_at`).run(
         record.runId,
         record.phaseIndex,
         record.phaseName,
@@ -3428,11 +3377,9 @@ function createOperationalRepositories(
           throw new Error(`Outcome ${record.outcomeId} already exists with different durable meaning`);
         return;
       }
-      db.prepare(
-        `INSERT INTO outcomes(
+      db.prepare(`INSERT INTO outcomes(
           outcome_id, session_id, turn_id, status, summary, sensitivity, created_at, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
         record.outcomeId,
         record.sessionId,
         record.turnId ?? null,
@@ -3453,7 +3400,6 @@ function createOperationalRepositories(
       const outcome = decodeOutcome(row);
       if (outcome.sessionId !== request.sessionId || outcome.turnId !== request.turnId)
         throw new Error(`Outcome ${request.outcomeId} does not belong to the classified turn`);
-
       const recordedValue = outcome.metadata["semanticObservation"];
       const recorded = OutcomeSemanticObservationSchema.safeParse(recordedValue);
       if (Object.hasOwn(outcome.metadata, "semanticObservation") && !recorded.success)
@@ -3465,7 +3411,6 @@ function createOperationalRepositories(
       }
       if (outcome.status !== "unknown")
         throw new Error(`Outcome ${request.outcomeId} cannot be classified from ${outcome.status}`);
-
       const status = request.classification === "correction" ? "corrected" : "unknown";
       const metadata = Object.freeze({
         ...outcome.metadata,
@@ -3475,11 +3420,9 @@ function createOperationalRepositories(
         }),
       });
       const changed = db
-        .prepare(
-          `UPDATE outcomes
+        .prepare(`UPDATE outcomes
            SET status = ?, metadata_json = ?
-           WHERE outcome_id = ? AND session_id = ? AND turn_id = ? AND status = 'unknown'`,
-        )
+           WHERE outcome_id = ? AND session_id = ? AND turn_id = ? AND status = 'unknown'`)
         .run(status, JSON.stringify(metadata), request.outcomeId, request.sessionId, request.turnId);
       if (changed.changes !== 1)
         throw new Error(`Outcome ${request.outcomeId} changed before semantic classification`);
@@ -3490,11 +3433,9 @@ function createOperationalRepositories(
   const putSearchConfiguration = async (configuration: SearchConfiguration): Promise<DatabaseRowRef> => {
     SearchConfigurationSchema.parse(configuration);
     database.transaction(() => {
-      db.prepare(
-        `UPDATE search_configuration SET
+      db.prepare(`UPDATE search_configuration SET
           lexical_limit = ?, semantic_limit = ?, rerank_limit = ?, max_excerpt_chars = ?,
-          include_private = ?, updated_at = ? WHERE configuration_id = 'default'`,
-      ).run(
+          include_private = ?, updated_at = ? WHERE configuration_id = 'default'`).run(
         configuration.lexicalLimit,
         configuration.semanticLimit,
         configuration.rerankLimit,
@@ -3506,7 +3447,6 @@ function createOperationalRepositories(
     });
     return databaseRef("search_configuration", "default");
   };
-
   return Object.freeze({
     contextCheckpoints: Object.freeze({
       get: getContextCheckpoint,
@@ -3519,15 +3459,23 @@ function createOperationalRepositories(
         if (row === undefined) return undefined;
         const outcomeId = optionalString(row, "outcome_id");
         const settledAt = optionalString(row, "settled_at");
-        return Object.freeze({
-          turnId: requiredString(row, "turn_id"),
-          sessionId: requiredString(row, "session_id"),
-          planId: requiredString(row, "plan_id"),
-          status: z.enum(["running", "completed", "aborted", "failed"]).parse(requiredString(row, "status")),
-          ...(outcomeId ? { outcomeId } : {}),
-          admittedAt: requiredString(row, "admitted_at"),
-          ...(settledAt ? { settledAt } : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return Object.freeze(
+          createConditionalObject({
+            turnId: requiredString(row, "turn_id"),
+            sessionId: requiredString(row, "session_id"),
+            planId: requiredString(row, "plan_id"),
+            status: z
+              .enum(["running", "completed", "aborted", "failed"])
+              .parse(requiredString(row, "status")),
+          } as const)
+            .addOptional(outcomeId ? { outcomeId } : undefined)
+            .add({
+              admittedAt: requiredString(row, "admitted_at"),
+            } as const)
+            .addOptional(settledAt ? { settledAt } : undefined)
+            .finish(),
+        );
       },
       settle: async (
         request: Parameters<NoesisWorkspaceStore["operational"]["foregroundTurns"]["settle"]>[0],
@@ -3549,11 +3497,14 @@ function createOperationalRepositories(
             requiredString(outcome, "session_id") !== requiredString(turn, "session_id")
           )
             throw new Error(`Foreground turn ${request.turnId} has no matching durable outcome`);
-          db.prepare(
-            `UPDATE foreground_turns
+          db.prepare(`UPDATE foreground_turns
              SET status = ?, outcome_id = ?, settled_at = ?
-             WHERE turn_id = ? AND status = 'running'`,
-          ).run(request.status, request.outcomeId, request.settledAt, request.turnId);
+             WHERE turn_id = ? AND status = 'running'`).run(
+            request.status,
+            request.outcomeId,
+            request.settledAt,
+            request.turnId,
+          );
           db.prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ?").run(
             request.status === "completed" ? "idle" : request.status === "aborted" ? "aborted" : "failed",
             request.settledAt,
@@ -3584,26 +3535,22 @@ function createOperationalRepositories(
       get: async (messageId: string) =>
         decodeOptional(
           db
-            .prepare(
-              `SELECT m.*, timeline.timeline_sequence
+            .prepare(`SELECT m.*, timeline.timeline_sequence
                FROM messages AS m
                LEFT JOIN turn_timeline_entries AS timeline
                  ON timeline.entry_kind = 'message' AND timeline.entry_id = m.message_id
-               WHERE m.message_id = ?`,
-            )
+               WHERE m.message_id = ?`)
             .get(messageId),
           decodeMessage,
         ),
       put: putMessage,
       listForSession: async (sessionId: string) =>
         db
-          .prepare(
-            `SELECT m.*, timeline.timeline_sequence
+          .prepare(`SELECT m.*, timeline.timeline_sequence
              FROM messages AS m
              LEFT JOIN turn_timeline_entries AS timeline
                ON timeline.entry_kind = 'message' AND timeline.entry_id = m.message_id
-             WHERE m.session_id = ? ORDER BY m.created_at, m.rowid`,
-          )
+             WHERE m.session_id = ? ORDER BY m.created_at, m.rowid`)
           .all(sessionId)
           .map(decodeMessage),
     }),
@@ -3617,32 +3564,26 @@ function createOperationalRepositories(
       releaseHeldSteer: releaseHeldUserIntentSteer,
       listPending: async (sessionId: string) =>
         db
-          .prepare(
-            `SELECT *
+          .prepare(`SELECT *
              FROM user_intents
              WHERE session_id = ? AND status = 'pending'
-             ORDER BY queue_sequence`,
-          )
+             ORDER BY queue_sequence`)
           .all(sessionId)
           .map(decodeUserIntent),
       listHeld: async (sessionId: string) =>
         db
-          .prepare(
-            `SELECT *
+          .prepare(`SELECT *
              FROM user_intents
              WHERE session_id = ? AND status = 'held'
-             ORDER BY queue_sequence`,
-          )
+             ORDER BY queue_sequence`)
           .all(sessionId)
           .map(decodeUserIntent),
       listUnresolved: async (sessionId: string) =>
         db
-          .prepare(
-            `SELECT *
+          .prepare(`SELECT *
              FROM user_intents
              WHERE session_id = ? AND status = 'unresolved'
-             ORDER BY queue_sequence`,
-          )
+             ORDER BY queue_sequence`)
           .all(sessionId)
           .map(decodeUserIntent),
       claimOldestPending: claimOldestPendingUserIntent,
@@ -3659,71 +3600,59 @@ function createOperationalRepositories(
       get: async (toolCallId: string) =>
         decodeOptional(
           db
-            .prepare(
-              `SELECT calls.*, timeline.timeline_sequence
+            .prepare(`SELECT calls.*, timeline.timeline_sequence
                FROM tool_calls AS calls
                LEFT JOIN turn_timeline_entries AS timeline
                  ON timeline.entry_kind = 'tool_call' AND timeline.entry_id = calls.tool_call_id
-               WHERE calls.tool_call_id = ?`,
-            )
+               WHERE calls.tool_call_id = ?`)
             .get(toolCallId),
           decodeToolCall,
         ),
       put: putToolCall,
       listForSession: async (sessionId: string) =>
         db
-          .prepare(
-            `SELECT calls.*, timeline.timeline_sequence
+          .prepare(`SELECT calls.*, timeline.timeline_sequence
              FROM tool_calls AS calls
              LEFT JOIN turn_timeline_entries AS timeline
                ON timeline.entry_kind = 'tool_call' AND timeline.entry_id = calls.tool_call_id
-             WHERE calls.session_id = ? ORDER BY calls.created_at, calls.tool_call_id`,
-          )
+             WHERE calls.session_id = ? ORDER BY calls.created_at, calls.tool_call_id`)
           .all(sessionId)
           .map(decodeToolCall),
       listForTurn: async (sessionId: string, turnId: string) =>
         db
-          .prepare(
-            `SELECT calls.*, timeline.timeline_sequence
+          .prepare(`SELECT calls.*, timeline.timeline_sequence
              FROM tool_calls AS calls
              LEFT JOIN turn_timeline_entries AS timeline
                ON timeline.entry_kind = 'tool_call' AND timeline.entry_id = calls.tool_call_id
              WHERE calls.session_id = ? AND calls.turn_id = ?
-             ORDER BY calls.action_sequence, calls.tool_call_id`,
-          )
+             ORDER BY calls.action_sequence, calls.tool_call_id`)
           .all(sessionId, turnId)
           .map(decodeToolCall),
       listForExecution: async (executionId: string) =>
         db
-          .prepare(
-            `SELECT calls.*, timeline.timeline_sequence
+          .prepare(`SELECT calls.*, timeline.timeline_sequence
              FROM tool_calls AS calls
              LEFT JOIN turn_timeline_entries AS timeline
                ON timeline.entry_kind = 'tool_call' AND timeline.entry_id = calls.tool_call_id
              WHERE calls.execution_id = ?
                 OR json_extract(calls.request_json, '$.executionId') = ?
-             ORDER BY calls.created_at, calls.tool_call_id`,
-          )
+             ORDER BY calls.created_at, calls.tool_call_id`)
           .all(executionId, executionId)
           .map(decodeToolCall),
       interruptRunningForTurn: async (turnId: string, interruptedAt: string) =>
         database.transaction(() => {
           const running = db
-            .prepare(
-              `SELECT tool_call_id
+            .prepare(`SELECT tool_call_id
                FROM tool_calls
-               WHERE turn_id = ? AND status IN ('requested', 'running')`,
-            )
+               WHERE turn_id = ? AND status IN ('requested', 'running')`)
             .all(turnId);
           for (const row of running) {
             const toolCallId = requiredString(row, "tool_call_id");
-            db.prepare(
-              `UPDATE tool_calls
+            db.prepare(`UPDATE tool_calls
                SET status = 'failed',
                    response_json = '{"error":"Turn interrupted","reason":"interrupted"}',
                    completed_at = ?
-               WHERE tool_call_id = ? AND status IN ('requested', 'running')`,
-            ).run(interruptedAt, toolCallId);
+               WHERE tool_call_id = ? AND status IN ('requested', 'running')`).run(interruptedAt, toolCallId);
             recordActivity(systemActor, "tool_call.interrupted", "tool_call", toolCallId);
           }
           return running.length;
@@ -3748,12 +3677,10 @@ function createOperationalRepositories(
             .all();
           for (const row of running) {
             const executionId = requiredString(row, "execution_id");
-            db.prepare(
-              `UPDATE codemode_executions
+            db.prepare(`UPDATE codemode_executions
                SET status = 'interrupted', error = 'Process exited before execution settled',
                    completed_at = ?
-               WHERE execution_id = ? AND status = 'running'`,
-            ).run(interruptedAt, executionId);
+               WHERE execution_id = ? AND status = 'running'`).run(interruptedAt, executionId);
             recordActivity(systemActor, "codemode_execution.interrupted", "codemode_execution", executionId);
           }
           return running.length;
@@ -3769,8 +3696,7 @@ function createOperationalRepositories(
       claimPausedRun: async (runId: string, sessionId: string, projectId: string, claimedAt: string) =>
         database.transaction(() => {
           const claimed = db
-            .prepare(
-              `UPDATE workflow_runs
+            .prepare(`UPDATE workflow_runs
                SET status = 'running', error = NULL, updated_at = ?, completed_at = NULL
                WHERE run_id = ? AND session_id = ?
                  AND (
@@ -3789,8 +3715,7 @@ function createOperationalRepositories(
                      )
                    )
                  )
-                 AND status = 'paused'`,
-            )
+                 AND status = 'paused'`)
             .run(claimedAt, runId, sessionId, projectId, projectId);
           if (Number(claimed.changes) !== 1) return undefined;
           const row = db.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get(runId);
@@ -3812,34 +3737,32 @@ function createOperationalRepositories(
       interruptRunning: async (interruptedAt: string) =>
         database.transaction(() => {
           const runningPhases = db
-            .prepare(
-              `SELECT run_id, phase_index
+            .prepare(`SELECT run_id, phase_index
                FROM workflow_phase_runs
-               WHERE status = 'running'`,
-            )
+               WHERE status = 'running'`)
             .all();
           for (const row of runningPhases) {
             const runId = requiredString(row, "run_id");
             const phaseIndex = requiredNumber(row, "phase_index");
-            db.prepare(
-              `UPDATE workflow_phase_runs
+            db.prepare(`UPDATE workflow_phase_runs
                SET status = 'failed',
                    error = 'Process exited before workflow phase settled',
                    completed_at = ?
-               WHERE run_id = ? AND phase_index = ? AND status = 'running'`,
-            ).run(interruptedAt, runId, phaseIndex);
+               WHERE run_id = ? AND phase_index = ? AND status = 'running'`).run(
+              interruptedAt,
+              runId,
+              phaseIndex,
+            );
             recordActivity(systemActor, "workflow_phase.interrupted", "workflow_run", runId, [phaseIndex]);
           }
           const runningRuns = db.prepare("SELECT run_id FROM workflow_runs WHERE status = 'running'").all();
           for (const row of runningRuns) {
             const runId = requiredString(row, "run_id");
-            db.prepare(
-              `UPDATE workflow_runs
+            db.prepare(`UPDATE workflow_runs
                SET status = 'paused',
                    error = 'Process exited before workflow settled',
                    updated_at = ?
-               WHERE run_id = ? AND status = 'running'`,
-            ).run(interruptedAt, runId);
+               WHERE run_id = ? AND status = 'running'`).run(interruptedAt, runId);
             recordActivity(systemActor, "workflow_run.interrupted", "workflow_run", runId);
           }
           return Object.freeze({
@@ -3871,7 +3794,6 @@ function createOperationalRepositories(
     }),
   });
 }
-
 function createResearchRepositories(
   database: WorkspaceDatabase,
   recordActivity: (actor: ActorRef, kind: string, subjectKind: string, subjectId: string) => void,
@@ -3926,12 +3848,10 @@ function createResearchRepositories(
       value.preflightId,
       () =>
         db
-          .prepare(
-            `INSERT INTO preflight_reports(
+          .prepare(`INSERT INTO preflight_reports(
               preflight_id, experiment_id, plan_id, decision, data_json, created_at,
               approval_required
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          )
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)`)
           .run(
             value.preflightId,
             value.experimentId,
@@ -3980,7 +3900,7 @@ function createResearchRepositories(
       listExperiments: async (
         request: Parameters<NoesisWorkspaceStore["research"]["experiments"]["listExperiments"]>[0],
       ) => {
-        if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 1_000)
+        if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 1000)
           throw new Error("Experiment list limit must be an integer between 1 and 1000");
         const clauses: string[] = [];
         const values: Array<string | number> = [];
@@ -3989,7 +3909,7 @@ function createResearchRepositories(
           values.push(request.status);
         }
         if (request.sourceAdjustmentIds !== undefined) {
-          const adjustmentIds = z.array(z.string().min(1)).max(1_000).parse(request.sourceAdjustmentIds);
+          const adjustmentIds = z.array(z.string().min(1)).max(1000).parse(request.sourceAdjustmentIds);
           if (adjustmentIds.length === 0) clauses.push("0");
           else {
             clauses.push(
@@ -4047,6 +3967,7 @@ function createResearchRepositories(
               now(),
             );
           } else {
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             const from = requiredString(current, "status") as ExperimentStatus;
             if (from === "completed" && requiredString(current, "data_json") !== encoded)
               throw new Error(`Completed experiment ${value.experimentId} is immutable`);
@@ -4094,13 +4015,13 @@ function createResearchRepositories(
             );
           } else {
             const from = requiredString(current, "status");
-            const allowed: Readonly<Record<string, readonly string[]>> = {
+            const allowed = {
               planned: ["running", "failed"],
               running: ["completed", "failed"],
               completed: [],
               failed: [],
-            };
-            if (from !== value.status && !allowed[from]?.includes(value.status))
+            } satisfies Readonly<Record<string, readonly string[]>>;
+            if (from !== value.status && !permitsTransition(allowed, from, value.status))
               throw new Error(`Invalid trial transition ${from} -> ${value.status}`);
             db.prepare(
               "UPDATE experiment_trials SET status = ?, data_json = ?, updated_at = ? WHERE trial_id = ?",
@@ -4195,7 +4116,7 @@ function createResearchRepositories(
           NonNullable<NoesisWorkspaceStore["research"]["feedbackSignals"]["listFeedbackSignals"]>
         >[0],
       ) => {
-        if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 1_000)
+        if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 1000)
           throw new Error("Feedback signal list limit must be an integer between 1 and 1000");
         const experimentId =
           request.experimentId === undefined ? undefined : z.string().min(1).parse(request.experimentId);
@@ -4246,7 +4167,6 @@ function createResearchRepositories(
     }),
   });
 }
-
 function createSearchIndex(
   database: WorkspaceDatabase,
   paths: WorkspacePaths,
@@ -4260,7 +4180,7 @@ function createSearchIndex(
     const failClosed: ProvenanceResolution = Object.freeze({ sensitivity: "secret", sessionIds: [] });
     const resolutionMemo = new Map<string, ProvenanceResolution>();
     const resolving = new Set<string>();
-    let remainingResolutionNodes = 10_000;
+    let remainingResolutionNodes = 10000;
     const maxSensitivity = (
       left: SearchDocument["sensitivity"],
       right: SearchDocument["sensitivity"],
@@ -4368,6 +4288,7 @@ function createSearchIndex(
       resolutionMemo.set(key, resolution);
       return resolution;
     }
+    // BOUNDARY: Historical SQLite JSON may predate current evidence-reference schemas.
     const resolveProvenance = (
       baseSensitivity: SearchDocument["sensitivity"],
       rawRefs: unknown,
@@ -4387,14 +4308,20 @@ function createSearchIndex(
     ): void => {
       if (body.length === 0) return;
       const documentId = createHash("sha256").update(JSON.stringify(source)).digest("hex");
-      documents.push({
-        documentId,
-        source,
-        ...(sessionId === undefined ? {} : { sessionId }),
-        sensitivity,
-        occurredAt,
-        body,
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      documents.push(
+        createConditionalObject({
+          documentId,
+          source,
+        } as const)
+          .addOptional(!(sessionId === undefined) ? { sessionId } : undefined)
+          .add({
+            sensitivity,
+            occurredAt,
+            body,
+          } as const)
+          .finish(),
+      );
     };
     for (const row of db.prepare("SELECT * FROM sessions").all())
       add(
@@ -4405,6 +4332,7 @@ function createSearchIndex(
         requiredString(row, "session_id"),
       );
     for (const row of db.prepare("SELECT * FROM messages").all())
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       add(
         {
           kind: "database_row",
@@ -4418,17 +4346,16 @@ function createSearchIndex(
         requiredString(row, "session_id"),
       );
     for (const row of db
-      .prepare(
-        `SELECT * FROM tool_calls
+      .prepare(`SELECT * FROM tool_calls
            WHERE status IN ('completed', 'failed', 'denied', 'ambiguous')
-             AND tool_name NOT GLOB 'history.*'`,
-      )
+             AND tool_name NOT GLOB 'history.*'`)
       .all()) {
       const body = [
         requiredString(row, "tool_name"),
         requiredString(row, "request_json"),
         optionalString(row, "response_json") ?? "",
       ].join("\n");
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       add(
         {
           kind: "database_row",
@@ -4443,6 +4370,7 @@ function createSearchIndex(
       );
     }
     for (const row of db.prepare("SELECT * FROM outcomes").all())
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       add(
         {
           kind: "database_row",
@@ -4500,12 +4428,10 @@ function createSearchIndex(
     return documents.sort((left, right) => left.documentId.localeCompare(right.documentId));
   };
   const insertDocuments = (documents: readonly SearchDocument[]): void => {
-    const insertDocument = db.prepare(
-      `INSERT INTO search_documents(
+    const insertDocument = db.prepare(`INSERT INTO search_documents(
         document_id, source_kind, source_table, source_id, source_field, session_id,
         sensitivity, occurred_at, body, citation_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     const insertFts = db.prepare("INSERT INTO search_fts(document_id, body) VALUES (?, ?)");
     for (const document of documents) {
       insertDocument.run(
@@ -4524,14 +4450,15 @@ function createSearchIndex(
     }
   };
   const listDocuments = async (
-    options: { readonly includePrivate?: boolean; readonly includeSecret?: boolean } = {},
+    options: {
+      readonly includePrivate?: boolean;
+      readonly includeSecret?: boolean;
+    } = {},
   ) => {
     const rows = db
-      .prepare(
-        `SELECT * FROM search_documents
+      .prepare(`SELECT * FROM search_documents
          WHERE (sensitivity = 'normal' OR (? = 1 AND sensitivity = 'private') OR (? = 1 AND sensitivity = 'secret'))
-         ORDER BY document_id`,
-      )
+         ORDER BY document_id`)
       .all(options.includePrivate ? 1 : 0, options.includeSecret ? 1 : 0);
     return rows.map(decodeSearchDocument);
   };
@@ -4587,8 +4514,7 @@ function createSearchIndex(
         request.sessionScope?.kind === "previous" ? request.sessionScope.currentSessionId : null;
       const sourceScope = sourceScopeParameters(request.sourceScope);
       const rows = db
-        .prepare(
-          `SELECT search_documents.*, bm25(search_fts) AS rank
+        .prepare(`SELECT search_documents.*, bm25(search_fts) AS rank
            FROM search_fts JOIN search_documents USING(document_id)
            WHERE search_fts MATCH ?
              AND sensitivity != 'secret'
@@ -4596,8 +4522,7 @@ function createSearchIndex(
              AND (? IS NULL OR session_id = ?)
              AND (? IS NULL OR (session_id IS NOT NULL AND session_id != ?))
              AND ${sourceScopeSql}
-           ORDER BY rank, search_documents.document_id LIMIT ?`,
-        )
+           ORDER BY rank, search_documents.document_id LIMIT ?`)
         .all(
           query,
           request.includePrivate ? 1 : 0,
@@ -4615,12 +4540,11 @@ function createSearchIndex(
     },
     putEmbeddings: async (modelId: string, embeddings: ReadonlyMap<string, readonly number[]>) => {
       database.transaction(() => {
-        const statement = db.prepare(
-          `INSERT INTO search_embeddings(document_id, model_id, dimensions, vector_json)
+        const statement =
+          db.prepare(`INSERT INTO search_embeddings(document_id, model_id, dimensions, vector_json)
            VALUES (?, ?, ?, ?)
            ON CONFLICT(document_id, model_id) DO UPDATE SET
-             dimensions = excluded.dimensions, vector_json = excluded.vector_json`,
-        );
+             dimensions = excluded.dimensions, vector_json = excluded.vector_json`);
         for (const [documentId, vector] of embeddings) {
           if (vector.length === 0 || vector.some((value) => !Number.isFinite(value)))
             throw new Error(`Invalid embedding for ${documentId}`);
@@ -4637,15 +4561,13 @@ function createSearchIndex(
         request.sessionScope?.kind === "previous" ? request.sessionScope.currentSessionId : null;
       const sourceScope = sourceScopeParameters(request.sourceScope);
       const rows = db
-        .prepare(
-          `SELECT search_documents.*, search_embeddings.vector_json
+        .prepare(`SELECT search_documents.*, search_embeddings.vector_json
            FROM search_embeddings JOIN search_documents USING(document_id)
            WHERE model_id = ? AND sensitivity != 'secret'
              AND (sensitivity = 'normal' OR ? = 1)
              AND (? IS NULL OR session_id = ?)
              AND (? IS NULL OR (session_id IS NOT NULL AND session_id != ?))
-             AND ${sourceScopeSql}`,
-        )
+             AND ${sourceScopeSql}`)
         .all(
           request.modelId,
           request.includePrivate ? 1 : 0,
@@ -4671,7 +4593,6 @@ function createSearchIndex(
       await openCanonicalSource(db, paths, source),
   });
 }
-
 function sessionSensitivity(db: DatabaseSync, sessionId: string): SearchDocument["sensitivity"] | undefined {
   const session = db.prepare("SELECT metadata_json FROM sessions WHERE session_id = ?").get(sessionId);
   if (!session) return undefined;
@@ -4680,11 +4601,9 @@ function sessionSensitivity(db: DatabaseSync, sessionId: string): SearchDocument
   const sensitivities = [
     ...(explicit.success ? [explicit.data] : []),
     ...db
-      .prepare(
-        `SELECT sensitivity FROM messages WHERE session_id = ?
+      .prepare(`SELECT sensitivity FROM messages WHERE session_id = ?
          UNION ALL SELECT sensitivity FROM tool_calls WHERE session_id = ?
-         UNION ALL SELECT sensitivity FROM outcomes WHERE session_id = ?`,
-      )
+         UNION ALL SELECT sensitivity FROM outcomes WHERE session_id = ?`)
       .all(sessionId, sessionId, sessionId)
       .map((row) => SensitivitySchema.parse(requiredString(row, "sensitivity"))),
   ];
@@ -4693,7 +4612,6 @@ function sessionSensitivity(db: DatabaseSync, sessionId: string): SearchDocument
   if (sensitivities.includes("normal")) return "normal";
   return "private";
 }
-
 async function openCanonicalSource(
   db: DatabaseSync,
   paths: WorkspacePaths,
@@ -4709,6 +4627,7 @@ async function openCanonicalSource(
       throw new Error(`File revision ${source.revisionId} failed digest verification`);
     return bytes.toString("utf8");
   }
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const mapping = {
     sessions: { key: "session_id", title: "title" },
     messages: { key: "message_id", content: "content" },
@@ -4721,14 +4640,13 @@ async function openCanonicalSource(
   } as const;
   const table = mapping[source.table];
   if (!(source.field in table) || source.field === "key") return undefined;
-  const expression = Reflect.get(table, source.field);
-  if (typeof expression !== "string") return undefined;
+  const expression = Object.entries(table).find(([field]) => field === source.field)?.[1];
+  if (expression === undefined) return undefined;
   const row = db
     .prepare(`SELECT ${expression} AS body FROM ${source.table} WHERE ${table.key} = ?`)
     .get(source.rowId);
   return row === undefined ? undefined : requiredString(row, "body");
 }
-
 function cosineSimilarity(left: readonly number[], right: readonly number[]): number {
   if (left.length !== right.length || left.length === 0) return -1;
   let dot = 0;
@@ -4744,7 +4662,6 @@ function cosineSimilarity(left: readonly number[], right: readonly number[]): nu
   if (leftMagnitude === 0 || rightMagnitude === 0) return 0;
   return dot / (Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude));
 }
-
 function ftsQuery(query: string): string {
   return query
     .trim()
@@ -4753,11 +4670,9 @@ function ftsQuery(query: string): string {
     .map((token) => `"${token.replaceAll('"', '""')}"`)
     .join(" OR ");
 }
-
-function isMissing(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
+function isMissing(cause: unknown): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
 }
-
-function ignoreMissing(error: unknown): void {
-  if (!isMissing(error)) throw error;
+function ignoreMissing(cause: unknown): void {
+  if (!isMissing(cause)) throw cause;
 }

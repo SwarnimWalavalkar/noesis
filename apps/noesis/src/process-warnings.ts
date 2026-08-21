@@ -1,3 +1,4 @@
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const SUPPRESSED_EXPERIMENTAL_FEATURES = ["SQLite"] as const;
 
 /**

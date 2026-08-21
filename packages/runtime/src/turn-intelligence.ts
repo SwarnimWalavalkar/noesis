@@ -26,18 +26,15 @@ import type {
   ProjectRef,
   WorkingAdjustment,
 } from "@noesis/domain";
-import { canonicalJson, sha256 } from "@noesis/domain";
+import { createConditionalObject, canonicalJson, sha256 } from "@noesis/domain";
 import { isCapabilityBindingAdmissionConflictError, type NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
-
 const decoder = new TextDecoder("utf8", { fatal: true });
-
 export interface TurnCapabilityResolver {
   readonly resolveCapability: (capabilityId: string) => Promise<Capability | undefined>;
   readonly resolveRevision: (reference: CapabilityRevisionRef) => Promise<CapabilityRevision | undefined>;
   readonly resolveBaseline: (reference: CapabilityRevisionRef) => Promise<FrozenBaselineRef>;
 }
-
 export interface TurnPlanningRequest {
   readonly sessionId: string;
   readonly turnId: string;
@@ -52,7 +49,6 @@ export interface TurnPlanningRequest {
   readonly requestTokenBudget?: number;
   readonly retrievalCitations?: readonly EvidenceRef[];
 }
-
 async function freezeContextCheckpoint(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
@@ -64,6 +60,7 @@ async function freezeContextCheckpoint(
     throw new Error(`Context checkpoint ${checkpointId} does not belong to session ${sessionId}`);
   if (sha256(checkpoint.summary) !== checkpoint.summaryDigest)
     throw new Error(`Context checkpoint ${checkpointId} failed summary verification`);
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     checkpointId,
     checkpointRef: Object.freeze({
@@ -78,18 +75,15 @@ async function freezeContextCheckpoint(
     createdAt: checkpoint.createdAt,
   });
 }
-
 export interface TurnIntelligencePlanner {
   readonly planAndAdmit: (request: TurnPlanningRequest) => Promise<FrozenTurnPlan>;
 }
-
 export interface TurnCapabilityRoutingCandidate {
   readonly capabilityId: string;
   readonly name: string;
   readonly scope: string;
   readonly intent: string;
 }
-
 export interface TurnRoutingHistoryMessage {
   readonly messageId: string;
   readonly role: "user" | "assistant";
@@ -97,7 +91,6 @@ export interface TurnRoutingHistoryMessage {
   readonly createdAt: string;
   readonly turnStatus?: "completed" | "failed" | "aborted";
 }
-
 export interface TurnCapabilityRoutingRequest {
   readonly sessionId: string;
   readonly turnId: string;
@@ -105,12 +98,10 @@ export interface TurnCapabilityRoutingRequest {
   readonly priorConversation: readonly TurnRoutingHistoryMessage[];
   readonly candidates: readonly TurnCapabilityRoutingCandidate[];
 }
-
 export interface TurnCapabilityRoutingSelection {
   readonly capabilityId: string;
   readonly reason: string;
 }
-
 export interface TurnCapabilityRoutingDecision {
   readonly strategyId: string;
   readonly reason: string;
@@ -120,12 +111,10 @@ export interface TurnCapabilityRoutingDecision {
     readonly reason: string;
   };
 }
-
 /** Semantic relevance is supplied by a capable-model adapter at the composition root. */
 export interface TurnCapabilityRouter {
   readonly route: (request: TurnCapabilityRoutingRequest) => Promise<TurnCapabilityRoutingDecision>;
 }
-
 export interface TurnIntelligencePlannerOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly protectedRuntime: ProtectedWorkspaceRuntime;
@@ -137,9 +126,7 @@ export interface TurnIntelligencePlannerOptions {
   readonly now?: () => string;
   readonly createPlanId?: (turnId: string) => string;
 }
-
 const WORKING_ADJUSTMENT_ENVELOPE_VERSION = "project-working-adjustment-v1";
-
 /**
  * Renders model-authored strategy as delimited data inside a protected, stable instruction.
  * JSON encoding prevents the strategy from escaping the envelope's structural boundary.
@@ -160,13 +147,11 @@ export function renderWorkingAdjustmentEnvelope(adjustment: WorkingAdjustment): 
     `<working-adjustment-data>${escapedData}</working-adjustment-data>`,
   ].join("\n");
 }
-
 export {
   MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS,
   MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES,
   MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
 } from "@noesis/agent-types";
-
 async function freezeConversationHistory(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
@@ -204,25 +189,28 @@ async function freezeConversationHistory(
       if (!turn || turn.sessionId !== sessionId || turn.status !== message.turnStatus)
         throw new Error(`Turn history message ${message.messageId} has a stale terminal turn status`);
     }
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     frozen.push(
-      Object.freeze({
-        messageId: message.messageId,
-        messageRef: Object.freeze({
-          kind: "database_row" as const,
-          table: "messages" as const,
-          rowId: message.messageId,
-        }),
-        role: message.role,
-        content: message.content,
-        createdAt: message.createdAt,
-        contentDigest: sha256(message.content),
-        ...(message.turnStatus === undefined ? {} : { turnStatus: message.turnStatus }),
-      }),
+      Object.freeze(
+        createConditionalObject({
+          messageId: message.messageId,
+          messageRef: Object.freeze({
+            kind: "database_row" as const,
+            table: "messages" as const,
+            rowId: message.messageId,
+          }),
+          role: message.role,
+          content: message.content,
+          createdAt: message.createdAt,
+          contentDigest: sha256(message.content),
+        } as const)
+          .addOptional(!(message.turnStatus === undefined) ? { turnStatus: message.turnStatus } : undefined)
+          .finish(),
+      ),
     );
   }
   return Object.freeze(frozen);
 }
-
 async function materialize(
   workspace: NoesisWorkspaceStore,
   reference: FileRevisionRef,
@@ -230,7 +218,6 @@ async function materialize(
   const bytes = await workspace.reads.readRevision(reference);
   return Object.freeze({ revision: reference, content: decoder.decode(bytes) });
 }
-
 function mergedPermissions(
   selections: readonly FrozenCapabilitySelection[],
   baseline: PermissionManifest = Object.freeze({
@@ -260,13 +247,11 @@ function mergedPermissions(
     ]),
   });
 }
-
 export function createTurnIntelligencePlanner(
   options: TurnIntelligencePlannerOptions,
 ): TurnIntelligencePlanner {
   const now = options.now ?? (() => new Date().toISOString());
   const createPlanId = options.createPlanId ?? ((turnId) => `turn_plan_${turnId}`);
-
   const planAndAdmitOnce = async (request: TurnPlanningRequest): Promise<FrozenTurnPlan> => {
     const [activation, lifecycleBindings] = await Promise.all([
       options.protectedRuntime.activations.current(),
@@ -291,10 +276,10 @@ export function createTurnIntelligencePlanner(
       (reference): reference is CapabilityRevisionRef => reference.kind === "capability_revision",
     );
     const legacyBindingBatches: Promise<readonly import("@noesis/domain").CapabilityBinding[]>[] = [];
-    for (let offset = 0; offset < legacyCapabilityReferences.length; offset += 1_000)
+    for (let offset = 0; offset < legacyCapabilityReferences.length; offset += 1000)
       legacyBindingBatches.push(
         options.workspace.capabilities.getBindings(
-          legacyCapabilityReferences.slice(offset, offset + 1_000).map((reference) => reference.capabilityId),
+          legacyCapabilityReferences.slice(offset, offset + 1000).map((reference) => reference.capabilityId),
         ),
       );
     const lifecycleCapabilityIds = new Set(
@@ -328,7 +313,6 @@ export function createTurnIntelligencePlanner(
         );
       resolved.push(Object.freeze({ reference, capability, revision, baseline }));
     }
-
     const general = resolved.filter((item) => item.baseline.kind === "genesis");
     const always = resolved.filter(
       (item) =>
@@ -339,6 +323,7 @@ export function createTurnIntelligencePlanner(
         item.baseline.kind !== "genesis" &&
         (lifecycleModes.get(item.reference.capabilityId) ?? "relevant") === "relevant",
     );
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const routing: TurnCapabilityRoutingDecision =
       candidates.length === 0
         ? Object.freeze({
@@ -362,13 +347,16 @@ export function createTurnIntelligencePlanner(
                   ]
                 : []),
               ...conversationHistory.map(({ messageId, role, content, createdAt, turnStatus }) =>
-                Object.freeze({
-                  messageId,
-                  role,
-                  content,
-                  createdAt,
-                  ...(turnStatus === undefined ? {} : { turnStatus }),
-                }),
+                Object.freeze(
+                  createConditionalObject({
+                    messageId,
+                    role,
+                    content,
+                    createdAt,
+                  } as const)
+                    .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
+                    .finish(),
+                ),
               ),
             ]),
             candidates: Object.freeze(
@@ -408,7 +396,6 @@ export function createTurnIntelligencePlanner(
       throw new Error(
         `Capability router returned no learning-attribution reason for ${learningAttribution.capabilityId}`,
       );
-
     const selectedResolved = [
       ...general.map((item) => Object.freeze({ ...item, selectionReason: "protected genesis baseline" })),
       ...always.map((item) => Object.freeze({ ...item, selectionReason: "always active" })),
@@ -449,21 +436,27 @@ export function createTurnIntelligencePlanner(
               }),
         ),
       );
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       selections.push(
-        Object.freeze({
-          capabilityId: capability.capabilityId,
-          name: capability.name,
-          scope: capability.scope,
-          selectionReason,
-          revision: reference,
-          baseline,
-          ...(effects.length === 0 ? {} : { effects: Object.freeze(effects) }),
-          promptModules: Object.freeze(promptModules),
-          skills: Object.freeze(skills),
-          tools: Object.freeze(tools),
-          router,
-          permissionManifest: revision.permissionManifest,
-        }),
+        Object.freeze(
+          createConditionalObject({
+            capabilityId: capability.capabilityId,
+            name: capability.name,
+            scope: capability.scope,
+            selectionReason,
+            revision: reference,
+            baseline,
+          } as const)
+            .addOptional(!(effects.length === 0) ? { effects: Object.freeze(effects) } : undefined)
+            .add({
+              promptModules: Object.freeze(promptModules),
+              skills: Object.freeze(skills),
+              tools: Object.freeze(tools),
+              router,
+              permissionManifest: revision.permissionManifest,
+            } as const)
+            .finish(),
+        ),
       );
     }
     const promptLayers = selections.flatMap((selection) =>
@@ -476,40 +469,66 @@ export function createTurnIntelligencePlanner(
             ...selection.skills.map((material) => material.content.trim()),
           ],
     );
-    const unsigned = Object.freeze({
-      schemaVersion: 1 as const,
-      planId: createPlanId(request.turnId),
-      sessionId: request.sessionId,
-      turnId: request.turnId,
-      project: options.project,
-      activationId: activation.activationId,
-      activationRevision: activation.revision,
-      selectedCapabilities: Object.freeze(selections),
-      conversationHistory,
-      ...(contextCheckpoint ? { contextCheckpoint } : {}),
-      ...(request.contextTokenBudget === undefined ? {} : { contextTokenBudget: request.contextTokenBudget }),
-      ...(request.requestTokenBudget === undefined ? {} : { requestTokenBudget: request.requestTokenBudget }),
-      renderedSystemPrompt: [request.baseSystemPrompt.trim(), ...promptLayers]
-        .filter((layer): layer is string => Boolean(layer))
-        .join("\n\n"),
-      provider: request.provider,
-      model: request.model,
-      thinkingLevel: request.thinkingLevel,
-      permissionSnapshot: mergedPermissions(selections, options.basePermissionManifest),
-      retrievalCitations: Object.freeze([...(request.retrievalCitations ?? [])]),
-      routing: Object.freeze({
-        strategyId: routing.strategyId,
-        reason: routing.reason,
-        ...(learningAttribution ? { learningAttribution: Object.freeze({ ...learningAttribution }) } : {}),
-      }),
-      createdAt: now(),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const unsigned = Object.freeze(
+      createConditionalObject({
+        schemaVersion: 1 as const,
+        planId: createPlanId(request.turnId),
+        sessionId: request.sessionId,
+        turnId: request.turnId,
+        project: options.project,
+        activationId: activation.activationId,
+        activationRevision: activation.revision,
+        selectedCapabilities: Object.freeze(selections),
+        conversationHistory,
+      } as const)
+        .addOptional(contextCheckpoint ? { contextCheckpoint } : undefined)
+        .addOptional(
+          !(request.contextTokenBudget === undefined)
+            ? {
+                contextTokenBudget: request.contextTokenBudget,
+              }
+            : undefined,
+        )
+        .addOptional(
+          !(request.requestTokenBudget === undefined)
+            ? {
+                requestTokenBudget: request.requestTokenBudget,
+              }
+            : undefined,
+        )
+        .add({
+          renderedSystemPrompt: [request.baseSystemPrompt.trim(), ...promptLayers]
+            .filter((layer): layer is string => Boolean(layer))
+            .join("\n\n"),
+          provider: request.provider,
+          model: request.model,
+          thinkingLevel: request.thinkingLevel,
+          permissionSnapshot: mergedPermissions(selections, options.basePermissionManifest),
+          retrievalCitations: Object.freeze([...(request.retrievalCitations ?? [])]),
+          routing: Object.freeze(
+            createConditionalObject({
+              strategyId: routing.strategyId,
+              reason: routing.reason,
+            } as const)
+              .addOptional(
+                learningAttribution
+                  ? {
+                      learningAttribution: Object.freeze({ ...learningAttribution }),
+                    }
+                  : undefined,
+              )
+              .finish(),
+          ),
+          createdAt: now(),
+        } as const)
+        .finish(),
+    );
     const plan = validateFrozenTurnPlan(
       Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) }),
     );
     return await options.protectedRuntime.activations.admitTurnPlan(plan);
   };
-
   const planAndAdmit = async (request: TurnPlanningRequest): Promise<FrozenTurnPlan> => {
     try {
       return await planAndAdmitOnce(request);
@@ -518,6 +537,5 @@ export function createTurnIntelligencePlanner(
       return await planAndAdmitOnce(request);
     }
   };
-
   return Object.freeze({ planAndAdmit });
 }

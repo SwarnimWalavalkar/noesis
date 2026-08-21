@@ -1,4 +1,4 @@
-import { CapabilityRevisionRefSchema } from "@noesis/domain";
+import { CapabilityRevisionRefSchema, type JsonValue, JsonValueSchema } from "@noesis/domain";
 import { z } from "zod";
 import {
   type ControlledPiPrompt,
@@ -23,14 +23,14 @@ function namedMessage(prompt: RolePrompt, name: string): string {
   return message.content;
 }
 
-function parsedMessage(prompt: RolePrompt, name: string): unknown {
-  return JSON.parse(namedMessage(prompt, name));
+function parsedMessage(prompt: RolePrompt, name: string): JsonValue {
+  return JsonValueSchema.parse(JSON.parse(namedMessage(prompt, name)));
 }
 
-function structuredPayload(content: string): unknown {
+function structuredPayload(content: string): JsonValue {
   const payload = content.split("\n\nReturn JSON only.", 1)[0]?.split("\n\nRepair the following", 1)[0];
   if (!payload) throw new Error("Controlled role received no structured payload");
-  return JSON.parse(payload);
+  return JsonValueSchema.parse(JSON.parse(payload));
 }
 
 export function researchLoopControlledResponse(

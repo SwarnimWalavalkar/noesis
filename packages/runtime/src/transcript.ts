@@ -1,7 +1,12 @@
-import { type JsonValue, JsonValueSchema } from "@noesis/domain";
+import {
+  createConditionalObject,
+  isJsonObject,
+  type JsonObject,
+  type JsonValue,
+  JsonValueSchema,
+} from "@noesis/domain";
 import type { NoesisWorkspaceStore, ToolCallRecord } from "@noesis/workspace";
 import type { RuntimeTranscriptAction, RuntimeTranscriptEntry, RuntimeTranscriptMessage } from "./index.ts";
-
 type TranscriptPoint = Readonly<{
   occurredAt: string;
   entry: RuntimeTranscriptEntry;
@@ -11,15 +16,13 @@ type TranscriptPoint = Readonly<{
   timelineSequence?: number;
   steer?: boolean;
 }>;
-
-const optionalTurnId = (metadata: Readonly<Record<string, unknown>>): string | undefined => {
+const optionalTurnId = (metadata: JsonObject): string | undefined => {
   const turnId = metadata["turnId"];
   if (typeof turnId === "string" && turnId) return turnId;
   const legacyEventId = metadata["legacyEventId"];
   return typeof legacyEventId === "string" && legacyEventId ? legacyEventId : undefined;
 };
-
-const inheritedHistorySequence = (metadata: Readonly<Record<string, unknown>>): number | undefined => {
+const inheritedHistorySequence = (metadata: JsonObject): number | undefined => {
   if (
     metadata["replayEligible"] !== true ||
     typeof metadata["inheritedFromSessionId"] !== "string" ||
@@ -33,36 +36,33 @@ const inheritedHistorySequence = (metadata: Readonly<Record<string, unknown>>): 
     ? sequence
     : undefined;
 };
-
+// BOUNDARY: Legacy transcript metadata stores optional sequence values without a shared row schema.
 const nonnegativeSequence = (value: unknown): number | undefined =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-
 const jsonValue = (value: unknown): JsonValue | undefined => {
   const result = JsonValueSchema.safeParse(value);
   return result.success ? result.data : undefined;
 };
-
-const nestedBrokerPayload = (value: unknown, field: "input" | "output"): unknown => {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
-  if (!Object.hasOwn(value, field)) return value;
-  return Reflect.get(value, field);
+const nestedBrokerPayload = (value: unknown, field: "input" | "output"): JsonValue | undefined => {
+  const parsed = JsonValueSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  if (!isJsonObject(parsed.data) || !Object.hasOwn(parsed.data, field)) return parsed.data;
+  return parsed.data[field];
 };
-
 const executionIdFrom = (...values: readonly unknown[]): string | undefined => {
   for (const value of values) {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
-    const executionId = Reflect.get(value, "executionId");
+    const parsed = JsonValueSchema.safeParse(value);
+    if (!parsed.success || !isJsonObject(parsed.data)) continue;
+    const executionId = parsed.data["executionId"];
     if (typeof executionId === "string" && executionId) return executionId;
   }
   return undefined;
 };
-
 const interruptedResponse = (response: unknown): boolean =>
-  response !== null &&
-  typeof response === "object" &&
-  !Array.isArray(response) &&
-  Reflect.get(response, "reason") === "interrupted";
-
+  (() => {
+    const parsed = JsonValueSchema.safeParse(response);
+    return parsed.success && isJsonObject(parsed.data) && parsed.data["reason"] === "interrupted";
+  })();
 const actionStatus = (
   record: ToolCallRecord,
   terminalTurnStatus: "completed" | "aborted" | "failed" | undefined,
@@ -74,18 +74,15 @@ const actionStatus = (
   if (record.status === "ambiguous") return "ambiguous";
   return interruptedResponse(record.response) ? "interrupted" : "failed";
 };
-
 const pointTieRank = (point: TranscriptPoint): number => {
   if (point.entry.kind === "action") return 3;
   if (point.entry.role === "system") return 0;
   if (point.entry.role === "user") return point.steer === true ? 2 : 1;
   return 4;
 };
-
 const compareActionIdentity = (left: RuntimeTranscriptAction, right: RuntimeTranscriptAction): number =>
   (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER) ||
   left.actionId.localeCompare(right.actionId);
-
 const actionOrderAtTimestampTies = (
   actions: readonly RuntimeTranscriptAction[],
 ): ReadonlyMap<string, number> => {
@@ -112,7 +109,6 @@ const actionOrderAtTimestampTies = (
   }
   return order;
 };
-
 const compareTranscriptPoints = (
   tiedActionOrder: ReadonlyMap<string, number>,
   turnAnchors: ReadonlyMap<string, string>,
@@ -169,10 +165,8 @@ const compareTranscriptPoints = (
   }
   return entryId(left.entry).localeCompare(entryId(right.entry));
 };
-
 const entryId = (entry: RuntimeTranscriptEntry): string =>
   entry.kind === "action" ? entry.actionId : entry.messageId;
-
 const transcriptTurnOrder = (
   points: readonly TranscriptPoint[],
 ): {
@@ -195,7 +189,6 @@ const transcriptTurnOrder = (
     completeTimelines: new Set([...seenTurns].filter((turnId) => !incompleteTimelines.has(turnId))),
   });
 };
-
 /**
  * Builds the one runtime transcript read model from authoritative operational rows.
  *
@@ -237,58 +230,89 @@ export async function loadRuntimeTranscript(
       call.response === undefined
         ? undefined
         : jsonValue(nested ? nestedBrokerPayload(call.response, "output") : call.response);
-    const action = Object.freeze({
-      kind: "action" as const,
-      actionId: call.toolCallId,
-      sequence: call.sequence ?? Number.MAX_SAFE_INTEGER,
-      ...(call.turnId ? { turnId: call.turnId } : {}),
-      ...(derivedParent ? { parentActionId: derivedParent } : {}),
-      ...(!nested && executionId && knownExecutionIds.has(executionId) ? { executionId } : {}),
-      name: call.toolName,
-      status: actionStatus(call, call.turnId ? turnStatus.get(call.turnId) : undefined),
-      ...(input === undefined ? {} : { input }),
-      ...(update === undefined ? {} : { update }),
-      ...(output === undefined ? {} : { output }),
-      startedAt: call.createdAt,
-      ...(call.completedAt ? { completedAt: call.completedAt } : {}),
-    }) satisfies RuntimeTranscriptAction;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const action = Object.freeze(
+      createConditionalObject({
+        kind: "action" as const,
+        actionId: call.toolCallId,
+        sequence: call.sequence ?? Number.MAX_SAFE_INTEGER,
+      } as const)
+        .addOptional(call.turnId ? { turnId: call.turnId } : undefined)
+        .addOptional(derivedParent ? { parentActionId: derivedParent } : undefined)
+        .addOptional(
+          !nested && executionId && knownExecutionIds.has(executionId) ? { executionId } : undefined,
+        )
+        .add({
+          name: call.toolName,
+          status: actionStatus(call, call.turnId ? turnStatus.get(call.turnId) : undefined),
+        } as const)
+        .addOptional(!(input === undefined) ? { input } : undefined)
+        .addOptional(!(update === undefined) ? { update } : undefined)
+        .addOptional(!(output === undefined) ? { output } : undefined)
+        .add({
+          startedAt: call.createdAt,
+        } as const)
+        .addOptional(call.completedAt ? { completedAt: call.completedAt } : undefined)
+        .finish(),
+    ) satisfies RuntimeTranscriptAction;
     actions.push(action);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     points.push(
-      Object.freeze({
-        occurredAt: action.startedAt,
-        entry: action,
-        ...(call.turnId ? { turnId: call.turnId } : {}),
-        ...(call.timelineSequence === undefined ? {} : { timelineSequence: call.timelineSequence }),
-      }),
+      Object.freeze(
+        createConditionalObject({
+          occurredAt: action.startedAt,
+          entry: action,
+        } as const)
+          .addOptional(call.turnId ? { turnId: call.turnId } : undefined)
+          .addOptional(
+            !(call.timelineSequence === undefined) ? { timelineSequence: call.timelineSequence } : undefined,
+          )
+          .finish(),
+      ),
     );
   }
-
   for (const message of messages) {
     if (message.role === "tool") continue;
     const turnId = optionalTurnId(message.metadata);
-    const entry = Object.freeze({
-      kind: "message" as const,
-      messageId: message.messageId,
-      ...(turnId ? { turnId } : {}),
-      role: message.role,
-      text: message.content,
-      createdAt: message.createdAt,
-    }) satisfies RuntimeTranscriptMessage;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const entry = Object.freeze(
+      createConditionalObject({
+        kind: "message" as const,
+        messageId: message.messageId,
+      } as const)
+        .addOptional(turnId ? { turnId } : undefined)
+        .add({
+          role: message.role,
+          text: message.content,
+          createdAt: message.createdAt,
+        } as const)
+        .finish(),
+    ) satisfies RuntimeTranscriptMessage;
     const sequence = inheritedHistorySequence(message.metadata);
     const steer = message.role === "user" && message.metadata["deliveryMode"] === "steer";
     const interactionSequence = steer
       ? nonnegativeSequence(message.metadata["interactionSequence"])
       : undefined;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     points.push(
-      Object.freeze({
-        occurredAt: entry.createdAt,
-        entry,
-        ...(sequence === undefined ? {} : { inheritedHistorySequence: sequence }),
-        ...(interactionSequence === undefined ? {} : { interactionSequence }),
-        ...(steer ? { steer: true } : {}),
-        ...(turnId ? { turnId } : {}),
-        ...(message.timelineSequence === undefined ? {} : { timelineSequence: message.timelineSequence }),
-      }),
+      Object.freeze(
+        createConditionalObject({
+          occurredAt: entry.createdAt,
+          entry,
+        } as const)
+          .addOptional(!(sequence === undefined) ? { inheritedHistorySequence: sequence } : undefined)
+          .addOptional(!(interactionSequence === undefined) ? { interactionSequence } : undefined)
+          .addOptional(steer ? { steer: true } : undefined)
+          .addOptional(turnId ? { turnId } : undefined)
+          .addOptional(
+            !(message.timelineSequence === undefined)
+              ? {
+                  timelineSequence: message.timelineSequence,
+                }
+              : undefined,
+          )
+          .finish(),
+      ),
     );
   }
   const tiedActionOrder = actionOrderAtTimestampTies(actions);

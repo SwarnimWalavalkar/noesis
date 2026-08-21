@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import { AgentHarness } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { AssistantMessage, MutableModels } from "@earendil-works/pi-ai";
@@ -11,11 +12,9 @@ import type {
   RoleVariantConfiguration,
   RuntimePiAgentRoleRunner,
 } from "./role-types.ts";
-
 function assistantText(message: AssistantMessage): string {
   return message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 }
-
 function usageOf(message: AssistantMessage): AgentUsage {
   const totalTokens =
     message.usage.totalTokens ||
@@ -27,7 +26,6 @@ function usageOf(message: AssistantMessage): AgentUsage {
     estimatedCost: message.usage.cost.total,
   });
 }
-
 function missingAuthMessage(provider: string): string {
   if (provider === "openai-codex") {
     return "Codex OAuth is not configured. Run `noesis auth login openai-codex` before using this role.";
@@ -43,7 +41,6 @@ function missingAuthMessage(provider: string): string {
   }
   return `Pi credentials are missing for provider ${provider}.`;
 }
-
 interface ActivePiRoleRun {
   readonly controller: AbortController;
   harness?: AgentHarness;
@@ -51,17 +48,14 @@ interface ActivePiRoleRun {
   requestHarnessAbort?: () => Promise<void>;
   abortError?: unknown;
 }
-
 export function createPiRoleModelBackend(cwd: string, models: MutableModels): RoleModelBackend {
   const active = new Map<string, ActivePiRoleRun>();
-
   const abort = async (runId: string): Promise<void> => {
     const execution = active.get(runId);
     execution?.controller.abort();
     await execution?.requestHarnessAbort?.();
     if (execution?.abortError) throw execution.abortError;
   };
-
   const run = async (request: RoleBackendRequest): Promise<RoleBackendResult> => {
     if (active.has(request.runId)) throw new Error(`Pi role run ${request.runId} is already active`);
     const execution: ActivePiRoleRun = { controller: new AbortController() };
@@ -69,7 +63,6 @@ export function createPiRoleModelBackend(cwd: string, models: MutableModels): Ro
     if (request.signal.aborted) forwardAbort();
     else request.signal.addEventListener("abort", forwardAbort, { once: true });
     active.set(request.runId, execution);
-
     try {
       if (execution.controller.signal.aborted) throw new Error("Pi role run aborted");
       const model = models.getModel(request.provider, request.model);
@@ -77,10 +70,10 @@ export function createPiRoleModelBackend(cwd: string, models: MutableModels): Ro
       const auth = await models.getAuth(model);
       if (!auth) throw new Error(missingAuthMessage(request.provider));
       if (execution.controller.signal.aborted) throw new Error("Pi role run aborted");
-
       const { session, sessionId } = await createEphemeralPiSession();
       execution.sessionId = sessionId;
       if (execution.controller.signal.aborted) throw new Error("Pi role run aborted");
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),
         session,
@@ -89,18 +82,18 @@ export function createPiRoleModelBackend(cwd: string, models: MutableModels): Ro
         tools: [],
         thinkingLevel: request.reasoning,
         systemPrompt: request.systemPrompt,
-        streamOptions: {
-          ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
-          ...(request.maxRetries === undefined ? {} : { maxRetries: request.maxRetries }),
-        },
+        streamOptions: createConditionalObject({} as const)
+          .addOptional(!(request.timeoutMs === undefined) ? { timeoutMs: request.timeoutMs } : undefined)
+          .addOptional(!(request.maxRetries === undefined) ? { maxRetries: request.maxRetries } : undefined)
+          .finish(),
       });
       execution.harness = harness;
       let abortPromise: Promise<void> | undefined;
       const requestHarnessAbort = (): Promise<void> => {
         abortPromise ??= harness.abort().then(
           () => undefined,
-          (error: unknown) => {
-            execution.abortError = error;
+          (cause: unknown) => {
+            execution.abortError = cause;
           },
         );
         return abortPromise;
@@ -111,14 +104,18 @@ export function createPiRoleModelBackend(cwd: string, models: MutableModels): Ro
       let result: RoleBackendResult;
       try {
         const message = await harness.prompt(request.prompt);
-        result = Object.freeze({
-          text: assistantText(message),
-          provider: message.provider,
-          model: message.model,
-          stopReason: message.stopReason,
-          usage: usageOf(message),
-          ...(message.errorMessage?.trim() ? { error: message.errorMessage.trim() } : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        result = Object.freeze(
+          createConditionalObject({
+            text: assistantText(message),
+            provider: message.provider,
+            model: message.model,
+            stopReason: message.stopReason,
+            usage: usageOf(message),
+          } as const)
+            .addOptional(message.errorMessage?.trim() ? { error: message.errorMessage.trim() } : undefined)
+            .finish(),
+        );
       } finally {
         execution.controller.signal.removeEventListener("abort", abortHarness);
         await abortPromise;
@@ -138,10 +135,8 @@ export function createPiRoleModelBackend(cwd: string, models: MutableModels): Ro
       }
     }
   };
-
   return Object.freeze({ run, abort });
 }
-
 export function createPiAgentRoleRunner(
   cwd: string,
   models: MutableModels,

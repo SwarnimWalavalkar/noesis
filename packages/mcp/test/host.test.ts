@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, test, vi } from "vitest";
+import { isJsonObject } from "@noesis/domain";
 import { loadMcpConfig, writeMcpServer } from "../src/config.ts";
 import { createMcpConnectionLifecycleFailure, createMcpHostManager } from "../src/host.ts";
 import type { McpOAuthCredentialStore } from "../src/oauth.ts";
@@ -184,10 +185,7 @@ describe("MCP host", () => {
         elicit: async () => ({ action: "decline" }),
         onOAuthRedirect: () => undefined,
         onEvent: (event) => {
-          const status =
-            typeof event.payload === "object" && event.payload !== null
-              ? Reflect.get(event.payload, "status")
-              : undefined;
+          const status = isJsonObject(event.payload) ? event.payload["status"] : undefined;
           if (event.type === "connection" && typeof status === "string") statuses.push(status);
         },
       },
@@ -253,9 +251,8 @@ describe("MCP host", () => {
         onEvent: (event) => {
           if (
             event.type === "catalog_changed" &&
-            typeof event.payload === "object" &&
-            event.payload !== null &&
-            Reflect.get(event.payload, "dirty") === true
+            isJsonObject(event.payload) &&
+            event.payload["dirty"] === true
           )
             dirtyEvents += 1;
         },
@@ -545,6 +542,7 @@ describe("MCP host", () => {
         onOAuthRedirect: () => undefined,
       },
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const invocation = Object.freeze({
       route: Object.freeze({ provider: "controlled", model: "test", reasoning: "high" as const }),
       sessionId: "session-1",
@@ -557,8 +555,7 @@ describe("MCP host", () => {
       await manager.start();
 
       const first = await manager.startToolTask("mcp.controlled.task-tool", {}, { invocation });
-      const firstTaskId =
-        typeof first === "object" && first !== null ? Reflect.get(first, "taskId") : undefined;
+      const firstTaskId = isJsonObject(first) ? first["taskId"] : undefined;
       if (typeof firstTaskId !== "string") throw new Error("Expected controlled task id");
       const controller = new AbortController();
       controller.abort(new Error("cancelled result poll"));
@@ -571,8 +568,7 @@ describe("MCP host", () => {
       });
 
       const second = await manager.startToolTask("mcp.controlled.task-tool", {}, { invocation });
-      const secondTaskId =
-        typeof second === "object" && second !== null ? Reflect.get(second, "taskId") : undefined;
+      const secondTaskId = isJsonObject(second) ? second["taskId"] : undefined;
       if (typeof secondTaskId !== "string") throw new Error("Expected controlled task id");
       const cancelController = new AbortController();
       cancelController.abort(new Error("cancelled task cancellation"));
@@ -912,10 +908,7 @@ describe("MCP host", () => {
         elicit: async () => ({ action: "decline" }),
         onOAuthRedirect: () => undefined,
         onEvent: (event) => {
-          const status =
-            typeof event.payload === "object" && event.payload !== null
-              ? Reflect.get(event.payload, "status")
-              : undefined;
+          const status = isJsonObject(event.payload) ? event.payload["status"] : undefined;
           if (event.type === "connection" && typeof status === "string") statuses.push(status);
         },
       },

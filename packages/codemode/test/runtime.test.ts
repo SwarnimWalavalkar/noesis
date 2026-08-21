@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { JsonValue } from "@noesis/domain";
 import type { AuthorityBoundary, EffectDecision } from "@noesis/policy";
 import {
@@ -10,15 +11,13 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { type CodeExecutionEvent, type CodeModeRuntime, createCodeModeRuntime } from "../src/index.ts";
-
 const runtimes = new Set<CodeModeRuntime>();
-
 afterEach(async () => {
   await Promise.all([...runtimes].map(async (code) => await code.shutdown()));
   runtimes.clear();
 });
-
 function authority(): Pick<AuthorityBoundary, "runForeground"> {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return Object.freeze({
     runForeground: async <T extends JsonValue>(
       request: Parameters<AuthorityBoundary["runForeground"]>[0],
@@ -34,7 +33,6 @@ function authority(): Pick<AuthorityBoundary, "runForeground"> {
       }),
   });
 }
-
 function runtime(
   options: {
     readonly recorder?: ToolInvocationRecorder;
@@ -43,31 +41,35 @@ function runtime(
     readonly overrideInvocationResult?: ToolInvocationResult;
   } = {},
 ) {
-  const broker = createToolBroker({
-    authority: authority(),
-    permission: Object.freeze({
-      effects: Object.freeze(["read"]),
-      resourcePatterns: Object.freeze(["math:"]),
-      credentialRefs: Object.freeze([]),
-    }),
-    definitions: [
-      defineTool({
-        name: "math.double",
-        label: "Double",
-        description: "Double a number",
-        visibility: "codemode_only",
-        inputSchema: z.strictObject({ value: z.number() }),
-        outputSchema: z.strictObject({ value: z.number() }),
-        effect: () => ({ effect: "read", resource: "math:double", estimatedCost: 0 }),
-        execute: async ({ value }, context) => {
-          await options.beforeDouble?.();
-          if (options.doubleProgress !== undefined) context.emitUpdate?.(options.doubleProgress);
-          return { value: value * 2 };
-        },
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  const broker = createToolBroker(
+    createConditionalObject({
+      authority: authority(),
+      permission: Object.freeze({
+        effects: Object.freeze(["read"]),
+        resourcePatterns: Object.freeze(["math:"]),
+        credentialRefs: Object.freeze([]),
       }),
-    ],
-    ...(options.recorder ? { recorder: options.recorder } : {}),
-  });
+      definitions: [
+        defineTool({
+          name: "math.double",
+          label: "Double",
+          description: "Double a number",
+          visibility: "codemode_only",
+          inputSchema: z.strictObject({ value: z.number() }),
+          outputSchema: z.strictObject({ value: z.number() }),
+          effect: () => ({ effect: "read", resource: "math:double", estimatedCost: 0 }),
+          execute: async ({ value }, context) => {
+            await options.beforeDouble?.();
+            if (options.doubleProgress !== undefined) context.emitUpdate?.(options.doubleProgress);
+            return { value: value * 2 };
+          },
+        }),
+      ],
+    } as const)
+      .addOptional(options.recorder ? { recorder: options.recorder } : undefined)
+      .finish(),
+  );
   const overrideInvocationResult = options.overrideInvocationResult;
   const effectiveBroker = overrideInvocationResult
     ? Object.freeze({ ...broker, invoke: async () => overrideInvocationResult })
@@ -76,7 +78,6 @@ function runtime(
   runtimes.add(code);
   return code;
 }
-
 describe("codemode runtime", () => {
   it("runs ordinary JavaScript and composes sequential and parallel SDK calls", async () => {
     const events: CodeExecutionEvent[] = [];
@@ -119,17 +120,28 @@ describe("codemode runtime", () => {
       }),
     );
     const firstStart = events.find(
-      (event): event is Extract<CodeExecutionEvent, { readonly type: "tool-start" }> =>
-        event.type === "tool-start" && event.callIndex === 1,
+      (
+        event,
+      ): event is Extract<
+        CodeExecutionEvent,
+        {
+          readonly type: "tool-start";
+        }
+      > => event.type === "tool-start" && event.callIndex === 1,
     );
     const firstEnd = events.find(
-      (event): event is Extract<CodeExecutionEvent, { readonly type: "tool-end" }> =>
-        event.type === "tool-end" && event.callIndex === 1,
+      (
+        event,
+      ): event is Extract<
+        CodeExecutionEvent,
+        {
+          readonly type: "tool-end";
+        }
+      > => event.type === "tool-end" && event.callIndex === 1,
     );
     expect(firstStart?.callId).toMatch(/^tool_call_[a-f0-9]{64}$/u);
     expect(firstEnd?.callId).toBe(firstStart?.callId);
   });
-
   it("returns actionable frozen-catalog recovery for an unknown tool name", async () => {
     await expect(
       runtime().execute({
@@ -140,7 +152,6 @@ describe("codemode runtime", () => {
       "Unknown tool: math.multiply. Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
     );
   });
-
   it("supports Node imports and progress", async () => {
     const events: JsonValue[] = [];
     const result = await runtime().execute(
@@ -159,7 +170,6 @@ describe("codemode runtime", () => {
     expect(result.value).toEqual({ joined: "a/b" });
     expect(events).toEqual([{ base: "noesis" }]);
   });
-
   it("binds Broker progress to the exact nested tool call", async () => {
     const events: CodeExecutionEvent[] = [];
     const result = await runtime({ doubleProgress: { message: "Halfway" } }).execute(
@@ -170,11 +180,16 @@ describe("codemode runtime", () => {
       (event) => events.push(event),
     );
     const started = events.find(
-      (event): event is Extract<CodeExecutionEvent, { readonly type: "tool-start" }> =>
-        event.type === "tool-start",
+      (
+        event,
+      ): event is Extract<
+        CodeExecutionEvent,
+        {
+          readonly type: "tool-start";
+        }
+      > => event.type === "tool-start",
     );
     if (!started) throw new Error("Expected nested tool start");
-
     expect(events).toContainEqual({
       type: "progress",
       executionId: result.executionId,
@@ -184,14 +199,12 @@ describe("codemode runtime", () => {
       callIndex: started.callIndex,
     });
   });
-
   it("persists store values across executions in the same session only", async () => {
     const code = runtime();
     await code.execute({
       source: 'store("topic", { name: "Noesis" }); return null;',
       sessionId: "session-1",
     });
-
     await expect(
       code.execute({
         source: 'return load("topic");',
@@ -206,7 +219,6 @@ describe("codemode runtime", () => {
     ).resolves.toMatchObject({ value: null });
     await code.shutdown();
   });
-
   it("merges concurrent store mutations without overwriting unrelated keys", async () => {
     const code = runtime();
     await Promise.all([
@@ -219,7 +231,6 @@ describe("codemode runtime", () => {
         sessionId: "shared-session",
       }),
     ]);
-
     await expect(
       code.execute({
         source: 'return { first: load("first"), second: load("second") };',
@@ -227,7 +238,6 @@ describe("codemode runtime", () => {
       }),
     ).resolves.toMatchObject({ value: { first: 1, second: 2 } });
   });
-
   it("derives stable host call identities from a logical execution across retries", async () => {
     const requestedCallIds: string[] = [];
     const code = runtime({
@@ -237,20 +247,18 @@ describe("codemode runtime", () => {
         },
       }),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = {
       source: "return await tools.math.double({ value: 4 });",
       logicalExecutionId: "workflow-phase-logical-1",
       sessionId: "session-1",
     } as const;
-
     await code.execute({ ...request, executionId: "physical-attempt-1" });
     await code.execute({ ...request, executionId: "physical-attempt-2" });
-
     expect(requestedCallIds).toHaveLength(2);
     expect(requestedCallIds[0]).toBe(requestedCallIds[1]);
     await code.shutdown();
   });
-
   it("waits for unawaited SDK effects before recording execution completion", async () => {
     let effectCompleted = false;
     const code = runtime({
@@ -263,18 +271,15 @@ describe("codemode runtime", () => {
         );
       },
     });
-
     const result = await code.execute({
       source: "void tools.math.double({ value: 4 }); return { returned: true };",
       sessionId: "session-1",
     });
-
     expect(result.value).toEqual({ returned: true });
     expect(result.calls).toBe(1);
     expect(effectCompleted).toBe(true);
     await code.shutdown();
   });
-
   it("cancels an active cell and shuts down cleanly", async () => {
     const controller = new AbortController();
     const pending = runtime().execute({
@@ -285,7 +290,6 @@ describe("codemode runtime", () => {
     controller.abort();
     await expect(pending).rejects.toThrow("cancelled");
   });
-
   it("does not hang shutdown when a broker call ignores cancellation", async () => {
     let markToolStarted: (() => void) | undefined;
     const toolStarted = new Promise<void>((resolve) => {
@@ -303,11 +307,9 @@ describe("codemode runtime", () => {
       sessionId: "session-1",
     });
     await toolStarted;
-
     await expect(code.shutdown()).resolves.toBeUndefined();
     await expect(pending).rejects.toThrow("cancelled");
   });
-
   it("times out after the cell returns while an unawaited broker call is still settling", async () => {
     let markToolStarted: (() => void) | undefined;
     const toolStarted = new Promise<void>((resolve) => {
@@ -319,22 +321,23 @@ describe("codemode runtime", () => {
         await new Promise<never>(() => undefined);
       },
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const outcome = code
       .execute({
         source: "void tools.math.double({ value: 4 }); return null;",
         sessionId: "session-timeout-during-settlement",
-        timeoutMs: 1_000,
+        timeoutMs: 1000,
       })
       .then(
         (value) => ({ ok: true, value }) as const,
-        (error: unknown) => ({ ok: false, error }) as const,
+        (cause: unknown) => ({ ok: false, error: cause }) as const,
       );
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const firstEvent = await Promise.race([
       toolStarted.then(() => "tool-started" as const),
       outcome.then(() => "execution-settled" as const),
     ]);
     expect(firstEvent).toBe("tool-started");
-
     const result = await outcome;
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("Expected codemode execution to time out");
@@ -342,7 +345,6 @@ describe("codemode runtime", () => {
     if (!(result.error instanceof Error)) throw new Error("Expected codemode execution to fail");
     expect(result.error.message).toContain("timed out");
   });
-
   it("does not spawn work for an already-cancelled request", async () => {
     const controller = new AbortController();
     controller.abort();
@@ -354,7 +356,6 @@ describe("codemode runtime", () => {
       }),
     ).rejects.toThrow("cancelled");
   });
-
   it("returns large values across the child-process boundary", async () => {
     await expect(
       runtime().execute({
@@ -363,7 +364,6 @@ describe("codemode runtime", () => {
       }),
     ).resolves.toMatchObject({ value: "x".repeat(2 * 1024 * 1024) });
   });
-
   it("bounds SDK inputs and failure frames before sending them over IPC", async () => {
     await expect(
       runtime().execute({
@@ -371,7 +371,6 @@ describe("codemode runtime", () => {
         sessionId: "session-1",
       }),
     ).rejects.toThrow("Codemode SDK request exceeds");
-
     let thrown: unknown;
     try {
       await runtime().execute({
@@ -385,7 +384,6 @@ describe("codemode runtime", () => {
     if (!(thrown instanceof Error)) throw new Error("Expected codemode execution to fail");
     expect(Buffer.byteLength(thrown.message, "utf8")).toBeLessThanOrEqual(32 * 1024);
   });
-
   it("bounds cumulative child-originated IPC even when generated code bypasses helpers", async () => {
     await expect(
       runtime().execute({
@@ -404,7 +402,6 @@ describe("codemode runtime", () => {
       }),
     ).rejects.toThrow("Codemode IPC output exceeds");
   });
-
   it("enforces host-side frame and semantic limits against raw IPC bypasses", async () => {
     await expect(
       runtime().execute({
@@ -421,7 +418,6 @@ describe("codemode runtime", () => {
         sessionId: "raw-sdk",
       }),
     ).rejects.toThrow("Codemode SDK request exceeds");
-
     await expect(
       runtime().execute({
         source: `
@@ -431,7 +427,6 @@ describe("codemode runtime", () => {
         sessionId: "raw-result",
       }),
     ).resolves.toMatchObject({ value: "x".repeat(2 * 1024 * 1024) });
-
     await expect(
       runtime().execute({
         source: `
@@ -441,7 +436,6 @@ describe("codemode runtime", () => {
         sessionId: "raw-failure",
       }),
     ).rejects.toThrow("Codemode failure message exceeds");
-
     await expect(
       runtime().execute({
         source: `
@@ -451,7 +445,6 @@ describe("codemode runtime", () => {
         sessionId: "raw-stack",
       }),
     ).rejects.toThrow("Codemode failure stack exceeds");
-
     await expect(
       runtime().execute({
         source: `
@@ -461,7 +454,6 @@ describe("codemode runtime", () => {
         sessionId: "raw-progress",
       }),
     ).rejects.toThrow("Codemode progress value exceeds");
-
     await expect(
       runtime().execute({
         source: `
@@ -472,7 +464,6 @@ describe("codemode runtime", () => {
       }),
     ).rejects.toThrow("Codemode IPC frame exceeds");
   });
-
   it("bounds aggregate store state in the child before returning it", async () => {
     await expect(
       runtime().execute({
@@ -484,7 +475,6 @@ describe("codemode runtime", () => {
       }),
     ).rejects.toThrow("Codemode store exceeds");
   });
-
   it("bounds individual and aggregate progress before sending it over IPC", async () => {
     await expect(
       runtime().execute({
@@ -492,7 +482,6 @@ describe("codemode runtime", () => {
         sessionId: "session-1",
       }),
     ).rejects.toThrow("Codemode progress value exceeds");
-
     await expect(
       runtime().execute({
         source: `
@@ -503,7 +492,6 @@ describe("codemode runtime", () => {
       }),
     ).rejects.toThrow("Codemode progress exceeds");
   });
-
   it("applies progress limits to Broker-emitted updates", async () => {
     await expect(
       runtime({ doubleProgress: "x".repeat(65 * 1024) }).execute({
@@ -511,7 +499,6 @@ describe("codemode runtime", () => {
         sessionId: "broker-progress-value-limit",
       }),
     ).rejects.toThrow("Codemode progress value exceeds");
-
     await expect(
       runtime({ doubleProgress: "x".repeat(60 * 1024) }).execute({
         source: `
@@ -523,7 +510,6 @@ describe("codemode runtime", () => {
       }),
     ).rejects.toThrow("Codemode progress exceeds");
   });
-
   it("bounds Broker failure details before returning them to the child", async () => {
     const events: CodeExecutionEvent[] = [];
     await expect(
@@ -543,13 +529,18 @@ describe("codemode runtime", () => {
       ),
     ).rejects.toThrow("remote tool failed");
     const failedCall = events.find(
-      (event): event is Extract<CodeExecutionEvent, { readonly type: "tool-end" }> =>
-        event.type === "tool-end" && !event.ok,
+      (
+        event,
+      ): event is Extract<
+        CodeExecutionEvent,
+        {
+          readonly type: "tool-end";
+        }
+      > => event.type === "tool-end" && !event.ok,
     );
     expect(failedCall?.error).toContain("remote tool failed");
     expect(Buffer.byteLength(failedCall?.error ?? "", "utf8")).toBeLessThanOrEqual(64 * 1024);
   });
-
   it("does not leak a child when an event observer throws", async () => {
     const code = runtime();
     await expect(

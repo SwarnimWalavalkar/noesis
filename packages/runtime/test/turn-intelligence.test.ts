@@ -36,6 +36,7 @@ async function definition(
   path: string,
   content: string,
 ): Promise<FileRevisionRef> {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const published = await workspace.definitionPublications.publish({
     namespace: "turn-plan-fixture",
     definitionId: id,
@@ -52,6 +53,7 @@ async function definition(
 }
 
 describe("turn intelligence", () => {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test("admits exact immutable material while a narrow adaptation abstains from unrelated work", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-turn-plan-"));
     const workspace = await createWorkspaceStore(root);
@@ -83,6 +85,7 @@ describe("turn intelligence", () => {
           "{}",
         ),
       ]);
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return Object.freeze({
         capabilityRevisionId: `${capability.capabilityId}-v1`,
         capabilityId: capability.capabilityId,
@@ -145,6 +148,7 @@ describe("turn intelligence", () => {
           }),
         });
       else
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         await workspace.capabilities.create({
           definition: Object.freeze({
             capabilityId: capability.capabilityId,
@@ -241,6 +245,7 @@ describe("turn intelligence", () => {
       updatedAt: "2026-07-24T23:58:00.000Z",
       metadata: Object.freeze({}),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const priorHistory = Object.freeze([
       Object.freeze({
         messageId: "history-user",
@@ -530,6 +535,7 @@ describe("turn intelligence", () => {
       capabilityRevision: reference,
       activeDefinitions: Object.freeze({ router: routerRevision }),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const session = (sessionId: string) =>
       Object.freeze({
         sessionId,
@@ -544,6 +550,7 @@ describe("turn intelligence", () => {
       });
     await workspace.operational.sessions.put(session("session-observation"));
     await workspace.operational.sessions.put(session("session-general"));
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const sourcePlanner = createTurnIntelligencePlanner({
       workspace,
       protectedRuntime,
@@ -608,6 +615,7 @@ describe("turn intelligence", () => {
         },
       }),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const planner = createTurnIntelligencePlanner({
       workspace,
       protectedRuntime: observingProtectedRuntime,

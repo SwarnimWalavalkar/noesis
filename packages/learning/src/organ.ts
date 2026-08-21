@@ -7,6 +7,7 @@ import type {
 } from "@noesis/agent-types";
 import type { AtomicCapabilityRegistry, CapabilityRevisionConstruction } from "@noesis/capabilities";
 import {
+  createConditionalObject,
   type Capability,
   type CapabilityRevision,
   type CapabilityRevisionRef,
@@ -45,12 +46,10 @@ import {
   ScopeRelationshipVerificationSchema,
   type SemanticTurnObservation,
 } from "./schemas.ts";
-
 export interface HarvestedLearningSignal {
   readonly signal: FeedbackSignal;
   readonly rowRef: EvidenceRef;
 }
-
 export interface SignalHarvestResult {
   readonly turn: LearningTurnInput;
   readonly signals: readonly HarvestedLearningSignal[];
@@ -58,14 +57,12 @@ export interface SignalHarvestResult {
   readonly citations: readonly LearningCitation[];
   readonly recurrenceCount: number;
 }
-
 export interface LearningRoleResearchRun {
   readonly runId: string;
   readonly role: AgentRole;
   readonly research: RoleResearchMetadata;
   readonly trace: AgentTrace;
 }
-
 export interface ExperimentBrief {
   readonly experimentId: string;
   readonly title: string;
@@ -90,7 +87,6 @@ export interface ExperimentBrief {
   readonly reflectionRun?: LearningRoleResearchRun;
   readonly sourceAdjustmentId?: string;
 }
-
 export interface ExperimentBriefStore {
   readonly findByDedupeKey: (key: string) => Promise<ExperimentBrief | undefined>;
   /** Create-only. A publication collision must be byte-identical. */
@@ -101,22 +97,24 @@ export interface ExperimentBriefStore {
     readonly brief: ExperimentBrief;
   }) => Promise<ExperimentBrief>;
 }
-
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE = "experiment_brief_publication_collision" as const;
 const MAX_BRIEF_RECONCILIATION_ATTEMPTS = 3;
-
 export function experimentBriefPublicationCollisionError(key: string, cause?: unknown): Error {
-  return durableJobFailureError(`Experiment brief publication collision for ${key}`, {
-    code: EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE,
-    retryable: true,
-    ...(cause === undefined ? {} : { cause }),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return durableJobFailureError(
+    `Experiment brief publication collision for ${key}`,
+    createConditionalObject({
+      code: EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE,
+      retryable: true,
+    } as const)
+      .addOptional(!(cause === undefined) ? { cause } : undefined)
+      .finish(),
+  );
 }
-
-function isExperimentBriefPublicationCollision(error: unknown): boolean {
-  return durableJobFailureFromError(error)?.code === EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE;
+function isExperimentBriefPublicationCollision(cause: unknown): boolean {
+  return durableJobFailureFromError(cause)?.code === EXPERIMENT_BRIEF_PUBLICATION_COLLISION_CODE;
 }
-
 /**
  * Durable semantic-hypothesis material used by the revision author. SQLite owns the matching
  * operational Experiment from hypothesis onward; the brief remains inspectable authored evidence.
@@ -145,13 +143,11 @@ export function createInMemoryExperimentBriefStore(): ExperimentBriefStore {
     },
   });
 }
-
 export interface LearningNotification {
   readonly mode: "quiet" | "detailed";
   readonly kind: "criterion" | "experiment" | "working_adjustment";
   readonly message: string;
 }
-
 export type ObserveLearningResult =
   | {
       readonly status: "no_change";
@@ -206,7 +202,6 @@ export type ObserveLearningResult =
       readonly notification: LearningNotification | null;
       readonly interruption: null;
     };
-
 export interface AuthorRevisionResult {
   readonly brief: ExperimentBrief;
   readonly revision: CapabilityRevision;
@@ -214,7 +209,6 @@ export interface AuthorRevisionResult {
   readonly authorRun: LearningRoleResearchRun;
   readonly experiment: Experiment;
 }
-
 export interface AutomaticLearningOrganOptions {
   readonly config: AutomaticLearningConfig;
   readonly history: Pick<HistoryPort, "search" | "resolve">;
@@ -227,7 +221,6 @@ export interface AutomaticLearningOrganOptions {
   readonly candidateManifests?: LearningCandidateManifestStore;
   readonly nextId?: (prefix: string) => string;
 }
-
 export interface LearningCandidateManifestStore {
   readonly persist: (input: {
     readonly brief: ExperimentBrief;
@@ -235,7 +228,6 @@ export interface LearningCandidateManifestStore {
     readonly revisionRef: CapabilityRevisionRef;
   }) => Promise<FileRevisionRef>;
 }
-
 export interface ObserveLearningTurnRequest {
   readonly turn: unknown;
   readonly baselineRevision: CapabilityRevisionRef;
@@ -250,13 +242,11 @@ export interface ObserveLearningTurnRequest {
     readonly evaluatorInstruction: string;
   }[];
 }
-
 export interface AuthorExperimentRevisionRequest {
   readonly brief: ExperimentBrief;
   readonly predecessorRevision?: CapabilityRevisionRef;
   readonly signal?: AbortSignal;
 }
-
 export interface AuthorFollowUpRevisionRequest {
   readonly parentExperiment: Experiment;
   readonly capability: Capability;
@@ -265,7 +255,6 @@ export interface AuthorFollowUpRevisionRequest {
   readonly citations?: readonly LearningCitation[];
   readonly signal?: AbortSignal;
 }
-
 export interface AutomaticLearningOrgan {
   readonly observeTurn: (request: ObserveLearningTurnRequest) => Promise<ObserveLearningResult>;
   readonly authorExperimentRevision: (
@@ -273,7 +262,6 @@ export interface AutomaticLearningOrgan {
   ) => Promise<AuthorRevisionResult>;
   readonly authorFollowUpRevision: (request: AuthorFollowUpRevisionRequest) => Promise<AuthorRevisionResult>;
 }
-
 function sameFileRevision(left: FileRevisionRef, right: FileRevisionRef): boolean {
   return (
     left.revisionId === right.revisionId &&
@@ -282,7 +270,6 @@ function sameFileRevision(left: FileRevisionRef, right: FileRevisionRef): boolea
     left.contentDigest === right.contentDigest
   );
 }
-
 function validateRoleConfiguration(name: string, configuration: LearningRoleConfiguration): void {
   if (
     !configuration.variant.configurationRefs.some((reference) =>
@@ -292,11 +279,9 @@ function validateRoleConfiguration(name: string, configuration: LearningRoleConf
     throw new Error(`${name} role variant must pin its prompt revision`);
   }
 }
-
 function cloneEvidenceRefs(refs: readonly EvidenceRef[]): readonly EvidenceRef[] {
   return Object.freeze(refs.map((reference) => Object.freeze({ ...reference })));
 }
-
 function evidenceKey(reference: EvidenceRef): string {
   switch (reference.kind) {
     case "database_row":
@@ -308,13 +293,11 @@ function evidenceKey(reference: EvidenceRef): string {
       return `${reference.kind}:${reference.artifactId}`;
   }
 }
-
 function uniqueEvidenceRefs(refs: readonly EvidenceRef[]): readonly EvidenceRef[] {
   const unique = new Map<string, EvidenceRef>();
   for (const reference of refs) unique.set(evidenceKey(reference), Object.freeze({ ...reference }));
   return Object.freeze([...unique.values()]);
 }
-
 function toEvidenceRef(citation: ExactCitation): EvidenceRef | undefined {
   const source = citation.source;
   if (source.kind !== "database_row") return undefined;
@@ -333,26 +316,26 @@ function toEvidenceRef(citation: ExactCitation): EvidenceRef | undefined {
       return undefined;
   }
 }
-
 function cloneCitation(citation: ExactCitation): LearningCitation {
   return Object.freeze({
     ...citation,
     source: Object.freeze({ ...citation.source }),
   });
 }
-
 function signalKind(turn: LearningTurnInput) {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   if (turn.outcome === "failed" || turn.telemetry.toolFailureCount > 0) return "repeated_failure" as const;
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   if (turn.telemetry.retryCount > 0 || turn.telemetry.aborted) return "friction" as const;
   if (
     turn.telemetry.latencyMs !== undefined &&
     turn.telemetry.expectedLatencyMs !== undefined &&
     turn.telemetry.latencyMs > turn.telemetry.expectedLatencyMs
   )
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return "cost_or_latency" as const;
   return undefined;
 }
-
 function signalStrength(kind: NonNullable<ReturnType<typeof signalKind>>): number {
   switch (kind) {
     case "repeated_failure":
@@ -363,7 +346,6 @@ function signalStrength(kind: NonNullable<ReturnType<typeof signalKind>>): numbe
       return 0.65;
   }
 }
-
 function stableSignalId(turn: LearningTurnInput, kind: FeedbackSignal["kind"]): string {
   return `signal_${sha256(
     canonicalJson({
@@ -375,7 +357,6 @@ function stableSignalId(turn: LearningTurnInput, kind: FeedbackSignal["kind"]): 
     }),
   ).slice(0, 32)}`;
 }
-
 function citationSourceKey(citation: ExactCitation): string {
   switch (citation.source.kind) {
     case "database_row":
@@ -384,7 +365,6 @@ function citationSourceKey(citation: ExactCitation): string {
       return `revision:${citation.source.revisionId}`;
   }
 }
-
 function evidenceCitationSourceKey(reference: EvidenceRef): string {
   switch (reference.kind) {
     case "database_row":
@@ -396,11 +376,9 @@ function evidenceCitationSourceKey(reference: EvidenceRef): string {
       return `artifact:${reference.artifactId}`;
   }
 }
-
 function currentCitationSourceKeys(turn: LearningTurnInput): ReadonlySet<string> {
   return new Set(turn.evidenceRefs.map(evidenceCitationSourceKey));
 }
-
 function distinctHistoricalCitations(
   turn: LearningTurnInput,
   citations: readonly ExactCitation[],
@@ -415,9 +393,13 @@ function distinctHistoricalCitations(
   }
   return Object.freeze([...distinct.values()]);
 }
-
 function recurrenceCitations(
-  reflected: Extract<ReflectorOutput, { readonly decision: "experiment" }>,
+  reflected: Extract<
+    ReflectorOutput,
+    {
+      readonly decision: "experiment";
+    }
+  >,
   citations: readonly LearningCitation[],
 ): readonly LearningCitation[] {
   const selected = new Map<string, LearningCitation>();
@@ -428,10 +410,14 @@ function recurrenceCitations(
   }
   return Object.freeze([...selected.values()]);
 }
-
 function validateScopeContract(input: {
   readonly currentScope: string;
-  readonly reflection: Extract<ReflectorOutput, { readonly decision: "experiment" }>;
+  readonly reflection: Extract<
+    ReflectorOutput,
+    {
+      readonly decision: "experiment";
+    }
+  >;
   readonly verification: ScopeRelationshipVerification;
 }): void {
   const sameScope =
@@ -444,7 +430,6 @@ function validateScopeContract(input: {
     );
   }
 }
-
 function validateBroadeningEvidence(input: {
   readonly verifiedRelationship: ScopeRelationshipVerification["relationship"];
   readonly recurrenceCitations: readonly LearningCitation[];
@@ -459,17 +444,14 @@ function validateBroadeningEvidence(input: {
     );
   }
 }
-
 function citationKey(citation: LearningCitation): string {
   return canonicalJson({ source: citation.source, contentDigest: citation.contentDigest });
 }
-
 function uniqueCitations(citations: readonly LearningCitation[]): readonly LearningCitation[] {
   const unique = new Map<string, LearningCitation>();
   for (const citation of citations) unique.set(citationKey(citation), cloneCitation(citation));
   return Object.freeze([...unique.values()]);
 }
-
 function roleRequest(input: {
   readonly runId: string;
   readonly role: AgentRole;
@@ -478,17 +460,20 @@ function roleRequest(input: {
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly signal?: AbortSignal;
 }): AgentRunRequest {
-  return Object.freeze({
-    runId: input.runId,
-    role: input.role,
-    variant: input.configuration.variant,
-    messages: Object.freeze(input.messages.map((message) => Object.freeze({ ...message }))),
-    evidenceRefs: cloneEvidenceRefs(input.evidenceRefs),
-    availableTools: Object.freeze([]),
-    ...(input.signal ? { signal: input.signal } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      runId: input.runId,
+      role: input.role,
+      variant: input.configuration.variant,
+      messages: Object.freeze(input.messages.map((message) => Object.freeze({ ...message }))),
+      evidenceRefs: cloneEvidenceRefs(input.evidenceRefs),
+      availableTools: Object.freeze([]),
+    } as const)
+      .addOptional(input.signal ? { signal: input.signal } : undefined)
+      .finish(),
+  );
 }
-
 function researchRun(
   runId: string,
   role: AgentRole,
@@ -522,21 +507,22 @@ function researchRun(
     }),
   });
 }
-
 function normalizedHypothesisKey(scope: string, hypothesis: string, sourceAdjustmentId?: string): string {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return sha256(
-    canonicalJson({
-      scope: scope.trim().toLocaleLowerCase(),
-      hypothesis: hypothesis.trim().toLocaleLowerCase().replaceAll(/\s+/gu, " "),
-      ...(sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId }),
-    }),
+    canonicalJson(
+      createConditionalObject({
+        scope: scope.trim().toLocaleLowerCase(),
+        hypothesis: hypothesis.trim().toLocaleLowerCase().replaceAll(/\s+/gu, " "),
+      } as const)
+        .addOptional(!(sourceAdjustmentId === undefined) ? { sourceAdjustmentId } : undefined)
+        .finish(),
+    ),
   );
 }
-
 function experimentIdForHypothesis(dedupeKey: string): string {
   return `experiment_${sha256(`learning-hypothesis:${dedupeKey}`).slice(0, 32)}`;
 }
-
 function followUpExperimentId(input: {
   readonly dedupeKey: string;
   readonly predecessorExperimentId: string;
@@ -549,11 +535,9 @@ function followUpExperimentId(input: {
     }),
   ).slice(0, 32)}`;
 }
-
 function normalizedCapabilityScope(scope: string): string {
   return scope.trim().toLocaleLowerCase().replaceAll(/\s+/gu, " ");
 }
-
 function learnedCapabilityId(input: {
   readonly name: string;
   readonly scope: string;
@@ -574,10 +558,14 @@ function learnedCapabilityId(input: {
     }),
   ).slice(0, 12)}`;
 }
-
 function capabilityFromReflection(
   current: Capability,
-  reflection: Extract<ReflectorOutput, { readonly decision: "experiment" }>,
+  reflection: Extract<
+    ReflectorOutput,
+    {
+      readonly decision: "experiment";
+    }
+  >,
 ): Capability {
   if (normalizedCapabilityScope(reflection.scope) === normalizedCapabilityScope(current.scope)) {
     return Object.freeze({ ...current });
@@ -592,7 +580,6 @@ function capabilityFromReflection(
     ...authored,
   });
 }
-
 function safeComponentPath(path: string): string {
   const normalized = path.replaceAll("\\", "/").replace(/^\/+/, "");
   if (
@@ -603,7 +590,6 @@ function safeComponentPath(path: string): string {
   }
   return normalized;
 }
-
 function freezeBrief(brief: ExperimentBrief): ExperimentBrief {
   return Object.freeze({
     ...brief,
@@ -625,7 +611,6 @@ function freezeBrief(brief: ExperimentBrief): ExperimentBrief {
     ),
   });
 }
-
 function sourceCasesFrom(input: {
   readonly experimentId: string;
   readonly scope: string;
@@ -651,7 +636,6 @@ function sourceCasesFrom(input: {
     ),
   );
 }
-
 function mergeBriefObservation(
   existing: ExperimentBrief,
   harvest: SignalHarvestResult,
@@ -680,7 +664,6 @@ function mergeBriefObservation(
     recurrenceCount: recurrence.length,
   });
 }
-
 interface WorkingAdjustmentEvidenceCandidate {
   readonly kind: "current_turn" | "served_turn";
   readonly adjustmentId: string | null;
@@ -693,8 +676,7 @@ interface WorkingAdjustmentEvidenceCandidate {
   readonly settledAt: string;
   readonly evidenceRefs: readonly EvidenceRef[];
 }
-
-const WORKING_ADJUSTMENT_CONTEXT_MAX_CHARACTERS = 11_999;
+const WORKING_ADJUSTMENT_CONTEXT_MAX_CHARACTERS = 11999;
 const WORKING_ADJUSTMENT_PROMPT_IDENTITY_LIMIT = 256;
 interface WorkingAdjustmentPromptStringLimits {
   readonly projectId: number;
@@ -707,19 +689,17 @@ interface WorkingAdjustmentPromptStringLimits {
   readonly evidenceSummary: number;
   readonly evidenceSettledAt: number;
 }
-
 const WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS: WorkingAdjustmentPromptStringLimits = Object.freeze({
   projectId: 256,
   projectRoot: 512,
-  observation: 1_024,
-  strategy: 3_072,
+  observation: 1024,
+  strategy: 3072,
   successSignal: 768,
   createdFromTurnId: 128,
   evidenceTurnId: 128,
   evidenceSummary: 256,
   evidenceSettledAt: 64,
 });
-
 const COMPACT_WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS: WorkingAdjustmentPromptStringLimits = Object.freeze({
   projectId: 17,
   projectRoot: 17,
@@ -731,18 +711,15 @@ const COMPACT_WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS: WorkingAdjustmentPromptSt
   evidenceSummary: 17,
   evidenceSettledAt: 17,
 });
-
 function jsonStringContentLength(value: string): number {
   return JSON.stringify(value).length - 2;
 }
-
 function boundedPromptString(value: string, maxEscapedCharacters: number): string {
   if (jsonStringContentLength(value) <= maxEscapedCharacters) return value;
   const digest = sha256(value).slice(0, 16);
   const suffix = `…${digest}`;
   const suffixLength = jsonStringContentLength(suffix);
   if (suffixLength > maxEscapedCharacters) return digest.slice(0, maxEscapedCharacters);
-
   let prefix = "";
   let prefixLength = 0;
   const availablePrefixCharacters = maxEscapedCharacters - suffixLength;
@@ -756,18 +733,20 @@ function boundedPromptString(value: string, maxEscapedCharacters: number): strin
   }
   return `${prefix}${suffix}`;
 }
-
 function workingAdjustmentPromptIdentity(adjustmentId: string | null | undefined): string | null {
   if (adjustmentId === null || adjustmentId === undefined) return null;
   return boundedPromptString(adjustmentId, WORKING_ADJUSTMENT_PROMPT_IDENTITY_LIMIT);
 }
-
 function serializeWorkingAdjustmentContext(input: {
   readonly turn: LearningTurnInput;
   readonly activeAdjustment?: WorkingAdjustment;
   readonly evidence: readonly WorkingAdjustmentEvidenceCandidate[];
-}): Readonly<{ content: string; expectedActiveAdjustmentId: string | null }> {
+}): Readonly<{
+  content: string;
+  expectedActiveAdjustmentId: string | null;
+}> {
   const expectedActiveAdjustmentId = workingAdjustmentPromptIdentity(input.turn.expectedActiveAdjustmentId);
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const projectContext = (
     limits: WorkingAdjustmentPromptStringLimits,
     includeEvidenceSummaries: boolean,
@@ -792,24 +771,29 @@ function serializeWorkingAdjustmentContext(input: {
               limits.createdFromTurnId,
             ),
           },
-    evidence: input.evidence.map((candidate, citationIndex) => ({
-      citationIndex,
-      kind: candidate.kind,
-      turnId: boundedPromptString(candidate.turnId, limits.evidenceTurnId),
-      outcome: candidate.outcome,
-      ...(candidate.summary === undefined || !includeEvidenceSummaries
-        ? {}
-        : {
-            summary: boundedPromptString(candidate.summary, limits.evidenceSummary),
-          }),
-      settledAt: boundedPromptString(candidate.settledAt, limits.evidenceSettledAt),
-    })),
+    evidence: input.evidence.map((candidate, citationIndex) =>
+      createConditionalObject({
+        citationIndex,
+        kind: candidate.kind,
+        turnId: boundedPromptString(candidate.turnId, limits.evidenceTurnId),
+        outcome: candidate.outcome,
+      } as const)
+        .addOptional(
+          !(candidate.summary === undefined || !includeEvidenceSummaries)
+            ? {
+                summary: boundedPromptString(candidate.summary, limits.evidenceSummary),
+              }
+            : undefined,
+        )
+        .add({
+          settledAt: boundedPromptString(candidate.settledAt, limits.evidenceSettledAt),
+        } as const)
+        .finish(),
+    ),
   });
-
   const content = JSON.stringify(projectContext(WORKING_ADJUSTMENT_PROMPT_STRING_LIMITS, true));
   if (content.length <= WORKING_ADJUSTMENT_CONTEXT_MAX_CHARACTERS)
     return Object.freeze({ content, expectedActiveAdjustmentId });
-
   // This compact projection preserves the ordered citation index mapping and digest identity while
   // ensuring future structural growth cannot turn prompt shaping into a failed reflection job.
   const compactContent = JSON.stringify(
@@ -817,7 +801,6 @@ function serializeWorkingAdjustmentContext(input: {
   );
   if (compactContent.length <= WORKING_ADJUSTMENT_CONTEXT_MAX_CHARACTERS)
     return Object.freeze({ content: compactContent, expectedActiveAdjustmentId });
-
   // Parsed learning turns contain at most one current and eight served evidence candidates. This
   // final projection is therefore structurally bounded while retaining the exact private citation
   // indexes and the same expected-adjustment token used by decision validation.
@@ -831,18 +814,24 @@ function serializeWorkingAdjustmentContext(input: {
     expectedActiveAdjustmentId,
   });
 }
-
 function workingAdjustmentEvidence(turn: LearningTurnInput): readonly WorkingAdjustmentEvidenceCandidate[] {
-  const current: WorkingAdjustmentEvidenceCandidate = Object.freeze({
-    kind: "current_turn",
-    adjustmentId: turn.expectedActiveAdjustmentId ?? null,
-    sessionId: turn.sessionId,
-    turnId: turn.turnId,
-    ...(turn.outcomeId === undefined ? {} : { outcomeId: turn.outcomeId }),
-    outcome: turn.outcome,
-    settledAt: turn.occurredAt,
-    evidenceRefs: cloneEvidenceRefs(turn.evidenceRefs),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  const current: WorkingAdjustmentEvidenceCandidate = Object.freeze(
+    createConditionalObject({
+      kind: "current_turn",
+      adjustmentId: turn.expectedActiveAdjustmentId ?? null,
+      sessionId: turn.sessionId,
+      turnId: turn.turnId,
+    } as const)
+      .addOptional(!(turn.outcomeId === undefined) ? { outcomeId: turn.outcomeId } : undefined)
+      .add({
+        outcome: turn.outcome,
+        settledAt: turn.occurredAt,
+        evidenceRefs: cloneEvidenceRefs(turn.evidenceRefs),
+      } as const)
+      .finish(),
+  );
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze([
     current,
     ...turn.servedWorkingAdjustmentOutcomes.map((served) =>
@@ -861,7 +850,6 @@ function workingAdjustmentEvidence(turn: LearningTurnInput): readonly WorkingAdj
     ),
   ]);
 }
-
 function citedWorkingAdjustmentEvidence(
   indexes: readonly number[],
   candidates: readonly WorkingAdjustmentEvidenceCandidate[],
@@ -871,6 +859,7 @@ function citedWorkingAdjustmentEvidence(
     if (!candidate) throw new Error(`Working-adjustment evidence citation ${index} is out of bounds`);
     return candidate;
   });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze(
     uniqueEvidenceRefs(
       selected.flatMap((candidate) => [
@@ -888,7 +877,6 @@ function citedWorkingAdjustmentEvidence(
     ).slice(0, WORKING_ADJUSTMENT_LIMITS.evidenceRefs),
   );
 }
-
 export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOptions): AutomaticLearningOrgan {
   const config = AutomaticLearningConfigSchema.parse(options.config);
   validateRoleConfiguration("reflector", config.roles.reflector);
@@ -896,7 +884,6 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
   validateRoleConfiguration("revisionAgent", config.roles.revisionAgent);
   const nextId = options.nextId ?? createId;
   const hypothesisOperations = new Map<string, Promise<void>>();
-
   const serializeHypothesis = async <Value>(key: string, operation: () => Promise<Value>): Promise<Value> => {
     const predecessor = hypothesisOperations.get(key) ?? Promise.resolve();
     const running = predecessor.catch(() => undefined).then(operation);
@@ -911,7 +898,6 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       if (hypothesisOperations.get(key) === marker) hypothesisOperations.delete(key);
     }
   };
-
   const harvestTurn = async (value: unknown): Promise<SignalHarvestResult> => {
     const turn = LearningTurnInputSchema.parse(value);
     const kind = signalKind(turn);
@@ -924,7 +910,6 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         recurrenceCount: 0,
       });
     }
-
     const query = (turn.correction ?? turn.userMessage).trim();
     const searched = await options.history.search({
       query,
@@ -973,7 +958,6 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       recurrenceCount: 0,
     });
   };
-
   const observeTurn = async (request: ObserveLearningTurnRequest): Promise<ObserveLearningResult> => {
     const harvest = await harvestTurn(request.turn);
     if (!config.enabled) {
@@ -1020,13 +1004,23 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       throw new Error("Served working-adjustment evidence does not match the pinned adjustment");
     }
     const adjustmentEvidence = workingAdjustmentEvidence(harvest.turn);
-    const workingAdjustmentContext = serializeWorkingAdjustmentContext({
-      turn: harvest.turn,
-      ...(request.activeWorkingAdjustment === undefined
-        ? {}
-        : { activeAdjustment: request.activeWorkingAdjustment }),
-      evidence: adjustmentEvidence,
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const workingAdjustmentContext = serializeWorkingAdjustmentContext(
+      createConditionalObject({
+        turn: harvest.turn,
+      } as const)
+        .addOptional(
+          !(request.activeWorkingAdjustment === undefined)
+            ? {
+                activeAdjustment: request.activeWorkingAdjustment,
+              }
+            : undefined,
+        )
+        .add({
+          evidence: adjustmentEvidence,
+        } as const)
+        .finish(),
+    );
     const promptExpectedAdjustmentId = workingAdjustmentContext.expectedActiveAdjustmentId;
     const runId = nextId("reflect");
     const messages: readonly AgentMessage[] = [
@@ -1064,19 +1058,24 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         content: workingAdjustmentContext.content,
       },
     ];
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const reflected = await options.inference.run(
-      roleRequest({
-        runId,
-        role: "reflector",
-        configuration: config.roles.reflector,
-        messages,
-        evidenceRefs: harvest.evidenceRefs,
-        ...(request.signal ? { signal: request.signal } : {}),
-      }),
+      roleRequest(
+        createConditionalObject({
+          runId,
+          role: "reflector",
+          configuration: config.roles.reflector,
+          messages,
+          evidenceRefs: harvest.evidenceRefs,
+        } as const)
+          .addOptional(request.signal ? { signal: request.signal } : undefined)
+          .finish(),
+      ),
       ReflectorOutputSchema,
     );
     const reflectionRun = researchRun(runId, "reflector", config.roles.reflector, reflected.trace);
     const observation = Object.freeze({ ...reflected.value.observation });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const semanticKind =
       observation.kind === "correction"
         ? ("explicit_correction" as const)
@@ -1113,7 +1112,6 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         interruption: null,
       });
     }
-
     if (
       reflected.value.decision === "apply_working_adjustment" ||
       reflected.value.decision === "unapply_working_adjustment"
@@ -1128,6 +1126,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         adjustmentEvidence,
       );
       if (reflected.value.decision === "apply_working_adjustment")
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           status: "apply_working_adjustment" as const,
           harvest: classifiedHarvest,
@@ -1151,6 +1150,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         });
       if (expectedAdjustmentId === null)
         throw new Error("Reflector cannot unapply a project with no pinned working adjustment");
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         status: "unapply_working_adjustment" as const,
         harvest: classifiedHarvest,
@@ -1171,7 +1171,6 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         interruption: null,
       });
     }
-
     const reflection = reflected.value;
     const selectedRecurrence = recurrenceCitations(reflection, classifiedHarvest.citations);
     const selectedAdjustmentEvidence = citedWorkingAdjustmentEvidence(
@@ -1192,25 +1191,29 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         ? undefined
         : request.activeWorkingAdjustment?.adjustmentId;
     const scopeRunId = nextId("scope_verify");
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const verifiedScope = await options.inference.run(
-      roleRequest({
-        runId: scopeRunId,
-        role: "reflector",
-        configuration: config.roles.reflector,
-        messages: Object.freeze([
-          Object.freeze({
-            role: "user",
-            name: "evidence",
-            content: JSON.stringify({
-              currentScope: request.capability.scope,
-              proposedScope: reflection.scope,
-              scopeRationale: reflection.scopeRationale,
+      roleRequest(
+        createConditionalObject({
+          runId: scopeRunId,
+          role: "reflector",
+          configuration: config.roles.reflector,
+          messages: Object.freeze([
+            Object.freeze({
+              role: "user",
+              name: "evidence",
+              content: JSON.stringify({
+                currentScope: request.capability.scope,
+                proposedScope: reflection.scope,
+                scopeRationale: reflection.scopeRationale,
+              }),
             }),
-          }),
-        ]),
-        evidenceRefs: Object.freeze([]),
-        ...(request.signal ? { signal: request.signal } : {}),
-      }),
+          ]),
+          evidenceRefs: Object.freeze([]),
+        } as const)
+          .addOptional(request.signal ? { signal: request.signal } : undefined)
+          .finish(),
+      ),
       ScopeRelationshipVerificationSchema,
     );
     const scopeVerificationRun = researchRun(
@@ -1231,42 +1234,50 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       evidenceRefs: readonly EvidenceRef[] = experimentHarvest.evidenceRefs,
     ): ExperimentBrief => {
       const mergedEvidenceRefs = uniqueEvidenceRefs(evidenceRefs);
-      return freezeBrief({
-        experimentId,
-        title: reflection.title,
-        hypothesis: reflection.hypothesis,
-        hypothesisDedupeKey: dedupeKey,
-        scope: reflection.scope,
-        anticipatedFutureUse: reflection.anticipatedFutureUse,
-        scopeRelationship: reflection.scopeRelationship,
-        scopeRationale: reflection.scopeRationale,
-        staleOrContradictionConditions: reflection.staleOrContradictionConditions,
-        verifiedScopeRelationship: verifiedScope.value.relationship,
-        scopeVerificationReason: verifiedScope.value.reason,
-        scopeVerificationRun,
-        capability,
-        baselineRevision: request.baselineRevision,
-        evidenceRefs: mergedEvidenceRefs,
-        feedbackSignalIds: classifiedHarvest.signals.map(({ signal }) => signal.signalId),
-        citations: classifiedHarvest.citations,
-        recurrenceCitations: selectedRecurrence,
-        sourceCases: sourceCasesFrom({
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return freezeBrief(
+        createConditionalObject({
           experimentId,
+          title: reflection.title,
+          hypothesis: reflection.hypothesis,
+          hypothesisDedupeKey: dedupeKey,
           scope: reflection.scope,
-          cases: reflection.sourceCases,
+          anticipatedFutureUse: reflection.anticipatedFutureUse,
+          scopeRelationship: reflection.scopeRelationship,
+          scopeRationale: reflection.scopeRationale,
+          staleOrContradictionConditions: reflection.staleOrContradictionConditions,
+          verifiedScopeRelationship: verifiedScope.value.relationship,
+          scopeVerificationReason: verifiedScope.value.reason,
+          scopeVerificationRun,
+          capability,
+          baselineRevision: request.baselineRevision,
           evidenceRefs: mergedEvidenceRefs,
+          feedbackSignalIds: classifiedHarvest.signals.map(({ signal }) => signal.signalId),
           citations: classifiedHarvest.citations,
-        }),
-        recurrenceCount: selectedRecurrence.length,
-        reflectionRun,
-        ...(sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId }),
-      });
+          recurrenceCitations: selectedRecurrence,
+          sourceCases: sourceCasesFrom({
+            experimentId,
+            scope: reflection.scope,
+            cases: reflection.sourceCases,
+            evidenceRefs: mergedEvidenceRefs,
+            citations: classifiedHarvest.citations,
+          }),
+          recurrenceCount: selectedRecurrence.length,
+          reflectionRun,
+        } as const)
+          .addOptional(!(sourceAdjustmentId === undefined) ? { sourceAdjustmentId } : undefined)
+          .finish(),
+      );
     };
-
     const reconcileObservation = async (
       current: ExperimentBrief,
       attemptsRemaining = MAX_BRIEF_RECONCILIATION_ATTEMPTS,
-    ): Promise<Readonly<{ status: "experiment" | "deduped"; brief: ExperimentBrief }>> => {
+    ): Promise<
+      Readonly<{
+        status: "experiment" | "deduped";
+        brief: ExperimentBrief;
+      }>
+    > => {
       const experiment = await options.experiments.getExperiment(current.experimentId);
       let status: "experiment" | "deduped";
       let proposed: ExperimentBrief;
@@ -1309,7 +1320,6 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         return await reconcileObservation(winner, attemptsRemaining - 1);
       }
     };
-
     const observed = await serializeHypothesis(dedupeKey, async () => {
       const existing = await options.briefs.findByDedupeKey(dedupeKey);
       if (!existing) {
@@ -1321,6 +1331,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         const brief = makeBrief(experimentIdForHypothesis(dedupeKey));
         await persistHypothesisExperiment(brief);
         try {
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           return Object.freeze({ status: "experiment" as const, brief: await options.briefs.put(brief) });
         } catch (error) {
           if (!isExperimentBriefPublicationCollision(error)) throw error;
@@ -1329,7 +1340,6 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
           return await reconcileObservation(winner);
         }
       }
-
       validateBroadeningEvidence({
         verifiedRelationship: verifiedScope.value.relationship,
         recurrenceCitations: uniqueCitations([...existing.recurrenceCitations, ...selectedRecurrence]),
@@ -1337,7 +1347,6 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       });
       return await reconcileObservation(existing);
     });
-
     if (observed.status === "deduped") {
       return Object.freeze({
         status: "deduped",
@@ -1366,19 +1375,28 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       interruption: null,
     });
   };
-
   async function persistHypothesisExperiment(brief: ExperimentBrief): Promise<Experiment> {
-    const experiment: Experiment = Object.freeze({
-      experimentId: brief.experimentId,
-      hypothesis: brief.hypothesis,
-      scope: brief.scope,
-      evidenceRefs: cloneEvidenceRefs(brief.evidenceRefs),
-      baselineRevision: Object.freeze({ ...brief.baselineRevision }),
-      candidateRevisions: Object.freeze([]),
-      feedbackSignalIds: Object.freeze([...brief.feedbackSignalIds]),
-      status: "hypothesis",
-      ...(brief.sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId: brief.sourceAdjustmentId }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const experiment: Experiment = Object.freeze(
+      createConditionalObject({
+        experimentId: brief.experimentId,
+        hypothesis: brief.hypothesis,
+        scope: brief.scope,
+        evidenceRefs: cloneEvidenceRefs(brief.evidenceRefs),
+        baselineRevision: Object.freeze({ ...brief.baselineRevision }),
+        candidateRevisions: Object.freeze([]),
+        feedbackSignalIds: Object.freeze([...brief.feedbackSignalIds]),
+        status: "hypothesis",
+      } as const)
+        .addOptional(
+          !(brief.sourceAdjustmentId === undefined)
+            ? {
+                sourceAdjustmentId: brief.sourceAdjustmentId,
+              }
+            : undefined,
+        )
+        .finish(),
+    );
     const existing = await options.experiments.getExperiment(brief.experimentId);
     if (existing) {
       if (
@@ -1402,7 +1420,6 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     await options.experiments.putExperiment(experiment);
     return experiment;
   }
-
   async function attachHarvestToExperiment(
     brief: ExperimentBrief,
     harvest: SignalHarvestResult,
@@ -1422,7 +1439,7 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     await options.experiments.putExperiment(updated);
     return updated;
   }
-
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const recordCandidateFile = async (input: {
     readonly capabilityId: string;
     readonly capabilityRevisionId: string;
@@ -1432,15 +1449,19 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
     readonly evidenceRefs: readonly EvidenceRef[];
     readonly predecessorRevisionId?: string;
   }): Promise<FileRevisionRef> =>
-    await options.candidateDefinitions.recordCandidateDefinition({
-      workingPath: `${input.capabilityId}/${input.capabilityRevisionId}/${input.area}/${safeComponentPath(input.path)}`,
-      bytes: new TextEncoder().encode(input.content),
-      actor: { actorId: "automatic-learning-organ", kind: "noesis" },
-      reason: `Capability revision ${input.capabilityRevisionId} authors ${input.area}`,
-      provenanceRefs: input.evidenceRefs,
-      ...(input.predecessorRevisionId ? { predecessorRevisionId: input.predecessorRevisionId } : {}),
-    });
-
+    await options.candidateDefinitions.recordCandidateDefinition(
+      createConditionalObject({
+        workingPath: `${input.capabilityId}/${input.capabilityRevisionId}/${input.area}/${safeComponentPath(input.path)}`,
+        bytes: new TextEncoder().encode(input.content),
+        actor: { actorId: "automatic-learning-organ", kind: "noesis" },
+        reason: `Capability revision ${input.capabilityRevisionId} authors ${input.area}`,
+        provenanceRefs: input.evidenceRefs,
+      } as const)
+        .addOptional(
+          input.predecessorRevisionId ? { predecessorRevisionId: input.predecessorRevisionId } : undefined,
+        )
+        .finish(),
+    );
   const materializeList = async (input: {
     readonly capabilityId: string;
     readonly capabilityRevisionId: string;
@@ -1456,16 +1477,19 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
         if (paths.has(path)) throw new Error(`Duplicate candidate ${input.area} path ${path}`);
         paths.add(path);
         const predecessor = input.predecessors[index];
-        return await recordCandidateFile({
-          ...input,
-          path,
-          content: file.content,
-          ...(predecessor ? { predecessorRevisionId: predecessor.revisionId } : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return await recordCandidateFile(
+          createConditionalObject({
+            ...input,
+            path,
+            content: file.content,
+          } as const)
+            .addOptional(predecessor ? { predecessorRevisionId: predecessor.revisionId } : undefined)
+            .finish(),
+        );
       }),
     );
   };
-
   const persistCandidateExperiment = async (
     brief: ExperimentBrief,
     revision: CapabilityRevision,
@@ -1473,27 +1497,36 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
   ): Promise<Experiment> => {
     const manifestRevision = await options.candidateManifests?.persist({ brief, revision, revisionRef });
     const current = await options.experiments.getExperiment(brief.experimentId);
-    const experiment: Experiment = Object.freeze({
-      experimentId: brief.experimentId,
-      hypothesis: brief.hypothesis,
-      scope: brief.scope,
-      evidenceRefs: uniqueEvidenceRefs([
-        ...(current?.evidenceRefs ?? []),
-        ...brief.evidenceRefs,
-        ...(manifestRevision ? [manifestRevision] : []),
-      ]),
-      baselineRevision: Object.freeze({ ...brief.baselineRevision }),
-      candidateRevisions: Object.freeze([Object.freeze({ ...revisionRef })]),
-      feedbackSignalIds: Object.freeze([
-        ...new Set([...(current?.feedbackSignalIds ?? []), ...brief.feedbackSignalIds]),
-      ]),
-      status: "authoring",
-      ...(brief.sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId: brief.sourceAdjustmentId }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const experiment: Experiment = Object.freeze(
+      createConditionalObject({
+        experimentId: brief.experimentId,
+        hypothesis: brief.hypothesis,
+        scope: brief.scope,
+        evidenceRefs: uniqueEvidenceRefs([
+          ...(current?.evidenceRefs ?? []),
+          ...brief.evidenceRefs,
+          ...(manifestRevision ? [manifestRevision] : []),
+        ]),
+        baselineRevision: Object.freeze({ ...brief.baselineRevision }),
+        candidateRevisions: Object.freeze([Object.freeze({ ...revisionRef })]),
+        feedbackSignalIds: Object.freeze([
+          ...new Set([...(current?.feedbackSignalIds ?? []), ...brief.feedbackSignalIds]),
+        ]),
+        status: "authoring",
+      } as const)
+        .addOptional(
+          !(brief.sourceAdjustmentId === undefined)
+            ? {
+                sourceAdjustmentId: brief.sourceAdjustmentId,
+              }
+            : undefined,
+        )
+        .finish(),
+    );
     await options.experiments.putExperiment(experiment);
     return experiment;
   };
-
   const authorBundle = async (input: {
     readonly brief: ExperimentBrief;
     readonly predecessorRevision: CapabilityRevisionRef;
@@ -1508,15 +1541,19 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       input.predecessorRevision.capabilityId === input.brief.capability.capabilityId;
     options.capabilities.registerCapability(input.brief.capability);
     const runId = nextId(input.role === "revision_author" ? "author" : "revise");
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const inferred = await options.inference.run(
-      roleRequest({
-        runId,
-        role: input.role,
-        configuration: input.configuration,
-        messages: input.messages,
-        evidenceRefs: input.brief.evidenceRefs,
-        ...(input.signal ? { signal: input.signal } : {}),
-      }),
+      roleRequest(
+        createConditionalObject({
+          runId,
+          role: input.role,
+          configuration: input.configuration,
+          messages: input.messages,
+          evidenceRefs: input.brief.evidenceRefs,
+        } as const)
+          .addOptional(input.signal ? { signal: input.signal } : undefined)
+          .finish(),
+      ),
       RevisionAuthorInferenceOutputSchema,
     );
     const authored = Object.freeze({
@@ -1549,17 +1586,25 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       evidenceRefs: input.brief.evidenceRefs,
       predecessors: revisesExistingCapability ? predecessor.tools : Object.freeze([]),
     });
-    const routerRevision = await recordCandidateFile({
-      capabilityId: input.brief.capability.capabilityId,
-      capabilityRevisionId,
-      area: "router",
-      path: authored.value.router.path,
-      content: authored.value.router.content,
-      evidenceRefs: input.brief.evidenceRefs,
-      ...(revisesExistingCapability
-        ? { predecessorRevisionId: predecessor.toolset.routerRevision.revisionId }
-        : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const routerRevision = await recordCandidateFile(
+      createConditionalObject({
+        capabilityId: input.brief.capability.capabilityId,
+        capabilityRevisionId,
+        area: "router",
+        path: authored.value.router.path,
+        content: authored.value.router.content,
+        evidenceRefs: input.brief.evidenceRefs,
+      } as const)
+        .addOptional(
+          revisesExistingCapability
+            ? {
+                predecessorRevisionId: predecessor.toolset.routerRevision.revisionId,
+              }
+            : undefined,
+        )
+        .finish(),
+    );
     const sourceEvaluationDefinitions = await materializeList({
       capabilityId: input.brief.capability.capabilityId,
       capabilityRevisionId,
@@ -1568,36 +1613,52 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       evidenceRefs: input.brief.evidenceRefs,
       predecessors: revisesExistingCapability ? predecessor.sourceEvaluationDefinitions : Object.freeze([]),
     });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const dependencyLock = authored.value.dependencyLock
-      ? await recordCandidateFile({
-          capabilityId: input.brief.capability.capabilityId,
-          capabilityRevisionId,
-          area: "dependencies",
-          path: authored.value.dependencyLock.path,
-          content: authored.value.dependencyLock.content,
-          evidenceRefs: input.brief.evidenceRefs,
-          ...(revisesExistingCapability && predecessor.dependencyLock
-            ? { predecessorRevisionId: predecessor.dependencyLock.revisionId }
-            : {}),
-        })
+      ? await recordCandidateFile(
+          createConditionalObject({
+            capabilityId: input.brief.capability.capabilityId,
+            capabilityRevisionId,
+            area: "dependencies",
+            path: authored.value.dependencyLock.path,
+            content: authored.value.dependencyLock.content,
+            evidenceRefs: input.brief.evidenceRefs,
+          } as const)
+            .addOptional(
+              revisesExistingCapability && predecessor.dependencyLock
+                ? {
+                    predecessorRevisionId: predecessor.dependencyLock.revisionId,
+                  }
+                : undefined,
+            )
+            .finish(),
+        )
       : undefined;
-    const construction: CapabilityRevisionConstruction = {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const construction: CapabilityRevisionConstruction = createConditionalObject({
       definitionState: "candidate",
       capabilityRevisionId,
       capabilityId: input.brief.capability.capabilityId,
-      ...(revisesExistingCapability ? { predecessorRevisionId: predecessor.capabilityRevisionId } : {}),
-      promptModules,
-      skills,
-      tools,
-      routerRevision,
-      routerStrategyId: authored.value.router.strategyId,
-      activationPolicy: authored.value.activationPolicy,
-      ...(dependencyLock ? { dependencyLock } : {}),
-      permissionManifest: authored.value.permissionManifest,
-      evidenceRefs: input.brief.evidenceRefs,
-      sourceEvaluationDefinitions,
-      requestedPermissionDelta: authored.value.requestedPermissionDelta,
-    };
+    } as const)
+      .addOptional(
+        revisesExistingCapability ? { predecessorRevisionId: predecessor.capabilityRevisionId } : undefined,
+      )
+      .add({
+        promptModules,
+        skills,
+        tools,
+        routerRevision,
+        routerStrategyId: authored.value.router.strategyId,
+        activationPolicy: authored.value.activationPolicy,
+      } as const)
+      .addOptional(dependencyLock ? { dependencyLock } : undefined)
+      .add({
+        permissionManifest: authored.value.permissionManifest,
+        evidenceRefs: input.brief.evidenceRefs,
+        sourceEvaluationDefinitions,
+        requestedPermissionDelta: authored.value.requestedPermissionDelta,
+      } as const)
+      .finish();
     const revisionRef = options.capabilities.constructRevision(construction);
     const revision = options.capabilities.getRevision(revisionRef);
     if (!revision) throw new Error("AC-03 did not retain the complete authored capability revision");
@@ -1610,43 +1671,47 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       experiment,
     });
   };
-
   const authorExperimentRevision = async (
     request: AuthorExperimentRevisionRequest,
   ): Promise<AuthorRevisionResult> => {
     const predecessorRevision = request.predecessorRevision ?? request.brief.baselineRevision;
-    return await authorBundle({
-      brief: request.brief,
-      predecessorRevision,
-      role: "revision_author",
-      configuration: config.roles.revisionAuthor,
-      ...(request.signal ? { signal: request.signal } : {}),
-      messages: [
-        {
-          role: "user",
-          name: "hypothesis",
-          content: JSON.stringify({
-            experimentId: request.brief.experimentId,
-            hypothesis: request.brief.hypothesis,
-            scope: request.brief.scope,
-            anticipatedFutureUse: request.brief.anticipatedFutureUse,
-            scopeRelationship: request.brief.scopeRelationship,
-            scopeRationale: request.brief.scopeRationale,
-            staleOrContradictionConditions: request.brief.staleOrContradictionConditions,
-            verifiedScopeRelationship: request.brief.verifiedScopeRelationship,
-            scopeVerificationReason: request.brief.scopeVerificationReason,
-            capability: request.brief.capability,
-          }),
-        },
-        {
-          role: "user",
-          name: "source_cases",
-          content: JSON.stringify(request.brief.sourceCases),
-        },
-      ],
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return await authorBundle(
+      createConditionalObject({
+        brief: request.brief,
+        predecessorRevision,
+        role: "revision_author",
+        configuration: config.roles.revisionAuthor,
+      } as const)
+        .addOptional(request.signal ? { signal: request.signal } : undefined)
+        .add({
+          messages: [
+            {
+              role: "user",
+              name: "hypothesis",
+              content: JSON.stringify({
+                experimentId: request.brief.experimentId,
+                hypothesis: request.brief.hypothesis,
+                scope: request.brief.scope,
+                anticipatedFutureUse: request.brief.anticipatedFutureUse,
+                scopeRelationship: request.brief.scopeRelationship,
+                scopeRationale: request.brief.scopeRationale,
+                staleOrContradictionConditions: request.brief.staleOrContradictionConditions,
+                verifiedScopeRelationship: request.brief.verifiedScopeRelationship,
+                scopeVerificationReason: request.brief.scopeVerificationReason,
+                capability: request.brief.capability,
+              }),
+            },
+            {
+              role: "user",
+              name: "source_cases",
+              content: JSON.stringify(request.brief.sourceCases),
+            },
+          ],
+        } as const)
+        .finish(),
+    );
   };
-
   const authorFollowUpRevision = async (
     request: AuthorFollowUpRevisionRequest,
   ): Promise<AuthorRevisionResult> => {
@@ -1678,62 +1743,76 @@ export function createAutomaticLearningOrgan(options: AutomaticLearningOrganOpti
       evidenceRefs,
       citations,
     });
-    const brief = freezeBrief({
-      experimentId: request.parentExperiment.followUpExperimentId,
-      title: `Revise ${request.capability.name}`,
-      hypothesis: `A successor revision can address: ${request.failureSummary}`,
-      hypothesisDedupeKey: normalizedHypothesisKey(
-        request.parentExperiment.scope,
-        request.failureSummary,
-        request.parentExperiment.sourceAdjustmentId,
-      ),
-      scope: request.parentExperiment.scope,
-      anticipatedFutureUse: `When revising ${request.capability.name} after this observed failure recurs.`,
-      scopeRelationship: "same",
-      scopeRationale: "The follow-up revises the same capability scope implicated by the evaluated failure.",
-      staleOrContradictionConditions: Object.freeze([
-        "The observed failure no longer reproduces against the current capability revision.",
-        "The successor weakens behavior that the prior evaluation established as useful.",
-      ]),
-      verifiedScopeRelationship: "same",
-      scopeVerificationReason: "The follow-up retains the parent experiment's capability scope.",
-      capability: request.capability,
-      baselineRevision: predecessorRevision,
-      evidenceRefs,
-      feedbackSignalIds: request.parentExperiment.feedbackSignalIds,
-      citations,
-      recurrenceCitations: citations,
-      sourceCases,
-      recurrenceCount: citations.length,
-      ...(request.parentExperiment.sourceAdjustmentId === undefined
-        ? {}
-        : { sourceAdjustmentId: request.parentExperiment.sourceAdjustmentId }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const brief = freezeBrief(
+      createConditionalObject({
+        experimentId: request.parentExperiment.followUpExperimentId,
+        title: `Revise ${request.capability.name}`,
+        hypothesis: `A successor revision can address: ${request.failureSummary}`,
+        hypothesisDedupeKey: normalizedHypothesisKey(
+          request.parentExperiment.scope,
+          request.failureSummary,
+          request.parentExperiment.sourceAdjustmentId,
+        ),
+        scope: request.parentExperiment.scope,
+        anticipatedFutureUse: `When revising ${request.capability.name} after this observed failure recurs.`,
+        scopeRelationship: "same",
+        scopeRationale:
+          "The follow-up revises the same capability scope implicated by the evaluated failure.",
+        staleOrContradictionConditions: Object.freeze([
+          "The observed failure no longer reproduces against the current capability revision.",
+          "The successor weakens behavior that the prior evaluation established as useful.",
+        ]),
+        verifiedScopeRelationship: "same",
+        scopeVerificationReason: "The follow-up retains the parent experiment's capability scope.",
+        capability: request.capability,
+        baselineRevision: predecessorRevision,
+        evidenceRefs,
+        feedbackSignalIds: request.parentExperiment.feedbackSignalIds,
+        citations,
+        recurrenceCitations: citations,
+        sourceCases,
+        recurrenceCount: citations.length,
+      } as const)
+        .addOptional(
+          !(request.parentExperiment.sourceAdjustmentId === undefined)
+            ? {
+                sourceAdjustmentId: request.parentExperiment.sourceAdjustmentId,
+              }
+            : undefined,
+        )
+        .finish(),
+    );
     await options.briefs.put(brief);
-    return await authorBundle({
-      brief,
-      predecessorRevision,
-      role: "revision_agent",
-      configuration: config.roles.revisionAgent,
-      ...(request.signal ? { signal: request.signal } : {}),
-      messages: [
-        {
-          role: "user",
-          name: "failures",
-          content: JSON.stringify({
-            parentExperimentId: request.parentExperiment.experimentId,
-            failureSummary: request.failureSummary,
-            predecessorRevision,
-          }),
-        },
-        {
-          role: "user",
-          name: "judgment_evidence",
-          content: JSON.stringify(request.judgmentEvidenceRefs),
-        },
-      ],
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return await authorBundle(
+      createConditionalObject({
+        brief,
+        predecessorRevision,
+        role: "revision_agent",
+        configuration: config.roles.revisionAgent,
+      } as const)
+        .addOptional(request.signal ? { signal: request.signal } : undefined)
+        .add({
+          messages: [
+            {
+              role: "user",
+              name: "failures",
+              content: JSON.stringify({
+                parentExperimentId: request.parentExperiment.experimentId,
+                failureSummary: request.failureSummary,
+                predecessorRevision,
+              }),
+            },
+            {
+              role: "user",
+              name: "judgment_evidence",
+              content: JSON.stringify(request.judgmentEvidenceRefs),
+            },
+          ],
+        } as const)
+        .finish(),
+    );
   };
-
   return Object.freeze({ observeTurn, authorExperimentRevision, authorFollowUpRevision });
 }

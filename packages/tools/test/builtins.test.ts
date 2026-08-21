@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import { createHash } from "node:crypto";
 import { access, chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,7 +13,6 @@ import {
   type ToolDefinition,
   type ToolExecutionContext,
 } from "../src/index.ts";
-
 const permission = Object.freeze({
   effects: Object.freeze(["read", "write", "execute", "network"]),
   resourcePatterns: Object.freeze([
@@ -26,13 +26,13 @@ const permission = Object.freeze({
   ]),
   credentialRefs: Object.freeze([]),
 });
-
 function authority(): Pick<AuthorityBoundary, "runForeground"> {
   return Object.freeze({
     runForeground: async <T extends JsonValue>(
       request: Parameters<AuthorityBoundary["runForeground"]>[0],
     ): Promise<EffectDecision<T>> => {
       try {
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze({
           ok: true,
           value: (await request.execute(
@@ -46,6 +46,7 @@ function authority(): Pick<AuthorityBoundary, "runForeground"> {
         });
       } catch (error) {
         const failure = inspectEffectExecutionFailure(error);
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze({
           ok: false,
           code: failure?.code ?? ("failed" as const),
@@ -55,7 +56,6 @@ function authority(): Pick<AuthorityBoundary, "runForeground"> {
     },
   });
 }
-
 function context(signal = new AbortController().signal): ToolExecutionContext {
   return Object.freeze({
     executionId: "execution-builtins",
@@ -65,41 +65,41 @@ function context(signal = new AbortController().signal): ToolExecutionContext {
     signal,
   });
 }
-
 function tool(definitions: readonly ToolDefinition[], name: string): ToolDefinition {
   const definition = definitions.find((candidate) => candidate.name === name);
   if (!definition) throw new Error(`Missing ${name}`);
   return definition;
 }
-
 function toolsAt(cwd: string, searchCommand?: string): readonly ToolDefinition[] {
-  return createLocalWorkTools({
-    cwd,
-    ...(searchCommand ? { searchCommand } : {}),
-    writeArtifact: async ({ path, content }) => ({
-      path,
-      bytes: Buffer.byteLength(content, "utf8"),
-      contentDigest: createHash("sha256").update(content).digest("hex"),
-    }),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  return createLocalWorkTools(
+    createConditionalObject({
+      cwd,
+    } as const)
+      .addOptional(searchCommand ? { searchCommand } : undefined)
+      .add({
+        writeArtifact: async ({ path, content }: { readonly path: string; readonly content: string }) => ({
+          path,
+          bytes: Buffer.byteLength(content, "utf8"),
+          contentDigest: createHash("sha256").update(content).digest("hex"),
+        }),
+      } as const)
+      .finish(),
+  );
 }
-
 afterEach(() => {
   vi.unstubAllGlobals();
 });
-
 describe("local work tools", () => {
   it("streams a bounded file read while hashing the complete file", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-read-"));
     const content = `${"abcdefghij\n".repeat(Math.ceil(MAX_TOOL_TEXT_BYTES / 10) + 100)}tail`;
     const path = join(cwd, "large.txt");
     await writeFile(path, content, "utf8");
-
     const result = await tool(toolsAt(cwd), "files.read").execute(
       { path: "large.txt", startLine: 1 },
       context(),
     );
-
     expect(result).toMatchObject({
       path,
       truncated: true,
@@ -114,11 +114,9 @@ describe("local work tools", () => {
       throw new Error("files.read returned an unexpected value");
     expect(Buffer.byteLength(result["content"], "utf8")).toBeLessThanOrEqual(MAX_TOOL_TEXT_BYTES);
   });
-
   it("uses a read-only resource namespace distinct from file writes", () => {
     const read = tool(toolsAt("/workspace"), "files.read");
     const write = tool(toolsAt("/workspace"), "files.write");
-
     expect(read.effect({ path: "/outside/notes.md" }, context())).toMatchObject({
       effect: "read",
       resource: "file-read:/outside/notes.md",
@@ -128,13 +126,11 @@ describe("local work tools", () => {
       resource: "file:/outside/notes.md",
     });
   });
-
   it("does not invent a trailing line for newline-terminated or empty files", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-lines-"));
     await writeFile(join(cwd, "terminated.txt"), "alpha\nbeta\n", "utf8");
     await writeFile(join(cwd, "empty.txt"), "", "utf8");
     const read = tool(toolsAt(cwd), "files.read");
-
     await expect(read.execute({ path: "terminated.txt" }, context())).resolves.toMatchObject({
       content: "alpha\nbeta",
       endLine: 2,
@@ -148,22 +144,19 @@ describe("local work tools", () => {
       truncated: false,
     });
   });
-
   it("does not spawn a pre-aborted shell command", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-abort-"));
     const marker = join(cwd, "should-not-exist");
     const controller = new AbortController();
     controller.abort();
-
     await expect(
       tool(toolsAt(cwd), "shell.run").execute(
-        { command: `touch ${JSON.stringify(marker)}`, timeoutMs: 1_000 },
+        { command: `touch ${JSON.stringify(marker)}`, timeoutMs: 1000 },
         context(controller.signal),
       ),
-    ).rejects.toSatisfy((error: unknown) => inspectEffectExecutionFailure(error)?.code === "cancelled");
+    ).rejects.toSatisfy((cause: unknown) => inspectEffectExecutionFailure(cause)?.code === "cancelled");
     await expect(access(marker)).rejects.toThrow();
   });
-
   it("terminates shell descendants when a command is cancelled", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-tree-"));
     const marker = join(cwd, "descendant-survived");
@@ -174,18 +167,16 @@ describe("local work tools", () => {
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(childScript)} & wait`;
     const controller = new AbortController();
     const execution = tool(toolsAt(cwd), "shell.run").execute(
-      { command, timeoutMs: 5_000 },
+      { command, timeoutMs: 5000 },
       context(controller.signal),
     );
     setTimeout(() => controller.abort(), 100);
-
     await expect(execution).rejects.toSatisfy(
-      (error: unknown) => inspectEffectExecutionFailure(error)?.code === "cancelled",
+      (cause: unknown) => inspectEffectExecutionFailure(cause)?.code === "cancelled",
     );
     await new Promise((resolveWait) => setTimeout(resolveWait, 850));
     await expect(access(marker)).rejects.toThrow();
   });
-
   it("kills a descendant group on timeout after the direct shell has exited", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-timeout-tree-"));
     const marker = join(cwd, "timed-out-descendant-survived");
@@ -195,15 +186,13 @@ describe("local work tools", () => {
     ].join(";");
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(childScript)} & exit 0`;
     const startedAt = Date.now();
-
     await expect(
       tool(toolsAt(cwd), "shell.run").execute({ command, timeoutMs: 150 }, context()),
     ).rejects.toThrow("Process timed out after 150ms");
-    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(Date.now() - startedAt).toBeLessThan(2000);
     await new Promise((resolveWait) => setTimeout(resolveWait, 850));
     await expect(access(marker)).rejects.toThrow();
   });
-
   it("decodes split UTF-8 sequences from stdout and stderr without replacement characters", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-utf8-"));
     const script = [
@@ -215,9 +204,8 @@ describe("local work tools", () => {
       "}, 50)",
     ].join(";");
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
-
     await expect(
-      tool(toolsAt(cwd), "shell.run").execute({ command, timeoutMs: 2_000 }, context()),
+      tool(toolsAt(cwd), "shell.run").execute({ command, timeoutMs: 2000 }, context()),
     ).resolves.toMatchObject({
       exitCode: 0,
       stdout: "€",
@@ -225,20 +213,13 @@ describe("local work tools", () => {
       truncated: false,
     });
   });
-
   it("bounds decoded UTF-8 output when invalid or incomplete bytes expand during decoding", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-utf8-bounds-"));
     const shell = tool(toolsAt(cwd), "shell.run");
-    const invalidCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
-      `process.stdout.write(Buffer.alloc(${MAX_TOOL_TEXT_BYTES}, 0xff))`,
-    )}`;
-    const boundaryCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(
-      `process.stdout.write(Buffer.concat([Buffer.alloc(${MAX_TOOL_TEXT_BYTES - 1}, 0x61), Buffer.from([0xe2])]))`,
-    )}`;
-
-    const invalid = await shell.execute({ command: invalidCommand, timeoutMs: 2_000 }, context());
-    const boundary = await shell.execute({ command: boundaryCommand, timeoutMs: 2_000 }, context());
-
+    const invalidCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.stdout.write(Buffer.alloc(${MAX_TOOL_TEXT_BYTES}, 0xff))`)}`;
+    const boundaryCommand = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(`process.stdout.write(Buffer.concat([Buffer.alloc(${MAX_TOOL_TEXT_BYTES - 1}, 0x61), Buffer.from([0xe2])]))`)}`;
+    const invalid = await shell.execute({ command: invalidCommand, timeoutMs: 2000 }, context());
+    const boundary = await shell.execute({ command: boundaryCommand, timeoutMs: 2000 }, context());
     for (const result of [invalid, boundary]) {
       if (
         typeof result !== "object" ||
@@ -259,7 +240,6 @@ describe("local work tools", () => {
       throw new Error("shell.run returned an unexpected boundary value");
     expect(boundary["stdout"]).not.toContain("\ufffd");
   });
-
   it("uses literal search semantics in the primary ripgrep execution path", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-primary-search-"));
     const searchCommand = join(cwd, "literal-rg.mjs");
@@ -276,7 +256,6 @@ describe("local work tools", () => {
       "utf8",
     );
     await chmod(searchCommand, 0o755);
-
     await expect(
       tool(toolsAt(cwd, searchCommand), "files.search").execute(
         { query: "[a-z]+", path: "src", maxMatches: 10 },
@@ -287,24 +266,20 @@ describe("local work tools", () => {
       truncated: false,
     });
   });
-
   it("falls back to an in-process search when ripgrep is unavailable", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-search-"));
     await mkdir(join(cwd, "src"));
     await writeFile(join(cwd, "src", "first.ts"), "const needle = true;\n", "utf8");
     await writeFile(join(cwd, "src", "second.txt"), "needle\n", "utf8");
-
     const result = await tool(toolsAt(cwd, "noesis-rg-does-not-exist"), "files.search").execute(
       { query: "needle", path: "src", glob: "**/*.ts", maxMatches: 10 },
       context(),
     );
-
     expect(result).toEqual({
       matches: [{ path: join(cwd, "src", "first.ts"), line: 1, text: "const needle = true;" }],
       truncated: false,
     });
   });
-
   it("keeps fallback search literal and bounded while skipping hidden, dependency, and binary data", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-search-bounds-"));
     await mkdir(join(cwd, "src"));
@@ -316,15 +291,13 @@ describe("local work tools", () => {
     await writeFile(join(cwd, "src", "a-regex-looking.txt"), "letters only\n[a-z]+ literal\n", "utf8");
     const hugeLines = Array.from(
       { length: 100 },
-      (_, index) => `[a-z]+ match ${String(index)} ${"x".repeat(5_000)}`,
+      (_, index) => `[a-z]+ match ${String(index)} ${"x".repeat(5000)}`,
     ).join("\n");
     await writeFile(join(cwd, "src", "huge.txt"), hugeLines, "utf8");
-
     const result = await tool(toolsAt(cwd, "noesis-rg-does-not-exist"), "files.search").execute(
-      { query: "[a-z]+", path: ".", maxMatches: 1_000 },
+      { query: "[a-z]+", path: ".", maxMatches: 1000 },
       context(),
     );
-
     expect(result).toMatchObject({ truncated: true });
     if (
       typeof result !== "object" ||
@@ -349,23 +322,19 @@ describe("local work tools", () => {
     ).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(96 * 1024);
   });
-
   it("continues fallback search after truncating one oversized file", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-search-oversized-file-"));
     await writeFile(join(cwd, "a-oversized.log"), "x".repeat(3 * 1024 * 1024), "utf8");
     await writeFile(join(cwd, "z-match.ts"), "const laterNeedle = true;\n", "utf8");
-
     const result = await tool(toolsAt(cwd, "noesis-rg-does-not-exist"), "files.search").execute(
       { query: "laterNeedle", path: ".", maxMatches: 10 },
       context(),
     );
-
     expect(result).toEqual({
       matches: [{ path: join(cwd, "z-match.ts"), line: 1, text: "const laterNeedle = true;" }],
       truncated: true,
     });
   });
-
   it("retains a partial-line match found at the fallback per-file byte cap", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-search-partial-line-"));
     const query = "boundaryNeedle";
@@ -375,12 +344,10 @@ describe("local work tools", () => {
       `${"x".repeat(perFileLimit - query.length)}${query}ignored`,
       "utf8",
     );
-
     const result = await tool(toolsAt(cwd, "noesis-rg-does-not-exist"), "files.search").execute(
       { query, path: ".", maxMatches: 10 },
       context(),
     );
-
     expect(result).toEqual({
       matches: [
         {
@@ -392,7 +359,6 @@ describe("local work tools", () => {
       truncated: true,
     });
   });
-
   it("does not invent a replacement-character match when the byte cap splits UTF-8", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-search-split-utf8-"));
     const perFileLimit = 2 * 1024 * 1024;
@@ -400,15 +366,12 @@ describe("local work tools", () => {
       join(cwd, "oversized.log"),
       Buffer.concat([Buffer.alloc(perFileLimit - 1, "x"), Buffer.from("€ignored", "utf8")]),
     );
-
     const result = await tool(toolsAt(cwd, "noesis-rg-does-not-exist"), "files.search").execute(
       { query: "\ufffd", path: ".", maxMatches: 10 },
       context(),
     );
-
     expect(result).toEqual({ matches: [], truncated: true });
   });
-
   it("does not follow redirects and bounds streamed response bodies", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
@@ -421,10 +384,8 @@ describe("local work tools", () => {
       .mockResolvedValueOnce(new Response("x".repeat(MAX_TOOL_TEXT_BYTES + 100)));
     vi.stubGlobal("fetch", fetchMock);
     const fetchTool = tool(toolsAt(process.cwd()), "web.fetch");
-
     const redirect = await fetchTool.execute({ url: "https://allowed.example/start" }, context());
     const large = await fetchTool.execute({ url: "https://allowed.example/large" }, context());
-
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ redirect: "manual" });
     expect(redirect).toMatchObject({ status: 302, body: "redirect", truncated: false });
@@ -438,7 +399,6 @@ describe("local work tools", () => {
       throw new Error("web.fetch returned an unexpected value");
     expect(Buffer.byteLength(large["body"], "utf8")).toBe(MAX_TOOL_TEXT_BYTES);
   });
-
   it("binds the catalog identity to the resolved working directory", () => {
     const firstCwd = resolve(process.cwd());
     const secondCwd = resolve(process.cwd(), "packages");
@@ -457,7 +417,6 @@ describe("local work tools", () => {
       authority: authority(),
       permission,
     });
-
     expect(equivalent.catalogDigest).toBe(first.catalogDigest);
     expect(second.catalogDigest).not.toBe(first.catalogDigest);
   });

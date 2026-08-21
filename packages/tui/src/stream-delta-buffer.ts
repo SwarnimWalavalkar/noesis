@@ -1,5 +1,11 @@
 import { streamingFrameDelay } from "./lifecycle-utils.ts";
 
+export type ActiveTurnToken = Readonly<{
+  generation: number;
+  trailId: string;
+  turnId: string;
+}>;
+
 export interface StreamDeltaBuffer<Token> {
   readonly queue: (token: Token, text: string) => void;
   readonly flush: (token: Token) => void;

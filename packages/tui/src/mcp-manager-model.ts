@@ -1,13 +1,13 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { TuiMcpServerDetail, TuiMcpServerSummary } from "./runtime-port.ts";
 import { ANSI, safeTerminalText } from "./theme.ts";
-
 export interface McpCapabilityItem {
   readonly id: string;
   readonly label: string;
   readonly description?: string;
   readonly lines: readonly string[];
 }
-
+// BOUNDARY: MCP schemas are protocol-owned values rendered as inert diagnostic text.
 function encodeJson(value: unknown): string {
   try {
     return JSON.stringify(value, undefined, 2) ?? String(value);
@@ -15,15 +15,12 @@ function encodeJson(value: unknown): string {
     return String(value);
   }
 }
-
 export function safeMcpLines(lines: readonly string[]): readonly string[] {
   return lines.flatMap((line) => safeTerminalText(line).split("\n"));
 }
-
 export function safeMcpScalar(text: string): string {
   return safeTerminalText(text).replaceAll("\t", " ").replaceAll("\n", " ");
 }
-
 export function mcpStatusGlyph(status: TuiMcpServerSummary["status"]): string {
   if (status === "connected") return "●";
   if (status === "connecting") return "◐";
@@ -31,7 +28,6 @@ export function mcpStatusGlyph(status: TuiMcpServerSummary["status"]): string {
   if (status === "failed") return "×";
   return "○";
 }
-
 export function mcpStatusColor(status: TuiMcpServerSummary["status"]): string {
   if (status === "connected") return ANSI.green;
   if (status === "connecting") return ANSI.cyan;
@@ -39,14 +35,18 @@ export function mcpStatusColor(status: TuiMcpServerSummary["status"]): string {
   if (status === "failed") return ANSI.red;
   return ANSI.dim;
 }
-
 export function mcpServerIdentity(server: Pick<TuiMcpServerSummary, "scope" | "name">): string {
   return `${server.scope}:${server.name}`;
 }
-
-export function parseMcpArguments(
-  value: string,
-): { readonly ok: true; readonly value: readonly string[] } | { readonly ok: false; readonly error: string } {
+export function parseMcpArguments(value: string):
+  | {
+      readonly ok: true;
+      readonly value: readonly string[];
+    }
+  | {
+      readonly ok: false;
+      readonly error: string;
+    } {
   const trimmed = value.trim();
   if (!trimmed) return { ok: true, value: Object.freeze([]) };
   let decoded: unknown;
@@ -59,7 +59,6 @@ export function parseMcpArguments(
     return { ok: false, error: "Arguments must be a JSON array containing only strings." };
   return { ok: true, value: Object.freeze([...decoded]) };
 }
-
 export function validateMcpRemoteUrl(value: string): string | undefined {
   try {
     const url = new URL(value);
@@ -70,7 +69,6 @@ export function validateMcpRemoteUrl(value: string): string | undefined {
     return "Server URL must be a valid http:// or https:// URL.";
   }
 }
-
 export async function waitForMcpMutationSettlement(
   mutation: Promise<void>,
   timeoutMs: number,
@@ -84,63 +82,82 @@ export async function waitForMcpMutationSettlement(
   ]);
   if (timer) clearTimeout(timer);
 }
-
 export function mcpToolItems(detail: TuiMcpServerDetail): readonly McpCapabilityItem[] {
-  return detail.tools.map((tool) => ({
-    id: tool.name,
-    label: safeMcpScalar(tool.name),
-    ...(tool.description ? { description: safeMcpScalar(tool.description) } : {}),
-    lines: safeMcpLines([
-      ...(tool.description ? [tool.description, ""] : []),
-      "Input schema",
-      encodeJson(tool.inputSchema),
-      ...(tool.outputSchema === undefined ? [] : ["", "Output schema", encodeJson(tool.outputSchema)]),
-    ]),
-  }));
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return detail.tools.map((tool) =>
+    createConditionalObject({
+      id: tool.name,
+      label: safeMcpScalar(tool.name),
+    } as const)
+      .addOptional(tool.description ? { description: safeMcpScalar(tool.description) } : undefined)
+      .add({
+        lines: safeMcpLines([
+          ...(tool.description ? [tool.description, ""] : []),
+          "Input schema",
+          encodeJson(tool.inputSchema),
+          ...(tool.outputSchema === undefined ? [] : ["", "Output schema", encodeJson(tool.outputSchema)]),
+        ]),
+      } as const)
+      .finish(),
+  );
 }
-
 export function mcpPromptItems(detail: TuiMcpServerDetail): readonly McpCapabilityItem[] {
-  return detail.prompts.map((prompt) => ({
-    id: prompt.name,
-    label: safeMcpScalar(prompt.name),
-    ...(prompt.description ? { description: safeMcpScalar(prompt.description) } : {}),
-    lines: safeMcpLines([
-      ...(prompt.description ? [prompt.description, ""] : []),
-      `Arguments · ${String(prompt.arguments?.length ?? 0)}`,
-      ...(prompt.arguments ?? []).map(
-        (argument) =>
-          `${argument.required ? "*" : "·"} ${argument.name}${argument.description ? ` — ${argument.description}` : ""}`,
-      ),
-    ]),
-  }));
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return detail.prompts.map((prompt) =>
+    createConditionalObject({
+      id: prompt.name,
+      label: safeMcpScalar(prompt.name),
+    } as const)
+      .addOptional(prompt.description ? { description: safeMcpScalar(prompt.description) } : undefined)
+      .add({
+        lines: safeMcpLines([
+          ...(prompt.description ? [prompt.description, ""] : []),
+          `Arguments · ${String(prompt.arguments?.length ?? 0)}`,
+          ...(prompt.arguments ?? []).map(
+            (argument) =>
+              `${argument.required ? "*" : "·"} ${argument.name}${argument.description ? ` — ${argument.description}` : ""}`,
+          ),
+        ]),
+      } as const)
+      .finish(),
+  );
 }
-
 export function mcpResourceItems(detail: TuiMcpServerDetail): readonly McpCapabilityItem[] {
-  return detail.resources.map((resource) => ({
-    id: resource.uri,
-    label: safeMcpScalar(resource.name ?? resource.uri),
-    ...(resource.description ? { description: safeMcpScalar(resource.description) } : {}),
-    lines: safeMcpLines([
-      `URI · ${resource.uri}`,
-      ...(resource.mimeType ? [`Media type · ${resource.mimeType}`] : []),
-      ...(resource.description ? ["", resource.description] : []),
-    ]),
-  }));
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return detail.resources.map((resource) =>
+    createConditionalObject({
+      id: resource.uri,
+      label: safeMcpScalar(resource.name ?? resource.uri),
+    } as const)
+      .addOptional(resource.description ? { description: safeMcpScalar(resource.description) } : undefined)
+      .add({
+        lines: safeMcpLines([
+          `URI · ${resource.uri}`,
+          ...(resource.mimeType ? [`Media type · ${resource.mimeType}`] : []),
+          ...(resource.description ? ["", resource.description] : []),
+        ]),
+      } as const)
+      .finish(),
+  );
 }
-
 export function mcpTemplateItems(detail: TuiMcpServerDetail): readonly McpCapabilityItem[] {
-  return detail.resourceTemplates.map((template) => ({
-    id: template.uriTemplate,
-    label: safeMcpScalar(template.name ?? template.uriTemplate),
-    ...(template.description ? { description: safeMcpScalar(template.description) } : {}),
-    lines: safeMcpLines([
-      `URI template · ${template.uriTemplate}`,
-      ...(template.mimeType ? [`Media type · ${template.mimeType}`] : []),
-      ...(template.description ? ["", template.description] : []),
-    ]),
-  }));
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return detail.resourceTemplates.map((template) =>
+    createConditionalObject({
+      id: template.uriTemplate,
+      label: safeMcpScalar(template.name ?? template.uriTemplate),
+    } as const)
+      .addOptional(template.description ? { description: safeMcpScalar(template.description) } : undefined)
+      .add({
+        lines: safeMcpLines([
+          `URI template · ${template.uriTemplate}`,
+          ...(template.mimeType ? [`Media type · ${template.mimeType}`] : []),
+          ...(template.description ? ["", template.description] : []),
+        ]),
+      } as const)
+      .finish(),
+  );
 }
-
 export function mcpConnectionLines(detail: TuiMcpServerDetail): readonly string[] {
   const common = [
     `Name · ${detail.name}`,
@@ -168,15 +185,12 @@ export function mcpConnectionLines(detail: TuiMcpServerDetail): readonly string[
         ];
   return safeMcpLines(lines);
 }
-
 export function mcpOAuthActionsAvailable(detail: TuiMcpServerDetail, mutationsEnabled: boolean): boolean {
   return mutationsEnabled && !detail.shadowed && detail.config.type === "remote" && detail.config.oauth;
 }
-
 export function mcpLiveActionsAvailable(detail: TuiMcpServerDetail, mutationsEnabled: boolean): boolean {
   return mutationsEnabled && !detail.shadowed && detail.enabled;
 }
-
 export function mcpManagerHint(input: {
   readonly screenKind: "list" | "server" | "collection" | "text" | "input" | "choice" | "confirm";
   readonly detail?: TuiMcpServerDetail;
@@ -204,7 +218,6 @@ export function mcpManagerHint(input: {
   if (input.screenKind === "choice") return "↑/↓ select · 1-9 jump · Enter continue · Esc back";
   return "Enter / y confirm · Esc / n cancel";
 }
-
 export function mcpServerOptions(
   detail: TuiMcpServerDetail,
   mutationsEnabled = true,

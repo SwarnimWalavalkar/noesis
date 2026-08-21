@@ -53,6 +53,7 @@ describe("session compaction", () => {
   });
 
   test("counts unfinished-turn labels before deciding whether compaction is required", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const failed = Object.freeze({
       ...message("1", "retry this operation", true),
       turnStatus: "failed" as const,
@@ -66,6 +67,7 @@ describe("session compaction", () => {
   });
 
   test("applies frozen character bounds to the rendered unfinished message", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const failed = Object.freeze({
       ...message("1", "x".repeat(MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS), true),
       turnStatus: "failed" as const,
@@ -121,6 +123,7 @@ describe("session compaction", () => {
       message("5", "new-user", true),
       message("6", "new-assistant", false),
     ]);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const checkpoint = Object.freeze({
       checkpointId: "checkpoint-1",
       sessionId: "session-1",

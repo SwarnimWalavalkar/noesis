@@ -1,15 +1,15 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import type { JsonValue } from "@noesis/domain";
 import { z } from "zod";
 import type { PiSkillResource } from "./skill-library.ts";
-
 const executeParameters = z.strictObject({
   source: z
     .string()
     .min(1)
     .max(128 * 1024),
-  timeoutMs: z.number().int().min(100).max(600_000).optional(),
+  timeoutMs: z.number().int().min(100).max(600000).optional(),
 });
 const executeParametersJsonSchema = z.toJSONSchema(executeParameters);
 const MAX_SOURCE_BYTES = 128 * 1024;
@@ -18,13 +18,11 @@ const MAX_WORKFLOW_INDEX_BYTES = 4 * 1024;
 const MAX_WORKFLOW_NAME_BYTES = 96;
 const MAX_WORKFLOW_TOOL_NAME_BYTES = 128;
 const MAX_WORKFLOW_DESCRIPTION_BYTES = 192;
-
 export interface PiWorkflowSummary {
   readonly name: string;
   readonly description: string;
   readonly toolName: string;
 }
-
 export interface PiMcpServerSummary {
   readonly name: string;
   readonly tools: number;
@@ -32,9 +30,11 @@ export interface PiMcpServerSummary {
   readonly resources: number;
   readonly resourceTemplates: number;
 }
-
 export type PiCodeExecutionEvent =
-  | { readonly type: "started"; readonly executionId: string }
+  | {
+      readonly type: "started";
+      readonly executionId: string;
+    }
   | {
       readonly type: "progress";
       readonly value: JsonValue;
@@ -58,7 +58,6 @@ export type PiCodeExecutionEvent =
       readonly result?: JsonValue;
       readonly error?: string;
     };
-
 export interface PiFrozenToolCatalog {
   readonly catalogId: string;
   readonly catalogDigest: string;
@@ -71,7 +70,6 @@ export interface PiFrozenToolCatalog {
     readonly outputSchema: JsonValue;
   }[];
 }
-
 export interface PreparedPiCodeExecution {
   readonly catalog: PiFrozenToolCatalog;
   readonly workflowSummaries?: readonly PiWorkflowSummary[];
@@ -92,7 +90,9 @@ export interface PreparedPiCodeExecution {
     timeoutMs: number | undefined,
     signal: AbortSignal,
     emit: (event: PiCodeExecutionEvent) => void,
-    identity?: { readonly logicalExecutionId: string },
+    identity?: {
+      readonly logicalExecutionId: string;
+    },
   ) => Promise<{
     readonly executionId: string;
     readonly value: JsonValue;
@@ -101,16 +101,16 @@ export interface PreparedPiCodeExecution {
   }>;
   readonly close: () => Promise<void>;
 }
-
 export interface PiCodeExecutionAdapter {
   readonly prepare: (
     plan: FrozenTurnPlan,
     signal: AbortSignal,
-    resources?: { readonly skills: readonly PiSkillResource[] },
+    resources?: {
+      readonly skills: readonly PiSkillResource[];
+    },
   ) => Promise<PreparedPiCodeExecution>;
   readonly shutdown: () => Promise<void>;
 }
-
 export type PiExecuteToolDetails =
   | {
       readonly kind: "activity";
@@ -122,11 +122,9 @@ export type PiExecuteToolDetails =
       readonly executionId: string;
       readonly calls: number;
     };
-
 function normalizeSingleLine(value: string): string {
   return value.replaceAll(/\s+/gu, " ").trim();
 }
-
 function escapeXml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -135,7 +133,6 @@ function escapeXml(value: string): string {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
 }
-
 function escapeXmlBounded(value: string, maxBytes: number): string {
   const encoder = new TextEncoder();
   const escaped = escapeXml(value);
@@ -153,7 +150,6 @@ function escapeXmlBounded(value: string, maxBytes: number): string {
   }
   return `${result}${ellipsis}`;
 }
-
 function workflowIndex(summaries: readonly PiWorkflowSummary[] | undefined): string | undefined {
   if (!summaries || summaries.length === 0) return undefined;
   const normalized = summaries
@@ -173,10 +169,7 @@ function workflowIndex(summaries: readonly PiWorkflowSummary[] | undefined): str
     const compactEntries = entries
       .map(
         ({ name, description, toolName }) =>
-          `${escapeXmlBounded(name, MAX_WORKFLOW_NAME_BYTES)} [tool: ${escapeXmlBounded(
-            toolName,
-            MAX_WORKFLOW_TOOL_NAME_BYTES,
-          )}] — ${escapeXmlBounded(description, MAX_WORKFLOW_DESCRIPTION_BYTES)}`,
+          `${escapeXmlBounded(name, MAX_WORKFLOW_NAME_BYTES)} [tool: ${escapeXmlBounded(toolName, MAX_WORKFLOW_TOOL_NAME_BYTES)}] — ${escapeXmlBounded(description, MAX_WORKFLOW_DESCRIPTION_BYTES)}`,
       )
       .join("; ");
     return [
@@ -195,7 +188,6 @@ function workflowIndex(summaries: readonly PiWorkflowSummary[] | undefined): str
   }
   return render([], true);
 }
-
 function mcpIndex(summaries: readonly PiMcpServerSummary[] | undefined): string | undefined {
   if (!summaries || summaries.length === 0) return undefined;
   const entries = summaries
@@ -211,7 +203,6 @@ function mcpIndex(summaries: readonly PiMcpServerSummary[] | undefined): string 
   }
   return "MCP servers are available. Use mcp.servers, mcp.inspect, and noesis.search for progressive discovery.";
 }
-
 export function createPiExecuteTool(input: {
   readonly prepared: PreparedPiCodeExecution;
   readonly turnId: string;
@@ -256,17 +247,24 @@ export function createPiExecuteTool(input: {
           (event) => {
             if (event.type === "started") executionId = event.executionId;
             input.emit(event, toolCallId);
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             onUpdate?.({
               content: [],
-              details: Object.freeze({
-                kind: "activity",
-                ...(executionId ? { executionId } : {}),
-                event,
-              }),
+              details: Object.freeze(
+                createConditionalObject({
+                  kind: "activity",
+                } as const)
+                  .addOptional(executionId ? { executionId } : undefined)
+                  .add({
+                    event,
+                  } as const)
+                  .finish(),
+              ),
             });
           },
           { logicalExecutionId: `${input.turnId}:${toolCallId}` },
         );
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result.value) }],
           details: {

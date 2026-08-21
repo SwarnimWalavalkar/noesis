@@ -15,6 +15,7 @@ const RESET = `${ESC}[0m`;
 const highlight = (code: string, language: string): string[] => highlightCode(code, language, true);
 
 describe("syntax language resolution", () => {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["js", "js"],
     ["JavaScript", "js"],

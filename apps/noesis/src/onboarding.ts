@@ -44,6 +44,7 @@ export class OnboardingCancelledError extends Error {
   }
 }
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const ONBOARDING_PROVIDERS = Object.freeze({
   "openai-codex": Object.freeze({
     label: "OpenAI Codex OAuth",

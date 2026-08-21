@@ -6,6 +6,7 @@ import {
 } from "../src/mcp-elicitation-validation.ts";
 
 describe("MCP elicitation validation", () => {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test("validates string length and the supported formats", () => {
     expect(validateMcpTextField({ type: "text", name: "code", label: "Code", minLength: 3 }, "ab")).toContain(
       "at least 3",
@@ -46,6 +47,7 @@ describe("MCP elicitation validation", () => {
   });
 
   test("validates integer and numeric bounds", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const field = {
       type: "number" as const,
       name: "count",
@@ -61,6 +63,7 @@ describe("MCP elicitation validation", () => {
   });
 
   test("validates multi-select bounds", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const field = {
       type: "multiselect" as const,
       name: "labels",

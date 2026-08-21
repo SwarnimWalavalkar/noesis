@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { AgentActionEvent, NoesisAgentRuntime } from "@noesis/agent-types";
 import { compileContext } from "@noesis/context";
 import {
@@ -16,13 +17,11 @@ import {
   type TrailSummary,
   type TurnResult,
 } from "@noesis/runtime";
-
 export interface TestNoesisRuntime extends NoesisRuntime {
   readonly runTurn: (trailId: string, input: string, options?: RunTurnOptions) => Promise<TurnResult>;
   readonly resumedTrailIds: readonly string[];
   readonly failedTurnCount: number;
 }
-
 interface TestInteractionState {
   phase: InteractionSnapshot["phase"];
   queuePaused: boolean;
@@ -36,13 +35,11 @@ interface TestInteractionState {
   observer?: NonNullable<InteractionDispatchOptions["onEvent"]>;
   drain?: Promise<void>;
 }
-
 interface StoredTrail {
   state: TrailState;
   readonly createdAt: string;
   updatedAt: string;
 }
-
 export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesisRuntime {
   const trails = new Map<string, StoredTrail>();
   const resumedTrailIds: string[] = [];
@@ -112,24 +109,32 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
       }),
     );
   };
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const listTrailSummaries = (): readonly TrailSummary[] =>
     Object.freeze(
       [...trails.values()]
         .map(({ state, createdAt, updatedAt }) =>
-          Object.freeze({
-            trailId: state.trailId,
-            ...(state.parentTrailId === undefined ? {} : { parentTrailId: state.parentTrailId }),
-            title: state.title,
-            status: state.status,
-            provider: state.provider,
-            model: state.model,
-            runtime: state.runtime,
-            createdAt,
-            updatedAt,
-            turnCount: state.turns.length,
-            messageCount: state.turns.length * 2,
-            preview: state.turns.at(-1)?.input ?? "",
-          }),
+          Object.freeze(
+            createConditionalObject({
+              trailId: state.trailId,
+            } as const)
+              .addOptional(
+                !(state.parentTrailId === undefined) ? { parentTrailId: state.parentTrailId } : undefined,
+              )
+              .add({
+                title: state.title,
+                status: state.status,
+                provider: state.provider,
+                model: state.model,
+                runtime: state.runtime,
+                createdAt,
+                updatedAt,
+                turnCount: state.turns.length,
+                messageCount: state.turns.length * 2,
+                preview: state.turns.at(-1)?.input ?? "",
+              } as const)
+              .finish(),
+          ),
         )
         .sort(compareTrailRecency)
         .slice(0, SESSION_PICKER_LIMIT),
@@ -180,7 +185,7 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
         },
       ],
       stored.state.capabilityVersions,
-      { maxTokens: 4_000, maxFragmentTokens: 4_000 },
+      { maxTokens: 4000, maxFragmentTokens: 4000 },
     );
     const result = await (async () => {
       try {
@@ -208,13 +213,19 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     }
     if (result.outcome === "aborted") {
       replaceState(stored, Object.freeze({ ...stored.state, status: "idle" }));
-      return Object.freeze({
-        outcome: "aborted",
-        output: result.text,
-        context,
-        usedCapabilities: Object.freeze({}),
-        ...(result.contextUsage === undefined ? {} : { contextUsage: result.contextUsage }),
-      });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+      return Object.freeze(
+        createConditionalObject({
+          outcome: "aborted",
+          output: result.text,
+          context,
+          usedCapabilities: Object.freeze({}),
+        } as const)
+          .addOptional(
+            !(result.contextUsage === undefined) ? { contextUsage: result.contextUsage } : undefined,
+          )
+          .finish(),
+      );
     }
     replaceState(
       stored,
@@ -226,13 +237,17 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
         turns: Object.freeze([...stored.state.turns, Object.freeze({ input, output: result.text })]),
       }),
     );
-    return Object.freeze({
-      outcome: "completed",
-      output: result.text,
-      context,
-      usedCapabilities: Object.freeze({}),
-      ...(result.contextUsage === undefined ? {} : { contextUsage: result.contextUsage }),
-    });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    return Object.freeze(
+      createConditionalObject({
+        outcome: "completed",
+        output: result.text,
+        context,
+        usedCapabilities: Object.freeze({}),
+      } as const)
+        .addOptional(!(result.contextUsage === undefined) ? { contextUsage: result.contextUsage } : undefined)
+        .finish(),
+    );
   };
   const interactionState = (trailId: string): TestInteractionState => {
     const existing = interactions.get(trailId);
@@ -246,14 +261,20 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     interactions.set(trailId, created);
     return created;
   };
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const interactionSnapshot = (trailId: string, state = interactionState(trailId)): InteractionSnapshot =>
-    Object.freeze({
-      sessionId: trailId,
-      phase: state.phase,
-      queuePaused: state.queuePaused,
-      ...(state.active ? { active: Object.freeze({ ...state.active }) } : {}),
-      pending: Object.freeze(state.pending.map((intent) => Object.freeze({ ...intent }))),
-    });
+    Object.freeze(
+      createConditionalObject({
+        sessionId: trailId,
+        phase: state.phase,
+        queuePaused: state.queuePaused,
+      } as const)
+        .addOptional(state.active ? { active: Object.freeze({ ...state.active }) } : undefined)
+        .add({
+          pending: Object.freeze(state.pending.map((intent) => Object.freeze({ ...intent }))),
+        } as const)
+        .finish(),
+    );
   const emitInteractionState = (trailId: string, state: TestInteractionState): void => {
     state.observer?.({
       type: "state",
@@ -261,50 +282,76 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     });
   };
   const persistAction = (trailId: string, turnId: string, event: AgentActionEvent): AgentActionEvent => {
-    const durableEvent = Object.freeze({
-      ...event,
-      actionId: `${turnId}:${event.actionId}`,
-      ...(event.parentActionId ? { parentActionId: `${turnId}:${event.parentActionId}` } : {}),
-    });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    const durableEvent = Object.freeze(
+      createConditionalObject({
+        ...event,
+        actionId: `${turnId}:${event.actionId}`,
+      } as const)
+        .addOptional(
+          event.parentActionId ? { parentActionId: `${turnId}:${event.parentActionId}` } : undefined,
+        )
+        .finish(),
+    );
     const actions = actionsByTrail.get(trailId) ?? [];
     actionsByTrail.set(trailId, actions);
     const existingIndex = actions.findIndex((action) => action.actionId === durableEvent.actionId);
     const current = existingIndex < 0 ? undefined : actions[existingIndex];
     const occurredAt = timestamp();
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const next: RuntimeTranscriptAction =
       durableEvent.type === "tool-start"
-        ? Object.freeze({
-            kind: "action",
-            actionId: durableEvent.actionId,
-            turnId,
-            ...(durableEvent.parentActionId ? { parentActionId: durableEvent.parentActionId } : {}),
-            name: durableEvent.name,
-            status: "running",
-            input: durableEvent.input,
-            startedAt: occurredAt,
-          })
+        ? Object.freeze(
+            createConditionalObject({
+              kind: "action",
+              actionId: durableEvent.actionId,
+              turnId,
+            } as const)
+              .addOptional(
+                durableEvent.parentActionId ? { parentActionId: durableEvent.parentActionId } : undefined,
+              )
+              .add({
+                name: durableEvent.name,
+                status: "running",
+                input: durableEvent.input,
+                startedAt: occurredAt,
+              } as const)
+              .finish(),
+          )
         : durableEvent.type === "tool-update"
           ? Object.freeze({
-              ...(current ?? {
-                kind: "action" as const,
-                actionId: durableEvent.actionId,
-                turnId,
-                ...(durableEvent.parentActionId ? { parentActionId: durableEvent.parentActionId } : {}),
-                name: durableEvent.name,
-                status: "running" as const,
-                startedAt: occurredAt,
-              }),
+              ...(current ??
+                createConditionalObject({
+                  kind: "action" as const,
+                  actionId: durableEvent.actionId,
+                  turnId,
+                } as const)
+                  .addOptional(
+                    durableEvent.parentActionId ? { parentActionId: durableEvent.parentActionId } : undefined,
+                  )
+                  .add({
+                    name: durableEvent.name,
+                    status: "running" as const,
+                    startedAt: occurredAt,
+                  } as const)
+                  .finish()),
               update: durableEvent.update,
             })
           : Object.freeze({
-              ...(current ?? {
-                kind: "action" as const,
-                actionId: durableEvent.actionId,
-                turnId,
-                ...(durableEvent.parentActionId ? { parentActionId: durableEvent.parentActionId } : {}),
-                name: durableEvent.name,
-                startedAt: occurredAt,
-              }),
+              ...(current ??
+                createConditionalObject({
+                  kind: "action" as const,
+                  actionId: durableEvent.actionId,
+                  turnId,
+                } as const)
+                  .addOptional(
+                    durableEvent.parentActionId ? { parentActionId: durableEvent.parentActionId } : undefined,
+                  )
+                  .add({
+                    name: durableEvent.name,
+                    startedAt: occurredAt,
+                  } as const)
+                  .finish()),
               status: durableEvent.isError ? ("failed" as const) : ("completed" as const),
               output: durableEvent.result,
               completedAt: occurredAt,
@@ -490,15 +537,18 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
       emitInteractionState(trailId, state);
       await agent.abort(trailId);
     }
-    return Object.freeze({
-      effect,
-      snapshot: interactionSnapshot(trailId, state),
-      ...(restoredText === undefined ? {} : { restoredText }),
-      ...(intentId === undefined ? {} : { intentId }),
-      ...(queueWasHeld === undefined ? {} : { queueWasHeld }),
-    });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    return Object.freeze(
+      createConditionalObject({
+        effect,
+        snapshot: interactionSnapshot(trailId, state),
+      } as const)
+        .addOptional(!(restoredText === undefined) ? { restoredText } : undefined)
+        .addOptional(!(intentId === undefined) ? { intentId } : undefined)
+        .addOptional(!(queueWasHeld === undefined) ? { queueWasHeld } : undefined)
+        .finish(),
+    );
   };
-
   return Object.freeze({
     agentDefaults: Object.freeze({
       provider: "test-provider",

@@ -22,6 +22,7 @@ export interface ProtectedActivationStatePort {
   ) => Promise<DatabaseRowRef<"activation_pointers">>;
 }
 
+/** BOUNDARY: Recorded rows are validated against PreflightReportSchema before activation decisions. */
 export interface RecordedPreflightReportReadPort {
   readonly readPreflightReport: (ref: DatabaseRowRef<"preflight_reports">) => Promise<unknown | undefined>;
 }

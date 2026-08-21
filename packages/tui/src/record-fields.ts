@@ -1,14 +1,16 @@
-export function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+import { isJsonObject, type JsonObject, type JsonValue } from "@noesis/domain";
+
+export function isRecord(value: JsonValue | undefined): value is JsonObject {
+  return value !== undefined && isJsonObject(value);
 }
 
-export function stringField(value: unknown, key: string): string | undefined {
+export function stringField(value: JsonValue | undefined, key: string): string | undefined {
   if (!isRecord(value)) return undefined;
   const field = value[key];
   return typeof field === "string" ? field : undefined;
 }
 
-export function numberField(value: unknown, key: string): number | undefined {
+export function numberField(value: JsonValue | undefined, key: string): number | undefined {
   if (!isRecord(value)) return undefined;
   const field = value[key];
   return typeof field === "number" && Number.isFinite(field) ? field : undefined;

@@ -12,15 +12,48 @@ function isRuntimeFunction(node: ESTree.Node): node is RuntimeFunction {
 	);
 }
 
-function isInsideTypeGuard(node: ESTree.Node): boolean {
+function enclosingRuntimeFunction(node: ESTree.Node): RuntimeFunction | null {
 	let current: ESTree.Node | null = node.parent;
 	while (current !== null && current.type !== "Program") {
-		if (isRuntimeFunction(current)) {
-			return current.returnType?.typeAnnotation.type === "TSTypePredicate";
-		}
+		if (isRuntimeFunction(current)) return current;
 		current = current.parent;
 	}
-	return false;
+	return null;
+}
+
+function parameterHasUnknownAnnotation(parameter: ESTree.ParamPattern): boolean {
+	if (parameter.type === "TSParameterProperty") return parameterHasUnknownAnnotation(parameter.parameter);
+	if (parameter.type === "RestElement") {
+		return (
+			parameter.typeAnnotation?.typeAnnotation.type === "TSUnknownKeyword" ||
+			parameterHasUnknownAnnotation(parameter.argument)
+		);
+	}
+	if (parameter.type === "AssignmentPattern") {
+		return (
+			parameter.typeAnnotation?.typeAnnotation.type === "TSUnknownKeyword" ||
+			parameter.left.typeAnnotation?.typeAnnotation.type === "TSUnknownKeyword"
+		);
+	}
+	return parameter.typeAnnotation?.typeAnnotation.type === "TSUnknownKeyword";
+}
+
+function hasBoundaryComment(
+	context: Readonly<{
+		sourceCode: Readonly<{
+			getCommentsBefore: (node: ESTree.Node) => readonly Readonly<{ value: string }>[];
+		}>;
+	}>,
+	owner: RuntimeFunction,
+): boolean {
+	let current: ESTree.Node = owner;
+	while (true) {
+		if (context.sourceCode.getCommentsBefore(current).some((comment) => /\bBOUNDARY\s*:/u.test(comment.value))) {
+			return true;
+		}
+		if (current.parent.type === "Program" || current.parent.type === "BlockStatement") return false;
+		current = current.parent;
+	}
 }
 
 /** Disallow runtime typeof checks that narrow unparsed values instead of decoding them. */
@@ -55,12 +88,12 @@ export const noRuntimeTypeofRule = defineRule({
 					option !== null &&
 					!Array.isArray(option) &&
 					option.allowInTypeGuards === true;
-				if (
-					node.operator === "typeof" &&
-					(!allowInTypeGuards || !isInsideTypeGuard(node))
-				) {
-					context.report({ node, messageId: "runtimeTypeof" });
-				}
+				if (node.operator !== "typeof") return;
+				const owner = enclosingRuntimeFunction(node);
+				if (owner === null) return;
+				if (allowInTypeGuards && owner.returnType?.typeAnnotation.type === "TSTypePredicate") return;
+				if (!owner.params.some(parameterHasUnknownAnnotation) || hasBoundaryComment(context, owner)) return;
+				context.report({ node, messageId: "runtimeTypeof" });
 			},
 		};
 	},

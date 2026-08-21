@@ -1,5 +1,6 @@
 import type { FrozenBaselineRef } from "@noesis/agent-types";
 import {
+  createConditionalObject,
   type Capability,
   type CapabilityRevision,
   type CapabilityRevisionRef,
@@ -13,18 +14,18 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
 import { createTurnIntelligencePlanner, type TurnCapabilityResolver } from "../src/index.ts";
-
-const opened: { readonly root: string; readonly close: () => void }[] = [];
+const opened: {
+  readonly root: string;
+  readonly close: () => void;
+}[] = [];
 const encoder = new TextEncoder();
 const project = Object.freeze({ projectId: "project-effects", root: "/workspace/effects" });
-
 afterEach(async () => {
   for (const item of opened.splice(0)) {
     item.close();
     await rm(item.root, { recursive: true, force: true });
   }
 });
-
 describe("effects-first Capability turn planning", () => {
   test("injects instruction effects, freezes skill effects, and keeps skill bodies out of the prompt", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-turn-effects-"));
@@ -43,6 +44,7 @@ describe("effects-first Capability turn planning", () => {
       metadata: Object.freeze({}),
     });
     const publish = async (id: string, path: string, content: string): Promise<FileRevisionRef> => {
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       const result = await workspace.definitionPublications.publish({
         namespace: "capability-effect-fixture",
         definitionId: id,
@@ -67,39 +69,46 @@ describe("effects-first Capability turn planning", () => {
         "PRIVATE SKILL BODY: synthesize sources in three passes.",
       ),
     ]);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const makeRevision = (
       capabilityId: string,
       capabilityRevisionId: string,
       promptModules: readonly FileRevisionRef[],
       effects?: CapabilityRevision["effects"],
     ): CapabilityRevision =>
-      Object.freeze({
-        capabilityRevisionId,
-        capabilityId,
-        ...(effects ? { effects } : {}),
-        promptModules: Object.freeze([...promptModules]),
-        skills: Object.freeze([]),
-        tools: Object.freeze([]),
-        toolset: Object.freeze({
-          toolRevisionIds: Object.freeze([]),
-          routerRevision: router,
-          strategyId: "semantic-capability-router-v1",
-        }),
-        activationPolicy: Object.freeze({ mode: "automatic_low_risk" as const, scope: "general" }),
-        permissionManifest: Object.freeze({
-          effects: Object.freeze([]),
-          resourcePatterns: Object.freeze([]),
-          credentialRefs: Object.freeze([]),
-        }),
-        evidenceRefs: Object.freeze([]),
-        sourceEvaluationDefinitions: Object.freeze([]),
-        requestedPermissionDelta: Object.freeze({
-          addedEffects: Object.freeze([]),
-          widenedResources: Object.freeze([]),
-          addedCredentialRefs: Object.freeze([]),
-        }),
-      });
+      Object.freeze(
+        createConditionalObject({
+          capabilityRevisionId,
+          capabilityId,
+        } as const)
+          .addOptional(effects ? { effects } : undefined)
+          .add({
+            promptModules: Object.freeze([...promptModules]),
+            skills: Object.freeze([]),
+            tools: Object.freeze([]),
+            toolset: Object.freeze({
+              toolRevisionIds: Object.freeze([]),
+              routerRevision: router,
+              strategyId: "semantic-capability-router-v1",
+            }),
+            activationPolicy: Object.freeze({ mode: "automatic_low_risk" as const, scope: "general" }),
+            permissionManifest: Object.freeze({
+              effects: Object.freeze([]),
+              resourcePatterns: Object.freeze([]),
+              credentialRefs: Object.freeze([]),
+            }),
+            evidenceRefs: Object.freeze([]),
+            sourceEvaluationDefinitions: Object.freeze([]),
+            requestedPermissionDelta: Object.freeze({
+              addedEffects: Object.freeze([]),
+              widenedResources: Object.freeze([]),
+              addedCredentialRefs: Object.freeze([]),
+            }),
+          } as const)
+          .finish(),
+      );
     const genesis = makeRevision("general", "general-r1", [genesisPrompt]);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const learned = makeRevision(
       "evidence-synthesis",
       "evidence-synthesis-r1",
@@ -120,6 +129,7 @@ describe("effects-first Capability turn planning", () => {
       capabilityRevision: genesisRef,
       activeDefinitions: Object.freeze({ prompt: genesisPrompt, router }),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await workspace.capabilities.create({
       definition: Object.freeze({
         capabilityId: "evidence-synthesis",
@@ -181,7 +191,6 @@ describe("effects-first Capability turn planning", () => {
       project,
       now: () => "2026-08-21T00:01:00.000Z",
     });
-
     const plan = await planner.planAndAdmit({
       sessionId: "session-effects",
       turnId: "turn-effects",
@@ -191,7 +200,6 @@ describe("effects-first Capability turn planning", () => {
       thinkingLevel: "off",
       baseSystemPrompt: "BASE",
     });
-
     expect(plan.renderedSystemPrompt).toContain("Keep answers evidence-dense.");
     expect(plan.renderedSystemPrompt).not.toContain("PRIVATE SKILL BODY");
     expect(

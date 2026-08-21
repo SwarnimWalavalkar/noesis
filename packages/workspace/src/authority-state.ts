@@ -1,3 +1,4 @@
+import type { DatabaseRow } from "./database.ts";
 import { canonicalJson, GrantSchema, toJsonValue, type Grant, type JsonValue } from "@noesis/domain";
 import {
   createDurableAuthorityBoundary,
@@ -14,7 +15,7 @@ interface AuthorityDatabase {
   readonly transaction: <T>(operation: () => T) => T;
 }
 
-const decodeGrant = (row: unknown): Grant =>
+const decodeGrant = (row: DatabaseRow | undefined): Grant =>
   GrantSchema.parse({
     schemaVersion: 1,
     grantId: requiredString(row, "grant_id"),
@@ -33,7 +34,7 @@ const permitted = (grant: Grant, operation: DurableAuthorityOperation, at: strin
   grant.resourcePrefixes.some((prefix) => operation.identity.resource.startsWith(prefix));
 
 const replayReservation = (
-  row: unknown,
+  row: DatabaseRow | undefined,
   operation: DurableAuthorityOperation,
 ): Exclude<DurableAuthorityReservation, { readonly status: "reserved" }> => {
   if (requiredString(row, "operation_fingerprint") !== operation.fingerprint)

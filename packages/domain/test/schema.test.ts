@@ -10,6 +10,7 @@ import {
   toJsonValue,
 } from "../src/index.ts";
 
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const ledgerEvent = {
   schemaVersion: 1,
   eventId: "evt-1",
@@ -29,6 +30,7 @@ describe("domain Zod schemas", () => {
   });
 
   test("preserves grant constraints and strict unknown-key rejection", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const grant = {
       schemaVersion: 1,
       grantId: "grant-1",

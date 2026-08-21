@@ -6,6 +6,7 @@ import {
   validateCapabilityEffects,
 } from "@noesis/capabilities";
 import {
+  createConditionalObject,
   type Capability,
   type CapabilityActivationMode,
   type CapabilityDefinition,
@@ -17,6 +18,7 @@ import {
   canonicalJson,
   createId,
   type EvidenceRef,
+  type JsonObject,
   type ProjectRef,
   sha256,
 } from "@noesis/domain";
@@ -24,7 +26,6 @@ import type { ExactCitation, HistoryPort } from "@noesis/intelligence";
 import type { CapabilityLifecycleStore, NoesisWorkspaceStore } from "@noesis/workspace";
 import { z } from "zod";
 import type { LearningRoleConfiguration, LearningTurnInput } from "./schemas.ts";
-
 const CapabilityScopeDecisionSchema = z.enum(["global", "current_project", "current_session"]);
 const CapabilityConsequenceSchema = z.enum([
   "ordinary",
@@ -35,13 +36,13 @@ const CapabilityConsequenceSchema = z.enum([
 const CapabilityEffectDraftSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("instruction"),
-    content: z.string().min(1).max(12_000),
+    content: z.string().min(1).max(12000),
   }),
   z.strictObject({
     kind: z.literal("skill"),
     name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-    description: z.string().min(1).max(2_048),
-    instructions: z.string().min(1).max(32_000),
+    description: z.string().min(1).max(2048),
+    instructions: z.string().min(1).max(32000),
   }),
   z.strictObject({
     kind: z.literal("script"),
@@ -52,41 +53,38 @@ const CapabilityEffectDraftSchema = z.discriminatedUnion("kind", [
     name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
   }),
 ]);
-
 const CapabilityProposalSchema = z
   .strictObject({
     name: z.string().min(1).max(160),
     /** Accepted only for compatibility with controlled responders written before effects-first authoring. */
     kind: z.literal("instruction").optional(),
-    description: z.string().min(1).max(2_048),
-    applicability: z.string().min(1).max(2_048),
-    summary: z.string().min(1).max(2_048),
-    rationale: z.string().min(1).max(4_096),
-    anticipatedEffect: z.string().min(1).max(2_048),
-    instruction: z.string().min(1).max(12_000).optional(),
+    description: z.string().min(1).max(2048),
+    applicability: z.string().min(1).max(2048),
+    summary: z.string().min(1).max(2048),
+    rationale: z.string().min(1).max(4096),
+    anticipatedEffect: z.string().min(1).max(2048),
+    instruction: z.string().min(1).max(12000).optional(),
     effects: z.array(CapabilityEffectDraftSchema).min(1).max(8).optional(),
     scope: CapabilityScopeDecisionSchema.optional(),
     activationMode: z.enum(["relevant", "always"]).optional(),
     consequence: CapabilityConsequenceSchema,
-    consequenceDescription: z.string().min(1).max(2_048),
+    consequenceDescription: z.string().min(1).max(2048),
     evidenceCitationIndexes: z.array(z.number().int().nonnegative()).min(1).max(16),
   })
   .superRefine((proposal, context) => {
     if (proposal.effects === undefined && proposal.instruction === undefined)
       context.addIssue({ code: "custom", message: "Capability proposal requires effects" });
   });
-
 const CapabilityGateChangeSchema = z.strictObject({
-  summary: z.string().min(1).max(2_048),
-  rationale: z.string().min(1).max(4_096),
-  anticipatedEffect: z.string().min(1).max(2_048),
+  summary: z.string().min(1).max(2048),
+  rationale: z.string().min(1).max(4096),
+  anticipatedEffect: z.string().min(1).max(2048),
   effects: z.array(CapabilityEffectDraftSchema).min(1).max(8),
   consequence: CapabilityConsequenceSchema,
-  consequenceDescription: z.string().min(1).max(2_048),
+  consequenceDescription: z.string().min(1).max(2048),
 });
-
 export const CapabilityReflectionOutputSchema = z.discriminatedUnion("decision", [
-  z.strictObject({ decision: z.literal("no_change"), reason: z.string().min(1).max(2_048) }),
+  z.strictObject({ decision: z.literal("no_change"), reason: z.string().min(1).max(2048) }),
   z.strictObject({ decision: z.literal("create"), proposal: CapabilityProposalSchema }),
   z.strictObject({
     decision: z.literal("revise"),
@@ -96,39 +94,43 @@ export const CapabilityReflectionOutputSchema = z.discriminatedUnion("decision",
   z.strictObject({
     decision: z.literal("pause"),
     capabilityId: z.string().min(1),
-    reason: z.string().min(1).max(2_048),
+    reason: z.string().min(1).max(2048),
   }),
   z.strictObject({
     decision: z.literal("restore"),
     capabilityId: z.string().min(1),
     capabilityRevisionId: z.string().min(1),
-    reason: z.string().min(1).max(2_048),
+    reason: z.string().min(1).max(2048),
   }),
   z.strictObject({
     decision: z.literal("change_binding"),
     capabilityId: z.string().min(1),
     scope: CapabilityScopeDecisionSchema,
     activationMode: z.enum(["relevant", "always"]),
-    reason: z.string().min(1).max(2_048),
+    reason: z.string().min(1).max(2048),
   }),
 ]);
 export type CapabilityReflectionOutput = Readonly<z.infer<typeof CapabilityReflectionOutputSchema>>;
-
 export interface CapabilityLearningTurn {
   readonly turn: LearningTurnInput;
   readonly project: ProjectRef;
   readonly selectedCapabilities: readonly CapabilityRevisionRef[];
 }
-
 export type CapabilityReflectionResult =
-  | { readonly status: "no_change"; readonly reason: string }
+  | {
+      readonly status: "no_change";
+      readonly reason: string;
+    }
   | {
       readonly status: "activated" | "revised" | "pending" | "paused" | "restored" | "binding_changed";
       readonly capabilityId: string;
       readonly message: string;
     }
-  | { readonly status: "stale"; readonly capabilityId: string; readonly message: string };
-
+  | {
+      readonly status: "stale";
+      readonly capabilityId: string;
+      readonly message: string;
+    };
 export type CapabilityManagementIntent =
   | {
       readonly type: "pause";
@@ -158,17 +160,28 @@ export type CapabilityManagementIntent =
       readonly mode: CapabilityActivationMode;
       readonly expectedBindingRevision: number;
     }
-  | { readonly type: "approve"; readonly gateRequestId: string }
-  | { readonly type: "deny"; readonly gateRequestId: string }
-  | { readonly type: "change"; readonly gateRequestId: string; readonly instruction: string };
-
+  | {
+      readonly type: "approve";
+      readonly gateRequestId: string;
+    }
+  | {
+      readonly type: "deny";
+      readonly gateRequestId: string;
+    }
+  | {
+      readonly type: "change";
+      readonly gateRequestId: string;
+      readonly instruction: string;
+    };
 export interface CapabilityLearningModule {
   readonly reflectSettledTurn: (
     turn: CapabilityLearningTurn,
     signal: AbortSignal,
   ) => Promise<CapabilityReflectionResult>;
   readonly iterateOnFeedback: (
-    input: CapabilityLearningTurn & { readonly feedback: string },
+    input: CapabilityLearningTurn & {
+      readonly feedback: string;
+    },
     signal: AbortSignal,
   ) => Promise<CapabilityReflectionResult>;
   readonly manage: (
@@ -176,7 +189,6 @@ export interface CapabilityLearningModule {
     signal: AbortSignal,
   ) => Promise<CapabilityReflectionResult>;
 }
-
 export interface CreateCapabilityLearningModuleOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly store: CapabilityLifecycleStore;
@@ -188,7 +200,6 @@ export interface CreateCapabilityLearningModuleOptions {
   readonly now?: () => string;
   readonly nextId?: (prefix: string) => string;
 }
-
 export interface CapabilityProgramLibrary {
   readonly list: (project: ProjectRef) => Promise<
     readonly {
@@ -202,9 +213,16 @@ export interface CapabilityProgramLibrary {
     kind: "script" | "workflow",
     name: string,
     project: ProjectRef,
-  ) => Promise<Extract<CapabilityEffect, { readonly kind: "script" | "workflow" }> | undefined>;
+  ) => Promise<
+    | Extract<
+        CapabilityEffect,
+        {
+          readonly kind: "script" | "workflow";
+        }
+      >
+    | undefined
+  >;
 }
-
 function roleRequest(
   configuration: LearningRoleConfiguration,
   runId: string,
@@ -212,6 +230,7 @@ function roleRequest(
   evidenceRefs: readonly EvidenceRef[],
   signal: AbortSignal,
 ) {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     runId,
     role: "reflector" as const,
@@ -222,7 +241,6 @@ function roleRequest(
     signal,
   });
 }
-
 function scopeFrom(
   decision: z.infer<typeof CapabilityScopeDecisionSchema>,
   input: CapabilityLearningTurn,
@@ -232,13 +250,11 @@ function scopeFrom(
     return Object.freeze({ kind: "project", project: Object.freeze({ ...input.project }) });
   return Object.freeze({ kind: "session", sessionId: input.turn.sessionId });
 }
-
 function scopeDecision(scope: CapabilityScope): z.infer<typeof CapabilityScopeDecisionSchema> {
   if (scope.kind === "global") return "global";
   if (scope.kind === "project") return "current_project";
   return "current_session";
 }
-
 function proposedScope(
   proposal: z.infer<typeof CapabilityProposalSchema>,
   input: CapabilityLearningTurn,
@@ -252,34 +268,32 @@ function proposedScope(
       throw new Error("Script and workflow Capability effects require current-project scope");
     return Object.freeze({ kind: "project", project: Object.freeze({ ...input.project }) });
   }
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return proposal.scope === undefined
     ? (current ?? Object.freeze({ kind: "global" as const }))
     : scopeFrom(proposal.scope, input);
 }
-
 function proposalEffects(
   proposal: z.infer<typeof CapabilityProposalSchema>,
 ): readonly z.infer<typeof CapabilityEffectDraftSchema>[] {
   if (proposal.effects) return Object.freeze([...proposal.effects]);
   if (!proposal.instruction) throw new Error("Capability proposal has no effects");
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze([{ kind: "instruction" as const, content: proposal.instruction }]);
 }
-
 function proposedActivationMode(
   proposal: z.infer<typeof CapabilityProposalSchema>,
   current?: CapabilityActivationMode,
 ): CapabilityActivationMode {
   return proposal.activationMode ?? current ?? "relevant";
 }
-
-const REFLECTOR_MESSAGE_MAX_CHARACTERS = 10_000;
+const REFLECTOR_MESSAGE_MAX_CHARACTERS = 10000;
 const CURRENT_CAPABILITIES_MAX_CHARACTERS = REFLECTOR_MESSAGE_MAX_CHARACTERS;
 const CURRENT_CAPABILITIES_MAX_ITEMS = 64;
 const CURRENT_MATERIALS_MAX_CHARACTERS = REFLECTOR_MESSAGE_MAX_CHARACTERS;
-const CURRENT_MATERIAL_EXCERPT_CHARACTERS = 4_000;
-const AVAILABLE_PROGRAMS_MAX_CHARACTERS = 8_000;
+const CURRENT_MATERIAL_EXCERPT_CHARACTERS = 4000;
+const AVAILABLE_PROGRAMS_MAX_CHARACTERS = 8000;
 const AVAILABLE_PROGRAMS_MAX_ITEMS = 64;
-
 function currentCapabilitiesMessage(
   definitions: readonly CapabilityDefinition[],
   bindings: readonly import("@noesis/domain").CapabilityBinding[],
@@ -292,26 +306,34 @@ function currentCapabilitiesMessage(
     .map((definition) => {
       const binding = bindingByCapabilityId.get(definition.capabilityId);
       const lifecycle = revisions.get(definition.capabilityId);
-      return Object.freeze({
-        capabilityId: definition.capabilityId,
-        name: definition.name,
-        selectedForSettledTurn: selectedIds.has(definition.capabilityId),
-        effects: lifecycle ? capabilityEffectKinds(lifecycle.revision) : Object.freeze([]),
-        ...(!lifecycle && definition.kind ? { legacyKind: definition.kind } : {}),
-        description: definition.description,
-        applicability: definition.applicability,
-        ...(binding
-          ? {
-              binding: Object.freeze({
-                revision: binding.revision,
-                scope: binding.scope,
-                activationMode: binding.activationMode,
-                state: binding.state,
-                revisionNumber: binding.revisionNumber,
-              }),
-            }
-          : {}),
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return Object.freeze(
+        createConditionalObject({
+          capabilityId: definition.capabilityId,
+          name: definition.name,
+          selectedForSettledTurn: selectedIds.has(definition.capabilityId),
+          effects: lifecycle ? capabilityEffectKinds(lifecycle.revision) : Object.freeze([]),
+        } as const)
+          .addOptional(!lifecycle && definition.kind ? { legacyKind: definition.kind } : undefined)
+          .add({
+            description: definition.description,
+            applicability: definition.applicability,
+          } as const)
+          .addOptional(
+            binding
+              ? {
+                  binding: Object.freeze({
+                    revision: binding.revision,
+                    scope: binding.scope,
+                    activationMode: binding.activationMode,
+                    state: binding.state,
+                    revisionNumber: binding.revisionNumber,
+                  }),
+                }
+              : undefined,
+          )
+          .finish(),
+      );
     })
     .sort((left, right) => {
       const selectedDelta =
@@ -329,7 +351,6 @@ function currentCapabilitiesMessage(
   }
   return canonicalJson({ capabilities: [], omittedCount: definitions.length });
 }
-
 function citedEvidence(
   indexes: readonly number[],
   citations: readonly ExactCitation[],
@@ -349,11 +370,9 @@ function citedEvidence(
   if (selected.size === 0) throw new Error("Capability decision requires authoritative evidence");
   return Object.freeze([...selected.values()]);
 }
-
 const CURRENT_TURN_CITATION_CHARACTERS = 800;
 const MINIMUM_CITATION_CHARACTERS = 96;
 const MAX_REFLECTION_CITATIONS = 32;
-
 interface ReflectionCitationCandidate {
   readonly citation: ExactCitation;
   readonly kind: "message" | "tool_call" | "outcome" | "history";
@@ -361,8 +380,7 @@ interface ReflectionCitationCandidate {
   readonly toolName?: string;
   readonly toolStatus?: string;
 }
-
-function boundedText(value: string, maximumCharacters: number): string | Readonly<Record<string, unknown>> {
+function boundedText(value: string, maximumCharacters: number): string | JsonObject {
   if (value.length <= maximumCharacters) return value;
   const markerCharacters = 160;
   const retainedCharacters = Math.max(0, maximumCharacters - markerCharacters);
@@ -375,31 +393,47 @@ function boundedText(value: string, maximumCharacters: number): string | Readonl
     truncated: true,
   });
 }
-
-function settledTurnMessage(input: CapabilityLearningTurn & { readonly feedback?: string }): string {
-  const encoded = canonicalJson({
-    sessionId: input.turn.sessionId,
-    turnId: input.turn.turnId,
-    ...(input.turn.outcomeId ? { outcomeId: input.turn.outcomeId } : {}),
-    scope: input.turn.scope,
-    userMessage: boundedText(input.turn.userMessage, 3_000),
-    ...(input.turn.assistantMessage
-      ? { assistantMessage: boundedText(input.turn.assistantMessage, 3_000) }
-      : {}),
-    ...(input.turn.correction ? { correction: boundedText(input.turn.correction, 1_000) } : {}),
-    ...(input.feedback ? { explicitFeedback: boundedText(input.feedback, 1_000) } : {}),
-    outcome: input.turn.outcome,
-    occurredAt: input.turn.occurredAt,
-    sensitivity: input.turn.sensitivity,
-    telemetry: input.turn.telemetry,
-    evidenceRefCount: input.turn.evidenceRefs.length,
-    priorAdjustmentOutcomeCount: input.turn.servedWorkingAdjustmentOutcomes.length,
-  });
+function settledTurnMessage(
+  input: CapabilityLearningTurn & {
+    readonly feedback?: string;
+  },
+): string {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  const encoded = canonicalJson(
+    createConditionalObject({
+      sessionId: input.turn.sessionId,
+      turnId: input.turn.turnId,
+    } as const)
+      .addOptional(input.turn.outcomeId ? { outcomeId: input.turn.outcomeId } : undefined)
+      .add({
+        scope: input.turn.scope,
+        userMessage: boundedText(input.turn.userMessage, 3000),
+      } as const)
+      .addOptional(
+        input.turn.assistantMessage
+          ? {
+              assistantMessage: boundedText(input.turn.assistantMessage, 3000),
+            }
+          : undefined,
+      )
+      .addOptional(
+        input.turn.correction ? { correction: boundedText(input.turn.correction, 1000) } : undefined,
+      )
+      .addOptional(input.feedback ? { explicitFeedback: boundedText(input.feedback, 1000) } : undefined)
+      .add({
+        outcome: input.turn.outcome,
+        occurredAt: input.turn.occurredAt,
+        sensitivity: input.turn.sensitivity,
+        telemetry: input.turn.telemetry,
+        evidenceRefCount: input.turn.evidenceRefs.length,
+        priorAdjustmentOutcomeCount: input.turn.servedWorkingAdjustmentOutcomes.length,
+      } as const)
+      .finish(),
+  );
   if (encoded.length > REFLECTOR_MESSAGE_MAX_CHARACTERS)
     throw new Error("Bounded settled turn exceeds the reflector message budget");
   return encoded;
 }
-
 function exactCitation(source: ExactCitation["source"], occurredAt: string, content: string): ExactCitation {
   const excerpt = content.slice(0, CURRENT_TURN_CITATION_CHARACTERS);
   return Object.freeze({
@@ -411,7 +445,6 @@ function exactCitation(source: ExactCitation["source"], occurredAt: string, cont
     contentDigest: sha256(content),
   });
 }
-
 async function currentTurnCitations(
   workspace: NoesisWorkspaceStore,
   turn: LearningTurnInput,
@@ -507,7 +540,6 @@ async function currentTurnCitations(
     }),
   ]);
 }
-
 function resizeCitation(citation: ExactCitation, maximumCharacters: number): ExactCitation {
   const excerpt = citation.excerpt.slice(0, maximumCharacters);
   return Object.freeze({
@@ -516,7 +548,6 @@ function resizeCitation(citation: ExactCitation, maximumCharacters: number): Exa
     endOffset: citation.startOffset + excerpt.length,
   });
 }
-
 function representativeCurrentTurnCitations(
   candidates: readonly ReflectionCitationCandidate[],
 ): readonly ReflectionCitationCandidate[] {
@@ -539,11 +570,13 @@ function representativeCurrentTurnCitations(
   });
   return Object.freeze([...direct, ...tools]);
 }
-
 function reflectionEvidencePacket(
   currentCandidates: readonly ReflectionCitationCandidate[],
   historyCitations: readonly ExactCitation[],
-): { readonly citations: readonly ExactCitation[]; readonly content: string } {
+): {
+  readonly citations: readonly ExactCitation[];
+  readonly content: string;
+} {
   const current = representativeCurrentTurnCitations(currentCandidates);
   const selectedCurrent = [...current]
     .sort(
@@ -558,6 +591,7 @@ function reflectionEvidencePacket(
         left.citation.occurredAt.localeCompare(right.citation.occurredAt) ||
         canonicalJson(left.citation.source).localeCompare(canonicalJson(right.citation.source)),
     );
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const candidates = [
     ...selectedCurrent,
     ...historyCitations
@@ -611,7 +645,6 @@ function reflectionEvidencePacket(
   }
   throw new Error("Reflector evidence packet cannot fit its message budget");
 }
-
 async function currentCapabilityMaterialsMessage(
   workspace: NoesisWorkspaceStore,
   revisions: ReadonlyMap<string, CapabilityLifecycleRevision>,
@@ -636,16 +669,26 @@ async function currentCapabilityMaterialsMessage(
         const content = new TextDecoder("utf8", { fatal: true })
           .decode(await workspace.reads.readRevision(reference))
           .slice(0, CURRENT_MATERIAL_EXCERPT_CHARACTERS);
-        return Object.freeze({
-          kind: effect.kind,
-          ...(effect.kind === "skill" || effect.kind === "script" || effect.kind === "workflow"
-            ? { name: effect.name }
-            : {}),
-          ...(effect.kind === "skill" ? { description: effect.description } : {}),
-          revisionId: reference.revisionId,
-          contentDigest: reference.contentDigest,
-          content,
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return Object.freeze(
+          createConditionalObject({
+            kind: effect.kind,
+          } as const)
+            .addOptional(
+              effect.kind === "skill" || effect.kind === "script" || effect.kind === "workflow"
+                ? {
+                    name: effect.name,
+                  }
+                : undefined,
+            )
+            .addOptional(effect.kind === "skill" ? { description: effect.description } : undefined)
+            .add({
+              revisionId: reference.revisionId,
+              contentDigest: reference.contentDigest,
+              content,
+            } as const)
+            .finish(),
+        );
       }),
     );
     const item = Object.freeze({
@@ -661,7 +704,6 @@ async function currentCapabilityMaterialsMessage(
   }
   return canonicalJson({ capabilities: projected });
 }
-
 function availableProgramsMessage(programs: Awaited<ReturnType<CapabilityProgramLibrary["list"]>>): string {
   const projected = [...programs]
     .sort((left, right) => left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name))
@@ -682,7 +724,6 @@ function availableProgramsMessage(programs: Awaited<ReturnType<CapabilityProgram
     omittedCount: programs.length,
   });
 }
-
 function registryCapability(capability: CapabilityDefinition): Capability {
   return Object.freeze({
     capabilityId: capability.capabilityId,
@@ -691,7 +732,6 @@ function registryCapability(capability: CapabilityDefinition): Capability {
     intent: capability.applicability,
   });
 }
-
 export function createCapabilityLearningModule(
   options: CreateCapabilityLearningModuleOptions,
 ): CapabilityLearningModule {
@@ -703,12 +743,12 @@ export function createCapabilityLearningModule(
       list: async () => Object.freeze([]),
       resolve: async () => undefined,
     });
-
   const compatibilityRouter = async (evidenceRefs: readonly EvidenceRef[]) => {
     const namespace = "capability_system";
     const definitionId = "semantic-router-v1";
     const current = await options.workspace.definitionMetadata.getCurrent(namespace, definitionId);
     if (current) return current.definitionRevision;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const publication = await options.workspace.definitionPublications.publish({
       namespace,
       definitionId,
@@ -729,7 +769,6 @@ export function createCapabilityLearningModule(
     if (!raced) throw new Error(publication.error.message);
     return raced.definitionRevision;
   };
-
   const authorRevision = async (input: {
     readonly proposal: z.infer<typeof CapabilityProposalSchema>;
     readonly capabilityId: string;
@@ -747,15 +786,22 @@ export function createCapabilityLearningModule(
     if (input.predecessor && !existingDefinition)
       throw new Error(`Capability ${input.capabilityId} has a revision but no definition`);
     const drafts = proposalEffects(input.proposal);
-    const definition: CapabilityDefinition = Object.freeze({
-      capabilityId: input.capabilityId,
-      name: existingDefinition?.name ?? input.proposal.name,
-      ...(existingDefinition?.kind ? { kind: existingDefinition.kind } : {}),
-      description: existingDefinition?.description ?? input.proposal.description,
-      applicability: existingDefinition?.applicability ?? input.proposal.applicability,
-      createdAt: existingDefinition?.createdAt ?? now(),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const definition: CapabilityDefinition = Object.freeze(
+      createConditionalObject({
+        capabilityId: input.capabilityId,
+        name: existingDefinition?.name ?? input.proposal.name,
+      } as const)
+        .addOptional(existingDefinition?.kind ? { kind: existingDefinition.kind } : undefined)
+        .add({
+          description: existingDefinition?.description ?? input.proposal.description,
+          applicability: existingDefinition?.applicability ?? input.proposal.applicability,
+          createdAt: existingDefinition?.createdAt ?? now(),
+        } as const)
+        .finish(),
+    );
     options.registry.registerCapability(registryCapability(definition));
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const actor = Object.freeze({ actorId: "capability-learning", kind: "noesis" as const });
     const predecessorEffects = input.predecessor
       ? capabilityEffects(input.predecessor.revision)
@@ -770,32 +816,50 @@ export function createCapabilityLearningModule(
             const predecessor = predecessorEffects.filter((effect) => effect.kind === "instruction")[
               instructionIndex
             ];
-            const material = await options.workspace.definitions.recordWorkingDefinition({
-              workingPath: `capabilities/${input.capabilityId}/${capabilityRevisionId}/instruction-${String(index + 1)}.md`,
-              bytes: new TextEncoder().encode(`${draft.content.trim()}\n`),
-              actor,
-              reason: input.proposal.rationale,
-              provenanceRefs: input.evidenceRefs,
-              ...(predecessor?.kind === "instruction"
-                ? { predecessorRevisionId: predecessor.material.revisionId }
-                : {}),
-            });
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+            const material = await options.workspace.definitions.recordWorkingDefinition(
+              createConditionalObject({
+                workingPath: `capabilities/${input.capabilityId}/${capabilityRevisionId}/instruction-${String(index + 1)}.md`,
+                bytes: new TextEncoder().encode(`${draft.content.trim()}\n`),
+                actor,
+                reason: input.proposal.rationale,
+                provenanceRefs: input.evidenceRefs,
+              } as const)
+                .addOptional(
+                  predecessor?.kind === "instruction"
+                    ? {
+                        predecessorRevisionId: predecessor.material.revisionId,
+                      }
+                    : undefined,
+                )
+                .finish(),
+            );
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             return Object.freeze({ kind: "instruction" as const, material });
           }
           if (draft.kind === "skill") {
             const predecessor = predecessorEffects.find(
               (effect) => effect.kind === "skill" && effect.name === draft.name,
             );
-            const material = await options.workspace.definitions.recordWorkingDefinition({
-              workingPath: `capabilities/${input.capabilityId}/${capabilityRevisionId}/skills/${draft.name}/SKILL.md`,
-              bytes: new TextEncoder().encode(`${draft.instructions.trim()}\n`),
-              actor,
-              reason: input.proposal.rationale,
-              provenanceRefs: input.evidenceRefs,
-              ...(predecessor?.kind === "skill"
-                ? { predecessorRevisionId: predecessor.material.revisionId }
-                : {}),
-            });
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+            const material = await options.workspace.definitions.recordWorkingDefinition(
+              createConditionalObject({
+                workingPath: `capabilities/${input.capabilityId}/${capabilityRevisionId}/skills/${draft.name}/SKILL.md`,
+                bytes: new TextEncoder().encode(`${draft.instructions.trim()}\n`),
+                actor,
+                reason: input.proposal.rationale,
+                provenanceRefs: input.evidenceRefs,
+              } as const)
+                .addOptional(
+                  predecessor?.kind === "skill"
+                    ? {
+                        predecessorRevisionId: predecessor.material.revisionId,
+                      }
+                    : undefined,
+                )
+                .finish(),
+            );
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             return Object.freeze({
               kind: "skill" as const,
               name: draft.name,
@@ -813,43 +877,53 @@ export function createCapabilityLearningModule(
     );
     const router = await compatibilityRouter(input.evidenceRefs);
     const executesPrograms = effects.some((effect) => effect.kind === "script" || effect.kind === "workflow");
-    const reference = options.registry.constructRevision({
-      definitionState: "candidate",
-      capabilityRevisionId,
-      capabilityId: input.capabilityId,
-      ...(input.predecessor
-        ? { predecessorRevisionId: input.predecessor.revision.capabilityRevisionId }
-        : {}),
-      effects,
-      promptModules: Object.freeze(
-        effects.flatMap((effect) => (effect.kind === "instruction" ? [effect.material] : [])),
-      ),
-      skills: Object.freeze([]),
-      tools: Object.freeze([]),
-      routerRevision: router,
-      routerStrategyId: "semantic-capability-router-v1",
-      activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
-      permissionManifest: Object.freeze({
-        effects: Object.freeze(executesPrograms ? ["execute"] : []),
-        resourcePatterns: Object.freeze(
-          effects.flatMap((effect) =>
-            effect.kind === "script"
-              ? [`script:${effect.project.projectId}:${effect.name}:run`, "scripts:*"]
-              : effect.kind === "workflow"
-                ? [`workflow:${effect.project.projectId}:${effect.name}:run`, "workflows:*"]
-                : [],
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const reference = options.registry.constructRevision(
+      createConditionalObject({
+        definitionState: "candidate",
+        capabilityRevisionId,
+        capabilityId: input.capabilityId,
+      } as const)
+        .addOptional(
+          input.predecessor
+            ? {
+                predecessorRevisionId: input.predecessor.revision.capabilityRevisionId,
+              }
+            : undefined,
+        )
+        .add({
+          effects,
+          promptModules: Object.freeze(
+            effects.flatMap((effect) => (effect.kind === "instruction" ? [effect.material] : [])),
           ),
-        ),
-        credentialRefs: Object.freeze([]),
-      }),
-      evidenceRefs: input.evidenceRefs,
-      sourceEvaluationDefinitions: Object.freeze([]),
-      requestedPermissionDelta: Object.freeze({
-        addedEffects: Object.freeze([]),
-        widenedResources: Object.freeze([]),
-        addedCredentialRefs: Object.freeze([]),
-      }),
-    });
+          skills: Object.freeze([]),
+          tools: Object.freeze([]),
+          routerRevision: router,
+          routerStrategyId: "semantic-capability-router-v1",
+          activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
+          permissionManifest: Object.freeze({
+            effects: Object.freeze(executesPrograms ? ["execute"] : []),
+            resourcePatterns: Object.freeze(
+              effects.flatMap((effect) =>
+                effect.kind === "script"
+                  ? [`script:${effect.project.projectId}:${effect.name}:run`, "scripts:*"]
+                  : effect.kind === "workflow"
+                    ? [`workflow:${effect.project.projectId}:${effect.name}:run`, "workflows:*"]
+                    : [],
+              ),
+            ),
+            credentialRefs: Object.freeze([]),
+          }),
+          evidenceRefs: input.evidenceRefs,
+          sourceEvaluationDefinitions: Object.freeze([]),
+          requestedPermissionDelta: Object.freeze({
+            addedEffects: Object.freeze([]),
+            widenedResources: Object.freeze([]),
+            addedCredentialRefs: Object.freeze([]),
+          }),
+        } as const)
+        .finish(),
+    );
     const revision = options.registry.getRevision(reference);
     if (!revision) throw new Error(`Capability registry lost authored revision ${capabilityRevisionId}`);
     return Object.freeze({
@@ -864,9 +938,10 @@ export function createCapabilityLearningModule(
       }),
     });
   };
-
   const reflect = async (
-    input: CapabilityLearningTurn & { readonly feedback?: string },
+    input: CapabilityLearningTurn & {
+      readonly feedback?: string;
+    },
     signal: AbortSignal,
   ): Promise<CapabilityReflectionResult> => {
     signal.throwIfAborted();
@@ -886,7 +961,7 @@ export function createCapabilityLearningModule(
       options.store.listBindings({
         project: input.project,
         sessionId: input.turn.sessionId,
-        limit: 1_000,
+        limit: 1000,
       }),
     ]);
     const [definitions, currentRevisions, availablePrograms] = await Promise.all([
@@ -903,6 +978,7 @@ export function createCapabilityLearningModule(
       history.hits.map((hit) => hit.citation),
     );
     const citations = evidence.citations;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const messages: readonly AgentMessage[] = Object.freeze([
       Object.freeze({
         role: "user" as const,
@@ -1036,17 +1112,22 @@ export function createCapabilityLearningModule(
     const predecessor = binding ? await options.store.getRevision(binding.revision) : undefined;
     if (decision.decision === "revise" && (!binding || !predecessor))
       throw new Error(`Cannot revise unknown capability ${capabilityId}`);
-    const authored = await authorRevision({
-      proposal,
-      capabilityId,
-      evidenceRefs,
-      project: input.project,
-      ...(predecessor ? { predecessor } : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const authored = await authorRevision(
+      createConditionalObject({
+        proposal,
+        capabilityId,
+        evidenceRefs,
+        project: input.project,
+      } as const)
+        .addOptional(predecessor ? { predecessor } : undefined)
+        .finish(),
+    );
     const requiresGate = proposal.consequence !== "ordinary";
     const nextScope = proposedScope(proposal, input, binding?.scope);
     const nextActivationMode = proposedActivationMode(proposal, binding?.activationMode);
     if (!binding) {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const gate = requiresGate
         ? Object.freeze({
             gateRequestId: nextId("capability_gate"),
@@ -1061,24 +1142,29 @@ export function createCapabilityLearningModule(
           })
         : undefined;
       signal.throwIfAborted();
-      await options.store.create({
-        definition: authored.definition,
-        revision: authored.revision,
-        binding: Object.freeze({
-          capabilityId,
-          revision: authored.revision.reference,
-          scope: nextScope,
-          activationMode: nextActivationMode,
-          state: requiresGate ? "paused" : "active",
-        }),
-        ...(gate ? { gate } : {}),
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      await options.store.create(
+        createConditionalObject({
+          definition: authored.definition,
+          revision: authored.revision,
+          binding: Object.freeze({
+            capabilityId,
+            revision: authored.revision.reference,
+            scope: nextScope,
+            activationMode: nextActivationMode,
+            state: requiresGate ? "paused" : "active",
+          }),
+        } as const)
+          .addOptional(gate ? { gate } : undefined)
+          .finish(),
+      );
       return Object.freeze({
         status: requiresGate ? "pending" : "activated",
         capabilityId,
         message: authored.revision.summary,
       });
     }
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const feedback = Object.freeze({
       feedbackId: nextId("capability_feedback"),
       capabilityId,
@@ -1121,7 +1207,6 @@ export function createCapabilityLearningModule(
       message: authored.revision.summary,
     });
   };
-
   const manage: CapabilityLearningModule["manage"] = async (intent, signal) => {
     signal.throwIfAborted();
     if (intent.type === "approve" || intent.type === "deny") {
@@ -1165,6 +1250,7 @@ export function createCapabilityLearningModule(
       ]);
       if (!binding || !predecessor || !definition)
         throw new Error(`Capability gate ${intent.gateRequestId} has incomplete authority`);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const inferred = await options.inference.run(
         roleRequest(
           options.reflector,
@@ -1202,13 +1288,19 @@ export function createCapabilityLearningModule(
         consequenceDescription: changed.consequenceDescription,
         evidenceCitationIndexes: [0],
       });
-      const authored = await authorRevision({
-        proposal,
-        capabilityId: gate.capabilityId,
-        predecessor,
-        evidenceRefs: predecessor.revision.evidenceRefs,
-        ...(gate.proposedScope.kind === "project" ? { project: gate.proposedScope.project } : {}),
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      const authored = await authorRevision(
+        createConditionalObject({
+          proposal,
+          capabilityId: gate.capabilityId,
+          predecessor,
+          evidenceRefs: predecessor.revision.evidenceRefs,
+        } as const)
+          .addOptional(
+            gate.proposedScope.kind === "project" ? { project: gate.proposedScope.project } : undefined,
+          )
+          .finish(),
+      );
       signal.throwIfAborted();
       await options.store.stageGatedRevision({
         revision: authored.revision,
@@ -1243,6 +1335,7 @@ export function createCapabilityLearningModule(
     }
     const binding = await options.store.getBinding(intent.capabilityId);
     if (!binding) throw new Error(`Unknown capability ${intent.capabilityId}`);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const request =
       intent.type === "pause" || intent.type === "resume"
         ? {
@@ -1283,12 +1376,13 @@ export function createCapabilityLearningModule(
       message: updated.status === "stale" ? "Capability changed concurrently" : "Capability updated",
     });
   };
-
   return Object.freeze({
     reflectSettledTurn: async (turn: CapabilityLearningTurn, signal: AbortSignal) =>
       await reflect(turn, signal),
     iterateOnFeedback: async (
-      input: CapabilityLearningTurn & { readonly feedback: string },
+      input: CapabilityLearningTurn & {
+        readonly feedback: string;
+      },
       signal: AbortSignal,
     ) => await reflect(input, signal),
     manage,

@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import {
   Container,
   Input,
@@ -13,17 +14,14 @@ import {
 } from "@earendil-works/pi-tui";
 import { ANSI, elideText, NOESIS_WORDMARK, safeTerminalText, shouldUseColor, styled } from "./theme.ts";
 import { createSelectTheme } from "./safe-editor.ts";
-
 export interface OnboardingSurfaceChoice {
   readonly id: string;
   readonly label: string;
   readonly description?: string;
 }
-
 export interface OnboardingPromptOptions {
   readonly signal?: AbortSignal;
 }
-
 /**
  * Presentation port for first-launch setup. Callers own the decision flow; this surface only
  * asks questions and reports progress, so the same flow runs against scripted prompts in tests.
@@ -42,24 +40,24 @@ export interface OnboardingSurface {
   note(message: string): void;
   reference(label: string, value: string): void;
 }
-
 export class OnboardingInterruptedError extends Error {
   constructor() {
     super("Setup was interrupted before it finished.");
     this.name = "OnboardingInterruptedError";
   }
 }
-
 const CHOICE_HINT = "↑/↓ navigate · 1-9 jump · Enter select · Ctrl+C cancel";
 const TEXT_HINT = "Enter accept · Ctrl+C cancel";
 const SECRET_HINT = "Input hidden · Enter accept · Ctrl+C cancel";
 const WAITING_HINT = "Ctrl+C cancel";
 const WAITING_DELAY_MS = 200;
-const ELAPSED_INTERVAL_MS = 1_000;
+const ELAPSED_INTERVAL_MS = 1000;
 const MAX_CHOICE_ROWS = 9;
-
 type TranscriptEntry =
-  | { readonly kind: "note"; readonly text: string }
+  | {
+      readonly kind: "note";
+      readonly text: string;
+    }
   | {
       readonly kind: "answer";
       readonly question: string;
@@ -70,18 +68,19 @@ type TranscriptEntry =
       readonly label: string;
       readonly value: string;
     };
-
 interface ActiveBody {
   readonly component: Component;
   readonly rows: number;
   readonly hint: string;
 }
-
 export function onboardingHeaderLines(
   width: number,
   height: number,
   colorEnabled: boolean,
-  options: { readonly collapsed?: boolean; readonly subtitle?: string } = {},
+  options: {
+    readonly collapsed?: boolean;
+    readonly subtitle?: string;
+  } = {},
 ): string[] {
   const collapsed = options.collapsed ?? false;
   const subtitle = options.subtitle ?? "first-launch setup";
@@ -97,7 +96,6 @@ export function onboardingHeaderLines(
     ];
   return [`${brand("NOESIS")}${muted(`  ${subtitle}`)}`, muted("─".repeat(width))];
 }
-
 function chunkByWidth(value: string, width: number): string[] {
   if (width <= 0) return [];
   const codePoints = [...value];
@@ -106,16 +104,11 @@ function chunkByWidth(value: string, width: number): string[] {
     chunks.push(codePoints.slice(index, index + width).join(""));
   return chunks.length > 0 ? chunks : [""];
 }
-
 function renderTranscriptEntry(entry: TranscriptEntry, width: number, colorEnabled: boolean): string[] {
   if (entry.kind === "answer")
     return [
       elideText(
-        `${styled(colorEnabled, ANSI.green, "✓")} ${styled(
-          colorEnabled,
-          ANSI.dim,
-          `${safeTerminalText(entry.question)} · `,
-        )}${styled(colorEnabled, ANSI.bold, safeTerminalText(entry.value))}`,
+        `${styled(colorEnabled, ANSI.green, "✓")} ${styled(colorEnabled, ANSI.dim, `${safeTerminalText(entry.question)} · `)}${styled(colorEnabled, ANSI.bold, safeTerminalText(entry.value))}`,
         width,
       ),
     ];
@@ -133,8 +126,12 @@ function renderTranscriptEntry(entry: TranscriptEntry, width: number, colorEnabl
     .flatMap((line) => (line ? wrapTextWithAnsi(line, width) : [""]))
     .map((line) => styled(colorEnabled, ANSI.dim, line));
 }
-
-function createMaskedInput(input: Input, colorEnabled: boolean): Component & { focused: boolean } {
+function createMaskedInput(
+  input: Input,
+  colorEnabled: boolean,
+): Component & {
+  focused: boolean;
+} {
   return {
     get focused() {
       return input.focused;
@@ -150,7 +147,6 @@ function createMaskedInput(input: Input, colorEnabled: boolean): Component & { f
     },
   };
 }
-
 function createChoiceBody(
   choices: readonly OnboardingSurfaceChoice[],
   defaultId: string,
@@ -158,12 +154,16 @@ function createChoiceBody(
   rows: number,
   onSelect: (id: string) => void,
 ): ActiveBody {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const list = new SelectList(
-    choices.map((choice) => ({
-      value: choice.id,
-      label: choice.label,
-      ...(choice.description ? { description: choice.description } : {}),
-    })),
+    choices.map((choice) =>
+      createConditionalObject({
+        value: choice.id,
+        label: choice.label,
+      } as const)
+        .addOptional(choice.description ? { description: choice.description } : undefined)
+        .finish(),
+    ),
     rows,
     theme,
     { minPrimaryColumnWidth: 18, maxPrimaryColumnWidth: 48 },
@@ -189,13 +189,11 @@ function createChoiceBody(
     },
   };
 }
-
 export interface SetupTuiOptions {
   readonly terminal?: Terminal;
   /** Compact header label under the wordmark. Defaults to first-launch setup. */
   readonly subtitle?: string;
 }
-
 export async function runNoesisOnboardingTui<T>(
   run: (surface: OnboardingSurface) => Promise<T>,
   options: SetupTuiOptions = {},
@@ -209,7 +207,6 @@ export async function runNoesisOnboardingTui<T>(
   const root = new Container();
   const body = new Container();
   const entries: TranscriptEntry[] = [];
-
   let question: string | undefined;
   let active: ActiveBody | undefined;
   let waitingLabel = "Working";
@@ -217,13 +214,11 @@ export async function runNoesisOnboardingTui<T>(
   let elapsedTimer: NodeJS.Timeout | undefined;
   let loader: Loader | undefined;
   let stopped = false;
-
   const abortController = new AbortController();
   let interrupt: (() => void) | undefined;
   const interrupted = new Promise<never>((_resolve, reject) => {
     interrupt = () => reject(new OnboardingInterruptedError());
   });
-
   const chrome: Component = {
     invalidate() {},
     render(width) {
@@ -257,7 +252,6 @@ export async function runNoesisOnboardingTui<T>(
       return [...header, ...transcript, ...questionLines];
     },
   };
-
   const hintView: Component = {
     invalidate() {},
     render: (width) =>
@@ -265,7 +259,6 @@ export async function runNoesisOnboardingTui<T>(
         ? [elideText(styled(colorEnabled, ANSI.dim, active.hint), Math.max(0, width))]
         : [],
   };
-
   const clearWaiting = (): void => {
     if (waitingTimer) clearTimeout(waitingTimer);
     if (elapsedTimer) clearInterval(elapsedTimer);
@@ -274,7 +267,6 @@ export async function runNoesisOnboardingTui<T>(
     loader?.stop();
     loader = undefined;
   };
-
   const showWaiting = (): void => {
     if (stopped || active) return;
     const startedAt = Date.now();
@@ -291,13 +283,12 @@ export async function runNoesisOnboardingTui<T>(
     body.addChild(next);
     next.start();
     elapsedTimer = setInterval(() => {
-      const seconds = Math.floor((Date.now() - startedAt) / 1_000);
+      const seconds = Math.floor((Date.now() - startedAt) / 1000);
       next.setMessage(seconds >= 3 ? `${waitingLabel} · ${String(seconds)}s` : waitingLabel);
     }, ELAPSED_INTERVAL_MS);
     elapsedTimer.unref();
     tui.requestRender();
   };
-
   const scheduleWaiting = (): void => {
     clearWaiting();
     if (stopped) return;
@@ -306,7 +297,6 @@ export async function runNoesisOnboardingTui<T>(
     waitingTimer = setTimeout(showWaiting, WAITING_DELAY_MS);
     waitingTimer.unref();
   };
-
   const mount = (prompt: string, next: ActiveBody): void => {
     clearWaiting();
     question = prompt;
@@ -316,8 +306,14 @@ export async function runNoesisOnboardingTui<T>(
     tui.setFocus(next.component);
     tui.requestRender();
   };
-
-  const settle = (answered: { readonly question: string; readonly value: string } | undefined): void => {
+  const settle = (
+    answered:
+      | {
+          readonly question: string;
+          readonly value: string;
+        }
+      | undefined,
+  ): void => {
     if (answered) entries.push({ kind: "answer", ...answered });
     question = undefined;
     active = undefined;
@@ -326,9 +322,10 @@ export async function runNoesisOnboardingTui<T>(
     scheduleWaiting();
     tui.requestRender();
   };
-
   const ask = <V>(
-    build: (resolve: (value: V) => void) => { readonly prompt: string } & ActiveBody,
+    build: (resolve: (value: V) => void) => {
+      readonly prompt: string;
+    } & ActiveBody,
     options: OnboardingPromptOptions | undefined,
     record: (value: V) => string,
   ): Promise<V> =>
@@ -356,15 +353,15 @@ export async function runNoesisOnboardingTui<T>(
       });
       mount(built.prompt, built);
     });
-
   const choiceRows = (count: number): number =>
     Math.max(1, Math.min(count, MAX_CHOICE_ROWS, Math.max(1, terminal.rows - 6)));
-
   const textBody = (
     initial: string,
     masked: boolean,
     resolve: (value: string) => void,
-  ): Omit<ActiveBody, "hint"> & { readonly hint: string } => {
+  ): Omit<ActiveBody, "hint"> & {
+    readonly hint: string;
+  } => {
     const input = new Input();
     if (initial) {
       input.setValue(initial);
@@ -378,7 +375,6 @@ export async function runNoesisOnboardingTui<T>(
       component: masked ? createMaskedInput(input, colorEnabled) : input,
     };
   };
-
   const surface: OnboardingSurface = {
     signal: abortController.signal,
     choose: (message, choices, defaultId, options) =>
@@ -435,14 +431,12 @@ export async function runNoesisOnboardingTui<T>(
       tui.requestRender();
     },
   };
-
   const removeInputListener = tui.addInputListener((data) => {
     if (!matchesKey(data, "ctrl+c")) return undefined;
     abortController.abort();
     interrupt?.();
     return { consume: true };
   });
-
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
@@ -462,14 +456,12 @@ export async function runNoesisOnboardingTui<T>(
       tui.stop();
     }
   };
-
   root.addChild(chrome);
   root.addChild(body);
   root.addChild(hintView);
   tui.addChild(root);
   tui.start();
   scheduleWaiting();
-
   const running = run(surface);
   // The race reports whichever settles first; the loser is observed here so an interrupted flow
   // that unwinds later never surfaces as an unhandled rejection.

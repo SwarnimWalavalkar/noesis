@@ -7,6 +7,7 @@ import type {
   UserCriterionRepository,
 } from "@noesis/config";
 import {
+  createConditionalObject,
   type Capability,
   capabilityRevisionRef,
   type DatabaseRowRef,
@@ -18,6 +19,7 @@ import {
   type FeedbackSignal,
   type FeedbackSignalStorePort,
   type FileRevisionRef,
+  type JsonObject,
   ok,
   type Result,
   sha256,
@@ -42,14 +44,12 @@ import {
   type ScriptedLearningInferencePort,
   type ScriptedLearningInferenceStep,
 } from "./support/scripted-learning-inference.ts";
-
 const capability: Capability = Object.freeze({
   capabilityId: "writing-assistance",
   name: "Writing assistance",
   scope: "writing",
   intent: "Help with evidence-grounded writing",
 });
-
 function fileRef(name: string): FileRevisionRef {
   return Object.freeze({
     kind: "file_revision",
@@ -59,11 +59,9 @@ function fileRef(name: string): FileRevisionRef {
     contentDigest: sha256(name),
   });
 }
-
 const reflectorPrompt = fileRef("reflector-prompt.md");
 const authorPrompt = fileRef("author-prompt.md");
 const revisionPrompt = fileRef("revision-prompt.md");
-
 const config: AutomaticLearningConfig = Object.freeze({
   schemaVersion: 1,
   enabled: true,
@@ -108,7 +106,6 @@ const config: AutomaticLearningConfig = Object.freeze({
     }),
   }),
 });
-
 function citation(index: number, excerpt = `prior correction ${index}`): ExactCitation {
   return Object.freeze({
     source: Object.freeze({
@@ -124,7 +121,6 @@ function citation(index: number, excerpt = `prior correction ${index}`): ExactCi
     contentDigest: sha256(excerpt),
   });
 }
-
 function outcomeCitation(rowId: string, excerpt: string): ExactCitation {
   return Object.freeze({
     source: Object.freeze({ kind: "database_row", table: "outcomes", rowId, field: "summary" }),
@@ -135,7 +131,6 @@ function outcomeCitation(rowId: string, excerpt: string): ExactCitation {
     contentDigest: sha256(excerpt),
   });
 }
-
 function experimentCitation(rowId: string, excerpt: string): ExactCitation {
   return Object.freeze({
     source: Object.freeze({ kind: "database_row", table: "experiments", rowId, field: "data_json" }),
@@ -146,7 +141,6 @@ function experimentCitation(rowId: string, excerpt: string): ExactCitation {
     contentDigest: sha256(excerpt),
   });
 }
-
 function fileRevisionCitation(revisionId: string, excerpt: string): ExactCitation {
   return Object.freeze({
     source: Object.freeze({ kind: "file_revision", revisionId, field: "bytes" }),
@@ -157,11 +151,9 @@ function fileRevisionCitation(revisionId: string, excerpt: string): ExactCitatio
     contentDigest: sha256(excerpt),
   });
 }
-
 function databaseRef(rowId: string): DatabaseRowRef<"messages"> {
   return Object.freeze({ kind: "database_row", table: "messages", rowId });
 }
-
 function hasUnpairedSurrogate(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const current = value.charCodeAt(index);
@@ -176,7 +168,6 @@ function hasUnpairedSurrogate(value: string): boolean {
   }
   return false;
 }
-
 function createHistoryHarness(citations: readonly ExactCitation[]) {
   const requests: HistorySearchRequest[] = [];
   const history: Pick<HistoryPort, "search" | "resolve"> = Object.freeze({
@@ -202,7 +193,6 @@ function createHistoryHarness(citations: readonly ExactCitation[]) {
   });
   return Object.freeze({ history, requests: () => Object.freeze([...requests]) });
 }
-
 function createFeedbackHarness() {
   const signals: FeedbackSignal[] = [];
   return Object.freeze({
@@ -222,6 +212,7 @@ function createFeedbackHarness() {
           throw new Error(`Feedback signal ${signal.signalId} changed`);
         }
         if (!existing) signals.push(signal);
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze({
           kind: "database_row" as const,
           table: "feedback_signals" as const,
@@ -232,9 +223,10 @@ function createFeedbackHarness() {
     signals: () => Object.freeze([...signals]),
   });
 }
-
 function criterionModel(
-  input: CreateUserCriterionInput & { readonly criterionId: string },
+  input: CreateUserCriterionInput & {
+    readonly criterionId: string;
+  },
 ): UserCriterionReadModel {
   const definitionRevision = fileRef(`criterion-${input.criterionId}.json`);
   return Object.freeze({
@@ -267,7 +259,6 @@ function criterionModel(
     }),
   });
 }
-
 function createCriteriaHarness() {
   const values = new Map<string, UserCriterionReadModel>();
   const creates: CreateUserCriterionInput[] = [];
@@ -296,7 +287,6 @@ function createCriteriaHarness() {
     values: () => Object.freeze([...values.values()]),
   });
 }
-
 function baselineConstruction(): CapabilityRevisionConstruction {
   return Object.freeze({
     definitionState: "candidate",
@@ -322,7 +312,6 @@ function baselineConstruction(): CapabilityRevisionConstruction {
     }),
   });
 }
-
 function createCandidateDefinitionHarness() {
   const requests: DefinitionWriteRequest[] = [];
   return Object.freeze({
@@ -343,7 +332,7 @@ function createCandidateDefinitionHarness() {
     requests: () => Object.freeze([...requests]),
   });
 }
-
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const reflectionStep = Object.freeze({
   role: "reflector" as const,
   value: Object.freeze({
@@ -370,8 +359,8 @@ const reflectionStep = Object.freeze({
     ]),
   }),
 }) satisfies ScriptedLearningInferenceStep;
-
 function scopeVerificationStep(relationship: "same" | "narrower" | "broader"): ScriptedLearningInferenceStep {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return Object.freeze({
     role: "reflector" as const,
     value: Object.freeze({
@@ -380,7 +369,6 @@ function scopeVerificationStep(relationship: "same" | "narrower" | "broader"): S
     }),
   });
 }
-
 function withScopeVerification(
   steps: readonly ScriptedLearningInferenceStep[],
   relationships: readonly ("same" | "narrower" | "broader")[] = [],
@@ -396,7 +384,7 @@ function withScopeVerification(
     }),
   );
 }
-
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const authorStep = Object.freeze({
   role: "revision_author" as const,
   value: Object.freeze({
@@ -430,12 +418,11 @@ const authorStep = Object.freeze({
     }),
   }),
 }) satisfies ScriptedLearningInferenceStep;
-
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const revisionStep = Object.freeze({
   ...authorStep,
   role: "revision_agent" as const,
 }) satisfies ScriptedLearningInferenceStep;
-
 function turn(input: {
   readonly turnId?: string;
   readonly userMessage?: string;
@@ -443,23 +430,28 @@ function turn(input: {
   readonly outcome?: "accepted" | "corrected" | "failed" | "unknown";
   readonly evidenceRef?: EvidenceRef;
 }) {
-  return Object.freeze({
-    sessionId: "session-1",
-    turnId: input.turnId ?? "turn-1",
-    project: Object.freeze({ projectId: "project-noesis", root: "/work/noesis" }),
-    expectedActiveAdjustmentId: null,
-    servedWorkingAdjustmentOutcomes: Object.freeze([]),
-    scope: "writing",
-    userMessage: input.userMessage ?? "Please rewrite this paragraph",
-    ...(input.correction ? { correction: input.correction } : {}),
-    outcome: input.outcome ?? "corrected",
-    occurredAt: "2026-01-10T00:00:00.000Z",
-    evidenceRefs: Object.freeze([input.evidenceRef ?? databaseRef("current-message")]),
-    sensitivity: "normal" as const,
-    telemetry: Object.freeze({ retryCount: 0, toolFailureCount: 0, aborted: false }),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  return Object.freeze(
+    createConditionalObject({
+      sessionId: "session-1",
+      turnId: input.turnId ?? "turn-1",
+      project: Object.freeze({ projectId: "project-noesis", root: "/work/noesis" }),
+      expectedActiveAdjustmentId: null,
+      servedWorkingAdjustmentOutcomes: Object.freeze([]),
+      scope: "writing",
+      userMessage: input.userMessage ?? "Please rewrite this paragraph",
+    } as const)
+      .addOptional(input.correction ? { correction: input.correction } : undefined)
+      .add({
+        outcome: input.outcome ?? "corrected",
+        occurredAt: "2026-01-10T00:00:00.000Z",
+        evidenceRefs: Object.freeze([input.evidenceRef ?? databaseRef("current-message")]),
+        sensitivity: "normal" as const,
+        telemetry: Object.freeze({ retryCount: 0, toolFailureCount: 0, aborted: false }),
+      } as const)
+      .finish(),
+  );
 }
-
 function sequentialIds() {
   const counts = new Map<string, number>();
   return (prefix: string) => {
@@ -468,7 +460,6 @@ function sequentialIds() {
     return `${prefix}-${next}`;
   };
 }
-
 function createHarness(input: {
   readonly steps: readonly ScriptedLearningInferenceStep[];
   readonly citations?: readonly ExactCitation[];
@@ -514,7 +505,6 @@ function createHarness(input: {
     putExperiment: experimentState.port.putExperiment,
   });
 }
-
 function createExperimentState() {
   const experiments: Experiment[] = [];
   const port: ExperimentStorePort = Object.freeze({
@@ -553,6 +543,7 @@ function createExperimentState() {
         : experiment;
       if (index === -1) experiments.push(value);
       else experiments[index] = value;
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return Object.freeze({
         kind: "database_row" as const,
         table: "experiments" as const,
@@ -562,7 +553,6 @@ function createExperimentState() {
   });
   return Object.freeze({ port, values: () => Object.freeze([...experiments]) });
 }
-
 function createContendedBriefStore(initial: ExperimentBrief) {
   let current = initial;
   let initialReads = 0;
@@ -596,7 +586,6 @@ function createContendedBriefStore(initial: ExperimentBrief) {
   });
   return Object.freeze({ port, current: () => current, collisions: () => collisions });
 }
-
 function createContendedInitialBriefStore() {
   let current: ExperimentBrief | undefined;
   let dedupeKey: string | undefined;
@@ -637,7 +626,6 @@ function createContendedInitialBriefStore() {
   });
   return Object.freeze({ port, current: () => current, collisions: () => collisions });
 }
-
 function createBarrierInference(
   steps: readonly ScriptedLearningInferenceStep[],
 ): ScriptedLearningInferencePort {
@@ -655,9 +643,9 @@ function createBarrierInference(
   };
   return Object.freeze({ run, requests: base.requests, remaining: base.remaining });
 }
-
 describe("automatic learning organ", () => {
   test("bounds working-adjustment model output and served outcome context at the durable job boundary", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const exactDecision = {
       observation: {
         kind: "correction" as const,
@@ -695,8 +683,8 @@ describe("automatic learning organ", () => {
         observation: { ...exactDecision.observation, reason: `${exactDecision.observation.reason}x` },
       }).success,
     ).toBe(false);
-
     const base = turn({ turnId: "turn-bounded-evidence" });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const parsed = LearningTurnInputSchema.parse({
       ...base,
       servedWorkingAdjustmentOutcomes: Array.from({ length: 8 }, (_, outcomeIndex) => ({
@@ -706,17 +694,16 @@ describe("automatic learning organ", () => {
         turnId: `served-turn-${outcomeIndex}`,
         outcomeId: `outcome-${outcomeIndex}`,
         outcome: "accepted" as const,
-        summary: "q".repeat(1_000),
+        summary: "q".repeat(1000),
         settledAt: "2026-01-10T00:00:00.000Z",
         evidenceRefs: Array.from({ length: 10 }, (_, referenceIndex) =>
           databaseRef(`served-${outcomeIndex}-${referenceIndex}`),
         ),
       })),
     });
-
     expect(
       parsed.servedWorkingAdjustmentOutcomes.reduce((total, outcome) => total + outcome.summary.length, 0),
-    ).toBe(2_048);
+    ).toBe(2048);
     expect(parsed.servedWorkingAdjustmentOutcomes.flatMap((outcome) => outcome.evidenceRefs)).toHaveLength(
       WORKING_ADJUSTMENT_LIMITS.evidenceRefs,
     );
@@ -728,12 +715,10 @@ describe("automatic learning organ", () => {
       ).size,
     ).toBe(WORKING_ADJUSTMENT_LIMITS.evidenceRefs);
   });
-
   test("keeps automatic-learning configuration on schema version 1", () => {
     expect(AutomaticLearningConfigSchema.safeParse(config).success).toBe(true);
     expect(AutomaticLearningConfigSchema.safeParse({ ...config, schemaVersion: 2 }).success).toBe(false);
   });
-
   test("turns a normal correction into one bounded evidence-linked experiment brief", async () => {
     const harness = createHarness({
       steps: [reflectionStep],
@@ -744,7 +729,6 @@ describe("automatic learning organ", () => {
       baselineRevision: harness.baseline,
       capability,
     });
-
     expect(result.status).toBe("experiment");
     if (result.status !== "experiment") throw new Error("Expected an experiment brief");
     expect(result.harvest.signals).toHaveLength(1);
@@ -781,8 +765,8 @@ describe("automatic learning organ", () => {
       privacy: "normal",
     });
   });
-
   test("authors a narrow reflection as a new capability slot without claiming genesis lineage", async () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const narrowReflection = Object.freeze({
       role: "reflector" as const,
       value: Object.freeze({
@@ -821,7 +805,6 @@ describe("automatic learning organ", () => {
       capability,
     });
     if (observed.status !== "experiment") throw new Error("Expected a narrow experiment brief");
-
     expect(observed.brief.capability).toMatchObject({
       capabilityId: expect.stringMatching(/^learned-research-brief-evidence-[a-f0-9]{12}$/u),
       name: "Research brief evidence",
@@ -834,7 +817,6 @@ describe("automatic learning organ", () => {
       verifiedScopeRelationship: "narrower",
       scopeVerificationReason: "Independent scope verification classified the proposal as narrower.",
     });
-
     const authored = await harness.organ.authorExperimentRevision({ brief: observed.brief });
     expect(authored.revision.capabilityId).toBe(observed.brief.capability.capabilityId);
     expect(authored.revision.predecessorRevisionId).toBeUndefined();
@@ -843,8 +825,8 @@ describe("automatic learning organ", () => {
       harness.candidates.requests().every((request) => request.predecessorRevisionId === undefined),
     ).toBe(true);
   });
-
   test("rejects one-off broadening without the configured distinct recurrence evidence", async () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const broadReflection = Object.freeze({
       ...reflectionStep,
       value: Object.freeze({
@@ -857,7 +839,6 @@ describe("automatic learning organ", () => {
       }),
     }) satisfies ScriptedLearningInferenceStep;
     const harness = createHarness({ steps: [broadReflection], citations: [citation(1)] });
-
     await expect(
       harness.organ.observeTurn({
         turn: turn({ correction: "Use primary sources." }),
@@ -867,8 +848,8 @@ describe("automatic learning organ", () => {
     ).rejects.toThrow("Broader learning scope requires at least 2 distinct recurrence citations");
     expect(harness.experiments()).toHaveLength(0);
   });
-
   test("accepts broader scope when the reflector cites enough distinct recurrence evidence", async () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const broadReflection = Object.freeze({
       ...reflectionStep,
       value: Object.freeze({
@@ -884,13 +865,11 @@ describe("automatic learning organ", () => {
       steps: [broadReflection],
       citations: [citation(1), citation(2)],
     });
-
     const result = await harness.organ.observeTurn({
       turn: turn({ correction: "Use primary sources." }),
       baselineRevision: harness.baseline,
       capability,
     });
-
     if (result.status !== "experiment") throw new Error("Expected a broader experiment");
     expect(result.brief).toMatchObject({
       scope: "all collaboration",
@@ -899,8 +878,8 @@ describe("automatic learning organ", () => {
       anticipatedFutureUse: "Whenever the user asks for evidence-grounded work.",
     });
   });
-
   test("rejects a broad proposal that self-labels as narrower", async () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const inconsistentReflection = Object.freeze({
       ...reflectionStep,
       value: Object.freeze({
@@ -914,7 +893,6 @@ describe("automatic learning organ", () => {
       citations: [citation(1)],
       scopeVerificationRelationships: ["broader"],
     });
-
     await expect(
       harness.organ.observeTurn({
         turn: turn({ correction: "Use primary sources." }),
@@ -924,7 +902,6 @@ describe("automatic learning organ", () => {
     ).rejects.toThrow("disagrees with independent verification broader");
     expect(harness.experiments()).toHaveLength(0);
   });
-
   test("leaves normative interpretation to the reflector instead of creating a keyword criterion", async () => {
     const harness = createHarness({ steps: [reflectionStep], citations: [citation(1)] });
     const result = await harness.organ.observeTurn({
@@ -932,7 +909,6 @@ describe("automatic learning organ", () => {
       baselineRevision: harness.baseline,
       capability,
     });
-
     expect(result.status).toBe("experiment");
     expect(harness.criteria.creates()).toHaveLength(0);
     expect(harness.inference.requests()[0]?.messages[0]).toMatchObject({
@@ -945,7 +921,6 @@ describe("automatic learning organ", () => {
       message: "Learning experiment ready: Preserve writing intent",
     });
   });
-
   test("links an experiment to an active adjustment only when the reflector cites its evidence", async () => {
     const activeAdjustment = Object.freeze({
       adjustmentId: "adjustment-active",
@@ -975,7 +950,6 @@ describe("automatic learning organ", () => {
       activeWorkingAdjustment: activeAdjustment,
     });
     if (linkedResult.status !== "experiment") throw new Error("Expected a linked experiment");
-
     expect(linkedResult.brief.sourceAdjustmentId).toBe(activeAdjustment.adjustmentId);
     expect(linked.experiments()[0]?.sourceAdjustmentId).toBe(activeAdjustment.adjustmentId);
     expect(linkedResult.brief.evidenceRefs).toContainEqual({
@@ -983,7 +957,6 @@ describe("automatic learning organ", () => {
       table: "working_adjustments",
       rowId: activeAdjustment.adjustmentId,
     });
-
     const unlinked = createHarness({ steps: [reflectionStep], citations: [citation(1)] });
     const unlinkedTurn = turn({ turnId: "turn-unlinked", correction: "Use primary sources." });
     const unlinkedResult = await unlinked.organ.observeTurn({
@@ -999,7 +972,6 @@ describe("automatic learning organ", () => {
     expect(unlinkedResult.brief.sourceAdjustmentId).toBeUndefined();
     expect(unlinked.experiments()[0]?.sourceAdjustmentId).toBeUndefined();
   });
-
   test("carries cited working-adjustment outcome evidence into revision-author source cases", async () => {
     const activeAdjustment = Object.freeze({
       adjustmentId: "adjustment-source-cases",
@@ -1019,6 +991,7 @@ describe("automatic learning organ", () => {
       }),
     });
     const harness = createHarness({ steps: [linkedStep, authorStep], citations: [citation(1)] });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const observed = await harness.organ.observeTurn({
       turn: Object.freeze({
         ...turn({ turnId: "turn-adjustment-source-case", correction: "Verify the real state first." }),
@@ -1042,7 +1015,7 @@ describe("automatic learning organ", () => {
       activeWorkingAdjustment: activeAdjustment,
     });
     if (observed.status !== "experiment") throw new Error("Expected an adjustment-backed experiment");
-
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const expectedAdjustmentEvidence = Object.freeze({
       kind: "database_row" as const,
       table: "working_adjustments" as const,
@@ -1052,14 +1025,12 @@ describe("automatic learning organ", () => {
     expect(observed.brief.sourceCases[0]?.evidenceRefs).toEqual(observed.brief.evidenceRefs);
     expect(observed.brief.sourceCases[0]?.evidenceRefs).toContainEqual(expectedAdjustmentEvidence);
     expect(observed.brief.sourceCases[0]?.evidenceRefs).toContainEqual(citedServedOutcome);
-
     await harness.organ.authorExperimentRevision({ brief: observed.brief });
     const authorRequest = harness.inference.requests().find((request) => request.role === "revision_author");
     const sourceCasesMessage = authorRequest?.messages.find((message) => message.name === "source_cases");
     const authoredSourceCases: unknown = JSON.parse(sourceCasesMessage?.content ?? "null");
     expect(authoredSourceCases).toEqual(observed.brief.sourceCases);
   });
-
   test("lets the reflector return no change for ordinary chat", async () => {
     const harness = createHarness({
       steps: [
@@ -1078,14 +1049,12 @@ describe("automatic learning organ", () => {
       baselineRevision: harness.baseline,
       capability,
     });
-
     expect(result).toMatchObject({ status: "no_change", reason: "reflector_no_change", interruption: null });
     expect(harness.history.requests()).toHaveLength(1);
     expect(harness.feedback.signals()).toHaveLength(0);
     expect(harness.criteria.creates()).toHaveLength(0);
     expect(harness.inference.requests()).toHaveLength(1);
   });
-
   test("returns a cited project working-adjustment decision without opening an experiment", async () => {
     const harness = createHarness({
       steps: [
@@ -1110,13 +1079,11 @@ describe("automatic learning organ", () => {
       Array.from({ length: 40 }, (_, index) => databaseRef(`current-message-${index}`)),
     );
     const base = turn({ correction: "You said it worked without checking the actual state." });
-
     const result = await harness.organ.observeTurn({
       turn: Object.freeze({ ...base, evidenceRefs: currentEvidence }),
       baselineRevision: harness.baseline,
       capability,
     });
-
     expect(result).toMatchObject({
       status: "apply_working_adjustment",
       project: { projectId: "project-noesis" },
@@ -1131,7 +1098,6 @@ describe("automatic learning organ", () => {
       name: "working_adjustment_context",
     });
   });
-
   test("does not duplicate current-turn message text in working-adjustment evidence context", async () => {
     const harness = createHarness({
       steps: [
@@ -1145,9 +1111,8 @@ describe("automatic learning organ", () => {
         }),
       ],
     });
-    const userMessage = `unique-user-message-${"u".repeat(20_000)}`;
-    const assistantMessage = `unique-assistant-message-${"a".repeat(20_000)}`;
-
+    const userMessage = `unique-user-message-${"u".repeat(20000)}`;
+    const assistantMessage = `unique-assistant-message-${"a".repeat(20000)}`;
     await harness.organ.observeTurn({
       turn: Object.freeze({
         ...turn({ userMessage }),
@@ -1156,7 +1121,6 @@ describe("automatic learning organ", () => {
       baselineRevision: harness.baseline,
       capability,
     });
-
     const request = harness.inference.requests()[0];
     const currentTurnMessage = request?.messages.find((message) => message.name === "current_turn");
     const adjustmentContextMessage = request?.messages.find(
@@ -1164,7 +1128,6 @@ describe("automatic learning organ", () => {
     );
     if (!currentTurnMessage || !adjustmentContextMessage)
       throw new Error("Expected reflector context messages");
-
     expect(currentTurnMessage.content).toContain(userMessage);
     expect(currentTurnMessage.content).toContain(assistantMessage);
     expect(adjustmentContextMessage.content).not.toContain(userMessage);
@@ -1172,16 +1135,15 @@ describe("automatic learning organ", () => {
     expect(adjustmentContextMessage.content).toContain('"kind":"current_turn"');
     expect(adjustmentContextMessage.content).toContain('"turnId":"turn-1"');
     expect(adjustmentContextMessage.content).toContain('"outcome":"corrected"');
-    expect(adjustmentContextMessage.content.length).toBeLessThan(4_000);
+    expect(adjustmentContextMessage.content.length).toBeLessThan(4000);
   });
-
   test("keeps worst-case working-adjustment context below the reflector message policy without losing citation indexes", async () => {
-    const activeAdjustmentId = `adjustment-${"d".repeat(4_000)}`;
+    const activeAdjustmentId = `adjustment-${"d".repeat(4000)}`;
     const promptAdjustmentIdentity = `${activeAdjustmentId.slice(0, 239)}…${sha256(activeAdjustmentId).slice(0, 16)}`;
     const servedEvidence = Array.from({ length: 8 }, (_, outcomeIndex) =>
       Object.freeze(
         Array.from({ length: 4 }, (_, referenceIndex) =>
-          databaseRef(`served-${outcomeIndex}-${referenceIndex}-${"e".repeat(2_000)}`),
+          databaseRef(`served-${outcomeIndex}-${referenceIndex}-${"e".repeat(2000)}`),
         ),
       ),
     );
@@ -1207,8 +1169,8 @@ describe("automatic learning organ", () => {
       ],
     });
     const project = Object.freeze({
-      projectId: `project-${"p".repeat(4_000)}`,
-      root: `/work/${"r".repeat(4_000)}`,
+      projectId: `project-${"p".repeat(4000)}`,
+      root: `/work/${"r".repeat(4000)}`,
     });
     const activeAdjustment = Object.freeze({
       adjustmentId: activeAdjustmentId,
@@ -1218,13 +1180,13 @@ describe("automatic learning organ", () => {
       successSignal: "x".repeat(WORKING_ADJUSTMENT_LIMITS.successSignalChars),
       evidenceRefs: Object.freeze(
         Array.from({ length: WORKING_ADJUSTMENT_LIMITS.evidenceRefs }, (_, index) =>
-          databaseRef(`active-${index}-${"a".repeat(2_000)}`),
+          databaseRef(`active-${index}-${"a".repeat(2000)}`),
         ),
       ),
-      createdFromTurnId: `turn-${"t".repeat(2_000)}`,
+      createdFromTurnId: `turn-${"t".repeat(2000)}`,
     });
     const base = turn({ turnId: "turn-worst-case-context" });
-
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const result = await harness.organ.observeTurn({
       turn: Object.freeze({
         ...base,
@@ -1234,10 +1196,10 @@ describe("automatic learning organ", () => {
           servedEvidence.map((evidenceRefs, outcomeIndex) =>
             Object.freeze({
               adjustmentId: activeAdjustmentId,
-              planId: `plan-${outcomeIndex}-${"l".repeat(2_000)}`,
-              sessionId: `session-${outcomeIndex}-${"n".repeat(2_000)}`,
-              turnId: `served-turn-${outcomeIndex}-${"u".repeat(2_000)}`,
-              outcomeId: `outcome-${outcomeIndex}-${"i".repeat(2_000)}`,
+              planId: `plan-${outcomeIndex}-${"l".repeat(2000)}`,
+              sessionId: `session-${outcomeIndex}-${"n".repeat(2000)}`,
+              turnId: `served-turn-${outcomeIndex}-${"u".repeat(2000)}`,
+              outcomeId: `outcome-${outcomeIndex}-${"i".repeat(2000)}`,
               outcome: "accepted" as const,
               summary: "q".repeat(512),
               settledAt: "2026-01-10T00:00:00.000Z",
@@ -1250,21 +1212,24 @@ describe("automatic learning organ", () => {
       capability,
       activeWorkingAdjustment: activeAdjustment,
     });
-
     if (result.status !== "apply_working_adjustment")
       throw new Error("Expected a replacement working adjustment");
     expect(result.expectedActiveAdjustmentId).toBe(activeAdjustmentId);
     expect(result.evidenceRefs).toContainEqual(lastServedEvidence);
-
     const adjustmentContextMessage = harness.inference
       .requests()[0]
       ?.messages.find((message) => message.name === "working_adjustment_context");
     if (!adjustmentContextMessage) throw new Error("Expected working-adjustment context");
-    expect(adjustmentContextMessage.content.length).toBeLessThan(12_000);
+    expect(adjustmentContextMessage.content.length).toBeLessThan(12000);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const promptContext = JSON.parse(adjustmentContextMessage.content) as {
       readonly expectedActiveAdjustmentId: string;
-      readonly activeAdjustment: Readonly<Record<string, unknown>>;
-      readonly evidence: readonly Readonly<Record<string, unknown> & { readonly citationIndex: number }>[];
+      readonly activeAdjustment: JsonObject;
+      readonly evidence: readonly Readonly<
+        JsonObject & {
+          readonly citationIndex: number;
+        }
+      >[];
     };
     expect(promptContext.expectedActiveAdjustmentId).toBe(promptAdjustmentIdentity);
     expect(promptContext.activeAdjustment).not.toHaveProperty("evidenceRefs");
@@ -1275,7 +1240,6 @@ describe("automatic learning organ", () => {
     expect(promptContext.evidence.every((candidate) => !("evidenceRefs" in candidate))).toBe(true);
     expect(adjustmentContextMessage.content).not.toContain(lastServedEvidence.rowId);
   });
-
   test("does not split an emoji surrogate pair at a working-adjustment prompt boundary", async () => {
     expect(hasUnpairedSurrogate("\ud800")).toBe(true);
     expect(hasUnpairedSurrogate("😀")).toBe(false);
@@ -1292,7 +1256,7 @@ describe("automatic learning organ", () => {
       ],
     });
     const base = turn({ correction: "Keep the current project strategy." });
-    const strategy = `${"a".repeat(3_054)}😀${"z".repeat(500)}`;
+    const strategy = `${"a".repeat(3054)}😀${"z".repeat(500)}`;
     const activeAdjustment = Object.freeze({
       adjustmentId: "adjustment-emoji-boundary",
       scope: base.project,
@@ -1302,7 +1266,6 @@ describe("automatic learning organ", () => {
       evidenceRefs: Object.freeze([databaseRef("emoji-boundary-evidence")]),
       createdFromTurnId: "turn-emoji-source",
     });
-
     await harness.organ.observeTurn({
       turn: Object.freeze({
         ...base,
@@ -1312,19 +1275,20 @@ describe("automatic learning organ", () => {
       capability,
       activeWorkingAdjustment: activeAdjustment,
     });
-
     const message = harness.inference
       .requests()[0]
       ?.messages.find((candidate) => candidate.name === "working_adjustment_context");
     if (!message) throw new Error("Expected working-adjustment context");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const parsed = JSON.parse(message.content) as {
-      readonly activeAdjustment: { readonly strategy: string };
+      readonly activeAdjustment: {
+        readonly strategy: string;
+      };
     };
-    expect(parsed.activeAdjustment.strategy).toBe(`${"a".repeat(3_054)}…${sha256(strategy).slice(0, 16)}`);
+    expect(parsed.activeAdjustment.strategy).toBe(`${"a".repeat(3054)}…${sha256(strategy).slice(0, 16)}`);
     expect(hasUnpairedSurrogate(parsed.activeAdjustment.strategy)).toBe(false);
-    expect(message.content.length).toBeLessThan(12_000);
+    expect(message.content.length).toBeLessThan(12000);
   });
-
   test("keeps escape-heavy maximum fields as valid bounded JSON with exact citation indexes", async () => {
     const activeAdjustmentId = "adjustment-escape-heavy";
     const escaped = '\u0000\n\\"';
@@ -1353,8 +1317,8 @@ describe("automatic learning organ", () => {
       ],
     });
     const project = Object.freeze({
-      projectId: escaped.repeat(1_000),
-      root: `/${escaped.repeat(1_000)}`,
+      projectId: escaped.repeat(1000),
+      root: `/${escaped.repeat(1000)}`,
     });
     const activeAdjustment = Object.freeze({
       adjustmentId: activeAdjustmentId,
@@ -1363,10 +1327,10 @@ describe("automatic learning organ", () => {
       strategy: escaped.repeat(WORKING_ADJUSTMENT_LIMITS.strategyChars / escaped.length),
       successSignal: escaped.repeat(WORKING_ADJUSTMENT_LIMITS.successSignalChars / escaped.length),
       evidenceRefs: Object.freeze([databaseRef("escape-heavy-active")]),
-      createdFromTurnId: escaped.repeat(1_000),
+      createdFromTurnId: escaped.repeat(1000),
     });
-    const base = turn({ turnId: escaped.repeat(1_000) });
-
+    const base = turn({ turnId: escaped.repeat(1000) });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const result = await harness.organ.observeTurn({
       turn: Object.freeze({
         ...base,
@@ -1378,7 +1342,7 @@ describe("automatic learning organ", () => {
               adjustmentId: activeAdjustmentId,
               planId: `plan-${index}`,
               sessionId: `session-${index}`,
-              turnId: escaped.repeat(1_000),
+              turnId: escaped.repeat(1000),
               outcomeId: `outcome-${index}`,
               outcome: "accepted" as const,
               summary: escaped.repeat(128),
@@ -1392,7 +1356,6 @@ describe("automatic learning organ", () => {
       capability,
       activeWorkingAdjustment: activeAdjustment,
     });
-
     if (result.status !== "apply_working_adjustment")
       throw new Error("Expected a replacement working adjustment");
     expect(result.evidenceRefs).toContainEqual(citedEvidence);
@@ -1400,16 +1363,18 @@ describe("automatic learning organ", () => {
       .requests()[0]
       ?.messages.find((candidate) => candidate.name === "working_adjustment_context");
     if (!message) throw new Error("Expected working-adjustment context");
-    expect(message.content.length).toBeLessThan(12_000);
+    expect(message.content.length).toBeLessThan(12000);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const parsed = JSON.parse(message.content) as {
       readonly expectedActiveAdjustmentId: string;
-      readonly evidence: readonly { readonly citationIndex: number }[];
+      readonly evidence: readonly {
+        readonly citationIndex: number;
+      }[];
     };
     expect(parsed.expectedActiveAdjustmentId).toBe(activeAdjustmentId);
     expect(parsed.evidence.map((candidate) => candidate.citationIndex)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
     expect(message.content).not.toContain(citedEvidence.rowId);
   });
-
   test("requires an unapply decision to target the exact adjustment served to the turn", async () => {
     const harness = createHarness({
       steps: [
@@ -1426,7 +1391,6 @@ describe("automatic learning organ", () => {
       ],
     });
     const base = turn({ userMessage: "That approach was less useful." });
-
     await expect(
       harness.organ.observeTurn({
         turn: Object.freeze({
@@ -1448,7 +1412,6 @@ describe("automatic learning organ", () => {
     ).rejects.toThrow("changed the expected active identity");
     expect(harness.experiments()).toHaveLength(0);
   });
-
   test("records a model-classified preference independently of experiment creation", async () => {
     const harness = createHarness({
       steps: [
@@ -1465,13 +1428,11 @@ describe("automatic learning organ", () => {
         }),
       ],
     });
-
     const result = await harness.organ.observeTurn({
       turn: turn({ userMessage: "I prefer concise summaries with links to primary sources." }),
       baselineRevision: harness.baseline,
       capability,
     });
-
     expect(result).toMatchObject({
       status: "no_change",
       observation: { kind: "preference" },
@@ -1484,7 +1445,6 @@ describe("automatic learning organ", () => {
     ]);
     expect(harness.experiments()).toHaveLength(0);
   });
-
   test("accepts an explicit reflector no-change result without authoring a candidate", async () => {
     const harness = createHarness({
       steps: [
@@ -1507,7 +1467,6 @@ describe("automatic learning organ", () => {
       baselineRevision: harness.baseline,
       capability,
     });
-
     expect(result).toMatchObject({
       status: "no_change",
       reason: "reflector_no_change",
@@ -1519,7 +1478,6 @@ describe("automatic learning organ", () => {
     expect(harness.candidates.requests()).toHaveLength(0);
     expect(harness.experiments()).toHaveLength(0);
   });
-
   test("harvests failed session outcomes as evidence-linked failure signals", async () => {
     const harness = createHarness({
       steps: [
@@ -1539,7 +1497,6 @@ describe("automatic learning organ", () => {
       baselineRevision: harness.baseline,
       capability,
     });
-
     expect(result.status).toBe("no_change");
     expect(result.harvest.signals[0]?.signal).toMatchObject({
       kind: "repeated_failure",
@@ -1548,7 +1505,6 @@ describe("automatic learning organ", () => {
     });
     expect(harness.criteria.creates()).toHaveLength(0);
   });
-
   test("deduplicates recurring hypotheses while retaining exact source-case citations", async () => {
     const briefs = createInMemoryExperimentBriefStore();
     const harness = createHarness({
@@ -1570,7 +1526,6 @@ describe("automatic learning organ", () => {
       baselineRevision: harness.baseline,
       capability,
     });
-
     expect(first.status).toBe("experiment");
     expect(second.status).toBe("deduped");
     if (first.status !== "experiment" || second.status !== "deduped") {
@@ -1586,7 +1541,6 @@ describe("automatic learning organ", () => {
     expect(authored.revisionRef).toEqual(capabilityRevisionRef(authored.revision));
     expect(authored.experiment.candidateRevisions).toEqual([authored.revisionRef]);
   });
-
   test("reconciles newly cited working-adjustment evidence into a deduped brief and experiment", async () => {
     const activeAdjustment = Object.freeze({
       adjustmentId: "adjustment-deduped-evidence",
@@ -1616,7 +1570,6 @@ describe("automatic learning organ", () => {
       steps: [firstLinkedStep, secondLinkedStep],
       citations: [citation(1)],
     });
-
     const firstTurn = turn({ turnId: "turn-adjustment-dedupe-1", correction: "Verify the real state." });
     const first = await harness.organ.observeTurn({
       turn: Object.freeze({
@@ -1632,6 +1585,7 @@ describe("automatic learning organ", () => {
       correction: "Keep verifying the real state.",
       evidenceRef: databaseRef("current-adjustment-dedupe-2"),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const second = await harness.organ.observeTurn({
       turn: Object.freeze({
         ...secondTurn,
@@ -1654,7 +1608,6 @@ describe("automatic learning organ", () => {
       capability,
       activeWorkingAdjustment: activeAdjustment,
     });
-
     if (first.status !== "experiment" || second.status !== "deduped")
       throw new Error("Expected an experiment followed by a deduped observation");
     expect(second.brief.experimentId).toBe(first.brief.experimentId);
@@ -1668,7 +1621,6 @@ describe("automatic learning organ", () => {
       .find((experiment) => experiment.experimentId === second.brief.experimentId);
     expect(durableExperiment?.evidenceRefs).toContainEqual(newlyCitedServedEvidence);
   });
-
   test("serializes two reflected observations without losing either provenance set", async () => {
     const inference = createBarrierInference([
       reflectionStep,
@@ -1681,7 +1633,6 @@ describe("automatic learning organ", () => {
       inference,
       citations: [citation(1)],
     });
-
     const [first, second] = await Promise.all([
       harness.organ.observeTurn({
         turn: turn({ turnId: "turn-concurrent-1", correction: "Use primary sources." }),
@@ -1698,7 +1649,6 @@ describe("automatic learning organ", () => {
         capability,
       }),
     ]);
-
     expect([first.status, second.status].sort()).toEqual(["deduped", "experiment"]);
     if (!("brief" in first) || !("brief" in second))
       throw new Error("Expected concurrent experiment results");
@@ -1710,7 +1660,6 @@ describe("automatic learning organ", () => {
     expect(harness.experiments()).toHaveLength(1);
     expect(harness.experiments()[0]?.feedbackSignalIds).toHaveLength(2);
   });
-
   test("reconciles a concurrent initial publication with the winning brief", async () => {
     const experimentState = createExperimentState();
     const briefs = createContendedInitialBriefStore();
@@ -1726,7 +1675,6 @@ describe("automatic learning organ", () => {
       briefs: briefs.port,
       experimentState,
     });
-
     const [leftResult, rightResult] = await Promise.all([
       left.organ.observeTurn({
         turn: turn({
@@ -1747,7 +1695,6 @@ describe("automatic learning organ", () => {
         capability,
       }),
     ]);
-
     expect([leftResult.status, rightResult.status].sort()).toEqual(["deduped", "experiment"]);
     if (!("brief" in leftResult) || !("brief" in rightResult))
       throw new Error("Expected concurrent initial publication results");
@@ -1777,7 +1724,6 @@ describe("automatic learning organ", () => {
       ]),
     });
   });
-
   test("retains outcome and file-revision citations independently of evidence conversion", async () => {
     const outcome = outcomeCitation("outcome-prior", "The report failed source review");
     const file = fileRevisionCitation("revision-prior-report", "A prior report omitted citations");
@@ -1789,13 +1735,11 @@ describe("automatic learning organ", () => {
       }),
     }) satisfies ScriptedLearningInferenceStep;
     const harness = createHarness({ steps: [reflection], citations: [outcome, file] });
-
     const result = await harness.organ.observeTurn({
       turn: turn({ correction: "Use primary sources." }),
       baselineRevision: harness.baseline,
       capability,
     });
-
     if (result.status !== "experiment") throw new Error("Expected an experiment");
     expect(result.brief.citations).toEqual([outcome, file]);
     expect(result.brief.recurrenceCitations).toEqual([outcome, file]);
@@ -1811,20 +1755,17 @@ describe("automatic learning organ", () => {
       }),
     );
   });
-
   test("retains completed experiment citations as authoritative learning evidence", async () => {
     const experiment = experimentCitation(
       "experiment-prior",
       "A prior citation experiment completed with outcome keep",
     );
     const harness = createHarness({ steps: [reflectionStep], citations: [experiment] });
-
     const result = await harness.organ.observeTurn({
       turn: turn({ correction: "Use primary sources." }),
       baselineRevision: harness.baseline,
       capability,
     });
-
     if (result.status !== "experiment") throw new Error("Expected an experiment");
     expect(result.brief.citations).toEqual([experiment]);
     expect(result.brief.recurrenceCitations).toEqual([experiment]);
@@ -1834,7 +1775,6 @@ describe("automatic learning organ", () => {
       rowId: "experiment-prior",
     });
   });
-
   test("does not count a current-turn file revision returned by history as recurrence", async () => {
     const currentRevision = fileRef("current-turn-source.md");
     const currentCitation = fileRevisionCitation(currentRevision.revisionId, "The current correction");
@@ -1850,7 +1790,6 @@ describe("automatic learning organ", () => {
       steps: [selectsFilteredIndex],
       citations: [currentCitation, priorOutcome],
     });
-
     const result = await harness.organ.observeTurn({
       turn: turn({
         correction: "Use primary sources.",
@@ -1859,7 +1798,6 @@ describe("automatic learning organ", () => {
       baselineRevision: harness.baseline,
       capability,
     });
-
     if (result.status !== "experiment") throw new Error("Expected an experiment");
     expect(result.brief.evidenceRefs).toEqual([
       currentRevision,
@@ -1870,28 +1808,25 @@ describe("automatic learning organ", () => {
     expect(result.brief.recurrenceCitations).toEqual([priorOutcome]);
     expect(result.brief.recurrenceCount).toBe(1);
   });
-
   test("retries one reflected turn without duplicating its feedback signal or hypothesis", async () => {
     const harness = createHarness({
       steps: [reflectionStep, reflectionStep],
       citations: [citation(1), citation(2)],
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = {
       turn: turn({ turnId: "turn-retried", correction: "Use primary sources." }),
       baselineRevision: harness.baseline,
       capability,
     } as const;
-
     const first = await harness.organ.observeTurn(request);
     const retried = await harness.organ.observeTurn(request);
-
     expect(first.status).toBe("experiment");
     expect(retried.status).toBe("deduped");
     expect(harness.feedback.signals()).toHaveLength(1);
     expect(harness.experiments()).toHaveLength(1);
     expect(harness.feedback.signals()[0]?.signalId).toMatch(/^signal_[a-f0-9]{32}$/u);
   });
-
   test("counts only distinct recurrence citations selected by the reflector", async () => {
     const selectiveReflection = Object.freeze({
       ...reflectionStep,
@@ -1904,18 +1839,15 @@ describe("automatic learning organ", () => {
       steps: [selectiveReflection],
       citations: [citation(1, "same correction"), citation(2, "same correction")],
     });
-
     const result = await harness.organ.observeTurn({
       turn: turn({ correction: "Use primary sources." }),
       baselineRevision: harness.baseline,
       capability,
     });
-
     if (result.status !== "experiment") throw new Error("Expected an experiment");
     expect(result.brief.citations).toHaveLength(2);
     expect(result.brief.recurrenceCount).toBe(1);
   });
-
   test("reports fresh recurrence without overwriting exact cumulative recurrence evidence", async () => {
     const noFreshRecurrence = Object.freeze({
       ...reflectionStep,
@@ -1942,13 +1874,11 @@ describe("automatic learning organ", () => {
       baselineRevision: harness.baseline,
       capability,
     });
-
     if (second.status !== "deduped") throw new Error("Expected a deduped experiment");
     expect(second.harvest.recurrenceCount).toBe(0);
     expect(second.brief.recurrenceCount).toBe(1);
     expect(second.brief.recurrenceCitations).toEqual([citation(1)]);
   });
-
   test("creates a fresh generation when new evidence recurs after a completed experiment", async () => {
     const harness = createHarness({
       steps: [reflectionStep, reflectionStep],
@@ -1962,24 +1892,39 @@ describe("automatic learning organ", () => {
     if (first.status !== "experiment") throw new Error("Expected an experiment");
     const openExperiment = harness.experiments()[0];
     if (!openExperiment) throw new Error("Expected the first experiment to be stored");
-    const completedExperiment: Experiment = Object.freeze({
-      experimentId: openExperiment.experimentId,
-      hypothesis: openExperiment.hypothesis,
-      scope: openExperiment.scope,
-      evidenceRefs: openExperiment.evidenceRefs,
-      baselineRevision: openExperiment.baselineRevision,
-      candidateRevisions: openExperiment.candidateRevisions,
-      feedbackSignalIds: openExperiment.feedbackSignalIds,
-      ...(openExperiment.preflightRef ? { preflightRef: openExperiment.preflightRef } : {}),
-      ...(openExperiment.activatedRevision ? { activatedRevision: openExperiment.activatedRevision } : {}),
-      ...(openExperiment.followUpExperimentId
-        ? { followUpExperimentId: openExperiment.followUpExperimentId }
-        : {}),
-      status: "completed",
-      outcome: "keep",
-    });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    const completedExperiment: Experiment = Object.freeze(
+      createConditionalObject({
+        experimentId: openExperiment.experimentId,
+        hypothesis: openExperiment.hypothesis,
+        scope: openExperiment.scope,
+        evidenceRefs: openExperiment.evidenceRefs,
+        baselineRevision: openExperiment.baselineRevision,
+        candidateRevisions: openExperiment.candidateRevisions,
+        feedbackSignalIds: openExperiment.feedbackSignalIds,
+      } as const)
+        .addOptional(openExperiment.preflightRef ? { preflightRef: openExperiment.preflightRef } : undefined)
+        .addOptional(
+          openExperiment.activatedRevision
+            ? {
+                activatedRevision: openExperiment.activatedRevision,
+              }
+            : undefined,
+        )
+        .addOptional(
+          openExperiment.followUpExperimentId
+            ? {
+                followUpExperimentId: openExperiment.followUpExperimentId,
+              }
+            : undefined,
+        )
+        .add({
+          status: "completed",
+          outcome: "keep",
+        } as const)
+        .finish(),
+    );
     await harness.putExperiment(completedExperiment);
-
     const second = await harness.organ.observeTurn({
       turn: turn({
         turnId: "turn-generation-2",
@@ -1989,7 +1934,6 @@ describe("automatic learning organ", () => {
       baselineRevision: harness.baseline,
       capability,
     });
-
     if (second.status !== "experiment") throw new Error("Expected a follow-up experiment");
     expect(second.brief.experimentId).not.toBe(first.brief.experimentId);
     expect(harness.experiments()).toHaveLength(2);
@@ -2009,7 +1953,6 @@ describe("automatic learning organ", () => {
       ]),
     });
   });
-
   test("reconciles concurrent follow-up observations into one reachable successor", async () => {
     const experimentState = createExperimentState();
     const genesis = createHarness({
@@ -2025,6 +1968,7 @@ describe("automatic learning organ", () => {
     if (first.status !== "experiment") throw new Error("Expected a parent experiment");
     const parent = experimentState.values()[0];
     if (!parent) throw new Error("Expected the parent experiment to be stored");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await experimentState.port.putExperiment(
       Object.freeze({
         ...parent,
@@ -2032,7 +1976,6 @@ describe("automatic learning organ", () => {
         outcome: "keep" as const,
       }),
     );
-
     const briefs = createContendedBriefStore(first.brief);
     const left = createHarness({
       steps: [reflectionStep],
@@ -2066,7 +2009,6 @@ describe("automatic learning organ", () => {
         capability,
       }),
     ]);
-
     expect([leftResult.status, rightResult.status].sort()).toEqual(["deduped", "experiment"]);
     if (!("brief" in leftResult) || !("brief" in rightResult))
       throw new Error("Expected concurrent follow-up results");
@@ -2096,7 +2038,6 @@ describe("automatic learning organ", () => {
       ]),
     });
   });
-
   test("authors a complete immutable AC-03 revision and a canonical authoring experiment", async () => {
     const harness = createHarness({ steps: [reflectionStep, authorStep], citations: [citation(1)] });
     const observed = await harness.organ.observeTurn({
@@ -2106,7 +2047,6 @@ describe("automatic learning organ", () => {
     });
     if (observed.status !== "experiment") throw new Error("Expected an experiment brief");
     const authored = await harness.organ.authorExperimentRevision({ brief: observed.brief });
-
     expect(authored.revisionRef).toEqual(capabilityRevisionRef(authored.revision));
     expect(authored.revision.predecessorRevisionId).toBe(harness.baseline.capabilityRevisionId);
     expect(authored.revision.promptModules).toHaveLength(1);
@@ -2138,8 +2078,8 @@ describe("automatic learning organ", () => {
     expect(harness.experiments()).toEqual([authored.experiment]);
     expect("activate" in harness.registry).toBe(false);
   });
-
   test("repairs a singleton-array revision-author handoff without choosing among candidates", async () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const wrappedAuthor = Object.freeze({
       role: "revision_author" as const,
       value: Object.freeze([authorStep.value]),
@@ -2151,13 +2091,10 @@ describe("automatic learning organ", () => {
       capability,
     });
     if (observed.status !== "experiment") throw new Error("Expected an experiment brief");
-
     const authored = await harness.organ.authorExperimentRevision({ brief: observed.brief });
-
     expect(authored.revision.promptModules).toHaveLength(1);
     expect(authored.experiment.status).toBe("authoring");
   });
-
   test("keeps coordinator cancellation transient while forwarding it to reflector and author roles", async () => {
     const harness = createHarness({ steps: [reflectionStep, authorStep], citations: [citation(1)] });
     const controller = new AbortController();
@@ -2168,12 +2105,10 @@ describe("automatic learning organ", () => {
       signal: controller.signal,
     });
     if (observed.status !== "experiment") throw new Error("Expected an experiment brief");
-
     await harness.organ.authorExperimentRevision({
       brief: observed.brief,
       signal: controller.signal,
     });
-
     const requests = harness.inference.requests();
     expect(requests.map((request) => request.signal)).toEqual([
       controller.signal,
@@ -2183,7 +2118,6 @@ describe("automatic learning organ", () => {
     expect(JSON.stringify(observed.brief)).not.toContain('"signal":');
     expect(JSON.stringify(harness.experiments())).not.toContain('"signal":');
   });
-
   test("isolates reflector and author inputs from protected control-plane context", async () => {
     const harness = createHarness({ steps: [reflectionStep, authorStep], citations: [citation(1)] });
     const observed = await harness.organ.observeTurn({
@@ -2193,7 +2127,6 @@ describe("automatic learning organ", () => {
     });
     if (observed.status !== "experiment") throw new Error("Expected an experiment brief");
     await harness.organ.authorExperimentRevision({ brief: observed.brief });
-
     const requests = harness.inference.requests();
     expect(requests.map((request) => request.role)).toEqual(["reflector", "reflector", "revision_author"]);
     expect(requests[0]?.messages.map((message) => message.name)).toEqual([
@@ -2224,7 +2157,6 @@ describe("automatic learning organ", () => {
       expect(encoded).not.toContain("activation_handle");
     }
   });
-
   test("authors revise outcomes as successor revisions with linked experiment lineage", async () => {
     const harness = createHarness({ steps: [revisionStep], citations: [] });
     const parent: Experiment = Object.freeze({
@@ -2248,7 +2180,6 @@ describe("automatic learning organ", () => {
       judgmentEvidenceRefs: Object.freeze([databaseRef("judgment-evidence")]),
       citations: Object.freeze([citation(1, "The rewrite flattened the user's tone")]),
     });
-
     expect(result.brief.experimentId).toBe(parent.followUpExperimentId);
     expect(result.brief.sourceAdjustmentId).toBe(parent.sourceAdjustmentId);
     expect(result.revision.predecessorRevisionId).toBe(harness.baseline.capabilityRevisionId);
@@ -2265,7 +2196,6 @@ describe("automatic learning organ", () => {
       "judgment_evidence",
     ]);
   });
-
   test("records deterministic scripted prompt, model, reasoning, and trace metadata", async () => {
     const harness = createHarness({ steps: [reflectionStep], citations: [citation(1)] });
     const result = await harness.organ.observeTurn({
@@ -2274,7 +2204,6 @@ describe("automatic learning organ", () => {
       capability,
     });
     if (result.status !== "experiment") throw new Error("Expected an experiment brief");
-
     expect(result.reflectionRun).toMatchObject({
       role: "reflector",
       research: {
@@ -2293,7 +2222,6 @@ describe("automatic learning organ", () => {
     });
     expect(harness.inference.remaining()).toBe(0);
   });
-
   test("the scripted inference rejects role drift deterministically", async () => {
     const inference = createScriptedLearningInferencePort({ steps: [reflectionStep] });
     const request: AgentRunRequest = Object.freeze({
@@ -2304,7 +2232,6 @@ describe("automatic learning organ", () => {
       evidenceRefs: Object.freeze([]),
       availableTools: Object.freeze([]),
     });
-
     await expect(inference.run(request, RevisionAuthorOutputSchema)).rejects.toThrow(
       "Expected scripted role reflector",
     );

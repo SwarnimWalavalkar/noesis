@@ -1,4 +1,5 @@
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { isJsonObject, type JsonValue } from "@noesis/domain";
 import { EXECUTE_ACTION_NAME, formatCount, sourceOf, summarizeAction } from "./action-summary.ts";
 import { renderRichText } from "./rich-text.ts";
 import {
@@ -37,7 +38,7 @@ export function renderMessageBlock(message: TuiMessage, width: number, colorEnab
   ];
 }
 
-function printableActionValue(value: unknown): string {
+function printableActionValue(value: JsonValue): string {
   if (typeof value === "string") return safeTerminalText(value);
   try {
     const encoded = JSON.stringify(value, undefined, 2);
@@ -47,15 +48,15 @@ function printableActionValue(value: unknown): string {
   }
 }
 
-function boundedActionValue(value: unknown): string {
+function boundedActionValue(value: JsonValue): string {
   const text = printableActionValue(value);
   if (text.length <= ACTION_DETAIL_MAX_CHARACTERS) return text;
   return `${text.slice(0, ACTION_DETAIL_MAX_CHARACTERS)}\n… action detail truncated`;
 }
 
-function actionDetailSection(label: string, value: unknown): string {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    const source = Reflect.get(value, "source");
+function actionDetailSection(label: string, value: JsonValue): string {
+  if (isJsonObject(value)) {
+    const source = value["source"];
     if (typeof source === "string") {
       const metadata = Object.fromEntries(Object.entries(value).filter(([key]) => key !== "source"));
       const hasMetadata = Object.keys(metadata).length > 0;
@@ -203,6 +204,7 @@ export interface TranscriptRenderer {
   readonly metrics: () => TranscriptRenderMetrics;
 }
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const EMPTY_TRANSCRIPT_HINTS = Object.freeze([
   "What are you thinking about?",
   "What do you want to understand, make, or change?",

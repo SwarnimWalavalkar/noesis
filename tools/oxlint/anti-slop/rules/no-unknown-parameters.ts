@@ -39,6 +39,69 @@ function parameterName(parameter: Parameter, sourceText: string): string {
     : sourceText.replace(/\s*:\s*unknown\s*$/u, "");
 }
 
+function establishesRuntimeContract(owner: ParameterOwner): boolean {
+  return owner.returnType?.typeAnnotation.type === "TSTypePredicate";
+}
+
+function hasBoundaryComment(
+  context: Readonly<{
+    sourceCode: Readonly<{
+      getCommentsBefore: (node: ESTree.Node) => readonly Readonly<{ value: string }>[];
+    }>;
+  }>,
+  owner: ParameterOwner,
+): boolean {
+  let current: ESTree.Node = owner;
+  while (true) {
+    if (context.sourceCode.getCommentsBefore(current).some((comment) => /\bBOUNDARY\s*:/u.test(comment.value))) {
+      return true;
+    }
+    if (current.parent.type === "Program" || current.parent.type === "BlockStatement") return false;
+    current = current.parent;
+  }
+}
+
+function parsesAtBoundary(owner: ParameterOwner, parameter: Parameter): boolean {
+  if (parameter.type !== "Identifier") return false;
+  if (
+    owner.type !== "ArrowFunctionExpression" &&
+    owner.type !== "FunctionDeclaration" &&
+    owner.type !== "FunctionExpression"
+  )
+    return false;
+  const body = owner.body;
+  const boundaryNode = body.type === "BlockStatement" ? body.body[0] : body;
+  if (boundaryNode === undefined) return false;
+  let parsed = false;
+  const visit = (node: ESTree.Node) => {
+    if (parsed) return;
+    if (
+      node.type === "CallExpression" &&
+      node.callee.type === "MemberExpression" &&
+      !node.callee.computed &&
+      node.callee.property.type === "Identifier" &&
+      (node.callee.property.name === "parse" || node.callee.property.name === "safeParse") &&
+      node.arguments.some(
+        (argument) => argument.type !== "SpreadElement" && argument.type === "Identifier" && argument.name === parameter.name,
+      )
+    ) {
+      parsed = true;
+      return;
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "parent") continue;
+      const child = node[key as keyof typeof node];
+      if (Array.isArray(child)) {
+        for (const item of child) if (item && typeof item === "object" && "type" in item) visit(item as ESTree.Node);
+      } else if (child && typeof child === "object" && "type" in child) {
+        visit(child as ESTree.Node);
+      }
+    }
+  };
+  visit(boundaryNode);
+  return parsed;
+}
+
 /** Disallow unknown inputs except explicitly named error-cause enrichment. */
 export const noUnknownParametersRule = defineRule({
   meta: {
@@ -54,11 +117,14 @@ export const noUnknownParametersRule = defineRule({
   },
   createOnce(context) {
     const checkParameters = (node: ParameterOwner) => {
+      if (establishesRuntimeContract(node)) return;
+      if (hasBoundaryComment(context, node)) return;
       for (const parameter of node.params) {
         const annotation = parameterAnnotation(parameter);
         if (annotation?.typeAnnotation.type !== "TSUnknownKeyword") continue;
         const name = parameterName(parameter, context.sourceCode.getText(parameter));
         if (name === "cause") continue;
+        if (parsesAtBoundary(node, parameter)) continue;
         context.report({
           node: annotation.typeAnnotation,
           messageId: "unknownParameter",

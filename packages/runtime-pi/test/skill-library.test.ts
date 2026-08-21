@@ -58,6 +58,7 @@ describe("Pi skill library adapter", () => {
     roots.push(root);
     const project = join(root, "project");
     const skillPackage = join(root, "package");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const definitions = [
       { directory: "lower", name: "zeta" },
       { directory: "accented", name: "äther" },
@@ -297,6 +298,7 @@ describe("Pi skill library adapter", () => {
       admissions += 1;
       admissionStarted?.();
       await admissionBarrier;
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return Object.freeze({
         ...snapshot,
         skills: Object.freeze(
@@ -354,6 +356,7 @@ describe("Pi skill library adapter", () => {
       admissions += 1;
       discardedAdmissionStarted?.();
       await discardedBarrier;
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return Object.freeze({
         ...snapshot,
         diagnostics: Object.freeze([
@@ -387,6 +390,7 @@ describe("Pi skill library adapter", () => {
       admissions += 1;
       replacementAdmissionStarted?.();
       await replacementBarrier;
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return Object.freeze({
         ...snapshot,
         diagnostics: Object.freeze([

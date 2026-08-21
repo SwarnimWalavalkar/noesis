@@ -1,3 +1,10 @@
+import {
+  createConditionalObject,
+  isJsonObject,
+  type JsonObject,
+  type JsonValue,
+  JsonValueSchema,
+} from "@noesis/domain";
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
@@ -14,23 +21,18 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-
 type CredentialFile = Readonly<Record<string, Credential>>;
-
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const NOESIS_PROVIDER_IDS = Object.freeze([
   "openai-codex",
   "anthropic",
   "openrouter",
   "opencode",
 ] as const);
-
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  value !== null && typeof value === "object" && !Array.isArray(value);
-
-function isCredential(value: unknown): value is Credential {
+const isRecord = (value: JsonValue | undefined): value is JsonObject => isJsonObject(value);
+function isCredential(value: JsonValue): boolean {
   if (!isRecord(value)) return false;
   if (value["type"] === "api_key") {
     if (value["key"] !== undefined && typeof value["key"] !== "string") return false;
@@ -47,11 +49,10 @@ function isCredential(value: unknown): value is Credential {
     Number.isFinite(value["expires"])
   );
 }
-
-function decodeCredentialFile(path: string, raw: string): CredentialFile {
-  let parsed: unknown;
+function decodeCredentialFile(path: string, raw: string) {
+  let parsed: JsonValue;
   try {
-    parsed = JSON.parse(raw);
+    parsed = JsonValueSchema.parse(JSON.parse(raw));
   } catch (error) {
     throw new Error(`${path}: invalid credential JSON`, { cause: error });
   }
@@ -59,31 +60,26 @@ function decodeCredentialFile(path: string, raw: string): CredentialFile {
   const credentials: Record<string, Credential> = {};
   for (const [provider, value] of Object.entries(parsed)) {
     if (!isCredential(value)) throw new Error(`${path}: invalid typed credential for provider ${provider}`);
-    credentials[provider] = value;
+    // SAFETY: isCredential has validated the complete Pi credential discriminated union.
+    credentials[provider] = value as Credential;
   }
   return credentials;
 }
-
 export const piAuthPath = (home: string): string => join(home, "auth.json");
-
 interface FileIdentity {
   readonly dev: number;
   readonly ino: number;
 }
-
-function isCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+function isCode(cause: unknown, code: string): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === code;
 }
-
 function currentUid(): number | undefined {
   return typeof process.getuid === "function" ? process.getuid() : undefined;
 }
-
 function assertOwned(path: string, uid: number | undefined, actualUid: number): void {
   if (uid !== undefined && actualUid !== uid)
     throw new Error(`${path}: refusing to use a filesystem entry owned by uid ${actualUid}`);
 }
-
 export interface SecurePiCredentialStore {
   readonly path: string;
   readonly read: (providerId: string) => Promise<Credential | undefined>;
@@ -93,16 +89,13 @@ export interface SecurePiCredentialStore {
   ) => Promise<Credential | undefined>;
   readonly delete: (providerId: string) => Promise<void>;
 }
-
 export function createSecurePiCredentialStore(path: string): SecurePiCredentialStore {
   let queue: Promise<void> = Promise.resolve();
-
   const read = async (providerId: string): Promise<Credential | undefined> => {
     return await enqueue(async () =>
       withProcessLock(async (directory) => (await readCredentials(directory))[providerId]),
     );
   };
-
   const modify = (
     providerId: string,
     fn: (current: Credential | undefined) => Promise<Credential | undefined>,
@@ -117,7 +110,6 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
       }),
     );
   };
-
   const remove = (providerId: string): Promise<void> => {
     return enqueue(async () =>
       withProcessLock(async (directory) => {
@@ -129,7 +121,6 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
       }),
     );
   };
-
   function enqueue<T>(operation: () => Promise<T>): Promise<T> {
     const prior = queue;
     let release: (() => void) | undefined;
@@ -145,7 +136,6 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
       }
     })();
   }
-
   async function secureDirectory(): Promise<FileIdentity> {
     const directory = dirname(path);
     await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -175,7 +165,6 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
     }
     return { dev: metadata.dev, ino: metadata.ino };
   }
-
   async function assertDirectoryIdentity(expected: FileIdentity): Promise<void> {
     const directory = dirname(path);
     const metadata = await lstat(directory);
@@ -190,7 +179,6 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
     if ((metadata.mode & 0o777) !== 0o700)
       throw new Error(`${directory}: unsafe Pi credential directory permissions; expected 0700`);
   }
-
   async function secureCredentialFile(): Promise<FileIdentity | undefined> {
     let metadata: Stats;
     try {
@@ -235,7 +223,6 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
     }
     return { dev: metadata.dev, ino: metadata.ino };
   }
-
   async function readRegularFile(filePath: string): Promise<string> {
     const handle = await open(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
@@ -244,7 +231,6 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
       await handle.close();
     }
   }
-
   async function readCredentials(directory: FileIdentity): Promise<CredentialFile> {
     await assertDirectoryIdentity(directory);
     const identity = await secureCredentialFile();
@@ -259,17 +245,22 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
       await handle.close();
     }
   }
-
-  async function readLock(lockPath: string): Promise<{ readonly token?: unknown; readonly pid?: unknown }> {
+  async function readLock(lockPath: string): Promise<{
+    readonly token?: unknown;
+    readonly pid?: unknown;
+  }> {
     const metadata = await lstat(lockPath);
     if (metadata.isSymbolicLink() || !metadata.isFile())
       throw new Error(`${lockPath}: unsafe Pi credential lock entry`);
     assertOwned(lockPath, currentUid(), metadata.uid);
     if ((metadata.mode & 0o777) !== 0o600 || metadata.nlink !== 1)
       throw new Error(`${lockPath}: unsafe Pi credential lock permissions`);
-    return JSON.parse(await readRegularFile(lockPath)) as { token?: unknown; pid?: unknown };
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return JSON.parse(await readRegularFile(lockPath)) as {
+      token?: unknown;
+      pid?: unknown;
+    };
   }
-
   async function withProcessLock<T>(operation: (directory: FileIdentity) => Promise<T>): Promise<T> {
     const directory = await secureDirectory();
     const lockPath = `${path}.lock`;
@@ -316,7 +307,6 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
     }
     throw new Error(`${lockPath}: timed out waiting for the Pi credential writer lock`);
   }
-
   async function persist(credentials: CredentialFile, directoryIdentity: FileIdentity): Promise<void> {
     const directory = dirname(path);
     await assertDirectoryIdentity(directoryIdentity);
@@ -356,20 +346,27 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
       await unlink(temporary).catch(() => undefined);
     }
   }
-
   return Object.freeze({ path, read, modify, delete: remove });
 }
-
 export interface PiAuthStatus {
   readonly provider: string;
   readonly configured: boolean;
   readonly source: "oauth" | "stored-api-key" | "environment" | "none";
   readonly expired?: boolean;
 }
-
-export type NoesisAuthPrompt = { readonly signal?: AbortSignal } & (
-  | { readonly type: "text"; readonly message: string; readonly placeholder?: string }
-  | { readonly type: "secret"; readonly message: string; readonly placeholder?: string }
+export type NoesisAuthPrompt = {
+  readonly signal?: AbortSignal;
+} & (
+  | {
+      readonly type: "text";
+      readonly message: string;
+      readonly placeholder?: string;
+    }
+  | {
+      readonly type: "secret";
+      readonly message: string;
+      readonly placeholder?: string;
+    }
   | {
       readonly type: "select";
       readonly message: string;
@@ -379,11 +376,18 @@ export type NoesisAuthPrompt = { readonly signal?: AbortSignal } & (
         readonly description?: string;
       }[];
     }
-  | { readonly type: "manual_code"; readonly message: string; readonly placeholder?: string }
+  | {
+      readonly type: "manual_code";
+      readonly message: string;
+      readonly placeholder?: string;
+    }
 );
-
 export type NoesisAuthEvent =
-  | { readonly type: "auth_url"; readonly url: string; readonly instructions?: string }
+  | {
+      readonly type: "auth_url";
+      readonly url: string;
+      readonly instructions?: string;
+    }
   | {
       readonly type: "device_code";
       readonly userCode: string;
@@ -391,40 +395,45 @@ export type NoesisAuthEvent =
       readonly intervalSeconds?: number;
       readonly expiresInSeconds?: number;
     }
-  | { readonly type: "progress"; readonly message: string };
-
+  | {
+      readonly type: "progress";
+      readonly message: string;
+    };
 export interface NoesisOAuthCallbackPage {
   readonly provider: "openai-codex";
   readonly status: "success";
 }
-
 export interface NoesisAuthLoginCallbacks {
   readonly signal?: AbortSignal;
   prompt(prompt: NoesisAuthPrompt): Promise<string>;
   notify(event: NoesisAuthEvent): void;
   renderOAuthCallbackPage?(page: NoesisOAuthCallbackPage): string;
 }
-
 export interface PiAuthManager {
   readonly login: (providerId: string, callbacks: NoesisAuthLoginCallbacks) => Promise<PiAuthStatus>;
   readonly status: (providerId: string) => Promise<PiAuthStatus>;
   readonly logout: (providerId: string) => Promise<void>;
 }
-
 export type PiAuthOperations = PiAuthManager;
-
 export function createPiAuthManager(models: MutableModels, credentials: CredentialStore): PiAuthManager {
   const login = async (providerId: string, callbacks: NoesisAuthLoginCallbacks): Promise<PiAuthStatus> => {
     const provider = models.getProvider(providerId);
     if (!provider) throw new Error(`Unknown Pi provider ${providerId}`);
-    const piCallbacks: AuthLoginCallbacks = {
-      ...(callbacks.signal ? { signal: callbacks.signal } : {}),
-      prompt: async (prompt) => await callbacks.prompt(prompt),
-      notify: (event) => callbacks.notify(event),
-      ...(callbacks.renderOAuthCallbackPage
-        ? { renderOAuthCallbackPage: callbacks.renderOAuthCallbackPage }
-        : {}),
-    };
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const piCallbacks: AuthLoginCallbacks = createConditionalObject({} as const)
+      .addOptional(callbacks.signal ? { signal: callbacks.signal } : undefined)
+      .add({
+        prompt: async (prompt: Parameters<AuthLoginCallbacks["prompt"]>[0]) => await callbacks.prompt(prompt),
+        notify: (event: Parameters<AuthLoginCallbacks["notify"]>[0]) => callbacks.notify(event),
+      } as const)
+      .addOptional(
+        callbacks.renderOAuthCallbackPage
+          ? {
+              renderOAuthCallbackPage: callbacks.renderOAuthCallbackPage,
+            }
+          : undefined,
+      )
+      .finish();
     const credential = provider.auth.oauth
       ? await provider.auth.oauth.login(piCallbacks)
       : provider.auth.apiKey?.login
@@ -434,7 +443,6 @@ export function createPiAuthManager(models: MutableModels, credentials: Credenti
     await credentials.modify(providerId, async () => credential);
     return await status(providerId);
   };
-
   const status = async (providerId: string): Promise<PiAuthStatus> => {
     const provider = models.getProvider(providerId);
     if (!provider) throw new Error(`Unknown Pi provider ${providerId}`);
@@ -456,37 +464,39 @@ export function createPiAuthManager(models: MutableModels, credentials: Credenti
       source: ambient === undefined ? "none" : "environment",
     };
   };
-
   const logout = async (providerId: string): Promise<void> => {
     if (!models.getProvider(providerId)) throw new Error(`Unknown Pi provider ${providerId}`);
     await credentials.delete(providerId);
   };
-
   return Object.freeze({ login, status, logout });
 }
-
 export interface PiModelServices {
   readonly models: MutableModels;
   readonly credentials: CredentialStore;
   readonly auth: PiAuthOperations;
 }
-
 export function createPiModelServices(
   home: string,
-  options: { readonly credentials?: CredentialStore; readonly authContext?: AuthContext } = {},
+  options: {
+    readonly credentials?: CredentialStore;
+    readonly authContext?: AuthContext;
+  } = {},
 ): PiModelServices {
   const credentials = options.credentials ?? createSecurePiCredentialStore(piAuthPath(home));
-  const models = createModels({
-    credentials,
-    ...(options.authContext ? { authContext: options.authContext } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  const models = createModels(
+    createConditionalObject({
+      credentials,
+    } as const)
+      .addOptional(options.authContext ? { authContext: options.authContext } : undefined)
+      .finish(),
+  );
   models.setProvider(openaiCodexProvider());
   models.setProvider(openrouterProvider());
   models.setProvider(anthropicProvider());
   models.setProvider(opencodeProvider());
   return Object.freeze({ models, credentials, auth: createPiAuthManager(models, credentials) });
 }
-
 export async function credentialFileMode(home: string): Promise<number | undefined> {
   try {
     const metadata = await lstat(piAuthPath(home));

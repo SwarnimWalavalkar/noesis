@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,16 +16,16 @@ import {
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createTurnSettlement } from "../src/index.ts";
-
-const homes: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
-
+const homes: {
+  readonly root: string;
+  readonly workspace: NoesisWorkspaceStore;
+}[] = [];
 afterEach(async () => {
   for (const item of homes.splice(0)) {
     item.workspace.close();
     await rm(item.root, { recursive: true, force: true });
   }
 });
-
 const revisionRef = (capabilityId: string): CapabilityRevisionRef =>
   Object.freeze({
     kind: "capability_revision",
@@ -32,7 +33,6 @@ const revisionRef = (capabilityId: string): CapabilityRevisionRef =>
     capabilityRevisionId: `${capabilityId}-v1`,
     bundleDigest: capabilityId === "general" ? "a".repeat(64) : "b".repeat(64),
   });
-
 function turnPlan(
   sessionId: string,
   turnId: string,
@@ -41,8 +41,12 @@ function turnPlan(
     readonly name: string;
     readonly scope: string;
   }[],
-  learningAttribution?: { readonly capabilityId: string; readonly reason: string },
+  learningAttribution?: {
+    readonly capabilityId: string;
+    readonly reason: string;
+  },
 ): FrozenTurnPlan {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return Object.freeze({
     schemaVersion: 1,
     planId: `plan-${turnId}`,
@@ -89,16 +93,20 @@ function turnPlan(
       credentialRefs: Object.freeze([]),
     }),
     retrievalCitations: Object.freeze([]),
-    routing: Object.freeze({
-      strategyId: "semantic-capability-router-v1",
-      reason: "fixture",
-      ...(learningAttribution ? { learningAttribution: Object.freeze(learningAttribution) } : {}),
-    }),
+    routing: Object.freeze(
+      createConditionalObject({
+        strategyId: "semantic-capability-router-v1",
+        reason: "fixture",
+      } as const)
+        .addOptional(
+          learningAttribution ? { learningAttribution: Object.freeze(learningAttribution) } : undefined,
+        )
+        .finish(),
+    ),
     createdAt: "2026-07-25T00:00:00.000Z",
     canonicalDigest: "d".repeat(64),
   });
 }
-
 describe("turn settlement", () => {
   test("records canonical outcomes and reflects every settled turn", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-turn-settlement-"));
@@ -178,7 +186,6 @@ describe("turn settlement", () => {
       createdAt: "2026-07-25T00:00:00.500Z",
       completedAt: "2026-07-25T00:00:00.750Z",
     });
-
     await expect(
       settlement.run({
         sessionId: "session-1",
@@ -246,7 +253,6 @@ describe("turn settlement", () => {
       turnId: "turn-accepted",
       sourceIntentId: "intent-accepted",
     });
-
     const abortedPlan = turnPlan("session-1", "turn-aborted", [
       { capabilityId: "general", name: "General", scope: "general" },
     ]);
@@ -274,7 +280,6 @@ describe("turn settlement", () => {
       status: "failed",
       metadata: { aborted: true, replayEligible: false },
     });
-
     const correctedPlan = turnPlan("session-1", "turn-corrected", [
       { capabilityId: "general", name: "General", scope: "general" },
     ]);
@@ -315,7 +320,6 @@ describe("turn settlement", () => {
         },
       },
     });
-
     const history = createHistoryPort({
       workspace,
       embeddings: createDeterministicEmbeddingPort(),
@@ -334,7 +338,6 @@ describe("turn settlement", () => {
     if (corrections.ok) expect(corrections.value.fragments).toHaveLength(1);
   });
 });
-
 function seedForegroundTurn(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
@@ -344,11 +347,9 @@ function seedForegroundTurn(
   const database = new DatabaseSync(workspace.unsafeDatabasePathForTesting);
   database.exec("PRAGMA foreign_keys = OFF");
   database
-    .prepare(
-      `INSERT INTO foreground_turns(
+    .prepare(`INSERT INTO foreground_turns(
         turn_id, session_id, plan_id, status, outcome_id, admitted_at, settled_at
-      ) VALUES (?, ?, ?, 'running', NULL, ?, NULL)`,
-    )
+      ) VALUES (?, ?, ?, 'running', NULL, ?, NULL)`)
     .run(turnId, sessionId, planId, "2026-07-25T00:00:00.000Z");
   database.close();
 }

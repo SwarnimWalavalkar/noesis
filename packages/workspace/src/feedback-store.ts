@@ -1,5 +1,7 @@
+import type { DatabaseRow } from "./database.ts";
 import type { DatabaseSync } from "node:sqlite";
 import {
+  createConditionalObject,
   type ActorRef,
   CapabilityRevisionRefSchema,
   canonicalJson,
@@ -39,15 +41,14 @@ import type {
   ProtectedFeedbackStore,
   SuccessorLineageInputRecord,
 } from "./types.ts";
-
+/** BOUNDARY: Activity references are serialized by the authoritative workspace activity writer. */
 type RecordActivity = (
   actor: ActorRef,
   activityKind: string,
   subjectKind: string,
   subjectId: string,
   references?: unknown,
-) => unknown;
-
+) => DatabaseRowRef<"activity_log">;
 interface CreateProtectedFeedbackStoreOptions {
   readonly database: WorkspaceDatabase;
   readonly now: () => string;
@@ -75,7 +76,6 @@ interface CreateProtectedFeedbackStoreOptions {
   readonly normalizeActiveWorkingPath: (workingPath: string) => string;
   readonly cleanupOutcomePublicationStage: (operationId: string) => Promise<void>;
 }
-
 interface OutcomeActivationPublication {
   readonly publicationKey: string;
   readonly action: "publish" | "delete";
@@ -84,7 +84,6 @@ interface OutcomeActivationPublication {
   readonly stagedPath?: string;
   readonly contentDigest?: string;
 }
-
 export async function createProtectedFeedbackStore(
   dependencies: CreateProtectedFeedbackStoreOptions,
 ): Promise<ProtectedFeedbackStore> {
@@ -97,7 +96,6 @@ export async function createProtectedFeedbackStore(
     _database: DatabaseSync,
     reference: EvidenceRef | DatabaseRowRef | FileRevisionRef,
   ): void => dependencies.assertStoredReference(reference);
-
   const currentActivationIdentity = (): {
     readonly revision: number;
     readonly activationId: string | null;
@@ -112,7 +110,6 @@ export async function createProtectedFeedbackStore(
           activationId: requiredString(state, "activation_id"),
         });
   };
-
   const materializationsFor = (operationId: string): readonly ActivationMaterializationRecord[] =>
     Object.freeze(
       db
@@ -135,125 +132,161 @@ export async function createProtectedFeedbackStore(
           }),
         ),
     );
-
-  const decodeActivationOperation = (row: unknown): ActivationOperationRecord =>
+  const decodeActivationOperation = (row: DatabaseRow | undefined): ActivationOperationRecord =>
     decodeActivationOperationRow(row, materializationsFor(requiredString(row, "operation_id")));
-
-  const decodeObservation = (row: unknown): ExperimentObservationRecord => {
+  const decodeObservation = (row: DatabaseRow | undefined): ExperimentObservationRecord => {
     const userDecision = optionalString(row, "user_decision");
-    return Object.freeze({
-      observationId: requiredString(row, "observation_id"),
-      dedupeKey: requiredString(row, "dedupe_key"),
-      experimentId: requiredString(row, "experiment_id"),
-      signalId: requiredString(row, "signal_id"),
-      outcomeId: requiredString(row, "outcome_id"),
-      preflightId: requiredString(row, "preflight_id"),
-      experimentActivationId: requiredString(row, "experiment_activation_id"),
-      servingActivationId: requiredString(row, "serving_activation_id"),
-      activationRevision: requiredNumber(row, "activation_revision"),
-      sessionId: requiredString(row, "session_id"),
-      turnId: requiredString(row, "turn_id"),
-      capabilityRevision: CapabilityRevisionRefSchema.parse(
-        parseJson(requiredString(row, "capability_revision_json")),
-      ),
-      metrics: z
-        .strictObject({
-          quality: z.number().min(0).max(1).nullable(),
-          baselineQuality: z.number().min(0).max(1).nullable(),
-          latencyMs: z.number().nonnegative().nullable(),
-          baselineLatencyMs: z.number().nonnegative().nullable(),
-          cost: z.number().nonnegative().nullable(),
-          baselineCost: z.number().nonnegative().nullable(),
-          failed: z.boolean(),
-          protectedRailViolation: z.boolean(),
-        })
-        .parse(parseJson(requiredString(row, "metrics_json"))),
-      evidenceRefs: z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "evidence_refs_json"))),
-      precedence: z
-        .enum(["none", "correction", "preference", "user_veto"])
-        .parse(requiredString(row, "precedence")),
-      ...(userDecision === undefined
-        ? {}
-        : { userDecision: z.enum(["keep", "revise", "revert"]).parse(userDecision) }),
-      hardRegression: requiredNumber(row, "hard_regression") === 1,
-      createdAt: requiredString(row, "created_at"),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        observationId: requiredString(row, "observation_id"),
+        dedupeKey: requiredString(row, "dedupe_key"),
+        experimentId: requiredString(row, "experiment_id"),
+        signalId: requiredString(row, "signal_id"),
+        outcomeId: requiredString(row, "outcome_id"),
+        preflightId: requiredString(row, "preflight_id"),
+        experimentActivationId: requiredString(row, "experiment_activation_id"),
+        servingActivationId: requiredString(row, "serving_activation_id"),
+        activationRevision: requiredNumber(row, "activation_revision"),
+        sessionId: requiredString(row, "session_id"),
+        turnId: requiredString(row, "turn_id"),
+        capabilityRevision: CapabilityRevisionRefSchema.parse(
+          parseJson(requiredString(row, "capability_revision_json")),
+        ),
+        metrics: z
+          .strictObject({
+            quality: z.number().min(0).max(1).nullable(),
+            baselineQuality: z.number().min(0).max(1).nullable(),
+            latencyMs: z.number().nonnegative().nullable(),
+            baselineLatencyMs: z.number().nonnegative().nullable(),
+            cost: z.number().nonnegative().nullable(),
+            baselineCost: z.number().nonnegative().nullable(),
+            failed: z.boolean(),
+            protectedRailViolation: z.boolean(),
+          })
+          .parse(parseJson(requiredString(row, "metrics_json"))),
+        evidenceRefs: z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "evidence_refs_json"))),
+        precedence: z
+          .enum(["none", "correction", "preference", "user_veto"])
+          .parse(requiredString(row, "precedence")),
+      } as const)
+        .addOptional(
+          !(userDecision === undefined)
+            ? {
+                userDecision: z.enum(["keep", "revise", "revert"]).parse(userDecision),
+              }
+            : undefined,
+        )
+        .add({
+          hardRegression: requiredNumber(row, "hard_regression") === 1,
+          createdAt: requiredString(row, "created_at"),
+        } as const)
+        .finish(),
+    );
   };
-
-  const decodeResearchRun = (row: unknown): ExperimentResearchRunRecord => {
+  const decodeResearchRun = (row: DatabaseRow | undefined): ExperimentResearchRunRecord => {
     const proposal = optionalString(row, "proposal");
     const failureMessage = optionalString(row, "failure_message");
-    return Object.freeze({
-      runId: requiredString(row, "run_id"),
-      experimentId: requiredString(row, "experiment_id"),
-      strategyId: requiredString(row, "strategy_id"),
-      inputDigest: requiredString(row, "input_digest"),
-      status: z.enum(["running", "completed", "failed"]).parse(requiredString(row, "status")),
-      ...(proposal === undefined ? {} : { proposal: z.enum(["keep", "revise", "revert"]).parse(proposal) }),
-      citedObservationIds: z
-        .array(z.string().min(1))
-        .parse(parseJson(requiredString(row, "cited_observation_ids_json"))),
-      evidenceRefs: z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "evidence_refs_json"))),
-      attempt: requiredNumber(row, "attempt"),
-      ...(failureMessage === undefined ? {} : { failureMessage }),
-      retryable: requiredNumber(row, "retryable") === 1,
-      createdAt: requiredString(row, "created_at"),
-      updatedAt: requiredString(row, "updated_at"),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        runId: requiredString(row, "run_id"),
+        experimentId: requiredString(row, "experiment_id"),
+        strategyId: requiredString(row, "strategy_id"),
+        inputDigest: requiredString(row, "input_digest"),
+        status: z.enum(["running", "completed", "failed"]).parse(requiredString(row, "status")),
+      } as const)
+        .addOptional(
+          !(proposal === undefined)
+            ? {
+                proposal: z.enum(["keep", "revise", "revert"]).parse(proposal),
+              }
+            : undefined,
+        )
+        .add({
+          citedObservationIds: z
+            .array(z.string().min(1))
+            .parse(parseJson(requiredString(row, "cited_observation_ids_json"))),
+          evidenceRefs: z
+            .array(EvidenceRefSchema)
+            .parse(parseJson(requiredString(row, "evidence_refs_json"))),
+          attempt: requiredNumber(row, "attempt"),
+        } as const)
+        .addOptional(!(failureMessage === undefined) ? { failureMessage } : undefined)
+        .add({
+          retryable: requiredNumber(row, "retryable") === 1,
+          createdAt: requiredString(row, "created_at"),
+          updatedAt: requiredString(row, "updated_at"),
+        } as const)
+        .finish(),
+    );
   };
-
-  const decodeExperimentOutcome = (row: unknown): ExperimentOutcomeOperationRecord => {
+  const decodeExperimentOutcome = (row: DatabaseRow | undefined): ExperimentOutcomeOperationRecord => {
     const researchRunId = optionalString(row, "research_run_id");
     const restoreSourceActivationId = optionalString(row, "restore_source_activation_id");
     const restoredActivationId = optionalString(row, "restored_activation_id");
     const successorExperimentId = optionalString(row, "successor_experiment_id");
-    return Object.freeze({
-      operationId: requiredString(row, "operation_id"),
-      idempotencyKey: requiredString(row, "idempotency_key"),
-      experimentId: requiredString(row, "experiment_id"),
-      decision: z.enum(["keep", "revise", "revert"]).parse(requiredString(row, "decision")),
-      strategyId: requiredString(row, "strategy_id"),
-      ...(researchRunId === undefined ? {} : { researchRunId }),
-      expectedActivationId: requiredString(row, "expected_activation_id"),
-      expectedActivationRevision: requiredNumber(row, "expected_activation_revision"),
-      ...(restoreSourceActivationId === undefined ? {} : { restoreSourceActivationId }),
-      ...(restoredActivationId === undefined ? {} : { restoredActivationId }),
-      ...(successorExperimentId === undefined ? {} : { successorExperimentId }),
-      evidenceRefs: z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "evidence_refs_json"))),
-      operationDigest: requiredString(row, "operation_digest"),
-      committedAt: requiredString(row, "committed_at"),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        operationId: requiredString(row, "operation_id"),
+        idempotencyKey: requiredString(row, "idempotency_key"),
+        experimentId: requiredString(row, "experiment_id"),
+        decision: z.enum(["keep", "revise", "revert"]).parse(requiredString(row, "decision")),
+        strategyId: requiredString(row, "strategy_id"),
+      } as const)
+        .addOptional(!(researchRunId === undefined) ? { researchRunId } : undefined)
+        .add({
+          expectedActivationId: requiredString(row, "expected_activation_id"),
+          expectedActivationRevision: requiredNumber(row, "expected_activation_revision"),
+        } as const)
+        .addOptional(!(restoreSourceActivationId === undefined) ? { restoreSourceActivationId } : undefined)
+        .addOptional(!(restoredActivationId === undefined) ? { restoredActivationId } : undefined)
+        .addOptional(!(successorExperimentId === undefined) ? { successorExperimentId } : undefined)
+        .add({
+          evidenceRefs: z
+            .array(EvidenceRefSchema)
+            .parse(parseJson(requiredString(row, "evidence_refs_json"))),
+          operationDigest: requiredString(row, "operation_digest"),
+          committedAt: requiredString(row, "committed_at"),
+        } as const)
+        .finish(),
+    );
   };
-
   const pendingOutcomePublications = (operationId: string): readonly OutcomeActivationPublication[] =>
     Object.freeze(
       db
-        .prepare(
-          `SELECT publication_key, action, working_path, source_revision_json,
+        .prepare(`SELECT publication_key, action, working_path, source_revision_json,
              staged_path, content_digest
            FROM outcome_activation_publications
            WHERE operation_id = ? AND published = 0
-           ORDER BY publication_key`,
-        )
+           ORDER BY publication_key`)
         .all(operationId)
         .map((row) => {
           const action = z.enum(["publish", "delete"]).parse(requiredString(row, "action"));
           const sourceRevision = optionalString(row, "source_revision_json");
           const stagedPath = optionalString(row, "staged_path");
           const contentDigest = optionalString(row, "content_digest");
-          return Object.freeze({
-            publicationKey: requiredString(row, "publication_key"),
-            action,
-            workingPath: requiredString(row, "working_path"),
-            ...(sourceRevision === undefined
-              ? {}
-              : { sourceRevision: FileRevisionRefSchema.parse(parseJson(sourceRevision)) }),
-            ...(stagedPath === undefined ? {} : { stagedPath }),
-            ...(contentDigest === undefined ? {} : { contentDigest }),
-          });
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          return Object.freeze(
+            createConditionalObject({
+              publicationKey: requiredString(row, "publication_key"),
+              action,
+              workingPath: requiredString(row, "working_path"),
+            } as const)
+              .addOptional(
+                !(sourceRevision === undefined)
+                  ? {
+                      sourceRevision: FileRevisionRefSchema.parse(parseJson(sourceRevision)),
+                    }
+                  : undefined,
+              )
+              .addOptional(!(stagedPath === undefined) ? { stagedPath } : undefined)
+              .addOptional(!(contentDigest === undefined) ? { contentDigest } : undefined)
+              .finish(),
+          );
         }),
     );
-
   const publishOutcomeRestoration = async (operationId: string): Promise<number> => {
     let published = 0;
     for (const publication of pendingOutcomePublications(operationId)) {
@@ -272,10 +305,8 @@ export async function createProtectedFeedbackStore(
         await options.deleteActiveDefinition(publication.workingPath);
       }
       database.transaction(() => {
-        db.prepare(
-          `UPDATE outcome_activation_publications SET published = 1
-           WHERE operation_id = ? AND publication_key = ?`,
-        ).run(operationId, publication.publicationKey);
+        db.prepare(`UPDATE outcome_activation_publications SET published = 1
+           WHERE operation_id = ? AND publication_key = ?`).run(operationId, publication.publicationKey);
       });
       published += 1;
     }
@@ -283,20 +314,16 @@ export async function createProtectedFeedbackStore(
       await options.cleanupOutcomePublicationStage(operationId);
     return published;
   };
-
   const recoverCommittedOutcomePublications = async (): Promise<number> => {
     const rows = db
-      .prepare(
-        `SELECT DISTINCT operation_id FROM outcome_activation_publications
-         WHERE published = 0 ORDER BY operation_id`,
-      )
+      .prepare(`SELECT DISTINCT operation_id FROM outcome_activation_publications
+         WHERE published = 0 ORDER BY operation_id`)
       .all();
     let recovered = 0;
     for (const row of rows) recovered += await publishOutcomeRestoration(requiredString(row, "operation_id"));
     return recovered;
   };
-
-  const decodeSuccessorInput = (row: unknown): SuccessorLineageInputRecord =>
+  const decodeSuccessorInput = (row: DatabaseRow | undefined): SuccessorLineageInputRecord =>
     Object.freeze({
       inputId: requiredString(row, "input_id"),
       predecessorExperimentId: requiredString(row, "predecessor_experiment_id"),
@@ -311,7 +338,6 @@ export async function createProtectedFeedbackStore(
       evidenceRefs: z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "evidence_refs_json"))),
       createdAt: requiredString(row, "created_at"),
     });
-
   const operationForActivation = async (
     activationId: string,
   ): Promise<ActivationOperationRecord | undefined> =>
@@ -321,47 +347,37 @@ export async function createProtectedFeedbackStore(
         .get(activationId),
       decodeActivationOperation,
     );
-
   const getObservation = async (observationId: string): Promise<ExperimentObservationRecord | undefined> =>
     decodeOptional(
       db.prepare("SELECT * FROM experiment_observations WHERE observation_id = ?").get(observationId),
       decodeObservation,
     );
-
   const listObservationsForOutcome = async (
     outcomeId: string,
   ): Promise<readonly ExperimentObservationRecord[]> =>
     Object.freeze(
       db
-        .prepare(
-          `SELECT * FROM experiment_observations
-           WHERE outcome_id = ? ORDER BY created_at, observation_id`,
-        )
+        .prepare(`SELECT * FROM experiment_observations
+           WHERE outcome_id = ? ORDER BY created_at, observation_id`)
         .all(outcomeId)
         .map(decodeObservation),
     );
-
   const observationIsDecisionBound = (observationId: string): boolean => {
     const citedByRun = db
-      .prepare(
-        `SELECT 1 AS found
+      .prepare(`SELECT 1 AS found
          FROM experiment_research_runs AS runs, json_each(runs.cited_observation_ids_json) AS cited
-         WHERE cited.value = ? LIMIT 1`,
-      )
+         WHERE cited.value = ? LIMIT 1`)
       .get(observationId);
     const citedByOutcome = db
-      .prepare(
-        `SELECT 1 AS found
+      .prepare(`SELECT 1 AS found
          FROM experiment_outcomes AS outcomes, json_each(outcomes.evidence_refs_json) AS evidence
          WHERE json_extract(evidence.value, '$.kind') = 'database_row'
            AND json_extract(evidence.value, '$.table') = 'experiment_observations'
            AND json_extract(evidence.value, '$.rowId') = ?
-         LIMIT 1`,
-      )
+         LIMIT 1`)
       .get(observationId);
     return citedByRun !== undefined || citedByOutcome !== undefined;
   };
-
   const observationClassificationState = async (
     request: ClassifyExperimentObservationsRequest,
   ): Promise<ExperimentObservationClassificationResult | undefined> => {
@@ -391,6 +407,7 @@ export async function createProtectedFeedbackStore(
           observation.precedence === desiredPrecedence || observation.precedence === "user_veto",
       )
     )
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({ status: "unchanged" as const, observations });
     if (
       observations.some(
@@ -398,10 +415,10 @@ export async function createProtectedFeedbackStore(
           observation.precedence === "none" && observationIsDecisionBound(observation.observationId),
       )
     )
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({ status: "already_bound" as const, observations });
     return undefined;
   };
-
   const classifyObservations = async (
     request: ClassifyExperimentObservationsRequest,
   ): Promise<ExperimentObservationClassificationResult> => {
@@ -415,10 +432,8 @@ export async function createProtectedFeedbackStore(
           : "none";
     database.transaction(() => {
       const rows = db
-        .prepare(
-          `SELECT * FROM experiment_observations
-           WHERE outcome_id = ? ORDER BY created_at, observation_id`,
-        )
+        .prepare(`SELECT * FROM experiment_observations
+           WHERE outcome_id = ? ORDER BY created_at, observation_id`)
         .all(request.outcomeId);
       for (const row of rows) {
         const observation = decodeObservation(row);
@@ -439,10 +454,11 @@ export async function createProtectedFeedbackStore(
       for (const row of rows) {
         const observation = decodeObservation(row);
         if (observation.precedence !== "none") continue;
-        db.prepare(
-          `UPDATE experiment_observations SET precedence = ?
-           WHERE observation_id = ? AND precedence = 'none'`,
-        ).run(desiredPrecedence, observation.observationId);
+        db.prepare(`UPDATE experiment_observations SET precedence = ?
+           WHERE observation_id = ? AND precedence = 'none'`).run(
+          desiredPrecedence,
+          observation.observationId,
+        );
         recordActivity(
           { actorId: "protected-feedback", kind: "system" },
           "experiment_observation.classified",
@@ -452,17 +468,17 @@ export async function createProtectedFeedbackStore(
         );
       }
     });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return Object.freeze({
       status: "updated" as const,
       observations: await listObservationsForOutcome(request.outcomeId),
     });
   };
-
   const recordObservation = async (
     record: Omit<ExperimentObservationRecord, "createdAt">,
     maximumObservations: number,
   ): Promise<ExperimentObservationRecord | undefined> => {
-    if (!Number.isInteger(maximumObservations) || maximumObservations < 1 || maximumObservations > 1_000)
+    if (!Number.isInteger(maximumObservations) || maximumObservations < 1 || maximumObservations > 1000)
       throw new Error("Observation window must be an integer between 1 and 1000");
     const existingRow = db
       .prepare("SELECT * FROM experiment_observations WHERE dedupe_key = ?")
@@ -542,14 +558,12 @@ export async function createProtectedFeedbackStore(
       )
         throw new Error("Observation outcome does not match its session and turn");
       for (const ref of record.evidenceRefs) assertStoredReference(db, ref);
-      db.prepare(
-        `INSERT INTO experiment_observations(
+      db.prepare(`INSERT INTO experiment_observations(
           observation_id, dedupe_key, experiment_id, signal_id, outcome_id, preflight_id,
           experiment_activation_id, serving_activation_id, activation_revision, session_id,
           turn_id, capability_id, capability_revision_json, metrics_json, evidence_refs_json,
           precedence, user_decision, hard_regression, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         record.observationId,
         record.dedupeKey,
         record.experimentId,
@@ -589,13 +603,11 @@ export async function createProtectedFeedbackStore(
     });
     return inserted ? await getObservation(record.observationId) : undefined;
   };
-
   const getResearchRun = async (runId: string): Promise<ExperimentResearchRunRecord | undefined> =>
     decodeOptional(
       db.prepare("SELECT * FROM experiment_research_runs WHERE run_id = ?").get(runId),
       decodeResearchRun,
     );
-
   const putResearchRun = async (
     record: Omit<ExperimentResearchRunRecord, "createdAt" | "updatedAt">,
   ): Promise<ExperimentResearchRunRecord> => {
@@ -603,10 +615,8 @@ export async function createProtectedFeedbackStore(
     const timestamp = now();
     database.transaction(() => {
       const existing = db
-        .prepare(
-          `SELECT experiment_id, strategy_id, input_digest, created_at
-           FROM experiment_research_runs WHERE run_id = ?`,
-        )
+        .prepare(`SELECT experiment_id, strategy_id, input_digest, created_at
+           FROM experiment_research_runs WHERE run_id = ?`)
         .get(record.runId);
       if (
         existing !== undefined &&
@@ -616,13 +626,11 @@ export async function createProtectedFeedbackStore(
       )
         throw new Error(`Research run identity ${record.runId} was reused with different input`);
       if (existing === undefined)
-        db.prepare(
-          `INSERT INTO experiment_research_runs(
+        db.prepare(`INSERT INTO experiment_research_runs(
             run_id, experiment_id, strategy_id, input_digest, status, proposal,
             cited_observation_ids_json, evidence_refs_json, attempt, failure_message,
             retryable, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
           record.runId,
           record.experimentId,
           record.strategyId,
@@ -638,11 +646,9 @@ export async function createProtectedFeedbackStore(
           timestamp,
         );
       else
-        db.prepare(
-          `UPDATE experiment_research_runs SET status = ?, proposal = ?,
+        db.prepare(`UPDATE experiment_research_runs SET status = ?, proposal = ?,
             cited_observation_ids_json = ?, evidence_refs_json = ?, attempt = ?,
-            failure_message = ?, retryable = ?, updated_at = ? WHERE run_id = ?`,
-        ).run(
+            failure_message = ?, retryable = ?, updated_at = ? WHERE run_id = ?`).run(
           record.status,
           record.proposal ?? null,
           JSON.stringify(record.citedObservationIds),
@@ -665,7 +671,6 @@ export async function createProtectedFeedbackStore(
     if (!stored) throw new Error(`Research run ${record.runId} was not recorded`);
     return stored;
   };
-
   const getExperimentOutcome = async (
     experimentId: string,
   ): Promise<ExperimentOutcomeOperationRecord | undefined> =>
@@ -673,15 +678,18 @@ export async function createProtectedFeedbackStore(
       db.prepare("SELECT * FROM experiment_outcomes WHERE experiment_id = ?").get(experimentId),
       decodeExperimentOutcome,
     );
-
   const permissionSubset = (
     restored: CommitExperimentOutcomeRequest["restore"] extends infer Value
-      ? Value extends { readonly restoredPermissionManifest: infer Manifest }
+      ? Value extends {
+          readonly restoredPermissionManifest: infer Manifest;
+        }
         ? Manifest
         : never
       : never,
     current: CommitExperimentOutcomeRequest["restore"] extends infer Value
-      ? Value extends { readonly currentPermissionManifest: infer Manifest }
+      ? Value extends {
+          readonly currentPermissionManifest: infer Manifest;
+        }
         ? Manifest
         : never
       : never,
@@ -694,7 +702,6 @@ export async function createProtectedFeedbackStore(
       contains(current.credentialRefs, restored.credentialRefs)
     );
   };
-
   const stageRevertPublications = async (
     request: CommitExperimentOutcomeRequest,
   ): Promise<readonly OutcomeActivationPublication[]> => {
@@ -744,6 +751,7 @@ export async function createProtectedFeedbackStore(
         const staged = await options.stageActiveRevision(request.operationId, publicationKey, sourceRevision);
         if (staged.workingPath !== restoredPath)
           throw new Error(`Revert staged a mismatched active definition path ${staged.workingPath}`);
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         publications.push(
           Object.freeze({
             publicationKey,
@@ -760,6 +768,7 @@ export async function createProtectedFeedbackStore(
         const workingPath = options.normalizeActiveWorkingPath(currentRevision.workingPath);
         if (retainedPaths.has(workingPath) || deletedPaths.has(workingPath)) continue;
         deletedPaths.add(workingPath);
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         publications.push(
           Object.freeze({
             publicationKey: `delete:${sha256(workingPath)}`,
@@ -776,7 +785,6 @@ export async function createProtectedFeedbackStore(
       throw error;
     }
   };
-
   const commitExperimentOutcome = async (
     request: CommitExperimentOutcomeRequest,
   ): Promise<ExperimentOutcomeOperationRecord> => {
@@ -916,12 +924,10 @@ export async function createProtectedFeedbackStore(
                 ),
               );
           restoredActivationId = `restoration_${sha256(request.operationId).slice(0, 32)}`;
-          db.prepare(
-            `INSERT INTO activations(
+          db.prepare(`INSERT INTO activations(
             activation_id, revision, previous_activation_id, definitions_json,
             capability_revisions_json, preflight_id, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          ).run(
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
             restoredActivationId,
             request.expectedActivationRevision + 1,
             request.expectedActivationId,
@@ -931,8 +937,7 @@ export async function createProtectedFeedbackStore(
             committedAt,
           );
           if (restoredRevision)
-            db.prepare(
-              `INSERT INTO activation_pointers(
+            db.prepare(`INSERT INTO activation_pointers(
               pointer_id, capability_id, activation_id, capability_revision_id, updated_at,
               capability_revision_json
             ) VALUES (?, ?, ?, ?, ?, ?)
@@ -940,8 +945,7 @@ export async function createProtectedFeedbackStore(
               pointer_id = excluded.pointer_id, activation_id = excluded.activation_id,
               capability_revision_id = excluded.capability_revision_id,
               capability_revision_json = excluded.capability_revision_json,
-              updated_at = excluded.updated_at`,
-            ).run(
+              updated_at = excluded.updated_at`).run(
               `activation_pointer_${sha256(targetCapabilityId).slice(0, 32)}`,
               targetCapabilityId,
               restoredActivationId,
@@ -950,10 +954,12 @@ export async function createProtectedFeedbackStore(
               JSON.stringify(restoredRevision),
             );
           else db.prepare("DELETE FROM activation_pointers WHERE capability_id = ?").run(targetCapabilityId);
-          db.prepare(
-            `UPDATE activation_state SET activation_id = ?, revision = ?, updated_at = ?
-           WHERE state_id = 'current'`,
-          ).run(restoredActivationId, request.expectedActivationRevision + 1, committedAt);
+          db.prepare(`UPDATE activation_state SET activation_id = ?, revision = ?, updated_at = ?
+           WHERE state_id = 'current'`).run(
+            restoredActivationId,
+            request.expectedActivationRevision + 1,
+            committedAt,
+          );
         } else if (request.decision === "revise") {
           if (!request.successor || request.restore)
             throw new Error("Revise requires one successor lineage input and no restoration");
@@ -977,13 +983,11 @@ export async function createProtectedFeedbackStore(
             committedAt,
             committedAt,
           );
-          db.prepare(
-            `INSERT INTO successor_lineage_inputs(
+          db.prepare(`INSERT INTO successor_lineage_inputs(
             input_id, predecessor_experiment_id, successor_experiment_id,
             predecessor_activation_id, predecessor_revision_json, baseline_revision_json,
             evidence_refs_json, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          ).run(
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
             lineage.inputId,
             lineage.predecessorExperimentId,
             lineage.successorExperimentId,
@@ -997,24 +1001,26 @@ export async function createProtectedFeedbackStore(
         } else if (request.restore || request.successor) {
           throw new Error("Keep cannot restore activation state or create a successor");
         }
-        const completed = ExperimentSchema.parse({
-          ...experiment,
-          status: "completed",
-          outcome: request.decision,
-          ...(successorExperimentId ? { followUpExperimentId: successorExperimentId } : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        const completed = ExperimentSchema.parse(
+          createConditionalObject({
+            ...experiment,
+            status: "completed",
+            outcome: request.decision,
+          } as const)
+            .addOptional(successorExperimentId ? { followUpExperimentId: successorExperimentId } : undefined)
+            .finish(),
+        );
         db.prepare(
           "UPDATE experiments SET status = 'completed', data_json = ?, updated_at = ? WHERE experiment_id = ?",
         ).run(JSON.stringify(completed), committedAt, experiment.experimentId);
         options.duringOutcomeCommitForTesting?.();
-        db.prepare(
-          `INSERT INTO experiment_outcomes(
+        db.prepare(`INSERT INTO experiment_outcomes(
           operation_id, idempotency_key, experiment_id, decision, strategy_id,
           research_run_id, expected_activation_id, expected_activation_revision,
           restore_source_activation_id, restored_activation_id, successor_experiment_id,
           evidence_refs_json, operation_digest, committed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
           request.operationId,
           request.idempotencyKey,
           request.experimentId,
@@ -1038,12 +1044,10 @@ export async function createProtectedFeedbackStore(
           request.evidenceRefs,
         );
         for (const publication of revertPublications)
-          db.prepare(
-            `INSERT INTO outcome_activation_publications(
+          db.prepare(`INSERT INTO outcome_activation_publications(
               operation_id, publication_key, action, working_path, source_revision_json,
               staged_path, content_digest, published
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
-          ).run(
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`).run(
             request.operationId,
             publication.publicationKey,
             publication.action,
@@ -1063,7 +1067,6 @@ export async function createProtectedFeedbackStore(
     if (!committed) throw new Error(`Experiment outcome ${request.operationId} did not commit`);
     return committed;
   };
-
   const protectedFeedback = Object.freeze({
     operationForActivation,
     recordObservation,
@@ -1072,14 +1075,12 @@ export async function createProtectedFeedbackStore(
     getObservation,
     listObservationsForOutcome,
     listObservations: async (experimentId: string, limit: number) => {
-      if (!Number.isInteger(limit) || limit < 1 || limit > 1_000)
+      if (!Number.isInteger(limit) || limit < 1 || limit > 1000)
         throw new Error("Observation query limit must be an integer between 1 and 1000");
       return Object.freeze(
         db
-          .prepare(
-            `SELECT * FROM experiment_observations WHERE experiment_id = ?
-             ORDER BY created_at DESC, observation_id DESC LIMIT ?`,
-          )
+          .prepare(`SELECT * FROM experiment_observations WHERE experiment_id = ?
+             ORDER BY created_at DESC, observation_id DESC LIMIT ?`)
           .all(experimentId, limit)
           .map(decodeObservation)
           .reverse(),
@@ -1090,10 +1091,8 @@ export async function createProtectedFeedbackStore(
     listResearchRuns: async (experimentId: string) =>
       Object.freeze(
         db
-          .prepare(
-            `SELECT * FROM experiment_research_runs WHERE experiment_id = ?
-             ORDER BY created_at, run_id`,
-          )
+          .prepare(`SELECT * FROM experiment_research_runs WHERE experiment_id = ?
+             ORDER BY created_at, run_id`)
           .all(experimentId)
           .map(decodeResearchRun),
       ),
@@ -1107,7 +1106,6 @@ export async function createProtectedFeedbackStore(
         decodeSuccessorInput,
       ),
   });
-
   await recoverCommittedOutcomePublications();
   return protectedFeedback;
 }

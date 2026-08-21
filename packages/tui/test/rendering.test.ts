@@ -60,6 +60,7 @@ const settleSafeEditorAmbiguity = async (): Promise<void> => {
 };
 
 describe("Noesis safe editor key path", () => {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["Shift+Enter", "\u001b[27;2;13~"],
     ["Ctrl+J", "\n"],
@@ -86,6 +87,7 @@ describe("Noesis safe editor key path", () => {
     expect(containsUnsafeTextControl(editor.getText())).toBe(false);
   });
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["DEL", "\u007f"],
     ["BS", "\u0008"],
@@ -234,6 +236,7 @@ describe("Noesis safe editor key path", () => {
 
 describe("Noesis transcript rendering", () => {
   const codemodeActions = () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const execute = {
       actionId: "execute-1",
       name: "execute",
@@ -244,6 +247,7 @@ describe("Noesis transcript rendering", () => {
       output: { calls: 2, details: { kind: "result", executionId: "exec-9" } },
       durationMs: 1_240,
     };
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const read = {
       actionId: "execute-1:call:1",
       parentActionId: "execute-1",
@@ -258,6 +262,7 @@ describe("Noesis transcript rendering", () => {
         truncated: false,
       },
     };
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const write = {
       actionId: "execute-1:call:2",
       parentActionId: "execute-1",
@@ -365,6 +370,7 @@ describe("Noesis transcript rendering", () => {
   });
 
   test("summarizes a failed nested call with its error rather than its payload", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const failed = {
       actionId: "execute-1:call:1",
       parentActionId: "execute-1",
@@ -382,6 +388,7 @@ describe("Noesis transcript rendering", () => {
 
   test("sanitizes hostile action summary fields and keeps them on one line", () => {
     const hostile = "safe\u001b[31m\u001b]0;owned\u0007\u009dC1\u009c\nSECOND-LINE";
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const actions = [
       {
         actionId: "shell",
@@ -440,6 +447,7 @@ describe("Noesis transcript rendering", () => {
   });
 
   test("previews the program while an execute call has produced no nested calls yet", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const running = {
       actionId: "execute-1",
       name: "execute",
@@ -507,11 +515,13 @@ describe("Noesis transcript rendering", () => {
   });
 
   test("indents nested codemode SDK calls under execute", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const parent = {
       actionId: "execute-1",
       name: "execute",
       status: "running" as const,
     };
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const child = {
       actionId: "execute-1:call:1",
       parentActionId: parent.actionId,
@@ -552,6 +562,7 @@ describe("Noesis transcript rendering", () => {
   });
 
   test("separates successive semantic message blocks with one optical row", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const state = {
       ...initialTuiState("fake"),
       timeline: [
@@ -579,6 +590,7 @@ describe("Noesis transcript rendering", () => {
   });
 
   test("flows actions chronologically between assistant response segments without a separate panel", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const state = {
       ...initialTuiState("fake"),
       timeline: [
@@ -743,6 +755,7 @@ describe("Noesis transcript rendering", () => {
     expect(rendered).not.toContain("╭─ math");
   });
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["backtick", "```", "````"],
     ["tilde", "~~~", "~~~~"],
@@ -823,7 +836,9 @@ describe("Noesis transcript rendering", () => {
     expect(math).toContain("╰─");
   });
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test("elides responsively and never emits an over-width line", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const state = {
       ...initialTuiState("fake", {
         provider: "provider-with-a-long-name",
@@ -856,6 +871,7 @@ describe("Noesis transcript rendering", () => {
   });
 
   test("keeps every owned emitted line inside terminal columns from 1 through 120", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const state = {
       ...initialTuiState("fake", {
         provider: "a-provider-name-that-must-elide",
@@ -902,9 +918,11 @@ describe("Noesis transcript rendering", () => {
     }
   });
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each(["user", "assistant", "system"] as const)(
     "keeps every line of a long %s message reachable",
     (role) => {
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       const state = {
         ...initialTuiState("fake"),
         timeline: [
@@ -926,6 +944,7 @@ describe("Noesis transcript rendering", () => {
   );
 
   test("bounds an expanded codemode program to the visible screen", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const state = {
       ...initialTuiState("fake"),
       timeline: [
@@ -962,6 +981,7 @@ describe("Noesis transcript rendering", () => {
 
   test("reuses settled blocks so a growing transcript reparses only what changed", () => {
     const renderer = createTranscriptRenderer();
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const completed = Array.from({ length: 100 }, (_, index) => ({
       kind: "message" as const,
       role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
@@ -970,6 +990,7 @@ describe("Noesis transcript rendering", () => {
     let state = { ...initialTuiState("fake"), timeline: completed };
     renderer.render(state, 70);
     for (let index = 1; index <= 40; index += 1) {
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       state = {
         ...state,
         execution: "streaming",
@@ -994,6 +1015,7 @@ describe("Noesis transcript rendering", () => {
 
   test("invalidates an execute row when its child action summary changes", () => {
     const renderer = createTranscriptRenderer();
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const execute = {
       kind: "action" as const,
       actionId: "execute-1",
@@ -1007,6 +1029,7 @@ describe("Noesis transcript rendering", () => {
     };
     expect(renderer.render(initial, 80).join("\n")).toContain("noesis.invoke");
 
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const runningChild = {
       kind: "action" as const,
       actionId: "execute-1:call:1",
@@ -1022,6 +1045,7 @@ describe("Noesis transcript rendering", () => {
     expect(running).toContain("1 call · 1 shell.run");
     expect(running).not.toContain("noesis.invoke");
 
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const withFailedChild = {
       ...initial,
       timeline: [
@@ -1037,6 +1061,7 @@ describe("Noesis transcript rendering", () => {
   });
 
   test("separates turns but keeps nested codemode calls tight under their parent", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const state = {
       ...initialTuiState("fake"),
       timeline: [

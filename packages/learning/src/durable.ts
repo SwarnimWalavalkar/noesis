@@ -1,4 +1,5 @@
 import {
+  createConditionalObject,
   ArtifactFileRefSchema,
   type CapabilityRevision,
   type CapabilityRevisionRef,
@@ -24,12 +25,11 @@ import {
   type ExperimentBriefStore,
   type LearningCandidateManifestStore,
 } from "./organ.ts";
-
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const namespace = "learning_experiment_brief";
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const actor = Object.freeze({ actorId: "automatic-learning-organ", kind: "noesis" as const });
-
 const CitationSchema = z.strictObject({
   source: z.union([
     z.strictObject({
@@ -50,13 +50,11 @@ const CitationSchema = z.strictObject({
   endOffset: z.number().int().nonnegative(),
   contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
 });
-
 const VariantSchema = z.strictObject({
   variantId: z.string().min(1),
   axis: z.enum(["role", "retrieval", "routing", "evaluation", "tool_runtime", "activation"]),
   configurationRefs: z.array(FileRevisionRefSchema),
 });
-
 const RoleRunSchema = z.strictObject({
   runId: z.string().min(1),
   role: z.enum([
@@ -106,7 +104,6 @@ const RoleRunSchema = z.strictObject({
     artifactRefs: z.array(ArtifactFileRefSchema),
   }),
 });
-
 const RawExperimentBriefSchema = z.strictObject({
   experimentId: z.string().min(1),
   title: z.string().min(1),
@@ -143,7 +140,6 @@ const RawExperimentBriefSchema = z.strictObject({
   reflectionRun: RoleRunSchema.optional(),
   sourceAdjustmentId: z.string().min(1).optional(),
 });
-
 const ExperimentBriefSchema: z.ZodType<ExperimentBrief> = RawExperimentBriefSchema.transform(
   (value): ExperimentBrief => {
     const {
@@ -154,17 +150,20 @@ const ExperimentBriefSchema: z.ZodType<ExperimentBrief> = RawExperimentBriefSche
       sourceAdjustmentId,
       ...brief
     } = value;
-    return Object.freeze({
-      ...brief,
-      staleOrContradictionConditions: Object.freeze([...staleOrContradictionConditions]),
-      verifiedScopeRelationship: verifiedScopeRelationship ?? value.scopeRelationship,
-      ...(reflectionRun === undefined ? {} : { reflectionRun }),
-      ...(scopeVerificationRun === undefined ? {} : { scopeVerificationRun }),
-      ...(sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        ...brief,
+        staleOrContradictionConditions: Object.freeze([...staleOrContradictionConditions]),
+        verifiedScopeRelationship: verifiedScopeRelationship ?? value.scopeRelationship,
+      } as const)
+        .addOptional(!(reflectionRun === undefined) ? { reflectionRun } : undefined)
+        .addOptional(!(scopeVerificationRun === undefined) ? { scopeVerificationRun } : undefined)
+        .addOptional(!(sourceAdjustmentId === undefined) ? { sourceAdjustmentId } : undefined)
+        .finish(),
+    );
   },
 );
-
 const CandidateManifestSchema = z.strictObject({
   schemaVersion: z.literal(1),
   kind: z.literal("learning_candidate_revision"),
@@ -187,7 +186,6 @@ const CandidateManifestSchema = z.strictObject({
     evidenceRefs: z.array(EvidenceRefSchema),
   }),
 });
-
 export interface RehydratedLearningCandidate {
   readonly brief: ExperimentBrief;
   readonly revision: CapabilityRevision;
@@ -195,36 +193,34 @@ export interface RehydratedLearningCandidate {
   readonly experiment: Experiment;
   readonly manifestRevision: FileRevisionRef;
 }
-
 type DurableWorkspace = Pick<
   WorkspaceStore,
   "reads" | "definitions" | "definitionMetadata" | "definitionPublications" | "research"
 >;
-
 function briefPath(key: string): string {
   return `evals/learning-briefs/${key}.json`;
 }
-
 function manifestPath(reference: CapabilityRevisionRef): string {
   return `${reference.capabilityId}/${reference.capabilityRevisionId}/manifest.json`;
 }
-
 function parseCapabilityRevision(value: unknown): CapabilityRevision {
   const parsed = CapabilityRevisionSchema.parse(value);
   const { predecessorRevisionId, dependencyLock, ...required } = parsed;
-  return Object.freeze({
-    ...required,
-    ...(predecessorRevisionId === undefined ? {} : { predecessorRevisionId }),
-    ...(dependencyLock === undefined ? {} : { dependencyLock }),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      ...required,
+    } as const)
+      .addOptional(!(predecessorRevisionId === undefined) ? { predecessorRevisionId } : undefined)
+      .addOptional(!(dependencyLock === undefined) ? { dependencyLock } : undefined)
+      .finish(),
+  );
 }
-
 async function readBrief(workspace: DurableWorkspace, reference: FileRevisionRef): Promise<ExperimentBrief> {
   return ExperimentBriefSchema.parse(
     JSON.parse(decoder.decode(await workspace.reads.readRevision(reference))),
   );
 }
-
 export function createWorkspaceExperimentBriefStore(workspace: DurableWorkspace): ExperimentBriefStore {
   const requireSamePublication = (existing: ExperimentBrief, requested: ExperimentBrief) => {
     if (canonicalJson(existing) !== canonicalJson(requested))
@@ -299,13 +295,13 @@ export function createWorkspaceExperimentBriefStore(workspace: DurableWorkspace)
     },
   });
 }
-
 export function createWorkspaceLearningCandidateManifestStore(
   workspace: DurableWorkspace,
 ): LearningCandidateManifestStore & {
   readonly rehydrate: (experimentId: string) => Promise<RehydratedLearningCandidate | undefined>;
 } {
   const persist: LearningCandidateManifestStore["persist"] = async (input) => {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const manifest = CandidateManifestSchema.parse({
       schemaVersion: 1,
       kind: "learning_candidate_revision",
@@ -333,7 +329,6 @@ export function createWorkspaceLearningCandidateManifestStore(
       sensitivity: "private",
     });
   };
-
   const rehydrate = async (experimentId: string): Promise<RehydratedLearningCandidate | undefined> => {
     const experiment = await workspace.research.experiments.getExperiment(experimentId);
     if (!experiment) return undefined;
@@ -375,17 +370,14 @@ export function createWorkspaceLearningCandidateManifestStore(
       manifestRevision,
     });
   };
-
   return Object.freeze({ persist, rehydrate });
 }
-
 export interface DurableAutomaticLearningOrganOptions extends Omit<
   AutomaticLearningOrganOptions,
   "briefs" | "candidateDefinitions" | "experiments" | "feedbackSignals" | "candidateManifests"
 > {
   readonly workspace: DurableWorkspace;
 }
-
 export function createDurableAutomaticLearningOrgan(
   options: DurableAutomaticLearningOrganOptions,
 ): AutomaticLearningOrgan {

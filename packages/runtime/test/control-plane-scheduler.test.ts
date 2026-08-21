@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,17 +13,13 @@ import {
   type RuntimeControlPlaneTimers,
   type RuntimeCoordinator,
 } from "../src/index.ts";
-
 const roots: string[] = [];
-
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
 });
-
 function unsupported(): never {
   throw new Error("This scheduler fixture does not exercise the operation");
 }
-
 describe("runtime control-plane resident scheduling", () => {
   test("startup recovery re-arms at durable notBefore without a busy loop and stop cancels the timer", async () => {
     let nowMs = Date.parse("2026-07-23T00:00:00.000Z");
@@ -32,7 +29,7 @@ describe("runtime control-plane resident scheduling", () => {
       now: () => new Date(nowMs).toISOString(),
     });
     const deferredJobIds = await Promise.all(
-      Array.from({ length: 1_001 }, async (_, index) => {
+      Array.from({ length: 1001 }, async (_, index) => {
         const jobId = `deferred-runtime-${String(index).padStart(4, "0")}`;
         await workspace.jobs.enqueue({
           jobId,
@@ -41,7 +38,7 @@ describe("runtime control-plane resident scheduling", () => {
           payloadRefs: Object.freeze([]),
           operationId: `operation:${jobId}`,
           idempotencyKey: `operation:${jobId}`,
-          notBefore: new Date(nowMs + 2_000).toISOString(),
+          notBefore: new Date(nowMs + 2000).toISOString(),
           maxAttempts: 1,
           estimatedCost: 0,
           budget: 0,
@@ -56,16 +53,20 @@ describe("runtime control-plane resident scheduling", () => {
       payloadRefs: Object.freeze([]),
       operationId: "future-operation",
       idempotencyKey: "future-operation",
-      notBefore: new Date(nowMs + 1_000).toISOString(),
+      notBefore: new Date(nowMs + 1000).toISOString(),
       maxAttempts: 1,
       estimatedCost: 1,
       budget: 1,
     });
-
     let sequence = 0;
     const scheduled = new Map<
       number,
-      { readonly at: number; readonly callback: () => void; cancelled: boolean; unrefed: boolean }
+      {
+        readonly at: number;
+        readonly callback: () => void;
+        cancelled: boolean;
+        unrefed: boolean;
+      }
     >();
     const timers: RuntimeControlPlaneTimers = Object.freeze({
       setTimeout: (callback: () => void, delayMs: number): RuntimeControlPlaneTimerHandle => {
@@ -84,6 +85,7 @@ describe("runtime control-plane resident scheduling", () => {
       clearTimeout: (handle: RuntimeControlPlaneTimerHandle) => handle.cancel(),
     });
     let drains = 0;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const coordinator: RuntimeCoordinator = Object.freeze({
       observeCompletedTurn: async () => unsupported(),
       runAvailable: async () => {
@@ -91,7 +93,7 @@ describe("runtime control-plane resident scheduling", () => {
         const claimed = await workspace.jobs.claim({
           workerId: "fake-resident-worker",
           now: new Date(nowMs).toISOString(),
-          leaseUntil: new Date(nowMs + 10_000).toISOString(),
+          leaseUntil: new Date(nowMs + 10000).toISOString(),
           maximumCost: 1,
           kinds: Object.freeze(["runtime.reflect_turn"]),
         });
@@ -119,6 +121,7 @@ describe("runtime control-plane resident scheduling", () => {
       getOperation: async () => undefined,
       pinTurnActivation: async () => unsupported(),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const feedback: ContinuousFeedbackController = Object.freeze({
       classifyTurnObservations: async () =>
         Object.freeze({ status: "unchanged" as const, observations: Object.freeze([]) }),
@@ -148,12 +151,11 @@ describe("runtime control-plane resident scheduling", () => {
       now: () => new Date(nowMs),
       timers,
     });
-
     await controlPlane.idle();
     expect(await workspace.jobs.get(job.jobId)).toMatchObject({ status: "scheduled", attempt: 0 });
     const armed = [...scheduled.values()].filter((timer) => !timer.cancelled);
     expect(armed).toHaveLength(1);
-    expect(armed[0]).toMatchObject({ at: nowMs + 1_000, unrefed: true });
+    expect(armed[0]).toMatchObject({ at: nowMs + 1000, unrefed: true });
     expect(drains).toBe(1);
     expect(listRequests.length).toBeGreaterThan(2);
     expect(
@@ -165,30 +167,26 @@ describe("runtime control-plane resident scheduling", () => {
       ),
     ).toBe(true);
     expect(listRequests.some((request) => request?.after !== undefined)).toBe(true);
-
     await Promise.all(
       deferredJobIds.map(async (jobId) => await workspace.jobs.cancel(jobId, new Date(nowMs).toISOString())),
     );
-
-    nowMs += 1_000;
+    nowMs += 1000;
     if (armed[0]) armed[0].cancelled = true;
     armed[0]?.callback();
     await controlPlane.idle();
     expect(await workspace.jobs.get(job.jobId)).toMatchObject({ status: "completed", attempt: 1 });
     expect(drains).toBe(2);
     expect([...scheduled.values()].filter((timer) => !timer.cancelled)).toHaveLength(0);
-
     await controlPlane.stop();
     expect([...scheduled.values()].filter((timer) => !timer.cancelled)).toHaveLength(0);
     workspace.close();
-  }, 30_000);
-
+  }, 30000);
   test("reduces a large active backlog without variadic argument limits", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-control-plane-large-backlog-"));
     roots.push(root);
     const workspace = await createWorkspaceStore(root);
     const nowMs = Date.parse("2026-07-23T00:00:00.000Z");
-    const total = 150_000;
+    const total = 150000;
     let pagesRead = 0;
     const jobs = Object.freeze({
       ...workspace.jobs,
@@ -199,7 +197,8 @@ describe("runtime control-plane resident scheduling", () => {
         const end = Math.min(total, start + limit);
         const records: DurableJobRecord[] = [];
         for (let index = start; index < end; index += 1) {
-          const timestamp = new Date(nowMs + 1_000 + index).toISOString();
+          const timestamp = new Date(nowMs + 1000 + index).toISOString();
+          // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
           records.push(
             Object.freeze({
               jobId: `synthetic-${String(index)}`,
@@ -220,13 +219,18 @@ describe("runtime control-plane resident scheduling", () => {
           );
         }
         const last = records.at(-1);
-        return Object.freeze({
-          records: Object.freeze(records),
-          exhausted: end >= total,
-          ...(last ? { nextCursor: { createdAt: last.createdAt, jobId: last.jobId } } : {}),
-        });
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+        return Object.freeze(
+          createConditionalObject({
+            records: Object.freeze(records),
+            exhausted: end >= total,
+          } as const)
+            .addOptional(last ? { nextCursor: { createdAt: last.createdAt, jobId: last.jobId } } : undefined)
+            .finish(),
+        );
       },
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const coordinator: RuntimeCoordinator = Object.freeze({
       observeCompletedTurn: async () => unsupported(),
       runAvailable: async () => undefined,
@@ -247,6 +251,7 @@ describe("runtime control-plane resident scheduling", () => {
       getOperation: async () => undefined,
       pinTurnActivation: async () => unsupported(),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const feedback: ContinuousFeedbackController = Object.freeze({
       classifyTurnObservations: async () =>
         Object.freeze({ status: "unchanged" as const, observations: Object.freeze([]) }),
@@ -278,14 +283,12 @@ describe("runtime control-plane resident scheduling", () => {
       timers,
       autoStart: false,
     });
-
     await controlPlane.runAvailable();
-    await expect(armed).resolves.toBe(1_000);
+    await expect(armed).resolves.toBe(1000);
     expect(pagesRead).toBe(150);
     await controlPlane.stop();
     workspace.close();
-  }, 30_000);
-
+  }, 30000);
   test("stop prevents later lifecycle stages when coordinator draining settles afterward", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-control-plane-stop-"));
     roots.push(root);
@@ -302,6 +305,7 @@ describe("runtime control-plane resident scheduling", () => {
     let feedbackRuns = 0;
     let feedbackStops = 0;
     let activationAttempts = 0;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const coordinator: RuntimeCoordinator = Object.freeze({
       observeCompletedTurn: async () => unsupported(),
       runAvailable: async () => {
@@ -330,6 +334,7 @@ describe("runtime control-plane resident scheduling", () => {
       getOperation: async () => undefined,
       pinTurnActivation: async () => unsupported(),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const feedback: ContinuousFeedbackController = Object.freeze({
       classifyTurnObservations: async () =>
         Object.freeze({ status: "unchanged" as const, observations: Object.freeze([]) }),
@@ -352,13 +357,11 @@ describe("runtime control-plane resident scheduling", () => {
       feedback,
       autoStart: false,
     });
-
     const running = controlPlane.runAvailable();
     await coordinatorStarted;
     const stopping = controlPlane.stop();
     releaseCoordinator?.();
     await Promise.all([running, stopping]);
-
     expect(coordinatorStops).toBe(1);
     expect(feedbackStops).toBe(1);
     expect(feedbackRuns).toBe(0);

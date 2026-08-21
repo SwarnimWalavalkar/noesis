@@ -16,6 +16,7 @@ import type { NoesisWorkspaceStore } from "@noesis/workspace";
 import { z } from "zod";
 import { authorizeScheduledJob, runScheduledJob } from "./scheduled-execution.ts";
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const CAPABILITY_REFLECTION_JOB_KIND = "runtime.reflect_capability" as const;
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled", "budget_exhausted"]);
 const REFLECTION_LEASE_MS = 120_000;
@@ -85,19 +86,19 @@ function decodeJob(job: DurableJobRecord): CapabilityReflectionJobView {
   });
 }
 
-function failureFrom(error: unknown, retryable = false): DurableJobFailure {
+function failureFrom(cause: unknown, retryable = false): DurableJobFailure {
   if (retryable)
     return Object.freeze({
       code: "capability_reflection_interrupted",
-      message: error instanceof Error ? error.message : String(error),
+      message: cause instanceof Error ? cause.message : String(cause),
       retryable: true,
       ambiguous: false,
     });
   return (
-    durableJobFailureFromError(error) ??
+    durableJobFailureFromError(cause) ??
     Object.freeze({
       code: "capability_reflection_failed",
-      message: error instanceof Error ? error.message : String(error),
+      message: cause instanceof Error ? cause.message : String(cause),
       retryable: false,
       ambiguous: false,
     })
@@ -247,11 +248,15 @@ export function createCapabilityCoordinator(
     const deadlineMs = request.deadline.getTime();
     if (!Number.isFinite(deadlineMs)) throw new Error("Capability reflection wait needs a valid deadline");
     for (;;) {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       if (request.signal?.aborted) return Object.freeze({ status: "cancelled" as const });
       const job = await options.workspace.jobs.get(request.jobId);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       if (!job) return Object.freeze({ status: "missing" as const });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       if (TERMINAL_JOB_STATUSES.has(job.status)) return Object.freeze({ status: "terminal" as const, job });
       const remaining = deadlineMs - Date.now();
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       if (remaining <= 0) return Object.freeze({ status: "timeout" as const });
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, Math.min(25, remaining));

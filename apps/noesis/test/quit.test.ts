@@ -197,6 +197,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["first-launch-quit-lf", "/quit"],
     ["first-launch-ctrl-c", "Ctrl+C"],
@@ -211,6 +212,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     7_000,
   );
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["first-launch-oauth-quit-lf", "/quit"],
     ["first-launch-oauth-ctrl-c", "Ctrl+C"],
@@ -252,6 +254,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each(["quit-lf", "ctrl-c"] as const)(
     "--continue renders the latest history and %s cleanup exits cleanly",
     async (action) => {
@@ -325,6 +328,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["completed-turn-quit-lf", "/quit"],
     ["completed-turn-ctrl-c", "Ctrl+C"],
@@ -348,6 +352,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     7_000,
   );
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["DEL", "backspace-del-quit", "ab"],
     ["BS", "backspace-bs-quit", "ab"],

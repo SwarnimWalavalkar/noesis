@@ -86,6 +86,7 @@ describe("Pi MCP sampling adapter", () => {
         Object.freeze({
           sample: async () => {
             called = true;
+            // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
             return Object.freeze({
               model: "unused",
               role: "assistant" as const,
@@ -484,6 +485,7 @@ describe("Pi MCP sampling adapter", () => {
     );
   });
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     {
       name: "audio input",

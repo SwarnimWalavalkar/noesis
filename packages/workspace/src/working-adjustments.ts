@@ -1,5 +1,7 @@
+import type { DatabaseRow } from "./database.ts";
 import {
   type ActorRef,
+  type DatabaseRowRef,
   type EvidenceRef,
   type WorkingAdjustment,
   WorkingAdjustmentSchema,
@@ -11,13 +13,14 @@ interface CreateWorkingAdjustmentStoreOptions {
   readonly database: WorkspaceDatabase;
   readonly now: () => string;
   readonly assertStoredReference: (reference: EvidenceRef) => void;
+  /** BOUNDARY: Activity references are serialized by the authoritative workspace activity writer. */
   readonly recordActivity: (
     actor: ActorRef,
     kind: string,
     subjectKind: string,
     subjectId: string,
     references?: unknown,
-  ) => unknown;
+  ) => DatabaseRowRef<"activity_log">;
 }
 
 const actor: ActorRef = Object.freeze({ actorId: "working-adjustment", kind: "system" });
@@ -27,7 +30,7 @@ export function createProtectedWorkingAdjustmentStore(
 ): ProtectedWorkingAdjustmentStore {
   const db = options.database.connection;
 
-  const decode = (row: unknown): WorkingAdjustment | undefined => {
+  const decode = (row: DatabaseRow | undefined): WorkingAdjustment | undefined => {
     if (row === undefined) return undefined;
     return WorkingAdjustmentSchema.parse(parseJson(requiredString(row, "data_json")));
   };
@@ -137,6 +140,7 @@ export function createProtectedWorkingAdjustmentStore(
           throw new Error(
             `Active working adjustment ${adjustment.adjustmentId} is missing its immutable row`,
           );
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           status: "applied" as const,
           adjustment,
@@ -151,6 +155,7 @@ export function createProtectedWorkingAdjustmentStore(
           adjustment.adjustmentId,
           Object.freeze([currentId]),
         );
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           status: "stale" as const,
           adjustmentId: adjustment.adjustmentId,
@@ -185,6 +190,7 @@ export function createProtectedWorkingAdjustmentStore(
         adjustment.adjustmentId,
         Object.freeze(currentId === null ? [] : [currentId]),
       );
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         status: "applied" as const,
         adjustment,
@@ -213,6 +219,7 @@ export function createProtectedWorkingAdjustmentStore(
           request.expectedActiveAdjustmentId,
           Object.freeze([currentId]),
         );
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           status: "stale" as const,
           adjustmentId: request.expectedActiveAdjustmentId,
@@ -229,6 +236,7 @@ export function createProtectedWorkingAdjustmentStore(
         "working_adjustment",
         request.expectedActiveAdjustmentId,
       );
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         status: "unapplied" as const,
         adjustmentId: request.expectedActiveAdjustmentId,

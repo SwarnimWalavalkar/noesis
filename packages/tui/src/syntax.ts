@@ -10,7 +10,7 @@ import { ANSI, safeTerminalText } from "./theme.ts";
 
 export type SyntaxLanguage = "js" | "json" | "shell";
 
-const LANGUAGE_ALIASES: Readonly<Record<string, SyntaxLanguage>> = {
+const LANGUAGE_ALIASES = {
   javascript: "js",
   js: "js",
   jsx: "js",
@@ -28,11 +28,12 @@ const LANGUAGE_ALIASES: Readonly<Record<string, SyntaxLanguage>> = {
   sh: "shell",
   shell: "shell",
   zsh: "shell",
-};
+} satisfies Readonly<Record<string, SyntaxLanguage>>;
 
 export function syntaxLanguage(language: string | undefined): SyntaxLanguage | undefined {
   if (!language) return undefined;
-  return LANGUAGE_ALIASES[language.trim().toLowerCase().split(/[\s:]/u)[0] ?? ""];
+  const requested = language.trim().toLowerCase().split(/[\s:]/u)[0] ?? "";
+  return Object.entries(LANGUAGE_ALIASES).find(([name]) => name === requested)?.[1];
 }
 
 type TokenStyle =
@@ -55,7 +56,7 @@ interface Token {
 
 type PushToken = (text: string, style: TokenStyle) => void;
 
-const TOKEN_ANSI: Readonly<Record<TokenStyle, string>> = {
+const TOKEN_ANSI = {
   plain: "",
   comment: ANSI.dim,
   keyword: ANSI.magenta,
@@ -67,7 +68,7 @@ const TOKEN_ANSI: Readonly<Record<TokenStyle, string>> = {
   key: ANSI.cyan,
   punctuation: ANSI.dim,
   operator: ANSI.dim,
-};
+} satisfies Readonly<Record<TokenStyle, string>>;
 
 const JS_KEYWORDS = new Set([
   "as",

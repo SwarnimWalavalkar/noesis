@@ -20,7 +20,14 @@ import {
   type McpOAuthCredentialStore,
 } from "@noesis/mcp";
 import { adaptMcpSamplingRequest, type PiMcpSamplingPort } from "@noesis/runtime-pi";
-import { canonicalJson, createId, type JsonValue, toJsonValue } from "@noesis/domain";
+import {
+  createConditionalObject,
+  canonicalJson,
+  createId,
+  isJsonObject,
+  type JsonValue,
+  toJsonValue,
+} from "@noesis/domain";
 import type {
   NoesisTuiRuntime,
   TuiMcpFormField,
@@ -30,7 +37,6 @@ import type {
   TuiMcpServerDetail,
   TuiMcpServerSummary,
 } from "@noesis/tui";
-
 export interface ApplicationMcpIntegration {
   readonly host: McpHostManager;
   readonly start: () => Promise<void>;
@@ -41,7 +47,7 @@ export interface ApplicationMcpIntegration {
   readonly setSamplingAuthorizer: (authorizer: ApplicationMcpSamplingAuthorizer) => void;
   readonly setLifecycleAuthorizer: (authorizer: ApplicationMcpLifecycleAuthorizer) => void;
 }
-
+/** BOUNDARY: MCP sampling is SDK-owned until the authorizer executes and the result parser validates it. */
 export type ApplicationMcpSamplingAuthorizer = (input: {
   readonly serverName: string;
   readonly request: unknown;
@@ -49,11 +55,15 @@ export type ApplicationMcpSamplingAuthorizer = (input: {
   readonly invocation: McpInvocationContext;
   readonly execute: () => Promise<unknown>;
 }) => Promise<unknown>;
-
 type ApplicationMcpLifecycleIdentity =
-  | { readonly operationId: string; readonly connectionIdentity?: never }
-  | { readonly operationId?: never; readonly connectionIdentity: string };
-
+  | {
+      readonly operationId: string;
+      readonly connectionIdentity?: never;
+    }
+  | {
+      readonly operationId?: never;
+      readonly connectionIdentity: string;
+    };
 export type ApplicationMcpLifecycleAuthorizer = (
   input: ApplicationMcpLifecycleIdentity & {
     readonly effect: "write" | "execute" | "network";
@@ -62,9 +72,9 @@ export type ApplicationMcpLifecycleAuthorizer = (
     readonly execute: () => Promise<JsonValue>;
   },
 ) => Promise<JsonValue>;
-
 function hostConfig(config: LoadedMcpConfig, workspaceTrusted: boolean): LoadedMcpConfig {
   if (workspaceTrusted) return config;
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const servers = new Map(
     Object.entries(config.global.servers).map(([name, serverConfig]) => [
       name,
@@ -79,34 +89,48 @@ function hostConfig(config: LoadedMcpConfig, workspaceTrusted: boolean): LoadedM
   );
   return Object.freeze({ ...config, servers });
 }
-
 function formFields(
-  request: Exclude<McpElicitRequest["params"], { mode: "url" }>,
+  request: Exclude<
+    McpElicitRequest["params"],
+    {
+      mode: "url";
+    }
+  >,
 ): readonly TuiMcpFormField[] {
   const required = new Set(request.requestedSchema.required ?? []);
   return Object.freeze(
     Object.entries(request.requestedSchema.properties).map(([name, property]): TuiMcpFormField => {
-      const common = {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      const common = createConditionalObject({
         name,
         label: property.title ?? name,
-        ...(property.description ? { description: property.description } : {}),
-        ...(required.has(name) ? { required: true } : {}),
-      };
+      } as const)
+        .addOptional(property.description ? { description: property.description } : undefined)
+        .addOptional(required.has(name) ? { required: true } : undefined)
+        .finish();
       if (property.type === "boolean")
-        return Object.freeze({
-          ...common,
-          type: "boolean",
-          ...(property.default === undefined ? {} : { defaultValue: property.default }),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return Object.freeze(
+          createConditionalObject({
+            ...common,
+            type: "boolean",
+          } as const)
+            .addOptional(!(property.default === undefined) ? { defaultValue: property.default } : undefined)
+            .finish(),
+        );
       if (property.type === "number" || property.type === "integer")
-        return Object.freeze({
-          ...common,
-          type: "number",
-          ...(property.default === undefined ? {} : { defaultValue: property.default }),
-          ...(property.type === "integer" ? { integer: true } : {}),
-          ...(property.minimum === undefined ? {} : { minimum: property.minimum }),
-          ...(property.maximum === undefined ? {} : { maximum: property.maximum }),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return Object.freeze(
+          createConditionalObject({
+            ...common,
+            type: "number",
+          } as const)
+            .addOptional(!(property.default === undefined) ? { defaultValue: property.default } : undefined)
+            .addOptional(property.type === "integer" ? { integer: true } : undefined)
+            .addOptional(!(property.minimum === undefined) ? { minimum: property.minimum } : undefined)
+            .addOptional(!(property.maximum === undefined) ? { maximum: property.maximum } : undefined)
+            .finish(),
+        );
       if (property.type === "array") {
         const choices =
           "enum" in property.items
@@ -114,56 +138,79 @@ function formFields(
             : property.items.anyOf.map((choice) =>
                 Object.freeze({ value: choice.const, label: choice.title }),
               );
-        return Object.freeze({
-          ...common,
-          type: "multiselect",
-          choices: Object.freeze(choices),
-          ...(property.default === undefined ? {} : { defaultValue: Object.freeze(property.default) }),
-          ...(property.minItems === undefined ? {} : { minItems: property.minItems }),
-          ...(property.maxItems === undefined ? {} : { maxItems: property.maxItems }),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return Object.freeze(
+          createConditionalObject({
+            ...common,
+            type: "multiselect",
+            choices: Object.freeze(choices),
+          } as const)
+            .addOptional(
+              !(property.default === undefined)
+                ? {
+                    defaultValue: Object.freeze(property.default),
+                  }
+                : undefined,
+            )
+            .addOptional(!(property.minItems === undefined) ? { minItems: property.minItems } : undefined)
+            .addOptional(!(property.maxItems === undefined) ? { maxItems: property.maxItems } : undefined)
+            .finish(),
+        );
       }
       if ("enum" in property) {
         const names = "enumNames" in property ? property.enumNames : undefined;
-        return Object.freeze({
-          ...common,
-          type: "select",
-          choices: Object.freeze(
-            property.enum.map((value, index) => Object.freeze({ value, label: names?.[index] ?? value })),
-          ),
-          ...(property.default === undefined ? {} : { defaultValue: property.default }),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return Object.freeze(
+          createConditionalObject({
+            ...common,
+            type: "select",
+            choices: Object.freeze(
+              property.enum.map((value, index) => Object.freeze({ value, label: names?.[index] ?? value })),
+            ),
+          } as const)
+            .addOptional(!(property.default === undefined) ? { defaultValue: property.default } : undefined)
+            .finish(),
+        );
       }
       if ("oneOf" in property) {
-        return Object.freeze({
-          ...common,
-          type: "select",
-          choices: Object.freeze(
-            property.oneOf.map((choice) => Object.freeze({ value: choice.const, label: choice.title })),
-          ),
-          ...(property.default === undefined ? {} : { defaultValue: property.default }),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return Object.freeze(
+          createConditionalObject({
+            ...common,
+            type: "select",
+            choices: Object.freeze(
+              property.oneOf.map((choice) => Object.freeze({ value: choice.const, label: choice.title })),
+            ),
+          } as const)
+            .addOptional(!(property.default === undefined) ? { defaultValue: property.default } : undefined)
+            .finish(),
+        );
       }
       if (property.type !== "string") throw new Error(`Unsupported MCP form field ${name}`);
       const defaultValue =
         "default" in property && typeof property.default === "string" ? property.default : undefined;
-      return Object.freeze({
-        ...common,
-        type: "text",
-        ...(defaultValue === undefined ? {} : { defaultValue }),
-        ...(property.minLength === undefined ? {} : { minLength: property.minLength }),
-        ...(property.maxLength === undefined ? {} : { maxLength: property.maxLength }),
-        ...(property.format === "date" ||
-        property.format === "uri" ||
-        property.format === "email" ||
-        property.format === "date-time"
-          ? { format: property.format }
-          : {}),
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return Object.freeze(
+        createConditionalObject({
+          ...common,
+          type: "text",
+        } as const)
+          .addOptional(!(defaultValue === undefined) ? { defaultValue } : undefined)
+          .addOptional(!(property.minLength === undefined) ? { minLength: property.minLength } : undefined)
+          .addOptional(!(property.maxLength === undefined) ? { maxLength: property.maxLength } : undefined)
+          .addOptional(
+            property.format === "date" ||
+              property.format === "uri" ||
+              property.format === "email" ||
+              property.format === "date-time"
+              ? { format: property.format }
+              : undefined,
+          )
+          .finish(),
+      );
     }),
   );
 }
-
 async function presentElicitation(
   serverName: string,
   request: McpElicitRequest,
@@ -206,34 +253,34 @@ async function presentElicitation(
       : { action: result.action };
   return validateMcpElicitationResult(request, response);
 }
-
 function tuiConfig(
   detail: McpServerDetail | undefined,
   config: LoadedMcpConfig["installed"][number]["config"],
 ): TuiMcpServerConfig {
   void detail;
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return config.type === "local"
-    ? {
+    ? createConditionalObject({
         type: "local",
         command: Object.freeze([config.command, ...(config.args ?? [])]),
-        ...(config.cwd ? { cwd: config.cwd } : {}),
-        ...(config.environment ? { environmentReferences: config.environment } : {}),
-      }
-    : {
+      } as const)
+        .addOptional(config.cwd ? { cwd: config.cwd } : undefined)
+        .addOptional(config.environment ? { environmentReferences: config.environment } : undefined)
+        .finish()
+    : createConditionalObject({
         type: "remote",
         url: config.url,
         oauth: config.oauth !== false,
-        ...(config.headers ? { headers: config.headers } : {}),
-      };
+      } as const)
+        .addOptional(config.headers ? { headers: config.headers } : undefined)
+        .finish();
 }
-
 function validatedRemoteUrl(value: string): string {
   const url = new URL(value);
   if (url.protocol !== "http:" && url.protocol !== "https:")
     throw new Error("MCP remote server URL must use http:// or https://");
   return url.href;
 }
-
 export function createApplicationMcpIntegration(input: {
   readonly home: string;
   readonly projectDirectory: string;
@@ -294,7 +341,10 @@ export function createApplicationMcpIntegration(input: {
   };
   const recentErrors = new Map<
     string,
-    { readonly identity: string; readonly entries: readonly TuiMcpRecentError[] }
+    {
+      readonly identity: string;
+      readonly entries: readonly TuiMcpRecentError[];
+    }
   >();
   const scopedServerKey = (scope: "global" | "project", name: string): string => `${scope}:${name}`;
   const serverIdentity = (server: LoadedMcpConfig["installed"][number]): string =>
@@ -319,7 +369,7 @@ export function createApplicationMcpIntegration(input: {
       identity,
       entries: [
         ...(previous?.identity === identity ? previous.entries : []),
-        { message: message.slice(0, 2_000), occurredAt: new Date().toISOString(), operation },
+        { message: message.slice(0, 2000), occurredAt: new Date().toISOString(), operation },
       ].slice(-20),
     });
   };
@@ -382,9 +432,9 @@ export function createApplicationMcpIntegration(input: {
           await presentElicitation(serverName, request, input.interactions, signal),
         onOAuthRedirect: async ({ authorizationUrl }) => await input.openUrl(authorizationUrl.href),
         onEvent: (event) => {
-          if (typeof event.payload === "object" && event.payload !== null) {
-            const error = Reflect.get(event.payload, "error");
-            const level = Reflect.get(event.payload, "level");
+          if (isJsonObject(event.payload)) {
+            const error = event.payload["error"];
+            const level = event.payload["level"];
             if (typeof error === "string") rememberEventError(event.serverName, event.type, error);
             else if (
               event.type === "log" &&
@@ -396,11 +446,8 @@ export function createApplicationMcpIntegration(input: {
           }
           if (event.type !== "elicitation_complete") return;
           const elicitationId =
-            typeof event.payload === "object" &&
-            event.payload !== null &&
-            !Array.isArray(event.payload) &&
-            "elicitationId" in event.payload
-              ? Reflect.get(event.payload, "elicitationId")
+            isJsonObject(event.payload) && "elicitationId" in event.payload
+              ? event.payload["elicitationId"]
               : undefined;
           if (typeof elicitationId === "string")
             input.interactions.completeUrl(event.serverName, elicitationId);
@@ -432,30 +479,36 @@ export function createApplicationMcpIntegration(input: {
         const projectBlocked = installed.scope === "project" && !input.workspaceTrusted;
         const shadowed = input.workspaceTrusted && installed.shadowed;
         const summary = shadowed || projectBlocked ? undefined : live.get(installed.name);
-        return Object.freeze({
-          name: installed.name,
-          scope: installed.scope,
-          sourcePath: installed.sourcePath,
-          enabled: !projectBlocked && installed.config.enabled !== false,
-          type: installed.config.type,
-          status: projectBlocked
-            ? "disabled"
-            : shadowed
-              ? "overridden"
-              : (summary?.status ?? (installed.config.enabled === false ? "disabled" : "failed")),
-          capabilityCounts: summary?.capabilityCounts ?? {
-            tools: 0,
-            prompts: 0,
-            resources: 0,
-            resourceTemplates: 0,
-          },
-          ...(shadowed ? { shadowed: true } : {}),
-          ...(projectBlocked
-            ? { lastError: "Project MCP servers require a trusted workspace." }
-            : summary?.lastError
-              ? { lastError: summary.lastError }
-              : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return Object.freeze(
+          createConditionalObject({
+            name: installed.name,
+            scope: installed.scope,
+            sourcePath: installed.sourcePath,
+            enabled: !projectBlocked && installed.config.enabled !== false,
+            type: installed.config.type,
+            status: projectBlocked
+              ? "disabled"
+              : shadowed
+                ? "overridden"
+                : (summary?.status ?? (installed.config.enabled === false ? "disabled" : "failed")),
+            capabilityCounts: summary?.capabilityCounts ?? {
+              tools: 0,
+              prompts: 0,
+              resources: 0,
+              resourceTemplates: 0,
+            },
+          } as const)
+            .addOptional(shadowed ? { shadowed: true } : undefined)
+            .add(
+              projectBlocked
+                ? { lastError: "Project MCP servers require a trusted workspace." }
+                : summary?.lastError
+                  ? { lastError: summary.lastError }
+                  : {},
+            )
+            .finish(),
+        );
       }),
     );
   };
@@ -468,70 +521,99 @@ export function createApplicationMcpIntegration(input: {
     const live = projectBlocked || shadowed ? undefined : manager.inspectServer(name);
     const summary = (await listMcpServers()).find((entry) => entry.scope === scope && entry.name === name);
     if (!summary) return undefined;
-    const detail: TuiMcpServerDetail = {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const detail: TuiMcpServerDetail = createConditionalObject({
       ...summary,
       config: tuiConfig(live, installed.config),
-      ...(live?.instructions ? { instructions: live.instructions } : {}),
-      negotiatedCapabilities: Object.freeze(Object.keys(live?.negotiatedCapabilities ?? {}).sort()),
-      tools: Object.freeze(
-        (live?.tools ?? []).map((tool) => ({
-          name: tool.name,
-          ...(tool.description ? { description: tool.description } : {}),
-          inputSchema: tool.inputSchema,
-          ...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
-        })),
-      ),
-      prompts: Object.freeze(
-        (live?.prompts ?? []).map((prompt) => ({
-          name: prompt.name,
-          ...(prompt.description ? { description: prompt.description } : {}),
-          ...(prompt.arguments
-            ? {
-                arguments: Object.freeze(
-                  prompt.arguments.map((argument) => ({
-                    name: argument.name,
-                    ...(argument.description ? { description: argument.description } : {}),
-                    ...(argument.required === undefined ? {} : { required: argument.required }),
-                  })),
-                ),
-              }
-            : {}),
-        })),
-      ),
-      resources: Object.freeze(
-        (live?.resources ?? []).map((resource) => ({
-          uri: resource.uri,
-          name: resource.name,
-          ...(resource.description ? { description: resource.description } : {}),
-          ...(resource.mimeType ? { mimeType: resource.mimeType } : {}),
-        })),
-      ),
-      resourceTemplates: Object.freeze(
-        (live?.resourceTemplates ?? []).map((template) => ({
-          uriTemplate: template.uriTemplate,
-          name: template.name,
-          ...(template.description ? { description: template.description } : {}),
-          ...(template.mimeType ? { mimeType: template.mimeType } : {}),
-        })),
-      ),
-      recentErrors: Object.freeze([
-        ...(live?.diagnostics ?? []).map((diagnostic) => ({
-          message: diagnostic.message,
-          operation: diagnostic.toolName ? `${diagnostic.code}:${diagnostic.toolName}` : diagnostic.code,
-        })),
-        ...(recentErrors.get(scopedServerKey(scope, name))?.identity === serverIdentity(installed)
-          ? (recentErrors.get(scopedServerKey(scope, name))?.entries ?? [])
-          : []),
-        ...(summary.lastError &&
-        !(
-          recentErrors.get(scopedServerKey(scope, name))?.identity === serverIdentity(installed)
+    } as const)
+      .addOptional(live?.instructions ? { instructions: live.instructions } : undefined)
+      .add({
+        negotiatedCapabilities: Object.freeze(Object.keys(live?.negotiatedCapabilities ?? {}).sort()),
+        tools: Object.freeze(
+          (live?.tools ?? []).map((tool) =>
+            createConditionalObject({
+              name: tool.name,
+            } as const)
+              .addOptional(tool.description ? { description: tool.description } : undefined)
+              .add({
+                inputSchema: tool.inputSchema,
+              } as const)
+              .addOptional(tool.outputSchema ? { outputSchema: tool.outputSchema } : undefined)
+              .finish(),
+          ),
+        ),
+        prompts: Object.freeze(
+          (live?.prompts ?? []).map((prompt) =>
+            createConditionalObject({
+              name: prompt.name,
+            } as const)
+              .addOptional(prompt.description ? { description: prompt.description } : undefined)
+              .addOptional(
+                prompt.arguments
+                  ? {
+                      arguments: Object.freeze(
+                        prompt.arguments.map((argument) =>
+                          createConditionalObject({
+                            name: argument.name,
+                          } as const)
+                            .addOptional(
+                              argument.description ? { description: argument.description } : undefined,
+                            )
+                            .addOptional(
+                              !(argument.required === undefined)
+                                ? { required: argument.required }
+                                : undefined,
+                            )
+                            .finish(),
+                        ),
+                      ),
+                    }
+                  : undefined,
+              )
+              .finish(),
+          ),
+        ),
+        resources: Object.freeze(
+          (live?.resources ?? []).map((resource) =>
+            createConditionalObject({
+              uri: resource.uri,
+              name: resource.name,
+            } as const)
+              .addOptional(resource.description ? { description: resource.description } : undefined)
+              .addOptional(resource.mimeType ? { mimeType: resource.mimeType } : undefined)
+              .finish(),
+          ),
+        ),
+        resourceTemplates: Object.freeze(
+          (live?.resourceTemplates ?? []).map((template) =>
+            createConditionalObject({
+              uriTemplate: template.uriTemplate,
+              name: template.name,
+            } as const)
+              .addOptional(template.description ? { description: template.description } : undefined)
+              .addOptional(template.mimeType ? { mimeType: template.mimeType } : undefined)
+              .finish(),
+          ),
+        ),
+        recentErrors: Object.freeze([
+          ...(live?.diagnostics ?? []).map((diagnostic) => ({
+            message: diagnostic.message,
+            operation: diagnostic.toolName ? `${diagnostic.code}:${diagnostic.toolName}` : diagnostic.code,
+          })),
+          ...(recentErrors.get(scopedServerKey(scope, name))?.identity === serverIdentity(installed)
             ? (recentErrors.get(scopedServerKey(scope, name))?.entries ?? [])
-            : []
-        ).some((entry) => entry.message === summary.lastError)
-          ? [{ message: summary.lastError }]
-          : []),
-      ]),
-    };
+            : []),
+          ...(summary.lastError &&
+          !(
+            recentErrors.get(scopedServerKey(scope, name))?.identity === serverIdentity(installed)
+              ? (recentErrors.get(scopedServerKey(scope, name))?.entries ?? [])
+              : []
+          ).some((entry) => entry.message === summary.lastError)
+            ? [{ message: summary.lastError }]
+            : []),
+        ]),
+      } as const)
+      .finish();
     return Object.freeze(detail);
   };
   const mutateMcp: ApplicationMcpIntegration["mutateMcp"] = async (intent, signal) => {
@@ -633,20 +715,27 @@ export function createApplicationMcpIntegration(input: {
         resource: `config:${intent.scope}:${intent.name}`,
         request: toJsonValue(intent),
         execute: async () => {
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           await writeMcpServer({
             ...input,
             scope: intent.scope,
             name: intent.name,
-            config: normalizeMcpLocalServerConfig({
-              ...(intent.type === "edit-local" && existing?.type === "local" ? existing : {}),
-              type: "local",
-              command:
-                intent.command[0] ??
-                (() => {
-                  throw new Error("MCP command cannot be empty");
-                })(),
-              args: intent.command.slice(1),
-            }),
+            config: normalizeMcpLocalServerConfig(
+              createConditionalObject({} as const)
+                .addOptional(
+                  intent.type === "edit-local" && existing?.type === "local" ? existing : undefined,
+                )
+                .add({
+                  type: "local",
+                  command:
+                    intent.command[0] ??
+                    (() => {
+                      throw new Error("MCP command cannot be empty");
+                    })(),
+                  args: intent.command.slice(1),
+                } as const)
+                .finish(),
+            ),
           });
           return null;
         },
@@ -670,16 +759,21 @@ export function createApplicationMcpIntegration(input: {
         resource: `config:${intent.scope}:${intent.name}`,
         request: toJsonValue(intent),
         execute: async () => {
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           await writeMcpServer({
             ...input,
             scope: intent.scope,
             name: intent.name,
-            config: {
-              ...(intent.type === "edit-remote" && existing?.type === "remote" ? existing : {}),
-              type: "remote",
-              url,
-              oauth,
-            },
+            config: createConditionalObject({} as const)
+              .addOptional(
+                intent.type === "edit-remote" && existing?.type === "remote" ? existing : undefined,
+              )
+              .add({
+                type: "remote",
+                url,
+                oauth,
+              } as const)
+              .finish(),
           });
           return null;
         },

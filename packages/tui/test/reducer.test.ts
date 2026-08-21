@@ -177,6 +177,7 @@ describe("Noesis TUI reducer", () => {
   });
 
   test("renders the whole conversation instead of cropping it to the viewport", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const crowded = {
       ...initialTuiState("fake"),
       timeline: Array.from({ length: 20 }, (_, index) => ({
@@ -240,6 +241,7 @@ describe("Noesis TUI reducer", () => {
   });
 
   test("drops low-priority status fields before essential state, model, and context", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const state = {
       ...initialTuiState("pi", {
         provider: "openai-codex",

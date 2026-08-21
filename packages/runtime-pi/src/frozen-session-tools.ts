@@ -30,6 +30,7 @@ function materialKey(material: FrozenPlanMaterialUse): string {
 }
 
 export function frozenPlanMaterialUses(plan: FrozenTurnPlan): readonly FrozenPlanMaterialUse[] {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze(
     plan.selectedCapabilities.flatMap((selection) => [
       ...selection.skills.map((material) =>

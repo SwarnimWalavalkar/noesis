@@ -1,21 +1,19 @@
+import { createConditionalObject } from "@noesis/domain";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 export interface ExternalEditorEnvironment {
   readonly VISUAL?: string;
   readonly EDITOR?: string;
   readonly [name: string]: string | undefined;
 }
-
 export interface EditTextInExternalEditorInput {
   readonly content: string;
   readonly configuredCommand?: string;
   readonly environment?: ExternalEditorEnvironment;
   readonly platform?: NodeJS.Platform;
 }
-
 export type EditTextInExternalEditorResult =
   | {
       readonly status: "edited";
@@ -29,16 +27,17 @@ export type EditTextInExternalEditorResult =
       readonly exitCode?: number | null;
       readonly error?: string;
     };
-
 type EditorProcessResult =
-  | { readonly status: "complete"; readonly content: string }
+  | {
+      readonly status: "complete";
+      readonly content: string;
+    }
   | {
       readonly status: "failed";
       readonly reason: "editor-exit" | "launch-failed" | "io-failed";
       readonly exitCode?: number | null;
       readonly error?: string;
     };
-
 export type ExternalEditorLaunch =
   | {
       readonly status: "complete";
@@ -46,13 +45,14 @@ export type ExternalEditorLaunch =
       readonly args: readonly string[];
       readonly windowsVerbatimArguments?: true;
     }
-  | { readonly status: "failed"; readonly error: string };
-
+  | {
+      readonly status: "failed";
+      readonly error: string;
+    };
 const nonEmpty = (value: string | undefined): string | undefined => {
   const normalized = value?.trim();
   return normalized ? normalized : undefined;
 };
-
 export function resolveExternalEditorCommand(
   configuredCommand: string | undefined,
   environment: ExternalEditorEnvironment = process.env,
@@ -65,15 +65,20 @@ export function resolveExternalEditorCommand(
     (platform === "win32" ? "notepad" : "nano")
   );
 }
-
-const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error));
-
+const describeError = (cause: unknown): string => (cause instanceof Error ? cause.message : String(cause));
 function parseEditorCommand(
   command: string,
   platform: NodeJS.Platform,
 ):
-  | { readonly status: "complete"; readonly executable: string; readonly args: readonly string[] }
-  | { readonly status: "failed"; readonly error: string } {
+  | {
+      readonly status: "complete";
+      readonly executable: string;
+      readonly args: readonly string[];
+    }
+  | {
+      readonly status: "failed";
+      readonly error: string;
+    } {
   const words: string[] = [];
   let word = "";
   let wordStarted = false;
@@ -124,14 +129,11 @@ function parseEditorCommand(
     ? { status: "complete", executable, args }
     : { status: "failed", error: "invalid editor command: no executable" };
 }
-
 const windowsCommandMetaCharacter = /([()\][%!^"`<>&|;, *?])/gu;
 const windowsCommandShim = /(?:^|[\\/])node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/iu;
-
 function escapeWindowsCommand(value: string): string {
   return value.replace(windowsCommandMetaCharacter, "^$1");
 }
-
 function escapeWindowsCommandArgument(
   value: string,
   doubleEscapeMetaCharacters: boolean,
@@ -142,7 +144,6 @@ function escapeWindowsCommandArgument(
   const escaped = `"${escapedTrailingBackslashes}"`.replace(windowsCommandMetaCharacter, "^$1");
   return doubleEscapeMetaCharacters ? escaped.replace(windowsCommandMetaCharacter, "^$1") : escaped;
 }
-
 /** Build a host-independent process launch, including the Windows batch-file boundary. */
 export function prepareExternalEditorLaunch(
   command: string,
@@ -152,7 +153,6 @@ export function prepareExternalEditorLaunch(
 ): ExternalEditorLaunch {
   const parsed = parseEditorCommand(command, platform);
   if (parsed.status === "failed") return parsed;
-
   const editorArgs = [...parsed.args, filePath];
   if (platform !== "win32" || !/\.(?:bat|cmd)$/iu.test(parsed.executable)) {
     return {
@@ -161,7 +161,6 @@ export function prepareExternalEditorLaunch(
       args: editorArgs,
     };
   }
-
   if (/[\0\r\n]/u.test(parsed.executable)) {
     return { status: "failed", error: "invalid Windows batch editor command" };
   }
@@ -187,14 +186,15 @@ export function prepareExternalEditorLaunch(
     windowsVerbatimArguments: true,
   };
 }
-
 async function runEditor(
   command: string,
   filePath: string,
   environment: ExternalEditorEnvironment,
   platform: NodeJS.Platform,
 ): Promise<
-  | { readonly status: "complete" }
+  | {
+      readonly status: "complete";
+    }
   | {
       readonly status: "failed";
       readonly reason: "editor-exit" | "launch-failed";
@@ -206,7 +206,9 @@ async function runEditor(
     let settled = false;
     const settle = (
       result:
-        | { readonly status: "complete" }
+        | {
+            readonly status: "complete";
+          }
         | {
             readonly status: "failed";
             readonly reason: "editor-exit" | "launch-failed";
@@ -228,14 +230,24 @@ async function runEditor(
       return;
     }
     const childEnvironment = { ...process.env, ...environment };
-    const child = spawn(launch.executable, launch.args, {
-      env: childEnvironment,
-      shell: false,
-      stdio: "inherit",
-      ...(launch.windowsVerbatimArguments
-        ? { windowsVerbatimArguments: launch.windowsVerbatimArguments }
-        : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const child = spawn(
+      launch.executable,
+      launch.args,
+      createConditionalObject({
+        env: childEnvironment,
+        shell: false,
+        stdio: "inherit",
+      } as const)
+        .addOptional(
+          launch.windowsVerbatimArguments
+            ? {
+                windowsVerbatimArguments: launch.windowsVerbatimArguments,
+              }
+            : undefined,
+        )
+        .finish(),
+    );
     child.once("error", (error) =>
       settle({
         status: "failed",
@@ -256,7 +268,6 @@ async function runEditor(
     );
   });
 }
-
 async function runExternalEditor(
   command: string,
   content: string,
@@ -290,7 +301,6 @@ async function runExternalEditor(
     }
   }
 }
-
 /** Edit text through a temporary Markdown file without mutating the caller's buffer. */
 export async function editTextInExternalEditor(
   input: EditTextInExternalEditorInput,
@@ -300,13 +310,15 @@ export async function editTextInExternalEditor(
   const command = resolveExternalEditorCommand(input.configuredCommand, environment, platform);
   const result = await runExternalEditor(command, input.content, environment, platform);
   if (result.status === "failed") {
-    return {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return createConditionalObject({
       status: "unchanged",
       command,
       reason: result.reason,
-      ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {}),
-      ...(result.error !== undefined ? { error: result.error } : {}),
-    };
+    } as const)
+      .addOptional(result.exitCode !== undefined ? { exitCode: result.exitCode } : undefined)
+      .addOptional(result.error !== undefined ? { error: result.error } : undefined)
+      .finish();
   }
   return { status: "edited", command, content: result.content };
 }

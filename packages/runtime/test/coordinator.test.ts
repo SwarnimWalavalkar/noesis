@@ -187,6 +187,7 @@ async function fixture(decision: PreflightDecision = "pass") {
           };
         }
         const experimentId = sharedExperimentId ?? `experiment:${payload.turn.turnId}`;
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         const experiment = {
           experimentId,
           hypothesis: "preserve voice",
@@ -280,6 +281,7 @@ async function fixture(decision: PreflightDecision = "pass") {
         actor: { actorId: "fake-judge", kind: "system" },
         evidenceKind: "report",
       });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       const variant = { variantId: "fake-evaluation-v1", axis: "evaluation" as const, configurationRefs: [] };
       await workspace.research.preflights.putPreflightPlan({
         planId: payload.planId,
@@ -385,12 +387,14 @@ async function fixture(decision: PreflightDecision = "pass") {
     }) => {
       const currentId = activeWorkingAdjustment?.adjustmentId ?? null;
       if (currentId === request.adjustment.adjustmentId)
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze({
           status: "applied" as const,
           adjustment: request.adjustment,
           replacedAdjustmentId: null,
         });
       if (currentId !== request.expectedActiveAdjustmentId)
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze({
           status: "stale" as const,
           adjustmentId: request.adjustment.adjustmentId,
@@ -399,6 +403,7 @@ async function fixture(decision: PreflightDecision = "pass") {
       request.signal?.throwIfAborted();
       workingAdjustmentRecords.set(request.adjustment.adjustmentId, request.adjustment);
       activeWorkingAdjustment = request.adjustment;
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return Object.freeze({
         status: "applied" as const,
         adjustment: request.adjustment,
@@ -418,6 +423,7 @@ async function fixture(decision: PreflightDecision = "pass") {
         );
       const currentId = activeWorkingAdjustment?.adjustmentId ?? null;
       if (currentId !== request.expectedActiveAdjustmentId)
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze({
           status: "stale" as const,
           adjustmentId: request.expectedActiveAdjustmentId,
@@ -425,6 +431,7 @@ async function fixture(decision: PreflightDecision = "pass") {
         });
       request.signal?.throwIfAborted();
       activeWorkingAdjustment = undefined;
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return Object.freeze({
         status: "unapplied" as const,
         adjustmentId: request.expectedActiveAdjustmentId,
@@ -464,6 +471,7 @@ async function fixture(decision: PreflightDecision = "pass") {
 
 describe("automatic runtime coordinator", () => {
   test("bounds durable reflection evidence at the shared working-adjustment limit", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const references = Array.from({ length: WORKING_ADJUSTMENT_LIMITS.evidenceRefs }, (_, index) => ({
       kind: "database_row" as const,
       table: "messages" as const,
@@ -526,6 +534,7 @@ describe("automatic runtime coordinator", () => {
     expect(handoff?.candidateRevision).toEqual(candidate);
     expect(f.counts()).toEqual({ reflectCalls: 1, authorCalls: 1, preflightCalls: 1, peakReflects: 1 });
     const database = new DatabaseSync(f.workspace.unsafeDatabasePathForTesting, { readOnly: true });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const scheduledOperations = database
       .prepare(
         `SELECT resource, status FROM authority_operations
@@ -1083,6 +1092,7 @@ describe("automatic runtime coordinator", () => {
     f.workspace.close();
   });
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each(["authoring", "completed"] as const)(
     "does not enqueue duplicate author work for an authoritative deduped %s experiment",
     async (status) => {

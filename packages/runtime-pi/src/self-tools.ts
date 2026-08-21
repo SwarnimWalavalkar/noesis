@@ -1,9 +1,8 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { AgentRuntimeRequest, FrozenTurnPlan } from "@noesis/agent-types";
-import { type JsonValue, JsonValueSchema } from "@noesis/domain";
+import { createConditionalObject, type JsonValue, JsonValueSchema } from "@noesis/domain";
 import { z } from "zod";
 import type { PiFrozenToolCatalog } from "./execute-tool.ts";
-
 const inspectInput = z.strictObject({
   section: z.enum(["overview", "context", "capabilities", "memory", "experiments", "tools"]).optional(),
   tool: z.string().trim().min(1).max(128).optional(),
@@ -11,9 +10,9 @@ const inspectInput = z.strictObject({
   limit: z.number().int().min(1).max(25).optional(),
 });
 const rememberInput = z.strictObject({
-  memory: z.string().trim().min(1).max(8_192),
+  memory: z.string().trim().min(1).max(8192),
   scope: z.string().trim().min(1).max(512),
-  anticipatedUse: z.string().trim().min(1).max(2_048),
+  anticipatedUse: z.string().trim().min(1).max(2048),
 });
 const adaptInput = z.discriminatedUnion("action", [
   z.strictObject({
@@ -25,7 +24,6 @@ const adaptInput = z.discriminatedUnion("action", [
     tool: z.string().trim().min(1).max(128),
   }),
 ]);
-
 export interface PiSelfToolAdapter {
   readonly hotbar: (input: {
     readonly plan: FrozenTurnPlan;
@@ -57,7 +55,6 @@ export interface PiSelfToolAdapter {
     },
   ) => Promise<JsonValue>;
 }
-
 function directTool<Parameters extends z.ZodType>(input: {
   readonly name: string;
   readonly label: string;
@@ -67,7 +64,12 @@ function directTool<Parameters extends z.ZodType>(input: {
   readonly execute: (parameters: z.output<Parameters>, signal: AbortSignal) => Promise<JsonValue>;
 }): AgentTool {
   const parameters = z.toJSONSchema(input.schema);
-  const tool: AgentTool<typeof parameters, { readonly semantic: true }> = {
+  const tool: AgentTool<
+    typeof parameters,
+    {
+      readonly semantic: true;
+    }
+  > = {
     name: input.name,
     label: input.label,
     description: input.description,
@@ -102,7 +104,6 @@ function directTool<Parameters extends z.ZodType>(input: {
   };
   return Object.freeze(tool);
 }
-
 export function createPiSelfTools(input: {
   readonly adapter: PiSelfToolAdapter;
   readonly plan: FrozenTurnPlan;
@@ -111,6 +112,7 @@ export function createPiSelfTools(input: {
   readonly catalog?: PiFrozenToolCatalog;
   readonly applyHotbar: (canonicalToolNames: readonly string[]) => Promise<void>;
 }): readonly AgentTool[] {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const semanticTools = [
     directTool({
       name: "inspect_self",
@@ -120,16 +122,19 @@ export function createPiSelfTools(input: {
       schema: inspectInput,
       signal: input.signal,
       execute: async ({ section = "overview", tool, cursor, limit }, signal) =>
-        await input.adapter.inspect({
-          section,
-          tool,
-          cursor,
-          limit,
-          plan: input.plan,
-          request: input.request,
-          signal,
-          ...(input.catalog ? { catalog: input.catalog } : {}),
-        }),
+        await input.adapter.inspect(
+          createConditionalObject({
+            section,
+            tool,
+            cursor,
+            limit,
+            plan: input.plan,
+            request: input.request,
+            signal,
+          } as const)
+            .addOptional(input.catalog ? { catalog: input.catalog } : undefined)
+            .finish(),
+        ),
     }),
     directTool({
       name: "remember",

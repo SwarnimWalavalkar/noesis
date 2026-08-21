@@ -1,3 +1,4 @@
+import { createConditionalObject, type JsonObject } from "@noesis/domain";
 import {
   createModels,
   fauxAssistantMessage,
@@ -6,16 +7,13 @@ import {
   type AssistantMessage,
   type Context,
 } from "@earendil-works/pi-ai";
-
 export const CONTROLLED_PI_PROVIDER = "controlled-pi";
 export const CONTROLLED_PI_MODEL = "controlled-model";
-
 export interface ControlledPiPrompt {
   readonly systemPrompt: string;
   readonly lastUserText: string;
   readonly context: Context;
 }
-
 export interface CreateControlledPiModelsOptions {
   readonly respond?: (
     prompt: ControlledPiPrompt,
@@ -23,15 +21,9 @@ export interface CreateControlledPiModelsOptions {
   readonly responseBudget?: number;
   readonly tokensPerSecond?: number;
 }
-
-export function controlledToolCallResponse(
-  name: string,
-  input: Readonly<Record<string, unknown>>,
-  id: string,
-): AssistantMessage {
+export function controlledToolCallResponse(name: string, input: JsonObject, id: string): AssistantMessage {
   return fauxAssistantMessage(fauxToolCall(name, input, { id }), { stopReason: "toolUse" });
 }
-
 function contentText(content: Context["messages"][number]["content"]): string {
   if (typeof content === "string") return content;
   return content
@@ -42,14 +34,18 @@ function contentText(content: Context["messages"][number]["content"]): string {
     })
     .join("");
 }
-
 export function createControlledPiModels(options: CreateControlledPiModelsOptions = {}) {
   const models = createModels();
-  const provider = fauxProvider({
-    provider: CONTROLLED_PI_PROVIDER,
-    models: [{ id: CONTROLLED_PI_MODEL, contextWindow: 8_000, maxTokens: 1_000 }],
-    ...(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond }),
-  });
+  const provider = fauxProvider(
+    createConditionalObject({
+      provider: CONTROLLED_PI_PROVIDER,
+      models: [{ id: CONTROLLED_PI_MODEL, contextWindow: 8000, maxTokens: 1000 }],
+    })
+      .addOptional(
+        !(options.tokensPerSecond === undefined) ? { tokensPerSecond: options.tokensPerSecond } : undefined,
+      )
+      .finish(),
+  );
   const respond =
     options.respond ?? ((prompt: ControlledPiPrompt) => `Controlled completion for: ${prompt.lastUserText}`);
   const responseFactory = async (context: Context) => {

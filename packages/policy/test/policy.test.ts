@@ -20,6 +20,7 @@ interface StoredOperation {
   reason?: string;
 }
 
+// BOUNDARY: This test double observes opaque receipt payloads emitted by the authority contract.
 function receiptOperationId(value: unknown): string {
   return typeof value === "object" &&
     value !== null &&
@@ -137,6 +138,7 @@ describe("durable authority boundary", () => {
   test("foreground effects cannot widen the frozen turn permission", async () => {
     const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
     let executions = 0;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = Object.freeze({
       operationId: "operation-foreground-write",
       effect: "write" as const,
@@ -176,6 +178,7 @@ describe("durable authority boundary", () => {
 
   test("accepts only exact resources or one trailing wildcard and fails closed otherwise", async () => {
     const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = Object.freeze({
       operationId: "operation-permission-pattern",
       effect: "read" as const,
@@ -217,6 +220,7 @@ describe("durable authority boundary", () => {
   test("preserves typed execution failures across durable failed replays", async () => {
     const authority = createDurableAuthorityBoundary(createInMemoryDurableAuthorityState());
     let executions = 0;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = Object.freeze({
       operationId: "operation-invalid-output",
       effect: "read" as const,
@@ -290,6 +294,7 @@ describe("durable authority boundary", () => {
       }),
     );
     let executions = 0;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = Object.freeze({
       operationId: "operation-foreground-replay",
       effect: "read" as const,
@@ -336,6 +341,7 @@ describe("durable authority boundary", () => {
     );
     if (forged === undefined) throw new Error("Expected a durable typed failure encoding");
     let executions = 0;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = Object.freeze({
       operationId: "operation-forged-failure",
       effect: "read" as const,

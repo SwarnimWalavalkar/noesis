@@ -168,6 +168,7 @@ function createFakeWorkspaceStore(): WorkspaceStore {
     return ref;
   };
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return Object.freeze({
     reads: Object.freeze({
       readDatabaseRow: async () => undefined,
@@ -333,6 +334,7 @@ describe("AC-00 research contract", () => {
     });
     expect(changedToolRevision.bundleDigest).not.toBe(candidateRevision.bundleDigest);
 
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const motivatingMessage = {
       kind: "database_row",
       table: "messages",
@@ -341,6 +343,7 @@ describe("AC-00 research contract", () => {
     const sharedCase = await appendEvidence("case-1", "input");
     const baselineOutput = await appendEvidence("baseline-output-1", "output");
     const candidateOutput = await appendEvidence("candidate-output-1", "output");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const variant = {
       variantId: "fake-runtime",
       axis: "evaluation",
@@ -383,6 +386,7 @@ describe("AC-00 research contract", () => {
     ).toBe(false);
     await research.preflights.putPreflightPlan(plan);
 
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const commonTrial = {
       experimentId: experiment.experimentId,
       comparisonGroupId: "comparison-1",

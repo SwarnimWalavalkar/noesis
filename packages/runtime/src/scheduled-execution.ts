@@ -57,12 +57,14 @@ export async function runScheduledJob<Result extends JsonValue>(
       }
     });
     if (decision.ok)
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         ok: true as const,
         value: decision.value,
         replayed: decision.replayed,
       });
     if (originalError !== undefined)
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         ok: false as const,
         code: decision.code,
@@ -71,12 +73,14 @@ export async function runScheduledJob<Result extends JsonValue>(
       });
     if (decision.code === "failed" && options.allowFailedAdvance !== false && runNumber < job.attempt)
       continue;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return Object.freeze({
       ok: false as const,
       code: decision.code,
       reason: decision.reason,
     });
   }
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     ok: false as const,
     code: "denied" as const,

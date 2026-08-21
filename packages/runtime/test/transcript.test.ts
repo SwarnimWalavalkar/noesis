@@ -2,18 +2,15 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FrozenTurnPlan, frozenTurnPlanDigest } from "@noesis/agent-types";
-import { sha256 } from "@noesis/domain";
+import { createConditionalObject, sha256 } from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
 import { loadRuntimeTranscript } from "../src/index.ts";
-
 const roots: string[] = [];
-
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
-
 const plan = (sessionId: string, turnId: string): FrozenTurnPlan => {
   const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
     schemaVersion: 1,
@@ -34,7 +31,6 @@ const plan = (sessionId: string, turnId: string): FrozenTurnPlan => {
   };
   return Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) });
 };
-
 describe("runtime transcript projection", () => {
   test("reconstructs the same ordered action tree after the workspace is reopened", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-"));
@@ -72,6 +68,7 @@ describe("runtime transcript projection", () => {
       metadata: Object.freeze({ turnId: "turn-1" }),
     });
     const source = Buffer.from("return await noesis.invoke('shell.run', { command: 'pwd' });");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const sourceArtifact = await workspace.artifacts.writeArtifact({
       path: "codemode/execution-1/source.mjs",
       mediaType: "text/javascript",
@@ -81,6 +78,7 @@ describe("runtime transcript projection", () => {
         { kind: "database_row" as const, table: "sessions" as const, rowId: "session-1" },
       ]),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const [stdoutArtifact, stderrArtifact] = await Promise.all([
       workspace.artifacts.writeArtifact({
         path: "codemode/execution-1/stdout.log",
@@ -190,12 +188,10 @@ describe("runtime transcript projection", () => {
       createdAt: "2026-07-30T00:00:04.000Z",
       metadata: Object.freeze({ turnId: "turn-1" }),
     });
-
     const beforeRestart = await loadRuntimeTranscript(workspace, "session-1");
     workspace.close();
     const reopened = await createWorkspaceStore(root);
     const afterRestart = await loadRuntimeTranscript(reopened, "session-1");
-
     expect(afterRestart).toEqual(beforeRestart);
     expect(
       afterRestart.map((entry) =>
@@ -233,7 +229,7 @@ describe("runtime transcript projection", () => {
     expect(afterRestart.at(5)).not.toHaveProperty("executionId");
     reopened.close();
   });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test("uses durable message sequences for same-timestamp source and inherited history", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-message-order-"));
     roots.push(root);
@@ -296,7 +292,6 @@ describe("runtime transcript projection", () => {
         interactionSequence: 7,
       }),
     });
-
     for (const [messageId, role, content, historySequence] of [
       ["inherited-a-assistant", "assistant", "assistant", 3],
       ["inherited-a-steer", "user", "steer", 2],
@@ -318,7 +313,6 @@ describe("runtime transcript projection", () => {
         }),
       });
     }
-
     expect(
       (await loadRuntimeTranscript(workspace, "session-source-order")).map((entry) =>
         entry.kind === "message" ? entry.text : entry.name,
@@ -331,7 +325,7 @@ describe("runtime transcript projection", () => {
     ).toEqual(["ordinary user", "steer", "assistant"]);
     workspace.close();
   });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test("uses one durable turn timeline across assistant boundaries, actions, and steering", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-turn-timeline-"));
     roots.push(root);
@@ -385,15 +379,19 @@ describe("runtime transcript projection", () => {
         timelineSequence: 5,
       },
     ]) {
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       await workspace.operational.messages.put({
         ...message,
         sessionId: "session-turn-timeline",
         sensitivity: "normal",
         createdAt,
-        metadata: Object.freeze({
-          turnId: "turn-timeline",
-          ...(message.timelineSequence === 4 ? { deliveryMode: "steer" } : {}),
-        }),
+        metadata: Object.freeze(
+          createConditionalObject({
+            turnId: "turn-timeline",
+          } as const)
+            .addOptional(message.timelineSequence === 4 ? { deliveryMode: "steer" } : undefined)
+            .finish(),
+        ),
       });
     }
     await workspace.operational.toolCalls.put({
@@ -423,7 +421,6 @@ describe("runtime transcript projection", () => {
       createdAt,
       completedAt: createdAt,
     });
-
     const beforeRestart = await loadRuntimeTranscript(workspace, "session-turn-timeline");
     workspace.close();
     const reopened = await createWorkspaceStore(root);
@@ -439,7 +436,6 @@ describe("runtime transcript projection", () => {
     ]);
     reopened.close();
   });
-
   test("uses one total order for same-timestamp entries from different turns", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-cross-turn-order-"));
     roots.push(root);
@@ -505,12 +501,10 @@ describe("runtime transcript projection", () => {
       createdAt,
       completedAt: createdAt,
     });
-
     const beforeRestart = await loadRuntimeTranscript(workspace, "session-cross-turn");
     workspace.close();
     const reopened = await createWorkspaceStore(root);
     const afterRestart = await loadRuntimeTranscript(reopened, "session-cross-turn");
-
     expect(afterRestart).toEqual(beforeRestart);
     expect(afterRestart.map((entry) => (entry.kind === "message" ? entry.text : "tool C"))).toEqual([
       "assistant A",
@@ -519,7 +513,6 @@ describe("runtime transcript projection", () => {
     ]);
     reopened.close();
   });
-
   test("marks running actions interrupted without losing their request", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-interrupt-"));
     roots.push(root);
@@ -556,7 +549,6 @@ describe("runtime transcript projection", () => {
       sensitivity: "normal",
       createdAt: "2026-07-30T00:00:01.000Z",
     });
-
     expect(
       await workspace.operational.toolCalls.interruptRunningForTurn(
         "turn-interrupted",
@@ -574,7 +566,6 @@ describe("runtime transcript projection", () => {
     ]);
     workspace.close();
   });
-
   test("omits turn identity for legacy actions that predate foreground turns", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-legacy-action-"));
     roots.push(root);
@@ -601,9 +592,7 @@ describe("runtime transcript projection", () => {
       createdAt: "2026-07-30T00:00:01.000Z",
       completedAt: "2026-07-30T00:00:02.000Z",
     });
-
     const [action] = await loadRuntimeTranscript(workspace, "session-legacy");
-
     expect(action).toMatchObject({ kind: "action", actionId: "legacy-action" });
     expect(action).not.toHaveProperty("turnId");
     workspace.close();

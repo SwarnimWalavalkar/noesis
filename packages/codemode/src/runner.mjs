@@ -1,5 +1,5 @@
+import { createConditionalObject } from "@noesis/domain";
 import process from "node:process";
-
 const pending = new Map();
 let sequence = 0;
 const MAX_SDK_INPUT_BYTES = 256 * 1024;
@@ -13,12 +13,10 @@ const MAX_CHILD_IPC_BYTES = 8 * 1024 * 1024;
 const MAX_FAILURE_MESSAGE_BYTES = 32 * 1024;
 const MAX_FAILURE_STACK_BYTES = 96 * 1024;
 let childIpcBytes = 0;
-
 function rawSend(message) {
   if (typeof process.send !== "function") throw new Error("Codemode IPC channel is unavailable");
   process.send(message);
 }
-
 function send(message) {
   const serialized = JSON.stringify(message);
   const frameBytes = Buffer.byteLength(serialized, "utf8");
@@ -32,7 +30,6 @@ function send(message) {
   if (!terminalResultFrame) childIpcBytes += frameBytes;
   rawSend(message);
 }
-
 function truncateUtf8(value, maximumBytes) {
   if (Buffer.byteLength(value, "utf8") <= maximumBytes) return value;
   let accepted = "";
@@ -45,17 +42,20 @@ function truncateUtf8(value, maximumBytes) {
   }
   return accepted;
 }
-
 function sendFailure(error) {
   const message = error instanceof Error ? error.message : String(error);
   const stack = error instanceof Error && typeof error.stack === "string" ? error.stack : undefined;
-  rawSend({
-    type: "failure",
-    error: truncateUtf8(message, MAX_FAILURE_MESSAGE_BYTES),
-    ...(stack === undefined ? {} : { stack: truncateUtf8(stack, MAX_FAILURE_STACK_BYTES) }),
-  });
+  rawSend(
+    createConditionalObject({
+      type: "failure",
+      error: truncateUtf8(message, MAX_FAILURE_MESSAGE_BYTES),
+    })
+      .addOptional(
+        !(stack === undefined) ? { stack: truncateUtf8(stack, MAX_FAILURE_STACK_BYTES) } : undefined,
+      )
+      .finish(),
+  );
 }
-
 function boundedJsonSafe(value, maximum, label) {
   const serialized = JSON.stringify(value === undefined ? null : value);
   if (Buffer.byteLength(serialized, "utf8") > maximum) {
@@ -63,11 +63,9 @@ function boundedJsonSafe(value, maximum, label) {
   }
   return JSON.parse(serialized);
 }
-
 function jsonSafe(value) {
   return JSON.parse(JSON.stringify(value === undefined ? null : value));
 }
-
 function delegate(kind, payload) {
   const requestId = `sdk_${++sequence}`;
   return new Promise((resolve, reject) => {
@@ -81,7 +79,6 @@ function delegate(kind, payload) {
     }
   });
 }
-
 const toolNamespaces = new Map();
 const tools = new Proxy(
   {},
@@ -108,10 +105,16 @@ const tools = new Proxy(
     },
   },
 );
-
 const noesis = Object.freeze({
   search: async (query, limit) =>
-    await delegate("search", { query: String(query), ...(limit === undefined ? {} : { limit }) }),
+    await delegate(
+      "search",
+      createConditionalObject({
+        query: String(query),
+      })
+        .addOptional(!(limit === undefined) ? { limit } : undefined)
+        .finish(),
+    ),
   describe: async (name) => await delegate("describe", { name: String(name) }),
   invoke: async (name, input = {}) =>
     await delegate("invoke", {
@@ -119,7 +122,6 @@ const noesis = Object.freeze({
       input,
     }),
 });
-
 process.on("message", async (message) => {
   if (!message || typeof message !== "object") return;
   if (message.type === "sdk-result" && typeof message.requestId === "string") {
@@ -182,5 +184,4 @@ process.on("message", async (message) => {
     sendFailure(error);
   }
 });
-
 send({ type: "ready" });

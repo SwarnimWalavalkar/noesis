@@ -10,6 +10,7 @@ import type {
   ProjectRef,
 } from "@noesis/domain";
 import {
+  createConditionalObject,
   CapabilityRevisionRefSchema,
   canonicalJson,
   EvidenceRefSchema,
@@ -18,7 +19,6 @@ import {
   sha256,
 } from "@noesis/domain";
 import { z } from "zod";
-
 export type AgentRole =
   | "foreground"
   | "capability_router"
@@ -32,20 +32,17 @@ export type AgentRole =
   | "judge_critic"
   | "revision_agent"
   | "ux_explainer";
-
 export interface AgentMessage {
   readonly role: "system" | "user" | "assistant" | "tool";
   readonly content: string;
   readonly name?: string;
 }
-
 export interface AgentUsage {
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly totalTokens: number;
   readonly estimatedCost: number;
 }
-
 export interface AgentTrace {
   readonly traceId: string;
   readonly role: AgentRole;
@@ -56,7 +53,6 @@ export interface AgentTrace {
   readonly evidenceRefs: readonly EvidenceRevisionRef[];
   readonly artifactRefs: readonly ArtifactFileRef[];
 }
-
 export interface AgentRunRequest {
   readonly runId: string;
   readonly role: AgentRole;
@@ -66,42 +62,38 @@ export interface AgentRunRequest {
   readonly availableTools: readonly AgentToolDescriptor[];
   readonly signal?: AbortSignal;
 }
-
 export interface AgentRunResult {
   readonly text: string;
   readonly structuredOutput?: JsonValue;
   readonly trace: AgentTrace;
 }
-
 export interface AgentRoleRunner {
   readonly run: (request: AgentRunRequest) => Promise<AgentRunResult>;
 }
-
 export type AgentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-
 export interface AgentContextUsage {
   readonly usedTokens: number;
   readonly contextWindow: number;
   readonly accuracy: "reported" | "estimated";
 }
-
 export type AgentCompletedStopReason = "stop" | "length" | "toolUse";
-
 export type FrozenBaselineRef =
-  | { readonly kind: "genesis" }
-  | { readonly kind: "unknown_legacy" }
+  | {
+      readonly kind: "genesis";
+    }
+  | {
+      readonly kind: "unknown_legacy";
+    }
   | {
       readonly kind: "capability_revision";
       readonly experimentId: string;
       readonly revision: CapabilityRevisionRef;
     };
-
 export interface FrozenRevisionMaterial {
   readonly revision: FileRevisionRef;
   /** Exact UTF-8 bytes decoded from the immutable revision at planning time. */
   readonly content: string;
 }
-
 export type FrozenCapabilityEffect =
   | {
       readonly kind: "instruction";
@@ -119,7 +111,6 @@ export type FrozenCapabilityEffect =
       readonly project: ProjectRef;
       readonly definition: FrozenRevisionMaterial;
     };
-
 export interface FrozenCapabilitySelection {
   readonly capabilityId: string;
   readonly name: string;
@@ -135,7 +126,6 @@ export interface FrozenCapabilitySelection {
   readonly router: FrozenRevisionMaterial;
   readonly permissionManifest: PermissionManifest;
 }
-
 export interface FrozenConversationHistoryEntry {
   readonly messageId: string;
   readonly messageRef: {
@@ -150,7 +140,6 @@ export interface FrozenConversationHistoryEntry {
   /** Terminal state of the source turn. Older plans omit this field. */
   readonly turnStatus?: "completed" | "failed" | "aborted";
 }
-
 export function renderFrozenConversationHistoryContent(entry: {
   readonly content: string;
   readonly role: "user" | "assistant";
@@ -160,7 +149,6 @@ export function renderFrozenConversationHistoryContent(entry: {
   const kind = entry.role === "user" ? "user message" : "partial assistant message";
   return `[Previous ${kind} from a turn that ${entry.turnStatus} before completion.]\n${entry.content}`;
 }
-
 export interface FrozenContextCheckpoint {
   readonly checkpointId: string;
   readonly checkpointRef: {
@@ -174,12 +162,10 @@ export interface FrozenContextCheckpoint {
   readonly sensitivity: "normal" | "private" | "secret";
   readonly createdAt: string;
 }
-
 export const MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES = 512;
-export const MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS = 96_000;
-export const MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS = 4_000_000;
-export const MAX_FROZEN_CONTEXT_CHECKPOINT_SUMMARY_CHARACTERS = 32_000;
-
+export const MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS = 96000;
+export const MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS = 4000000;
+export const MAX_FROZEN_CONTEXT_CHECKPOINT_SUMMARY_CHARACTERS = 32000;
 /**
  * Provider-independent token estimate used when a provider has not reported usage yet.
  * BPE tokenizers average roughly four UTF-8 bytes per token. Provider-owned usage replaces
@@ -188,7 +174,6 @@ export const MAX_FROZEN_CONTEXT_CHECKPOINT_SUMMARY_CHARACTERS = 32_000;
 export function estimateInputTokens(text: string): number {
   return Math.max(1, Math.ceil(new TextEncoder().encode(text).byteLength / 4));
 }
-
 /** The complete SQLite-authoritative input to one foreground execution. */
 export interface FrozenTurnPlan {
   readonly schemaVersion: 1;
@@ -227,7 +212,6 @@ export interface FrozenTurnPlan {
   readonly createdAt: string;
   readonly canonicalDigest: string;
 }
-
 const PermissionManifestSchema = z.strictObject({
   effects: z.array(z.string()),
   resourcePatterns: z.array(z.string()),
@@ -245,7 +229,7 @@ const FrozenCapabilityEffectSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("skill"),
     name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-    description: z.string().min(1).max(2_048),
+    description: z.string().min(1).max(2048),
     material: FrozenRevisionMaterialSchema,
   }),
   z.strictObject({
@@ -310,7 +294,6 @@ const FrozenContextCheckpointSchema = z.strictObject({
   sensitivity: z.enum(["normal", "private", "secret"]),
   createdAt: z.string().min(1),
 });
-
 export const FrozenTurnPlanSchema = z.strictObject({
   schemaVersion: z.literal(1),
   planId: z.string().min(1),
@@ -323,8 +306,8 @@ export const FrozenTurnPlanSchema = z.strictObject({
   selectedCapabilities: z.array(FrozenCapabilitySelectionSchema),
   conversationHistory: z.array(FrozenConversationHistoryEntrySchema).optional(),
   contextCheckpoint: FrozenContextCheckpointSchema.optional(),
-  contextTokenBudget: z.number().int().positive().max(1_000_000).optional(),
-  requestTokenBudget: z.number().int().positive().max(1_000_000).optional(),
+  contextTokenBudget: z.number().int().positive().max(1000000).optional(),
+  requestTokenBudget: z.number().int().positive().max(1000000).optional(),
   renderedSystemPrompt: z.string().min(1),
   provider: z.string().min(1),
   model: z.string().min(1),
@@ -344,11 +327,9 @@ export const FrozenTurnPlanSchema = z.strictObject({
   createdAt: z.string().min(1),
   canonicalDigest: z.string().regex(/^[a-f0-9]{64}$/u),
 });
-
 export function frozenTurnPlanDigest(plan: Omit<FrozenTurnPlan, "canonicalDigest">): string {
   return sha256(canonicalJson(plan));
 }
-
 export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
   const decoded = FrozenTurnPlanSchema.parse(value);
   const {
@@ -362,26 +343,50 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     ...base
   } = decoded;
   const { learningAttribution, ...routingBase } = routing;
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const normalizedConversationHistory = conversationHistory?.map(({ turnStatus, ...entry }) =>
-    Object.freeze({ ...entry, ...(turnStatus === undefined ? {} : { turnStatus }) }),
+    Object.freeze(
+      createConditionalObject({
+        ...entry,
+      } as const)
+        .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
+        .finish(),
+    ),
   );
-  const plan = Object.freeze({
-    ...base,
-    ...(normalizedConversationHistory === undefined
-      ? {}
-      : { conversationHistory: Object.freeze(normalizedConversationHistory) }),
-    ...(contextCheckpoint === undefined
-      ? {}
-      : { contextCheckpoint: Object.freeze({ ...contextCheckpoint }) }),
-    ...(contextTokenBudget === undefined ? {} : { contextTokenBudget }),
-    ...(requestTokenBudget === undefined ? {} : { requestTokenBudget }),
-    ...(project === undefined ? {} : { project: Object.freeze({ ...project }) }),
-    ...(workingAdjustmentId === undefined ? {} : { workingAdjustmentId }),
-    routing: Object.freeze({
-      ...routingBase,
-      ...(learningAttribution === undefined ? {} : { learningAttribution }),
-    }),
-  }) satisfies FrozenTurnPlan;
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  const plan = Object.freeze(
+    createConditionalObject({
+      ...base,
+    } as const)
+      .addOptional(
+        !(normalizedConversationHistory === undefined)
+          ? {
+              conversationHistory: Object.freeze(normalizedConversationHistory),
+            }
+          : undefined,
+      )
+      .addOptional(
+        !(contextCheckpoint === undefined)
+          ? {
+              contextCheckpoint: Object.freeze({ ...contextCheckpoint }),
+            }
+          : undefined,
+      )
+      .addOptional(!(contextTokenBudget === undefined) ? { contextTokenBudget } : undefined)
+      .addOptional(!(requestTokenBudget === undefined) ? { requestTokenBudget } : undefined)
+      .addOptional(!(project === undefined) ? { project: Object.freeze({ ...project }) } : undefined)
+      .addOptional(!(workingAdjustmentId === undefined) ? { workingAdjustmentId } : undefined)
+      .add({
+        routing: Object.freeze(
+          createConditionalObject({
+            ...routingBase,
+          } as const)
+            .addOptional(!(learningAttribution === undefined) ? { learningAttribution } : undefined)
+            .finish(),
+        ),
+      } as const)
+      .finish(),
+  ) satisfies FrozenTurnPlan;
   for (const selection of plan.selectedCapabilities) {
     const effectMaterials = (selection.effects ?? []).map((effect) =>
       effect.kind === "instruction" || effect.kind === "skill" ? effect.material : effect.definition,
@@ -471,7 +476,6 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     throw new Error(`Frozen turn plan ${plan.planId} failed canonical digest verification`);
   return plan;
 }
-
 export interface AgentRuntimeRequest {
   readonly trailId: string;
   readonly provider: string;
@@ -492,7 +496,6 @@ export interface AgentRuntimeRequest {
   /** Present on the product application path; legacy package tests may omit it until HL-11. */
   readonly frozenTurnPlan?: FrozenTurnPlan;
 }
-
 export interface AgentActionStartEvent {
   readonly type: "tool-start";
   /** Adapter-neutral stable identity for the lifetime of this action. */
@@ -506,7 +509,6 @@ export interface AgentActionStartEvent {
   /** The canonical Broker recorder owns persistence for this action. */
   readonly recordedByBroker?: boolean;
 }
-
 export interface AgentActionUpdateEvent {
   readonly type: "tool-update";
   readonly actionId: string;
@@ -516,7 +518,6 @@ export interface AgentActionUpdateEvent {
   readonly update: JsonValue;
   readonly recordedByBroker?: boolean;
 }
-
 export interface AgentActionEndEvent {
   readonly type: "tool-end";
   readonly actionId: string;
@@ -527,29 +528,39 @@ export interface AgentActionEndEvent {
   readonly result: JsonValue;
   readonly recordedByBroker?: boolean;
 }
-
 export type AgentActionEvent = AgentActionStartEvent | AgentActionUpdateEvent | AgentActionEndEvent;
-
 export interface AgentAssistantMessageBoundary {
   readonly text: string;
   readonly timelineSequence: number;
   readonly createdAt: string;
 }
-
 export type AgentRuntimeEvent =
-  | { readonly type: "delta"; readonly text: string }
+  | {
+      readonly type: "delta";
+      readonly text: string;
+    }
   | {
       readonly type: "model";
       readonly provider: string;
       readonly model: string;
       readonly contextWindow: number;
     }
-  | ({ readonly type: "usage" } & AgentContextUsage)
-  | ({ readonly type: "assistant-message" } & AgentAssistantMessageBoundary)
+  | ({
+      readonly type: "usage";
+    } & AgentContextUsage)
+  | ({
+      readonly type: "assistant-message";
+    } & AgentAssistantMessageBoundary)
   | AgentActionEvent
-  | { readonly type: "status"; readonly status: "started" | "completed" | "aborted" }
-  | { readonly type: "status"; readonly status: "failed"; readonly error: string };
-
+  | {
+      readonly type: "status";
+      readonly status: "started" | "completed" | "aborted";
+    }
+  | {
+      readonly type: "status";
+      readonly status: "failed";
+      readonly error: string;
+    };
 interface AgentRuntimeResultBase {
   readonly text: string;
   readonly assistantMessages?: readonly AgentAssistantMessageBoundary[];
@@ -557,7 +568,6 @@ interface AgentRuntimeResultBase {
   readonly model: string;
   readonly contextUsage?: AgentContextUsage;
 }
-
 export type AgentRuntimeResult =
   | (AgentRuntimeResultBase & {
       readonly outcome: "completed";
@@ -572,7 +582,6 @@ export type AgentRuntimeResult =
       readonly stopReason: "error";
       readonly error: string;
     });
-
 /**
  * Durable steering may only be acknowledged after Pi injects the queued user message into the
  * active loop. Queue acceptance alone is not delivery.
@@ -587,7 +596,6 @@ export type AgentSteerResult =
       readonly status: "not-consumed";
       readonly reason: "not-running" | "turn-ended" | "aborted";
     };
-
 export interface NoesisAgentRuntime {
   readonly name: string;
   readonly run: (
@@ -597,7 +605,6 @@ export interface NoesisAgentRuntime {
   readonly steer: (trailId: string, text: string) => Promise<AgentSteerResult>;
   readonly abort: (trailId: string) => Promise<void>;
 }
-
 export interface StructuredInferencePort {
   readonly run: <T>(
     request: AgentRunRequest,
@@ -607,7 +614,6 @@ export interface StructuredInferencePort {
     readonly trace: AgentTrace;
   }>;
 }
-
 export interface AgentToolDescriptor {
   readonly name: string;
   readonly description: string;
@@ -615,7 +621,6 @@ export interface AgentToolDescriptor {
   readonly outputSchemaId: string;
   readonly permissionManifestRef: string;
 }
-
 /** One execution child of the canonical domain Experiment lifecycle. */
 export interface ExperimentExecutionRun {
   readonly runId: string;

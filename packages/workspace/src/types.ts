@@ -11,6 +11,7 @@ import type {
   EvidenceRevisionRef,
   Experiment,
   FileRevisionRef,
+  JsonObject,
   JsonValue,
   PermissionManifest,
   WorkingAdjustment,
@@ -43,7 +44,7 @@ export interface SessionRecord {
   readonly runtime: string;
   readonly createdAt: string;
   readonly updatedAt: string;
-  readonly metadata: Readonly<Record<string, unknown>>;
+  readonly metadata: JsonObject;
 }
 
 export interface MessageRecord {
@@ -53,7 +54,7 @@ export interface MessageRecord {
   readonly content: string;
   readonly sensitivity: Sensitivity;
   readonly createdAt: string;
-  readonly metadata: Readonly<Record<string, unknown>>;
+  readonly metadata: JsonObject;
   /** One adapter-authored, SQLite-validated position in this turn's mixed interaction timeline. */
   readonly timelineSequence?: number;
 }
@@ -208,7 +209,7 @@ export interface OutcomeRecord {
   readonly summary: string;
   readonly sensitivity: Sensitivity;
   readonly createdAt: string;
-  readonly metadata: Readonly<Record<string, unknown>>;
+  readonly metadata: JsonObject;
 }
 
 export interface ClassifyOutcomeRequest {
@@ -306,8 +307,8 @@ export function workingAdjustmentAdmissionConflictError(): Error {
   return error;
 }
 
-export function isWorkingAdjustmentAdmissionConflictError(error: unknown): error is Error {
-  return error instanceof Error && workingAdjustmentAdmissionConflicts.has(error);
+export function isWorkingAdjustmentAdmissionConflictError(cause: unknown): cause is Error {
+  return cause instanceof Error && workingAdjustmentAdmissionConflicts.has(cause);
 }
 
 const capabilityBindingAdmissionConflicts = new WeakSet<Error>();
@@ -318,8 +319,8 @@ export function capabilityBindingAdmissionConflictError(): Error {
   return error;
 }
 
-export function isCapabilityBindingAdmissionConflictError(error: unknown): error is Error {
-  return error instanceof Error && capabilityBindingAdmissionConflicts.has(error);
+export function isCapabilityBindingAdmissionConflictError(cause: unknown): cause is Error {
+  return cause instanceof Error && capabilityBindingAdmissionConflicts.has(cause);
 }
 
 export interface ActivationMaterializationRecord {
@@ -336,7 +337,7 @@ export interface ActivationOperationRecord {
   readonly activationId: string;
   readonly binding: ActivationEvidenceBinding;
   readonly bindingDigest: string;
-  readonly policySnapshot: Readonly<Record<string, unknown>>;
+  readonly policySnapshot: JsonObject;
   readonly policyDigest: string;
   readonly decision: ActivationPolicyDecision;
   readonly status: ActivationOperationStatus;
@@ -522,7 +523,7 @@ export interface PrepareActivationOperationRequest {
   readonly activationId: string;
   readonly binding: ActivationEvidenceBinding;
   readonly bindingDigest: string;
-  readonly policySnapshot: Readonly<Record<string, unknown>>;
+  readonly policySnapshot: JsonObject;
   readonly policyDigest: string;
   readonly decision: ActivationPolicyDecision;
   readonly expectedActivationRevision: number;

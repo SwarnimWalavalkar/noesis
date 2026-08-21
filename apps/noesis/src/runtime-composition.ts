@@ -24,6 +24,7 @@ import {
 } from "@noesis/config";
 import { type ContextFragment, compileContext } from "@noesis/context";
 import {
+  createConditionalObject,
   type CapabilityRevision,
   type CapabilityRevisionRef,
   canonicalJson,
@@ -34,6 +35,7 @@ import {
   FileRevisionRefSchema,
   type JsonValue,
   JsonValueSchema,
+  isJsonObject,
   type ProjectRef,
   sameCapabilityRevisionRef,
   sha256,
@@ -137,7 +139,6 @@ import type {
   ApplicationMcpLifecycleAuthorizer,
   ApplicationMcpSamplingAuthorizer,
 } from "./mcp-integration.ts";
-
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
 const MAX_SELF_INSPECTION_RESULT_BYTES = 56 * 1024;
@@ -145,11 +146,11 @@ const MAX_SELF_INSPECTION_LABEL_BYTES = 256;
 const MAX_SELF_INSPECTION_PAGE_DESCRIPTION_BYTES = 768;
 const MAX_SELF_INSPECTION_DETAIL_DESCRIPTION_BYTES = 8 * 1024;
 const SHUTDOWN_GRACE_MS = 250;
-const REFLECTION_BARRIER_MS = 1_500;
+const REFLECTION_BARRIER_MS = 1500;
 const HISTORY_RERANK_MIN_EXCERPT_CHARACTERS = 32;
 const HISTORY_RERANK_MAX_EXCERPT_CHARACTERS = 480;
-const HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE = 4_096;
-const LATE_REFLECTION_REFRESH_MS = 5_000;
+const HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE = 4096;
+const LATE_REFLECTION_REFRESH_MS = 5000;
 const BASE_SYSTEM_PROMPT = [
   "Follow the user's instructions, use tools when useful, and finish the work.",
   "Before asking the user to repeat relevant prior work, search previous sessions when it could help.",
@@ -157,21 +158,21 @@ const BASE_SYSTEM_PROMPT = [
   "Never claim an action or system state without runtime evidence.",
 ].join("\n");
 const CONTEXT_COMPACTION_INTERRUPTED = "NoesisContextCompactionInterrupted";
-
 function contextCompactionInterrupted(reason: string): Error {
   const error = new Error(reason);
   error.name = CONTEXT_COMPACTION_INTERRUPTED;
   return error;
 }
-
-function isContextCompactionInterrupted(error: unknown): boolean {
-  return error instanceof Error && error.name === CONTEXT_COMPACTION_INTERRUPTED;
+function isContextCompactionInterrupted(cause: unknown): boolean {
+  return cause instanceof Error && cause.name === CONTEXT_COMPACTION_INTERRUPTED;
 }
-
 function boundedUtf8Text(
   value: string,
   maxBytes: number,
-): { readonly value: string; readonly truncated: boolean } {
+): {
+  readonly value: string;
+  readonly truncated: boolean;
+} {
   const encoded = encoder.encode(value);
   if (encoded.byteLength <= maxBytes) return Object.freeze({ value, truncated: false });
   let end = Math.max(0, maxBytes - encoder.encode("…").byteLength);
@@ -187,7 +188,6 @@ function boundedUtf8Text(
   }
   return Object.freeze({ value: "", truncated: true });
 }
-
 export async function waitForReflectionBarrier(
   coordinator: Pick<import("@noesis/runtime").CapabilityCoordinator, "waitForTerminal">,
   reflectionJobId: string,
@@ -202,47 +202,47 @@ export async function waitForReflectionBarrier(
     // background job, so an unavailable read model must not rewrite the turn as failed.
   }
 }
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const roleNames = ["capability_router", "session_compactor", "history_reranker", "reflector"] as const;
 type RoleName = (typeof roleNames)[number];
 type ApplicationRoleConfiguration = RoleVariantConfiguration & {
-  readonly variant: RoleVariantConfiguration["variant"] & { readonly axis: "role" };
+  readonly variant: RoleVariantConfiguration["variant"] & {
+    readonly axis: "role";
+  };
 };
-
 const CapabilityRoutingDecisionSchema = z.strictObject({
   selections: z
     .array(
       z.strictObject({
         capabilityId: z.string().min(1),
-        reason: z.string().min(1).max(2_048),
+        reason: z.string().min(1).max(2048),
       }),
     )
     .max(64),
-  reason: z.string().min(1).max(4_096),
+  reason: z.string().min(1).max(4096),
   learningAttribution: z
     .strictObject({
       capabilityId: z.string().min(1),
-      reason: z.string().min(1).max(2_048),
+      reason: z.string().min(1).max(2048),
     })
     .nullable(),
 });
-
 const HistoryRerankItemSchema = z.strictObject({
   documentId: z.string().min(1).max(512),
   reason: z.string().min(1).max(512),
 });
-
 const ContextCheckpointSummarySchema = z.strictObject({
-  goal: z.string().min(1).max(4_096),
-  constraints: z.array(z.string().min(1).max(2_048)).max(32),
-  completedWork: z.array(z.string().min(1).max(2_048)).max(64),
-  currentState: z.string().min(1).max(4_096),
-  decisions: z.array(z.string().min(1).max(2_048)).max(64),
-  blockers: z.array(z.string().min(1).max(2_048)).max(32),
-  nextSteps: z.array(z.string().min(1).max(2_048)).max(32),
-  criticalReferences: z.array(z.string().min(1).max(2_048)).max(64),
+  goal: z.string().min(1).max(4096),
+  constraints: z.array(z.string().min(1).max(2048)).max(32),
+  completedWork: z.array(z.string().min(1).max(2048)).max(64),
+  currentState: z.string().min(1).max(4096),
+  decisions: z.array(z.string().min(1).max(2048)).max(64),
+  blockers: z.array(z.string().min(1).max(2048)).max(32),
+  nextSteps: z.array(z.string().min(1).max(2048)).max(32),
+  criticalReferences: z.array(z.string().min(1).max(2048)).max(64),
 });
 const ContextCompactionInferenceResultSchema = z.strictObject({
-  summary: z.string().min(1).max(32_000),
+  summary: z.string().min(1).max(32000),
   usage: z.strictObject({
     inputTokens: z.number().int().nonnegative(),
     outputTokens: z.number().int().nonnegative(),
@@ -254,11 +254,10 @@ const ContextCheckpointActivationSchema = z.strictObject({
   status: z.enum(["activated", "conflict"]),
   activeCheckpointId: z.string().min(1).optional(),
 });
-
 const ScriptManifestSchema = z.strictObject({
   kind: z.literal("noesis_script"),
   name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-  description: z.string().min(1).max(2_048),
+  description: z.string().min(1).max(2048),
   revision: z.number().int().positive(),
   sourceRevision: FileRevisionRefSchema,
   inputSchema: z.record(z.string(), JsonValueSchema),
@@ -288,10 +287,9 @@ const ScriptSaveResultSchema = ScriptManifestSchema.extend({
     workingPath: z.string().min(1),
   }),
 });
-
 const WorkflowPhaseSchema = z.strictObject({
   name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-  description: z.string().min(1).max(2_048),
+  description: z.string().min(1).max(2048),
   source: z
     .string()
     .min(1)
@@ -303,7 +301,7 @@ const WorkflowPhaseSchema = z.strictObject({
 const WorkflowManifestSchema = z.strictObject({
   kind: z.literal("noesis_workflow"),
   name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-  description: z.string().min(1).max(2_048),
+  description: z.string().min(1).max(2048),
   revision: z.number().int().positive(),
   inputSchema: z.record(z.string(), JsonValueSchema),
   outputSchema: z.record(z.string(), JsonValueSchema),
@@ -319,21 +317,17 @@ const WorkflowSaveResultSchema = z.strictObject({
   manifest: WorkflowManifestSchema,
   definitionRevision: FileRevisionRefSchema,
 });
-
 function savedWorkflowToolName(project: ProjectRef, workflowName: string): string {
   return projectWorkflowToolName(project.projectId, workflowName);
 }
-
 function capabilityProgramToolName(capabilityId: string, kind: "script" | "workflow", name: string): string {
   return `capability_${sha256(`${capabilityId}:${kind}:${name}`).slice(0, 12)}_${kind}_${name}`;
 }
-
 export interface ProjectHotbarSelection {
   readonly global: readonly string[];
   readonly project: readonly string[];
   readonly effective: readonly string[];
 }
-
 export function resolveProjectHotbarSelection(
   tools: ResolvedNoesisConfig["tools"],
   projectId: string,
@@ -366,14 +360,13 @@ export function resolveProjectHotbarSelection(
     effective,
   });
 }
-
 function savedWorkflowValueSchema(schema: WorkflowManifest["inputSchema"]): z.ZodType<JsonValue> {
   // Workflow manifests admit JSON Schema expressed entirely as JsonValue, and the Broker validates
   // every invocation and result through this decoded schema. Preserve that exact schema in the
   // frozen descriptor while making its already-bounded JSON output explicit to TypeScript.
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return z.fromJSONSchema(schema) as z.ZodType<JsonValue>;
 }
-
 function decodedSchemaRequiresObject(schema: z.core.$ZodType): boolean {
   // Direct Pi tools require object parameters. Keep ambiguous schemas wrapped: JSON Schema
   // `properties` without an object constraint still accepts primitives, while decoded references
@@ -385,7 +378,6 @@ function decodedSchemaRequiresObject(schema: z.core.$ZodType): boolean {
     return schema.options.length > 0 && schema.options.every(decodedSchemaRequiresObject);
   return false;
 }
-
 function savedWorkflowInputAdapter(schema: WorkflowManifest["inputSchema"]): Readonly<{
   schema: z.ZodType<JsonValue>;
   unwrap: (input: JsonValue) => JsonValue;
@@ -402,12 +394,10 @@ function savedWorkflowInputAdapter(schema: WorkflowManifest["inputSchema"]): Rea
     unwrap: (input: JsonValue) => wrappedSchema.parse(input).input,
   });
 }
-
 interface SavedDefinitionScope {
   readonly namespace: string;
   readonly workingRoot: string;
 }
-
 function savedDefinitionScopes(
   kind: "script" | "workflow",
   project: ProjectRef,
@@ -421,13 +411,11 @@ function savedDefinitionScopes(
     Object.freeze({ namespace: kind, workingRoot: directory }),
   ]);
 }
-
 function projectDefinitionScope(kind: "script" | "workflow", project: ProjectRef): SavedDefinitionScope {
   const scope = savedDefinitionScopes(kind, project)[0];
   if (!scope) throw new Error(`Project ${kind} definition scope is missing`);
   return scope;
 }
-
 async function seedProjectDefinitionFromLegacy(
   workspace: NoesisWorkspaceStore,
   kind: "script" | "workflow",
@@ -473,27 +461,32 @@ async function seedProjectDefinitionFromLegacy(
     const legacy = legacyRevisions[projectRevisions.length];
     if (!legacy) return;
     const projectCurrent = projectRevisions.at(-1)?.definitionRevision;
-    const publication = await workspace.definitionPublications.publish({
-      namespace: projectScope.namespace,
-      definitionId: name,
-      revision: legacy.revision,
-      workingPath: `${projectScope.workingRoot}/${name}/${kind === "script" ? "script.json" : "workflow.json"}`,
-      bytes: await workspace.reads.readRevision(legacy.definitionRevision),
-      ...(projectCurrent ? { expectedCurrentRevisionId: projectCurrent.revisionId } : {}),
-      provenanceRefs: Object.freeze([legacy.definitionRevision]),
-      activity: Object.freeze({
-        kind: `${kind}.legacy_definition_seeded`,
-        actor: Object.freeze({ actorId: "noesis-definition-library", kind: "noesis" as const }),
-        reason: `Seeded project-local ${kind} ${name} from its legacy revision history`,
-      }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const publication = await workspace.definitionPublications.publish(
+      createConditionalObject({
+        namespace: projectScope.namespace,
+        definitionId: name,
+        revision: legacy.revision,
+        workingPath: `${projectScope.workingRoot}/${name}/${kind === "script" ? "script.json" : "workflow.json"}`,
+        bytes: await workspace.reads.readRevision(legacy.definitionRevision),
+      } as const)
+        .addOptional(projectCurrent ? { expectedCurrentRevisionId: projectCurrent.revisionId } : undefined)
+        .add({
+          provenanceRefs: Object.freeze([legacy.definitionRevision]),
+          activity: Object.freeze({
+            kind: `${kind}.legacy_definition_seeded`,
+            actor: Object.freeze({ actorId: "noesis-definition-library", kind: "noesis" as const }),
+            reason: `Seeded project-local ${kind} ${name} from its legacy revision history`,
+          }),
+        } as const)
+        .finish(),
+    );
     if (!publication.ok) {
       if (publication.error.code === "conflict") continue;
       throw new Error(publication.error.message);
     }
   }
 }
-
 async function currentDefinition(
   workspace: NoesisWorkspaceStore,
   kind: "script" | "workflow",
@@ -506,7 +499,6 @@ async function currentDefinition(
   }
   return undefined;
 }
-
 async function readStoredScript(
   workspace: NoesisWorkspaceStore,
   project: ProjectRef,
@@ -518,7 +510,6 @@ async function readStoredScript(
     JSON.parse(decoder.decode(await workspace.reads.readRevision(current.metadata.definitionRevision))),
   );
 }
-
 async function reconcileStoredScript(
   workspace: NoesisWorkspaceStore,
   project: ProjectRef,
@@ -541,6 +532,7 @@ async function reconcileStoredScript(
       sourceRevision: manifest.sourceRevision,
       createdFrom: manifest.createdFrom,
     });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const publication = await workspace.definitionPublications.publish({
       namespace: scope.namespace,
       definitionId: name,
@@ -570,6 +562,7 @@ async function reconcileStoredScript(
     revision: current.revision + 1,
     sourceRevision,
   });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const publication = await workspace.definitionPublications.publish({
     namespace: scope.namespace,
     definitionId: name,
@@ -587,7 +580,6 @@ async function reconcileStoredScript(
   if (!publication.ok) throw new Error(publication.error.message);
   return updated;
 }
-
 async function listStoredScripts(
   workspace: NoesisWorkspaceStore,
   project: ProjectRef,
@@ -609,12 +601,10 @@ async function listStoredScripts(
       .sort((left, right) => left.name.localeCompare(right.name)),
   );
 }
-
 async function reconcileStoredScripts(workspace: NoesisWorkspaceStore, project: ProjectRef): Promise<void> {
   const scripts = await listStoredScripts(workspace, project);
   for (const script of scripts) await reconcileStoredScript(workspace, project, script.name);
 }
-
 async function readStoredWorkflow(
   workspace: NoesisWorkspaceStore,
   project: ProjectRef,
@@ -635,7 +625,6 @@ async function readStoredWorkflow(
     definitionRevision: current.metadata.definitionRevision,
   });
 }
-
 async function reconcileStoredWorkflow(
   workspace: NoesisWorkspaceStore,
   project: ProjectRef,
@@ -666,6 +655,7 @@ async function reconcileStoredWorkflow(
     revision: metadata.revision + 1,
     createdFrom: storedManifest.createdFrom,
   });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const publication = await workspace.definitionPublications.publish({
     namespace: scope.namespace,
     definitionId: name,
@@ -686,7 +676,6 @@ async function reconcileStoredWorkflow(
     definitionRevision: publication.value.definitionRevision,
   });
 }
-
 async function readStoredWorkflowRevision(
   workspace: NoesisWorkspaceStore,
   project: ProjectRef,
@@ -715,7 +704,6 @@ async function readStoredWorkflowRevision(
     definitionRevision: selected.definitionRevision,
   });
 }
-
 async function workflowRunVisibleInProject(
   workspace: NoesisWorkspaceStore,
   project: ProjectRef,
@@ -726,7 +714,6 @@ async function workflowRunVisibleInProject(
     await readStoredWorkflowRevision(workspace, project, run.workflowName, run.definitionRevisionId),
   );
 }
-
 async function listStoredWorkflows(
   workspace: NoesisWorkspaceStore,
   project: ProjectRef,
@@ -753,12 +740,10 @@ async function listStoredWorkflows(
       .sort((left, right) => left.manifest.name.localeCompare(right.manifest.name)),
   );
 }
-
 async function reconcileStoredWorkflows(workspace: NoesisWorkspaceStore, project: ProjectRef): Promise<void> {
   const workflows = await listStoredWorkflows(workspace, project);
   for (const workflow of workflows) await reconcileStoredWorkflow(workspace, project, workflow.manifest.name);
 }
-
 function createCapabilityProgramLibrary(
   workspace: NoesisWorkspaceStore,
   activeProject: ProjectRef,
@@ -771,6 +756,7 @@ function createCapabilityProgramLibrary(
         listStoredScripts(workspace, project),
         listStoredWorkflows(workspace, project),
       ]);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze([
         ...scripts.map((script) =>
           Object.freeze({
@@ -800,6 +786,7 @@ function createCapabilityProgramLibrary(
       if (kind === "script") {
         const manifest = ScriptManifestSchema.parse(decoded);
         if (manifest.name !== name) throw new Error(`Saved script ${name} has mismatched identity`);
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           kind: "script" as const,
           name,
@@ -809,6 +796,7 @@ function createCapabilityProgramLibrary(
       }
       const manifest = WorkflowManifestSchema.parse(decoded);
       if (manifest.name !== name) throw new Error(`Saved workflow ${name} has mismatched identity`);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         kind: "workflow" as const,
         name,
@@ -818,7 +806,6 @@ function createCapabilityProgramLibrary(
     },
   });
 }
-
 function withoutWorkflowTerminalFields(
   record: WorkflowRunRecord,
 ): Omit<WorkflowRunRecord, "error" | "completedAt"> {
@@ -827,7 +814,6 @@ function withoutWorkflowTerminalFields(
   void completedAt;
   return active;
 }
-
 export interface ApplicationRuntime extends NoesisTuiRuntime {
   readonly home: string;
   readonly agentName: string;
@@ -857,7 +843,6 @@ export interface ApplicationRuntime extends NoesisTuiRuntime {
   };
   readonly shutdown: () => Promise<void>;
 }
-
 export interface ApplicationRuntimeCompositionOptions {
   readonly config: ResolvedNoesisConfig;
   /** Canonical host-derived active directory. Optional only for legacy test callers. */
@@ -887,9 +872,11 @@ export interface ApplicationRuntimeCompositionOptions {
   readonly resolveModelContext?: (
     provider: string,
     model: string,
-  ) => Readonly<{ contextWindow: number; maxOutputTokens: number }>;
+  ) => Readonly<{
+    contextWindow: number;
+    maxOutputTokens: number;
+  }>;
 }
-
 export async function resolveActiveProject(root: string): Promise<ProjectRef> {
   const canonicalRoot = await realpath(root);
   return Object.freeze({
@@ -897,7 +884,6 @@ export async function resolveActiveProject(root: string): Promise<ProjectRef> {
     root: canonicalRoot,
   });
 }
-
 export function createModelHistoryRerankPort(options: {
   readonly inference: ReturnType<typeof createStructuredInferencePort>;
   readonly configuration: ApplicationRoleConfiguration;
@@ -919,25 +905,32 @@ export function createModelHistoryRerankPort(options: {
             }),
           ),
         );
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const messages = Object.freeze(
           Array.from({ length: Math.ceil(candidates.length / candidatesPerMessage) }, (_, index) =>
             Object.freeze({
               role: "user" as const,
               name: "candidates",
               content: canonicalJson(
-                toJsonValue({
-                  ...(index === 0
-                    ? {
-                        instruction:
-                          "Rank every candidate from most to least useful for answering the query. Prefer meaningfully relevant evidence over literal word overlap. Return every document ID exactly once with a brief reason.",
-                        query: request.query,
-                      }
-                    : {}),
-                  candidates: candidates.slice(
-                    index * candidatesPerMessage,
-                    (index + 1) * candidatesPerMessage,
-                  ),
-                }),
+                toJsonValue(
+                  createConditionalObject({} as const)
+                    .addOptional(
+                      index === 0
+                        ? {
+                            instruction:
+                              "Rank every candidate from most to least useful for answering the query. Prefer meaningfully relevant evidence over literal word overlap. Return every document ID exactly once with a brief reason.",
+                            query: request.query,
+                          }
+                        : undefined,
+                    )
+                    .add({
+                      candidates: candidates.slice(
+                        index * candidatesPerMessage,
+                        (index + 1) * candidatesPerMessage,
+                      ),
+                    } as const)
+                    .finish(),
+                ),
               ),
             }),
           ),
@@ -992,16 +985,18 @@ export function createModelHistoryRerankPort(options: {
               message: "Ranking must contain every supplied candidate exactly once",
             });
         });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const result = await options.inference.run(
-        {
+        createConditionalObject({
           runId: createId("history-rerank"),
           role: "history_reranker",
           variant: options.configuration.variant,
           messages: Object.freeze(candidateMessages),
           evidenceRefs: Object.freeze([]),
           availableTools: Object.freeze([]),
-          ...(request.signal ? { signal: request.signal } : {}),
-        },
+        } as const)
+          .addOptional(request.signal ? { signal: request.signal } : undefined)
+          .finish(),
         z.strictObject({ ranking: RankingSchema }),
       );
       return Object.freeze(
@@ -1015,7 +1010,6 @@ export function createModelHistoryRerankPort(options: {
     },
   });
 }
-
 function sessionDefinitionsForBroker(
   definitions: Awaited<ReturnType<typeof resolveFrozenSessionToolDefinitions>>,
   options: {
@@ -1067,7 +1061,6 @@ function sessionDefinitionsForBroker(
     ),
   );
 }
-
 async function replayEligibleTurnIds(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
@@ -1076,11 +1069,9 @@ async function replayEligibleTurnIds(
   const turns = await foregroundTurnsForOutcomes(workspace, sessionId, outcomes);
   return replayEligibleTurnIdsFromOutcomes(outcomes, turns);
 }
-
 type ForegroundTurnRecord = NonNullable<
   Awaited<ReturnType<NoesisWorkspaceStore["operational"]["foregroundTurns"]["get"]>>
 >;
-
 async function foregroundTurnsForOutcomes(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
@@ -1094,11 +1085,11 @@ async function foregroundTurnsForOutcomes(
       return Object.freeze({ turnId: outcome.turnId, turn });
     }),
   );
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return new Map(
     entries.flatMap((entry) => (entry === undefined ? [] : [[entry.turnId, entry.turn] as const])),
   );
 }
-
 function replayEligibleTurnIdsFromOutcomes(
   outcomes: readonly OutcomeRecord[],
   turns: ReadonlyMap<string, ForegroundTurnRecord>,
@@ -1121,11 +1112,15 @@ function replayEligibleTurnIdsFromOutcomes(
   }
   return eligible;
 }
-
 async function replayEligibleTurns(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
-): Promise<readonly { readonly input: string; readonly output: string }[]> {
+): Promise<
+  readonly {
+    readonly input: string;
+    readonly output: string;
+  }[]
+> {
   const messages = await replayEligibleHistoryMessages(workspace, sessionId);
   const messagesByTurn = new Map<
     string,
@@ -1168,12 +1163,10 @@ async function replayEligibleTurns(
       .map(({ input, output }) => Object.freeze({ input, output })),
   );
 }
-
 function metadataString(message: MessageRecord, key: string): string | undefined {
   const value = message.metadata[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
-
 function inheritedReplayKind(message: MessageRecord): "turn" | "steer" | undefined {
   if (
     message.metadata["replayEligible"] !== true ||
@@ -1184,13 +1177,11 @@ function inheritedReplayKind(message: MessageRecord): "turn" | "steer" | undefin
   const kind = message.metadata["historyKind"];
   return kind === "turn" || kind === "steer" ? kind : undefined;
 }
-
 function replayHistoryKind(message: MessageRecord): "turn" | "steer" {
   const inherited = inheritedReplayKind(message);
   if (inherited !== undefined) return inherited;
   return message.role === "user" && message.metadata["deliveryMode"] === "steer" ? "steer" : "turn";
 }
-
 function replayHistoryTurnKey(message: MessageRecord): string | undefined {
   const inherited = inheritedReplayKind(message);
   if (inherited === "steer") return undefined;
@@ -1198,17 +1189,14 @@ function replayHistoryTurnKey(message: MessageRecord): string | undefined {
   const turnId = metadataString(message, "turnId") ?? metadataString(message, "legacyEventId");
   return turnId === undefined ? undefined : `${message.sessionId}:${turnId}`;
 }
-
 function historySequence(message: MessageRecord): number | undefined {
   const value = message.metadata["historySequence"];
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
-
 function interactionSequence(message: MessageRecord): number | undefined {
   const value = message.metadata["interactionSequence"];
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
-
 function sameTurnTimelineOrder(left: MessageRecord, right: MessageRecord): number {
   const leftTurnId = metadataString(left, "turnId");
   const rightTurnId = metadataString(right, "turnId");
@@ -1216,12 +1204,10 @@ function sameTurnTimelineOrder(left: MessageRecord, right: MessageRecord): numbe
   if (left.timelineSequence === undefined || right.timelineSequence === undefined) return 0;
   return left.timelineSequence - right.timelineSequence;
 }
-
 function replayMessageTieRank(message: MessageRecord): number {
   if (message.role === "assistant") return 2;
   return replayHistoryKind(message) === "steer" ? 1 : 0;
 }
-
 async function replayEligibleHistoryMessages(workspace: NoesisWorkspaceStore, sessionId: string) {
   const [messages, outcomes] = await Promise.all([
     workspace.operational.messages.listForSession(sessionId),
@@ -1230,14 +1216,11 @@ async function replayEligibleHistoryMessages(workspace: NoesisWorkspaceStore, se
   const eligibleTurnIds = await replayEligibleTurnIds(workspace, sessionId, outcomes);
   return orderedHistoryMessages(messages, eligibleTurnIds);
 }
-
 type ContextTurnStatus = "completed" | "failed" | "aborted";
-
 interface ContextHistoryMessage {
   readonly message: MessageRecord;
   readonly turnStatus?: ContextTurnStatus;
 }
-
 async function contextVisibleHistoryMessages(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
@@ -1262,17 +1245,29 @@ async function contextVisibleHistoryMessages(
     ordered.map((message) => {
       const turnId = metadataString(message, "turnId");
       const turnStatus = turnId === undefined ? undefined : statuses.get(turnId);
-      return Object.freeze({ message, ...(turnStatus === undefined ? {} : { turnStatus }) });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return Object.freeze(
+        createConditionalObject({
+          message,
+        } as const)
+          .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
+          .finish(),
+      );
     }),
   );
 }
-
 function orderedHistoryMessages(
   messages: readonly MessageRecord[],
   eligibleTurnIds: ReadonlySet<string>,
 ): readonly MessageRecord[] {
   const sourceOrder = new Map(messages.map((message, index) => [message.messageId, index]));
-  const turnChronology = new Map<string, { readonly createdAt: string; readonly sourceIndex: number }>();
+  const turnChronology = new Map<
+    string,
+    {
+      readonly createdAt: string;
+      readonly sourceIndex: number;
+    }
+  >();
   for (const [sourceIndex, message] of messages.entries()) {
     const turnId = metadataString(message, "turnId");
     if (turnId === undefined) continue;
@@ -1327,7 +1322,6 @@ function orderedHistoryMessages(
       }),
   );
 }
-
 function rolePrompt(name: RoleName): string {
   if (name === "reflector")
     return [
@@ -1345,7 +1339,6 @@ function rolePrompt(name: RoleName): string {
     ].join("\n");
   return [`Noesis protected role: ${name}.`, "Return only the requested structured JSON."].join("\n");
 }
-
 async function recordedRolePrompt(workspace: NoesisWorkspaceStore, name: RoleName): Promise<FileRevisionRef> {
   const definitionId = `control-plane-${name}`;
   const bytes = encoder.encode(`${rolePrompt(name)}\n`);
@@ -1354,25 +1347,30 @@ async function recordedRolePrompt(workspace: NoesisWorkspaceStore, name: RoleNam
     const existing = await workspace.reads.readRevision(current.definitionRevision);
     if (decoder.decode(existing) === decoder.decode(bytes)) return current.definitionRevision;
   }
-  const published = await workspace.definitionPublications.publish({
-    namespace: "runtime_role",
-    definitionId,
-    revision: (current?.revision ?? 0) + 1,
-    workingPath: `prompts/control-plane/${name}.md`,
-    bytes,
-    ...(current ? { expectedCurrentRevisionId: current.definitionRevision.revisionId } : {}),
-    activity: Object.freeze({
-      kind: current ? "runtime_role.updated" : "runtime_role.initialized",
-      actor: Object.freeze({ actorId: "apps-noesis", kind: "system" as const }),
-      reason: current
-        ? "Publish the new Capability learning role contract"
-        : "Production control-plane role definition",
-    }),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  const published = await workspace.definitionPublications.publish(
+    createConditionalObject({
+      namespace: "runtime_role",
+      definitionId,
+      revision: (current?.revision ?? 0) + 1,
+      workingPath: `prompts/control-plane/${name}.md`,
+      bytes,
+    } as const)
+      .addOptional(current ? { expectedCurrentRevisionId: current.definitionRevision.revisionId } : undefined)
+      .add({
+        activity: Object.freeze({
+          kind: current ? "runtime_role.updated" : "runtime_role.initialized",
+          actor: Object.freeze({ actorId: "apps-noesis", kind: "system" as const }),
+          reason: current
+            ? "Publish the new Capability learning role contract"
+            : "Production control-plane role definition",
+        }),
+      } as const)
+      .finish(),
+  );
   if (!published.ok) throw new Error(published.error.message);
   return published.value.definitionRevision;
 }
-
 async function roleConfigurations(
   workspace: NoesisWorkspaceStore,
   config: ResolvedNoesisConfig,
@@ -1380,6 +1378,7 @@ async function roleConfigurations(
   const entries = await Promise.all(
     roleNames.map(async (name) => {
       const prompt = await recordedRolePrompt(workspace, name);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const configuration: ApplicationRoleConfiguration = Object.freeze({
         role: name,
         variant: Object.freeze({
@@ -1395,16 +1394,17 @@ async function roleConfigurations(
           policyId: `noesis-${name}-bounded-v1`,
           maxMessages: name === "session_compactor" ? 1 : name === "capability_router" ? 24 : 12,
           maxCharactersPerMessage:
-            name === "session_compactor" ? 4_000_000 : name === "capability_router" ? 16_000 : 12_000,
+            name === "session_compactor" ? 4000000 : name === "capability_router" ? 16000 : 12000,
           maxTotalCharacters:
-            name === "session_compactor" ? 4_000_000 : name === "capability_router" ? 64_000 : 48_000,
+            name === "session_compactor" ? 4000000 : name === "capability_router" ? 64000 : 48000,
           maxEvidenceRefs: 64,
           maxTools: 0,
           includeCapabilityRevisions: true,
         }),
-        timeoutMs: 120_000,
+        timeoutMs: 120000,
         maxRetries: 0,
       });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return [name, configuration] as const;
     }),
   );
@@ -1421,7 +1421,6 @@ async function roleConfigurations(
     reflector: requireRole("reflector"),
   });
 }
-
 function registerRevision(
   registry: ReturnType<typeof createAtomicCapabilityRegistry>,
   revision: CapabilityRevision,
@@ -1433,30 +1432,41 @@ function registerRevision(
   },
 ): CapabilityRevisionRef {
   registry.registerCapability(capability);
-  const constructed = registry.constructRevision({
-    capabilityRevisionId: revision.capabilityRevisionId,
-    capabilityId: revision.capabilityId,
-    definitionState: "candidate",
-    ...(revision.predecessorRevisionId ? { predecessorRevisionId: revision.predecessorRevisionId } : {}),
-    ...(revision.effects ? { effects: revision.effects } : {}),
-    promptModules: revision.promptModules,
-    skills: revision.skills,
-    tools: revision.tools,
-    routerRevision: revision.toolset.routerRevision,
-    routerStrategyId: revision.toolset.strategyId,
-    activationPolicy: revision.activationPolicy,
-    ...(revision.dependencyLock ? { dependencyLock: revision.dependencyLock } : {}),
-    permissionManifest: revision.permissionManifest,
-    evidenceRefs: revision.evidenceRefs,
-    sourceEvaluationDefinitions: revision.sourceEvaluationDefinitions,
-    requestedPermissionDelta: revision.requestedPermissionDelta,
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  const constructed = registry.constructRevision(
+    createConditionalObject({
+      capabilityRevisionId: revision.capabilityRevisionId,
+      capabilityId: revision.capabilityId,
+      definitionState: "candidate",
+    } as const)
+      .addOptional(
+        revision.predecessorRevisionId
+          ? { predecessorRevisionId: revision.predecessorRevisionId }
+          : undefined,
+      )
+      .addOptional(revision.effects ? { effects: revision.effects } : undefined)
+      .add({
+        promptModules: revision.promptModules,
+        skills: revision.skills,
+        tools: revision.tools,
+        routerRevision: revision.toolset.routerRevision,
+        routerStrategyId: revision.toolset.strategyId,
+        activationPolicy: revision.activationPolicy,
+      } as const)
+      .addOptional(revision.dependencyLock ? { dependencyLock: revision.dependencyLock } : undefined)
+      .add({
+        permissionManifest: revision.permissionManifest,
+        evidenceRefs: revision.evidenceRefs,
+        sourceEvaluationDefinitions: revision.sourceEvaluationDefinitions,
+        requestedPermissionDelta: revision.requestedPermissionDelta,
+      } as const)
+      .finish(),
+  );
   const expected = capabilityRevisionRef(revision);
   if (!sameCapabilityRevisionRef(constructed, expected))
     throw new Error(`Capability registry changed exact revision ${revision.capabilityRevisionId}`);
   return constructed;
 }
-
 const GENESIS_CAPABILITY = Object.freeze({
   capabilityId: "general-collaboration",
   name: "General collaboration",
@@ -1464,7 +1474,6 @@ const GENESIS_CAPABILITY = Object.freeze({
   intent: "Provide the stable baseline for ordinary Noesis collaboration and future comparison.",
 });
 const GENESIS_REVISION_ID = "general-collaboration-genesis-v1";
-
 async function publishGenesisDefinition(
   workspace: NoesisWorkspaceStore,
   input: {
@@ -1481,6 +1490,7 @@ async function publishGenesisDefinition(
       throw new Error(`Genesis definition ${input.definitionId} changed without a revision`);
     return current.definitionRevision;
   }
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const published = await workspace.definitionPublications.publish({
     namespace: "genesis_baseline",
     definitionId: input.definitionId,
@@ -1496,7 +1506,6 @@ async function publishGenesisDefinition(
   if (!published.ok) throw new Error(published.error.message);
   return published.value.definitionRevision;
 }
-
 async function bootstrapGenesisBaseline(
   workspace: NoesisWorkspaceStore,
   protectedRuntime: ProtectedWorkspaceRuntime,
@@ -1568,13 +1577,11 @@ async function bootstrapGenesisBaseline(
   });
   return revisionRef;
 }
-
 function configurationPrompt(configuration: ApplicationRoleConfiguration): FileRevisionRef {
   const prompt = configuration.variant.configurationRefs[0];
   if (!prompt) throw new Error(`Role ${configuration.variant.variantId} has no immutable prompt revision`);
   return prompt;
 }
-
 export async function createApplicationRuntimeComposition(
   options: ApplicationRuntimeCompositionOptions,
 ): Promise<ApplicationRuntime> {
@@ -1679,6 +1686,7 @@ export async function createApplicationRuntimeComposition(
     if (!decision.ok) throw new Error(`MCP sampling ${decision.code}: ${decision.reason}`);
     return decision.value;
   });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   await workspace.cutoverLegacyOperationalAuthority(
     options.config.home,
     Object.freeze({ actorId: "operational-cutover", kind: "system" as const }),
@@ -1693,9 +1701,8 @@ export async function createApplicationRuntimeComposition(
   });
   const manifests = createWorkspaceLearningCandidateManifestStore(workspace);
   const genesisRevision = await bootstrapGenesisBaseline(workspace, protectedRuntime, registry);
-
   const hydrateRevisions = async (): Promise<void> => {
-    const experiments = await workspace.research.experiments.listExperiments({ limit: 1_000 });
+    const experiments = await workspace.research.experiments.listExperiments({ limit: 1000 });
     for (const experiment of experiments) {
       try {
         const durable = await manifests.rehydrate(experiment.experimentId);
@@ -1706,7 +1713,6 @@ export async function createApplicationRuntimeComposition(
     }
   };
   await hydrateRevisions();
-
   const hydrateCapabilityLifecycle = async (): Promise<void> => {
     for (const definition of await workspace.capabilities.listDefinitions()) {
       for (const lifecycleRevision of await workspace.capabilities.listRevisions(definition.capabilityId))
@@ -1718,7 +1724,6 @@ export async function createApplicationRuntimeComposition(
         });
     }
   };
-
   const cutoverWorkingAdjustments = async (): Promise<void> => {
     if (await workspace.capabilities.isCutoverComplete()) return;
     const adjustments = await workspace.capabilities.listActiveLegacyAdjustments();
@@ -1738,6 +1743,7 @@ export async function createApplicationRuntimeComposition(
           `${adjustment.createdFromTurnId}:user`,
         );
         const createdAt = sourceMessage?.createdAt ?? "1970-01-01T00:00:00.000Z";
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const actor = Object.freeze({ actorId: "capability-cutover", kind: "system" as const });
         const [prompt, router] = await Promise.all([
           workspace.definitions.recordWorkingDefinition({
@@ -1789,6 +1795,7 @@ export async function createApplicationRuntimeComposition(
         });
         const revision = registry.getRevision(reference);
         if (!revision) throw new Error(`Cutover lost revision ${capabilityRevisionId}`);
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         await workspace.capabilities.create({
           definition: Object.freeze({
             capabilityId,
@@ -1828,7 +1835,6 @@ export async function createApplicationRuntimeComposition(
   await hydrateCapabilityLifecycle();
   await cutoverWorkingAdjustments();
   await hydrateCapabilityLifecycle();
-
   const history = createHistoryPort({
     workspace,
     embeddings: createDeterministicEmbeddingPort(32, "noesis-hash-32-v1"),
@@ -1908,39 +1914,57 @@ export async function createApplicationRuntimeComposition(
     const directInvocation = record.turnId !== undefined && record.executionId === `direct:${record.turnId}`;
     const directTimelineSequence = directInvocation ? directActionTimelines.get(record.callId) : undefined;
     await binding?.parentReady;
-    await workspace.operational.toolCalls.put({
-      toolCallId: record.callId,
-      sessionId: record.sessionId,
-      ...(record.turnId ? { turnId: record.turnId } : {}),
-      ...(binding ? { parentToolCallId: binding.parentToolCallId } : {}),
-      ...(directInvocation ? {} : { executionId: record.executionId }),
-      toolName: record.toolName,
-      request: Object.freeze({
-        ...(directInvocation ? {} : { executionId: record.executionId }),
-        catalogId: record.catalogId,
-        catalogDigest: record.catalogDigest,
-        ...(record.turnId ? { turnId: record.turnId } : {}),
-        toolRevisionId: record.toolRevisionId,
-        input: record.input,
-      }),
-      ...(record.output !== undefined || record.error
-        ? {
-            response:
-              record.output !== undefined
-                ? Object.freeze({ output: record.output })
-                : Object.freeze({ error: record.error ?? "Tool call failed" }),
-          }
-        : {}),
-      status: record.status,
-      sensitivity: "normal",
-      createdAt: record.occurredAt,
-      ...(record.completedAt ? { completedAt: record.completedAt } : {}),
-      ...(binding
-        ? { timelineSequence: binding.timelineSequence }
-        : directTimelineSequence === undefined
-          ? {}
-          : { timelineSequence: directTimelineSequence }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    await workspace.operational.toolCalls.put(
+      createConditionalObject({
+        toolCallId: record.callId,
+        sessionId: record.sessionId,
+      } as const)
+        .addOptional(record.turnId ? { turnId: record.turnId } : undefined)
+        .addOptional(binding ? { parentToolCallId: binding.parentToolCallId } : undefined)
+        .addOptional(!directInvocation ? { executionId: record.executionId } : undefined)
+        .add({
+          toolName: record.toolName,
+          request: Object.freeze(
+            createConditionalObject({} as const)
+              .addOptional(!directInvocation ? { executionId: record.executionId } : undefined)
+              .add({
+                catalogId: record.catalogId,
+                catalogDigest: record.catalogDigest,
+              } as const)
+              .addOptional(record.turnId ? { turnId: record.turnId } : undefined)
+              .add({
+                toolRevisionId: record.toolRevisionId,
+                input: record.input,
+              } as const)
+              .finish(),
+          ),
+        } as const)
+        .addOptional(
+          record.output !== undefined || record.error
+            ? {
+                response:
+                  record.output !== undefined
+                    ? Object.freeze({ output: record.output })
+                    : Object.freeze({ error: record.error ?? "Tool call failed" }),
+              }
+            : undefined,
+        )
+        .add({
+          status: record.status,
+          sensitivity: "normal",
+          createdAt: record.occurredAt,
+        } as const)
+        .addOptional(record.completedAt ? { completedAt: record.completedAt } : undefined)
+        .add(
+          binding
+            ? { timelineSequence: binding.timelineSequence }
+            : directTimelineSequence === undefined
+              ? {}
+              : { timelineSequence: directTimelineSequence },
+        )
+        .finish(),
+    );
     if (
       binding &&
       (record.status === "completed" ||
@@ -1962,16 +1986,15 @@ export async function createApplicationRuntimeComposition(
     callId: string,
   ): Promise<ToolInvocationRecord["status"] | undefined> =>
     (await workspace.operational.toolCalls.get(callId))?.status;
-
   const actionExecutionId = (...values: readonly unknown[]): string | undefined => {
     for (const value of values) {
-      if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
-      const executionId = Reflect.get(value, "executionId");
+      const parsed = JsonValueSchema.safeParse(value);
+      if (!parsed.success || !isJsonObject(parsed.data)) continue;
+      const executionId = parsed.data["executionId"];
       if (typeof executionId === "string" && executionId) return executionId;
     }
     return undefined;
   };
-
   const persistTopLevelAction = async (
     sessionId: string,
     turnId: string,
@@ -1983,17 +2006,25 @@ export async function createApplicationRuntimeComposition(
     if (event.parentActionId || event.recordedByBroker) return;
     const occurredAt = new Date().toISOString();
     if (event.type === "tool-start") {
-      await workspace.operational.toolCalls.put({
-        toolCallId: event.actionId,
-        sessionId,
-        turnId,
-        toolName: event.name,
-        request: event.input,
-        status: "running",
-        sensitivity: "normal",
-        createdAt: occurredAt,
-        ...(event.timelineSequence === undefined ? {} : { timelineSequence: event.timelineSequence }),
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      await workspace.operational.toolCalls.put(
+        createConditionalObject({
+          toolCallId: event.actionId,
+          sessionId,
+          turnId,
+          toolName: event.name,
+          request: event.input,
+          status: "running",
+          sensitivity: "normal",
+          createdAt: occurredAt,
+        } as const)
+          .addOptional(
+            !(event.timelineSequence === undefined)
+              ? { timelineSequence: event.timelineSequence }
+              : undefined,
+          )
+          .finish(),
+      );
       return;
     }
     const current = await workspace.operational.toolCalls.get(event.actionId);
@@ -2002,29 +2033,47 @@ export async function createApplicationRuntimeComposition(
       throw new Error(`Agent action ${event.actionId} changed its durable identity`);
     if (event.type === "tool-update") {
       const executionId = actionExecutionId(event.update);
-      await workspace.operational.toolCalls.put({
-        ...current,
-        ...(executionId ? { executionId } : {}),
-        update: event.update,
-        status: "running",
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      await workspace.operational.toolCalls.put(
+        createConditionalObject({
+          ...current,
+        } as const)
+          .addOptional(executionId ? { executionId } : undefined)
+          .add({
+            update: event.update,
+            status: "running",
+          } as const)
+          .finish(),
+      );
       return;
     }
     const executionId = actionExecutionId(event.result, current.update);
-    await workspace.operational.toolCalls.put({
-      ...current,
-      ...(executionId && !current.executionId ? { executionId } : {}),
-      response: event.result,
-      status: event.isError ? "failed" : "completed",
-      completedAt: occurredAt,
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    await workspace.operational.toolCalls.put(
+      createConditionalObject({
+        ...current,
+      } as const)
+        .addOptional(executionId && !current.executionId ? { executionId } : undefined)
+        .add({
+          response: event.result,
+          status: event.isError ? "failed" : "completed",
+          completedAt: occurredAt,
+        } as const)
+        .finish(),
+    );
   };
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const durableActionEvent = (turnId: string, event: AgentActionEvent): AgentActionEvent =>
-    Object.freeze({
-      ...event,
-      actionId: event.parentActionId ? event.actionId : `${turnId}:${event.actionId}`,
-      ...(event.parentActionId ? { parentActionId: `${turnId}:${event.parentActionId}` } : {}),
-    });
+    Object.freeze(
+      createConditionalObject({
+        ...event,
+        actionId: event.parentActionId ? event.actionId : `${turnId}:${event.actionId}`,
+      } as const)
+        .addOptional(
+          event.parentActionId ? { parentActionId: `${turnId}:${event.parentActionId}` } : undefined,
+        )
+        .finish(),
+    );
   const prepareCodeExecution: PiCodeExecutionAdapter["prepare"] = async (plan, signal, resources) => {
     if (!plan.project || plan.project.projectId !== project.projectId || plan.project.root !== project.root)
       throw new Error(`Frozen turn plan ${plan.planId} does not belong to project ${project.projectId}`);
@@ -2059,7 +2108,10 @@ export async function createApplicationRuntimeComposition(
     );
     const savedThisTurnWorkflowsByName = new Map<
       string,
-      { readonly manifest: WorkflowManifest; readonly definitionRevision: FileRevisionRef }
+      {
+        readonly manifest: WorkflowManifest;
+        readonly definitionRevision: FileRevisionRef;
+      }
     >();
     const visibleWorkflows = () => {
       const workflows = new Map(frozenWorkflowsByName);
@@ -2183,7 +2235,7 @@ export async function createApplicationRuntimeComposition(
         visibility: "codemode_only",
         inputSchema: z.strictObject({
           name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-          description: z.string().min(1).max(2_048),
+          description: z.string().min(1).max(2048),
           source: z
             .string()
             .min(1)
@@ -2211,16 +2263,25 @@ export async function createApplicationRuntimeComposition(
                 throw new Error(`Script requires unavailable tool ${requiredTool}`);
             z.fromJSONSchema(inputSchema);
             z.fromJSONSchema(outputSchema);
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             const actor = Object.freeze({ actorId: "noesis-script-library", kind: "noesis" as const });
-            const sourceRevision = await workspace.definitions.recordWorkingDefinition({
-              workingPath: `${scriptScope.workingRoot}/${name}/index.mjs`,
-              bytes: encoder.encode(source),
-              actor,
-              reason: `Script source saved from turn ${plan.turnId}`,
-              ...(currentManifest
-                ? { predecessorRevisionId: currentManifest.sourceRevision.revisionId }
-                : {}),
-            });
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+            const sourceRevision = await workspace.definitions.recordWorkingDefinition(
+              createConditionalObject({
+                workingPath: `${scriptScope.workingRoot}/${name}/index.mjs`,
+                bytes: encoder.encode(source),
+                actor,
+                reason: `Script source saved from turn ${plan.turnId}`,
+              } as const)
+                .addOptional(
+                  currentManifest
+                    ? {
+                        predecessorRevisionId: currentManifest.sourceRevision.revisionId,
+                      }
+                    : undefined,
+                )
+                .finish(),
+            );
             const manifest = ScriptManifestSchema.parse({
               kind: "noesis_script",
               name,
@@ -2236,24 +2297,32 @@ export async function createApplicationRuntimeComposition(
                 planId: plan.planId,
               },
             });
-            const publication = await workspace.definitionPublications.publish({
-              namespace: scriptScope.namespace,
-              definitionId: name,
-              revision,
-              workingPath: `${scriptScope.workingRoot}/${name}/script.json`,
-              bytes: encoder.encode(`${canonicalJson(manifest)}\n`),
-              ...(projectCurrent
-                ? {
-                    expectedCurrentRevisionId: projectCurrent.definitionRevision.revisionId,
-                  }
-                : {}),
-              provenanceRefs: Object.freeze([foregroundEvidence(plan)]),
-              activity: Object.freeze({
-                kind: "script.saved",
-                actor,
-                reason: `Reusable script saved from turn ${plan.turnId}`,
-              }),
-            });
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+            const publication = await workspace.definitionPublications.publish(
+              createConditionalObject({
+                namespace: scriptScope.namespace,
+                definitionId: name,
+                revision,
+                workingPath: `${scriptScope.workingRoot}/${name}/script.json`,
+                bytes: encoder.encode(`${canonicalJson(manifest)}\n`),
+              } as const)
+                .addOptional(
+                  projectCurrent
+                    ? {
+                        expectedCurrentRevisionId: projectCurrent.definitionRevision.revisionId,
+                      }
+                    : undefined,
+                )
+                .add({
+                  provenanceRefs: Object.freeze([foregroundEvidence(plan)]),
+                  activity: Object.freeze({
+                    kind: "script.saved",
+                    actor,
+                    reason: `Reusable script saved from turn ${plan.turnId}`,
+                  }),
+                } as const)
+                .finish(),
+            );
             if (!publication.ok) throw new Error(publication.error.message);
             return {
               ...manifest,
@@ -2421,7 +2490,7 @@ export async function createApplicationRuntimeComposition(
         visibility: "codemode_only",
         inputSchema: z.strictObject({
           name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-          description: z.string().min(1).max(2_048),
+          description: z.string().min(1).max(2048),
           inputSchema: z.record(z.string(), JsonValueSchema),
           outputSchema: z.record(z.string(), JsonValueSchema),
           phases: z.array(WorkflowPhaseSchema).min(1).max(64),
@@ -2469,25 +2538,35 @@ export async function createApplicationRuntimeComposition(
                 planId: plan.planId,
               },
             });
-            const publication = await workspace.definitionPublications.publish({
-              namespace: workflowScope.namespace,
-              definitionId: name,
-              revision,
-              workingPath: `${workflowScope.workingRoot}/${name}/workflow.json`,
-              bytes: encoder.encode(`${canonicalJson(manifest)}\n`),
-              ...(projectCurrent
-                ? { expectedCurrentRevisionId: projectCurrent.definitionRevision.revisionId }
-                : {}),
-              provenanceRefs: Object.freeze([foregroundEvidence(plan)]),
-              activity: Object.freeze({
-                kind: "workflow.saved",
-                actor: Object.freeze({
-                  actorId: "noesis-workflow-library",
-                  kind: "noesis" as const,
-                }),
-                reason: `Workflow saved from turn ${plan.turnId}`,
-              }),
-            });
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+            const publication = await workspace.definitionPublications.publish(
+              createConditionalObject({
+                namespace: workflowScope.namespace,
+                definitionId: name,
+                revision,
+                workingPath: `${workflowScope.workingRoot}/${name}/workflow.json`,
+                bytes: encoder.encode(`${canonicalJson(manifest)}\n`),
+              } as const)
+                .addOptional(
+                  projectCurrent
+                    ? {
+                        expectedCurrentRevisionId: projectCurrent.definitionRevision.revisionId,
+                      }
+                    : undefined,
+                )
+                .add({
+                  provenanceRefs: Object.freeze([foregroundEvidence(plan)]),
+                  activity: Object.freeze({
+                    kind: "workflow.saved",
+                    actor: Object.freeze({
+                      actorId: "noesis-workflow-library",
+                      kind: "noesis" as const,
+                    }),
+                    reason: `Workflow saved from turn ${plan.turnId}`,
+                  }),
+                } as const)
+                .finish(),
+            );
             if (!publication.ok) throw new Error(publication.error.message);
             return toJsonValue({
               manifest,
@@ -2563,6 +2642,7 @@ export async function createApplicationRuntimeComposition(
             throw new Error(`Legacy workflow run ${runId} is not available in project ${project.projectId}`);
           if (run.status === "completed") {
             if (run.output === undefined) throw new Error(`Completed workflow run ${runId} has no output`);
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             return {
               runId,
               workflowRevision: run.workflowRevision,
@@ -2859,6 +2939,7 @@ export async function createApplicationRuntimeComposition(
       const logicalExecutionId = request.logicalExecutionId ?? executionId;
       const startedAt = new Date().toISOString();
       const artifactDirectory = `codemode/${sha256(executionId).slice(0, 32)}`;
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const artifactActor = Object.freeze({
         actorId: "noesis-codemode",
         kind: "noesis" as const,
@@ -2890,20 +2971,28 @@ export async function createApplicationRuntimeComposition(
       let callCount = 0;
       let capturedStdout = "";
       let capturedStderr = "";
-      const base = Object.freeze({
-        executionId,
-        logicalExecutionId,
-        ...(parentExecutionId ? { parentExecutionId } : {}),
-        sessionId: request.sessionId,
-        ...(request.turnId ? { turnId: request.turnId } : {}),
-        catalogId: broker.catalogId,
-        catalogDigest: broker.catalogDigest,
-        sourceDigest: sha256(request.source),
-        sourceArtifactId: sourceArtifact.artifactId,
-        stdoutArtifactId: pendingStdoutArtifact.artifactId,
-        stderrArtifactId: pendingStderrArtifact.artifactId,
-        startedAt,
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      const base = Object.freeze(
+        createConditionalObject({
+          executionId,
+          logicalExecutionId,
+        } as const)
+          .addOptional(parentExecutionId ? { parentExecutionId } : undefined)
+          .add({
+            sessionId: request.sessionId,
+          } as const)
+          .addOptional(request.turnId ? { turnId: request.turnId } : undefined)
+          .add({
+            catalogId: broker.catalogId,
+            catalogDigest: broker.catalogDigest,
+            sourceDigest: sha256(request.source),
+            sourceArtifactId: sourceArtifact.artifactId,
+            stdoutArtifactId: pendingStdoutArtifact.artifactId,
+            stderrArtifactId: pendingStderrArtifact.artifactId,
+            startedAt,
+          } as const)
+          .finish(),
+      );
       const persistLogs = async (stdout: string, stderr: string) => {
         const [stdoutArtifact, stderrArtifact] = await Promise.all([
           workspace.artifacts.writeArtifact({
@@ -3180,29 +3269,39 @@ export async function createApplicationRuntimeComposition(
           const message = error instanceof Error ? error.message : String(error);
           const failedAt = new Date().toISOString();
           const ambiguous = message.startsWith("ambiguous:");
-          await workspace.operational.workflows.putPhase({
-            runId,
-            phaseIndex,
-            phaseName: phase.name,
-            status: context.signal.aborted ? "cancelled" : "failed",
-            attempt,
-            logicalExecutionId,
-            input: phaseInput,
-            ...(executionPrepared ? { executionId } : {}),
-            error: message,
-            startedAt,
-            completedAt: failedAt,
-          });
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          await workspace.operational.workflows.putPhase(
+            createConditionalObject({
+              runId,
+              phaseIndex,
+              phaseName: phase.name,
+              status: context.signal.aborted ? "cancelled" : "failed",
+              attempt,
+              logicalExecutionId,
+              input: phaseInput,
+            } as const)
+              .addOptional(executionPrepared ? { executionId } : undefined)
+              .add({
+                error: message,
+                startedAt,
+                completedAt: failedAt,
+              } as const)
+              .finish(),
+          );
           const current = await workspace.operational.workflows.getRun(runId);
           if (current)
-            await workspace.operational.workflows.putRun({
-              ...current,
-              status: context.signal.aborted ? "cancelled" : ambiguous ? "failed" : "paused",
-              currentPhase: phaseIndex,
-              error: message,
-              updatedAt: failedAt,
-              ...(context.signal.aborted || ambiguous ? { completedAt: failedAt } : {}),
-            });
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+            await workspace.operational.workflows.putRun(
+              createConditionalObject({
+                ...current,
+                status: context.signal.aborted ? "cancelled" : ambiguous ? "failed" : "paused",
+                currentPhase: phaseIndex,
+                error: message,
+                updatedAt: failedAt,
+              } as const)
+                .addOptional(context.signal.aborted || ambiguous ? { completedAt: failedAt } : undefined)
+                .finish(),
+            );
           throw error;
         }
       }
@@ -3232,6 +3331,7 @@ export async function createApplicationRuntimeComposition(
         updatedAt: completedAt,
         completedAt,
       });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         runId,
         workflowRevision: manifest.revision,
@@ -3293,15 +3393,21 @@ export async function createApplicationRuntimeComposition(
         },
         emitUpdate?: (update: JsonValue) => void,
       ) => {
-        const result = await scriptAwareBroker.invoke(name, input, {
-          executionId: identity.executionId,
-          logicalExecutionId: identity.logicalExecutionId,
-          callId: identity.callId,
-          sessionId: plan.sessionId,
-          turnId: plan.turnId,
-          signal: invokeSignal,
-          ...(emitUpdate ? { emitUpdate } : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        const result = await scriptAwareBroker.invoke(
+          name,
+          input,
+          createConditionalObject({
+            executionId: identity.executionId,
+            logicalExecutionId: identity.logicalExecutionId,
+            callId: identity.callId,
+            sessionId: plan.sessionId,
+            turnId: plan.turnId,
+            signal: invokeSignal,
+          } as const)
+            .addOptional(emitUpdate ? { emitUpdate } : undefined)
+            .finish(),
+        );
         if (!result.ok)
           throw new Error(
             `${result.code}: ${result.message}${result.details === undefined ? "" : `\n${JSON.stringify(result.details)}`}`,
@@ -3313,28 +3419,36 @@ export async function createApplicationRuntimeComposition(
         timeoutMs: number | undefined,
         executeSignal: AbortSignal,
         emit: Parameters<Awaited<ReturnType<PiCodeExecutionAdapter["prepare"]>>["execute"]>[3],
-        identity?: { readonly logicalExecutionId: string },
+        identity?: {
+          readonly logicalExecutionId: string;
+        },
       ) => {
         if (!runRecordedCode) throw new Error("Codemode runtime is not initialized");
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const result = await runRecordedCode(
-          {
+          createConditionalObject({
             source,
             sessionId: plan.sessionId,
             turnId: plan.turnId,
             signal: executeSignal,
-            ...(identity ? { logicalExecutionId: identity.logicalExecutionId } : {}),
-            ...(timeoutMs === undefined ? {} : { timeoutMs }),
-          },
+          } as const)
+            .addOptional(identity ? { logicalExecutionId: identity.logicalExecutionId } : undefined)
+            .addOptional(!(timeoutMs === undefined) ? { timeoutMs } : undefined)
+            .finish(),
           undefined,
           (event) => {
             if (event.type === "progress")
-              emit({
-                type: "progress",
-                value: event.value,
-                ...(event.callId ? { callId: event.callId } : {}),
-                ...(event.name ? { name: event.name } : {}),
-                ...(event.callIndex === undefined ? {} : { callIndex: event.callIndex }),
-              });
+              // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+              emit(
+                createConditionalObject({
+                  type: "progress",
+                  value: event.value,
+                } as const)
+                  .addOptional(event.callId ? { callId: event.callId } : undefined)
+                  .addOptional(event.name ? { name: event.name } : undefined)
+                  .addOptional(!(event.callIndex === undefined) ? { callIndex: event.callIndex } : undefined)
+                  .finish(),
+              );
             else if (event.type === "tool-start")
               emit({
                 type: "tool-start",
@@ -3344,15 +3458,19 @@ export async function createApplicationRuntimeComposition(
                 input: event.input,
               });
             else if (event.type === "tool-end")
-              emit({
-                type: "tool-end",
-                callId: event.callId,
-                name: event.name,
-                callIndex: event.callIndex,
-                ok: event.ok,
-                ...(event.result === undefined ? {} : { result: event.result }),
-                ...(event.error ? { error: event.error } : {}),
-              });
+              // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+              emit(
+                createConditionalObject({
+                  type: "tool-end",
+                  callId: event.callId,
+                  name: event.name,
+                  callIndex: event.callIndex,
+                  ok: event.ok,
+                } as const)
+                  .addOptional(!(event.result === undefined) ? { result: event.result } : undefined)
+                  .addOptional(event.error ? { error: event.error } : undefined)
+                  .finish(),
+              );
           },
           async (executionId) => {
             emit({ type: "started", executionId });
@@ -3376,6 +3494,7 @@ export async function createApplicationRuntimeComposition(
     prepare: prepareCodeExecution,
     shutdown: shutdownCodeExecution,
   });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const foregroundEvidence = (plan: FrozenTurnPlan) =>
     Object.freeze({
       kind: "database_row" as const,
@@ -3435,14 +3554,16 @@ export async function createApplicationRuntimeComposition(
       const summarizeDescriptor = (descriptor: (typeof sortedTools)[number], descriptionBytes: number) => {
         const label = boundedUtf8Text(descriptor.label, MAX_SELF_INSPECTION_LABEL_BYTES);
         const description = boundedUtf8Text(descriptor.description, descriptionBytes);
-        return {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return createConditionalObject({
           name: descriptor.name,
           label: label.value,
           description: description.value,
           revisionId: descriptor.revisionId,
-          ...(label.truncated ? { labelTruncated: true } : {}),
-          ...(description.truncated ? { descriptionTruncated: true } : {}),
-        };
+        } as const)
+          .addOptional(label.truncated ? { labelTruncated: true } : undefined)
+          .addOptional(description.truncated ? { descriptionTruncated: true } : undefined)
+          .finish();
       };
       const inspectionBytes = (value: JsonValue): number => encoder.encode(canonicalJson(value)).byteLength;
       if (tool) {
@@ -3543,30 +3664,36 @@ export async function createApplicationRuntimeComposition(
     }
     if (tool !== undefined || cursor !== undefined || limit !== undefined)
       throw new Error("tool, cursor, and limit are only valid when section is 'tools'");
-    return toJsonValue({
-      planId: plan.planId,
-      sessionId: plan.sessionId,
-      turnId: plan.turnId,
-      provider: plan.provider,
-      model: plan.model,
-      thinkingLevel: plan.thinkingLevel,
-      capabilities: plan.selectedCapabilities.map((selection) => ({
-        capabilityId: selection.capabilityId,
-        revision: selection.revision,
-        scope: selection.scope,
-      })),
-      memory: memory?.ok ? memory.value : [],
-      experiments: experiments ?? [],
-      ...(catalog
-        ? {
-            catalog: {
-              catalogId: catalog.catalogId,
-              catalogDigest: catalog.catalogDigest,
-              toolCount: catalog.tools.length,
-            },
-          }
-        : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return toJsonValue(
+      createConditionalObject({
+        planId: plan.planId,
+        sessionId: plan.sessionId,
+        turnId: plan.turnId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        capabilities: plan.selectedCapabilities.map((selection) => ({
+          capabilityId: selection.capabilityId,
+          revision: selection.revision,
+          scope: selection.scope,
+        })),
+        memory: memory?.ok ? memory.value : [],
+        experiments: experiments ?? [],
+      } as const)
+        .addOptional(
+          catalog
+            ? {
+                catalog: {
+                  catalogId: catalog.catalogId,
+                  catalogDigest: catalog.catalogDigest,
+                  toolCount: catalog.tools.length,
+                },
+              }
+            : undefined,
+        )
+        .finish(),
+    );
   };
   const remember: PiSelfToolAdapter["remember"] = async ({ memory, scope, anticipatedUse, plan }) => {
     const criterionId = `remember-${sha256(canonicalJson({ memory, scope })).slice(0, 24)}`;
@@ -3588,6 +3715,7 @@ export async function createApplicationRuntimeComposition(
         idempotencyKey: `remember:${criterionId}:${plan.turnId}`,
         requestDigest,
         execute: async () => {
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           const created = await criteria.create({
             criterionId,
             source: "explicit_statement",
@@ -3673,16 +3801,20 @@ export async function createApplicationRuntimeComposition(
             } catch (error) {
               activationError = error instanceof Error ? error.message : String(error);
             }
-            return toJsonValue({
-              status: "hotbar_updated",
-              action: input.action,
-              tool: input.tool,
-              hotbar: hotbarToolNames,
-              activeHotbar: activeNext,
-              currentTurnUpdated: activationError === undefined,
-              availableImmediately: input.action === "add_tool" && activationError === undefined,
-              ...(activationError ? { activationError } : {}),
-            });
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+            return toJsonValue(
+              createConditionalObject({
+                status: "hotbar_updated",
+                action: input.action,
+                tool: input.tool,
+                hotbar: hotbarToolNames,
+                activeHotbar: activeNext,
+                currentTurnUpdated: activationError === undefined,
+                availableImmediately: input.action === "add_tool" && activationError === undefined,
+              } as const)
+                .addOptional(activationError ? { activationError } : undefined)
+                .finish(),
+            );
           },
         },
         Object.freeze({
@@ -3718,7 +3850,6 @@ export async function createApplicationRuntimeComposition(
       reasoning: options.config.agent.thinkingLevel,
     }),
   });
-
   const resolveRevision = async (
     reference: CapabilityRevisionRef,
   ): Promise<CapabilityRevision | undefined> => {
@@ -3729,13 +3860,15 @@ export async function createApplicationRuntimeComposition(
   };
   const resolveBaseline = async (reference: CapabilityRevisionRef): Promise<FrozenBaselineRef> => {
     if (sameCapabilityRevisionRef(reference, genesisRevision))
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({ kind: "genesis" as const });
-    const experiments = await workspace.research.experiments.listExperiments({ limit: 1_000 });
+    const experiments = await workspace.research.experiments.listExperiments({ limit: 1000 });
     const origin = experiments.find(
       (experiment) =>
         experiment.activatedRevision !== undefined &&
         sameCapabilityRevisionRef(experiment.activatedRevision, reference),
     );
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return origin
       ? Object.freeze({
           kind: "capability_revision" as const,
@@ -3744,6 +3877,7 @@ export async function createApplicationRuntimeComposition(
         })
       : Object.freeze({ kind: "unknown_legacy" as const });
   };
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const basePermissionManifest = Object.freeze({
     effects: Object.freeze(["read", "write", "execute", "network"] as const),
     resourcePatterns: Object.freeze([
@@ -3775,6 +3909,7 @@ export async function createApplicationRuntimeComposition(
     protectedRuntime,
     capabilityRouter: Object.freeze({
       route: async (request: TurnCapabilityRoutingRequest) => {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const result = await inference.run(
           {
             runId: `capability-route-${request.turnId}`,
@@ -3806,18 +3941,24 @@ export async function createApplicationRuntimeComposition(
           },
           CapabilityRoutingDecisionSchema,
         );
-        return Object.freeze({
-          strategyId: "semantic-capability-router-v1",
-          reason: result.value.reason,
-          selections: Object.freeze(
-            result.value.selections.map((selection) => Object.freeze({ ...selection })),
-          ),
-          ...(result.value.learningAttribution
-            ? {
-                learningAttribution: Object.freeze({ ...result.value.learningAttribution }),
-              }
-            : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return Object.freeze(
+          createConditionalObject({
+            strategyId: "semantic-capability-router-v1",
+            reason: result.value.reason,
+            selections: Object.freeze(
+              result.value.selections.map((selection) => Object.freeze({ ...selection })),
+            ),
+          } as const)
+            .addOptional(
+              result.value.learningAttribution
+                ? {
+                    learningAttribution: Object.freeze({ ...result.value.learningAttribution }),
+                  }
+                : undefined,
+            )
+            .finish(),
+        );
       },
     }),
     basePermissionManifest,
@@ -3843,8 +3984,13 @@ export async function createApplicationRuntimeComposition(
     coordinator,
     project,
   });
-
-  const sessionTimes = new Map<string, { readonly createdAt: string; readonly updatedAt: string }>();
+  const sessionTimes = new Map<
+    string,
+    {
+      readonly createdAt: string;
+      readonly updatedAt: string;
+    }
+  >();
   const trailStates = new Map<string, TrailState>();
   const messageCounts = new Map<string, number>();
   const refreshMessageCount = async (sessionId: string): Promise<number> => {
@@ -3857,42 +4003,53 @@ export async function createApplicationRuntimeComposition(
       replayEligibleTurns(workspace, session.sessionId),
       refreshMessageCount(session.sessionId),
     ]);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     trailStates.set(
       session.sessionId,
-      Object.freeze({
-        trailId: session.sessionId,
-        ...(session.parentSessionId ? { parentTrailId: session.parentSessionId } : {}),
-        title: session.title,
-        status: session.status,
-        provider: session.provider,
-        model: session.model,
-        runtime: session.runtime,
-        capabilityVersions: Object.freeze({}),
-        turns: Object.freeze(turns),
-      }),
+      Object.freeze(
+        createConditionalObject({
+          trailId: session.sessionId,
+        } as const)
+          .addOptional(session.parentSessionId ? { parentTrailId: session.parentSessionId } : undefined)
+          .add({
+            title: session.title,
+            status: session.status,
+            provider: session.provider,
+            model: session.model,
+            runtime: session.runtime,
+            capabilityVersions: Object.freeze({}),
+            turns: Object.freeze(turns),
+          } as const)
+          .finish(),
+      ),
     );
     sessionTimes.set(session.sessionId, {
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
     });
   }
-
   const persistTrail = async (trail: TrailState): Promise<TrailState> => {
     const timestamp = new Date().toISOString();
     const times = sessionTimes.get(trail.trailId) ?? { createdAt: timestamp, updatedAt: timestamp };
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     await workspace.operational.sessions.put(
-      Object.freeze({
-        sessionId: trail.trailId,
-        ...(trail.parentTrailId ? { parentSessionId: trail.parentTrailId } : {}),
-        title: trail.title,
-        status: trail.status,
-        provider: trail.provider,
-        model: trail.model,
-        runtime: trail.runtime,
-        createdAt: times.createdAt,
-        updatedAt: timestamp,
-        metadata: Object.freeze({ authority: "workspace-sqlite" }),
-      }),
+      Object.freeze(
+        createConditionalObject({
+          sessionId: trail.trailId,
+        } as const)
+          .addOptional(trail.parentTrailId ? { parentSessionId: trail.parentTrailId } : undefined)
+          .add({
+            title: trail.title,
+            status: trail.status,
+            provider: trail.provider,
+            model: trail.model,
+            runtime: trail.runtime,
+            createdAt: times.createdAt,
+            updatedAt: timestamp,
+            metadata: Object.freeze({ authority: "workspace-sqlite" }),
+          } as const)
+          .finish(),
+      ),
     );
     sessionTimes.set(trail.trailId, { createdAt: times.createdAt, updatedAt: timestamp });
     if (!messageCounts.has(trail.trailId)) messageCounts.set(trail.trailId, 0);
@@ -3916,24 +4073,31 @@ export async function createApplicationRuntimeComposition(
         .map((trail): TrailSummary => {
           const times = sessionTimes.get(trail.trailId);
           const latest = trail.turns.at(-1);
-          return Object.freeze({
-            trailId: trail.trailId,
-            ...(trail.parentTrailId ? { parentTrailId: trail.parentTrailId } : {}),
-            title: trail.title,
-            status: trail.status,
-            provider: trail.provider,
-            model: trail.model,
-            runtime: trail.runtime,
-            createdAt: times?.createdAt ?? "",
-            updatedAt: times?.updatedAt ?? "",
-            turnCount: trail.turns.length,
-            messageCount: messageCounts.get(trail.trailId) ?? 0,
-            preview: latest?.output ?? latest?.input ?? "",
-          });
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          return Object.freeze(
+            createConditionalObject({
+              trailId: trail.trailId,
+            } as const)
+              .addOptional(trail.parentTrailId ? { parentTrailId: trail.parentTrailId } : undefined)
+              .add({
+                title: trail.title,
+                status: trail.status,
+                provider: trail.provider,
+                model: trail.model,
+                runtime: trail.runtime,
+                createdAt: times?.createdAt ?? "",
+                updatedAt: times?.updatedAt ?? "",
+                turnCount: trail.turns.length,
+                messageCount: messageCounts.get(trail.trailId) ?? 0,
+                preview: latest?.output ?? latest?.input ?? "",
+              } as const)
+              .finish(),
+          );
         })
         .sort(compareTrailRecency)
         .slice(0, SESSION_PICKER_LIMIT),
     );
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const startTrail: NoesisRuntime["startTrail"] = async (input) =>
     await persistTrail(
       Object.freeze({
@@ -3957,11 +4121,13 @@ export async function createApplicationRuntimeComposition(
       throw new Error(
         `Session ${trailId} is still marked running; execution ownership recovery is required.`,
       );
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return await persistTrail(Object.freeze({ ...trail, status: "idle" as const }));
   };
   const forkTrail: NoesisRuntime["forkTrail"] = async (trailId, title) => {
     const source = getTrail(trailId);
     const inheritedHistory = await replayEligibleHistoryMessages(workspace, trailId);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     let fork = await persistTrail(
       Object.freeze({
         ...source,
@@ -3977,9 +4143,8 @@ export async function createApplicationRuntimeComposition(
       const historyTurnKey = replayHistoryTurnKey(message);
       if (historyKind === "turn" && historyTurnKey === undefined)
         throw new Error(`Replay-eligible message ${message.messageId} has no conversation turn identity`);
-      const messageId = `${fork.trailId}:inherited:${sha256(
-        canonicalJson({ sourceSessionId: trailId, sourceMessageId: message.messageId }),
-      ).slice(0, 32)}`;
+      const messageId = `${fork.trailId}:inherited:${sha256(canonicalJson({ sourceSessionId: trailId, sourceMessageId: message.messageId })).slice(0, 32)}`;
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const inherited = Object.freeze({
         messageId,
         sessionId: fork.trailId,
@@ -3987,14 +4152,19 @@ export async function createApplicationRuntimeComposition(
         content: message.content,
         sensitivity: message.sensitivity,
         createdAt: message.createdAt,
-        metadata: Object.freeze({
-          replayEligible: true,
-          historyKind,
-          historySequence: index,
-          ...(historyTurnKey ? { historyTurnKey } : {}),
-          inheritedFromSessionId: trailId,
-          inheritedFromMessageId: message.messageId,
-        }),
+        metadata: Object.freeze(
+          createConditionalObject({
+            replayEligible: true,
+            historyKind,
+            historySequence: index,
+          } as const)
+            .addOptional(historyTurnKey ? { historyTurnKey } : undefined)
+            .add({
+              inheritedFromSessionId: trailId,
+              inheritedFromMessageId: message.messageId,
+            } as const)
+            .finish(),
+        ),
       }) satisfies MessageRecord;
       const existing = await workspace.operational.messages.get(messageId);
       if (existing !== undefined) {
@@ -4013,7 +4183,6 @@ export async function createApplicationRuntimeComposition(
     );
     return fork;
   };
-
   const compactionTails = new Map<string, Promise<void>>();
   const activeCompactions = new Map<string, AbortController>();
   let compactionsClosing = false;
@@ -4036,18 +4205,22 @@ export async function createApplicationRuntimeComposition(
     resolveContextTokenBudget(Number.MAX_SAFE_INTEGER, modelContextLimits(trail));
   const effectiveHistoryBudget = (trail: TrailState, input: string): number =>
     resolveHistoryTokenBudget(effectiveContextBudget(trail), Object.freeze([BASE_SYSTEM_PROMPT, input]));
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const contextMessages = (messages: readonly ContextHistoryMessage[]): readonly SessionContextMessage[] =>
     Object.freeze(
       messages.map(({ message, turnStatus }) =>
-        Object.freeze({
-          messageId: message.messageId,
-          role: message.role === "user" ? ("user" as const) : ("assistant" as const),
-          content: message.content,
-          createdAt: message.createdAt,
-          sensitivity: message.sensitivity,
-          startsTurn: message.role === "user" && replayHistoryKind(message) === "turn",
-          ...(turnStatus === undefined ? {} : { turnStatus }),
-        }),
+        Object.freeze(
+          createConditionalObject({
+            messageId: message.messageId,
+            role: message.role === "user" ? ("user" as const) : ("assistant" as const),
+            content: message.content,
+            createdAt: message.createdAt,
+            sensitivity: message.sensitivity,
+            startsTurn: message.role === "user" && replayHistoryKind(message) === "turn",
+          } as const)
+            .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
+            .finish(),
+        ),
       ),
     );
   const compactSession = async (
@@ -4072,11 +4245,18 @@ export async function createApplicationRuntimeComposition(
         if (!current.exceedsBudget) {
           if (mode !== "manual" || compacted) return;
         }
-        const window = prepareCompactionWindow(messages, checkpoint, targetTokenBudget, {
-          force: mode === "manual" && !compacted,
-          compactorInputTokenBudget,
-          ...(focus?.trim() ? { instructions: focus } : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        const window = prepareCompactionWindow(
+          messages,
+          checkpoint,
+          targetTokenBudget,
+          createConditionalObject({
+            force: mode === "manual" && !compacted,
+            compactorInputTokenBudget,
+          } as const)
+            .addOptional(focus?.trim() ? { instructions: focus } : undefined)
+            .finish(),
+        );
         if (!window) throw new Error("There is no completed conversation context to compact.");
         const sensitivity = compactionSensitivity(checkpoint?.sensitivity, window.sourceMessages);
         if (sensitivity !== "normal")
@@ -4126,6 +4306,7 @@ export async function createApplicationRuntimeComposition(
             idempotencyKey: `context-compaction-inference:${checkpointId}`,
             requestDigest: inferenceRequestDigest,
             execute: async () => {
+              // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
               const result = await compactor.run(
                 {
                   runId: inferenceOperationId,
@@ -4180,20 +4361,34 @@ export async function createApplicationRuntimeComposition(
             requestDigest: contextCheckpointActivationRequestDigest(record),
             execute: async () => {
               controller.signal.throwIfAborted();
-              const result = await workspace.operational.contextCheckpoints.activate({
-                checkpoint: record,
-                expectedContextMessageIds: Object.freeze(
-                  current.messages.map((message) => message.messageId),
-                ),
-                ...(checkpoint ? { expectedActiveCheckpointId: checkpoint.checkpointId } : {}),
-              });
+              // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+              const result = await workspace.operational.contextCheckpoints.activate(
+                createConditionalObject({
+                  checkpoint: record,
+                  expectedContextMessageIds: Object.freeze(
+                    current.messages.map((message) => message.messageId),
+                  ),
+                } as const)
+                  .addOptional(
+                    checkpoint ? { expectedActiveCheckpointId: checkpoint.checkpointId } : undefined,
+                  )
+                  .finish(),
+              );
+              // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
               return toJsonValue(
                 result.status === "activated"
                   ? { status: result.status }
-                  : {
+                  : createConditionalObject({
                       status: result.status,
-                      ...(result.activeCheckpointId ? { activeCheckpointId: result.activeCheckpointId } : {}),
-                    },
+                    } as const)
+                      .addOptional(
+                        result.activeCheckpointId
+                          ? {
+                              activeCheckpointId: result.activeCheckpointId,
+                            }
+                          : undefined,
+                      )
+                      .finish(),
               );
             },
           },
@@ -4235,7 +4430,6 @@ export async function createApplicationRuntimeComposition(
     });
     await running;
   };
-
   const executeTurn = async (
     trailId: string,
     input: string,
@@ -4256,6 +4450,7 @@ export async function createApplicationRuntimeComposition(
     const contextTokenBudget = effectiveContextBudget(trail);
     const historyTokenBudget = effectiveHistoryBudget(trail, input);
     await serializeCompaction(trail, "automatic", historyTokenBudget);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
     const thinkingLevel = runOptions?.thinkingLevel ?? agentDefaults.thinkingLevel;
     try {
@@ -4280,28 +4475,38 @@ export async function createApplicationRuntimeComposition(
       const priorConversation = Object.freeze(
         historyMessages.map((message) => {
           const turnStatus = contextById.get(message.messageId)?.turnStatus;
-          return Object.freeze({
-            messageId: message.messageId,
-            role: message.role === "user" ? ("user" as const) : ("assistant" as const),
-            content: message.content,
-            createdAt: message.createdAt,
-            ...(turnStatus === undefined ? {} : { turnStatus }),
-          });
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          return Object.freeze(
+            createConditionalObject({
+              messageId: message.messageId,
+              role: message.role === "user" ? ("user" as const) : ("assistant" as const),
+              content: message.content,
+              createdAt: message.createdAt,
+            } as const)
+              .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
+              .finish(),
+          );
         }),
       );
-      const plan = await turnPlanner.planAndAdmit({
-        sessionId: trailId,
-        turnId,
-        userInput: input,
-        provider: running.provider,
-        model: running.model,
-        thinkingLevel,
-        priorHistory: priorConversation,
-        ...(activeCheckpoint ? { contextCheckpointId: activeCheckpoint.checkpointId } : {}),
-        contextTokenBudget: historyTokenBudget,
-        requestTokenBudget: contextTokenBudget,
-        baseSystemPrompt: BASE_SYSTEM_PROMPT,
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      const plan = await turnPlanner.planAndAdmit(
+        createConditionalObject({
+          sessionId: trailId,
+          turnId,
+          userInput: input,
+          provider: running.provider,
+          model: running.model,
+          thinkingLevel,
+          priorHistory: priorConversation,
+        } as const)
+          .addOptional(activeCheckpoint ? { contextCheckpointId: activeCheckpoint.checkpointId } : undefined)
+          .add({
+            contextTokenBudget: historyTokenBudget,
+            requestTokenBudget: contextTokenBudget,
+            baseSystemPrompt: BASE_SYSTEM_PROMPT,
+          } as const)
+          .finish(),
+      );
       const estimatedCompleteRequestTokens =
         estimateContextTokens(plan.renderedSystemPrompt) +
         estimateContextTokens(input) +
@@ -4314,6 +4519,7 @@ export async function createApplicationRuntimeComposition(
       if (estimatedCompleteRequestTokens > contextTokenBudget)
         throw new Error("The complete turn request exceeds the selected context token budget.");
       const occurredAt = new Date().toISOString();
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const contextFragments: ContextFragment[] = [
         Object.freeze({
           id: `${turnId}:system`,
@@ -4360,209 +4566,257 @@ export async function createApplicationRuntimeComposition(
         maxFragmentTokens: Math.max(1, Math.floor(contextTokenBudget / 2)),
       });
       try {
-        const settledTurn = await settlement.run({
-          sessionId: trailId,
-          turnId,
-          input,
-          ...(sourceIntentId ? { sourceIntentId } : {}),
-          occurredAt,
-          plan,
-          execute: async () => {
-            await options.skills?.pinSnapshot(
-              plan.planId,
-              undefined,
-              async (snapshot): Promise<PiSkillSnapshot> => {
-                const invocation = resolvePiSkillInvocation(input, snapshot.skills);
-                if (!invocation) return snapshot;
-                const invokedSkill = snapshot.skills.find((skill) => skill.name === invocation.name);
-                if (!invokedSkill)
-                  throw new Error(`Invoked skill ${invocation.name} is missing from its admitted snapshot`);
-                const revision = await workspace.evidence.appendEvidence({
-                  workingPath: `skill-invocations/${plan.planId}/${invokedSkill.contentDigest}.md`,
-                  bytes: encoder.encode(invokedSkill.content),
-                  evidenceKind: "input",
-                  actor: Object.freeze({ actorId: "runtime-turn-planner", kind: "system" as const }),
-                  reason: `Admit explicit skill ${invokedSkill.name} for frozen turn plan ${plan.planId}`,
-                  sensitivity: "normal",
-                  provenanceRefs: Object.freeze([foregroundEvidence(plan)]),
-                });
-                if (revision.contentDigest !== invokedSkill.contentDigest)
-                  throw new Error(`Admitted skill ${invokedSkill.name} changed while being recorded`);
-                return Object.freeze({
-                  skills: Object.freeze(
-                    snapshot.skills.map((skill) =>
-                      skill.name === invokedSkill.name
-                        ? Object.freeze({ ...skill, admittedRevision: revision })
-                        : skill,
-                    ),
-                  ),
-                  diagnostics: snapshot.diagnostics,
-                });
-              },
-            );
-            if (interactionControl?.isInterruptRequested())
-              return Object.freeze({
-                outcome: "aborted" as const,
-                output: "",
-                context,
-                usedCapabilities,
-                frozenTurnPlan: plan,
-              });
-            let actionPersistence = Promise.resolve();
-            let assistantPersistence = Promise.resolve();
-            let interactionReady = false;
-            let actionPersistenceFailure: unknown;
-            const recordActionPersistenceFailure = (error: unknown): void => {
-              actionPersistenceFailure ??= error;
-            };
-            const emit = (event: AgentRuntimeEvent): void => {
-              if (event.type === "status" && event.status === "started" && !interactionReady) {
-                interactionReady = true;
-                if (interactionControl?.isInterruptRequested()) void agent.abort(trailId);
-                else interactionControl?.onReady();
-              }
-              if (event.type === "tool-start" || event.type === "tool-update" || event.type === "tool-end") {
-                const durableEvent = durableActionEvent(turnId, event);
-                if (durableEvent.type === "tool-start" && durableEvent.parentActionId) {
-                  if (durableEvent.timelineSequence === undefined)
-                    throw new Error(`Nested action ${durableEvent.actionId} has no turn timeline position`);
-                  nestedActionBindings.set(
-                    durableEvent.actionId,
-                    Object.freeze({
-                      parentToolCallId: durableEvent.parentActionId,
-                      timelineSequence: durableEvent.timelineSequence,
-                      parentReady: actionPersistence,
-                    }),
-                  );
-                }
-                if (durableEvent.type === "tool-start" && durableEvent.recordedByBroker) {
-                  if (durableEvent.timelineSequence === undefined)
-                    throw new Error(`Direct action ${durableEvent.actionId} has no turn timeline position`);
-                  directActionTimelines.set(durableEvent.actionId, durableEvent.timelineSequence);
-                }
-                runOptions?.onEvent?.(durableEvent);
-                if (durableEvent.type === "tool-start") {
-                  const currentPersistence = persistTopLevelAction(trailId, turnId, durableEvent).catch(
-                    recordActionPersistenceFailure,
-                  );
-                  actionPersistence = Promise.all([actionPersistence, currentPersistence]).then(
-                    () => undefined,
-                  );
-                } else {
-                  actionPersistence = actionPersistence.then(async () => {
-                    try {
-                      await persistTopLevelAction(trailId, turnId, durableEvent);
-                    } catch (error) {
-                      recordActionPersistenceFailure(error);
-                    }
-                  });
-                }
-                if (durableEvent.type === "tool-end" && durableEvent.parentActionId)
-                  nestedActionBindings.delete(durableEvent.actionId);
-                return;
-              }
-              if (event.type === "assistant-message") {
-                const boundary = event;
-                const messageId = `${turnId}:assistant:${String(boundary.timelineSequence)}`;
-                const currentPersistence = workspace.operational.messages
-                  .put({
-                    messageId,
-                    sessionId: trailId,
-                    role: "assistant",
-                    content: boundary.text,
-                    sensitivity: "normal",
-                    createdAt: boundary.createdAt,
-                    metadata: Object.freeze({
-                      turnId,
-                      frozenTurnPlanId: plan.planId,
-                    }),
-                    timelineSequence: boundary.timelineSequence,
-                  })
-                  .then(async () => {
-                    await refreshMessageCount(trailId);
-                  });
-                assistantPersistence = Promise.all([assistantPersistence, currentPersistence]).then(
-                  () => undefined,
-                );
-                return;
-              }
-              runOptions?.onEvent?.(event);
-            };
-            let agentOutcome:
-              | {
-                  readonly status: "completed";
-                  readonly result: Awaited<ReturnType<NoesisAgentRuntime["run"]>>;
-                }
-              | { readonly status: "failed"; readonly error: unknown };
-            try {
-              agentOutcome = {
-                status: "completed",
-                result: await agent.run(
-                  {
-                    trailId,
-                    provider: plan.provider,
-                    model: plan.model,
-                    thinkingLevel: plan.thinkingLevel,
-                    systemPrompt: plan.renderedSystemPrompt,
-                    prompt: input,
-                    activeCapabilities: plan.selectedCapabilities.map((selection) => ({
-                      name: selection.name,
-                      version: plan.activationRevision,
-                    })),
-                    frozenTurnPlan: plan,
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        const settledTurn = await settlement.run(
+          createConditionalObject({
+            sessionId: trailId,
+            turnId,
+            input,
+          } as const)
+            .addOptional(sourceIntentId ? { sourceIntentId } : undefined)
+            .add({
+              occurredAt,
+              plan,
+              execute: async () => {
+                await options.skills?.pinSnapshot(
+                  plan.planId,
+                  undefined,
+                  async (snapshot): Promise<PiSkillSnapshot> => {
+                    const invocation = resolvePiSkillInvocation(input, snapshot.skills);
+                    if (!invocation) return snapshot;
+                    const invokedSkill = snapshot.skills.find((skill) => skill.name === invocation.name);
+                    if (!invokedSkill)
+                      throw new Error(
+                        `Invoked skill ${invocation.name} is missing from its admitted snapshot`,
+                      );
+                    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+                    const revision = await workspace.evidence.appendEvidence({
+                      workingPath: `skill-invocations/${plan.planId}/${invokedSkill.contentDigest}.md`,
+                      bytes: encoder.encode(invokedSkill.content),
+                      evidenceKind: "input",
+                      actor: Object.freeze({ actorId: "runtime-turn-planner", kind: "system" as const }),
+                      reason: `Admit explicit skill ${invokedSkill.name} for frozen turn plan ${plan.planId}`,
+                      sensitivity: "normal",
+                      provenanceRefs: Object.freeze([foregroundEvidence(plan)]),
+                    });
+                    if (revision.contentDigest !== invokedSkill.contentDigest)
+                      throw new Error(`Admitted skill ${invokedSkill.name} changed while being recorded`);
+                    return Object.freeze({
+                      skills: Object.freeze(
+                        snapshot.skills.map((skill) =>
+                          skill.name === invokedSkill.name
+                            ? Object.freeze({ ...skill, admittedRevision: revision })
+                            : skill,
+                        ),
+                      ),
+                      diagnostics: snapshot.diagnostics,
+                    });
                   },
-                  emit,
-                ),
-              };
-            } catch (error) {
-              agentOutcome = { status: "failed", error };
-            }
-            const [, assistantPersistenceResult] = await Promise.allSettled([
-              actionPersistence,
-              assistantPersistence,
-            ]);
-            await workspace.operational.toolCalls.interruptRunningForTurn(turnId, new Date().toISOString());
-            if (agentOutcome.status === "failed") throw agentOutcome.error;
-            if (actionPersistenceFailure !== undefined) throw actionPersistenceFailure;
-            if (assistantPersistenceResult.status === "rejected") throw assistantPersistenceResult.reason;
-            const agentResult = agentOutcome.result;
-            if (agentResult.stopReason === "error") throw new Error(agentResult.error);
-            return Object.freeze({
-              outcome: agentResult.stopReason === "aborted" ? ("aborted" as const) : ("completed" as const),
-              output: agentResult.text,
-              context,
-              usedCapabilities,
-              ...(agentResult.contextUsage ? { contextUsage: agentResult.contextUsage } : {}),
-              ...(agentResult.assistantMessages ? { assistantMessages: agentResult.assistantMessages } : {}),
-              frozenTurnPlan: plan,
-            });
-          },
-        });
+                );
+                if (interactionControl?.isInterruptRequested())
+                  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+                  return Object.freeze({
+                    outcome: "aborted" as const,
+                    output: "",
+                    context,
+                    usedCapabilities,
+                    frozenTurnPlan: plan,
+                  });
+                let actionPersistence = Promise.resolve();
+                let assistantPersistence = Promise.resolve();
+                let interactionReady = false;
+                let actionPersistenceFailure: unknown;
+                const recordActionPersistenceFailure = (cause: unknown): void => {
+                  actionPersistenceFailure ??= cause;
+                };
+                const emit = (event: AgentRuntimeEvent): void => {
+                  if (event.type === "status" && event.status === "started" && !interactionReady) {
+                    interactionReady = true;
+                    if (interactionControl?.isInterruptRequested()) void agent.abort(trailId);
+                    else interactionControl?.onReady();
+                  }
+                  if (
+                    event.type === "tool-start" ||
+                    event.type === "tool-update" ||
+                    event.type === "tool-end"
+                  ) {
+                    const durableEvent = durableActionEvent(turnId, event);
+                    if (durableEvent.type === "tool-start" && durableEvent.parentActionId) {
+                      if (durableEvent.timelineSequence === undefined)
+                        throw new Error(
+                          `Nested action ${durableEvent.actionId} has no turn timeline position`,
+                        );
+                      nestedActionBindings.set(
+                        durableEvent.actionId,
+                        Object.freeze({
+                          parentToolCallId: durableEvent.parentActionId,
+                          timelineSequence: durableEvent.timelineSequence,
+                          parentReady: actionPersistence,
+                        }),
+                      );
+                    }
+                    if (durableEvent.type === "tool-start" && durableEvent.recordedByBroker) {
+                      if (durableEvent.timelineSequence === undefined)
+                        throw new Error(
+                          `Direct action ${durableEvent.actionId} has no turn timeline position`,
+                        );
+                      directActionTimelines.set(durableEvent.actionId, durableEvent.timelineSequence);
+                    }
+                    runOptions?.onEvent?.(durableEvent);
+                    if (durableEvent.type === "tool-start") {
+                      const currentPersistence = persistTopLevelAction(trailId, turnId, durableEvent).catch(
+                        recordActionPersistenceFailure,
+                      );
+                      actionPersistence = Promise.all([actionPersistence, currentPersistence]).then(
+                        () => undefined,
+                      );
+                    } else {
+                      actionPersistence = actionPersistence.then(async () => {
+                        try {
+                          await persistTopLevelAction(trailId, turnId, durableEvent);
+                        } catch (error) {
+                          recordActionPersistenceFailure(error);
+                        }
+                      });
+                    }
+                    if (durableEvent.type === "tool-end" && durableEvent.parentActionId)
+                      nestedActionBindings.delete(durableEvent.actionId);
+                    return;
+                  }
+                  if (event.type === "assistant-message") {
+                    const boundary = event;
+                    const messageId = `${turnId}:assistant:${String(boundary.timelineSequence)}`;
+                    const currentPersistence = workspace.operational.messages
+                      .put({
+                        messageId,
+                        sessionId: trailId,
+                        role: "assistant",
+                        content: boundary.text,
+                        sensitivity: "normal",
+                        createdAt: boundary.createdAt,
+                        metadata: Object.freeze({
+                          turnId,
+                          frozenTurnPlanId: plan.planId,
+                        }),
+                        timelineSequence: boundary.timelineSequence,
+                      })
+                      .then(async () => {
+                        await refreshMessageCount(trailId);
+                      });
+                    assistantPersistence = Promise.all([assistantPersistence, currentPersistence]).then(
+                      () => undefined,
+                    );
+                    return;
+                  }
+                  runOptions?.onEvent?.(event);
+                };
+                let agentOutcome:
+                  | {
+                      readonly status: "completed";
+                      readonly result: Awaited<ReturnType<NoesisAgentRuntime["run"]>>;
+                    }
+                  | {
+                      readonly status: "failed";
+                      readonly error: unknown;
+                    };
+                try {
+                  agentOutcome = {
+                    status: "completed",
+                    result: await agent.run(
+                      {
+                        trailId,
+                        provider: plan.provider,
+                        model: plan.model,
+                        thinkingLevel: plan.thinkingLevel,
+                        systemPrompt: plan.renderedSystemPrompt,
+                        prompt: input,
+                        activeCapabilities: plan.selectedCapabilities.map((selection) => ({
+                          name: selection.name,
+                          version: plan.activationRevision,
+                        })),
+                        frozenTurnPlan: plan,
+                      },
+                      emit,
+                    ),
+                  };
+                } catch (error) {
+                  agentOutcome = { status: "failed", error };
+                }
+                const [, assistantPersistenceResult] = await Promise.allSettled([
+                  actionPersistence,
+                  assistantPersistence,
+                ]);
+                await workspace.operational.toolCalls.interruptRunningForTurn(
+                  turnId,
+                  new Date().toISOString(),
+                );
+                if (agentOutcome.status === "failed") throw agentOutcome.error;
+                if (actionPersistenceFailure !== undefined) throw actionPersistenceFailure;
+                if (assistantPersistenceResult.status === "rejected") throw assistantPersistenceResult.reason;
+                const agentResult = agentOutcome.result;
+                if (agentResult.stopReason === "error") throw new Error(agentResult.error);
+                // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+                return Object.freeze(
+                  createConditionalObject({
+                    outcome:
+                      agentResult.stopReason === "aborted" ? ("aborted" as const) : ("completed" as const),
+                    output: agentResult.text,
+                    context,
+                    usedCapabilities,
+                  } as const)
+                    .addOptional(
+                      agentResult.contextUsage ? { contextUsage: agentResult.contextUsage } : undefined,
+                    )
+                    .addOptional(
+                      agentResult.assistantMessages
+                        ? {
+                            assistantMessages: agentResult.assistantMessages,
+                          }
+                        : undefined,
+                    )
+                    .add({
+                      frozenTurnPlan: plan,
+                    } as const)
+                    .finish(),
+                );
+              },
+            } as const)
+            .finish(),
+        );
         const result = settledTurn.result;
         if (settledTurn.reflectionJobId)
           await waitForReflectionBarrier(coordinator, settledTurn.reflectionJobId);
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         await persistTrail(
-          Object.freeze({
-            ...running,
-            status: result.outcome === "aborted" ? ("aborted" as const) : ("idle" as const),
-            capabilityVersions: usedCapabilities,
-            ...(result.outcome === "completed"
-              ? {
-                  contextSnapshotId: result.context.snapshotId,
-                  context: result.context,
-                }
-              : {}),
-            turns:
-              result.outcome === "completed"
-                ? Object.freeze([...running.turns, Object.freeze({ input, output: result.output })])
-                : running.turns,
-          }),
+          Object.freeze(
+            createConditionalObject({
+              ...running,
+              status: result.outcome === "aborted" ? ("aborted" as const) : ("idle" as const),
+              capabilityVersions: usedCapabilities,
+            } as const)
+              .addOptional(
+                result.outcome === "completed"
+                  ? {
+                      contextSnapshotId: result.context.snapshotId,
+                      context: result.context,
+                    }
+                  : undefined,
+              )
+              .add({
+                turns:
+                  result.outcome === "completed"
+                    ? Object.freeze([...running.turns, Object.freeze({ input, output: result.output })])
+                    : running.turns,
+              } as const)
+              .finish(),
+          ),
         );
         return result;
       } finally {
         options.skills?.discardPinnedSnapshot(plan.planId);
       }
     } catch (error) {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       await persistTrail(Object.freeze({ ...running, status: "failed" as const }));
       throw error;
     } finally {
@@ -4589,20 +4843,23 @@ export async function createApplicationRuntimeComposition(
       isInterruptRequested,
     }) => {
       try {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const result = await executeTurn(
           sessionId,
           text,
           turnId,
-          {
+          createConditionalObject({
             onEvent,
-            ...(thinkingLevel ? { thinkingLevel } : {}),
-          },
+          } as const)
+            .addOptional(thinkingLevel ? { thinkingLevel } : undefined)
+            .finish(),
           intentId,
           { onReady, isInterruptRequested },
         );
         return Object.freeze({ outcome: result.outcome });
       } catch (error) {
         if (isInterruptRequested() && isContextCompactionInterrupted(error))
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           return Object.freeze({ outcome: "aborted" as const });
         throw error;
       }
@@ -4770,31 +5027,39 @@ export async function createApplicationRuntimeComposition(
       names.add(call.toolName);
       namesByExecution.set(executionId, names);
     }
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const codeSummaries = executions.map((execution) =>
-      Object.freeze({
-        kind: "codemode" as const,
-        executionId: execution.executionId,
-        label: "JavaScript",
-        status: execution.status,
-        toolNames: Object.freeze([...(namesByExecution.get(execution.executionId) ?? [])].sort()),
-        callCount: execution.callCount,
-        startedAt: execution.startedAt,
-        ...(execution.completedAt ? { completedAt: execution.completedAt } : {}),
-      }),
+      Object.freeze(
+        createConditionalObject({
+          kind: "codemode" as const,
+          executionId: execution.executionId,
+          label: "JavaScript",
+          status: execution.status,
+          toolNames: Object.freeze([...(namesByExecution.get(execution.executionId) ?? [])].sort()),
+          callCount: execution.callCount,
+          startedAt: execution.startedAt,
+        } as const)
+          .addOptional(execution.completedAt ? { completedAt: execution.completedAt } : undefined)
+          .finish(),
+      ),
     );
     const workflowSummaries = await Promise.all(
       workflowRuns.map(async (run) => {
         const phases = await workspace.operational.workflows.listPhases(run.runId);
-        return Object.freeze({
-          kind: "workflow" as const,
-          executionId: run.runId,
-          label: `${run.workflowName} · r${String(run.workflowRevision)}`,
-          status: run.status,
-          toolNames: Object.freeze(phases.map((phase) => phase.phaseName)),
-          callCount: phases.filter((phase) => phase.status === "completed").length,
-          startedAt: run.createdAt,
-          ...(run.completedAt ? { completedAt: run.completedAt } : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return Object.freeze(
+          createConditionalObject({
+            kind: "workflow" as const,
+            executionId: run.runId,
+            label: `${run.workflowName} · r${String(run.workflowRevision)}`,
+            status: run.status,
+            toolNames: Object.freeze(phases.map((phase) => phase.phaseName)),
+            callCount: phases.filter((phase) => phase.status === "completed").length,
+            startedAt: run.createdAt,
+          } as const)
+            .addOptional(run.completedAt ? { completedAt: run.completedAt } : undefined)
+            .finish(),
+        );
       }),
     );
     return Object.freeze(
@@ -4854,23 +5119,27 @@ export async function createApplicationRuntimeComposition(
             : job.status === "completed"
               ? "completed"
               : "failed";
-    return Object.freeze({
-      jobId: job.jobId,
-      stage: "reflection",
-      status: projectedStatus,
-      summary:
-        resultMessage ??
-        resultReason ??
-        job.lastError?.message ??
-        (projectedStatus === "queued" || projectedStatus === "running"
-          ? "Reflecting on the settled turn"
-          : "Capability reflection completed"),
-      updatedAt: job.updatedAt,
-      turnId: payload.turn.turnId,
-      projectId: payload.project.projectId,
-      ...(capabilityId ? { capabilityId } : {}),
-      ...(job.lastError ? { failure: job.lastError.message } : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        jobId: job.jobId,
+        stage: "reflection",
+        status: projectedStatus,
+        summary:
+          resultMessage ??
+          resultReason ??
+          job.lastError?.message ??
+          (projectedStatus === "queued" || projectedStatus === "running"
+            ? "Reflecting on the settled turn"
+            : "Capability reflection completed"),
+        updatedAt: job.updatedAt,
+        turnId: payload.turn.turnId,
+        projectId: payload.project.projectId,
+      } as const)
+        .addOptional(capabilityId ? { capabilityId } : undefined)
+        .addOptional(job.lastError ? { failure: job.lastError.message } : undefined)
+        .finish(),
+    );
   };
   const listLearningActivity: NonNullable<NoesisTuiRuntime["listLearningActivity"]> = async (sessionId) =>
     Object.freeze(
@@ -4879,7 +5148,7 @@ export async function createApplicationRuntimeComposition(
           kind: CAPABILITY_REFLECTION_JOB_KIND,
           payloadSessionId: sessionId,
           order: "newest",
-          limit: 1_000,
+          limit: 1000,
         })
       ).map(capabilityActivity),
     );
@@ -4902,6 +5171,7 @@ export async function createApplicationRuntimeComposition(
   const manageCapability: NonNullable<NoesisTuiRuntime["manageCapability"]> = async (
     intent: TuiCapabilityManagementIntent,
   ) => {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const mapped =
       intent.type === "set-scope"
         ? Object.freeze({
@@ -4918,7 +5188,7 @@ export async function createApplicationRuntimeComposition(
           })
         : intent;
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(new Error("Capability management timed out")), 120_000);
+    const timeout = setTimeout(() => controller.abort(new Error("Capability management timed out")), 120000);
     try {
       const result = await capabilityLearning.manage(mapped, controller.signal);
       if (result.status === "no_change")
@@ -4951,7 +5221,7 @@ export async function createApplicationRuntimeComposition(
         const artifact = await workspace.getArtifactMetadata(artifactId);
         if (!artifact) return undefined;
         const content = decoder.decode(await workspace.reads.readArtifact(artifact));
-        const previewLimit = 8_000;
+        const previewLimit = 8000;
         return Object.freeze({
           artifactId: artifact.artifactId,
           path: artifact.path,
@@ -4966,24 +5236,32 @@ export async function createApplicationRuntimeComposition(
         readArtifactPreview(code.stderrArtifactId),
       ]);
       const calls = await workspace.operational.toolCalls.listForExecution(executionId);
-      return Object.freeze({
-        kind: "codemode",
-        executionId: code.executionId,
-        label: "JavaScript",
-        status: code.status,
-        toolNames: Object.freeze([...new Set(calls.map((call) => call.toolName))].sort()),
-        callCount: code.callCount,
-        startedAt: code.startedAt,
-        ...(code.completedAt ? { completedAt: code.completedAt } : {}),
-        ...(code.parentExecutionId ? { parentExecutionId: code.parentExecutionId } : {}),
-        catalogDigest: code.catalogDigest,
-        sourceDigest: code.sourceDigest,
-        ...(sourceArtifact ? { sourceArtifact } : {}),
-        ...(stdoutArtifact ? { stdoutArtifact } : {}),
-        ...(stderrArtifact ? { stderrArtifact } : {}),
-        ...(code.result === undefined ? {} : { result: JSON.stringify(code.result, null, 2) }),
-        ...(code.error ? { error: code.error } : {}),
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return Object.freeze(
+        createConditionalObject({
+          kind: "codemode",
+          executionId: code.executionId,
+          label: "JavaScript",
+          status: code.status,
+          toolNames: Object.freeze([...new Set(calls.map((call) => call.toolName))].sort()),
+          callCount: code.callCount,
+          startedAt: code.startedAt,
+        } as const)
+          .addOptional(code.completedAt ? { completedAt: code.completedAt } : undefined)
+          .addOptional(code.parentExecutionId ? { parentExecutionId: code.parentExecutionId } : undefined)
+          .add({
+            catalogDigest: code.catalogDigest,
+            sourceDigest: code.sourceDigest,
+          } as const)
+          .addOptional(sourceArtifact ? { sourceArtifact } : undefined)
+          .addOptional(stdoutArtifact ? { stdoutArtifact } : undefined)
+          .addOptional(stderrArtifact ? { stderrArtifact } : undefined)
+          .addOptional(
+            !(code.result === undefined) ? { result: JSON.stringify(code.result, null, 2) } : undefined,
+          )
+          .addOptional(code.error ? { error: code.error } : undefined)
+          .finish(),
+      );
     }
     const workflow = await workspace.operational.workflows.getRun(executionId);
     if (
@@ -4992,29 +5270,40 @@ export async function createApplicationRuntimeComposition(
     )
       return undefined;
     const phases = await workspace.operational.workflows.listPhases(executionId);
-    return Object.freeze({
-      kind: "workflow",
-      executionId: workflow.runId,
-      label: `${workflow.workflowName} · r${String(workflow.workflowRevision)}`,
-      status: workflow.status,
-      toolNames: Object.freeze(phases.map((phase) => phase.phaseName)),
-      callCount: phases.filter((phase) => phase.status === "completed").length,
-      startedAt: workflow.createdAt,
-      ...(workflow.completedAt ? { completedAt: workflow.completedAt } : {}),
-      ...(workflow.output === undefined ? {} : { result: JSON.stringify(workflow.output, null, 2) }),
-      ...(workflow.error ? { error: workflow.error } : {}),
-      phases: Object.freeze(
-        phases.map((phase) =>
-          Object.freeze({
-            index: phase.phaseIndex,
-            name: phase.phaseName,
-            status: phase.status,
-            ...(phase.executionId ? { executionId: phase.executionId } : {}),
-            ...(phase.error ? { error: phase.error } : {}),
-          }),
-        ),
-      ),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        kind: "workflow",
+        executionId: workflow.runId,
+        label: `${workflow.workflowName} · r${String(workflow.workflowRevision)}`,
+        status: workflow.status,
+        toolNames: Object.freeze(phases.map((phase) => phase.phaseName)),
+        callCount: phases.filter((phase) => phase.status === "completed").length,
+        startedAt: workflow.createdAt,
+      } as const)
+        .addOptional(workflow.completedAt ? { completedAt: workflow.completedAt } : undefined)
+        .addOptional(
+          !(workflow.output === undefined) ? { result: JSON.stringify(workflow.output, null, 2) } : undefined,
+        )
+        .addOptional(workflow.error ? { error: workflow.error } : undefined)
+        .add({
+          phases: Object.freeze(
+            phases.map((phase) =>
+              Object.freeze(
+                createConditionalObject({
+                  index: phase.phaseIndex,
+                  name: phase.phaseName,
+                  status: phase.status,
+                } as const)
+                  .addOptional(phase.executionId ? { executionId: phase.executionId } : undefined)
+                  .addOptional(phase.error ? { error: phase.error } : undefined)
+                  .finish(),
+              ),
+            ),
+          ),
+        } as const)
+        .finish(),
+    );
   };
   let shutdownPromise: Promise<void> | undefined;
   const stopCompactions = async (): Promise<void> => {
@@ -5035,14 +5324,20 @@ export async function createApplicationRuntimeComposition(
         options.mcp?.close() ?? Promise.resolve(),
       ]).then(() => undefined);
       let graceTimer: NodeJS.Timeout | undefined;
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const settlement = await Promise.race<
-        | { readonly status: "settled" }
-        | { readonly status: "rejected"; readonly error: unknown }
+        | {
+            readonly status: "settled";
+          }
+        | {
+            readonly status: "rejected";
+            readonly error: unknown;
+          }
         | "timed-out"
       >([
         stop.then(
           () => ({ status: "settled" as const }),
-          (error: unknown) => ({ status: "rejected" as const, error }),
+          (cause: unknown) => ({ status: "rejected" as const, error: cause }),
         ),
         new Promise<"timed-out">((resolve) => {
           graceTimer = setTimeout(() => resolve("timed-out"), SHUTDOWN_GRACE_MS);
@@ -5074,64 +5369,72 @@ export async function createApplicationRuntimeComposition(
     }
     throw error;
   }
-  return Object.freeze({
-    home: options.config.home,
-    agentName: agent.name,
-    controlPlane,
-    debug: Object.freeze({
-      workspace,
-      runTurn: debugRunTurn,
-      adaptations: Object.freeze({
-        activations: Object.freeze({
-          current: protectedRuntime.activations.current,
-          getOperation: protectedRuntime.activations.getOperation,
-          listOperations: protectedRuntime.activations.listOperations,
-          getApproval: protectedRuntime.activations.getApproval,
-          getTurnPin: protectedRuntime.activations.getTurnPin,
-          getTurnPlan: protectedRuntime.activations.getTurnPlan,
-        }),
-        feedback: Object.freeze({
-          operationForActivation: protectedRuntime.feedback.operationForActivation,
-          getObservation: protectedRuntime.feedback.getObservation,
-          listObservations: protectedRuntime.feedback.listObservations,
-          getResearchRun: protectedRuntime.feedback.getResearchRun,
-          listResearchRuns: protectedRuntime.feedback.listResearchRuns,
-          getOutcome: protectedRuntime.feedback.getOutcome,
-          getSuccessorInput: protectedRuntime.feedback.getSuccessorInput,
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      home: options.config.home,
+      agentName: agent.name,
+      controlPlane,
+      debug: Object.freeze({
+        workspace,
+        runTurn: debugRunTurn,
+        adaptations: Object.freeze({
+          activations: Object.freeze({
+            current: protectedRuntime.activations.current,
+            getOperation: protectedRuntime.activations.getOperation,
+            listOperations: protectedRuntime.activations.listOperations,
+            getApproval: protectedRuntime.activations.getApproval,
+            getTurnPin: protectedRuntime.activations.getTurnPin,
+            getTurnPlan: protectedRuntime.activations.getTurnPlan,
+          }),
+          feedback: Object.freeze({
+            operationForActivation: protectedRuntime.feedback.operationForActivation,
+            getObservation: protectedRuntime.feedback.getObservation,
+            listObservations: protectedRuntime.feedback.listObservations,
+            getResearchRun: protectedRuntime.feedback.getResearchRun,
+            listResearchRuns: protectedRuntime.feedback.listResearchRuns,
+            getOutcome: protectedRuntime.feedback.getOutcome,
+            getSuccessorInput: protectedRuntime.feedback.getSuccessorInput,
+          }),
         }),
       }),
-    }),
-    agentDefaults,
-    startTrail,
-    listTrails,
-    listTrailSummaries,
-    getTrail,
-    getTranscript,
-    resumeTrail,
-    forkTrail,
-    interact,
-    inspectInteraction,
-    compact,
-    listSkills,
-    inspectSkill,
-    listScripts,
-    inspectScript,
-    listWorkflows,
-    inspectWorkflow,
-    listExecutions,
-    inspectExecution,
-    listLearningActivity,
-    inspectLearning,
-    inspectLearningAudit,
-    manageCapability,
-    waitForLearningActivity,
-    ...(options.mcp
-      ? {
-          listMcpServers: options.mcp.listMcpServers,
-          inspectMcpServer: options.mcp.inspectMcpServer,
-          mutateMcp: options.mcp.mutateMcp,
-        }
-      : {}),
-    shutdown,
-  });
+      agentDefaults,
+      startTrail,
+      listTrails,
+      listTrailSummaries,
+      getTrail,
+      getTranscript,
+      resumeTrail,
+      forkTrail,
+      interact,
+      inspectInteraction,
+      compact,
+      listSkills,
+      inspectSkill,
+      listScripts,
+      inspectScript,
+      listWorkflows,
+      inspectWorkflow,
+      listExecutions,
+      inspectExecution,
+      listLearningActivity,
+      inspectLearning,
+      inspectLearningAudit,
+      manageCapability,
+      waitForLearningActivity,
+    } as const)
+      .addOptional(
+        options.mcp
+          ? {
+              listMcpServers: options.mcp.listMcpServers,
+              inspectMcpServer: options.mcp.inspectMcpServer,
+              mutateMcp: options.mcp.mutateMcp,
+            }
+          : undefined,
+      )
+      .add({
+        shutdown,
+      } as const)
+      .finish(),
+  );
 }

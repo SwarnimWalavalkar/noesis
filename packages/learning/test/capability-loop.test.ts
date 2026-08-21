@@ -211,6 +211,7 @@ describe("Capability learning loop", () => {
         return `${prefix}-1`;
       },
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const result = await module.reflectSettledTurn(
       Object.freeze({
         turn: Object.freeze({
@@ -282,6 +283,7 @@ describe("Capability learning loop", () => {
       "I kept the research summary concise",
     );
 
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const pending = await module.reflectSettledTurn(
       Object.freeze({
         turn: Object.freeze({
@@ -333,6 +335,7 @@ describe("Capability learning loop", () => {
     expect(await workspace.capabilities.listRevisions("capability-1")).toHaveLength(3);
   });
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test("reflects a tool-dense turn within bounded messages and can attach the saved improvement", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-capability-dense-turn-"));
     const workspace = await createWorkspaceStore(root);
@@ -369,6 +372,7 @@ describe("Capability learning loop", () => {
       createdAt: "2026-08-20T19:50:00.000Z",
       metadata: Object.freeze({ turnId: "turn-dense" }),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const evidenceRefs: EvidenceRef[] = [
       Object.freeze({ kind: "database_row" as const, table: "messages" as const, rowId: "turn-dense:user" }),
       Object.freeze({
@@ -390,6 +394,7 @@ describe("Capability learning loop", () => {
         createdAt: `2026-08-20T19:4${String(index % 10)}:00.000Z`,
         completedAt: `2026-08-20T19:4${String(index % 10)}:01.000Z`,
       });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       evidenceRefs.push(
         Object.freeze({ kind: "database_row" as const, table: "tool_calls" as const, rowId: toolCallId }),
       );
@@ -410,10 +415,12 @@ describe("Capability learning loop", () => {
         createdAt: suffix === "save" ? "2026-08-20T19:51:00.000Z" : "2026-08-20T19:52:00.000Z",
         completedAt: suffix === "save" ? "2026-08-20T19:51:01.000Z" : "2026-08-20T19:52:01.000Z",
       });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       evidenceRefs.push(
         Object.freeze({ kind: "database_row" as const, table: "tool_calls" as const, rowId: toolCallId }),
       );
     }
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const definitionRevision = await workspace.definitions.recordWorkingDefinition({
       workingPath: "scripts/comparative-research-scout/index.mjs",
       bytes: new TextEncoder().encode("export default async function scout() { return []; }\n"),
@@ -443,6 +450,7 @@ describe("Capability learning loop", () => {
         }),
       ],
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const programs: CapabilityProgramLibrary = Object.freeze({
       list: async () =>
         Object.freeze([
@@ -550,6 +558,7 @@ describe("Capability learning loop", () => {
       createdAt: "2026-08-18T00:00:00.000Z",
       metadata: Object.freeze({ turnId: "turn-workflow" }),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const definitionRevision = await workspace.definitions.recordWorkingDefinition({
       workingPath: "workflows/evidence-synthesis/workflow.json",
       bytes: new TextEncoder().encode('{"kind":"noesis_workflow","name":"evidence-synthesis"}\n'),
@@ -579,6 +588,7 @@ describe("Capability learning loop", () => {
         }),
       ],
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const programs: CapabilityProgramLibrary = Object.freeze({
       list: async () =>
         Object.freeze([
@@ -622,6 +632,7 @@ describe("Capability learning loop", () => {
       nextId: (prefix) => `${prefix}-workflow`,
     });
 
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await expect(
       module.reflectSettledTurn(
         Object.freeze({

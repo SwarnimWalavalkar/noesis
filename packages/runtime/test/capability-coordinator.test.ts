@@ -58,6 +58,7 @@ describe("Capability coordinator", () => {
           reflectCalls += 1;
           reflectionStarted?.();
           await reflectionCanReturn;
+          // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
           return Object.freeze({ status: "no_change" as const, reason: "Lifecycle mutation committed" });
         },
       }),

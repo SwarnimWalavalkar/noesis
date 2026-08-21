@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { type FrozenTurnPlan, frozenTurnPlanDigest } from "@noesis/agent-types";
 import { createWorkspaceCapabilityControlStore, type CapabilityControlReadModel } from "@noesis/capabilities";
 import {
+  createConditionalObject,
   canonicalJson,
   capabilityRevisionRef,
   type CapabilityRevision,
@@ -30,8 +31,8 @@ import {
   type ActivationCandidateResolver,
   type PreflightActivationHandoff,
 } from "../src/index.ts";
-
 const encoder = new TextEncoder();
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const autonomy = Object.freeze({
   riskLevel: "low" as const,
   approval: "authority_expansion" as const,
@@ -40,7 +41,6 @@ const autonomy = Object.freeze({
 });
 const protectedRuntime = (workspace: NoesisWorkspaceStore): ProtectedWorkspaceRuntime =>
   createWorkspaceRuntimeInternals(workspace).protectedRuntime;
-
 async function recordCompletedSourceTurn(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
@@ -98,7 +98,6 @@ async function recordCompletedSourceTurn(
     settledAt: "2026-07-26T00:00:01.000Z",
   });
 }
-
 interface FixtureOptions {
   readonly suffix?: string;
   readonly capabilityId?: string;
@@ -115,7 +114,6 @@ interface FixtureOptions {
   readonly claimedCrossCapabilityPredecessor?: boolean;
   readonly sourceAdjustmentId?: string;
 }
-
 interface Fixture {
   readonly root: string;
   readonly authorityHome: string;
@@ -128,14 +126,13 @@ interface Fixture {
   readonly resolver: ActivationCandidateResolver;
   readonly controller: ReturnType<typeof createAtomicActivationController>;
 }
-
 const refKey = (reference: CapabilityRevisionRef): string => canonicalJson(reference);
-
 async function definition(
   workspace: NoesisWorkspaceStore,
   path: string,
   content: string,
 ): Promise<FileRevisionRef> {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return await workspace.definitions.recordCandidateDefinition({
     workingPath: path,
     bytes: encoder.encode(content),
@@ -143,13 +140,14 @@ async function definition(
     reason: "AC-09 fixture",
   });
 }
-
+// BOUNDARY: Test evidence is serialized immediately into the workspace evidence contract.
 async function evidence<Kind extends "input" | "output" | "judgment" | "report">(
   workspace: NoesisWorkspaceStore,
   path: string,
   kind: Kind,
   value: unknown,
 ): Promise<EvidenceRevisionRef<Kind>> {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return await workspace.evidence.appendEvidence({
     workingPath: path,
     bytes: encoder.encode(`${JSON.stringify(value)}\n`),
@@ -158,7 +156,7 @@ async function evidence<Kind extends "input" | "output" | "judgment" | "report">
     sensitivity: "private",
   });
 }
-
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const suffix = options.suffix ?? "one";
   const capabilityId = options.capabilityId ?? `capability-${suffix}`;
@@ -197,7 +195,6 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     }),
   });
   const baselineRef = capabilityRevisionRef(baseline);
-
   const prompt = await definition(workspace, `${suffix}/candidate-prompt.md`, "candidate prompt");
   const skill = await definition(workspace, `${suffix}/candidate-skill.md`, "candidate skill");
   const tool = await definition(workspace, `${suffix}/candidate-tool.mjs`, "candidate tool");
@@ -207,37 +204,47 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const router = await definition(workspace, `${suffix}/candidate-router.json`, "candidate router");
   const evaluation = await definition(workspace, `${suffix}/candidate-eval.json`, "candidate eval");
   const expands = options.permissionExpansion ?? false;
-  const candidate: CapabilityRevision = Object.freeze({
-    capabilityRevisionId: `${capabilityId}-r2`,
-    capabilityId,
-    ...(!options.newSlot || options.claimedCrossCapabilityPredecessor
-      ? { predecessorRevisionId: baseline.capabilityRevisionId }
-      : {}),
-    promptModules: Object.freeze([prompt]),
-    skills: Object.freeze([skill]),
-    tools: Object.freeze([tool, ...(extraTool ? [extraTool] : [])]),
-    toolset: Object.freeze({
-      toolRevisionIds: Object.freeze([tool.revisionId, ...(extraTool ? [extraTool.revisionId] : [])]),
-      routerRevision: router,
-      strategyId: "candidate-router",
-    }),
-    activationPolicy: Object.freeze({
-      mode: options.activationPolicy ?? "automatic_low_risk",
-      scope: `scope-${suffix}`,
-    }),
-    permissionManifest: Object.freeze({
-      effects: Object.freeze(expands ? ["read", "write"] : ["read"]),
-      resourcePatterns: Object.freeze(["workspace:"]),
-      credentialRefs: Object.freeze([]),
-    }),
-    evidenceRefs: Object.freeze([]),
-    sourceEvaluationDefinitions: Object.freeze([evaluation]),
-    requestedPermissionDelta: Object.freeze({
-      addedEffects: Object.freeze(expands ? ["write"] : []),
-      widenedResources: Object.freeze([]),
-      addedCredentialRefs: Object.freeze([]),
-    }),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  const candidate: CapabilityRevision = Object.freeze(
+    createConditionalObject({
+      capabilityRevisionId: `${capabilityId}-r2`,
+      capabilityId,
+    } as const)
+      .addOptional(
+        !options.newSlot || options.claimedCrossCapabilityPredecessor
+          ? {
+              predecessorRevisionId: baseline.capabilityRevisionId,
+            }
+          : undefined,
+      )
+      .add({
+        promptModules: Object.freeze([prompt]),
+        skills: Object.freeze([skill]),
+        tools: Object.freeze([tool, ...(extraTool ? [extraTool] : [])]),
+        toolset: Object.freeze({
+          toolRevisionIds: Object.freeze([tool.revisionId, ...(extraTool ? [extraTool.revisionId] : [])]),
+          routerRevision: router,
+          strategyId: "candidate-router",
+        }),
+        activationPolicy: Object.freeze({
+          mode: options.activationPolicy ?? "automatic_low_risk",
+          scope: `scope-${suffix}`,
+        }),
+        permissionManifest: Object.freeze({
+          effects: Object.freeze(expands ? ["read", "write"] : ["read"]),
+          resourcePatterns: Object.freeze(["workspace:"]),
+          credentialRefs: Object.freeze([]),
+        }),
+        evidenceRefs: Object.freeze([]),
+        sourceEvaluationDefinitions: Object.freeze([evaluation]),
+        requestedPermissionDelta: Object.freeze({
+          addedEffects: Object.freeze(expands ? ["write"] : []),
+          widenedResources: Object.freeze([]),
+          addedCredentialRefs: Object.freeze([]),
+        }),
+      } as const)
+      .finish(),
+  );
   const candidateRef = capabilityRevisionRef(candidate);
   const experimentId = `experiment-${suffix}`;
   const manifestRevision = await definition(
@@ -254,16 +261,26 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       },
     }),
   );
-  const experimentBase = Object.freeze({
-    experimentId,
-    hypothesis: `Improve ${suffix}`,
-    scope: `scope-${suffix}`,
-    evidenceRefs: Object.freeze([manifestRevision]),
-    baselineRevision: baselineRef,
-    candidateRevisions: Object.freeze([candidateRef]),
-    feedbackSignalIds: Object.freeze([]),
-    ...(options.sourceAdjustmentId === undefined ? {} : { sourceAdjustmentId: options.sourceAdjustmentId }),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  const experimentBase = Object.freeze(
+    createConditionalObject({
+      experimentId,
+      hypothesis: `Improve ${suffix}`,
+      scope: `scope-${suffix}`,
+      evidenceRefs: Object.freeze([manifestRevision]),
+      baselineRevision: baselineRef,
+      candidateRevisions: Object.freeze([candidateRef]),
+      feedbackSignalIds: Object.freeze([]),
+    } as const)
+      .addOptional(
+        !(options.sourceAdjustmentId === undefined)
+          ? {
+              sourceAdjustmentId: options.sourceAdjustmentId,
+            }
+          : undefined,
+      )
+      .finish(),
+  );
   if (options.sourceAdjustmentId !== undefined) {
     await protectedRuntime(workspace).activations.bootstrapGenesis({
       capabilityRevision: baselineRef,
@@ -288,16 +305,18 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       expectedActiveAdjustmentId: null,
     });
   }
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   await workspace.research.experiments.putExperiment(
     Object.freeze({ ...experimentBase, status: "hypothesis" as const }),
   );
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   await workspace.research.experiments.putExperiment(
     Object.freeze({ ...experimentBase, status: "authoring" as const }),
   );
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   await workspace.research.experiments.putExperiment(
     Object.freeze({ ...experimentBase, status: "preflight" as const }),
   );
-
   const caseRef = await evidence(workspace, `${suffix}/case`, "input", { input: suffix });
   const baselineOutput = await evidence(workspace, `${suffix}/baseline-output`, "output", {
     arm: "baseline",
@@ -308,6 +327,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
   const judgment = await evidence(workspace, `${suffix}/judgment`, "judgment", { winner: "candidate" });
   const reportEvidence = await evidence(workspace, `${suffix}/report`, "report", { decision: "pass" });
   const planId = `plan-${suffix}`;
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const variant = Object.freeze({
     variantId: `variant-${suffix}`,
     axis: "evaluation" as const,
@@ -341,6 +361,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       outputEvidenceRefs: Object.freeze([candidateOutput]),
     },
   ])
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await workspace.research.trials.putTrial(
       Object.freeze({
         ...trial,
@@ -353,6 +374,7 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       }),
     );
   const preflightId = `preflight-${suffix}`;
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const report = Object.freeze({
     preflightId,
     experimentId,
@@ -374,11 +396,14 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     reportEvidence,
   });
   const reportRef = await workspace.research.preflights.putPreflightReport(report);
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const finalExperiment = Object.freeze({
     ...experimentBase,
     status: "preflight" as const,
     preflightRef: reportRef,
-  }) satisfies Experiment & { readonly status: "preflight" };
+  }) satisfies Experiment & {
+    readonly status: "preflight";
+  };
   await workspace.research.experiments.putExperiment(finalExperiment);
   const handoff: PreflightActivationHandoff = Object.freeze({
     experiment: finalExperiment,
@@ -428,7 +453,6 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     controller,
   });
 }
-
 describe("AC-09 preflight policy", () => {
   test("derives expansion and requires approval independently of autonomy", () => {
     const expansion = derivePermissionExpansion(
@@ -436,6 +460,7 @@ describe("AC-09 preflight policy", () => {
       { effects: ["read", "write"], resourcePatterns: ["workspace:"], credentialRefs: [] },
       { addedEffects: ["write"], widenedResources: [], addedCredentialRefs: [] },
     );
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const candidate = {
       capabilityRevisionId: "r2",
       capabilityId: "cap",
@@ -486,14 +511,12 @@ describe("AC-09 preflight policy", () => {
     ).toMatchObject({ outcome: "approval_required", reasonCodes: ["authority_expansion"] });
   });
 });
-
 describe("AC-09 atomic activation with real WorkspaceStore", () => {
   test("conditionally unapplies the exact source adjustment in the activation commit", async () => {
     const fixture = await createFixture({
       suffix: "source-adjustment",
       sourceAdjustmentId: "adjustment-source",
     });
-
     expect(await fixture.workspace.workingAdjustments.getActive("project-source-adjustment")).toMatchObject({
       adjustmentId: "adjustment-source",
     });
@@ -503,7 +526,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     });
     expect(await fixture.workspace.workingAdjustments.getActive("project-source-adjustment")).toBeUndefined();
   });
-
   test("preserves a newer working adjustment when an older source candidate activates", async () => {
     const fixture = await createFixture({
       suffix: "replaced-source-adjustment",
@@ -522,7 +544,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       }),
       expectedActiveAdjustmentId: "adjustment-source-old",
     });
-
     await expect(fixture.controller.activateFromPreflight(fixture.handoff)).resolves.toMatchObject({
       ok: true,
       status: "activated",
@@ -531,7 +552,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       await fixture.workspace.workingAdjustments.getActive("project-replaced-source-adjustment"),
     ).toMatchObject({ adjustmentId: "adjustment-source-new" });
   });
-
   test("auto-activates a low-risk pass only after the complete immutable set is materialized", async () => {
     const fixture = await createFixture();
     const result = await fixture.controller.activateFromPreflight(fixture.handoff);
@@ -554,12 +574,10 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       ).toBe(true);
     }
   });
-
   test("adds a no-predecessor scoped capability while preserving the active genesis fallback", async () => {
     const fixture = await createFixture({ suffix: "new-slot", newSlot: true });
     const before = await protectedRuntime(fixture.workspace).activations.current();
     const result = await fixture.controller.activateFromPreflight(fixture.handoff);
-
     expect(result).toMatchObject({ ok: true, status: "activated" });
     const current = await protectedRuntime(fixture.workspace).activations.current();
     expect(current?.revision).toBe((before?.revision ?? 0) + 1);
@@ -568,14 +586,12 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       fixture.candidateRef,
     );
   });
-
   test("rejects a cross-capability candidate that claims predecessor lineage", async () => {
     const fixture = await createFixture({
       suffix: "cross-capability-predecessor",
       newSlot: true,
       claimedCrossCapabilityPredecessor: true,
     });
-
     await expect(fixture.controller.activateFromPreflight(fixture.handoff)).resolves.toMatchObject({
       ok: true,
       status: "blocked",
@@ -585,7 +601,7 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     expect(current?.activeCapabilityRevisions[fixture.candidateRef.capabilityId]).toBeUndefined();
     expect(current?.activeCapabilityRevisions[fixture.baselineRef.capabilityId]).toEqual(fixture.baselineRef);
   });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["candidate policy", { activationPolicy: "approval_required" as const }],
     ["canonical preflight decision", { decision: "approval_required" as const }],
@@ -610,7 +626,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     });
     expect(approved).toMatchObject({ ok: true, status: "activated" });
   });
-
   test("rejects an exact pending approval without activating", async () => {
     const fixture = await createFixture({ suffix: "reject", activationPolicy: "approval_required" });
     const pending = await fixture.controller.activateFromPreflight(fixture.handoff);
@@ -630,7 +645,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       }),
     ).resolves.toMatchObject({ ok: true, status: "rejected" });
   });
-
   test("fails closed when a durable pin arrives after preflight staging", async () => {
     const fixture = await createFixture({ suffix: "late-pin", activationPolicy: "approval_required" });
     const pending = await fixture.controller.activateFromPreflight(fixture.handoff);
@@ -658,7 +672,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     ).resolves.toMatchObject({ ok: false, code: "activation_conflict" });
     expect(await protectedRuntime(fixture.workspace).activations.current()).toBeUndefined();
   });
-
   test("block, complete-ref veto, and stale report mismatch never activate", async () => {
     const blocked = await createFixture({ suffix: "blocked", decision: "block" });
     await expect(blocked.controller.activateFromPreflight(blocked.handoff)).resolves.toMatchObject({
@@ -666,7 +679,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       status: "blocked",
     });
     expect(await protectedRuntime(blocked.workspace).activations.current()).toBeUndefined();
-
     const vetoBase = await createFixture({ suffix: "veto-base" });
     const vetoedControls: CapabilityControlReadModel = Object.freeze({
       capabilityId: vetoBase.candidateRef.capabilityId,
@@ -693,7 +705,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       status: "blocked",
     });
     expect(await protectedRuntime(vetoBase.workspace).activations.current()).toBeUndefined();
-
     const mismatched = await createFixture({ suffix: "mismatch" });
     const stale = Object.freeze({
       ...mismatched.handoff,
@@ -711,7 +722,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     });
     expect(await protectedRuntime(mismatched.workspace).activations.current()).toBeUndefined();
   });
-
   test("failure before the SQLite transaction leaves an inert stage and exact retry fails closed", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-ac-09-before-"));
     const fixture = await createFixture({
@@ -740,7 +750,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     expect((await protectedRuntime(reopened).activations.current())?.revision).toBeUndefined();
     reopened.close();
   });
-
   test("failure during the transaction rolls back; failure after commit recovers unambiguously", async () => {
     const duringRoot = await mkdtemp(join(tmpdir(), "noesis-ac-09-during-"));
     const during = await createFixture({
@@ -758,7 +767,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     });
     expect(await protectedRuntime(during.workspace).activations.current()).toBeUndefined();
     expect((await protectedRuntime(during.workspace).activations.listOperations())[0]?.status).toBe("staged");
-
     const afterRoot = await mkdtemp(join(tmpdir(), "noesis-ac-09-after-"));
     const after = await createFixture({
       suffix: "after",
@@ -778,7 +786,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     expect((await protectedRuntime(after.workspace).activations.current())?.activeDefinitions).toBeDefined();
     expect(committedBeforeRestart?.materializations.every((item) => !item.published)).toBe(true);
     after.workspace.close();
-
     const reopened = await createWorkspaceStore(afterRoot);
     const recovered = await protectedRuntime(reopened).activations.getOperation(
       committedBeforeRestart?.operationId ?? "missing",
@@ -802,7 +809,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
       ),
     ).toHaveLength(1);
   });
-
   test("turn pins survive later activation and history records the prior snapshot", async () => {
     const first = await createFixture({
       suffix: "turn-one",
@@ -834,7 +840,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     expect(current?.activeCapabilityRevisions["turn-capability"]).toEqual(second.candidateRef);
     expect(Object.keys(current?.activeDefinitions ?? {})).toHaveLength(5);
   });
-
   test("concurrent approvals serialize through activation CAS and never expose a partial set", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-ac-09-concurrent-"));
     const workspace = await createWorkspaceStore(root);
@@ -876,7 +881,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     expect(current?.revision).toBe(1);
     expect(Object.keys(current?.activeCapabilityRevisions ?? {})).toHaveLength(1);
     expect(Object.keys(current?.activeDefinitions ?? {})).toHaveLength(5);
-
     const firstWon = results[0]?.ok === true && results[0].status === "activated";
     const stalePending = firstWon ? pendingB : pendingA;
     const staleFixture = firstWon ? second : first;
@@ -904,7 +908,6 @@ describe("AC-09 atomic activation with real WorkspaceStore", () => {
     ).resolves.toMatchObject({ ok: true, status: "activated" });
     expect((await protectedRuntime(workspace).activations.current())?.revision).toBe(2);
   });
-
   test("controller leaks no authority handle to candidate resolvers or generated content", async () => {
     const fixture = await createFixture({ suffix: "no-leak" });
     const seen: unknown[] = [];

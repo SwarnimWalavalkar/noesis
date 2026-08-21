@@ -43,6 +43,7 @@ const unsupported = async (): Promise<never> => {
 const project = Object.freeze({ projectId: "project-protected", root: "/tmp/project-protected" });
 
 function adjustment(adjustmentId: string, scope: WorkingAdjustment["scope"] = project): WorkingAdjustment {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return Object.freeze({
     adjustmentId,
     scope,
@@ -75,6 +76,7 @@ function mutableWorkingAdjustments(): {
       const projectId = request.adjustment.scope.projectId;
       const currentActiveAdjustmentId = activeByProject.get(projectId)?.adjustmentId ?? null;
       if (currentActiveAdjustmentId !== request.expectedActiveAdjustmentId)
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze({
           status: "stale" as const,
           adjustmentId: request.adjustment.adjustmentId,
@@ -82,6 +84,7 @@ function mutableWorkingAdjustments(): {
         });
       records.set(request.adjustment.adjustmentId, request.adjustment);
       activeByProject.set(projectId, request.adjustment);
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return Object.freeze({
         status: "applied" as const,
         adjustment: request.adjustment,
@@ -92,12 +95,14 @@ function mutableWorkingAdjustments(): {
       unapplyCalls += 1;
       const currentActiveAdjustmentId = activeByProject.get(request.projectId)?.adjustmentId ?? null;
       if (currentActiveAdjustmentId !== request.expectedActiveAdjustmentId)
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze({
           status: "stale" as const,
           adjustmentId: request.expectedActiveAdjustmentId,
           currentActiveAdjustmentId,
         });
       activeByProject.delete(request.projectId);
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return Object.freeze({
         status: "unapplied" as const,
         adjustmentId: request.expectedActiveAdjustmentId,
@@ -139,6 +144,7 @@ function mutationPorts(onPin: () => void) {
       commit: unsupported,
       pinTurn: async (request: { readonly sessionId: string; readonly turnId: string }) => {
         onPin();
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze({
           turnKey: `${request.sessionId}:${request.turnId}`,
           sessionId: request.sessionId,
@@ -591,6 +597,7 @@ describe("protected workspace runtime", () => {
       feedback: ports.feedback,
       workingAdjustments: ports.workingAdjustments,
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const expected = Object.freeze({
       effect: "promote" as const,
       resource: "workspace:alpha:turn:session-1:turn-1:pin",

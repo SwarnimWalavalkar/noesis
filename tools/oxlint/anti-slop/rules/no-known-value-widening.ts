@@ -152,6 +152,9 @@ export const noKnownValueWideningRule = defineRule({
 			subject: string,
 		) => {
 			if (destination === null) return;
+			// A closed object annotation preserves its declared fields. Requiring a one-use alias for
+			// every local projection adds ceremony without recovering type evidence.
+			if (destination.kind === "anonymous object") return;
 			if (
 				isDictionaryAccumulatorTarget(destination) &&
 				isEmptyObjectExpression(expression)

@@ -1,14 +1,13 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { createMcpManagerOverlay, type McpManagerOverlay } from "./mcp-manager.ts";
 import { createTuiMcpInteractionPresenter, type TuiMcpInteractionBridge } from "./mcp-interaction.ts";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
-
 export interface TuiMcpOrchestration {
   readonly openManager: () => void;
   readonly ownsKeyboardFocus: () => boolean;
   readonly dispose: () => Promise<void>;
 }
-
 export function createTuiMcpOrchestration(options: {
   readonly runtime: NoesisTuiRuntime;
   readonly tui: TUI;
@@ -23,19 +22,23 @@ export function createTuiMcpOrchestration(options: {
   let managerOverlay: McpManagerOverlay | undefined;
   let interactionActive = false;
   let disposePromise: Promise<void> | undefined;
-
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const detachInteraction = options.interactionBridge?.attach(
-    createTuiMcpInteractionPresenter({
-      tui: options.tui,
-      colorEnabled: options.colorEnabled,
-      height: options.height,
-      ...(options.openUrl ? { openUrl: options.openUrl } : {}),
-      onActiveChange: (active) => {
-        interactionActive = active;
-      },
-    }),
+    createTuiMcpInteractionPresenter(
+      createConditionalObject({
+        tui: options.tui,
+        colorEnabled: options.colorEnabled,
+        height: options.height,
+      } as const)
+        .addOptional(options.openUrl ? { openUrl: options.openUrl } : undefined)
+        .add({
+          onActiveChange: (active: boolean) => {
+            interactionActive = active;
+          },
+        } as const)
+        .finish(),
+    ),
   );
-
   const closeManager = async (): Promise<void> => {
     const overlay = managerOverlay;
     managerOverlay = undefined;
@@ -44,7 +47,6 @@ export function createTuiMcpOrchestration(options: {
     options.tui.requestRender();
     await overlay?.dispose();
   };
-
   return Object.freeze({
     openManager() {
       if (managerHandle) {

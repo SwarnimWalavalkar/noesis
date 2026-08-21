@@ -1,4 +1,4 @@
-import { sha256, err, ok, type FileRevisionRef } from "@noesis/domain";
+import { createConditionalObject, sha256, err, ok, type FileRevisionRef } from "@noesis/domain";
 import { describe, expect, test } from "vitest";
 import {
   createUserCriterionRepository,
@@ -7,10 +7,10 @@ import {
   type UserCriterionDefinitionPort,
   type UserCriterionMetadataPort,
 } from "../src/index.ts";
-
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const user = { actorId: "user-1", kind: "user" } as const;
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const noesis = { actorId: "reflector-1", kind: "noesis" } as const;
-
 function createFakeDefinitionPort(): UserCriterionDefinitionPort & {
   readonly corrupt: (ref: FileRevisionRef, content: string) => void;
 } {
@@ -40,26 +40,26 @@ function createFakeDefinitionPort(): UserCriterionDefinitionPort & {
     },
   };
 }
-
 function createFakeMetadataPort(): UserCriterionMetadataPort & {
   readonly history: (criterionId: string) => readonly CriterionRevisionMetadata[];
 } {
   const histories = new Map<string, CriterionRevisionMetadata[]>();
   let activitySequence = 0;
-
   const current = (criterionId: string): CriterionRevisionMetadata | undefined =>
     histories.get(criterionId)?.at(-1);
-
   const commitRevision = async (request: CriterionRevisionCommitRequest) => {
     const previous = current(request.criterionId);
     if (previous?.definitionRevision.revisionId !== request.expectedCurrentRevisionId) {
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return err({ code: "conflict" as const, message: "Current criterion revision changed" });
     }
     if (request.revision !== (previous?.revision ?? 0) + 1) {
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return err({ code: "conflict" as const, message: "Criterion revision is not monotonic" });
     }
     activitySequence += 1;
-    const metadata: CriterionRevisionMetadata = {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    const metadata: CriterionRevisionMetadata = createConditionalObject({
       criterionId: request.criterionId,
       revision: request.revision,
       definitionRevision: request.definitionRevision,
@@ -73,12 +73,12 @@ function createFakeMetadataPort(): UserCriterionMetadataPort & {
         table: "activity_log",
         rowId: `activity-${activitySequence}`,
       },
-      ...(previous ? { predecessorRevisionId: previous.definitionRevision.revisionId } : {}),
-    };
+    } as const)
+      .addOptional(previous ? { predecessorRevisionId: previous.definitionRevision.revisionId } : undefined)
+      .finish();
     histories.set(request.criterionId, [...(histories.get(request.criterionId) ?? []), metadata]);
     return ok(metadata);
   };
-
   return {
     getCurrent: async (criterionId) => current(criterionId),
     listCurrent: async () => [...histories.values()].flatMap((history) => history.at(-1) ?? []),
@@ -87,7 +87,6 @@ function createFakeMetadataPort(): UserCriterionMetadataPort & {
     history: (criterionId) => histories.get(criterionId) ?? [],
   };
 }
-
 function createRepository() {
   const definitions = createFakeDefinitionPort();
   const metadata = createFakeMetadataPort();
@@ -101,7 +100,6 @@ function createRepository() {
     }),
   };
 }
-
 describe("user criterion repository", () => {
   test("creates, revises, pins, and retires criteria without rewriting prior revisions", async () => {
     const { repository, metadata } = createRepository();
@@ -113,17 +111,14 @@ describe("user criterion repository", () => {
       actor: user,
     });
     expect(created.ok).toBe(true);
-
     const revised = await repository.revise({
       criterionId: "preserve-voice",
       evaluatorInstruction: "Preserve voice and sentence rhythm.",
       actor: noesis,
     });
     expect(revised.ok && revised.value.definition.revision).toBe(2);
-
     const pinned = await repository.pin("preserve-voice", true, user, "Keep this contract stable");
     expect(pinned.ok && pinned.value.definition).toMatchObject({ revision: 3, pinned: true });
-
     const silentRewrite = await repository.revise({
       criterionId: "preserve-voice",
       evaluatorInstruction: "Replace the user's voice.",
@@ -134,7 +129,6 @@ describe("user criterion repository", () => {
       ok: false,
       error: { code: "pinned" },
     });
-
     const explicitRewrite = await repository.revise({
       criterionId: "preserve-voice",
       evaluatorInstruction: "Preserve voice, rhythm, and structure.",
@@ -144,11 +138,9 @@ describe("user criterion repository", () => {
       revision: 4,
       pinned: true,
     });
-
     const retired = await repository.retire("preserve-voice", user, "No longer applies");
     expect(retired.ok && retired.value.definition).toMatchObject({ revision: 5, status: "retired" });
     expect(metadata.history("preserve-voice")).toHaveLength(5);
-
     const original = await repository.inspect("preserve-voice", 1);
     expect(original.ok && original.value.definition).toMatchObject({
       revision: 1,
@@ -160,7 +152,6 @@ describe("user criterion repository", () => {
       new Set(metadata.history("preserve-voice").map((entry) => entry.definitionRevision.revisionId)).size,
     ).toBe(5);
   });
-
   test("builds scope-filtered immutable relevance snapshots with prompt ownership and provenance", async () => {
     const definitions = createFakeDefinitionPort();
     const metadata = createFakeMetadataPort();
@@ -193,7 +184,6 @@ describe("user criterion repository", () => {
       ],
       actor: user,
     });
-
     const snapshot = await repository.snapshotRelevant({
       snapshotId: "criteria-snapshot-1",
       scope: "writing/email",
@@ -204,7 +194,6 @@ describe("user criterion repository", () => {
         bundleDigest: "b".repeat(64),
       },
     });
-
     expect(snapshot.ok).toBe(true);
     if (!snapshot.ok) return;
     expect(snapshot.value.selectedCriterionIds).toEqual(["criterion-1"]);
@@ -219,7 +208,6 @@ describe("user criterion repository", () => {
     expect(Object.isFrozen(snapshot.value.criteria[0])).toBe(true);
     expect(Object.isFrozen(snapshot.value.criteria[0]?.evidenceRefs)).toBe(true);
   });
-
   test("fails closed when an immutable criterion file is malformed", async () => {
     const { repository, definitions } = createRepository();
     const created = await repository.create({
@@ -232,13 +220,11 @@ describe("user criterion repository", () => {
     expect(created.ok).toBe(true);
     if (!created.ok) return;
     definitions.corrupt(created.value.metadata.definitionRevision, "{not-json");
-
     await expect(repository.inspect("preserve-voice")).resolves.toMatchObject({
       ok: false,
       error: { code: "invalid_definition", criterionId: "preserve-voice", revision: 1 },
     });
   });
-
   test("exposes definition controls only, with no activation or authority mutation handle", () => {
     const { repository } = createRepository();
     expect("activate" in repository).toBe(false);

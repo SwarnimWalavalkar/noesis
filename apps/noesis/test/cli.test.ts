@@ -140,6 +140,7 @@ describe("Noesis CLI grammar", () => {
     expect(changed.code).toBe(1);
     expect(changed.output).toContain("Model gpt-5.6-sol belongs to openai-codex, not provider opencode");
     expect(changed.output).toContain("Choose a matching model with --model");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const persisted = NoesisConfigSchema.parse(
       JSON.parse(await readFile(join(home, "config.json"), "utf8")) as unknown,
     );
@@ -174,6 +175,7 @@ describe("Noesis CLI grammar", () => {
     ]);
 
     expect(changed.code).toBe(0);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const persisted = NoesisConfigSchema.parse(
       JSON.parse(await readFile(join(home, "config.json"), "utf8")) as unknown,
     );
@@ -195,6 +197,7 @@ describe("Noesis CLI grammar", () => {
 
     expect(changed.code).toBe(1);
     expect(changed.output).toContain("Model gpt-5.6-sol belongs to openai-codex, not provider opencode");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     expect(JSON.parse(await readFile(join(home, "config.json"), "utf8")) as unknown).toEqual(invalid);
   });
 
@@ -318,6 +321,7 @@ describe("Noesis CLI grammar", () => {
       metadata: Object.freeze({}),
     });
     const sourceBytes = Buffer.from("return null;");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const sourceArtifact = await store.artifacts.writeArtifact({
       path: "codemode/execution-running/source.mjs",
       mediaType: "text/javascript",
@@ -353,9 +357,10 @@ describe("Noesis CLI grammar", () => {
     database.close();
 
     expect(inspected.code).toBe(0);
-    expect(Reflect.get(row ?? {}, "status")).toBe("running");
+    expect((row ?? {})["status"]).toBe("running");
   });
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each(["inspect", "rebuild"] as const)("%s does not start configured MCP servers", async (command) => {
     const home = await mkdtemp(join(tmpdir(), `noesis-cli-${command}-no-mcp-`));
     const marker = join(home, `${command}-mcp-started`);

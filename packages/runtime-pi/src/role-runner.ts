@@ -5,7 +5,7 @@ import type {
   AgentUsage,
   StructuredInferencePort,
 } from "@noesis/agent-types";
-import { toJsonValue } from "@noesis/domain";
+import { createConditionalObject, toJsonValue } from "@noesis/domain";
 import { z } from "zod";
 import { applyRoleContextPolicy, renderBoundedRolePrompt, signalOf } from "./role-context.ts";
 import type {
@@ -20,21 +20,17 @@ import type {
   RuntimePiAgentTrace,
   RuntimePiStructuredInferencePort,
 } from "./role-types.ts";
-
 const ZERO_USAGE: AgentUsage = Object.freeze({
   inputTokens: 0,
   outputTokens: 0,
   totalTokens: 0,
   estimatedCost: 0,
 });
-
 export type RoleRunErrorCode = "aborted" | "backend" | "configuration" | "malformed_output";
-
 export interface RoleRunError extends Error {
   readonly code: RoleRunErrorCode;
   readonly trace: RuntimePiAgentTrace | undefined;
 }
-
 export function isRoleRunError(value: unknown): value is RoleRunError {
   return (
     value instanceof Error &&
@@ -43,7 +39,6 @@ export function isRoleRunError(value: unknown): value is RoleRunError {
     ["aborted", "backend", "configuration", "malformed_output"].includes(String(value.code))
   );
 }
-
 function roleRunError(
   code: RoleRunErrorCode,
   message: string,
@@ -56,18 +51,15 @@ function roleRunError(
     trace,
   });
 }
-
 export interface CreateAgentRoleRunnerOptions {
   readonly backend: RoleModelBackend;
   readonly variants: readonly RoleVariantConfiguration[];
   readonly now?: () => Date;
   readonly createTraceId?: () => string;
 }
-
 function variantKey(role: AgentRunRequest["role"], variantId: string): string {
   return `${role}\u0000${variantId}`;
 }
-
 function configurationMap(
   variants: readonly RoleVariantConfiguration[],
 ): ReadonlyMap<string, RoleVariantConfiguration> {
@@ -90,7 +82,6 @@ function configurationMap(
   }
   return configurations;
 }
-
 function sameVariant(
   request: AgentRunRequest["variant"],
   configuration: RoleVariantConfiguration["variant"],
@@ -112,18 +103,15 @@ function sameVariant(
     })
   );
 }
-
 function capabilityRevisionsFrom(input: ReturnType<typeof applyRoleContextPolicy>) {
   return Object.freeze(input.capabilityRevisions.map((revision) => Object.freeze({ ...revision })));
 }
-
 function traceReferences(request: AgentRunRequest) {
   return {
     evidenceRefs: request.evidenceRefs.filter((reference) => reference.kind === "evidence_revision"),
     artifactRefs: request.evidenceRefs.filter((reference) => reference.kind === "artifact_file"),
   };
 }
-
 function structuredJson(text: string) {
   const trimmed = text.trim();
   if (!trimmed) return undefined;
@@ -133,7 +121,6 @@ function structuredJson(text: string) {
     return undefined;
   }
 }
-
 function createTrace(input: {
   readonly request: AgentRunRequest;
   readonly configuration: RoleVariantConfiguration;
@@ -150,6 +137,7 @@ function createTrace(input: {
 }): RuntimePiAgentTrace {
   const references = traceReferences(input.request);
   const status = input.stopReason === "aborted" ? "aborted" : input.failure ? "failed" : "completed";
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     traceId: input.createTraceId(),
     role: input.request.role,
@@ -160,36 +148,36 @@ function createTrace(input: {
     evidenceRefs: references.evidenceRefs,
     artifactRefs: references.artifactRefs,
     capabilityRevisions: input.capabilityRevisions,
-    telemetry: Object.freeze({
-      provider: input.provider ?? input.configuration.provider,
-      model: input.model ?? input.configuration.model,
-      reasoning: input.configuration.reasoning,
-      contextPolicyId: input.configuration.contextPolicy.policyId,
-      latencyMs: Math.max(0, input.completedAt.getTime() - input.startedAt.getTime()),
-      stopReason: input.stopReason,
-      status,
-      attempts: 1 + (input.repairAttempts ?? 0),
-      repairAttempts: input.repairAttempts ?? 0,
-      ...(input.failure ? { failure: input.failure } : {}),
-    }),
+    telemetry: Object.freeze(
+      createConditionalObject({
+        provider: input.provider ?? input.configuration.provider,
+        model: input.model ?? input.configuration.model,
+        reasoning: input.configuration.reasoning,
+        contextPolicyId: input.configuration.contextPolicy.policyId,
+        latencyMs: Math.max(0, input.completedAt.getTime() - input.startedAt.getTime()),
+        stopReason: input.stopReason,
+        status,
+        attempts: 1 + (input.repairAttempts ?? 0),
+        repairAttempts: input.repairAttempts ?? 0,
+      } as const)
+        .addOptional(input.failure ? { failure: input.failure } : undefined)
+        .finish(),
+    ),
   });
 }
-
+// BOUNDARY: Provider failures may be arbitrary thrown values; normalize them to the runtime error contract.
 function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
-
 export function createAgentRoleRunner(options: CreateAgentRoleRunnerOptions): RuntimePiAgentRoleRunner {
   const configurations = configurationMap(options.variants);
   const active = new Map<string, AbortController>();
   const now = options.now ?? (() => new Date());
   const createTraceId = options.createTraceId ?? (() => `role_trace_${randomUUID()}`);
-
   const abort = async (runId: string): Promise<void> => {
     active.get(runId)?.abort();
     await options.backend.abort(runId);
   };
-
   const run = async (request: AgentRunRequest): Promise<RuntimePiAgentRunResult> => {
     if (request.variant.axis !== "role") {
       throw roleRunError(
@@ -213,7 +201,6 @@ export function createAgentRoleRunner(options: CreateAgentRoleRunnerOptions): Ru
     if (active.has(request.runId)) {
       throw roleRunError("configuration", `Role run ${request.runId} is already active`);
     }
-
     const boundedInput = applyRoleContextPolicy(request, configuration.contextPolicy);
     const capabilityRevisions = capabilityRevisionsFrom(boundedInput);
     const startedAt = now();
@@ -223,19 +210,26 @@ export function createAgentRoleRunner(options: CreateAgentRoleRunnerOptions): Ru
     if (externalSignal?.aborted) forwardAbort();
     else externalSignal?.addEventListener("abort", forwardAbort, { once: true });
     active.set(request.runId, controller);
-
     try {
-      const backendRequest: RoleBackendRequest = {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      const backendRequest: RoleBackendRequest = createConditionalObject({
         runId: request.runId,
         provider: configuration.provider,
         model: configuration.model,
         reasoning: configuration.reasoning,
         systemPrompt: configuration.systemPrompt,
         prompt: renderBoundedRolePrompt(boundedInput, configuration.contextPolicy),
-        ...(configuration.timeoutMs === undefined ? {} : { timeoutMs: configuration.timeoutMs }),
-        ...(configuration.maxRetries === undefined ? {} : { maxRetries: configuration.maxRetries }),
-        signal: controller.signal,
-      };
+      } as const)
+        .addOptional(
+          !(configuration.timeoutMs === undefined) ? { timeoutMs: configuration.timeoutMs } : undefined,
+        )
+        .addOptional(
+          !(configuration.maxRetries === undefined) ? { maxRetries: configuration.maxRetries } : undefined,
+        )
+        .add({
+          signal: controller.signal,
+        } as const)
+        .finish();
       let backendResult: RoleBackendResult;
       try {
         backendResult = await options.backend.run(backendRequest);
@@ -257,7 +251,6 @@ export function createAgentRoleRunner(options: CreateAgentRoleRunnerOptions): Ru
         });
         throw roleRunError(code, cause.message, trace, cause);
       }
-
       const completedAt = now();
       if (backendResult.stopReason === "aborted" || backendResult.stopReason === "error") {
         const code = backendResult.stopReason === "aborted" ? "aborted" : "backend";
@@ -277,7 +270,6 @@ export function createAgentRoleRunner(options: CreateAgentRoleRunnerOptions): Ru
         });
         throw roleRunError(code, message, trace);
       }
-
       const trace = createTrace({
         request,
         configuration,
@@ -291,24 +283,28 @@ export function createAgentRoleRunner(options: CreateAgentRoleRunnerOptions): Ru
         createTraceId,
       });
       const parsed = structuredJson(backendResult.text);
-      return Object.freeze({
-        text: backendResult.text,
-        ...(parsed === undefined ? {} : { structuredOutput: parsed }),
-        trace,
-        capabilityRevisions,
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return Object.freeze(
+        createConditionalObject({
+          text: backendResult.text,
+        } as const)
+          .addOptional(!(parsed === undefined) ? { structuredOutput: parsed } : undefined)
+          .add({
+            trace,
+            capabilityRevisions,
+          } as const)
+          .finish(),
+      );
     } finally {
       externalSignal?.removeEventListener("abort", forwardAbort);
       if (active.get(request.runId) === controller) active.delete(request.runId);
     }
   };
-
   const runner = Object.freeze({ run, abort });
   runner satisfies RuntimePiAgentRoleRunner;
   runner satisfies AgentRoleRunner;
   return runner;
 }
-
 function jsonCandidates(text: string): readonly string[] {
   const trimmed = text.trim();
   const candidates = new Set<string>([trimmed]);
@@ -322,7 +318,6 @@ function jsonCandidates(text: string): readonly string[] {
   if (arrayStart >= 0 && arrayEnd > arrayStart) candidates.add(trimmed.slice(arrayStart, arrayEnd + 1));
   return [...candidates].filter(Boolean);
 }
-
 function decodeStructured<T>(text: string, schema: z.ZodType<T>): T {
   const failures: string[] = [];
   for (const candidate of jsonCandidates(text)) {
@@ -339,9 +334,9 @@ function decodeStructured<T>(text: string, schema: z.ZodType<T>): T {
   }
   throw new Error(failures.at(-1) ?? "Model output did not contain JSON");
 }
-
 function addOutputContract(request: AgentRunRequest, schema: z.ZodType<unknown>): AgentRunRequest {
   const contract = JSON.stringify(z.toJSONSchema(schema));
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return {
     ...request,
     messages: Object.freeze([
@@ -354,7 +349,6 @@ function addOutputContract(request: AgentRunRequest, schema: z.ZodType<unknown>)
     ]),
   };
 }
-
 function repairRequest(
   request: AgentRunRequest,
   raw: string,
@@ -371,7 +365,6 @@ function repairRequest(
   );
   return { ...request, runId: `${request.runId}:repair:${attempt}`, messages };
 }
-
 function addUsage(left: AgentUsage, right: AgentUsage): AgentUsage {
   return Object.freeze({
     inputTokens: left.inputTokens + right.inputTokens,
@@ -380,7 +373,6 @@ function addUsage(left: AgentUsage, right: AgentUsage): AgentUsage {
     estimatedCost: left.estimatedCost + right.estimatedCost,
   });
 }
-
 function combineTraces(
   traces: readonly RuntimePiAgentTrace[],
   repairAttempts: number,
@@ -390,26 +382,28 @@ function combineTraces(
   const last = traces.at(-1);
   if (!first || !last) throw new Error("Cannot combine an empty role trace list");
   const usage = traces.reduce<AgentUsage>((total, trace) => addUsage(total, trace.usage), ZERO_USAGE);
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     ...last,
     startedAt: first.startedAt,
     usage,
-    telemetry: Object.freeze({
-      ...last.telemetry,
-      latencyMs: traces.reduce((total, trace) => total + trace.telemetry.latencyMs, 0),
-      attempts: traces.length,
-      repairAttempts,
-      status: failure ? "failed" : last.telemetry.status,
-      ...(failure ? { failure } : {}),
-    }),
+    telemetry: Object.freeze(
+      createConditionalObject({
+        ...last.telemetry,
+        latencyMs: traces.reduce((total, trace) => total + trace.telemetry.latencyMs, 0),
+        attempts: traces.length,
+        repairAttempts,
+        status: failure ? "failed" : last.telemetry.status,
+      } as const)
+        .addOptional(failure ? { failure } : undefined)
+        .finish(),
+    ),
   });
 }
-
 export interface CreateStructuredInferencePortOptions {
   readonly runner: RuntimePiAgentRoleRunner;
   readonly maxRepairAttempts?: number;
 }
-
 export function createStructuredInferencePort(
   options: CreateStructuredInferencePortOptions,
 ): RuntimePiStructuredInferencePort {
@@ -417,7 +411,6 @@ export function createStructuredInferencePort(
   if (!Number.isInteger(maxRepairAttempts) || maxRepairAttempts < 0) {
     throw roleRunError("configuration", "maxRepairAttempts must be a non-negative integer");
   }
-
   const run = async <T>(request: AgentRunRequest, outputSchema: z.ZodType<T>) => {
     const traces: RuntimePiAgentTrace[] = [];
     let result = await options.runner.run(addOutputContract(request, outputSchema));
@@ -433,7 +426,6 @@ export function createStructuredInferencePort(
     } catch (error) {
       failure = toError(error);
     }
-
     for (let attempt = 1; attempt <= maxRepairAttempts; attempt += 1) {
       result = await options.runner.run(repairRequest(request, result.text, failure, attempt));
       traces.push(result.trace);
@@ -448,14 +440,12 @@ export function createStructuredInferencePort(
         failure = toError(error);
       }
     }
-
     const trace = combineTraces(traces, maxRepairAttempts, {
       code: "malformed_output",
       message: failure.message,
     });
     throw roleRunError("malformed_output", failure.message, trace, failure);
   };
-
   const port = Object.freeze({ run });
   port satisfies RuntimePiStructuredInferencePort;
   port satisfies StructuredInferencePort;

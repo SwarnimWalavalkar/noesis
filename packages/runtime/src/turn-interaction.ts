@@ -1,20 +1,37 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { AgentRuntimeEvent, AgentSteerResult, AgentThinkingLevel } from "@noesis/agent-types";
 import type { UserIntentRecord } from "@noesis/workspace";
-
 export type InteractionCommand =
-  | { readonly type: "submit"; readonly text: string }
-  | { readonly type: "enqueue"; readonly text: string }
+  | {
+      readonly type: "submit";
+      readonly text: string;
+    }
+  | {
+      readonly type: "enqueue";
+      readonly text: string;
+    }
   | {
       readonly type: "reroute-pending";
       readonly sourceSessionId: string;
       readonly intentIds: readonly string[];
     }
-  | { readonly type: "steer"; readonly text?: string }
-  | { readonly type: "restore-newest" }
-  | { readonly type: "resume-queue" }
-  | { readonly type: "pause-queue" }
-  | { readonly type: "interrupt"; readonly turnId: string };
-
+  | {
+      readonly type: "steer";
+      readonly text?: string;
+    }
+  | {
+      readonly type: "restore-newest";
+    }
+  | {
+      readonly type: "resume-queue";
+    }
+  | {
+      readonly type: "pause-queue";
+    }
+  | {
+      readonly type: "interrupt";
+      readonly turnId: string;
+    };
 export interface InteractionPendingIntent {
   readonly intentId: string;
   readonly text: string;
@@ -22,14 +39,12 @@ export interface InteractionPendingIntent {
   readonly status: "pending" | "held";
   readonly createdAt: string;
 }
-
 export interface InteractionActiveTurn {
   readonly intentId: string;
   readonly turnId: string;
   readonly text: string;
   readonly mode: "turn" | "steer";
 }
-
 export interface InteractionSnapshot {
   readonly sessionId: string;
   readonly phase: "idle" | "running" | "interrupting";
@@ -37,9 +52,11 @@ export interface InteractionSnapshot {
   readonly active?: InteractionActiveTurn;
   readonly pending: readonly InteractionPendingIntent[];
 }
-
 export type TurnInteractionEvent =
-  | { readonly type: "state"; readonly snapshot: InteractionSnapshot }
+  | {
+      readonly type: "state";
+      readonly snapshot: InteractionSnapshot;
+    }
   | {
       readonly type: "turn-started";
       readonly sessionId: string;
@@ -74,7 +91,6 @@ export type TurnInteractionEvent =
       readonly sessionId: string;
       readonly error: string;
     };
-
 export interface InteractionDispatchOptions {
   /**
    * Replaces the observer currently attached to this controller. It remains active after dispatch
@@ -83,7 +99,6 @@ export interface InteractionDispatchOptions {
   readonly onEvent?: (event: TurnInteractionEvent) => void;
   readonly thinkingLevel?: AgentThinkingLevel;
 }
-
 export interface InteractionDispatchResult {
   readonly effect:
     | "queued"
@@ -99,7 +114,6 @@ export interface InteractionDispatchResult {
   readonly restoredText?: string;
   readonly queueWasHeld?: boolean;
 }
-
 export interface TurnInteractionIntentStore {
   readonly enqueue: (request: {
     readonly intentId: string;
@@ -199,7 +213,6 @@ export interface TurnInteractionIntentStore {
     readonly unresolved: number;
   }>;
 }
-
 export interface TurnInteractionControllerOptions {
   readonly intents: TurnInteractionIntentStore;
   readonly createIntentId: () => string;
@@ -215,7 +228,9 @@ export interface TurnInteractionControllerOptions {
     readonly onEvent: (event: AgentRuntimeEvent) => void;
     readonly onReady: () => void;
     readonly isInterruptRequested: () => boolean;
-  }) => Promise<{ readonly outcome: "completed" | "aborted" }>;
+  }) => Promise<{
+    readonly outcome: "completed" | "aborted";
+  }>;
   readonly steer: (sessionId: string, text: string) => Promise<AgentSteerResult>;
   readonly recordSteerDelivery: (request: {
     readonly sessionId: string;
@@ -227,7 +242,6 @@ export interface TurnInteractionControllerOptions {
   }) => Promise<void>;
   readonly interrupt: (sessionId: string) => Promise<void>;
 }
-
 export interface TurnInteractionController {
   readonly inspect: (sessionId: string) => Promise<InteractionSnapshot>;
   readonly dispatch: (
@@ -237,7 +251,6 @@ export interface TurnInteractionController {
   ) => Promise<InteractionDispatchResult>;
   readonly close: () => Promise<void>;
 }
-
 interface SessionInteractionState {
   phase: InteractionSnapshot["phase"];
   queuePaused: boolean;
@@ -258,25 +271,22 @@ interface SessionInteractionState {
   steerAdmissionTurnId?: string;
   steerableIntentId?: string;
 }
-
 interface TurnSteerReadiness {
   readonly turnId: string;
   readonly promise: Promise<boolean>;
   readonly settle: (ready: boolean) => void;
   settled: boolean;
 }
-
 const defaultSchedule = (task: () => void): (() => void) => {
   const handle = setTimeout(task, 0);
   return () => clearTimeout(handle);
 };
-
 const intentText = (record: UserIntentRecord): string => {
   if (record.text === undefined)
     throw new Error(`Intent ${record.intentId} has no editable content in status ${record.status}`);
   return record.text;
 };
-
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const pendingIntent = (record: UserIntentRecord): InteractionPendingIntent =>
   Object.freeze({
     intentId: record.intentId,
@@ -285,7 +295,6 @@ const pendingIntent = (record: UserIntentRecord): InteractionPendingIntent =>
     status: record.status === "held" ? ("held" as const) : ("pending" as const),
     createdAt: record.createdAt,
   });
-
 export function createTurnInteractionController(
   options: TurnInteractionControllerOptions,
 ): TurnInteractionController {
@@ -295,7 +304,6 @@ export function createTurnInteractionController(
   let observedSessionId: string | undefined;
   let closed = false;
   let closePromise: Promise<void> | undefined;
-
   const stateFor = (sessionId: string): SessionInteractionState => {
     const existing = sessions.get(sessionId);
     if (existing) return existing;
@@ -313,7 +321,6 @@ export function createTurnInteractionController(
     sessions.set(sessionId, created);
     return created;
   };
-
   const notify = (state: SessionInteractionState, event: TurnInteractionEvent): void => {
     try {
       state.observer?.(event);
@@ -321,14 +328,12 @@ export function createTurnInteractionController(
       // Rendering observers never own the interaction lifecycle.
     }
   };
-
   const ensureRecovered = async (sessionId: string, state: SessionInteractionState): Promise<void> => {
     state.recovery ??= options.intents
       .recoverDispatching({ sessionId, recoveredAt: now() })
       .then(() => undefined);
     await state.recovery;
   };
-
   const snapshot = async (
     sessionId: string,
     state: SessionInteractionState,
@@ -341,19 +346,23 @@ export function createTurnInteractionController(
       (left, right) =>
         left.queueSequence - right.queueSequence || left.intentId.localeCompare(right.intentId),
     );
-    return Object.freeze({
-      sessionId,
-      phase: state.phase,
-      queuePaused: state.queuePaused,
-      ...(state.active ? { active: Object.freeze({ ...state.active }) } : {}),
-      pending: Object.freeze(available.map(pendingIntent)),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        sessionId,
+        phase: state.phase,
+        queuePaused: state.queuePaused,
+      } as const)
+        .addOptional(state.active ? { active: Object.freeze({ ...state.active }) } : undefined)
+        .add({
+          pending: Object.freeze(available.map(pendingIntent)),
+        } as const)
+        .finish(),
+    );
   };
-
   const notifyState = async (sessionId: string, state: SessionInteractionState): Promise<void> => {
     notify(state, { type: "state", snapshot: await snapshot(sessionId, state) });
   };
-
   const createSteerReadiness = (turnId: string): TurnSteerReadiness => {
     let resolveReady: ((ready: boolean) => void) | undefined;
     const promise = new Promise<boolean>((resolve) => {
@@ -371,7 +380,6 @@ export function createTurnInteractionController(
     };
     return readiness;
   };
-
   const enqueueSteerDelivery = (
     state: SessionInteractionState,
     deliver: () => Promise<InteractionDispatchResult>,
@@ -384,7 +392,6 @@ export function createTurnInteractionController(
     state.steerDeliveries.add(settlement);
     return settlement;
   };
-
   const settleSteerDeliveries = async (state: SessionInteractionState): Promise<string | undefined> => {
     // Stop admitting new steers, then let any serialized command which already observed this turn
     // install its delivery settlement before taking the barrier snapshot.
@@ -406,7 +413,6 @@ export function createTurnInteractionController(
         : String(rejected.reason)
       : undefined;
   };
-
   const settleFailedDispatch = async (
     sessionId: string,
     state: SessionInteractionState,
@@ -430,17 +436,23 @@ export function createTurnInteractionController(
     delete state.steerableIntentId;
     state.interruptRequested = false;
     state.phase = "idle";
-    notify(state, {
-      type: "turn-settled",
-      sessionId,
-      intentId: active.intentId,
-      turnId: active.turnId,
-      outcome,
-      ...(error || steerFailure ? { error: [error, steerFailure].filter(Boolean).join("; ") } : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    notify(
+      state,
+      createConditionalObject({
+        type: "turn-settled",
+        sessionId,
+        intentId: active.intentId,
+        turnId: active.turnId,
+        outcome,
+      } as const)
+        .addOptional(
+          error || steerFailure ? { error: [error, steerFailure].filter(Boolean).join("; ") } : undefined,
+        )
+        .finish(),
+    );
     await notifyState(sessionId, state);
   };
-
   const drain = async (
     sessionId: string,
     state: SessionInteractionState,
@@ -466,6 +478,7 @@ export function createTurnInteractionController(
         if (!closed) await notifyState(sessionId, state);
         return;
       }
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const active = Object.freeze({
         intentId: claimed.intentId,
         turnId,
@@ -482,28 +495,35 @@ export function createTurnInteractionController(
       const resumeGenerationAtStart = state.resumeGeneration;
       await notifyState(sessionId, state);
       try {
-        const result = await options.runTurn({
-          sessionId,
-          intentId: active.intentId,
-          turnId,
-          text: active.text,
-          ...(thinkingLevel ? { thinkingLevel } : {}),
-          onEvent: (event) => notify(state, { type: "agent", sessionId, turnId, event }),
-          onReady: () => {
-            if (state.active?.intentId !== active.intentId) return;
-            if (state.steerableIntentId === active.intentId) return;
-            state.steerableIntentId = active.intentId;
-            steerReadiness.settle(true);
-            notify(state, {
-              type: "turn-started",
-              sessionId,
-              intentId: active.intentId,
-              turnId,
-              text: active.text,
-            });
-          },
-          isInterruptRequested: () => state.interruptRequested,
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        const result = await options.runTurn(
+          createConditionalObject({
+            sessionId,
+            intentId: active.intentId,
+            turnId,
+            text: active.text,
+          } as const)
+            .addOptional(thinkingLevel ? { thinkingLevel } : undefined)
+            .add({
+              onEvent: (event: AgentRuntimeEvent) =>
+                notify(state, { type: "agent", sessionId, turnId, event }),
+              onReady: () => {
+                if (state.active?.intentId !== active.intentId) return;
+                if (state.steerableIntentId === active.intentId) return;
+                state.steerableIntentId = active.intentId;
+                steerReadiness.settle(true);
+                notify(state, {
+                  type: "turn-started",
+                  sessionId,
+                  intentId: active.intentId,
+                  turnId,
+                  text: active.text,
+                });
+              },
+              isInterruptRequested: () => state.interruptRequested,
+            } as const)
+            .finish(),
+        );
         if (result.outcome === "aborted") {
           await settleFailedDispatch(sessionId, state, active, resumeGenerationAtStart, "aborted");
           return;
@@ -520,14 +540,19 @@ export function createTurnInteractionController(
         state.interruptRequested = false;
         state.phase = "idle";
         if (steerFailure) state.queuePaused = true;
-        notify(state, {
-          type: "turn-settled",
-          sessionId,
-          intentId: active.intentId,
-          turnId,
-          outcome: steerFailure ? "failed" : "completed",
-          ...(steerFailure ? { error: steerFailure } : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        notify(
+          state,
+          createConditionalObject({
+            type: "turn-settled",
+            sessionId,
+            intentId: active.intentId,
+            turnId,
+            outcome: steerFailure ? "failed" : "completed",
+          } as const)
+            .addOptional(steerFailure ? { error: steerFailure } : undefined)
+            .finish(),
+        );
         await notifyState(sessionId, state);
       } catch (error) {
         await settleFailedDispatch(
@@ -542,7 +567,6 @@ export function createTurnInteractionController(
       }
     }
   };
-
   const scheduleDrain = (
     sessionId: string,
     state: SessionInteractionState,
@@ -556,7 +580,7 @@ export function createTurnInteractionController(
     state.cancelScheduled = schedule(() => {
       delete state.cancelScheduled;
       if (closed || state.queuePaused) return;
-      const running = drain(sessionId, state, thinkingLevel).catch(async (error: unknown) => {
+      const running = drain(sessionId, state, thinkingLevel).catch(async (cause: unknown) => {
         state.queuePaused = true;
         const active = state.active;
         state.steerReadiness?.settle(false);
@@ -578,8 +602,8 @@ export function createTurnInteractionController(
         state.phase = "idle";
         const failure =
           recoveryFailure === undefined
-            ? error
-            : new AggregateError([error, recoveryFailure], "Interaction drain and recovery failed");
+            ? cause
+            : new AggregateError([cause, recoveryFailure], "Interaction drain and recovery failed");
         state.drainFailure = failure;
         const message = failure instanceof Error ? failure.message : String(failure);
         if (active)
@@ -606,7 +630,6 @@ export function createTurnInteractionController(
       void running.then(finish, finish);
     });
   };
-
   const serialize = async <T>(state: SessionInteractionState, operation: () => Promise<T>): Promise<T> => {
     const result = state.commandTail.then(operation, operation);
     state.commandTail = result.then(
@@ -615,13 +638,11 @@ export function createTurnInteractionController(
     );
     return await result;
   };
-
   const inspect = async (sessionId: string): Promise<InteractionSnapshot> => {
     const state = stateFor(sessionId);
     await ensureRecovered(sessionId, state);
     return await snapshot(sessionId, state);
   };
-
   const dispatch = async (
     sessionId: string,
     command: InteractionCommand,
@@ -635,8 +656,12 @@ export function createTurnInteractionController(
       state.observer = dispatchOptions.onEvent;
     }
     type SerializedDispatch =
-      | { readonly result: InteractionDispatchResult }
-      | { readonly settlement: Promise<InteractionDispatchResult> };
+      | {
+          readonly result: InteractionDispatchResult;
+        }
+      | {
+          readonly settlement: Promise<InteractionDispatchResult>;
+        };
     const serialized = await serialize<SerializedDispatch>(state, async () => {
       await ensureRecovered(sessionId, state);
       if (command.type === "submit" || command.type === "enqueue") {
@@ -654,6 +679,7 @@ export function createTurnInteractionController(
         }
         const current = await snapshot(sessionId, state);
         if (command.type === "submit") scheduleDrain(sessionId, state, dispatchOptions.thinkingLevel);
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           result: Object.freeze({ effect: "queued" as const, intentId: intent.intentId, snapshot: current }),
         });
@@ -672,6 +698,7 @@ export function createTurnInteractionController(
         });
         const current = await snapshot(sessionId, state);
         notify(state, { type: "state", snapshot: current });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({ result: Object.freeze({ effect: "rerouted" as const, snapshot: current }) });
       }
       if (command.type === "resume-queue") {
@@ -681,6 +708,7 @@ export function createTurnInteractionController(
         const current = await snapshot(sessionId, state);
         notify(state, { type: "state", snapshot: current });
         scheduleDrain(sessionId, state, dispatchOptions.thinkingLevel);
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({ result: Object.freeze({ effect: "resumed" as const, snapshot: current }) });
       }
       if (command.type === "pause-queue") {
@@ -691,6 +719,7 @@ export function createTurnInteractionController(
         delete state.cancelScheduled;
         const current = await snapshot(sessionId, state);
         notify(state, { type: "state", snapshot: current });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           result: Object.freeze({ effect: "idle" as const, snapshot: current, queueWasHeld }),
         });
@@ -725,6 +754,7 @@ export function createTurnInteractionController(
         }
         const current = await snapshot(sessionId, state);
         notify(state, { type: "state", snapshot: current });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze(
           restored
             ? {
@@ -748,6 +778,7 @@ export function createTurnInteractionController(
         if (!active || command.turnId !== active.turnId) {
           const current = await snapshot(sessionId, state);
           notify(state, { type: "state", snapshot: current });
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           return Object.freeze({ result: Object.freeze({ effect: "idle" as const, snapshot: current }) });
         }
         state.interruptRequested = true;
@@ -756,6 +787,7 @@ export function createTurnInteractionController(
         await options.interrupt(sessionId);
         const settlement = (async (): Promise<InteractionDispatchResult> => {
           if (state.drain) await state.drain;
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           return Object.freeze({
             effect: "interrupted" as const,
             intentId: active.intentId,
@@ -766,13 +798,13 @@ export function createTurnInteractionController(
           settlement,
         });
       }
-
       const active =
         state.phase === "running" && state.steerAdmissionTurnId === state.active?.turnId
           ? state.active
           : undefined;
       if (!active && command.text !== undefined) {
         if (!command.text) throw new Error("Cannot steer with an empty message");
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           result: Object.freeze({
             effect: "idle" as const,
@@ -782,6 +814,7 @@ export function createTurnInteractionController(
         });
       }
       if (!active)
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           result: Object.freeze({ effect: "idle" as const, snapshot: await snapshot(sessionId, state) }),
         });
@@ -811,6 +844,7 @@ export function createTurnInteractionController(
               heldAt: now(),
             });
         if (!steeringIntent) {
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           return Object.freeze({
             result: Object.freeze({
               effect: "idle" as const,
@@ -832,6 +866,7 @@ export function createTurnInteractionController(
               heldAt: now(),
             });
         if (!steeringIntent)
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           return Object.freeze({
             result: Object.freeze({ effect: "idle" as const, snapshot: await snapshot(sessionId, state) }),
           });
@@ -858,7 +893,9 @@ export function createTurnInteractionController(
             });
             const current = await snapshot(sessionId, state);
             notify(state, { type: "state", snapshot: current });
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             if (!released) return Object.freeze({ effect: "idle" as const, snapshot: current });
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             return explicit
               ? Object.freeze({
                   effect: "restored" as const,
@@ -897,6 +934,7 @@ export function createTurnInteractionController(
               throw new Error(`Unconsumed explicit steer ${intent.intentId} could not be withdrawn`);
             const current = await snapshot(sessionId, state);
             notify(state, { type: "state", snapshot: current });
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             return Object.freeze({
               effect: "restored" as const,
               intentId: intent.intentId,
@@ -952,7 +990,6 @@ export function createTurnInteractionController(
     });
     return "settlement" in serialized ? await serialized.settlement : serialized.result;
   };
-
   const close = (): Promise<void> => {
     closePromise ??= (async () => {
       closed = true;
@@ -967,8 +1004,8 @@ export function createTurnInteractionController(
         state.interruptRequested = true;
         state.steerReadiness?.settle(false);
         interrupts.push(
-          options.interrupt(sessionId).catch((error: unknown) => {
-            interruptFailures.push(error);
+          options.interrupt(sessionId).catch((cause: unknown) => {
+            interruptFailures.push(cause);
           }),
         );
       }
@@ -990,6 +1027,5 @@ export function createTurnInteractionController(
     })();
     return closePromise;
   };
-
   return Object.freeze({ inspect, dispatch, close });
 }

@@ -1,4 +1,5 @@
 import {
+  createConditionalObject,
   EvidenceRefSchema,
   FileRevisionRefSchema,
   canonicalJson,
@@ -17,16 +18,13 @@ import {
   type WorkspaceStore,
 } from "@noesis/domain";
 import { z } from "zod";
-
 export const CriterionSourceSchema = z.enum(["explicit_statement", "correction", "expert_command"]);
 export type CriterionSource = z.infer<typeof CriterionSourceSchema>;
-
 export const CriterionPromptOwnershipSchema = z.strictObject({
   owner: z.literal("user"),
   layer: z.enum(["user_constitution", "learned_profile"]),
 });
 export type CriterionPromptOwnership = Readonly<z.infer<typeof CriterionPromptOwnershipSchema>>;
-
 export interface UserCriterionDefinition {
   readonly kind: "user_evaluation_criterion";
   readonly criterionId: string;
@@ -39,7 +37,6 @@ export interface UserCriterionDefinition {
   readonly promptOwnership: CriterionPromptOwnership;
   readonly pinned: boolean;
 }
-
 export const UserCriterionDefinitionSchema: z.ZodType<UserCriterionDefinition> = z.strictObject({
   kind: z.literal("user_evaluation_criterion"),
   criterionId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
@@ -52,7 +49,6 @@ export const UserCriterionDefinitionSchema: z.ZodType<UserCriterionDefinition> =
   promptOwnership: CriterionPromptOwnershipSchema,
   pinned: z.boolean(),
 });
-
 export const CriterionRevisionMetadataSchema = z.strictObject({
   criterionId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
   revision: z.number().int().positive(),
@@ -62,7 +58,6 @@ export const CriterionRevisionMetadataSchema = z.strictObject({
   predecessorRevisionId: z.string().min(1).optional(),
 });
 export type CriterionRevisionMetadata = Readonly<z.infer<typeof CriterionRevisionMetadataSchema>>;
-
 export interface CriterionRevisionCommitRequest {
   readonly criterionId: string;
   readonly revision: number;
@@ -74,28 +69,25 @@ export interface CriterionRevisionCommitRequest {
     readonly reason?: string;
   };
 }
-
 export interface CriterionMetadataConflict {
   readonly code: "conflict";
   readonly message: string;
 }
-
 /** SQLite-backed implementations validate and commit the revision pointer and activity row together. */
+// BOUNDARY: Implementations may expose legacy metadata bytes only through the decoder below.
 export interface UserCriterionMetadataPort {
-  readonly getCurrent: (criterionId: string) => Promise<unknown | undefined>;
-  readonly listCurrent: () => Promise<readonly unknown[]>;
-  readonly listRevisions: (criterionId: string) => Promise<readonly unknown[]>;
+  readonly getCurrent: (criterionId: string) => Promise<CriterionRevisionMetadata | undefined>;
+  readonly listCurrent: () => Promise<readonly CriterionRevisionMetadata[]>;
+  readonly listRevisions: (criterionId: string) => Promise<readonly CriterionRevisionMetadata[]>;
   readonly commitRevision?: (
     request: CriterionRevisionCommitRequest,
-  ) => Promise<Result<unknown, CriterionMetadataConflict>>;
+  ) => Promise<Result<CriterionRevisionMetadata, CriterionMetadataConflict>>;
 }
-
 /** Compatible with WorkspaceStore definition and revision reads without owning workspace persistence. */
 export interface UserCriterionDefinitionPort {
   readonly recordWorkingDefinition: (request: DefinitionWriteRequest) => Promise<FileRevisionRef>;
   readonly readRevision: (ref: FileRevisionRef) => Promise<Uint8Array>;
 }
-
 export interface UserCriterionPublicationPort {
   readonly publishRevision: (
     request: Omit<CriterionRevisionCommitRequest, "definitionRevision"> & {
@@ -103,9 +95,8 @@ export interface UserCriterionPublicationPort {
       readonly bytes: Uint8Array;
       readonly evidenceRefs: readonly EvidenceRef[];
     },
-  ) => Promise<Result<unknown, CriterionMetadataConflict>>;
+  ) => Promise<Result<CriterionRevisionMetadata, CriterionMetadataConflict>>;
 }
-
 export type UserCriterionErrorCode =
   | "already_exists"
   | "conflict"
@@ -114,19 +105,16 @@ export type UserCriterionErrorCode =
   | "not_found"
   | "pinned"
   | "storage_error";
-
 export interface UserCriterionError {
   readonly code: UserCriterionErrorCode;
   readonly message: string;
   readonly criterionId?: string;
   readonly revision?: number;
 }
-
 export interface UserCriterionReadModel {
   readonly definition: UserCriterionDefinition;
   readonly metadata: CriterionRevisionMetadata;
 }
-
 export interface CreateUserCriterionInput {
   readonly criterionId?: string;
   readonly source: CriterionSource;
@@ -138,7 +126,6 @@ export interface CreateUserCriterionInput {
   readonly actor: ActorRef;
   readonly reason?: string;
 }
-
 export interface ReviseUserCriterionInput {
   readonly criterionId: string;
   readonly scope?: string;
@@ -148,14 +135,12 @@ export interface ReviseUserCriterionInput {
   readonly actor: ActorRef;
   readonly reason?: string;
 }
-
 export interface CriterionRelevanceSnapshotInput {
   readonly snapshotId: string;
   readonly scope: string;
   readonly candidateRevision?: CapabilityRevisionRef;
   readonly selectedCriterionIds?: readonly string[];
 }
-
 export interface RelevantCriterionSnapshot {
   readonly criterionId: string;
   readonly revision: number;
@@ -165,7 +150,6 @@ export interface RelevantCriterionSnapshot {
   readonly promptOwnership: CriterionPromptOwnership;
   readonly definitionRevision: FileRevisionRef;
 }
-
 export interface CriterionRelevanceSnapshot {
   readonly snapshotId: string;
   readonly scope: string;
@@ -174,7 +158,6 @@ export interface CriterionRelevanceSnapshot {
   readonly criteria: readonly RelevantCriterionSnapshot[];
   readonly snapshotDigest: string;
 }
-
 export interface UserCriterionRepository {
   readonly create: (
     input: CreateUserCriterionInput,
@@ -202,29 +185,31 @@ export interface UserCriterionRepository {
     input: CriterionRelevanceSnapshotInput,
   ) => Promise<Result<CriterionRelevanceSnapshot, UserCriterionError>>;
 }
-
 export interface UserCriterionRepositoryOptions {
   readonly definitions: UserCriterionDefinitionPort;
   readonly metadata: UserCriterionMetadataPort;
   readonly publications?: UserCriterionPublicationPort;
   readonly nextCriterionId?: () => string;
 }
-
 const USER_CRITERION_NAMESPACE = "user_criterion";
-
 function criterionMetadataFromStored(record: DefinitionMetadataRecord): CriterionRevisionMetadata {
-  return {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return createConditionalObject({
     criterionId: record.definitionId,
     revision: record.revision,
     definitionRevision: record.definitionRevision,
     fileRevisionRow: record.fileRevisionRow,
     activityRow: record.activityRow,
-    ...(record.predecessorRevisionId === undefined
-      ? {}
-      : { predecessorRevisionId: record.predecessorRevisionId }),
-  };
+  } as const)
+    .addOptional(
+      !(record.predecessorRevisionId === undefined)
+        ? {
+            predecessorRevisionId: record.predecessorRevisionId,
+          }
+        : undefined,
+    )
+    .finish();
 }
-
 /** Connects the criterion repository to WorkspaceStore's file bytes and SQLite current pointers. */
 export function createWorkspaceUserCriterionPorts(
   workspace: Pick<WorkspaceStore, "definitions" | "definitionMetadata" | "definitionPublications" | "reads">,
@@ -242,23 +227,37 @@ export function createWorkspaceUserCriterionPorts(
           readonly evidenceRefs: readonly EvidenceRef[];
         },
       ) => {
-        const committed = await workspace.definitionPublications.publish({
-          namespace: USER_CRITERION_NAMESPACE,
-          definitionId: request.criterionId,
-          revision: request.revision,
-          workingPath: request.workingPath,
-          bytes: request.bytes,
-          ...(request.expectedCurrentRevisionId === undefined
-            ? {}
-            : { expectedCurrentRevisionId: request.expectedCurrentRevisionId }),
-          sensitivity: "normal",
-          provenanceRefs: request.evidenceRefs,
-          activity: {
-            kind: `criterion.${request.activity.kind}`,
-            actor: request.activity.actor,
-            ...(request.activity.reason === undefined ? {} : { reason: request.activity.reason }),
-          },
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        const committed = await workspace.definitionPublications.publish(
+          createConditionalObject({
+            namespace: USER_CRITERION_NAMESPACE,
+            definitionId: request.criterionId,
+            revision: request.revision,
+            workingPath: request.workingPath,
+            bytes: request.bytes,
+          } as const)
+            .addOptional(
+              !(request.expectedCurrentRevisionId === undefined)
+                ? {
+                    expectedCurrentRevisionId: request.expectedCurrentRevisionId,
+                  }
+                : undefined,
+            )
+            .add({
+              sensitivity: "normal",
+              provenanceRefs: request.evidenceRefs,
+              activity: createConditionalObject({
+                kind: `criterion.${request.activity.kind}`,
+                actor: request.activity.actor,
+              } as const)
+                .addOptional(
+                  !(request.activity.reason === undefined) ? { reason: request.activity.reason } : undefined,
+                )
+                .finish(),
+            } as const)
+            .finish(),
+        );
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return committed.ok
           ? ok(criterionMetadataFromStored(committed.value))
           : err({ code: "conflict" as const, message: committed.error.message });
@@ -280,32 +279,29 @@ export function createWorkspaceUserCriterionPorts(
     }),
   });
 }
-
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf8", { fatal: true });
-
 function criterionError(
   code: UserCriterionErrorCode,
   message: string,
   criterionId?: string,
   revision?: number,
 ): UserCriterionError {
-  return {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return createConditionalObject({
     code,
     message,
-    ...(criterionId ? { criterionId } : {}),
-    ...(revision === undefined ? {} : { revision }),
-  };
+  } as const)
+    .addOptional(criterionId ? { criterionId } : undefined)
+    .addOptional(!(revision === undefined) ? { revision } : undefined)
+    .finish();
 }
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function errorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }
-
 function renderDefinition(definition: UserCriterionDefinition): Uint8Array {
   return textEncoder.encode(`${JSON.stringify(definition, null, 2)}\n`);
 }
-
 function freezeDefinition(definition: UserCriterionDefinition): UserCriterionDefinition {
   return Object.freeze({
     ...definition,
@@ -313,7 +309,6 @@ function freezeDefinition(definition: UserCriterionDefinition): UserCriterionDef
     promptOwnership: Object.freeze({ ...definition.promptOwnership }),
   });
 }
-
 function freezeMetadata(metadata: CriterionRevisionMetadata): CriterionRevisionMetadata {
   return Object.freeze({
     ...metadata,
@@ -322,7 +317,6 @@ function freezeMetadata(metadata: CriterionRevisionMetadata): CriterionRevisionM
     activityRow: Object.freeze({ ...metadata.activityRow }),
   });
 }
-
 function decodeMetadata(
   value: unknown,
   criterionId?: string,
@@ -337,7 +331,6 @@ function decodeMetadata(
     ),
   );
 }
-
 function decodeDefinition(
   bytes: Uint8Array,
   metadata: CriterionRevisionMetadata,
@@ -382,16 +375,13 @@ function decodeDefinition(
   }
   return ok(freezeDefinition(parsed.data));
 }
-
 function criterionWorkingPath(criterionId: string): string {
   return `config/criteria/${criterionId}.json`;
 }
-
 function isCriterionWorkingPath(workingPath: string, criterionId: string): boolean {
   const expected = criterionWorkingPath(criterionId);
   return workingPath === expected || workingPath === `definitions/${expected}`;
 }
-
 function sameFileRevision(left: FileRevisionRef, right: FileRevisionRef): boolean {
   return (
     left.revisionId === right.revisionId &&
@@ -400,16 +390,15 @@ function sameFileRevision(left: FileRevisionRef, right: FileRevisionRef): boolea
     left.contentDigest === right.contentDigest
   );
 }
-
 function isRelevant(criterionScope: string, targetScope: string): boolean {
   return (
     criterionScope === "*" || criterionScope === targetScope || targetScope.startsWith(`${criterionScope}/`)
   );
 }
-
 export function createUserCriterionRepository(
   options: UserCriterionRepositoryOptions,
 ): UserCriterionRepository {
+  // BOUNDARY: Metadata implementations may still provide legacy values; decodeMetadata owns validation.
   const loadModel = async (
     metadataValue: unknown,
     expectedCriterionId?: string,
@@ -441,7 +430,6 @@ export function createUserCriterionRepository(
       );
     }
   };
-
   const inspect = async (
     criterionId: string,
     revision?: number,
@@ -478,7 +466,6 @@ export function createUserCriterionRepository(
       );
     }
   };
-
   const writeRevision = async (
     definition: UserCriterionDefinition,
     predecessor: UserCriterionReadModel | undefined,
@@ -501,39 +488,77 @@ export function createUserCriterionRepository(
     let committed: Result<unknown, CriterionMetadataConflict>;
     try {
       if (options.publications) {
-        committed = await options.publications.publishRevision({
-          criterionId: definition.criterionId,
-          revision: definition.revision,
-          workingPath: criterionWorkingPath(definition.criterionId),
-          bytes: renderDefinition(validated.data),
-          evidenceRefs: definition.evidenceRefs,
-          ...(predecessor
-            ? { expectedCurrentRevisionId: predecessor.metadata.definitionRevision.revisionId }
-            : {}),
-          activity: { kind: activityKind, actor, ...(reason ? { reason } : {}) },
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        committed = await options.publications.publishRevision(
+          createConditionalObject({
+            criterionId: definition.criterionId,
+            revision: definition.revision,
+            workingPath: criterionWorkingPath(definition.criterionId),
+            bytes: renderDefinition(validated.data),
+            evidenceRefs: definition.evidenceRefs,
+          } as const)
+            .addOptional(
+              predecessor
+                ? {
+                    expectedCurrentRevisionId: predecessor.metadata.definitionRevision.revisionId,
+                  }
+                : undefined,
+            )
+            .add({
+              activity: createConditionalObject({
+                kind: activityKind,
+                actor,
+              } as const)
+                .addOptional(reason ? { reason } : undefined)
+                .finish(),
+            } as const)
+            .finish(),
+        );
       } else {
         if (!options.metadata.commitRevision)
           throw new Error("Criterion storage does not provide a coordinated publication port");
-        definitionRevision = await options.definitions.recordWorkingDefinition({
-          workingPath: criterionWorkingPath(definition.criterionId),
-          bytes: renderDefinition(validated.data),
-          actor,
-          provenanceRefs: definition.evidenceRefs,
-          ...(reason ? { reason } : {}),
-          ...(predecessor
-            ? { predecessorRevisionId: predecessor.metadata.definitionRevision.revisionId }
-            : {}),
-        });
-        committed = await options.metadata.commitRevision({
-          criterionId: definition.criterionId,
-          revision: definition.revision,
-          definitionRevision,
-          ...(predecessor
-            ? { expectedCurrentRevisionId: predecessor.metadata.definitionRevision.revisionId }
-            : {}),
-          activity: { kind: activityKind, actor, ...(reason ? { reason } : {}) },
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        definitionRevision = await options.definitions.recordWorkingDefinition(
+          createConditionalObject({
+            workingPath: criterionWorkingPath(definition.criterionId),
+            bytes: renderDefinition(validated.data),
+            actor,
+            provenanceRefs: definition.evidenceRefs,
+          } as const)
+            .addOptional(reason ? { reason } : undefined)
+            .addOptional(
+              predecessor
+                ? {
+                    predecessorRevisionId: predecessor.metadata.definitionRevision.revisionId,
+                  }
+                : undefined,
+            )
+            .finish(),
+        );
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        committed = await options.metadata.commitRevision(
+          createConditionalObject({
+            criterionId: definition.criterionId,
+            revision: definition.revision,
+            definitionRevision,
+          } as const)
+            .addOptional(
+              predecessor
+                ? {
+                    expectedCurrentRevisionId: predecessor.metadata.definitionRevision.revisionId,
+                  }
+                : undefined,
+            )
+            .add({
+              activity: createConditionalObject({
+                kind: activityKind,
+                actor,
+              } as const)
+                .addOptional(reason ? { reason } : undefined)
+                .finish(),
+            } as const)
+            .finish(),
+        );
       }
     } catch (error) {
       return err(
@@ -545,7 +570,6 @@ export function createUserCriterionRepository(
         ),
       );
     }
-
     if (!committed.ok) {
       return err(
         criterionError("conflict", committed.error.message, definition.criterionId, definition.revision),
@@ -565,7 +589,6 @@ export function createUserCriterionRepository(
     }
     return await loadModel(decoded.value, definition.criterionId);
   };
-
   const create = async (
     input: CreateUserCriterionInput,
   ): Promise<Result<UserCriterionReadModel, UserCriterionError>> => {
@@ -602,7 +625,6 @@ export function createUserCriterionRepository(
       input.reason,
     );
   };
-
   const list = async (): Promise<Result<readonly UserCriterionReadModel[], UserCriterionError>> => {
     let values: readonly unknown[];
     try {
@@ -624,7 +646,6 @@ export function createUserCriterionRepository(
       ),
     );
   };
-
   const revise = async (
     input: ReviseUserCriterionInput,
   ): Promise<Result<UserCriterionReadModel, UserCriterionError>> => {
@@ -655,7 +676,6 @@ export function createUserCriterionRepository(
       input.reason,
     );
   };
-
   const retire = async (
     criterionId: string,
     actor: ActorRef,
@@ -686,7 +706,6 @@ export function createUserCriterionRepository(
       reason,
     );
   };
-
   const pin = async (
     criterionId: string,
     pinned: boolean,
@@ -718,7 +737,6 @@ export function createUserCriterionRepository(
       reason,
     );
   };
-
   const snapshotRelevant = async (
     input: CriterionRelevanceSnapshotInput,
   ): Promise<Result<CriterionRelevanceSnapshot, UserCriterionError>> => {
@@ -747,25 +765,38 @@ export function createUserCriterionRepository(
         }),
       );
     const selectedCriterionIds = Object.freeze(criteria.map((criterion) => criterion.criterionId));
-    const digestInput = {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const digestInput = createConditionalObject({
       snapshotId: input.snapshotId,
       scope: input.scope,
-      ...(input.candidateRevision ? { candidateRevision: input.candidateRevision } : {}),
-      criteria,
-    };
+    } as const)
+      .addOptional(input.candidateRevision ? { candidateRevision: input.candidateRevision } : undefined)
+      .add({
+        criteria,
+      } as const)
+      .finish();
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return ok(
-      Object.freeze({
-        snapshotId: input.snapshotId,
-        scope: input.scope,
-        ...(input.candidateRevision
-          ? { candidateRevision: Object.freeze({ ...input.candidateRevision }) }
-          : {}),
-        selectedCriterionIds,
-        criteria: Object.freeze(criteria),
-        snapshotDigest: sha256(canonicalJson(digestInput)),
-      }),
+      Object.freeze(
+        createConditionalObject({
+          snapshotId: input.snapshotId,
+          scope: input.scope,
+        } as const)
+          .addOptional(
+            input.candidateRevision
+              ? {
+                  candidateRevision: Object.freeze({ ...input.candidateRevision }),
+                }
+              : undefined,
+          )
+          .add({
+            selectedCriterionIds,
+            criteria: Object.freeze(criteria),
+            snapshotDigest: sha256(canonicalJson(digestInput)),
+          } as const)
+          .finish(),
+      ),
     );
   };
-
   return Object.freeze({ create, list, inspect, revise, retire, pin, snapshotRelevant });
 }

@@ -141,6 +141,7 @@ function splitDisplayMath(source: string): readonly RichTextSegment[] {
       index = codeRange.end;
       continue;
     }
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const opener =
       source.startsWith("$$", index) && !isEscapedAt(source, index)
         ? ({ open: "$$", close: "$$" } as const)

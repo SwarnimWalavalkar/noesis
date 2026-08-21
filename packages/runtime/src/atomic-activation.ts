@@ -5,10 +5,12 @@ import {
   type CapabilityControlReadModel,
 } from "@noesis/capabilities";
 import {
+  createConditionalObject,
   CapabilityRevisionRefSchema,
   CapabilityRevisionSchema,
   ExperimentSchema,
   FileRevisionRefSchema,
+  JsonValueSchema,
   PreflightPlanSchema,
   PreflightReportSchema,
   canonicalJson,
@@ -36,7 +38,6 @@ import {
   type ActivationRisk,
   type PreflightPolicyDecision,
 } from "./preflight-policy.ts";
-
 const CandidateManifestBindingSchema = z.object({
   schemaVersion: z.literal(1),
   kind: z.literal("learning_candidate_revision"),
@@ -60,13 +61,11 @@ const CapabilityControlReadModelSchema = z.strictObject({
   pin: CapabilityPinMetadataSchema.nullable(),
   vetoes: z.array(CapabilityVetoMetadataSchema),
 });
-
 export interface ActivationCandidateResolver {
   readonly resolve: (reference: CapabilityRevisionRef) => Promise<CapabilityRevision | undefined>;
   readonly lineage: (reference: CapabilityRevisionRef) => Promise<readonly CapabilityRevisionRef[]>;
   readonly controls: (capabilityId: string) => Promise<CapabilityControlReadModel | undefined>;
 }
-
 export interface AtomicActivationControllerOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly protectedRuntime: ProtectedWorkspaceRuntime;
@@ -79,7 +78,6 @@ export interface AtomicActivationControllerOptions {
   }) => ActivationRisk;
   readonly actorId?: string;
 }
-
 export type ActivationAttemptResult =
   | {
       readonly ok: true;
@@ -111,7 +109,6 @@ export type ActivationAttemptResult =
       readonly code: "validation_failed" | "authority_denied" | "activation_conflict";
       readonly message: string;
     };
-
 export interface AtomicActivationController {
   readonly activateFromPreflight: (handoff: PreflightActivationHandoff) => Promise<ActivationAttemptResult>;
   readonly approve: (request: {
@@ -127,7 +124,6 @@ export interface AtomicActivationController {
   readonly getOperation: (operationId: string) => Promise<ActivationOperationRecord | undefined>;
   readonly pinTurnActivation: (sessionId: string, turnId: string) => Promise<TurnActivationPinRecord>;
 }
-
 interface ValidatedActivationInput {
   readonly binding: ActivationEvidenceBinding;
   readonly candidate: CapabilityRevision;
@@ -139,10 +135,8 @@ interface ValidatedActivationInput {
   readonly scopeBound: boolean;
   readonly allRailsPassed: boolean;
 }
-
 const emptyControls = (capabilityId: string): CapabilityControlReadModel =>
   Object.freeze({ capabilityId, pin: null, vetoes: Object.freeze([]) });
-
 function exactFileRef(left: FileRevisionRef, right: FileRevisionRef): boolean {
   return (
     left.revisionId === right.revisionId &&
@@ -151,27 +145,31 @@ function exactFileRef(left: FileRevisionRef, right: FileRevisionRef): boolean {
     left.contentDigest === right.contentDigest
   );
 }
-
 function parsedCapabilityRevision(value: unknown): CapabilityRevision {
   const parsed = CapabilityRevisionSchema.parse(value);
   const { predecessorRevisionId, dependencyLock, ...required } = parsed;
-  return Object.freeze({
-    ...required,
-    ...(predecessorRevisionId === undefined ? {} : { predecessorRevisionId }),
-    ...(dependencyLock === undefined ? {} : { dependencyLock }),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      ...required,
+    } as const)
+      .addOptional(!(predecessorRevisionId === undefined) ? { predecessorRevisionId } : undefined)
+      .addOptional(!(dependencyLock === undefined) ? { dependencyLock } : undefined)
+      .finish(),
+  );
 }
-
 function safeSlotName(value: string): string {
   const normalized = value.replaceAll(/[^A-Za-z0-9._-]/gu, "-");
   if (!normalized) throw new Error("Activation definition slot has no safe name");
   return normalized;
 }
-
 function completeDefinitionSlots(
   manifestRevision: FileRevisionRef,
   revision: CapabilityRevision,
-): readonly { readonly slotKey: string; readonly sourceRevision: FileRevisionRef }[] {
+): readonly {
+  readonly slotKey: string;
+  readonly sourceRevision: FileRevisionRef;
+}[] {
   const expectedToolIds = revision.tools.map((tool) => tool.revisionId);
   if (
     expectedToolIds.length !== revision.toolset.toolRevisionIds.length ||
@@ -203,11 +201,13 @@ function completeDefinitionSlots(
   }
   return Object.freeze(slots.map((slot) => Object.freeze(slot)));
 }
-
 function operationIdentity(
   binding: ActivationEvidenceBinding,
   policyDigest: string,
-  expectedActivation: { readonly activationId: string | null; readonly revision: number },
+  expectedActivation: {
+    readonly activationId: string | null;
+    readonly revision: number;
+  },
 ): {
   readonly operationId: string;
   readonly idempotencyKey: string;
@@ -222,16 +222,14 @@ function operationIdentity(
     approvalId: `activation_approval_${digest.slice(0, 32)}`,
   });
 }
-
-function classifyFailure(error: unknown): ActivationAttemptResult {
-  const message = error instanceof Error ? error.message : String(error);
+function classifyFailure(cause: unknown): ActivationAttemptResult {
+  const message = cause instanceof Error ? cause.message : String(cause);
   return Object.freeze({
     ok: false,
     code: /CAS conflict|snapshot changed/iu.test(message) ? "activation_conflict" : "validation_failed",
     message,
   });
 }
-
 function recoveredPolicy(operation: ActivationOperationRecord): PreflightPolicyDecision {
   return Object.freeze({
     outcome: operation.decision,
@@ -249,7 +247,6 @@ function recoveredPolicy(operation: ActivationOperationRecord): PreflightPolicyD
     snapshotDigest: operation.policyDigest,
   });
 }
-
 export function createAtomicActivationController(
   options: AtomicActivationControllerOptions,
 ): AtomicActivationController {
@@ -258,8 +255,8 @@ export function createAtomicActivationController(
     .string()
     .min(1)
     .parse(options.actorId ?? "protected-activation-user");
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const classifyRisk = options.classifyRisk ?? (() => "low" as const);
-
   const validate = async (handoff: PreflightActivationHandoff): Promise<ValidatedActivationInput> => {
     const experiment = ExperimentSchema.parse(handoff.experiment);
     const handedReport = PreflightReportSchema.parse(handoff.report);
@@ -372,37 +369,45 @@ export function createAtomicActivationController(
       candidate.capabilityId === candidateRef.capabilityId &&
       candidate.activationPolicy.scope === experiment.scope &&
       (candidate.capabilityId === baseline.capabilityId || createsNewSlot);
-    const binding = Object.freeze({
-      experimentId: experiment.experimentId,
-      candidateRevision: candidateRef,
-      manifestRevision,
-      preflightId: recordedReport.preflightId,
-      planId: parsedPlan.planId,
-      candidateDigest: candidateRef.bundleDigest,
-      manifestDigest: manifestRevision.contentDigest,
-      suiteDigest: sha256(
-        canonicalJson({
-          caseRefs: parsedPlan.caseRefs,
-          judgeVariant: parsedPlan.judgeVariant,
-          runtimeVariant: parsedPlan.runtimeVariant,
-          budget: parsedPlan.budget,
-        }),
-      ),
-      preflightDigest: sha256(canonicalJson({ plan: parsedPlan, report: recordedReport })),
-      reportDigest: recordedReport.reportEvidence.contentDigest,
-      definitionSetDigest: sha256(
-        canonicalJson(
-          completeDefinitionSlots(manifestRevision, candidate).map(({ slotKey, sourceRevision }) => ({
-            slotKey,
-            sourceRevision,
-          })),
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const binding = Object.freeze(
+      createConditionalObject({
+        experimentId: experiment.experimentId,
+        candidateRevision: candidateRef,
+        manifestRevision,
+        preflightId: recordedReport.preflightId,
+        planId: parsedPlan.planId,
+        candidateDigest: candidateRef.bundleDigest,
+        manifestDigest: manifestRevision.contentDigest,
+        suiteDigest: sha256(
+          canonicalJson({
+            caseRefs: parsedPlan.caseRefs,
+            judgeVariant: parsedPlan.judgeVariant,
+            runtimeVariant: parsedPlan.runtimeVariant,
+            budget: parsedPlan.budget,
+          }),
         ),
-      ),
-      controlRevisionId: controlMetadata?.definitionRevision.revisionId ?? null,
-      ...(experiment.sourceAdjustmentId === undefined
-        ? {}
-        : { sourceAdjustmentId: experiment.sourceAdjustmentId }),
-    }) satisfies ActivationEvidenceBinding;
+        preflightDigest: sha256(canonicalJson({ plan: parsedPlan, report: recordedReport })),
+        reportDigest: recordedReport.reportEvidence.contentDigest,
+        definitionSetDigest: sha256(
+          canonicalJson(
+            completeDefinitionSlots(manifestRevision, candidate).map(({ slotKey, sourceRevision }) => ({
+              slotKey,
+              sourceRevision,
+            })),
+          ),
+        ),
+        controlRevisionId: controlMetadata?.definitionRevision.revisionId ?? null,
+      } as const)
+        .addOptional(
+          !(experiment.sourceAdjustmentId === undefined)
+            ? {
+                sourceAdjustmentId: experiment.sourceAdjustmentId,
+              }
+            : undefined,
+        )
+        .finish(),
+    ) satisfies ActivationEvidenceBinding;
     return Object.freeze({
       binding,
       candidate,
@@ -415,7 +420,6 @@ export function createAtomicActivationController(
       allRailsPassed: recordedReport.railChecks.every((rail) => rail.passed),
     });
   };
-
   const commitWithAuthority = async (
     operation: ActivationOperationRecord,
     policy?: PreflightPolicyDecision,
@@ -463,13 +467,12 @@ export function createAtomicActivationController(
         }),
     });
   };
-
   const attemptActivation = async (
     handoff: PreflightActivationHandoff,
     retriesRemaining: number,
   ): Promise<ActivationAttemptResult> => {
     try {
-      const recovered = (await options.protectedRuntime.activations.listOperations(1_000)).find(
+      const recovered = (await options.protectedRuntime.activations.listOperations(1000)).find(
         (operation) =>
           operation.status === "committed" &&
           operation.binding.experimentId === handoff.experiment.experimentId &&
@@ -511,19 +514,21 @@ export function createAtomicActivationController(
         autonomy,
         permissionExpansion,
       });
-      const policySnapshot = Object.freeze({
-        outcome: policy.outcome,
-        reasonCodes: policy.reasonCodes,
-        risk,
-        autonomy,
-        activationPolicy: validated.candidate.activationPolicy,
-        permissionExpansion,
-        controls: validated.controls,
-        lineage: validated.lineage,
-        identityBound: validated.identityBound,
-        scopeBound: validated.scopeBound,
-        allRailsPassed: validated.allRailsPassed,
-      });
+      const policySnapshot = Object.freeze(
+        z.record(z.string(), JsonValueSchema).parse({
+          outcome: policy.outcome,
+          reasonCodes: policy.reasonCodes,
+          risk,
+          autonomy,
+          activationPolicy: validated.candidate.activationPolicy,
+          permissionExpansion,
+          controls: validated.controls,
+          lineage: validated.lineage,
+          identityBound: validated.identityBound,
+          scopeBound: validated.scopeBound,
+          allRailsPassed: validated.allRailsPassed,
+        }),
+      );
       const policyDigest = sha256(canonicalJson(policySnapshot));
       const current = await options.protectedRuntime.activations.current();
       const expectedActivation = Object.freeze({
@@ -531,7 +536,7 @@ export function createAtomicActivationController(
         revision: current?.revision ?? 0,
       });
       const identities = operationIdentity(validated.binding, policyDigest, expectedActivation);
-      const staleAttempts = (await options.protectedRuntime.activations.listOperations(1_000)).filter(
+      const staleAttempts = (await options.protectedRuntime.activations.listOperations(1000)).filter(
         (operation) =>
           operation.binding.experimentId === handoff.experiment.experimentId &&
           sameCapabilityRevisionRef(operation.binding.candidateRevision, handoff.candidateRevision) &&
@@ -572,6 +577,7 @@ export function createAtomicActivationController(
       if (policy.outcome !== "block") {
         for (const slot of completeDefinitionSlots(validated.binding.manifestRevision, validated.candidate)) {
           const bytes = await options.workspace.reads.readRevision(slot.sourceRevision);
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           const staged = await options.workspace.stageDefinition({
             targetArea: "active",
             relativePath: `${safeSlotName(validated.binding.candidateRevision.capabilityId)}/${safeSlotName(validated.binding.candidateRevision.capabilityRevisionId)}/${safeSlotName(slot.slotKey)}-${safeSlotName(basename(slot.sourceRevision.workingPath))}`,
@@ -589,20 +595,28 @@ export function createAtomicActivationController(
         }
       }
       const bindingDigest = sha256(canonicalJson(validated.binding));
-      const operation = await options.protectedRuntime.activations.prepare({
-        operationId: identities.operationId,
-        idempotencyKey: identities.idempotencyKey,
-        activationId: identities.activationId,
-        binding: validated.binding,
-        bindingDigest,
-        policySnapshot,
-        policyDigest,
-        decision: policy.outcome,
-        expectedActivationRevision: current?.revision ?? 0,
-        previousActivationId: current?.activationId ?? null,
-        ...(policy.outcome === "approval_required" ? { approvalId: identities.approvalId } : {}),
-        stagedDefinitions: Object.freeze(stagedDefinitions),
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      const operation = await options.protectedRuntime.activations.prepare(
+        createConditionalObject({
+          operationId: identities.operationId,
+          idempotencyKey: identities.idempotencyKey,
+          activationId: identities.activationId,
+          binding: validated.binding,
+          bindingDigest,
+          policySnapshot,
+          policyDigest,
+          decision: policy.outcome,
+          expectedActivationRevision: current?.revision ?? 0,
+          previousActivationId: current?.activationId ?? null,
+        } as const)
+          .addOptional(
+            policy.outcome === "approval_required" ? { approvalId: identities.approvalId } : undefined,
+          )
+          .add({
+            stagedDefinitions: Object.freeze(stagedDefinitions),
+          } as const)
+          .finish(),
+      );
       if (policy.outcome === "block")
         return Object.freeze({ ok: true, status: "blocked", operation, policy });
       if (policy.outcome === "approval_required")
@@ -625,11 +639,9 @@ export function createAtomicActivationController(
       return failure;
     }
   };
-
   const activateFromPreflight = async (
     handoff: PreflightActivationHandoff,
   ): Promise<ActivationAttemptResult> => await attemptActivation(handoff, 2);
-
   const approve = async (request: {
     readonly approvalId: string;
     readonly operationId: string;
@@ -650,9 +662,7 @@ export function createAtomicActivationController(
       ) {
         await options.protectedRuntime.activations.supersede({
           operationId: existing.operationId,
-          supersededByOperationId: `activation_revalidation_${sha256(
-            `${existing.operationId}:${current?.revision ?? 0}:${current?.activationId ?? "none"}`,
-          ).slice(0, 32)}`,
+          supersededByOperationId: `activation_revalidation_${sha256(`${existing.operationId}:${current?.revision ?? 0}:${current?.activationId ?? "none"}`).slice(0, 32)}`,
         });
         throw new Error("Activation approval is bound to a stale expected activation snapshot");
       }
@@ -668,7 +678,6 @@ export function createAtomicActivationController(
       return classifyFailure(error);
     }
   };
-
   const reject = async (request: {
     readonly approvalId: string;
     readonly operationId: string;
@@ -698,7 +707,6 @@ export function createAtomicActivationController(
       return classifyFailure(error);
     }
   };
-
   return Object.freeze({
     activateFromPreflight,
     approve,

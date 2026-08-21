@@ -36,6 +36,7 @@ const containsUnpairedSurrogate = (text: string): boolean => {
   return false;
 };
 
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const consumeSteer: NoesisAgentRuntime["steer"] = async () =>
   Object.freeze({
     status: "consumed" as const,
@@ -645,6 +646,7 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["/quit", "/quit\r"],
     ["Ctrl+C", "\u0003"],
@@ -756,6 +758,7 @@ describe("Noesis TUI lifecycle", () => {
     const turnGate = new Promise<void>((resolve) => {
       releaseTurn = resolve;
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const steer = vi.fn(async () => ({
       status: "consumed" as const,
       timelineSequence: 1,
@@ -1014,6 +1017,7 @@ describe("Noesis TUI lifecycle", () => {
           ...base,
           listLearningActivity: async (sessionId: string) => {
             requestedSessions.push(sessionId);
+            // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
             return Object.freeze([
               Object.freeze({
                 jobId,
@@ -1073,6 +1077,7 @@ describe("Noesis TUI lifecycle", () => {
       steer: consumeSteer,
       async abort() {},
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const runtime = Object.freeze({
       ...base,
       listLearningActivity: async (sessionId: string) =>
@@ -1139,6 +1144,7 @@ describe("Noesis TUI lifecycle", () => {
       listLearningActivity: async (sessionId: string) => {
         learningReads += 1;
         if (learningReads > 1) return Object.freeze([]);
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze([
           Object.freeze({
             jobId: "job-late-adjustment",
@@ -1307,6 +1313,7 @@ describe("Noesis TUI lifecycle", () => {
           result: { ok: true },
         });
         emit({ type: "delta", text: "grounded answer" });
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         const contextUsage = {
           usedTokens: 1_000,
           contextWindow: 4_000,
@@ -2232,9 +2239,9 @@ describe("Noesis TUI lifecycle", () => {
             clearTimeout(timeout);
             resolve();
           },
-          (error: unknown) => {
+          (cause: unknown) => {
             clearTimeout(timeout);
-            reject(error);
+            reject(cause);
           },
         );
       }),

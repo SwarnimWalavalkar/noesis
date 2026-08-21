@@ -23,6 +23,7 @@ const agent: NoesisAgentRuntime = {
     };
   },
   async steer() {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     return {
       status: "consumed" as const,
       timelineSequence: 1,
@@ -104,6 +105,7 @@ describe("Noesis slash commands", () => {
   });
 
   test("explains idle and unresolved steering without masking successful delivery", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const snapshot = { sessionId: "session", phase: "idle" as const, queuePaused: true, pending: [] };
     expect(steerFeedback({ effect: "idle", snapshot }, true)).toContain("No active turn");
     expect(steerFeedback({ effect: "idle", snapshot }, false)).toContain("No queued message");
@@ -156,6 +158,7 @@ describe("Noesis slash commands", () => {
       ...base,
       listLearningActivity: async (sessionId: string) => {
         requestedSessions.push(sessionId);
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze([
           Object.freeze({
             jobId: "job-reflection-running",
@@ -257,6 +260,7 @@ describe("Noesis slash commands", () => {
 
   test("inspects the active project adjustment in a fresh session without inventing activity", async () => {
     const base = createInMemoryTestRuntime(agent);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const runtime = Object.freeze({
       ...base,
       inspectLearning: async () =>
@@ -291,6 +295,7 @@ describe("Noesis slash commands", () => {
 
   test("paginates complete learning history instead of truncating later entries", async () => {
     const base = createInMemoryTestRuntime(agent);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const activity = Object.freeze(
       Array.from({ length: 240 }, (_, index) =>
         Object.freeze({

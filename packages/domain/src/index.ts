@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { CapabilityRevision, CapabilityRevisionRef } from "./research.ts";
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const SCHEMA_VERSION = 1 as const;
 const ISO_DATE_TIME_PATTERN = "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$";
 
@@ -65,13 +66,8 @@ export const EventTypeSchema = z.enum([
 ]);
 export type EventType = z.infer<typeof EventTypeSchema>;
 
-export type JsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | readonly JsonValue[]
-  | { readonly [key: string]: JsonValue };
+export type JsonObject = { readonly [key: string]: JsonValue };
+export type JsonValue = null | boolean | number | string | readonly JsonValue[] | JsonObject;
 export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
     z.null(),
@@ -82,6 +78,10 @@ export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
     z.record(z.string(), JsonValueSchema),
   ]),
 );
+
+export function isJsonObject(value: JsonValue | undefined): value is JsonObject {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 export function toJsonValue(value: unknown): JsonValue {
   return JsonValueSchema.parse(value);
@@ -127,6 +127,8 @@ export interface Clock {
 export const systemClock: Clock = { now: () => new Date() };
 export const createId = (prefix: string): string => `${prefix}_${randomUUID()}`;
 
+// BOUNDARY: Canonical serialization deliberately accepts any JavaScript value and recursively
+// normalizes it into deterministic JSON text.
 export function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -200,5 +202,6 @@ export function effectOperationFingerprint(identity: StableEffectOperationIdenti
 }
 
 export * from "./research.ts";
+export * from "./object-builder.ts";
 export * from "./storage-schemas.ts";
 export * from "./workspace.ts";

@@ -134,6 +134,7 @@ describe("first-party architecture boundaries", () => {
     const dependencyViolations: string[] = [];
     for (const path of manifests) {
       const localPath = relativePath(path);
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       const manifest = JSON.parse(await readFile(path, "utf8")) as {
         readonly dependencies?: Readonly<Record<string, string>>;
         readonly devDependencies?: Readonly<Record<string, string>>;
@@ -162,6 +163,7 @@ describe("first-party architecture boundaries", () => {
     const relativeImportViolations: string[] = [];
     for (const name of researchRolePackages) {
       const packageRoot = resolve(repositoryRoot, "packages", name);
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       const manifest = JSON.parse(await readFile(resolve(packageRoot, "package.json"), "utf8")) as {
         readonly dependencies?: Readonly<Record<string, string>>;
         readonly devDependencies?: Readonly<Record<string, string>>;
@@ -192,6 +194,7 @@ describe("first-party architecture boundaries", () => {
 
     const exportViolations: string[] = [];
     for (const name of ["domain", "policy", "runtime"]) {
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       const manifest = JSON.parse(
         await readFile(resolve(repositoryRoot, "packages", name, "package.json"), "utf8"),
       ) as { readonly exports?: Readonly<Record<string, string>> };
@@ -200,6 +203,7 @@ describe("first-party architecture boundaries", () => {
         exportViolations.push(`${name}:${exportedPaths.join(",")}`);
     }
 
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const rootConfig = JSON.parse(await readFile(resolve(repositoryRoot, "tsconfig.json"), "utf8")) as {
       readonly compilerOptions?: {
         readonly paths?: Readonly<Record<string, readonly string[]>>;
@@ -248,6 +252,7 @@ describe("first-party architecture boundaries", () => {
       };
       visit(sourceFile);
     }
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const manifest = JSON.parse(await readFile(resolve(tuiRoot, "package.json"), "utf8")) as {
       readonly dependencies?: Readonly<Record<string, string>>;
     };
@@ -268,6 +273,7 @@ describe("first-party architecture boundaries", () => {
         if (specifier === "@noesis/runtime-pi" || specifier.startsWith("@noesis/runtime-pi/"))
           sourceViolations.push(`${relativePath(path)}:${specifier}`);
     }
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const manifest = JSON.parse(await readFile(resolve(runtimeRoot, "package.json"), "utf8")) as {
       readonly dependencies?: Readonly<Record<string, string>>;
       readonly devDependencies?: Readonly<Record<string, string>>;
@@ -364,9 +370,11 @@ describe("first-party architecture boundaries", () => {
   });
 
   test("builds the TypeScript-source workspace without emitting beside sources", async () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const manifest = JSON.parse(await readFile(resolve(repositoryRoot, "package.json"), "utf8")) as {
       readonly scripts?: Readonly<Record<string, string>>;
     };
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const config = JSON.parse(await readFile(resolve(repositoryRoot, "tsconfig.json"), "utf8")) as {
       readonly compilerOptions?: { readonly noEmit?: boolean };
     };
@@ -404,6 +412,7 @@ describe("first-party architecture boundaries", () => {
     ];
     const dependencyViolations: string[] = [];
     for (const path of manifests) {
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       const manifest = JSON.parse(await readFile(path, "utf8")) as {
         readonly dependencies?: Readonly<Record<string, string>>;
         readonly devDependencies?: Readonly<Record<string, string>>;

@@ -7,6 +7,7 @@ import {
   type RecordedPreflightReportReadPort,
 } from "../src/protected-activation.ts";
 
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const fileRevision = (revisionId: string, digestCharacter: string) => ({
   kind: "file_revision" as const,
   revisionId,
@@ -15,6 +16,7 @@ const fileRevision = (revisionId: string, digestCharacter: string) => ({
   contentDigest: digestCharacter.repeat(64),
 });
 
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const evidence = <Kind extends "output" | "judgment" | "report">(revisionId: string, evidenceKind: Kind) => ({
   kind: "evidence_revision" as const,
   revisionId,

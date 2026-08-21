@@ -1,16 +1,15 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { JsonValue } from "@noesis/domain";
-
 export const MAX_AGENT_ACTION_PAYLOAD_BYTES = 256 * 1024;
-
 const MAX_DEPTH = 8;
 const MAX_COLLECTION_ITEMS = 100;
 const MAX_STRING_CHARACTERS = 256 * 1024;
-
 function truncateCharacters(value: string, limit: number): string {
   if (value.length <= limit) return value;
   return `${value.slice(0, limit)}\n… [truncated ${String(value.length - limit)} characters]`;
 }
-
+// BOUNDARY: Pi action payloads are arbitrary JavaScript values; this adapter bounds and converts
+// every supported runtime representation into durable JSON.
 function normalizeActionValue(value: unknown, depth: number, seen: WeakSet<object>): JsonValue {
   if (value === null || typeof value === "boolean" || typeof value === "string")
     return typeof value === "string" ? truncateCharacters(value, MAX_STRING_CHARACTERS) : value;
@@ -21,11 +20,17 @@ function normalizeActionValue(value: unknown, depth: number, seen: WeakSet<objec
   if (typeof value === "function") return `[function ${value.name || "anonymous"}]`;
   if (depth >= MAX_DEPTH) return "[maximum depth reached]";
   if (value instanceof Error)
-    return Object.freeze({
-      name: value.name,
-      message: value.message,
-      ...(value.stack ? { stack: truncateCharacters(value.stack, MAX_STRING_CHARACTERS) } : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        name: value.name,
+        message: value.message,
+      } as const)
+        .addOptional(
+          value.stack ? { stack: truncateCharacters(value.stack, MAX_STRING_CHARACTERS) } : undefined,
+        )
+        .finish(),
+    );
   if (Array.isArray(value)) {
     if (seen.has(value)) return "[circular]";
     seen.add(value);
@@ -57,14 +62,13 @@ function normalizeActionValue(value: unknown, depth: number, seen: WeakSet<objec
   }
   return String(value);
 }
-
 function truncateUtf8(value: string, maxBytes: number): string {
   const bytes = new TextEncoder().encode(value);
   if (bytes.byteLength <= maxBytes) return value;
   return new TextDecoder().decode(bytes.slice(0, maxBytes));
 }
-
 /** Convert arbitrary Pi payloads into bounded, adapter-neutral JSON for product read models. */
+// BOUNDARY: Pi supplies arbitrary callback payloads; normalization owns their JSON contract.
 export function toAgentActionPayload(value: unknown): JsonValue {
   const normalized = normalizeActionValue(value, 0, new WeakSet<object>());
   const serialized = JSON.stringify(normalized);

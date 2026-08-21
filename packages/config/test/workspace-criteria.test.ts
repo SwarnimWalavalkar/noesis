@@ -5,7 +5,9 @@ import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createUserCriterionRepository, createWorkspaceUserCriterionPorts } from "../src/index.ts";
 
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const user = { actorId: "barrier-user", kind: "user" } as const;
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const noesis = { actorId: "barrier-reflector", kind: "noesis" } as const;
 
 describe("Barrier F WorkspaceStore criterion integration", () => {

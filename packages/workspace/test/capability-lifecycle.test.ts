@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createConditionalObject,
   type CapabilityLifecycleRevision,
   type CapabilityRevision,
   capabilityRevisionRef,
@@ -9,16 +10,16 @@ import {
 } from "@noesis/domain";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "../src/index.ts";
-
-const opened: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
-
+const opened: {
+  readonly root: string;
+  readonly workspace: NoesisWorkspaceStore;
+}[] = [];
 afterEach(async () => {
   for (const item of opened.splice(0)) {
     item.workspace.close();
     await rm(item.root, { recursive: true, force: true });
   }
 });
-
 function lifecycleRevision(
   capabilityRevisionId: string,
   prompt: FileRevisionRef,
@@ -26,32 +27,38 @@ function lifecycleRevision(
   predecessorRevisionId?: string,
   capabilityId = "capability_concise_research",
 ): CapabilityLifecycleRevision {
-  const revision: CapabilityRevision = Object.freeze({
-    capabilityRevisionId,
-    capabilityId,
-    ...(predecessorRevisionId ? { predecessorRevisionId } : {}),
-    promptModules: Object.freeze([prompt]),
-    skills: Object.freeze([]),
-    tools: Object.freeze([]),
-    toolset: Object.freeze({
-      toolRevisionIds: Object.freeze([]),
-      routerRevision: router,
-      strategyId: "semantic-capability-router-v1",
-    }),
-    activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
-    permissionManifest: Object.freeze({
-      effects: Object.freeze([]),
-      resourcePatterns: Object.freeze([]),
-      credentialRefs: Object.freeze([]),
-    }),
-    evidenceRefs: Object.freeze([]),
-    sourceEvaluationDefinitions: Object.freeze([]),
-    requestedPermissionDelta: Object.freeze({
-      addedEffects: Object.freeze([]),
-      widenedResources: Object.freeze([]),
-      addedCredentialRefs: Object.freeze([]),
-    }),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  const revision: CapabilityRevision = Object.freeze(
+    createConditionalObject({
+      capabilityRevisionId,
+      capabilityId,
+    } as const)
+      .addOptional(predecessorRevisionId ? { predecessorRevisionId } : undefined)
+      .add({
+        promptModules: Object.freeze([prompt]),
+        skills: Object.freeze([]),
+        tools: Object.freeze([]),
+        toolset: Object.freeze({
+          toolRevisionIds: Object.freeze([]),
+          routerRevision: router,
+          strategyId: "semantic-capability-router-v1",
+        }),
+        activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
+        permissionManifest: Object.freeze({
+          effects: Object.freeze([]),
+          resourcePatterns: Object.freeze([]),
+          credentialRefs: Object.freeze([]),
+        }),
+        evidenceRefs: Object.freeze([]),
+        sourceEvaluationDefinitions: Object.freeze([]),
+        requestedPermissionDelta: Object.freeze({
+          addedEffects: Object.freeze([]),
+          widenedResources: Object.freeze([]),
+          addedCredentialRefs: Object.freeze([]),
+        }),
+      } as const)
+      .finish(),
+  );
   return Object.freeze({
     revision,
     reference: capabilityRevisionRef(revision),
@@ -62,12 +69,12 @@ function lifecycleRevision(
       capabilityRevisionId === "revision-1" ? "2026-08-18T00:00:00.000Z" : "2026-08-18T01:00:00.000Z",
   });
 }
-
 describe("Capability lifecycle store", () => {
   test("keeps saved program effects bound to their authoritative project", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-capability-program-scope-"));
     const workspace = await createWorkspaceStore(root);
     opened.push({ root, workspace });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const actor = Object.freeze({ actorId: "capability-test", kind: "system" as const });
     const project = Object.freeze({ projectId: "project-a", root: "/a" });
     const materials: readonly (readonly [string, string])[] = Object.freeze([
@@ -89,6 +96,7 @@ describe("Capability lifecycle store", () => {
     );
     if (!prompt || !router || !workflow) throw new Error("Capability fixture revisions are missing");
     const base = lifecycleRevision("revision-program", prompt, router);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const revision: CapabilityRevision = Object.freeze({
       ...base.revision,
       effects: Object.freeze([
@@ -108,7 +116,7 @@ describe("Capability lifecycle store", () => {
       applicability: "Evidence synthesis requests.",
       createdAt: base.createdAt,
     });
-
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await expect(
       workspace.capabilities.create({
         definition,
@@ -122,7 +130,7 @@ describe("Capability lifecycle store", () => {
         }),
       }),
     ).rejects.toThrow("must remain bound to project project-a");
-
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const binding = await workspace.capabilities.create({
       definition,
       revision: lifecycle,
@@ -134,6 +142,7 @@ describe("Capability lifecycle store", () => {
         state: "active",
       }),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await expect(
       workspace.capabilities.updateBinding({
         capabilityId: binding.capabilityId,
@@ -143,7 +152,6 @@ describe("Capability lifecycle store", () => {
     ).rejects.toThrow("must remain bound to project project-a");
     expect(await workspace.capabilities.getBinding(binding.capabilityId)).toEqual(binding);
   });
-
   test("owns immutable revisions, scoped activation, feedback, gates, and CAS updates", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-capability-lifecycle-"));
     const workspace = await createWorkspaceStore(root);
@@ -168,6 +176,7 @@ describe("Capability lifecycle store", () => {
       createdAt: "2026-08-18T02:00:00.000Z",
       metadata: Object.freeze({}),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const actor = Object.freeze({ actorId: "capability-test", kind: "system" as const });
     const recordMaterial = async (revisionId: string) =>
       await Promise.all([
@@ -188,6 +197,7 @@ describe("Capability lifecycle store", () => {
       ]);
     const firstMaterial = await recordMaterial("revision-1");
     const first = lifecycleRevision("revision-1", firstMaterial[0], firstMaterial[1]);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const binding = await workspace.capabilities.create({
       definition: Object.freeze({
         capabilityId: first.reference.capabilityId,
@@ -206,14 +216,12 @@ describe("Capability lifecycle store", () => {
         state: "active",
       }),
     });
-
     expect(
       await workspace.capabilities.listEligibleBindings({
         project: Object.freeze({ projectId: "project-a", root: "/a" }),
         sessionId: "session-a",
       }),
     ).toEqual([binding]);
-
     const secondMaterial = await recordMaterial("revision-2");
     const second = lifecycleRevision(
       "revision-2",
@@ -222,6 +230,7 @@ describe("Capability lifecycle store", () => {
       first.reference.capabilityRevisionId,
     );
     await workspace.capabilities.addRevision(second);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const updated = await workspace.capabilities.updateBinding({
       capabilityId: binding.capabilityId,
       expectedRevisionNumber: binding.revisionNumber,
@@ -246,7 +255,7 @@ describe("Capability lifecycle store", () => {
         sessionId: "session-b",
       }),
     ).toEqual([]);
-
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await workspace.capabilities.addFeedback(
       Object.freeze({
         feedbackId: "feedback-1",
@@ -264,6 +273,7 @@ describe("Capability lifecycle store", () => {
         createdAt: "2026-08-18T02:00:00.000Z",
       }),
     );
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await workspace.capabilities.createGate(
       Object.freeze({
         gateRequestId: "gate-1",
@@ -292,14 +302,12 @@ describe("Capability lifecycle store", () => {
     });
     expect(await workspace.capabilities.listPendingGates()).toEqual([]);
     expect(await workspace.capabilities.listRevisions(binding.capabilityId)).toEqual([first, second]);
-
     expect(await workspace.capabilities.getDefinitions([binding.capabilityId])).toEqual([
       await workspace.capabilities.getDefinition(binding.capabilityId),
     ]);
     expect(await workspace.capabilities.getBindings([binding.capabilityId])).toEqual([
       await workspace.capabilities.getBinding(binding.capabilityId),
     ]);
-
     const otherMaterial = await recordMaterial("other-revision-1");
     const other = lifecycleRevision(
       "other-revision-1",
@@ -308,6 +316,7 @@ describe("Capability lifecycle store", () => {
       undefined,
       "capability_other",
     );
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await workspace.capabilities.create({
       definition: Object.freeze({
         capabilityId: other.reference.capabilityId,
@@ -337,7 +346,6 @@ describe("Capability lifecycle store", () => {
         createdAt: "2026-08-18T04:00:00.000Z",
       }),
     });
-
     const thirdMaterial = await recordMaterial("revision-3");
     const third = lifecycleRevision(
       "revision-3",
@@ -345,6 +353,7 @@ describe("Capability lifecycle store", () => {
       thirdMaterial[1],
       second.reference.capabilityRevisionId,
     );
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await expect(
       workspace.capabilities.stageGatedRevision({
         revision: third,
@@ -364,7 +373,7 @@ describe("Capability lifecycle store", () => {
     ).rejects.toThrow("cannot supersede another capability's request");
     expect(await workspace.capabilities.getGate("other-gate")).toMatchObject({ status: "pending" });
     expect(await workspace.capabilities.getGate("gate-2")).toBeUndefined();
-
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await workspace.capabilities.createGate(
       Object.freeze({
         gateRequestId: "stale-gate",
@@ -385,6 +394,7 @@ describe("Capability lifecycle store", () => {
         state: "paused",
       }),
     ).toMatchObject({ status: "updated", binding: { state: "paused", revisionNumber: 4 } });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await expect(
       workspace.capabilities.stageGatedRevision({
         revision: third,
@@ -404,6 +414,7 @@ describe("Capability lifecycle store", () => {
     ).rejects.toThrow("cannot supersede a request for a stale binding");
     expect(await workspace.capabilities.getGate("stale-gate")).toMatchObject({ status: "pending" });
     expect(await workspace.capabilities.getGate("gate-after-stale")).toBeUndefined();
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     expect(
       await workspace.capabilities.applyRevision({
         revision: third,

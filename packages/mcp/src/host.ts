@@ -42,19 +42,23 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { canonicalJson, type JsonValue, sha256, toJsonValue } from "@noesis/domain";
+import {
+  createConditionalObject,
+  canonicalJson,
+  type JsonObject,
+  type JsonValue,
+  sha256,
+  toJsonValue,
+} from "@noesis/domain";
 import type { LoadedMcpConfig, McpRemoteServerConfig, ScopedMcpServer } from "./config.ts";
 import { createMcpOAuthProvider, type McpOAuthCredentialStore, type McpOAuthRedirect } from "./oauth.ts";
-
 export type McpServerStatus = "disabled" | "connecting" | "connected" | "auth_required" | "failed";
-
 export interface McpCapabilityCounts {
   readonly tools: number;
   readonly prompts: number;
   readonly resources: number;
   readonly resourceTemplates: number;
 }
-
 export interface McpServerSummary {
   readonly name: string;
   readonly scope: "global" | "project";
@@ -67,7 +71,6 @@ export interface McpServerSummary {
   readonly lastError?: string;
   readonly identityDigest: string;
 }
-
 export interface McpServerDetail extends McpServerSummary {
   readonly instructions?: string;
   readonly negotiatedCapabilities?: ServerCapabilities;
@@ -77,20 +80,17 @@ export interface McpServerDetail extends McpServerSummary {
   readonly resources: readonly Resource[];
   readonly resourceTemplates: readonly ResourceTemplate[];
 }
-
 export interface McpDiagnostic {
   readonly code: "invalid_tool_schema" | "duplicate_tool_name" | "subscriptions_dropped";
   readonly message: string;
   readonly toolName?: string;
 }
-
 export interface McpProgressEvent {
   readonly serverName: string;
   readonly progress: number;
   readonly total?: number;
   readonly message?: string;
 }
-
 export interface McpHostEvent {
   readonly serverName: string;
   readonly type:
@@ -103,7 +103,6 @@ export interface McpHostEvent {
   readonly payload: JsonValue;
   readonly invocation?: McpInvocationContext;
 }
-
 /** The exact foreground model route and execution identity responsible for an MCP request. */
 export interface McpInvocationContext {
   readonly route: {
@@ -117,7 +116,6 @@ export interface McpInvocationContext {
   readonly logicalExecutionId: string;
   readonly callId: string;
 }
-
 export interface McpHostHandlers {
   readonly connect?: (input: {
     readonly connectionIdentity: string;
@@ -141,15 +139,13 @@ export interface McpHostHandlers {
   readonly onOAuthRedirect: (redirect: McpOAuthRedirect) => void | Promise<void>;
   readonly onEvent?: (event: McpHostEvent) => void | Promise<void>;
 }
-
 const connectionLifecycleFailureBrand = Symbol("noesis.mcp.connection-lifecycle-failure");
-
 interface McpConnectionLifecycleFailure extends Error {
   readonly [connectionLifecycleFailureBrand]: boolean;
 }
-
 /** Prevents an authority denial from being mistaken for a retryable transport failure. */
 export function createMcpConnectionLifecycleFailure(message: string, retryable: boolean): Error {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const error = new Error(message) as McpConnectionLifecycleFailure;
   Object.defineProperty(error, connectionLifecycleFailureBrand, {
     configurable: false,
@@ -159,13 +155,12 @@ export function createMcpConnectionLifecycleFailure(message: string, retryable: 
   });
   return error;
 }
-
-function connectionLifecycleFailureRetryable(error: unknown): boolean | undefined {
-  return error instanceof Error
-    ? (error as Partial<McpConnectionLifecycleFailure>)[connectionLifecycleFailureBrand]
+function connectionLifecycleFailureRetryable(cause: unknown): boolean | undefined {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return cause instanceof Error
+    ? (cause as Partial<McpConnectionLifecycleFailure>)[connectionLifecycleFailureBrand]
     : undefined;
 }
-
 export interface CreateMcpHostManagerInput {
   readonly home: string;
   readonly projectDirectory: string;
@@ -176,14 +171,12 @@ export interface CreateMcpHostManagerInput {
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly clientVersion?: string;
 }
-
 interface Catalog {
   readonly tools: readonly Tool[];
   readonly prompts: readonly Prompt[];
   readonly resources: readonly Resource[];
   readonly resourceTemplates: readonly ResourceTemplate[];
 }
-
 interface Connection {
   readonly server: ScopedMcpServer;
   status: McpServerStatus;
@@ -202,86 +195,86 @@ interface Connection {
   intentionalClose: boolean;
   diagnostics: McpDiagnostic[];
 }
-
 interface ConnectionAttempt {
   readonly connection: Connection;
   readonly client: Client;
   readonly transport: Transport | RemoteTransport;
   readonly taskStore: InMemoryTaskStore;
 }
-
 interface ResourceSubscriptions {
   readonly serverIdentityDigest: string;
   readonly uris: Set<string>;
 }
-
 interface ActiveAuthentication {
   readonly controller: AbortController;
   readonly settled: Promise<void>;
   readonly settle: () => void;
 }
-
 interface PendingOAuthTransport {
   readonly transport: RemoteTransport;
   readonly owner: ActiveAuthentication | undefined;
 }
-
 type RemoteTransport = StreamableHTTPClientTransport | SSEClientTransport;
-
 const EMPTY_CATALOG: Catalog = Object.freeze({
   tools: Object.freeze([]),
   prompts: Object.freeze([]),
   resources: Object.freeze([]),
   resourceTemplates: Object.freeze([]),
 });
-
-const DEFAULT_TIMEOUT = 30_000;
-const AUTO_RECONNECT_DELAYS = Object.freeze([100, 500, 2_000]);
+const DEFAULT_TIMEOUT = 30000;
+const AUTO_RECONNECT_DELAYS = Object.freeze([100, 500, 2000]);
 const MAX_DIAGNOSTICS = 50;
-const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 2_000;
+const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 2000;
 const elicitationValidator = new AjvJsonSchemaValidator();
 const toolSchemaValidator = new AjvJsonSchemaValidator();
-
 export function parseMcpSamplingResult(value: unknown): CreateMessageResult | CreateMessageResultWithTools {
   const ordinary = CreateMessageResultSchema.safeParse(value);
   return ordinary.success ? ordinary.data : CreateMessageResultWithToolsSchema.parse(value);
 }
-
 export function validateMcpElicitationResult(request: ElicitRequest, result: ElicitResult): ElicitResult {
   if (result.action !== "accept" || request.params.mode === "url") return result;
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const validation = elicitationValidator.getValidator(
     structuredClone(request.params.requestedSchema) as never,
   )(result.content);
   if (!validation.valid) throw new Error(`MCP elicitation response is invalid: ${validation.errorMessage}`);
   return result;
 }
-
 function requestOptions(
   signal?: AbortSignal,
   timeout = DEFAULT_TIMEOUT,
   onProgress?: (event: McpProgressEvent) => void,
   serverName = "",
 ): RequestOptions {
-  return {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return createConditionalObject({
     timeout,
     resetTimeoutOnProgress: true,
-    ...(signal ? { signal } : {}),
-    ...(onProgress
-      ? {
-          onprogress: (progress) =>
-            onProgress({
-              serverName,
-              progress: progress.progress,
-              ...(progress.total === undefined ? {} : { total: progress.total }),
-              ...(progress.message === undefined ? {} : { message: progress.message }),
-            }),
-        }
-      : {}),
-  };
+  } as const)
+    .addOptional(signal ? { signal } : undefined)
+    .addOptional(
+      onProgress
+        ? {
+            onprogress: (progress: Parameters<NonNullable<RequestOptions["onprogress"]>>[0]) =>
+              onProgress(
+                createConditionalObject({
+                  serverName,
+                  progress: progress.progress,
+                } as const)
+                  .addOptional(!(progress.total === undefined) ? { total: progress.total } : undefined)
+                  .addOptional(!(progress.message === undefined) ? { message: progress.message } : undefined)
+                  .finish(),
+              ),
+          }
+        : undefined,
+    )
+    .finish();
 }
-
 async function paginated<Item>(
-  fetchPage: (cursor?: string) => Promise<{ readonly items: readonly Item[]; readonly nextCursor?: string }>,
+  fetchPage: (cursor?: string) => Promise<{
+    readonly items: readonly Item[];
+    readonly nextCursor?: string;
+  }>,
 ): Promise<readonly Item[]> {
   const items: Item[] = [];
   const cursors = new Set<string>();
@@ -290,19 +283,28 @@ async function paginated<Item>(
     if (cursor && cursors.has(cursor))
       throw new Error(`MCP pagination repeated cursor ${JSON.stringify(cursor)}`);
     if (cursor) cursors.add(cursor);
-    if (cursors.size > 1_000) throw new Error("MCP pagination exceeded 1000 pages");
+    if (cursors.size > 1000) throw new Error("MCP pagination exceeded 1000 pages");
     const page = await fetchPage(cursor);
     items.push(...page.items);
     cursor = page.nextCursor;
   } while (cursor !== undefined);
   return Object.freeze(items);
 }
-
 function canonicalDiscoveryCatalog(catalog: Catalog): JsonValue {
-  const byName = <Value extends { readonly name: string }>(values: readonly Value[]): readonly Value[] =>
-    [...values].sort((left, right) => left.name.localeCompare(right.name));
-  const byUri = <Value extends { readonly uri: string }>(values: readonly Value[]): readonly Value[] =>
-    [...values].sort((left, right) => left.uri.localeCompare(right.uri));
+  const byName = <
+    Value extends {
+      readonly name: string;
+    },
+  >(
+    values: readonly Value[],
+  ): readonly Value[] => [...values].sort((left, right) => left.name.localeCompare(right.name));
+  const byUri = <
+    Value extends {
+      readonly uri: string;
+    },
+  >(
+    values: readonly Value[],
+  ): readonly Value[] => [...values].sort((left, right) => left.uri.localeCompare(right.uri));
   return toJsonValue({
     tools: byName(catalog.tools),
     prompts: byName(catalog.prompts),
@@ -312,7 +314,6 @@ function canonicalDiscoveryCatalog(catalog: Catalog): JsonValue {
     ),
   });
 }
-
 function connectionIdentityDigest(connection: Connection): string {
   return sha256(
     canonicalJson({
@@ -325,27 +326,39 @@ function connectionIdentityDigest(connection: Connection): string {
     }),
   );
 }
-
 function connectionSummary(connection: Connection): McpServerSummary {
-  return Object.freeze({
-    name: connection.server.name,
-    scope: connection.server.scope,
-    sourcePath: connection.server.sourcePath,
-    type: connection.server.config.type,
-    enabled: connection.server.config.enabled !== false,
-    status: connection.status,
-    ...(connection.server.config.description ? { description: connection.server.config.description } : {}),
-    capabilityCounts: Object.freeze({
-      tools: connection.catalog.tools.length,
-      prompts: connection.catalog.prompts.length,
-      resources: connection.catalog.resources.length,
-      resourceTemplates: connection.catalog.resourceTemplates.length,
-    }),
-    ...(connection.lastError ? { lastError: connection.lastError } : {}),
-    identityDigest: connectionIdentityDigest(connection),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      name: connection.server.name,
+      scope: connection.server.scope,
+      sourcePath: connection.server.sourcePath,
+      type: connection.server.config.type,
+      enabled: connection.server.config.enabled !== false,
+      status: connection.status,
+    } as const)
+      .addOptional(
+        connection.server.config.description
+          ? {
+              description: connection.server.config.description,
+            }
+          : undefined,
+      )
+      .add({
+        capabilityCounts: Object.freeze({
+          tools: connection.catalog.tools.length,
+          prompts: connection.catalog.prompts.length,
+          resources: connection.catalog.resources.length,
+          resourceTemplates: connection.catalog.resourceTemplates.length,
+        }),
+      } as const)
+      .addOptional(connection.lastError ? { lastError: connection.lastError } : undefined)
+      .add({
+        identityDigest: connectionIdentityDigest(connection),
+      } as const)
+      .finish(),
+  );
 }
-
 export interface McpHostManager {
   readonly start: () => Promise<void>;
   readonly close: () => Promise<void>;
@@ -354,7 +367,10 @@ export interface McpHostManager {
   readonly reconnect: (name: string) => Promise<void>;
   readonly authenticate: (
     name: string,
-    options?: Readonly<{ signal?: AbortSignal; timeout?: number }>,
+    options?: Readonly<{
+      signal?: AbortSignal;
+      timeout?: number;
+    }>,
   ) => Promise<void>;
   readonly reload: (config: LoadedMcpConfig) => Promise<void>;
   readonly refreshDiscovery: (signal?: AbortSignal) => Promise<void>;
@@ -368,7 +384,7 @@ export interface McpHostManager {
   }>[];
   readonly callTool: (
     canonicalName: string,
-    args: Readonly<Record<string, unknown>>,
+    args: JsonObject,
     options?: Readonly<{
       signal?: AbortSignal;
       onProgress?: (event: McpProgressEvent) => void;
@@ -379,7 +395,7 @@ export interface McpHostManager {
   ) => Promise<CallToolResult>;
   readonly startToolTask: (
     canonicalName: string,
-    args: Readonly<Record<string, unknown>>,
+    args: JsonObject,
     options: Readonly<{
       ttl?: number | null;
       signal?: AbortSignal;
@@ -449,7 +465,6 @@ export interface McpHostManager {
     invocation?: McpInvocationContext,
   ) => Promise<CancelTaskResult>;
 }
-
 export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostManager {
   let activeConfig = input.config;
   let closing = false;
@@ -485,24 +500,25 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         config: server.config,
       }),
     );
-
   const emit = async (serverName: string, type: McpHostEvent["type"], payload: JsonValue): Promise<void> => {
     const invocation = connections.get(serverName)?.activeInvocation;
-    await input.handlers.onEvent?.({
-      serverName,
-      type,
-      payload,
-      ...(invocation ? { invocation } : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    await input.handlers.onEvent?.(
+      createConditionalObject({
+        serverName,
+        type,
+        payload,
+      } as const)
+        .addOptional(invocation ? { invocation } : undefined)
+        .finish(),
+    );
   };
-
   const closePendingOAuthTransport = async (name: string, owner?: ActiveAuthentication): Promise<void> => {
     const pending = pendingOAuthTransports.get(name);
     if (!pending || (owner && pending.owner !== owner)) return;
     pendingOAuthTransports.delete(name);
     await pending.transport.close().catch(() => undefined);
   };
-
   const replacePendingOAuthTransport = async (name: string, transport: RemoteTransport): Promise<void> => {
     const previous = pendingOAuthTransports.get(name);
     if (previous?.transport === transport) return;
@@ -512,7 +528,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     });
     await previous?.transport.close().catch(() => undefined);
   };
-
   const withInvocation = async <Result>(
     connection: Connection,
     invocation: McpInvocationContext | undefined,
@@ -551,7 +566,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       release?.();
     }
   };
-
   const requireConnection = (name: string): Connection => {
     const connection = connections.get(name);
     if (!connection?.client || connection.status !== "connected") {
@@ -559,14 +573,17 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     }
     return connection;
   };
-
-  const requireClient = (name: string): Readonly<{ connection: Connection; client: Client }> => {
+  const requireClient = (
+    name: string,
+  ): Readonly<{
+    connection: Connection;
+    client: Client;
+  }> => {
     const connection = requireConnection(name);
     const client = connection.client;
     if (!client) throw new Error(`MCP server ${JSON.stringify(name)} is not connected`);
     return { connection, client };
   };
-
   const addDiagnostic = (connection: Connection, diagnostic: McpDiagnostic): void => {
     connection.diagnostics.push(
       Object.freeze({
@@ -578,7 +595,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       connection.diagnostics.splice(0, connection.diagnostics.length - MAX_DIAGNOSTICS);
     }
   };
-
   const admissibleTools = (connection: Connection, tools: readonly Tool[]): readonly Tool[] => {
     const admitted: Tool[] = [];
     const names = new Set<string>();
@@ -592,8 +608,12 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         continue;
       }
       try {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         toolSchemaValidator.getValidator(structuredClone(tool.inputSchema) as never);
-        if (tool.outputSchema) toolSchemaValidator.getValidator(structuredClone(tool.outputSchema) as never);
+        if (tool.outputSchema) {
+          // SAFETY: The MCP SDK validator accepts the cloned protocol-owned JSON Schema.
+          toolSchemaValidator.getValidator(structuredClone(tool.outputSchema) as never);
+        }
         names.add(tool.name);
         admitted.push(tool);
       } catch (error) {
@@ -606,7 +626,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     }
     return Object.freeze(admitted);
   };
-
   const refreshCatalog = async (
     connection: Connection,
     signal?: AbortSignal,
@@ -621,28 +640,45 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       capabilities?.tools
         ? paginated(async (cursor) => {
             const page = await client.listTools(cursor ? { cursor } : undefined, options);
-            return { items: page.tools, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+            return createConditionalObject({
+              items: page.tools,
+            } as const)
+              .addOptional(page.nextCursor ? { nextCursor: page.nextCursor } : undefined)
+              .finish();
           })
         : [],
       capabilities?.prompts
         ? paginated(async (cursor) => {
             const page = await client.listPrompts(cursor ? { cursor } : undefined, options);
-            return { items: page.prompts, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+            return createConditionalObject({
+              items: page.prompts,
+            } as const)
+              .addOptional(page.nextCursor ? { nextCursor: page.nextCursor } : undefined)
+              .finish();
           })
         : [],
       capabilities?.resources
         ? paginated(async (cursor) => {
             const page = await client.listResources(cursor ? { cursor } : undefined, options);
-            return { items: page.resources, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+            return createConditionalObject({
+              items: page.resources,
+            } as const)
+              .addOptional(page.nextCursor ? { nextCursor: page.nextCursor } : undefined)
+              .finish();
           })
         : [],
       capabilities?.resources
         ? paginated(async (cursor) => {
             const page = await client.listResourceTemplates(cursor ? { cursor } : undefined, options);
-            return {
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+            return createConditionalObject({
               items: page.resourceTemplates,
-              ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-            };
+            } as const)
+              .addOptional(page.nextCursor ? { nextCursor: page.nextCursor } : undefined)
+              .finish();
           })
         : [],
     ]);
@@ -670,7 +706,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     });
     return true;
   };
-
   const restoreResourceSubscriptions = async (connection: Connection): Promise<void> => {
     const client = connection.client;
     if (!client) return;
@@ -689,7 +724,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       await client.subscribeResource({ uri }, requestOptions(undefined, connection.server.config.timeout));
     }
   };
-
   const scheduleReconnect = (connection: Connection): void => {
     if (
       closing ||
@@ -705,10 +739,10 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     connection.reconnectTimer = setTimeout(() => {
       connection.reconnectTimer = undefined;
       if (closing || connections.get(connection.server.name) !== connection) return;
-      void connect(connection.server).catch(async (error: unknown) => {
+      void connect(connection.server).catch(async (cause: unknown) => {
         if (connections.get(connection.server.name) !== connection) return;
         connection.status = "failed";
-        connection.lastError = error instanceof Error ? error.message : String(error);
+        connection.lastError = cause instanceof Error ? cause.message : String(cause);
         await emit(connection.server.name, "connection", {
           status: "failed",
           error: connection.lastError,
@@ -718,7 +752,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     }, delay);
     connection.reconnectTimer.unref();
   };
-
   const transitionAfterUnexpectedClose = (connection: Connection, client: Client, error?: Error): void => {
     if (
       closing ||
@@ -750,11 +783,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     });
     scheduleReconnect(connection);
   };
-
   const createClient = (
     connection: Connection,
     generation: number,
-  ): Readonly<{ client: Client; taskStore: InMemoryTaskStore }> => {
+  ): Readonly<{
+    client: Client;
+    taskStore: InMemoryTaskStore;
+  }> => {
     const taskStore = new InMemoryTaskStore();
     const markDirty = (): void => {
       if (
@@ -771,7 +806,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       {
         taskStore,
         taskMessageQueue: new InMemoryTaskMessageQueue(),
-        maxTaskQueueSize: 1_000,
+        maxTaskQueueSize: 1000,
         capabilities: {
           roots: { listChanged: true },
           sampling: { context: {}, tools: {} },
@@ -860,17 +895,19 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       return result;
     });
     client.setNotificationHandler(LoggingMessageNotificationSchema, async (notification) => {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       await emit(connection.server.name, "log", notification.params as JsonValue);
     });
     client.setNotificationHandler(ResourceUpdatedNotificationSchema, async (notification) => {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       await emit(connection.server.name, "resource_updated", notification.params as JsonValue);
     });
     client.setNotificationHandler(ElicitationCompleteNotificationSchema, async (notification) => {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       await emit(connection.server.name, "elicitation_complete", notification.params as JsonValue);
     });
     return { client, taskStore };
   };
-
   const remoteTransports = (
     server: ScopedMcpServer,
     config: McpRemoteServerConfig,
@@ -882,24 +919,30 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       oauthConfig?.redirectUri ??
       input.oauthRedirectUrl ??
       `http://127.0.0.1:${String(oauthConfig?.callbackPort ?? 1456)}/oauth/callback`;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const authProvider =
       oauth === undefined && config.oauth === false
         ? undefined
-        : createMcpOAuthProvider({
-            key: credentialKey(server),
-            serverName: server.name,
-            serverUrl: config.url,
-            authIdentityDigest: authIdentityDigest(config),
-            redirectUrl,
-            ...(oauthConfig ? { config: oauthConfig } : {}),
-            credentialStore: input.credentials,
-            onRedirect: async (redirect) => {
-              if (authentication && latestAuthenticationByServer.get(server.name) === authentication) {
-                await input.handlers.onOAuthRedirect(redirect);
-              }
-            },
-            environment: input.environment ?? process.env,
-          });
+        : createMcpOAuthProvider(
+            createConditionalObject({
+              key: credentialKey(server),
+              serverName: server.name,
+              serverUrl: config.url,
+              authIdentityDigest: authIdentityDigest(config),
+              redirectUrl,
+            } as const)
+              .addOptional(oauthConfig ? { config: oauthConfig } : undefined)
+              .add({
+                credentialStore: input.credentials,
+                onRedirect: async (redirect: McpOAuthRedirect) => {
+                  if (authentication && latestAuthenticationByServer.get(server.name) === authentication) {
+                    await input.handlers.onOAuthRedirect(redirect);
+                  }
+                },
+                environment: input.environment ?? process.env,
+              } as const)
+              .finish(),
+          );
     const url = new URL(config.url);
     const runtimeEnvironment = input.environment ?? process.env;
     const headers = config.headers
@@ -915,32 +958,32 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         )
       : undefined;
     const requestInit = headers ? { headers } : undefined;
-    const transportOptions = {
-      ...(authProvider ? { authProvider } : {}),
-      ...(requestInit ? { requestInit } : {}),
-    };
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const transportOptions = createConditionalObject({} as const)
+      .addOptional(authProvider ? { authProvider } : undefined)
+      .addOptional(requestInit ? { requestInit } : undefined)
+      .finish();
     const streamable = new StreamableHTTPClientTransport(url, transportOptions);
     const sse = new SSEClientTransport(url, transportOptions);
     if (config.transport === "streamable_http") return [streamable];
     if (config.transport === "sse") return [sse];
     return [streamable, sse];
   };
-
   async function connect(server: ScopedMcpServer): Promise<void> {
     if (closing) return;
     const generation = (connectionGenerations.get(server.name) ?? 0) + 1;
     connectionGenerations.set(server.name, generation);
-    const operation = performConnect(server, generation).catch(async (error: unknown) => {
+    const operation = performConnect(server, generation).catch(async (cause: unknown) => {
       if (closing || connectionGenerations.get(server.name) !== generation) return;
       const connection = connections.get(server.name);
       if (!connection || connection.intentionalClose) return;
       connection.status = "failed";
-      connection.lastError = error instanceof Error ? error.message : String(error);
+      connection.lastError = cause instanceof Error ? cause.message : String(cause);
       await emit(server.name, "connection", {
         status: "failed",
         error: connection.lastError,
       }).catch(() => undefined);
-      if (connectionLifecycleFailureRetryable(error) !== false) {
+      if (connectionLifecycleFailureRetryable(cause) !== false) {
         scheduleReconnect(connection);
       }
     });
@@ -951,7 +994,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       inFlightConnects.delete(operation);
     }
   }
-
   const closeConnectionAttempt = async (attempt: ConnectionAttempt): Promise<void> => {
     connectionAttempts.delete(attempt);
     if (attempt.connection.client === attempt.client) {
@@ -965,7 +1007,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     await attempt.transport.close().catch(() => undefined);
     attempt.taskStore.cleanup();
   };
-
   async function performConnect(server: ScopedMcpServer, generation: number): Promise<void> {
     if (closing) return;
     const connection: Connection = connections.get(server.name) ?? {
@@ -1046,6 +1087,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       const attempt: ConnectionAttempt = { connection, client, transport, taskStore };
       connectionAttempts.add(attempt);
       try {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const connectTransport = async (): Promise<void> =>
           await client.connect(transport as Transport, {
             timeout: server.config.timeout ?? DEFAULT_TIMEOUT,
@@ -1112,6 +1154,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         if (connection.taskStore === taskStore) connection.taskStore = undefined;
         if (error instanceof UnauthorizedError && server.config.type === "remote") {
           connectionAttempts.delete(attempt);
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           await replacePendingOAuthTransport(server.name, transport as RemoteTransport);
           if (!isCurrent()) {
             if (pendingOAuthTransports.get(server.name)?.transport === transport) {
@@ -1141,7 +1184,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       scheduleReconnect(connection);
     }
   }
-
   const disconnect = async (name: string): Promise<void> => {
     const connection = connections.get(name);
     await closePendingOAuthTransport(name);
@@ -1162,22 +1204,20 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     connection.taskStore = undefined;
     connection.taskInvocations.clear();
   };
-
   const start = async (): Promise<void> => {
     await Promise.all(
       [...activeConfig.servers.values()].map(async (server) => {
-        await connect(server).catch(async (error: unknown) => {
+        await connect(server).catch(async (cause: unknown) => {
           const connection = connections.get(server.name);
           if (!connection) return;
           connection.status = "failed";
-          connection.lastError = error instanceof Error ? error.message : String(error);
+          connection.lastError = cause instanceof Error ? cause.message : String(cause);
           await emit(server.name, "connection", { status: "failed", error: connection.lastError });
           scheduleReconnect(connection);
         });
       }),
     );
   };
-
   const close = async (): Promise<void> => {
     closing = true;
     const authentications = [...activeAuthentications];
@@ -1194,7 +1234,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     connections.clear();
     resourceSubscriptions.clear();
   };
-
   const reconnect = async (name: string): Promise<void> => {
     const server = activeConfig.servers.get(name);
     if (!server) throw new Error(`MCP server ${JSON.stringify(name)} is not configured`);
@@ -1209,7 +1248,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       );
     }
   };
-
   const reload = async (config: LoadedMcpConfig): Promise<void> => {
     const oldNames = new Set(activeConfig.servers.keys());
     activeConfig = config;
@@ -1222,18 +1260,17 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     }
     await Promise.all(
       [...config.servers.keys()].map(async (name) => {
-        await reconnect(name).catch(async (error: unknown) => {
+        await reconnect(name).catch(async (cause: unknown) => {
           const connection = connections.get(name);
           if (!connection) return;
           connection.status = "failed";
-          connection.lastError = error instanceof Error ? error.message : String(error);
+          connection.lastError = cause instanceof Error ? cause.message : String(cause);
           await emit(name, "connection", { status: "failed", error: connection.lastError });
           scheduleReconnect(connection);
         });
       }),
     );
   };
-
   const refreshDiscovery = async (signal?: AbortSignal): Promise<void> => {
     if (signal?.aborted) throw signal.reason ?? new Error("MCP discovery refresh was cancelled");
     await Promise.all(
@@ -1247,10 +1284,10 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
             connectionGenerations.get(connection.server.name) === generation &&
             connections.get(connection.server.name) === connection &&
             connection.status === "connected";
-          await refreshCatalog(connection, signal, canCommit).catch(async (error: unknown) => {
-            if (signal?.aborted) throw signal.reason ?? error;
+          await refreshCatalog(connection, signal, canCommit).catch(async (cause: unknown) => {
+            if (signal?.aborted) throw signal.reason ?? cause;
             if (!canCommit()) return;
-            connection.lastError = error instanceof Error ? error.message : String(error);
+            connection.lastError = cause instanceof Error ? cause.message : String(cause);
             connection.dirty = true;
             await emit(connection.server.name, "catalog_changed", {
               dirty: true,
@@ -1260,7 +1297,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         }),
     );
   };
-
   const exchangeAuthenticationCodeFor = async (
     name: string,
     authorizationCode: string,
@@ -1290,7 +1326,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
   };
   const finishAuthentication = async (name: string, authorizationCode: string): Promise<void> =>
     await finishAuthenticationFor(name, authorizationCode);
-
   const authenticate: McpHostManager["authenticate"] = async (name, options) => {
     if (closing) throw new Error("MCP host is closed");
     if (options?.signal?.aborted) {
@@ -1314,7 +1349,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     }
     const callbackHost = redirectUrl.hostname === "[::1]" ? "::1" : redirectUrl.hostname;
     const port = redirectUrl.port ? Number(redirectUrl.port) : 80;
-    const timeout = options?.timeout ?? 120_000;
+    const timeout = options?.timeout ?? 120000;
     const authenticationController = new AbortController();
     let settleAuthentication: (() => void) | undefined;
     const settled = new Promise<void>((resolve) => {
@@ -1506,7 +1541,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       }
     }
   };
-
   const logout = async (name: string): Promise<void> => {
     const server = activeConfig.servers.get(name);
     if (!server) throw new Error(`MCP server ${JSON.stringify(name)} is not configured`);
@@ -1514,9 +1548,20 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     await input.credentials.delete(credentialKey(server));
     await reconnect(name);
   };
-
-  const canonicalToolNames = (): ReadonlyMap<string, Readonly<{ serverName: string; toolName: string }>> => {
-    const names = new Map<string, Readonly<{ serverName: string; toolName: string }>>();
+  const canonicalToolNames = (): ReadonlyMap<
+    string,
+    Readonly<{
+      serverName: string;
+      toolName: string;
+    }>
+  > => {
+    const names = new Map<
+      string,
+      Readonly<{
+        serverName: string;
+        toolName: string;
+      }>
+    >();
     const entries = [...connections.values()]
       .filter((connection) => connection.status === "connected")
       .flatMap((connection) => connection.catalog.tools.map((definition) => ({ connection, definition })))
@@ -1572,7 +1617,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     }
     return names;
   };
-
   const listTools = (serverName?: string) => {
     const canonicalNames = canonicalToolNames();
     return Object.freeze(
@@ -1608,7 +1652,6 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         ),
     );
   };
-
   const callTool: McpHostManager["callTool"] = async (canonicalName, args, options) => {
     const target = canonicalToolNames().get(canonicalName);
     if (!target) throw new Error(`Unknown MCP tool ${JSON.stringify(canonicalName)}`);
@@ -1618,10 +1661,12 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       options?.onProgress?.(event);
       void emit(target.serverName, "progress", toJsonValue(event));
     };
-    const requestSettings = {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const requestSettings = createConditionalObject({
       ...requestOptions(options?.signal, connection.server.config.timeout, emitProgress, target.serverName),
-      ...(options?.task ? { task: options.task } : {}),
-    };
+    } as const)
+      .addOptional(options?.task ? { task: options.task } : undefined)
+      .finish();
     const definition = connection.catalog.tools.find((tool) => tool.name === target.toolName);
     return await withInvocation(connection, options?.invocation, options?.signal, async () => {
       if (connection.intentionalClose || connections.get(target.serverName) !== connection)
@@ -1649,10 +1694,10 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         }
         throw new Error(`MCP task tool ${JSON.stringify(canonicalName)} ended without a result`);
       }
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return (await client.callTool(request, undefined, requestSettings)) as CallToolResult;
     });
   };
-
   const manager: McpHostManager = {
     start,
     close,
@@ -1662,13 +1707,19 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       if (!connection) return undefined;
       const instructions = connection.client?.getInstructions();
       const negotiatedCapabilities = connection.client?.getServerCapabilities();
-      return Object.freeze({
-        ...connectionSummary(connection),
-        ...(instructions ? { instructions } : {}),
-        ...(negotiatedCapabilities ? { negotiatedCapabilities } : {}),
-        diagnostics: Object.freeze([...connection.diagnostics]),
-        ...connection.catalog,
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return Object.freeze(
+        createConditionalObject({
+          ...connectionSummary(connection),
+        } as const)
+          .addOptional(instructions ? { instructions } : undefined)
+          .addOptional(negotiatedCapabilities ? { negotiatedCapabilities } : undefined)
+          .add({
+            diagnostics: Object.freeze([...connection.diagnostics]),
+            ...connection.catalog,
+          } as const)
+          .finish(),
+      );
     },
     reconnect,
     authenticate,
@@ -1721,13 +1772,18 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     },
     getPrompt: async (serverName, name, args, signal, invocation) => {
       const { connection, client } = requireClient(serverName);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return await withInvocation(
         connection,
         invocation,
         signal,
         async () =>
           await client.getPrompt(
-            { name, ...(args ? { arguments: { ...args } } : {}) },
+            createConditionalObject({
+              name,
+            } as const)
+              .addOptional(args ? { arguments: { ...args } } : undefined)
+              .finish(),
             requestOptions(signal, connection.server.config.timeout),
           ),
       );

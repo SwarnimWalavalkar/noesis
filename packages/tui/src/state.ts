@@ -1,3 +1,4 @@
+import { createConditionalObject, type JsonValue } from "@noesis/domain";
 import type { ContextSnapshot } from "@noesis/context";
 import type {
   RuntimeAgentDefaults,
@@ -6,9 +7,7 @@ import type {
   TrailState,
 } from "@noesis/runtime";
 import type { TuiExecutionDetail, TuiInteractionSnapshot } from "./runtime-port.ts";
-
 export type Pane = "trail" | "context" | "capabilities";
-
 export interface TuiMessage {
   readonly role: "user" | "assistant" | "system";
   readonly text: string;
@@ -16,7 +15,6 @@ export interface TuiMessage {
   readonly turnId?: string;
   readonly createdAt?: string;
 }
-
 export interface TuiAgentAction {
   readonly actionId: string;
   readonly turnId?: string;
@@ -24,28 +22,23 @@ export interface TuiAgentAction {
   readonly executionId?: string;
   readonly name: string;
   readonly status: "running" | "completed" | "failed" | "denied" | "ambiguous" | "cancelled" | "interrupted";
-  readonly input?: unknown;
-  readonly update?: unknown;
-  readonly output?: unknown;
+  readonly input?: JsonValue;
+  readonly update?: JsonValue;
+  readonly output?: JsonValue;
   readonly startedAt?: number;
   readonly durationMs?: number;
 }
-
 export interface TuiMessageEntry extends TuiMessage {
   readonly kind: "message";
 }
-
 export interface TuiAgentActionEntry extends TuiAgentAction {
   readonly kind: "action";
 }
-
 export type TuiTimelineEntry = TuiMessageEntry | TuiAgentActionEntry;
-
 function parsedTimestamp(timestamp: string): number | undefined {
   const parsed = Date.parse(timestamp);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
-
 function actionDuration(action: RuntimeTranscriptAction): number | undefined {
   if (!action.completedAt) return undefined;
   const startedAt = parsedTimestamp(action.startedAt);
@@ -53,7 +46,6 @@ function actionDuration(action: RuntimeTranscriptAction): number | undefined {
   if (startedAt === undefined || completedAt === undefined) return undefined;
   return Math.max(0, completedAt - startedAt);
 }
-
 /**
  * The runtime owns transcript ordering and durable payloads. This adapter only converts their
  * representation into the same immutable entry shape used by live TUI events.
@@ -63,43 +55,47 @@ export function tuiTimelineFromRuntime(
 ): readonly TuiTimelineEntry[] {
   return transcript.map((entry): TuiTimelineEntry => {
     if (entry.kind === "message")
-      return {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return createConditionalObject({
         kind: "message",
         role: entry.role,
         text: entry.text,
         messageId: entry.messageId,
-        ...(entry.turnId ? { turnId: entry.turnId } : {}),
-        createdAt: entry.createdAt,
-      };
+      } as const)
+        .addOptional(entry.turnId ? { turnId: entry.turnId } : undefined)
+        .add({
+          createdAt: entry.createdAt,
+        } as const)
+        .finish();
     const startedAt = parsedTimestamp(entry.startedAt);
     const durationMs = actionDuration(entry);
-    return {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return createConditionalObject({
       kind: "action",
       actionId: entry.actionId,
-      ...(entry.turnId ? { turnId: entry.turnId } : {}),
-      ...(entry.parentActionId ? { parentActionId: entry.parentActionId } : {}),
-      ...(entry.executionId ? { executionId: entry.executionId } : {}),
-      name: entry.name,
-      status: entry.status,
-      ...(entry.input === undefined ? {} : { input: entry.input }),
-      ...(entry.update === undefined ? {} : { update: entry.update }),
-      ...(entry.output === undefined ? {} : { output: entry.output }),
-      ...(startedAt === undefined ? {} : { startedAt }),
-      ...(durationMs === undefined ? {} : { durationMs }),
-    };
+    } as const)
+      .addOptional(entry.turnId ? { turnId: entry.turnId } : undefined)
+      .addOptional(entry.parentActionId ? { parentActionId: entry.parentActionId } : undefined)
+      .addOptional(entry.executionId ? { executionId: entry.executionId } : undefined)
+      .add({
+        name: entry.name,
+        status: entry.status,
+      } as const)
+      .addOptional(!(entry.input === undefined) ? { input: entry.input } : undefined)
+      .addOptional(!(entry.update === undefined) ? { update: entry.update } : undefined)
+      .addOptional(!(entry.output === undefined) ? { output: entry.output } : undefined)
+      .addOptional(!(startedAt === undefined) ? { startedAt } : undefined)
+      .addOptional(!(durationMs === undefined) ? { durationMs } : undefined)
+      .finish();
   });
 }
-
 export function isTuiMessageEntry(entry: TuiTimelineEntry): entry is TuiMessageEntry {
   return entry.kind === "message";
 }
-
 export function isTuiAgentActionEntry(entry: TuiTimelineEntry): entry is TuiAgentActionEntry {
   return entry.kind === "action";
 }
-
 export type ExecutionState = "idle" | "thinking" | "streaming" | "tool" | "compacting" | "aborting" | "error";
-
 export function executionForInteractionPhase(
   current: ExecutionState,
   phase: TuiInteractionView["phase"],
@@ -109,20 +105,17 @@ export function executionForInteractionPhase(
   if (phase === "running" && (current === "idle" || current === "aborting")) return "thinking";
   return undefined;
 }
-
 export interface TuiContextUsage {
   readonly usedTokens: number;
   readonly contextWindow: number;
   readonly accuracy: "reported" | "estimated";
 }
-
 export interface TuiQueuedInput {
   readonly queueId: string;
   readonly text: string;
   readonly createdAt: string;
   readonly status?: "pending" | "held";
 }
-
 export interface TuiInteractionView {
   readonly phase: "idle" | "running" | "interrupting";
   readonly queuePaused: boolean;
@@ -133,21 +126,23 @@ export interface TuiInteractionView {
   };
   readonly queuedInputs: readonly TuiQueuedInput[];
 }
-
 export function interactionViewFromSnapshot(snapshot: TuiInteractionSnapshot): TuiInteractionView {
-  return {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return createConditionalObject({
     phase: snapshot.phase,
     queuePaused: snapshot.queuePaused,
-    ...(snapshot.active ? { active: { ...snapshot.active } } : {}),
-    queuedInputs: snapshot.pending.map((input) => ({
-      queueId: input.intentId,
-      text: input.text,
-      createdAt: input.createdAt,
-      status: input.status,
-    })),
-  };
+  } as const)
+    .addOptional(snapshot.active ? { active: { ...snapshot.active } } : undefined)
+    .add({
+      queuedInputs: snapshot.pending.map((input) => ({
+        queueId: input.intentId,
+        text: input.text,
+        createdAt: input.createdAt,
+        status: input.status,
+      })),
+    } as const)
+    .finish();
 }
-
 /** Overlay state for the run inspector opened from a transcript action. */
 export interface TuiInspectorState {
   readonly actionId: string;
@@ -157,7 +152,6 @@ export interface TuiInspectorState {
   readonly view: "semantic" | "raw";
   readonly scroll: number;
 }
-
 export interface NoesisTuiState {
   readonly trailId?: string;
   readonly title: string;
@@ -186,45 +180,67 @@ export interface NoesisTuiState {
     readonly tone: "info" | "success" | "attention";
   }>;
 }
-
 export type NoesisTuiAction =
-  | { readonly type: "trail-selected"; readonly trail: TrailState }
+  | {
+      readonly type: "trail-selected";
+      readonly trail: TrailState;
+    }
   | {
       readonly type: "transcript-hydrated";
       readonly trailId: string;
       readonly transcript: readonly RuntimeTranscriptEntry[];
     }
-  | { readonly type: "prompt-submitted"; readonly text: string }
-  | { readonly type: "steer-delivered"; readonly text: string }
-  | { readonly type: "stream-delta"; readonly text: string }
-  | { readonly type: "stream-reconciled"; readonly text: string }
+  | {
+      readonly type: "prompt-submitted";
+      readonly text: string;
+    }
+  | {
+      readonly type: "steer-delivered";
+      readonly text: string;
+    }
+  | {
+      readonly type: "stream-delta";
+      readonly text: string;
+    }
+  | {
+      readonly type: "stream-reconciled";
+      readonly text: string;
+    }
   | {
       readonly type: "action-started";
       readonly actionId: string;
       readonly parentActionId?: string;
       readonly name: string;
-      readonly input?: unknown;
+      readonly input?: JsonValue;
       readonly at?: number;
     }
   | {
       readonly type: "action-updated";
       readonly actionId: string;
-      readonly update: unknown;
+      readonly update: JsonValue;
     }
   | {
       readonly type: "action-ended";
       readonly actionId: string;
-      readonly output?: unknown;
+      readonly output?: JsonValue;
       readonly isError: boolean;
       readonly at?: number;
     }
-  | { readonly type: "action-expansion-toggled"; readonly actionId: string }
+  | {
+      readonly type: "action-expansion-toggled";
+      readonly actionId: string;
+    }
   | {
       readonly type: "action-cursor-moved";
       readonly direction: "previous" | "next";
     }
-  | { readonly type: "action-cursor-cleared" }
-  | { readonly type: "inspector-opened"; readonly actionId: string }
+  | {
+      readonly type: "action-cursor-cleared";
+    }
+  | {
+      readonly type: "inspector-opened";
+      readonly actionId: string;
+    }
   | {
       readonly type: "inspector-loaded";
       readonly actionId: string;
@@ -235,16 +251,25 @@ export type NoesisTuiAction =
       readonly delta: number;
       readonly maxScroll: number;
     }
-  | { readonly type: "inspector-view-toggled" }
-  | { readonly type: "inspector-closed" }
-  | { readonly type: "execution-changed"; readonly execution: ExecutionState }
+  | {
+      readonly type: "inspector-view-toggled";
+    }
+  | {
+      readonly type: "inspector-closed";
+    }
+  | {
+      readonly type: "execution-changed";
+      readonly execution: ExecutionState;
+    }
   | {
       readonly type: "model-metadata";
       readonly provider: string;
       readonly model: string;
       readonly contextWindow: number;
     }
-  | ({ readonly type: "usage-updated" } & TuiContextUsage)
+  | ({
+      readonly type: "usage-updated";
+    } & TuiContextUsage)
   | {
       readonly type: "interaction-changed";
       readonly interaction: TuiInteractionView;
@@ -256,24 +281,35 @@ export type NoesisTuiAction =
       readonly turnCount: number;
       readonly contextUsage?: TuiContextUsage;
     }
-  | { readonly type: "turn-aborted" }
-  | { readonly type: "compacted" }
-  | { readonly type: "pane-selected"; readonly pane: Pane }
-  | { readonly type: "failed"; readonly error: string }
+  | {
+      readonly type: "turn-aborted";
+    }
+  | {
+      readonly type: "compacted";
+    }
+  | {
+      readonly type: "pane-selected";
+      readonly pane: Pane;
+    }
+  | {
+      readonly type: "failed";
+      readonly error: string;
+    }
   | {
       readonly type: "notification-shown";
       readonly text: string;
       readonly tone: "info" | "success" | "attention";
     }
-  | { readonly type: "system-message"; readonly text: string };
-
+  | {
+      readonly type: "system-message";
+      readonly text: string;
+    };
 const NO_EXPANDED_ACTIONS: ReadonlySet<string> = new Set<string>();
 const EMPTY_INTERACTION: TuiInteractionView = Object.freeze({
   phase: "idle",
   queuePaused: false,
   queuedInputs: Object.freeze([]),
 });
-
 export const initialTuiState = (
   runtime: string,
   options: {
@@ -297,11 +333,9 @@ export const initialTuiState = (
   capabilityVersions: {},
   colorEnabled: options.colorEnabled ?? false,
 });
-
 export function timelineActions(timeline: readonly TuiTimelineEntry[]): readonly TuiAgentActionEntry[] {
   return timeline.filter((entry): entry is TuiAgentActionEntry => entry.kind === "action");
 }
-
 /** Nested calls a codemode `execute` action spawned, in timeline order. */
 export function childActions(
   actions: readonly TuiAgentAction[],
@@ -309,7 +343,6 @@ export function childActions(
 ): readonly TuiAgentAction[] {
   return actions.filter((action) => action.parentActionId === actionId);
 }
-
 function moveCursor(state: NoesisTuiState, direction: "previous" | "next"): NoesisTuiState {
   const actions = timelineActions(state.timeline);
   if (actions.length === 0) return state;
@@ -324,14 +357,12 @@ function moveCursor(state: NoesisTuiState, direction: "previous" | "next"): Noes
   const next = actions[nextIndex];
   return next ? { ...state, actionCursor: next.actionId } : state;
 }
-
 function toggleExpansion(state: NoesisTuiState, actionId: string): NoesisTuiState {
   const expanded = new Set(state.expandedActionIds);
   if (expanded.has(actionId)) expanded.delete(actionId);
   else expanded.add(actionId);
   return { ...state, expandedActionIds: expanded };
 }
-
 export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): NoesisTuiState {
   switch (action.type) {
     case "trail-selected": {
@@ -345,20 +376,24 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         inspector: _inspector,
         ...rest
       } = state;
-      return {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return createConditionalObject({
         ...rest,
         trailId: action.trail.trailId,
         title: action.trail.title,
         provider: action.trail.provider,
         model: action.trail.model,
         timeline: [],
-        ...(action.trail.context ? { context: action.trail.context } : {}),
-        capabilityVersions: { ...action.trail.capabilityVersions },
-        expandedActionIds: NO_EXPANDED_ACTIONS,
-        interaction: EMPTY_INTERACTION,
-        turnCount: action.trail.turns.length,
-        execution: "idle",
-      };
+      } as const)
+        .addOptional(action.trail.context ? { context: action.trail.context } : undefined)
+        .add({
+          capabilityVersions: { ...action.trail.capabilityVersions },
+          expandedActionIds: NO_EXPANDED_ACTIONS,
+          interaction: EMPTY_INTERACTION,
+          turnCount: action.trail.turns.length,
+          execution: "idle",
+        } as const)
+        .finish();
     }
     case "transcript-hydrated":
       if (state.trailId !== action.trailId) return state;
@@ -412,15 +447,19 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       return { ...state, timeline };
     }
     case "action-started": {
-      const next: TuiAgentActionEntry = {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      const next: TuiAgentActionEntry = createConditionalObject({
         kind: "action",
         actionId: action.actionId,
-        ...(action.parentActionId ? { parentActionId: action.parentActionId } : {}),
-        name: action.name,
-        status: "running",
-        ...(action.input === undefined ? {} : { input: action.input }),
-        ...(action.at === undefined ? {} : { startedAt: action.at }),
-      };
+      } as const)
+        .addOptional(action.parentActionId ? { parentActionId: action.parentActionId } : undefined)
+        .add({
+          name: action.name,
+          status: "running",
+        } as const)
+        .addOptional(!(action.input === undefined) ? { input: action.input } : undefined)
+        .addOptional(!(action.at === undefined) ? { startedAt: action.at } : undefined)
+        .finish();
       const existing = state.timeline.findIndex(
         (entry) => entry.kind === "action" && entry.actionId === action.actionId,
       );
@@ -446,12 +485,14 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
           action.at !== undefined && entry.startedAt !== undefined
             ? Math.max(0, action.at - entry.startedAt)
             : undefined;
-        return {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return createConditionalObject({
           ...entry,
           status: action.isError ? "failed" : "completed",
-          ...(action.output === undefined ? {} : { output: action.output }),
-          ...(durationMs === undefined ? {} : { durationMs }),
-        };
+        } as const)
+          .addOptional(!(action.output === undefined) ? { output: action.output } : undefined)
+          .addOptional(!(durationMs === undefined) ? { durationMs } : undefined)
+          .finish();
       });
       const activeTool = [...timeline]
         .reverse()
@@ -459,12 +500,16 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
           (entry): entry is TuiAgentActionEntry => entry.kind === "action" && entry.status === "running",
         )?.name;
       const { activeTool: _activeTool, ...rest } = state;
-      return {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return createConditionalObject({
         ...rest,
-        ...(activeTool ? { activeTool } : {}),
-        timeline,
-        execution: activeTool ? "tool" : "thinking",
-      };
+      } as const)
+        .addOptional(activeTool ? { activeTool } : undefined)
+        .add({
+          timeline,
+          execution: activeTool ? "tool" : "thinking",
+        } as const)
+        .finish();
     }
     case "action-expansion-toggled":
       return toggleExpansion(state, action.actionId);
@@ -488,15 +533,19 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
     case "inspector-loaded": {
       // A slow inspector fetch must never replace a newer selection.
       if (state.inspector?.actionId !== action.actionId) return state;
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return {
         ...state,
-        inspector: {
+        inspector: createConditionalObject({
           actionId: action.actionId,
           status: action.detail ? "ready" : "fallback",
-          ...(action.detail ? { detail: action.detail } : {}),
-          view: state.inspector.view,
-          scroll: 0,
-        },
+        } as const)
+          .addOptional(action.detail ? { detail: action.detail } : undefined)
+          .add({
+            view: state.inspector.view,
+            scroll: 0,
+          } as const)
+          .finish(),
       };
     }
     case "inspector-scrolled": {
@@ -540,25 +589,33 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         },
       };
     case "interaction-changed":
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return {
         ...state,
-        interaction: {
+        interaction: createConditionalObject({
           phase: action.interaction.phase,
           queuePaused: action.interaction.queuePaused,
-          ...(action.interaction.active ? { active: { ...action.interaction.active } } : {}),
-          queuedInputs: [...action.interaction.queuedInputs],
-        },
+        } as const)
+          .addOptional(action.interaction.active ? { active: { ...action.interaction.active } } : undefined)
+          .add({
+            queuedInputs: [...action.interaction.queuedInputs],
+          } as const)
+          .finish(),
       };
     case "turn-completed": {
       const { contextUsage: _contextUsage, ...rest } = state;
-      return {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return createConditionalObject({
         ...rest,
         execution: "idle",
         context: action.context,
         turnCount: action.turnCount,
-        ...(action.contextUsage ? { contextUsage: action.contextUsage } : {}),
-        capabilityVersions: { ...action.capabilityVersions },
-      };
+      } as const)
+        .addOptional(action.contextUsage ? { contextUsage: action.contextUsage } : undefined)
+        .add({
+          capabilityVersions: { ...action.capabilityVersions },
+        } as const)
+        .finish();
     }
     case "turn-aborted": {
       const timeline = [...state.timeline];

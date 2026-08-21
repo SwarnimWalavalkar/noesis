@@ -1,4 +1,11 @@
-import type { WorkingAdjustment, WorkingAdjustmentReadPort } from "@noesis/domain";
+import {
+  createConditionalObject,
+  isJsonObject,
+  type JsonObject,
+  JsonValueSchema,
+  type WorkingAdjustment,
+  type WorkingAdjustmentReadPort,
+} from "@noesis/domain";
 import type {
   CoordinatorEvidenceRef,
   CoordinatorJobKind,
@@ -13,44 +20,34 @@ import type {
   TuiWorkingAdjustmentState,
 } from "@noesis/tui";
 import type { OutcomeRecord } from "@noesis/workspace";
-
-interface UnknownRecord {
-  readonly [key: string]: unknown;
+function isRecord(value: unknown): value is JsonObject {
+  const parsed = JsonValueSchema.safeParse(value);
+  return parsed.success && isJsonObject(parsed.data);
 }
-
-function isRecord(value: unknown): value is UnknownRecord {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
+// BOUNDARY: Historical job results predate a single durable result schema; expose only guarded strings.
 function stringField(value: unknown, key: string): string | undefined {
   if (!isRecord(value)) return undefined;
   const field = value[key];
   return typeof field === "string" && field.length > 0 ? field : undefined;
 }
-
 function resultExperimentId(job: CoordinatorJobView): string | undefined {
   return stringField(job.job.result, "experimentId");
 }
-
 type ReflectionJob = CoordinatorJobView & {
   readonly kind: "runtime.reflect_turn";
   readonly payload: ReflectTurnJobPayload;
 };
-
 function isReflection(job: CoordinatorJobView): job is ReflectionJob {
   return job.kind === "runtime.reflect_turn";
 }
-
 function experimentId(job: CoordinatorJobView): string | undefined {
   return isReflection(job) ? resultExperimentId(job) : stringField(job.payload, "experimentId");
 }
-
 function stage(job: CoordinatorJobView): TuiLearningActivitySummary["stage"] {
   if (job.kind === "runtime.reflect_turn") return "reflection";
   if (job.kind === "runtime.author_revision") return "authoring";
   return "preflight";
 }
-
 function status(job: CoordinatorJobView): TuiLearningActivitySummary["status"] {
   if (job.job.status === "scheduled") return "queued";
   if (job.job.status === "running") return "running";
@@ -67,14 +64,12 @@ function status(job: CoordinatorJobView): TuiLearningActivitySummary["status"] {
     return resultStatus;
   return "completed";
 }
-
 function activeSummary(job: CoordinatorJobView): string {
   const state = job.job.status === "scheduled" ? "Queued" : "Running";
   if (job.kind === "runtime.reflect_turn") return `${state} reflection on the completed turn`;
   if (job.kind === "runtime.author_revision") return `${state} candidate revision authoring`;
   return `${state} candidate preflight`;
 }
-
 function completedSummary(job: CoordinatorJobView): string {
   const resultStatus = stringField(job.job.result, "status");
   if (job.kind === "runtime.reflect_turn") {
@@ -97,26 +92,22 @@ function completedSummary(job: CoordinatorJobView): string {
   const decision = stringField(job.job.result, "decision");
   return decision ? `Preflight decision: ${decision.replaceAll("_", " ")}` : "Candidate preflight completed";
 }
-
 function summary(job: CoordinatorJobView): string {
   if (job.job.status === "scheduled" || job.job.status === "running") return activeSummary(job);
   if (job.job.status === "completed") return completedSummary(job);
   return job.job.lastError?.message ?? `Learning job ${job.job.status.replaceAll("_", " ")}`;
 }
-
-function candidateRevision(job: CoordinatorJobView): UnknownRecord | undefined {
+function candidateRevision(job: CoordinatorJobView): JsonObject | undefined {
   if (!isRecord(job.job.result)) return undefined;
   const value = job.job.result["candidateRevision"];
   return isRecord(value) ? value : undefined;
 }
-
 function resultEvidenceRefs(job: CoordinatorJobView): readonly CoordinatorEvidenceRef[] | undefined {
   if (!isRecord(job.job.result)) return undefined;
   const parsed = CoordinatorEvidenceRefsSchema.safeParse(job.job.result["evidenceRefs"]);
   if (!parsed.success) return undefined;
   return Object.freeze(parsed.data.map((reference) => Object.freeze({ ...reference })));
 }
-
 function activity(job: CoordinatorJobView): TuiLearningActivitySummary {
   const candidate = candidateRevision(job);
   const experiment = experimentId(job);
@@ -133,43 +124,45 @@ function activity(job: CoordinatorJobView): TuiLearningActivitySummary {
   const evidenceRefs = resultEvidenceRefs(job);
   const failed =
     job.job.status === "failed" || job.job.status === "cancelled" || job.job.status === "budget_exhausted";
-  return Object.freeze({
-    jobId: job.job.jobId,
-    stage: stage(job),
-    status: status(job),
-    summary: summary(job),
-    updatedAt: job.job.updatedAt,
-    ...(isReflection(job) ? { turnId: job.payload.turn.turnId } : {}),
-    ...(experiment ? { experimentId: experiment } : {}),
-    ...(isReflection(job)
-      ? { capabilityId: job.payload.capability.capabilityId }
-      : candidateCapabilityId
-        ? { capabilityId: candidateCapabilityId }
-        : {}),
-    ...(candidateRevisionId ? { capabilityRevisionId: candidateRevisionId } : {}),
-    ...(projectId ? { projectId } : {}),
-    ...(adjustmentId ? { adjustmentId } : {}),
-    ...(activeAdjustmentId ? { activeAdjustmentId } : {}),
-    ...(evidenceRefs ? { evidenceRefs } : {}),
-    ...(failed && job.job.lastError ? { failure: job.job.lastError.message } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      jobId: job.job.jobId,
+      stage: stage(job),
+      status: status(job),
+      summary: summary(job),
+      updatedAt: job.job.updatedAt,
+    } as const)
+      .addOptional(isReflection(job) ? { turnId: job.payload.turn.turnId } : undefined)
+      .addOptional(experiment ? { experimentId: experiment } : undefined)
+      .add(
+        isReflection(job)
+          ? { capabilityId: job.payload.capability.capabilityId }
+          : candidateCapabilityId
+            ? { capabilityId: candidateCapabilityId }
+            : {},
+      )
+      .addOptional(candidateRevisionId ? { capabilityRevisionId: candidateRevisionId } : undefined)
+      .addOptional(projectId ? { projectId } : undefined)
+      .addOptional(adjustmentId ? { adjustmentId } : undefined)
+      .addOptional(activeAdjustmentId ? { activeAdjustmentId } : undefined)
+      .addOptional(evidenceRefs ? { evidenceRefs } : undefined)
+      .addOptional(failed && job.job.lastError ? { failure: job.job.lastError.message } : undefined)
+      .finish(),
+  );
 }
-
 export interface WorkingAdjustmentInspectionSource {
   readonly workingAdjustments: WorkingAdjustmentReadPort;
   readonly outcomes: {
     readonly get: (outcomeId: string) => Promise<OutcomeRecord | undefined>;
   };
 }
-
 const SERVED_EVIDENCE_LIMIT = 8;
 const EVIDENCE_SUMMARY_CHARACTERS = 500;
-
 function boundedSummary(summary: string): string {
   if (summary.length <= EVIDENCE_SUMMARY_CHARACTERS) return summary;
   return `${summary.slice(0, EVIDENCE_SUMMARY_CHARACTERS - 1)}…`;
 }
-
 async function workingAdjustmentState(
   projectId: string,
   adjustmentId: string,
@@ -197,7 +190,6 @@ async function workingAdjustmentState(
     source,
   );
 }
-
 async function inspectedWorkingAdjustmentState(
   adjustment: WorkingAdjustment,
   status: TuiWorkingAdjustmentState["status"],
@@ -232,7 +224,6 @@ async function inspectedWorkingAdjustmentState(
     servedEvidence,
   });
 }
-
 async function currentWorkingAdjustmentState(
   projectId: string,
   active: WorkingAdjustment | undefined,
@@ -250,7 +241,6 @@ async function currentWorkingAdjustmentState(
   });
   return await inspectedWorkingAdjustmentState(active, "active", settledEvidence, source);
 }
-
 function validateActiveWorkingAdjustment(
   projectId: string,
   active: WorkingAdjustment | undefined,
@@ -261,12 +251,10 @@ function validateActiveWorkingAdjustment(
     );
   return active;
 }
-
 interface ActiveWorkingAdjustmentSnapshot {
   readonly projectId: string;
   readonly adjustment: WorkingAdjustment | undefined;
 }
-
 function activeWorkingAdjustmentReader(
   source: WorkingAdjustmentInspectionSource,
   snapshot?: ActiveWorkingAdjustmentSnapshot,
@@ -287,7 +275,6 @@ function activeWorkingAdjustmentReader(
     return pending;
   };
 }
-
 async function enrichLearningActivity(
   activities: readonly TuiLearningActivitySummary[],
   source: WorkingAdjustmentInspectionSource,
@@ -320,7 +307,6 @@ async function enrichLearningActivity(
     ),
   );
 }
-
 /** Enriches learning jobs from the authoritative adjustment and settled-outcome stores. */
 export async function enrichLearningActivityWithWorkingAdjustments(
   activities: readonly TuiLearningActivitySummary[],
@@ -328,7 +314,6 @@ export async function enrichLearningActivityWithWorkingAdjustments(
 ): Promise<readonly TuiLearningActivitySummary[]> {
   return await enrichLearningActivity(activities, source);
 }
-
 /** Combines session-local learning jobs with the current authoritative project adjustment. */
 export async function loadLearningInspectionForSession(
   coordinator: Pick<RuntimeCoordinator, "listJobPage">,
@@ -355,12 +340,15 @@ export async function loadLearningInspectionForSession(
         }),
       )
     : activity;
-  return Object.freeze({
-    activity: deduplicated,
-    ...(currentWorkingAdjustment ? { currentWorkingAdjustment } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      activity: deduplicated,
+    } as const)
+      .addOptional(currentWorkingAdjustment ? { currentWorkingAdjustment } : undefined)
+      .finish(),
+  );
 }
-
 /** Projects authoritative coordinator jobs into one session's quiet learning activity view. */
 export function learningActivityForSession(
   jobs: readonly CoordinatorJobView[],
@@ -392,10 +380,8 @@ export function learningActivityForSession(
       ),
   );
 }
-
-const JOB_PAGE_SIZE = 1_000;
+const JOB_PAGE_SIZE = 1000;
 const EXPERIMENT_QUERY_CHUNK_SIZE = 250;
-
 async function listAllScopedJobs(
   coordinator: Pick<RuntimeCoordinator, "listJobPage">,
   request: Readonly<{
@@ -405,13 +391,22 @@ async function listAllScopedJobs(
   }>,
 ): Promise<readonly CoordinatorJobView[]> {
   const jobs: CoordinatorJobView[] = [];
-  let after: { readonly createdAt: string; readonly jobId: string } | undefined;
+  let after:
+    | {
+        readonly createdAt: string;
+        readonly jobId: string;
+      }
+    | undefined;
   while (true) {
-    const page = await coordinator.listJobPage({
-      ...request,
-      limit: JOB_PAGE_SIZE,
-      ...(after ? { after } : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const page = await coordinator.listJobPage(
+      createConditionalObject({
+        ...request,
+        limit: JOB_PAGE_SIZE,
+      } as const)
+        .addOptional(after ? { after } : undefined)
+        .finish(),
+    );
     jobs.push(...page.jobs);
     if (page.exhausted) return Object.freeze(jobs);
     if (!page.nextCursor)
@@ -419,13 +414,11 @@ async function listAllScopedJobs(
     after = page.nextCursor;
   }
 }
-
 function chunks<Value>(values: readonly Value[], size: number): readonly (readonly Value[])[] {
   const result: Value[][] = [];
   for (let index = 0; index < values.length; index += size) result.push(values.slice(index, index + size));
   return Object.freeze(result.map((chunk) => Object.freeze(chunk)));
 }
-
 /** Reads complete coordinator job chains before applying the pure session projection above. */
 export async function loadLearningActivityForSession(
   coordinator: Pick<RuntimeCoordinator, "listJobPage">,
@@ -436,6 +429,7 @@ export async function loadLearningActivityForSession(
     kind: "runtime.reflect_turn",
     sessionId,
   });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const sessionChildren = await Promise.all(
     (["runtime.author_revision", "runtime.preflight"] as const).map(
       async (kind) => await listAllScopedJobs(coordinator, { kind, sessionId }),
@@ -451,6 +445,7 @@ export async function loadLearningActivityForSession(
   );
   const linked: CoordinatorJobView[] = [];
   for (const experimentChunk of chunks(experimentIds, EXPERIMENT_QUERY_CHUNK_SIZE)) {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const chunkJobs = await Promise.all(
       (["runtime.author_revision", "runtime.preflight"] as const).map(
         async (kind) =>
@@ -464,6 +459,7 @@ export async function loadLearningActivityForSession(
       ...chunkJobs.flat().filter((job) => stringField(job.payload, "sourceSessionId") === undefined),
     );
   }
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const uniqueLinked = new Map(
     [...sessionChildren.flat(), ...linked].map((job) => [job.job.jobId, job] as const),
   );

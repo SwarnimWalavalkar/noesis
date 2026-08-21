@@ -714,6 +714,7 @@ describe("AC-07 session search tools", () => {
     ]);
     await workspace.research.experiments.putExperiment({ ...cycleA, status: "hypothesis" });
     await workspace.research.experiments.putExperiment({ ...cycleB, status: "hypothesis" });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const cycleARefs = [{ kind: "database_row", table: "experiments", rowId: "experiment-cycle-b" }] as const;
     await completeExistingExperiment({ ...cycleA, evidenceRefs: cycleARefs });
     await completeExistingExperiment(cycleB);
@@ -1280,6 +1281,7 @@ describe("AC-07 session search tools", () => {
     evidenceRefs: Experiment["evidenceRefs"],
     scope = "release research",
   ) {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     return {
       experimentId,
       hypothesis,

@@ -5,11 +5,13 @@ import {
   type CapabilityLifecycleRevision,
   type CapabilityRevision,
   capabilityRevisionRef,
+  type JsonObject,
 } from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { describe, expect, test } from "vitest";
 import { loadLearningAuditSnapshot } from "../src/learning-audit-read-model.ts";
 
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const baseline = Object.freeze({
   kind: "capability_revision" as const,
   capabilityId: "general-collaboration",
@@ -21,6 +23,7 @@ describe("learning audit read model", () => {
   test("projects only records whose authoritative origin belongs to the active project", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-learning-audit-"));
     const workspace = await createWorkspaceStore(home);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const projects = [
       Object.freeze({ projectId: "project-a", root: "/workspace/a" }),
       Object.freeze({ projectId: "project-b", root: "/workspace/b" }),
@@ -85,6 +88,7 @@ describe("learning audit read model", () => {
         createdAt: "2026-08-14T00:00:00.000Z",
         metadata: Object.freeze({}),
       });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       const evidence = Object.freeze({
         kind: "database_row" as const,
         table: "messages" as const,
@@ -124,6 +128,7 @@ describe("learning audit read model", () => {
         estimatedCost: 0,
         budget: 0,
       });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       await workspace.research.experiments.putExperiment(
         Object.freeze({
           experimentId: `experiment-${project.projectId}`,
@@ -136,6 +141,7 @@ describe("learning audit read model", () => {
           status: "hypothesis" as const,
         }),
       );
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       await workspace.research.feedbackSignals.recordFeedbackSignal(
         Object.freeze({
           signalId: `signal-${project.projectId}`,
@@ -356,6 +362,7 @@ describe("learning audit read model", () => {
       createdAt: "2026-08-18T00:00:00.000Z",
       metadata: Object.freeze({}),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const evidence = Object.freeze({
       kind: "database_row" as const,
       table: "messages" as const,
@@ -398,6 +405,7 @@ describe("learning audit read model", () => {
         rationale: "The correction is likely to recur.",
       }),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const actor = Object.freeze({ actorId: "learning-audit-test", kind: "system" as const });
     const [prompt, router] = await Promise.all([
       workspace.definitions.recordWorkingDefinition({
@@ -417,6 +425,7 @@ describe("learning audit read model", () => {
         provenanceRefs: Object.freeze([evidence]),
       }),
     ]);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const exactRevision: CapabilityRevision = Object.freeze({
       capabilityRevisionId: "capability-adaptation-path-r1",
       capabilityId: "capability-adaptation-path",
@@ -451,6 +460,7 @@ describe("learning audit read model", () => {
       anticipatedEffect: "Noesis proposes inspectable Capabilities instead of bypassing its control plane.",
       createdAt: "2026-08-18T00:00:03.000Z",
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await workspace.capabilities.create({
       definition: Object.freeze({
         capabilityId: exactRevision.capabilityId,
@@ -584,6 +594,7 @@ describe("learning audit read model", () => {
       updatedAt: "2026-08-14T00:00:00.000Z",
       metadata: Object.freeze({}),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const adjustmentEvidence = Object.freeze({
       kind: "database_row" as const,
       table: "sessions" as const,
@@ -598,6 +609,7 @@ describe("learning audit read model", () => {
       createdAt: "2026-08-14T00:00:01.000Z",
       metadata: Object.freeze({}),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const removalEvidence = Object.freeze({
       kind: "database_row" as const,
       table: "messages" as const,
@@ -625,7 +637,7 @@ describe("learning audit read model", () => {
     const enqueueReflection = async (
       jobId: string,
       sensitivity: "normal" | "private",
-      result: Readonly<Record<string, unknown>>,
+      result: JsonObject,
     ): Promise<void> => {
       await workspace.jobs.enqueue({
         jobId,

@@ -31,7 +31,7 @@ export interface ExclusiveCommandBarrier {
     readonly sourceSessionId: string;
     readonly scope: ExclusiveCommandScope;
     readonly execute: () => Promise<void>;
-    readonly onCommandFailure: (error: unknown) => void;
+    readonly onCommandFailure: (cause: unknown) => void;
   }) => void;
   readonly prepareDestination: (sessionId: string) => Promise<void>;
   readonly activeWork: () => Promise<void> | undefined;
@@ -51,13 +51,13 @@ export function createExclusiveCommandBarrier(options: {
     sessionId: string,
     command: BarrierInteractionCommand,
   ) => Promise<BarrierInteractionResult>;
-  readonly onPromptFailure: (error: unknown) => void;
+  readonly onPromptFailure: (cause: unknown) => void;
 }): ExclusiveCommandBarrier {
   let active: ActiveExclusiveCommand | undefined;
 
-  const reportPromptFailure = (error: unknown): void => {
+  const reportPromptFailure = (cause: unknown): void => {
     try {
-      options.onPromptFailure(error);
+      options.onPromptFailure(cause);
     } catch {
       // Presentation failures never own later prompt delivery.
     }
@@ -137,9 +137,9 @@ export function createExclusiveCommandBarrier(options: {
         }
         if (commandFailure !== undefined) throw commandFailure;
       })();
-      void state.work.then(undefined, (error: unknown) => {
+      void state.work.then(undefined, (cause: unknown) => {
         try {
-          request.onCommandFailure(error);
+          request.onCommandFailure(cause);
         } catch {
           // Presentation failures never own the serialized command lifecycle.
         }

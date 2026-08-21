@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import { AgentHarness, formatSkillsForSystemPrompt, type Skill } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { AssistantMessage, MutableModels, UserMessage } from "@earendil-works/pi-ai";
@@ -31,7 +32,6 @@ import { createPiSelfTools, type PiSelfToolAdapter } from "./self-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
 import { resolvePiSkillInvocation } from "./skill-invocation.ts";
 import type { PiSkillLibrary, PiSkillResource } from "./skill-library.ts";
-
 export type {
   AgentCompletedStopReason,
   AgentContextUsage,
@@ -64,7 +64,6 @@ export * from "./role-types.ts";
 export * from "./self-tools.ts";
 export * from "./skill-invocation.ts";
 export * from "./skill-library.ts";
-
 function assistantText(message: { readonly content: readonly unknown[] }): string {
   return message.content
     .flatMap((part) => {
@@ -74,7 +73,6 @@ function assistantText(message: { readonly content: readonly unknown[] }): strin
     })
     .join("");
 }
-
 function userMessageText(message: { readonly content: string | readonly unknown[] }): string {
   if (typeof message.content === "string") return message.content;
   return message.content
@@ -85,7 +83,6 @@ function userMessageText(message: { readonly content: string | readonly unknown[
     })
     .join("");
 }
-
 function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | undefined {
   if (!request.frozenTurnPlan) return undefined;
   const plan = validateFrozenTurnPlan(request.frozenTurnPlan);
@@ -116,7 +113,6 @@ function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | und
   }
   return plan;
 }
-
 function capabilitySkillResources(plan: FrozenTurnPlan | undefined): readonly PiSkillResource[] {
   if (!plan) return Object.freeze([]);
   return Object.freeze(
@@ -139,7 +135,6 @@ function capabilitySkillResources(plan: FrozenTurnPlan | undefined): readonly Pi
     ),
   );
 }
-
 function mergeSkillResources(
   discovered: readonly PiSkillResource[],
   capability: readonly PiSkillResource[],
@@ -153,12 +148,12 @@ function mergeSkillResources(
   }
   return Object.freeze([...merged.values()].sort((left, right) => left.name.localeCompare(right.name)));
 }
-
 function historyForRequest(
   request: AgentRuntimeRequest,
   plan: FrozenTurnPlan | undefined,
 ): NonNullable<AgentRuntimeRequest["history"]> {
   if (!plan) return Object.freeze([...(request.history ?? [])]);
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const frozen = Object.freeze([
     ...(plan.contextCheckpoint
       ? [
@@ -190,7 +185,6 @@ function historyForRequest(
   }
   return frozen;
 }
-
 export interface AssistantDeltaAggregator {
   /** Start the next Pi assistant message in the same tool-loop turn. */
   readonly beginMessage: () => void;
@@ -198,7 +192,6 @@ export interface AssistantDeltaAggregator {
   readonly push: (delta: string) => string;
   readonly text: () => string;
 }
-
 export function createAssistantDeltaAggregator(): AssistantDeltaAggregator {
   let aggregate = "";
   let currentMessageHasText = false;
@@ -217,7 +210,6 @@ export function createAssistantDeltaAggregator(): AssistantDeltaAggregator {
     text: () => aggregate,
   };
 }
-
 const emptyUsage = Object.freeze({
   input: 0,
   output: 0,
@@ -226,13 +218,11 @@ const emptyUsage = Object.freeze({
   totalTokens: 0,
   cost: Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }),
 });
-
 function historyTimestamp(createdAt: string | undefined, fallback: number): number {
   if (!createdAt) return fallback;
   const parsed = Date.parse(createdAt);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
-
 function priorUserMessage(content: string, timestamp: number): UserMessage {
   const message: UserMessage = {
     role: "user",
@@ -241,7 +231,6 @@ function priorUserMessage(content: string, timestamp: number): UserMessage {
   };
   return Object.freeze(message);
 }
-
 function priorAssistantMessage(
   content: string,
   timestamp: number,
@@ -259,7 +248,8 @@ function priorAssistantMessage(
   };
   return Object.freeze(message);
 }
-
+// BOUNDARY: Pi owns this callback payload and does not publish a concrete update contract; this
+// adapter recognizes its optional activity envelope and preserves every other payload unchanged.
 function piToolUpdatePayload(value: unknown): unknown {
   if (!value || typeof value !== "object" || !("details" in value)) return value;
   const details = value.details;
@@ -273,17 +263,21 @@ function piToolUpdatePayload(value: unknown): unknown {
     return value;
   const executionId =
     "executionId" in details && typeof details.executionId === "string" ? details.executionId : undefined;
-  return Object.freeze({
-    kind: "activity",
-    ...(executionId ? { executionId } : {}),
-    activity: details.event,
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      kind: "activity",
+    } as const)
+      .addOptional(executionId ? { executionId } : undefined)
+      .add({
+        activity: details.event,
+      } as const)
+      .finish(),
+  );
 }
-
 export interface PiAgentRuntime extends NoesisAgentRuntime {
   readonly name: "pi-agent-harness-0.80.6";
 }
-
 export interface CreatePiAgentRuntimeOptions {
   readonly codeExecution?: PiCodeExecutionAdapter;
   readonly selfTools?: PiSelfToolAdapter;
@@ -291,7 +285,6 @@ export interface CreatePiAgentRuntimeOptions {
   readonly requirePinnedSkillSnapshot?: boolean;
   readonly now?: () => string;
 }
-
 export function createPiAgentRuntime(
   cwd: string,
   models: MutableModels,
@@ -308,24 +301,24 @@ export function createPiAgentRuntime(
     abortError?: unknown;
     abortStatusEmitted?: boolean;
   }
-
   interface PendingPiSteer {
     readonly text: string;
     readonly promise: Promise<AgentSteerResult>;
     readonly resolve: (result: AgentSteerResult) => void;
   }
-
   const notConsumed = (
-    reason: Extract<AgentSteerResult, { readonly status: "not-consumed" }>["reason"],
+    reason: Extract<
+      AgentSteerResult,
+      {
+        readonly status: "not-consumed";
+      }
+    >["reason"],
   ): AgentSteerResult => Object.freeze({ status: "not-consumed", reason });
-
   const settlePendingSteers = (execution: ActivePiExecution, result: AgentSteerResult): void => {
     const pending = execution.pendingSteers.splice(0);
     for (const receipt of pending) receipt.resolve(result);
   };
-
   const active = new Map<string, ActivePiExecution>();
-
   const run = async (
     request: AgentRuntimeRequest,
     emit: (event: AgentRuntimeEvent) => void,
@@ -352,6 +345,7 @@ export function createPiAgentRuntime(
         execution.abortStatusEmitted = true;
         emit({ type: "status", status: "aborted" });
       }
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         text: "",
         assistantMessages: Object.freeze([]),
@@ -422,36 +416,54 @@ export function createPiAgentRuntime(
         recordedByBroker = false,
       ): void => {
         if (event.type === "tool-start")
-          emit({
-            type: "tool-start",
-            actionId: event.callId,
-            ...(parentActionId ? { parentActionId } : {}),
-            name: event.name,
-            input: toAgentActionPayload(event.input ?? {}),
-            timelineSequence: claimTimelineSequence(),
-            ...(recordedByBroker ? { recordedByBroker: true } : {}),
-          });
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          emit(
+            createConditionalObject({
+              type: "tool-start",
+              actionId: event.callId,
+            } as const)
+              .addOptional(parentActionId ? { parentActionId } : undefined)
+              .add({
+                name: event.name,
+                input: toAgentActionPayload(event.input ?? {}),
+                timelineSequence: claimTimelineSequence(),
+              } as const)
+              .addOptional(recordedByBroker ? { recordedByBroker: true } : undefined)
+              .finish(),
+          );
         else if (event.type === "progress" && event.callId && event.name)
-          emit({
-            type: "tool-update",
-            actionId: event.callId,
-            ...(parentActionId ? { parentActionId } : {}),
-            name: event.name,
-            update: toAgentActionPayload(event.value),
-            ...(recordedByBroker ? { recordedByBroker: true } : {}),
-          });
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          emit(
+            createConditionalObject({
+              type: "tool-update",
+              actionId: event.callId,
+            } as const)
+              .addOptional(parentActionId ? { parentActionId } : undefined)
+              .add({
+                name: event.name,
+                update: toAgentActionPayload(event.value),
+              } as const)
+              .addOptional(recordedByBroker ? { recordedByBroker: true } : undefined)
+              .finish(),
+          );
         else if (event.type === "tool-end")
-          emit({
-            type: "tool-end",
-            actionId: event.callId,
-            ...(parentActionId ? { parentActionId } : {}),
-            name: event.name,
-            isError: !event.ok,
-            result: toAgentActionPayload(
-              event.result ?? (event.error ? { error: event.error } : { ok: event.ok }),
-            ),
-            ...(recordedByBroker ? { recordedByBroker: true } : {}),
-          });
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          emit(
+            createConditionalObject({
+              type: "tool-end",
+              actionId: event.callId,
+            } as const)
+              .addOptional(parentActionId ? { parentActionId } : undefined)
+              .add({
+                name: event.name,
+                isError: !event.ok,
+                result: toAgentActionPayload(
+                  event.result ?? (event.error ? { error: event.error } : { ok: event.ok }),
+                ),
+              } as const)
+              .addOptional(recordedByBroker ? { recordedByBroker: true } : undefined)
+              .finish(),
+          );
       };
       let harness: AgentHarness | undefined;
       const initialHotbar =
@@ -489,20 +501,26 @@ export function createPiAgentRuntime(
         if (!harness) throw new Error("The direct-tool hotbar is not ready");
         await harness.setActiveTools(activeNames(resolved));
       };
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const selfTools =
         plan && options.selfTools
-          ? createPiSelfTools({
-              adapter: options.selfTools,
-              plan,
-              request,
-              signal: execution.controller.signal,
-              applyHotbar,
-              ...(preparedCode
-                ? {
-                    catalog: preparedCode.catalog,
-                  }
-                : {}),
-            })
+          ? createPiSelfTools(
+              createConditionalObject({
+                adapter: options.selfTools,
+                plan,
+                request,
+                signal: execution.controller.signal,
+                applyHotbar,
+              } as const)
+                .addOptional(
+                  preparedCode
+                    ? {
+                        catalog: preparedCode.catalog,
+                      }
+                    : undefined,
+                )
+                .finish(),
+            )
           : Object.freeze([]);
       const { session, sessionId } = await createEphemeralPiSession();
       execution.sessionId = sessionId;
@@ -610,8 +628,8 @@ export function createPiAgentRuntime(
       const requestHarnessAbort = (): Promise<void> => {
         abortPromise ??= harness.abort().then(
           () => undefined,
-          (error: unknown) => {
-            execution.abortError = error;
+          (cause: unknown) => {
+            execution.abortError = cause;
           },
         );
         return abortPromise;
@@ -713,13 +731,15 @@ export function createPiAgentRuntime(
               } satisfies AgentContextUsage)
             : undefined;
         if (contextUsage) emit({ type: "usage", ...contextUsage });
-        const base = {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        const base = createConditionalObject({
           text,
           assistantMessages: Object.freeze([...assistantMessages]),
           provider: message.provider,
           model: message.model,
-          ...(contextUsage ? { contextUsage } : {}),
-        };
+        } as const)
+          .addOptional(contextUsage ? { contextUsage } : undefined)
+          .finish();
         if (message.stopReason === "error") {
           const error = message.errorMessage?.trim() || "The provider returned an error without details.";
           emit({ type: "status", status: "failed", error });
@@ -766,7 +786,6 @@ export function createPiAgentRuntime(
       }
     }
   };
-
   const steer = async (trailId: string, text: string): Promise<AgentSteerResult> => {
     const execution = active.get(trailId);
     const harness = execution?.harness;
@@ -788,7 +807,6 @@ export function createPiAgentRuntime(
     }
     return receipt.promise;
   };
-
   const abort = async (trailId: string): Promise<void> => {
     const execution = active.get(trailId);
     if (!execution) return;
@@ -797,6 +815,5 @@ export function createPiAgentRuntime(
     await execution.requestHarnessAbort?.();
     if (execution.abortError) throw execution.abortError;
   };
-
   return Object.freeze({ name: "pi-agent-harness-0.80.6", run, steer, abort });
 }

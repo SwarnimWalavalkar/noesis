@@ -61,6 +61,7 @@ describe("durable compounding measurement reservations", () => {
       planId: admitted.planId,
       budgetId: "budget-1",
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const reservation = {
       operationId: "operation-1",
       replayId: "replay-1",

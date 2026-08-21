@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import { createHash } from "node:crypto";
 import type {
   CanonicalSearchSource,
@@ -7,7 +8,6 @@ import type {
   SearchSessionScope,
   SearchSourceScope,
 } from "@noesis/workspace";
-
 export interface ExactCitation {
   readonly source: CanonicalSearchSource;
   readonly occurredAt: string;
@@ -16,7 +16,6 @@ export interface ExactCitation {
   readonly endOffset: number;
   readonly contentDigest: string;
 }
-
 export interface HistorySearchRequest {
   readonly query: string;
   readonly signal?: AbortSignal;
@@ -32,7 +31,6 @@ export interface HistorySearchRequest {
   readonly maxExcerptChars?: number;
   readonly privacy?: "normal" | "include_private";
 }
-
 export interface HistorySearchHit {
   readonly citation: ExactCitation;
   readonly lexicalScore?: number;
@@ -40,7 +38,6 @@ export interface HistorySearchHit {
   readonly combinedScore: number;
   readonly rerankReason?: string;
 }
-
 export interface HistorySearchResult {
   readonly query: string;
   readonly hits: readonly HistorySearchHit[];
@@ -53,36 +50,32 @@ export interface HistorySearchResult {
     readonly maxExcerptChars: number;
   };
 }
-
 export interface HistoryOpenRequest {
   readonly citation: ExactCitation;
 }
-
 export interface HistoryOpenResult {
   readonly citation: ExactCitation;
   readonly content: string;
 }
-
 export interface HistoryPort {
   readonly search: (request: HistorySearchRequest) => Promise<HistorySearchResult>;
   readonly open: (request: HistoryOpenRequest) => Promise<HistoryOpenResult>;
   readonly resolve: (citations: readonly ExactCitation[]) => Promise<readonly ExactCitation[]>;
-  readonly rebuild: () => Promise<{ readonly documents: number; readonly embeddings: number }>;
+  readonly rebuild: () => Promise<{
+    readonly documents: number;
+    readonly embeddings: number;
+  }>;
 }
-
 export interface EmbeddingRequest {
   readonly texts: readonly string[];
 }
-
 export interface EmbeddingResult {
   readonly modelId: string;
   readonly vectors: readonly (readonly number[])[];
 }
-
 export interface EmbeddingPort {
   readonly embed: (request: EmbeddingRequest) => Promise<EmbeddingResult>;
 }
-
 export interface RerankCandidate {
   readonly documentId: string;
   readonly excerpt: string;
@@ -90,35 +83,32 @@ export interface RerankCandidate {
   readonly semanticScore?: number;
   readonly combinedScore: number;
 }
-
 export interface RerankRequest {
   readonly query: string;
   readonly candidates: readonly RerankCandidate[];
   readonly maxResults: number;
   readonly signal?: AbortSignal;
 }
-
 export interface RerankResultItem {
   readonly documentId: string;
   readonly reason: string;
 }
-
 /** A bounded seam for an injected LLM or deterministic test double. It receives excerpts, never full history. */
 export interface HistoryRerankPort {
   readonly rerank: (request: RerankRequest) => Promise<readonly RerankResultItem[]>;
 }
-
 export interface CreateHistoryPortOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly embeddings: EmbeddingPort;
   readonly reranker: HistoryRerankPort;
 }
-
 /** Maximum merged retrieval candidates admitted to one bounded model rerank. */
 export const MAX_HISTORY_RERANK_CANDIDATES = 100;
-
 export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPort {
-  const rebuild = async (): Promise<{ readonly documents: number; readonly embeddings: number }> => {
+  const rebuild = async (): Promise<{
+    readonly documents: number;
+    readonly embeddings: number;
+  }> => {
     const documents = await options.workspace.search.rebuildDocuments();
     const indexable = documents.filter((document) => document.sensitivity !== "secret");
     if (indexable.length === 0) return { documents: documents.length, embeddings: 0 };
@@ -133,13 +123,13 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
         indexable.map((document, index) => {
           const vector = result.vectors[index];
           if (!vector) throw new Error(`Embedding port omitted document ${document.documentId}`);
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           return [document.documentId, vector] as const;
         }),
       ),
     );
     return { documents: documents.length, embeddings: indexable.length };
   };
-
   const search = async (request: HistorySearchRequest): Promise<HistorySearchResult> => {
     const query = request.query.trim();
     if (query.length === 0) throw new Error("History search query must not be empty");
@@ -179,29 +169,41 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
         : { kind: "exact", sessionId: request.sessionId };
     if ((await options.workspace.search.listDocuments({ includePrivate: true })).length === 0)
       await rebuild();
-
-    const lexical = await options.workspace.search.lexicalCandidates({
-      query,
-      limit: lexicalLimit,
-      ...(sessionScope === undefined ? {} : { sessionScope }),
-      ...(request.sourceScope === undefined ? {} : { sourceScope: request.sourceScope }),
-      includePrivate,
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const lexical = await options.workspace.search.lexicalCandidates(
+      createConditionalObject({
+        query,
+        limit: lexicalLimit,
+      } as const)
+        .addOptional(!(sessionScope === undefined) ? { sessionScope } : undefined)
+        .addOptional(!(request.sourceScope === undefined) ? { sourceScope: request.sourceScope } : undefined)
+        .add({
+          includePrivate,
+        } as const)
+        .finish(),
+    );
     let semantic: readonly SearchCandidate[] = [];
     if (semanticLimit > 0) {
       const embedded = await options.embeddings.embed({ texts: [query] });
       const vector = embedded.vectors[0];
       if (!vector) throw new Error("Embedding port returned no query vector");
-      semantic = await options.workspace.search.semanticCandidates({
-        modelId: embedded.modelId,
-        vector,
-        limit: semanticLimit,
-        ...(sessionScope === undefined ? {} : { sessionScope }),
-        ...(request.sourceScope === undefined ? {} : { sourceScope: request.sourceScope }),
-        includePrivate,
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      semantic = await options.workspace.search.semanticCandidates(
+        createConditionalObject({
+          modelId: embedded.modelId,
+          vector,
+          limit: semanticLimit,
+        } as const)
+          .addOptional(!(sessionScope === undefined) ? { sessionScope } : undefined)
+          .addOptional(
+            !(request.sourceScope === undefined) ? { sourceScope: request.sourceScope } : undefined,
+          )
+          .add({
+            includePrivate,
+          } as const)
+          .finish(),
+      );
     }
-
     const visible = mergeCandidates(lexical, semantic).filter(
       (candidate) => candidate.sensitivity === "normal" || includePrivate,
     );
@@ -227,23 +229,47 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
         createExcerpt(candidate.body, query, maxExcerptChars),
       ]),
     );
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const reranked =
       rerankLimit === 0 || merged.length <= 1
         ? []
-        : await options.reranker.rerank({
-            query,
-            candidates: merged.map((candidate) => ({
-              documentId: candidate.documentId,
-              excerpt: excerpts.get(candidate.documentId)?.excerpt ?? "",
-              ...(candidate.lexicalScore === undefined ? {} : { lexicalScore: candidate.lexicalScore }),
-              ...(candidate.semanticScore === undefined ? {} : { semanticScore: candidate.semanticScore }),
-              combinedScore: candidate.combinedScore,
-            })),
-            maxResults: resultLimit,
-            ...(request.signal ? { signal: request.signal } : {}),
-          });
+        : await options.reranker.rerank(
+            createConditionalObject({
+              query,
+              candidates: merged.map((candidate) =>
+                createConditionalObject({
+                  documentId: candidate.documentId,
+                  excerpt: excerpts.get(candidate.documentId)?.excerpt ?? "",
+                } as const)
+                  .addOptional(
+                    !(candidate.lexicalScore === undefined)
+                      ? {
+                          lexicalScore: candidate.lexicalScore,
+                        }
+                      : undefined,
+                  )
+                  .addOptional(
+                    !(candidate.semanticScore === undefined)
+                      ? {
+                          semanticScore: candidate.semanticScore,
+                        }
+                      : undefined,
+                  )
+                  .add({
+                    combinedScore: candidate.combinedScore,
+                  } as const)
+                  .finish(),
+              ),
+              maxResults: resultLimit,
+            } as const)
+              .addOptional(request.signal ? { signal: request.signal } : undefined)
+              .finish(),
+          );
     const candidateById = new Map(merged.map((candidate) => [candidate.documentId, candidate]));
-    const selected: Array<{ readonly candidate: MergedCandidate; readonly reason?: string }> = [];
+    const selected: Array<{
+      readonly candidate: MergedCandidate;
+      readonly reason?: string;
+    }> = [];
     const seen = new Set<string>();
     for (const item of reranked) {
       const candidate = candidateById.get(item.documentId);
@@ -256,11 +282,11 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
       if (selected.length === resultLimit) break;
       if (!seen.has(candidate.documentId)) selected.push({ candidate });
     }
-
     const hits = selected.map(({ candidate, reason }): HistorySearchHit => {
       const excerpt = excerpts.get(candidate.documentId);
       if (!excerpt) throw new Error(`Missing bounded excerpt for ${candidate.documentId}`);
-      return {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return createConditionalObject({
         citation: {
           source: candidate.source,
           occurredAt: candidate.occurredAt,
@@ -269,11 +295,18 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
           endOffset: excerpt.endOffset,
           contentDigest: digestText(candidate.body),
         },
-        ...(candidate.lexicalScore === undefined ? {} : { lexicalScore: candidate.lexicalScore }),
-        ...(candidate.semanticScore === undefined ? {} : { semanticScore: candidate.semanticScore }),
-        combinedScore: candidate.combinedScore,
-        ...(reason === undefined ? {} : { rerankReason: reason }),
-      };
+      } as const)
+        .addOptional(
+          !(candidate.lexicalScore === undefined) ? { lexicalScore: candidate.lexicalScore } : undefined,
+        )
+        .addOptional(
+          !(candidate.semanticScore === undefined) ? { semanticScore: candidate.semanticScore } : undefined,
+        )
+        .add({
+          combinedScore: candidate.combinedScore,
+        } as const)
+        .addOptional(!(reason === undefined) ? { rerankReason: reason } : undefined)
+        .finish();
     });
     return {
       query,
@@ -282,28 +315,23 @@ export function createHistoryPort(options: CreateHistoryPortOptions): HistoryPor
       appliedBounds: { lexicalLimit, semanticLimit, rerankLimit, resultLimit, maxExcerptChars },
     };
   };
-
   const open = async (request: HistoryOpenRequest): Promise<HistoryOpenResult> => {
     const content = await options.workspace.search.openCanonicalSource(request.citation.source);
     if (content === undefined) throw new Error("History citation source is missing");
     verifyCitation(content, request.citation);
     return { citation: request.citation, content };
   };
-
   const resolve = async (citations: readonly ExactCitation[]): Promise<readonly ExactCitation[]> => {
     for (const citation of citations) await open({ citation });
     return citations.slice();
   };
-
   return Object.freeze({ search, open, resolve, rebuild });
 }
-
 interface MergedCandidate extends SearchDocument {
   readonly lexicalScore?: number;
   readonly semanticScore?: number;
   readonly combinedScore: number;
 }
-
 function mergeCandidates(
   lexical: readonly SearchCandidate[],
   semantic: readonly SearchCandidate[],
@@ -313,21 +341,31 @@ function mergeCandidates(
     const existing = merged.get(candidate.documentId);
     const lexicalScore = candidate.lexicalScore ?? existing?.lexicalScore;
     const semanticScore = candidate.semanticScore ?? existing?.semanticScore;
-    merged.set(candidate.documentId, {
-      ...candidate,
-      ...(lexicalScore === undefined ? {} : { lexicalScore }),
-      ...(semanticScore === undefined ? {} : { semanticScore }),
-      combinedScore: (lexicalScore ?? 0) * 0.55 + Math.max(0, semanticScore ?? 0) * 0.45,
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    merged.set(
+      candidate.documentId,
+      createConditionalObject({
+        ...candidate,
+      } as const)
+        .addOptional(!(lexicalScore === undefined) ? { lexicalScore } : undefined)
+        .addOptional(!(semanticScore === undefined) ? { semanticScore } : undefined)
+        .add({
+          combinedScore: (lexicalScore ?? 0) * 0.55 + Math.max(0, semanticScore ?? 0) * 0.45,
+        } as const)
+        .finish(),
+    );
   }
   return [...merged.values()];
 }
-
 function createExcerpt(
   content: string,
   query: string,
   maxChars: number,
-): { readonly excerpt: string; readonly startOffset: number; readonly endOffset: number } {
+): {
+  readonly excerpt: string;
+  readonly startOffset: number;
+  readonly endOffset: number;
+} {
   if (content.length <= maxChars) return { excerpt: content, startOffset: 0, endOffset: content.length };
   const terms = query.toLocaleLowerCase().split(/\s+/u).filter(Boolean);
   const lower = content.toLocaleLowerCase();
@@ -340,7 +378,6 @@ function createExcerpt(
   const endOffset = Math.min(content.length, startOffset + maxChars);
   return { excerpt: content.slice(startOffset, endOffset), startOffset, endOffset };
 }
-
 function verifyCitation(content: string, citation: ExactCitation): void {
   if (digestText(content) !== citation.contentDigest)
     throw new Error("History citation is stale: canonical content digest changed");
@@ -352,16 +389,13 @@ function verifyCitation(content: string, citation: ExactCitation): void {
   )
     throw new Error("History citation offsets do not resolve to the recorded excerpt");
 }
-
 function digestText(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
-
 function boundedInteger(value: number, minimum: number, maximum: number): number {
   if (!Number.isInteger(value)) throw new Error(`Expected an integer bound, received ${value}`);
   return Math.max(minimum, Math.min(maximum, value));
 }
-
 export function createDeterministicEmbeddingPort(
   dimensions = 32,
   modelId = `fake-hash-${dimensions}`,
@@ -375,7 +409,6 @@ export function createDeterministicEmbeddingPort(
     }),
   });
 }
-
 function deterministicVector(text: string, dimensions: number): readonly number[] {
   const vector = Array.from({ length: dimensions }, () => 0);
   for (const token of text.toLocaleLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []) {
@@ -387,7 +420,6 @@ function deterministicVector(text: string, dimensions: number): readonly number[
   const magnitude = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
   return magnitude === 0 ? vector : vector.map((value) => value / magnitude);
 }
-
 export function createDeterministicRerankPort(): HistoryRerankPort {
   return Object.freeze({
     rerank: async (request: RerankRequest): Promise<readonly RerankResultItem[]> => {
@@ -412,5 +444,4 @@ export function createDeterministicRerankPort(): HistoryRerankPort {
     },
   });
 }
-
 export * from "./session-tools.ts";

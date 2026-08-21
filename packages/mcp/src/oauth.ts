@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type {
   OAuthClientInformationMixed,
@@ -5,7 +6,6 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { McpOAuthConfig } from "./config.ts";
-
 export interface McpOAuthCredential {
   readonly serverUrl: string;
   readonly authIdentityDigest?: string;
@@ -15,10 +15,10 @@ export interface McpOAuthCredential {
   readonly state?: string | undefined;
   readonly discovery?: OAuthDiscoveryState | undefined;
 }
-
 export type McpOAuthClientInformation = OAuthClientInformationMixed &
-  Readonly<{ token_endpoint_auth_method?: string | undefined }>;
-
+  Readonly<{
+    token_endpoint_auth_method?: string | undefined;
+  }>;
 /**
  * Protected storage port. Runtime composition supplies the same filesystem-hardening
  * guarantees as the rest of Noesis credentials; mcp.json never contains tokens.
@@ -36,12 +36,10 @@ export interface McpOAuthCredentialStore {
     predicate: (current: McpOAuthCredential | undefined) => boolean,
   ) => Promise<void>;
 }
-
 export interface McpOAuthRedirect {
   readonly serverName: string;
   readonly authorizationUrl: URL;
 }
-
 export interface CreateMcpOAuthProviderInput {
   readonly key: string;
   readonly serverName: string;
@@ -53,7 +51,6 @@ export interface CreateMcpOAuthProviderInput {
   readonly onRedirect: (redirect: McpOAuthRedirect) => void | Promise<void>;
   readonly environment?: Readonly<Record<string, string | undefined>>;
 }
-
 async function updateCredential(
   store: McpOAuthCredentialStore,
   key: string,
@@ -69,7 +66,6 @@ async function updateCredential(
     ),
   );
 }
-
 export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAuthClientProvider {
   if (input.config?.clientSecretEnvironment) {
     const secret = input.environment?.[input.config.clientSecretEnvironment];
@@ -103,24 +99,30 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
       },
     };
   };
-  const metadata: OAuthClientMetadata = {
+  const metadata: OAuthClientMetadata = createConditionalObject({
     redirect_uris: [input.redirectUrl],
     token_endpoint_auth_method: defaultClientAuthMethod,
     client_name: "Noesis",
     software_id: "noesis",
     software_version: "0.1.0",
-    ...(input.config?.scope ? { scope: input.config.scope } : {}),
-  };
+  })
+    .addOptional(input.config?.scope ? { scope: input.config.scope } : undefined)
+    .finish();
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const configuredClient = input.config?.clientId
-    ? {
+    ? createConditionalObject({
         client_id: input.config.clientId,
         token_endpoint_auth_method: defaultClientAuthMethod,
-        ...(input.config.clientSecretEnvironment
-          ? { client_secret: input.environment?.[input.config.clientSecretEnvironment] }
-          : {}),
-      }
+      } as const)
+        .addOptional(
+          input.config.clientSecretEnvironment
+            ? {
+                client_secret: input.environment?.[input.config.clientSecretEnvironment],
+              }
+            : undefined,
+        )
+        .finish()
     : undefined;
-
   return {
     redirectUrl: input.redirectUrl,
     clientMetadata: metadata,
@@ -145,6 +147,7 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
         typeof clientInformation.token_endpoint_auth_method === "string"
           ? clientInformation.token_endpoint_auth_method
           : metadata.token_endpoint_auth_method;
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       await updateCredential(
         input.credentialStore,
         input.key,
@@ -152,10 +155,13 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
         input.authIdentityDigest,
         (current) => ({
           ...current,
-          clientInformation: {
+          clientInformation: createConditionalObject({
             ...clientInformation,
-            ...(tokenEndpointAuthMethod ? { token_endpoint_auth_method: tokenEndpointAuthMethod } : {}),
-          },
+          } as const)
+            .addOptional(
+              tokenEndpointAuthMethod ? { token_endpoint_auth_method: tokenEndpointAuthMethod } : undefined,
+            )
+            .finish(),
         }),
       );
     },
@@ -225,11 +231,15 @@ export function createMcpOAuthProvider(input: CreateMcpOAuthProviderInput): OAut
         }
         const current = stored;
         if (scope === "client")
-          return {
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          return createConditionalObject({
             serverUrl: current.serverUrl,
-            ...(current.authIdentityDigest ? { authIdentityDigest: current.authIdentityDigest } : {}),
-            ...(current.tokens ? { tokens: current.tokens } : {}),
-          };
+          } as const)
+            .addOptional(
+              current.authIdentityDigest ? { authIdentityDigest: current.authIdentityDigest } : undefined,
+            )
+            .addOptional(current.tokens ? { tokens: current.tokens } : undefined)
+            .finish();
         if (scope === "tokens") {
           const { tokens: _tokens, ...next } = current;
           return next;

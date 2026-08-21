@@ -13,6 +13,24 @@ type FunctionWithReturnType =
   | ESTree.TSFunctionType
   | ESTree.TSMethodSignature;
 
+function hasBoundaryComment(
+  context: Readonly<{
+    sourceCode: Readonly<{
+      getCommentsBefore: (node: ESTree.Node) => readonly Readonly<{ value: string }>[];
+    }>;
+  }>,
+  owner: FunctionWithReturnType,
+): boolean {
+  let current: ESTree.Node = owner;
+  while (true) {
+    if (context.sourceCode.getCommentsBefore(current).some((comment) => /\bBOUNDARY\s*:/u.test(comment.value))) {
+      return true;
+    }
+    if (current.parent.type === "Program" || current.parent.type === "BlockStatement") return false;
+    current = current.parent;
+  }
+}
+
 function referencedAliasName(type: ESTree.TSType): string | null {
   if (type.type === "TSParenthesizedType") return referencedAliasName(type.typeAnnotation);
   if (type.type !== "TSTypeReference" || type.typeName.type !== "Identifier") return null;
@@ -78,6 +96,7 @@ export const noUnknownReturnsRule = defineRule({
     const checkReturnType = (node: FunctionWithReturnType) => {
       const annotation = node.returnType;
       if (annotation === null || annotation === undefined) return;
+      if (hasBoundaryComment(context, node)) return;
       if (
         !resolvesToUnknown(
           annotation.typeAnnotation,

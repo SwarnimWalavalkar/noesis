@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createConditionalObject,
   CapabilityRevisionSchema,
   canonicalJson,
   capabilityRevisionRef,
@@ -35,22 +36,21 @@ import {
   type RuntimeCoordinatorConfig,
   type RuntimeCoordinatorResearchPort,
 } from "../src/index.ts";
-
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
 const timestamp = "2026-07-23T00:00:00.000Z";
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const autonomy = Object.freeze({
   riskLevel: "low" as const,
   approval: "authority_expansion" as const,
   pins: "respect" as const,
   vetoes: "respect" as const,
 });
-
 const coordinatorConfig: RuntimeCoordinatorConfig = Object.freeze({
   schemaVersion: 1,
   maxConcurrency: 2,
   maxJobsPerDrain: 20,
-  leaseMs: 1_000,
+  leaseMs: 1000,
   heartbeatMs: 100,
   retry: Object.freeze({ maxAttempts: 3, baseDelayMs: 0, maxDelayMs: 0 }),
   drainBudget: 20,
@@ -60,7 +60,6 @@ const coordinatorConfig: RuntimeCoordinatorConfig = Object.freeze({
     preflight: Object.freeze({ estimatedCost: 1, budget: 3 }),
   }),
 });
-
 const feedbackConfig = (minimumEvidence = 2): ContinuousFeedbackConfig =>
   Object.freeze({
     schemaVersion: 1,
@@ -74,18 +73,16 @@ const feedbackConfig = (minimumEvidence = 2): ContinuousFeedbackConfig =>
       failedOutcome: true,
     }),
   });
-
 const roots: string[] = [];
-
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
 });
-
 async function definition(
   workspace: NoesisWorkspaceStore,
   path: string,
   content: string,
 ): Promise<FileRevisionRef> {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return await workspace.definitions.recordCandidateDefinition({
     workingPath: path,
     bytes: encoder.encode(content),
@@ -93,13 +90,14 @@ async function definition(
     reason: "Barrier C acceptance fixture",
   });
 }
-
+// BOUNDARY: Test evidence is serialized immediately into the workspace evidence contract.
 async function evidence<Kind extends "input" | "output" | "judgment" | "report">(
   workspace: NoesisWorkspaceStore,
   path: string,
   kind: Kind,
   value: unknown,
 ): Promise<EvidenceRevisionRef<Kind>> {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return await workspace.evidence.appendEvidence({
     workingPath: path,
     bytes: encoder.encode(`${canonicalJson(value)}\n`),
@@ -108,7 +106,6 @@ async function evidence<Kind extends "input" | "output" | "judgment" | "report">
     sensitivity: "private",
   });
 }
-
 async function revision(input: {
   readonly workspace: NoesisWorkspaceStore;
   readonly capabilityId: string;
@@ -128,37 +125,44 @@ async function revision(input: {
     `${prefix}/source-case.json`,
     `${input.revisionId} source case`,
   );
-  return Object.freeze({
-    capabilityRevisionId: input.revisionId,
-    capabilityId: input.capabilityId,
-    ...(input.predecessorRevisionId ? { predecessorRevisionId: input.predecessorRevisionId } : {}),
-    promptModules: Object.freeze([prompt]),
-    skills: Object.freeze([skill]),
-    tools: Object.freeze([tool]),
-    toolset: Object.freeze({
-      toolRevisionIds: Object.freeze([tool.revisionId]),
-      routerRevision: router,
-      strategyId: `router-${input.revisionId}`,
-    }),
-    activationPolicy: Object.freeze({
-      mode: input.activationPolicy ?? "automatic_low_risk",
-      scope: "writing",
-    }),
-    permissionManifest: Object.freeze({
-      effects: Object.freeze([...(input.effects ?? ["read"])]),
-      resourcePatterns: Object.freeze(["workspace:writing/**"]),
-      credentialRefs: Object.freeze([]),
-    }),
-    evidenceRefs: Object.freeze([]),
-    sourceEvaluationDefinitions: Object.freeze([evaluation]),
-    requestedPermissionDelta: Object.freeze({
-      addedEffects: Object.freeze([...(input.requestedEffects ?? [])]),
-      widenedResources: Object.freeze([]),
-      addedCredentialRefs: Object.freeze([]),
-    }),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  return Object.freeze(
+    createConditionalObject({
+      capabilityRevisionId: input.revisionId,
+      capabilityId: input.capabilityId,
+    } as const)
+      .addOptional(
+        input.predecessorRevisionId ? { predecessorRevisionId: input.predecessorRevisionId } : undefined,
+      )
+      .add({
+        promptModules: Object.freeze([prompt]),
+        skills: Object.freeze([skill]),
+        tools: Object.freeze([tool]),
+        toolset: Object.freeze({
+          toolRevisionIds: Object.freeze([tool.revisionId]),
+          routerRevision: router,
+          strategyId: `router-${input.revisionId}`,
+        }),
+        activationPolicy: Object.freeze({
+          mode: input.activationPolicy ?? "automatic_low_risk",
+          scope: "writing",
+        }),
+        permissionManifest: Object.freeze({
+          effects: Object.freeze([...(input.effects ?? ["read"])]),
+          resourcePatterns: Object.freeze(["workspace:writing/**"]),
+          credentialRefs: Object.freeze([]),
+        }),
+        evidenceRefs: Object.freeze([]),
+        sourceEvaluationDefinitions: Object.freeze([evaluation]),
+        requestedPermissionDelta: Object.freeze({
+          addedEffects: Object.freeze([...(input.requestedEffects ?? [])]),
+          widenedResources: Object.freeze([]),
+          addedCredentialRefs: Object.freeze([]),
+        }),
+      } as const)
+      .finish(),
+  );
 }
-
 async function recordManifest(
   workspace: NoesisWorkspaceStore,
   experimentId: string,
@@ -180,7 +184,7 @@ async function recordManifest(
     }),
   );
 }
-
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 async function recordPreflight(input: {
   readonly workspace: NoesisWorkspaceStore;
   readonly experimentId: string;
@@ -202,9 +206,11 @@ async function recordPreflight(input: {
       candidateRevisions: Object.freeze([candidateRef]),
       feedbackSignalIds: Object.freeze([]),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await input.workspace.research.experiments.putExperiment(
       Object.freeze({ ...base, status: "hypothesis" as const }),
     );
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await input.workspace.research.experiments.putExperiment(
       Object.freeze({ ...base, status: "authoring" as const }),
     );
@@ -213,11 +219,11 @@ async function recordPreflight(input: {
   if (!authoring || (authoring.status !== "authoring" && authoring.status !== "preflight")) {
     throw new Error(`Expected authoring or preflight experiment ${input.experimentId}`);
   }
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const preflightExperiment = Object.freeze({ ...authoring, status: "preflight" as const });
   if (authoring.status === "authoring") {
     await input.workspace.research.experiments.putExperiment(preflightExperiment);
   }
-
   const caseRef = await evidence(input.workspace, `${input.experimentId}/case`, "input", {
     instruction: "preserve voice",
   });
@@ -242,6 +248,7 @@ async function recordPreflight(input: {
   const preflightId = `${input.experimentId}:preflight`;
   const sourceEvaluationDefinition = input.candidate.sourceEvaluationDefinitions[0];
   if (!sourceEvaluationDefinition) throw new Error("Candidate has no source evaluation definition");
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const variant = Object.freeze({
     variantId: "barrier-c-fake-evaluation-v1",
     axis: "evaluation" as const,
@@ -275,6 +282,7 @@ async function recordPreflight(input: {
       outputEvidenceRefs: Object.freeze([candidateOutput]),
     },
   ]) {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await input.workspace.research.trials.putTrial(
       Object.freeze({
         ...trial,
@@ -287,6 +295,7 @@ async function recordPreflight(input: {
       }),
     );
   }
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const report = Object.freeze({
     preflightId,
     experimentId: input.experimentId,
@@ -318,7 +327,6 @@ async function recordPreflight(input: {
     report,
   });
 }
-
 interface AcceptanceHarness {
   readonly root: string;
   readonly workspace: NoesisWorkspaceStore;
@@ -332,7 +340,6 @@ interface AcceptanceHarness {
   readonly roleInputs: readonly object[];
   readonly controlPlane: ReturnType<typeof createRuntimeControlPlane>;
 }
-
 async function createHarness(
   options: {
     readonly decision?: PreflightDecision;
@@ -356,15 +363,25 @@ async function createHarness(
     revisionId: "writing-r1",
     predecessorRevisionId: rootRevision.capabilityRevisionId,
   });
-  const candidate = await revision({
-    workspace,
-    capabilityId,
-    revisionId: "writing-r2",
-    predecessorRevisionId: baseline.capabilityRevisionId,
-    ...(options.activationPolicy === undefined ? {} : { activationPolicy: options.activationPolicy }),
-    effects: options.permissionExpansion ? ["read", "write"] : ["read"],
-    requestedEffects: options.permissionExpansion ? ["write"] : [],
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  const candidate = await revision(
+    createConditionalObject({
+      workspace,
+      capabilityId,
+      revisionId: "writing-r2",
+      predecessorRevisionId: baseline.capabilityRevisionId,
+    } as const)
+      .addOptional(
+        !(options.activationPolicy === undefined)
+          ? { activationPolicy: options.activationPolicy }
+          : undefined,
+      )
+      .add({
+        effects: options.permissionExpansion ? ["read", "write"] : ["read"],
+        requestedEffects: options.permissionExpansion ? ["write"] : [],
+      } as const)
+      .finish(),
+  );
   const revisions = new Map<string, CapabilityRevision>(
     [rootRevision, baseline, candidate].map((value) => [canonicalJson(capabilityRevisionRef(value)), value]),
   );
@@ -401,7 +418,7 @@ async function createHarness(
   const baselineSnapshot = await protectedRuntime.activations.current();
   if (!baselineSnapshot) throw new Error("Baseline activation snapshot is missing");
   const baselineActiveDefinitions = Object.freeze({ ...baselineSnapshot.activeDefinitions });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   await workspace.operational.sessions.put(
     Object.freeze({
       sessionId: "session-correction",
@@ -415,6 +432,7 @@ async function createHarness(
       metadata: Object.freeze({}),
     }),
   );
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const messageRef = await workspace.operational.messages.put(
     Object.freeze({
       messageId: "message-correction",
@@ -432,6 +450,7 @@ async function createHarness(
   const research: RuntimeCoordinatorResearchPort = {
     reflect: async (payload) => {
       roleInputs.push(payload);
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       return Object.freeze({
         status: "experiment" as const,
         experiment: Object.freeze({
@@ -459,9 +478,11 @@ async function createHarness(
         candidateRevisions: Object.freeze([capabilityRevisionRef(candidate)]),
         feedbackSignalIds: Object.freeze([]),
       });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       await workspace.research.experiments.putExperiment(
         Object.freeze({ ...base, status: "hypothesis" as const }),
       );
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       await workspace.research.experiments.putExperiment(
         Object.freeze({ ...base, status: "authoring" as const }),
       );
@@ -478,11 +499,15 @@ async function createHarness(
         .object({ revision: CapabilityRevisionSchema })
         .parse(JSON.parse(decoder.decode(await workspace.reads.readRevision(manifest))));
       const { predecessorRevisionId, dependencyLock, ...requiredRevision } = parsed.revision;
-      const rehydratedRevision: CapabilityRevision = Object.freeze({
-        ...requiredRevision,
-        ...(predecessorRevisionId === undefined ? {} : { predecessorRevisionId }),
-        ...(dependencyLock === undefined ? {} : { dependencyLock }),
-      });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+      const rehydratedRevision: CapabilityRevision = Object.freeze(
+        createConditionalObject({
+          ...requiredRevision,
+        } as const)
+          .addOptional(!(predecessorRevisionId === undefined) ? { predecessorRevisionId } : undefined)
+          .addOptional(!(dependencyLock === undefined) ? { dependencyLock } : undefined)
+          .finish(),
+      );
       const rehydrated = capabilityRevisionRef(rehydratedRevision);
       if (!sameCapabilityRevisionRef(rehydrated, capabilityRevisionRef(candidate))) {
         throw new Error("Fake author did not rehydrate the exact candidate bytes");
@@ -581,13 +606,13 @@ async function createHarness(
     controlPlane,
   });
 }
-
 function outcomeInput(
   turnId: string,
   overrides: Partial<
     Parameters<ReturnType<typeof createContinuousFeedbackController>["observeTurnOutcome"]>[0]
   > = {},
 ) {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return Object.freeze({
     sessionId: "session-correction",
     turnId,
@@ -601,12 +626,10 @@ function outcomeInput(
     ...overrides,
   });
 }
-
 describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
   test("automatically drains a correction through exact candidate rehydration, preflight, and atomic activation", async () => {
     const harness = await createHarness();
     await harness.controlPlane.idle();
-
     expect(
       (await harness.controlPlane.coordinator.listJobs()).map(({ job }) => ({
         status: job.status,
@@ -647,7 +670,6 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
       ),
     ).toBe(true);
   });
-
   test("keeps permission expansion pending for exact approval and rejection never activates", async () => {
     const harness = await createHarness({
       decision: "approval_required",
@@ -680,7 +702,6 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
       (await harness.protectedRuntime.activations.current())?.activeCapabilityRevisions["writing"],
     ).toEqual(capabilityRevisionRef(harness.baseline));
   });
-
   test("uses the frozen serving pin for later feedback and revise records cited successor lineage without activation", async () => {
     const harness = await createHarness({ judgeProposal: "revise", minimumEvidence: 1 });
     await harness.controlPlane.idle();
@@ -690,7 +711,6 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
     const pin = await harness.controlPlane.activation.pinTurnActivation("session-correction", "turn-revise");
     const before = await harness.protectedRuntime.activations.current();
     const result = await harness.controlPlane.feedback.observeTurnOutcome(outcomeInput("turn-revise"));
-
     expect(result[0]).toMatchObject({
       status: "resolved",
       outcome: { decision: "revise", successorExperimentId: expect.any(String) },
@@ -724,7 +744,6 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
     expect(comparison.evidenceRefs).toEqual(expect.arrayContaining([...(outcome?.evidenceRefs ?? [])]));
     expect(health).toMatchObject({ activeRevision: capabilityRevisionRef(harness.candidate) });
   });
-
   test("hard regression restores the exact prior snapshot once and restart recovers the committed outcome", async () => {
     let failAfterOutcome = true;
     const harness = await createHarness({
@@ -759,7 +778,6 @@ describe("Barrier C AC-08 -> AC-09 -> AC-10 integration", () => {
     expect(restored?.activeCapabilityRevisions["writing"]).toEqual(capabilityRevisionRef(harness.baseline));
     const restoredRevision = restored?.revision;
     harness.workspace.close();
-
     const reopened = await createWorkspaceStore(harness.root);
     const reopenedInternals = createWorkspaceRuntimeInternals(reopened);
     const restarted = createContinuousFeedbackController({

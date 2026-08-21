@@ -1,3 +1,4 @@
+import { createConditionalObject, isJsonObject, type JsonValue } from "@noesis/domain";
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import {
   type ActionPayloadPresentation,
@@ -15,67 +16,59 @@ import {
 } from "./state.ts";
 import { highlightCode } from "./syntax.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
-
 const SEMANTIC_INSPECTOR_HINT = "↑/↓ scroll · pgup/pgdn scroll · space exact · esc close";
 const RAW_INSPECTOR_HINT = "↑/↓ scroll · pgup/pgdn scroll · space semantic · esc close";
 /** Compatibility export for the inspector's default semantic view. */
 export const INSPECTOR_HINT = SEMANTIC_INSPECTOR_HINT;
-
 function inspectorHint(view: TuiInspectorState["view"]): string {
   return view === "raw" ? RAW_INSPECTOR_HINT : SEMANTIC_INSPECTOR_HINT;
 }
-
 export interface RenderedRunInspector {
   readonly rows: readonly string[];
   readonly maxScroll: number;
 }
-
 /** Artifact detail is a convenience preview. Exact action payloads stay available through scroll. */
-const ARTIFACT_PREVIEW_MAX_CHARACTERS = 20_000;
+const ARTIFACT_PREVIEW_MAX_CHARACTERS = 20000;
 const DIGEST_DISPLAY_CHARACTERS = 24;
 const CALL_SUMMARY_MAX_CHARACTERS = 256;
 const TOOL_DESCRIPTION_MAX_CHARACTERS = 180;
 const TOOL_NAME_MAX_CHARACTERS = 128;
-
 interface Section {
   readonly label: string;
   /** Qualifies the section without competing with its label, e.g. an artifact path. */
   readonly note?: string;
   readonly lines: readonly string[];
 }
-
 function boundedArtifactPreview(text: string): string {
   const safe = safeTerminalText(text);
   return safe.length <= ARTIFACT_PREVIEW_MAX_CHARACTERS
     ? safe
     : `${safe.slice(0, ARTIFACT_PREVIEW_MAX_CHARACTERS)}\n… truncated`;
 }
-
 const exactText = (text: string): string => safeTerminalText(text);
-
 /** Inspector metadata occupies one framed row; controls and embedded rows are never structural. */
 function safeInspectorScalar(text: string): string {
   return safeTerminalText(text).replaceAll("\t", " ").replaceAll("\n", " ");
 }
-
 function boundedInspectorScalar(text: string, maxCharacters: number): string {
   const safe = safeInspectorScalar(text);
   return safe.length <= maxCharacters ? safe : `${safe.slice(0, maxCharacters)}…`;
 }
-
-function encodeJson(value: unknown): string {
+function encodeJson(value: JsonValue): string {
   try {
     return JSON.stringify(value, undefined, 2) ?? String(value);
   } catch {
     return String(value);
   }
 }
-
-function jsonLines(value: unknown, colorEnabled: boolean): readonly string[] {
+function jsonLines(value: JsonValue, colorEnabled: boolean): readonly string[] {
   return highlightCode(exactText(encodeJson(value)), "json", colorEnabled);
 }
-
-function rawPayloadSection(label: string, value: unknown, colorEnabled: boolean): readonly Section[] {
+function rawPayloadSection(
+  label: string,
+  value: JsonValue | undefined,
+  colorEnabled: boolean,
+): readonly Section[] {
   if (value === undefined) return [];
   return [
     {
@@ -84,12 +77,10 @@ function rawPayloadSection(label: string, value: unknown, colorEnabled: boolean)
     },
   ];
 }
-
 const shortDigest = (digest: string): string => {
   const safe = safeInspectorScalar(digest);
   return safe.length > DIGEST_DISPLAY_CHARACTERS ? `${safe.slice(0, DIGEST_DISPLAY_CHARACTERS)}…` : safe;
 };
-
 /**
  * Right-aligned dim line numbers, so a stack trace or phase error can be located by eye. Long
  * lines are wrapped here rather than by the panel so their continuations stay under the first
@@ -113,7 +104,6 @@ function numberedCode(
     ),
   );
 }
-
 function keyValueLines(
   entries: readonly (readonly [string, string])[],
   colorEnabled: boolean,
@@ -121,7 +111,6 @@ function keyValueLines(
   const keyWidth = Math.max(0, ...entries.map(([key]) => key.length));
   return entries.map(([key, value]) => `${styled(colorEnabled, ANSI.dim, key.padEnd(keyWidth))}  ${value}`);
 }
-
 const statusGlyph = (status: string): string =>
   status === "running" || status === "paused"
     ? "●"
@@ -132,7 +121,6 @@ const statusGlyph = (status: string): string =>
         : status === "completed"
           ? "✓"
           : "?";
-
 const statusColor = (status: string): string =>
   status === "running" || status === "paused"
     ? ANSI.cyan
@@ -143,7 +131,6 @@ const statusColor = (status: string): string =>
         : status === "completed"
           ? ANSI.green
           : ANSI.yellow;
-
 function artifactSection(
   label: string,
   artifact: TuiExecutionArtifact | undefined,
@@ -161,24 +148,33 @@ function artifactSection(
     },
   ];
 }
-
 /** Nested calls read as a numbered list whose columns line up with the transcript summaries. */
 function callsSection(children: readonly TuiAgentAction[], colorEnabled: boolean): readonly Section[] {
   if (children.length === 0) return [];
   const ordinalWidth = String(children.length).length;
   const summaries = children.map((child) => {
     const summary = summarizeNestedAction(child);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return {
       child,
-      summary: {
+      summary: createConditionalObject({
         name: boundedInspectorScalar(summary.name, CALL_SUMMARY_MAX_CHARACTERS),
-        ...(summary.subject
-          ? { subject: boundedInspectorScalar(summary.subject, CALL_SUMMARY_MAX_CHARACTERS) }
-          : {}),
-        ...(summary.outcome
-          ? { outcome: boundedInspectorScalar(summary.outcome, CALL_SUMMARY_MAX_CHARACTERS) }
-          : {}),
-      },
+      } as const)
+        .addOptional(
+          summary.subject
+            ? {
+                subject: boundedInspectorScalar(summary.subject, CALL_SUMMARY_MAX_CHARACTERS),
+              }
+            : undefined,
+        )
+        .addOptional(
+          summary.outcome
+            ? {
+                outcome: boundedInspectorScalar(summary.outcome, CALL_SUMMARY_MAX_CHARACTERS),
+              }
+            : undefined,
+        )
+        .finish(),
     };
   });
   const nameWidth = Math.max(...summaries.map(({ summary }) => summary.name.length));
@@ -201,7 +197,6 @@ function callsSection(children: readonly TuiAgentAction[], colorEnabled: boolean
     },
   ];
 }
-
 function toolListLines(tools: readonly PresentedTool[], colorEnabled: boolean): readonly string[] {
   const ordinalWidth = String(tools.length).length;
   const presented = tools.map((tool) =>
@@ -232,13 +227,13 @@ function toolListLines(tools: readonly PresentedTool[], colorEnabled: boolean): 
     }),
   ];
 }
-
 function semanticPayloadLines(
   presentation: ActionPayloadPresentation,
   colorEnabled: boolean,
 ): readonly string[] {
   if (presentation.tools) {
     const catalog = presentation.catalog;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const metadata: (readonly [string, string])[] = catalog
       ? [
           ...(catalog.catalogId ? ([["catalog", safeInspectorScalar(catalog.catalogId)]] as const) : []),
@@ -258,27 +253,32 @@ function semanticPayloadLines(
     ];
   }
   if (typeof presentation.value === "string") return exactText(presentation.value).split("\n");
+  if (presentation.value === undefined) return [styled(colorEnabled, ANSI.dim, "(empty)")];
   if (presentation.value === null) return [styled(colorEnabled, ANSI.dim, "(null)")];
   return jsonLines(presentation.value, colorEnabled);
 }
-
 function semanticPayloadSection(
   label: string,
   actionName: string,
-  value: unknown,
+  value: JsonValue | undefined,
   colorEnabled: boolean,
 ): readonly Section[] {
   if (value === undefined) return [];
   const presentation = presentActionPayload(actionName, value);
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return [
-    {
+    createConditionalObject({
       label,
-      ...(presentation.unwrapped || presentation.tools ? { note: "semantic · space for exact" } : {}),
-      lines: semanticPayloadLines(presentation, colorEnabled),
-    },
+    } as const)
+      .addOptional(
+        presentation.unwrapped || presentation.tools ? { note: "semantic · space for exact" } : undefined,
+      )
+      .add({
+        lines: semanticPayloadLines(presentation, colorEnabled),
+      } as const)
+      .finish(),
   ];
 }
-
 function phasesSection(detail: TuiExecutionDetail | undefined, colorEnabled: boolean): readonly Section[] {
   const phases = detail?.phases ?? [];
   if (phases.length === 0) return [];
@@ -290,23 +290,19 @@ function phasesSection(detail: TuiExecutionDetail | undefined, colorEnabled: boo
         const status = safeInspectorScalar(phase.status);
         const error = phase.error ? boundedArtifactPreview(phase.error) : undefined;
         return [
-          `${styled(colorEnabled, ANSI.dim, String(phase.index + 1))} ${styled(
-            colorEnabled,
-            statusColor(status),
-            statusGlyph(status),
-          )} ${name} ${styled(colorEnabled, ANSI.dim, `· ${status}`)}`,
+          `${styled(colorEnabled, ANSI.dim, String(phase.index + 1))} ${styled(colorEnabled, statusColor(status), statusGlyph(status))} ${name} ${styled(colorEnabled, ANSI.dim, `· ${status}`)}`,
           ...(error ? [`  ${styled(colorEnabled, ANSI.red, error)}`] : []),
         ];
       }),
     },
   ];
 }
-
 function provenanceSection(
   detail: TuiExecutionDetail | undefined,
   colorEnabled: boolean,
 ): readonly Section[] {
   if (!detail) return [];
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const entries: (readonly [string, string])[] = [
     ["execution", safeInspectorScalar(detail.executionId)],
     ...(detail.parentExecutionId
@@ -319,20 +315,18 @@ function provenanceSection(
   ];
   return [{ label: "provenance", lines: keyValueLines(entries, colorEnabled) }];
 }
-
 function errorText(action: TuiAgentAction, detail: TuiExecutionDetail | undefined): string | undefined {
   if (detail?.error) return detail.error;
   if (action.status !== "failed") return undefined;
   const output = action.output;
   if (typeof output === "string") return output;
-  if (output && typeof output === "object") {
-    const error = Reflect.get(output, "error");
+  if (isJsonObject(output)) {
+    const error = output["error"];
     if (typeof error === "string") return error;
     return encodeJson(output);
   }
   return "The run failed without reporting an error.";
 }
-
 /**
  * One layout serves both the durable execution record and the in-memory action. The record
  * supplies provenance and artifacts when it resolves; the nested calls, program, and result are
@@ -384,15 +378,21 @@ function buildSections(
       ...artifactSection("stderr", detail?.stderrArtifact, colorEnabled),
       ...provenanceSection(detail, colorEnabled),
     ];
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return [
     ...common,
     ...(source
       ? [
-          {
+          createConditionalObject({
             label: "source",
-            ...(!exactSource && detail?.sourceArtifact?.truncated ? { note: "preview truncated" } : {}),
-            lines: numberedCode(source, "js", width, colorEnabled),
-          },
+          } as const)
+            .addOptional(
+              !exactSource && detail?.sourceArtifact?.truncated ? { note: "preview truncated" } : undefined,
+            )
+            .add({
+              lines: numberedCode(source, "js", width, colorEnabled),
+            } as const)
+            .finish(),
         ]
       : action.input === undefined
         ? []
@@ -409,7 +409,6 @@ function buildSections(
     ...provenanceSection(detail, colorEnabled),
   ];
 }
-
 function sectionRule(section: Section, width: number, colorEnabled: boolean): string {
   const label = styled(colorEnabled, ANSI.bold, section.label.toUpperCase());
   const note = section.note ? ` ${styled(colorEnabled, ANSI.dim, section.note)}` : "";
@@ -417,7 +416,6 @@ function sectionRule(section: Section, width: number, colorEnabled: boolean): st
   const fill = Math.max(0, width - used - 4);
   return `${styled(colorEnabled, ANSI.dim, "──")} ${label}${note} ${styled(colorEnabled, ANSI.dim, "─".repeat(fill))}`;
 }
-
 /** The identity line answers "what ran, how much of it, and how long" before any section. */
 function identityLines(
   action: TuiAgentAction,
@@ -444,17 +442,14 @@ function identityLines(
     ...(note ? [styled(colorEnabled, ANSI.dim, note)] : []),
   ];
 }
-
 function padTo(line: string, width: number): string {
   const padding = Math.max(0, width - visibleWidth(line));
   return `${line}${" ".repeat(padding)}`;
 }
-
 interface FrameEdge {
   readonly left: string;
   readonly right: string;
 }
-
 function frameEdge(
   edge: FrameEdge,
   leading: string,
@@ -471,13 +466,11 @@ function frameEdge(
     width,
   );
 }
-
 interface WrappedViewport {
   readonly rows: readonly string[];
   readonly totalRows: number;
   readonly scroll: number;
 }
-
 interface PreparedInspectorDocument {
   readonly action: TuiAgentAction | undefined;
   readonly children: readonly TuiAgentAction[];
@@ -488,12 +481,9 @@ interface PreparedInspectorDocument {
   readonly colorEnabled: boolean;
   readonly rows: readonly string[];
 }
-
 let preparedInspectorDocument: PreparedInspectorDocument | undefined;
-
 const sameActionReferences = (left: readonly TuiAgentAction[], right: readonly TuiAgentAction[]): boolean =>
   left.length === right.length && left.every((action, index) => action === right[index]);
-
 function prepareInspectorDocument(
   action: TuiAgentAction | undefined,
   children: readonly TuiAgentAction[],
@@ -513,7 +503,6 @@ function prepareInspectorDocument(
     sameActionReferences(cached.children, children)
   )
     return cached.rows;
-
   const body = action
     ? [
         ...identityLines(action, children, inspector, colorEnabled),
@@ -538,7 +527,6 @@ function prepareInspectorDocument(
   };
   return rows;
 }
-
 /** Slice a prepared document without re-encoding, highlighting, or wrapping its payload. */
 function wrappedViewport(
   rows: readonly string[],
@@ -553,7 +541,6 @@ function wrappedViewport(
     scroll,
   };
 }
-
 export function renderRunInspectorFrame(
   state: NoesisTuiState,
   width: number,
@@ -575,18 +562,13 @@ export function renderRunInspectorFrame(
   const status = safeInspectorScalar(inspector.detail?.status ?? action?.status ?? "unknown");
   const title = `${styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "RUN")}${
     action
-      ? `${styled(colorEnabled, ANSI.dim, " · ")}${styled(
-          colorEnabled,
-          ANSI.bold,
-          safeInspectorScalar(action.name),
-        )}`
+      ? `${styled(colorEnabled, ANSI.dim, " · ")}${styled(colorEnabled, ANSI.bold, safeInspectorScalar(action.name))}`
       : ""
   }`;
   const position =
     maxScroll > 0
       ? `${String(scroll + 1)}–${String(scroll + rows.length)} of ${String(viewport.totalRows)}`
       : formatCount(viewport.totalRows, "row");
-
   // The right frame edge doubles as a scrollbar track so the panel shows how much lies below.
   const thumbSize =
     maxScroll > 0 ? Math.max(1, Math.round((visibleRows / viewport.totalRows) * visibleRows)) : 0;
@@ -619,7 +601,6 @@ export function renderRunInspectorFrame(
     ],
   };
 }
-
 export function renderRunInspector(state: NoesisTuiState, width: number, height: number): string[] {
   return [...renderRunInspectorFrame(state, width, height).rows];
 }

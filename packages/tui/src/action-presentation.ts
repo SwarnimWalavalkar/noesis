@@ -1,12 +1,11 @@
+import { createConditionalObject, type JsonValue, JsonValueSchema } from "@noesis/domain";
 import { isRecord, numberField, stringField } from "./record-fields.ts";
-
 export interface PresentedTool {
   readonly name: string;
   readonly description?: string;
   readonly revisionId?: string;
   readonly score?: number;
 }
-
 export interface PresentedCatalog {
   readonly catalogId?: string;
   readonly catalogDigest?: string;
@@ -14,20 +13,21 @@ export interface PresentedCatalog {
   readonly resourceCount?: number;
   readonly credentialCount?: number;
 }
-
 export interface ActionPayloadPresentation {
-  readonly value: unknown;
+  readonly value: JsonValue | undefined;
   readonly unwrapped: boolean;
   readonly tools?: readonly PresentedTool[];
   readonly catalog?: PresentedCatalog;
 }
-
-function parseJsonText(value: unknown): { readonly value: unknown; readonly changed: boolean } {
+function parseJsonText(value: JsonValue | undefined): {
+  readonly value: JsonValue | undefined;
+  readonly changed: boolean;
+} {
   let current = value;
   let changed = false;
   for (let depth = 0; depth < 3 && typeof current === "string"; depth += 1) {
     try {
-      current = JSON.parse(current) as unknown;
+      current = JsonValueSchema.parse(JSON.parse(current));
       changed = true;
     } catch {
       break;
@@ -35,8 +35,7 @@ function parseJsonText(value: unknown): { readonly value: unknown; readonly chan
   }
   return { value: current, changed };
 }
-
-function piTextEnvelope(value: unknown): string | undefined {
+function piTextEnvelope(value: JsonValue | undefined): string | undefined {
   if (!isRecord(value) || !Array.isArray(value["content"]) || value["content"].length === 0) return undefined;
   const text: string[] = [];
   for (const part of value["content"]) {
@@ -45,22 +44,27 @@ function piTextEnvelope(value: unknown): string | undefined {
   }
   return text.join("\n");
 }
-
-function presentedTool(value: unknown): PresentedTool | undefined {
+function presentedTool(value: JsonValue): PresentedTool | undefined {
   const name = stringField(value, "name");
   if (!name) return undefined;
   const description = stringField(value, "description");
   const revisionId = stringField(value, "revisionId");
   const score = numberField(value, "score");
-  return Object.freeze({
-    name,
-    ...(description ? { description } : {}),
-    ...(revisionId ? { revisionId } : {}),
-    ...(score === undefined ? {} : { score }),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      name,
+    } as const)
+      .addOptional(description ? { description } : undefined)
+      .addOptional(revisionId ? { revisionId } : undefined)
+      .addOptional(!(score === undefined) ? { score } : undefined)
+      .finish(),
+  );
 }
-
-function presentedTools(actionName: string, value: unknown): readonly PresentedTool[] | undefined {
+function presentedTools(
+  actionName: string,
+  value: JsonValue | undefined,
+): readonly PresentedTool[] | undefined {
   const candidates =
     actionName === "noesis.search" && Array.isArray(value)
       ? value
@@ -71,8 +75,7 @@ function presentedTools(actionName: string, value: unknown): readonly PresentedT
   const tools = candidates.map(presentedTool).filter((tool): tool is PresentedTool => tool !== undefined);
   return tools.length === candidates.length ? Object.freeze(tools) : undefined;
 }
-
-function presentedCatalog(value: unknown): PresentedCatalog | undefined {
+function presentedCatalog(value: JsonValue | undefined): PresentedCatalog | undefined {
   if (!isRecord(value)) return undefined;
   const catalogId = stringField(value, "catalogId");
   const catalogDigest = stringField(value, "catalogDigest");
@@ -95,20 +98,25 @@ function presentedCatalog(value: unknown): PresentedCatalog | undefined {
     credentials === undefined
   )
     return undefined;
-  return Object.freeze({
-    ...(catalogId ? { catalogId } : {}),
-    ...(catalogDigest ? { catalogDigest } : {}),
-    ...(effects === undefined ? {} : { effectCount: effects }),
-    ...(resources === undefined ? {} : { resourceCount: resources }),
-    ...(credentials === undefined ? {} : { credentialCount: credentials }),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({} as const)
+      .addOptional(catalogId ? { catalogId } : undefined)
+      .addOptional(catalogDigest ? { catalogDigest } : undefined)
+      .addOptional(!(effects === undefined) ? { effectCount: effects } : undefined)
+      .addOptional(!(resources === undefined) ? { resourceCount: resources } : undefined)
+      .addOptional(!(credentials === undefined) ? { credentialCount: credentials } : undefined)
+      .finish(),
+  );
 }
-
 /**
  * Interpret known Pi and codemode result shapes without mutating the exact action payload.
  * The caller chooses whether to render this semantic projection or the untouched raw value.
  */
-export function presentActionPayload(actionName: string, payload: unknown): ActionPayloadPresentation {
+export function presentActionPayload(
+  actionName: string,
+  payload: JsonValue | undefined,
+): ActionPayloadPresentation {
   const activity = isRecord(payload) && isRecord(payload["activity"]) ? payload["activity"] : undefined;
   const hasProgressValue = activity?.["type"] === "progress" && "value" in activity;
   const semanticPayload = hasProgressValue ? activity["value"] : payload;
@@ -117,10 +125,14 @@ export function presentActionPayload(actionName: string, payload: unknown): Acti
   const value = decoded.value;
   const tools = presentedTools(actionName, value);
   const catalog = presentedCatalog(value);
-  return Object.freeze({
-    value,
-    unwrapped: hasProgressValue || envelopeText !== undefined || decoded.changed,
-    ...(tools ? { tools } : {}),
-    ...(catalog ? { catalog } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      value,
+      unwrapped: hasProgressValue || envelopeText !== undefined || decoded.changed,
+    } as const)
+      .addOptional(tools ? { tools } : undefined)
+      .addOptional(catalog ? { catalog } : undefined)
+      .finish(),
+  );
 }

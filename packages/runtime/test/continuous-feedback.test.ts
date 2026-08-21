@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
+  createConditionalObject,
   canonicalJson,
   capabilityRevisionRef,
   sha256,
@@ -29,10 +30,9 @@ import {
   type ExperimentOutcomeJudge,
   type PreflightActivationHandoff,
 } from "../src/index.ts";
-
 type JudgeInput = Parameters<ExperimentOutcomeJudge["run"]>[0];
-
 const encoder = new TextEncoder();
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const autonomy = Object.freeze({
   riskLevel: "low" as const,
   approval: "authority_expansion" as const,
@@ -52,12 +52,12 @@ const config = (minimumEvidence = 3): ContinuousFeedbackConfig =>
       failedOutcome: true,
     }),
   });
-
 async function definition(
   workspace: NoesisWorkspaceStore,
   path: string,
   body: string,
 ): Promise<FileRevisionRef> {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return await workspace.definitions.recordCandidateDefinition({
     workingPath: path,
     bytes: encoder.encode(body),
@@ -65,12 +65,12 @@ async function definition(
     reason: "AC-10 fixture",
   });
 }
-
 async function evidence<Kind extends "input" | "output" | "judgment" | "report">(
   workspace: NoesisWorkspaceStore,
   path: string,
   evidenceKind: Kind,
 ): Promise<EvidenceRevisionRef<Kind>> {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return await workspace.evidence.appendEvidence({
     workingPath: path,
     bytes: encoder.encode(`${path}\n`),
@@ -79,7 +79,6 @@ async function evidence<Kind extends "input" | "output" | "judgment" | "report">
     sensitivity: "normal",
   });
 }
-
 async function revision(
   workspace: NoesisWorkspaceStore,
   capabilityId: string,
@@ -93,34 +92,39 @@ async function revision(
   const tool = await definition(workspace, `${prefix}/tool.mjs`, `${revisionId} tool`);
   const router = await definition(workspace, `${prefix}/router.json`, `${revisionId} router`);
   const evaluation = await definition(workspace, `${prefix}/eval.json`, `${revisionId} eval`);
-  return Object.freeze({
-    capabilityRevisionId: revisionId,
-    capabilityId,
-    ...(predecessorRevisionId ? { predecessorRevisionId } : {}),
-    promptModules: Object.freeze([prompt]),
-    skills: Object.freeze([skill]),
-    tools: Object.freeze([tool]),
-    toolset: Object.freeze({
-      toolRevisionIds: Object.freeze([tool.revisionId]),
-      routerRevision: router,
-      strategyId: `router-${revisionId}`,
-    }),
-    activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: `scope-${capabilityId}` }),
-    permissionManifest: Object.freeze({
-      effects: Object.freeze([...effects]),
-      resourcePatterns: Object.freeze(["workspace:"]),
-      credentialRefs: Object.freeze([]),
-    }),
-    evidenceRefs: Object.freeze([]),
-    sourceEvaluationDefinitions: Object.freeze([evaluation]),
-    requestedPermissionDelta: Object.freeze({
-      addedEffects: Object.freeze([]),
-      widenedResources: Object.freeze([]),
-      addedCredentialRefs: Object.freeze([]),
-    }),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  return Object.freeze(
+    createConditionalObject({
+      capabilityRevisionId: revisionId,
+      capabilityId,
+    } as const)
+      .addOptional(predecessorRevisionId ? { predecessorRevisionId } : undefined)
+      .add({
+        promptModules: Object.freeze([prompt]),
+        skills: Object.freeze([skill]),
+        tools: Object.freeze([tool]),
+        toolset: Object.freeze({
+          toolRevisionIds: Object.freeze([tool.revisionId]),
+          routerRevision: router,
+          strategyId: `router-${revisionId}`,
+        }),
+        activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: `scope-${capabilityId}` }),
+        permissionManifest: Object.freeze({
+          effects: Object.freeze([...effects]),
+          resourcePatterns: Object.freeze(["workspace:"]),
+          credentialRefs: Object.freeze([]),
+        }),
+        evidenceRefs: Object.freeze([]),
+        sourceEvaluationDefinitions: Object.freeze([evaluation]),
+        requestedPermissionDelta: Object.freeze({
+          addedEffects: Object.freeze([]),
+          widenedResources: Object.freeze([]),
+          addedCredentialRefs: Object.freeze([]),
+        }),
+      } as const)
+      .finish(),
+  );
 }
-
 interface FeedbackFixture {
   readonly root: string;
   readonly workspace: NoesisWorkspaceStore;
@@ -134,7 +138,7 @@ interface FeedbackFixture {
   readonly candidate: CapabilityRevision;
   readonly experimentId: string;
 }
-
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 async function activate(
   fixture: Pick<FeedbackFixture, "workspace" | "protectedRuntime" | "resolver" | "revisions">,
   experimentId: string,
@@ -178,11 +182,13 @@ async function activate(
   const reportEvidence = await evidence(workspace, `${experimentId}/report`, "report");
   const baselineTrialId = `${experimentId}-baseline`;
   const candidateTrialId = `${experimentId}-candidate`;
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const variant = Object.freeze({
     variantId: `${experimentId}-variant`,
     axis: "activation" as const,
     configurationRefs: Object.freeze([]),
   });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   await workspace.research.trials.putTrial(
     Object.freeze({
       trialId: baselineTrialId,
@@ -197,6 +203,7 @@ async function activate(
       status: "completed" as const,
     }),
   );
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   await workspace.research.trials.putTrial(
     Object.freeze({
       trialId: candidateTrialId,
@@ -224,6 +231,7 @@ async function activate(
     budget: Object.freeze({ maxCases: 1, maxAttemptsPerArm: 1, maxCost: 1 }),
   });
   await workspace.research.preflights.putPreflightPlan(plan);
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const report = Object.freeze({
     preflightId,
     experimentId,
@@ -243,6 +251,7 @@ async function activate(
     reportEvidence,
   });
   await workspace.research.preflights.putPreflightReport(report);
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const preflightExperiment = Object.freeze({
     ...experimentBase,
     status: "preflight" as const,
@@ -270,7 +279,6 @@ async function activate(
   if (!activated.ok || activated.status !== "activated")
     throw new Error(`Fixture activation failed: ${canonicalJson(activated)}`);
 }
-
 async function createFixture(
   options: {
     readonly storeOptions?: WorkspaceStoreOptions;
@@ -325,8 +333,8 @@ async function createFixture(
     experimentId,
   });
 }
-
 async function pinTurn(fixture: FeedbackFixture, turnId: string): Promise<void> {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   await fixture.workspace.operational.sessions.put(
     Object.freeze({
       sessionId: "session-feedback",
@@ -345,7 +353,6 @@ async function pinTurn(fixture: FeedbackFixture, turnId: string): Promise<void> 
     turnId,
   });
 }
-
 const judge = (proposal: "keep" | "revise" | "revert" = "keep"): ExperimentOutcomeJudge =>
   Object.freeze({
     run: async ({ comparison }: JudgeInput) =>
@@ -357,7 +364,6 @@ const judge = (proposal: "keep" | "revise" | "revert" = "keep"): ExperimentOutco
         summary: proposal,
       }),
   });
-
 function controller(
   fixture: FeedbackFixture,
   outcomeJudge: ExperimentOutcomeJudge = judge(),
@@ -372,12 +378,12 @@ function controller(
     config: feedbackConfig,
   });
 }
-
 function observationInput(
   fixture: FeedbackFixture,
   turnId: string,
   overrides: Partial<Parameters<ReturnType<typeof controller>["observeTurnOutcome"]>[0]> = {},
 ) {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return {
     sessionId: "session-feedback",
     turnId,
@@ -391,7 +397,6 @@ function observationInput(
     ...overrides,
   };
 }
-
 describe("AC-10 continuous feedback and experiment outcomes", () => {
   test("attributes through the turn pin, excludes unrelated use, dedupes, and remains observing below evidence minimum", async () => {
     const fixture = await createFixture();
@@ -420,7 +425,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       activeRevision: capabilityRevisionRef(fixture.candidate),
     });
   });
-
   test("does not launch an outcome judge when stop lands while the claim is pending", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-stop-during-feedback-claim");
@@ -461,7 +465,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       }),
       config: config(1),
     });
-
     try {
       const observation = feedback.observeTurnOutcome(
         observationInput(fixture, "turn-stop-during-feedback-claim"),
@@ -470,7 +473,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       const stopping = feedback.stop();
       releaseClaim?.();
       await Promise.all([observation, stopping]);
-
       expect(judgeCalls).toBe(0);
       const jobs = await fixture.workspace.jobs.list({ kind: "runtime.outcome_judge", limit: 10 });
       expect(jobs).toMatchObject([
@@ -487,7 +489,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       fixture.workspace.close();
     }
   });
-
   test("keep resolves while preserving the active revision", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-keep");
@@ -499,7 +500,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       (await fixture.protectedRuntime.activations.current())?.activeCapabilityRevisions[fixture.capabilityId],
     ).toEqual(capabilityRevisionRef(fixture.candidate));
   });
-
   test("revise creates a durable successor lineage input without activation", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-revise");
@@ -526,7 +526,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     });
     expect(await fixture.protectedRuntime.activations.current()).toEqual(before);
   });
-
   test("explicit correction overrides a judge keep proposal", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-correction");
@@ -544,7 +543,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     );
     expect(result[0]).toMatchObject({ status: "resolved", outcome: { decision: "revise" } });
   });
-
   test("ambient semantic correction upgrades the pending observation before evaluation", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-semantic-correction");
@@ -554,11 +552,9 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       status: "unknown",
       summary: "completed before semantic reflection",
     });
-
     const pending = await feedback.observeTurnOutcome(unclassified);
     expect(pending[0]).toMatchObject({ status: "observing" });
     expect(await fixture.protectedRuntime.feedback.getOutcome(fixture.experimentId)).toBeUndefined();
-
     const classified = await feedback.classifyTurnObservations({
       outcomeId: "outcome-semantic-correction",
       sessionId: "session-feedback",
@@ -576,13 +572,11 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       status: "updated",
       observations: [{ precedence: "correction" }],
     });
-
     await expect(feedback.evaluateExperiment(fixture.experimentId)).resolves.toMatchObject({
       status: "resolved",
       outcome: { decision: "revise" },
     });
   });
-
   test("refuses to rewrite a neutral observation after evaluation has bound it", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-decision-bound");
@@ -592,7 +586,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       status: "unknown",
       summary: "completed before semantic reflection",
     });
-
     await feedback.observeTurnOutcome(unclassified);
     await expect(feedback.evaluateExperiment(fixture.experimentId)).resolves.toMatchObject({
       status: "resolved",
@@ -620,7 +613,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       (await fixture.protectedRuntime.feedback.listObservations(fixture.experimentId, 8))[0]?.precedence,
     ).toBe("none");
   });
-
   test("a hard regression automatically reverts to the exact prior snapshot and restart is idempotent", async () => {
     const fixture = await createFixture();
     const priorOperation = (await fixture.protectedRuntime.activations.listOperations(100)).find(
@@ -661,7 +653,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       (await createWorkspaceRuntimeInternals(reopened).protectedRuntime.activations.current())?.revision,
     ).toBe(restoredRevision);
   });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     [
       "before",
@@ -701,7 +693,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       });
     },
   );
-
   test("post-transaction failure is recovered as one committed restoration", async () => {
     const fixture = await createFixture({
       storeOptions: {
@@ -725,7 +716,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       ),
     ).toHaveLength(1);
   });
-
   test("delayed target feedback reverts only its capability after an unrelated activation", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-stale");
@@ -759,7 +749,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       ),
     );
   });
-
   test("revert rejects permission widening and an unrecorded prior snapshot", async () => {
     const widening = await createFixture({ baselineEffects: ["read", "write"], candidateEffects: ["read"] });
     await pinTurn(widening, "turn-widen");
@@ -772,7 +761,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
         }),
       ),
     ).rejects.toThrow(/permissions/iu);
-
     const root = await mkdtemp(join(tmpdir(), "noesis-ac-10-unrecorded-"));
     const workspace = await createWorkspaceStore(root);
     const internals = createWorkspaceRuntimeInternals(workspace);
@@ -816,7 +804,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       ),
     ).rejects.toThrow(/prior AC-09/iu);
   });
-
   test("ambiguous research fails closed, alternative operation identities run, and roles receive no authority", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-research");
@@ -827,6 +814,7 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
         seen.push(input);
         attempt += 1;
         if (attempt === 1) throw new Error("temporary fake-role failure");
+        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
         return Object.freeze({
           proposal: "keep" as const,
           citedObservationIds: Object.freeze(
@@ -861,7 +849,6 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
       lastError: { ambiguous: true, retryable: false },
     });
   });
-
   test("an expired running outcome lease fails closed without duplicate model work", async () => {
     const fixture = await createFixture();
     await pinTurn(fixture, "turn-ambiguous-lease");
@@ -878,22 +865,17 @@ describe("AC-10 continuous feedback and experiment outcomes", () => {
     if (!job || !run) throw new Error("Expected durable outcome job and research run");
     const database = new DatabaseSync(fixture.workspace.unsafeDatabasePathForTesting);
     database
-      .prepare(
-        `UPDATE experiment_research_runs
+      .prepare(`UPDATE experiment_research_runs
          SET status = 'running', proposal = NULL, failure_message = NULL,
              retryable = 0, attempt = 1
-         WHERE run_id = ?`,
-      )
+         WHERE run_id = ?`)
       .run(run.runId);
     database
-      .prepare(
-        `UPDATE jobs SET status = 'running', lease_owner = 'crashed-worker',
+      .prepare(`UPDATE jobs SET status = 'running', lease_owner = 'crashed-worker',
          lease_token = 'stale-lease', lease_until = '2000-01-01T00:00:00.000Z',
-         attempt = 1, budget_remaining = 1, completed_at = NULL WHERE job_id = ?`,
-      )
+         attempt = 1, budget_remaining = 1, completed_at = NULL WHERE job_id = ?`)
       .run(job.jobId);
     database.close();
-
     let duplicateCalls = 0;
     const recovered = controller(
       fixture,

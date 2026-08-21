@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { createPiAgentRuntime } from "@noesis/runtime-pi";
 import { describe, expect, test, vi } from "vitest";
@@ -15,13 +16,11 @@ import {
 import { ANSI } from "../src/theme.ts";
 import { createInMemoryTestRuntime } from "./support/in-memory-runtime.ts";
 import { createTestTerminal } from "./support/test-terminal.ts";
-
 const ENTER = "\r";
 const TAB = "\t";
 const DOWN = "\u001b[B";
 const ESCAPE = "\u001b";
 const NOW = new Date("2026-08-14T12:00:00.000Z");
-
 function record(
   input: Partial<TuiLearningPrimitive> & Pick<TuiLearningPrimitive, "id" | "kind" | "group" | "title">,
 ): TuiLearningPrimitive {
@@ -39,7 +38,6 @@ function record(
     ...input,
   });
 }
-
 const snapshot: TuiLearningAuditSnapshot = Object.freeze({
   projectId: "project-1",
   sessionId: "session-1",
@@ -316,21 +314,24 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
     }),
   ]),
 });
-
 function createHarness(focusRecordId?: string) {
   let closes = 0;
-  const component = createLearningAuditOverlay({
-    runtime: { inspectLearningAudit: async () => snapshot },
-    sessionId: "session-1",
-    colorEnabled: false,
-    height: () => 32,
-    requestRender: () => undefined,
-    close: () => {
-      closes += 1;
-    },
-    now: () => NOW,
-    ...(focusRecordId ? { focusRecordId } : {}),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  const component = createLearningAuditOverlay(
+    createConditionalObject({
+      runtime: { inspectLearningAudit: async () => snapshot },
+      sessionId: "session-1",
+      colorEnabled: false,
+      height: () => 32,
+      requestRender: () => undefined,
+      close: () => {
+        closes += 1;
+      },
+      now: () => NOW,
+    } as const)
+      .addOptional(focusRecordId ? { focusRecordId } : undefined)
+      .finish(),
+  );
   return {
     component,
     get closes() {
@@ -339,7 +340,6 @@ function createHarness(focusRecordId?: string) {
     output: (width = 110) => component.render(width).join("\n"),
   };
 }
-
 describe("learning audit overlay", () => {
   test("opens from /learning as a focused Pi TUI overlay", async () => {
     const controlled = createControlledPiModels();
@@ -355,11 +355,9 @@ describe("learning audit overlay", () => {
       terminal,
     );
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
-
     terminal.type("  /learning\r");
     await vi.waitFor(() => expect(terminal.output).toContain("Controlled completion for:   /learning"));
     expect(terminal.output).not.toContain("LEARNING · audit ledger");
-
     terminal.type("/learning\r");
     await vi.waitFor(() => expect(terminal.output).toContain("LEARNING · capabilities"));
     expect(terminal.output).toContain("Use the existing adaptation path");
@@ -367,11 +365,9 @@ describe("learning audit overlay", () => {
     terminal.send(ESCAPE);
     terminal.type("after audit\r");
     await vi.waitFor(() => expect(terminal.output).toContain("after audit"));
-
     terminal.type("/quit\n");
     await running;
   });
-
   test("shows Capabilities by default and keeps reflection history auditable", async () => {
     const harness = createHarness();
     await vi.waitFor(() => expect(harness.output()).toContain("LEARNING · capabilities"));
@@ -389,7 +385,6 @@ describe("learning audit overlay", () => {
     expect(harness.output()).toContain("12h ago");
     expect(harness.output()).toContain("r refresh");
     expect(harness.output()).not.toContain("\u001b]");
-
     harness.component.handleInput?.("a");
     expect(harness.output()).toContain("No lasting change");
     expect(harness.output()).toContain("baseline trial");
@@ -398,18 +393,15 @@ describe("learning audit overlay", () => {
     harness.component.handleInput?.("x");
     expect(harness.output()).toContain("Reflection failed");
     expect(harness.output()).toContain("× failed");
-
     harness.component.handleInput?.("a");
     harness.component.handleInput?.("s");
     expect(harness.output()).toContain("current session · 1 visible");
     expect(harness.output()).not.toContain("Use narrower research first");
-
     harness.component.handleInput?.("s");
     harness.component.handleInput?.("f");
     expect(harness.output()).toContain("Nothing in this view.");
     expect(harness.output()).not.toContain("Use the existing adaptation path");
   });
-
   test("explains a Capability with cited evidence and keeps identities in raw authority", async () => {
     const harness = createHarness();
     await vi.waitFor(() => expect(harness.output()).toContain("Use the existing adaptation path"));
@@ -431,7 +423,6 @@ describe("learning audit overlay", () => {
     harness.component.handleInput?.(ENTER);
     expect(harness.output()).toContain("WHAT CHANGED");
     expect(harness.output()).toContain("Use the existing adaptation path");
-
     harness.component.handleInput?.(TAB);
     expect(harness.output()).toContain("Enter expands");
     expect(harness.output()).toContain("Please propose the capability through adapt.");
@@ -469,7 +460,6 @@ describe("learning audit overlay", () => {
     harness.component.handleInput?.(ESCAPE);
     expect(harness.output()).toContain("Use the existing adaptation path");
   });
-
   test("supports keyboard navigation and closes cleanly", async () => {
     const harness = createHarness();
     await vi.waitFor(() => expect(harness.output()).toContain("Use the existing adaptation path"));
@@ -481,7 +471,6 @@ describe("learning audit overlay", () => {
     harness.component.handleInput?.(ESCAPE);
     expect(harness.closes).toBe(1);
   });
-
   test("closes the overlay frame on every row", async () => {
     const harness = createHarness();
     await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · capabilities"));
@@ -497,12 +486,10 @@ describe("learning audit overlay", () => {
       );
       expect(plain(row).endsWith("╮") || plain(row).endsWith("│") || plain(row).endsWith("╯")).toBe(true);
     }
-
     for (const width of [1, 2, 3, 4, 8, 19]) {
       for (const row of harness.component.render(width)) expect(visibleWidth(row)).toBe(width);
     }
   });
-
   test("renders responsive master-detail panes at wide terminal widths", async () => {
     const harness = createHarness();
     await vi.waitFor(() => expect(harness.output(160)).toContain("▸ CAPABILITIES"));
@@ -513,12 +500,10 @@ describe("learning audit overlay", () => {
     expect(wide).toContain("Enter opens");
     expect(wide).not.toContain("INPUTS CONSIDERED");
     expect(wide).toContain("│");
-
     const narrow = harness.output(90);
     expect(narrow).toContain("Use the existing adaptation path");
     expect(narrow).not.toContain("▸ CAPABILITY");
     expect(narrow).not.toContain("WHAT CHANGED");
-
     harness.component.handleInput?.(ENTER);
     harness.component.handleInput?.(TAB);
     const focused = harness.output(160);
@@ -526,7 +511,6 @@ describe("learning audit overlay", () => {
     expect(focused).toContain("EVIDENCE CITED");
     expect(focused).toContain("Please propose the capability through adapt.");
   });
-
   test("focuses related records with tab and up/down instead of left/right", async () => {
     const harness = createHarness();
     await vi.waitFor(() => expect(harness.output(160)).toContain("Use the existing adaptation path"));
@@ -550,27 +534,23 @@ describe("learning audit overlay", () => {
     harness.component.handleInput?.(ENTER);
     expect(harness.output(160)).toContain("LEARNING · reflection");
   });
-
   test("opens /learning onto a remembered decision", async () => {
     const harness = createHarness("experiment:experiment-1");
     await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · experiment"));
     expect(harness.output(160)).toContain("Use narrower research first");
     expect(harness.output(160)).toContain("▸ RECORD");
   });
-
   test("finishes loading when a remembered record is outside the bounded snapshot", async () => {
     const harness = createHarness("experiment:outside-bounded-snapshot");
     await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · capabilities"));
     expect(harness.output(160)).not.toContain("Refreshing the learning ledger");
     expect(harness.output(160)).toContain("Use the existing adaptation path");
   });
-
   test("expands quiet failed reflections when opening onto one", async () => {
     const harness = createHarness("reflection:failed-1");
     await vi.waitFor(() => expect(harness.output(160)).toContain("Reflection failed"));
     expect(harness.output(160)).toContain("× failed");
   });
-
   test("explains an empty noteworthy view when only routine reflections exist", async () => {
     const quiet: TuiLearningAuditSnapshot = Object.freeze({
       ...snapshot,
@@ -597,7 +577,6 @@ describe("learning audit overlay", () => {
     await vi.waitFor(() => expect(component.render(110).join("\n")).toContain("No Capabilities yet"));
     expect(component.render(110).join("\n")).toContain("Ambient reflection is still running.");
   });
-
   test("manages the live Capability binding from the detail pane", async () => {
     const capability = record({
       id: "capability:concise-research",
@@ -621,6 +600,7 @@ describe("learning audit overlay", () => {
           Object.freeze({ ...snapshot, primitives: Object.freeze([capability]) }),
         manageCapability: async (intent) => {
           managed.push(intent);
+          // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
           return Object.freeze({
             status: "binding_changed" as const,
             capabilityId: capability.capabilityId ?? "concise-research",
@@ -665,7 +645,6 @@ describe("learning audit overlay", () => {
       },
     ]);
   });
-
   test("changes a pending Capability gate with natural-language input", async () => {
     const gate = record({
       id: "capability-gate:gate-1",
@@ -682,6 +661,7 @@ describe("learning audit overlay", () => {
         inspectLearningAudit: async () => Object.freeze({ ...snapshot, primitives: Object.freeze([gate]) }),
         manageCapability: async (intent) => {
           managed.push(intent);
+          // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
           return Object.freeze({
             status: "pending" as const,
             capabilityId: "recovery-behavior",

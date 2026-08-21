@@ -1,8 +1,11 @@
+import type { DatabaseRow } from "./database.ts";
 import { randomUUID } from "node:crypto";
 import {
+  createConditionalObject,
   EvidenceRefSchema,
   JsonValueSchema,
   type ActorRef,
+  type DatabaseRowRef,
   type DurableJobEnqueueRequest,
   type DurableJobFailure,
   type DurableJobListRequest,
@@ -20,7 +23,6 @@ import {
   requiredString,
   type WorkspaceDatabase,
 } from "./database.ts";
-
 const JobStatusSchema = z.enum([
   "scheduled",
   "running",
@@ -54,15 +56,14 @@ const EnqueueSchema = z.strictObject({
   observations: z.array(JobObservationSchema).optional(),
   inheritObservationsFromParentJobId: z.string().min(1).optional(),
 });
-
+/** BOUNDARY: Activity references are serialized by the authoritative workspace activity writer. */
 type RecordActivity = (
   actor: ActorRef,
   activityKind: string,
   subjectKind: string,
   subjectId: string,
   references?: unknown,
-) => unknown;
-
+) => DatabaseRowRef<"activity_log">;
 export function createDurableJobStore(
   database: WorkspaceDatabase,
   recordActivity: RecordActivity,
@@ -70,24 +71,22 @@ export function createDurableJobStore(
 ): import("@noesis/domain").DurableJobStorePort {
   const db = database.connection;
   const actor: ActorRef = Object.freeze({ actorId: "runtime-coordinator", kind: "system" });
-
   const read = (jobId: string): DurableJobRecord | undefined => {
     const row = db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId);
     return row === undefined ? undefined : decodeDurableJob(row);
   };
-
   const recordObservation = (jobId: string, observation: DurableJobObservationRequest): void => {
-    db.prepare(
-      `INSERT OR IGNORE INTO job_lineage(child_job_id, parent_job_id, linked_at)
-       VALUES (?, ?, ?)`,
-    ).run(jobId, observation.parentJobId, observation.observedAt);
-    db.prepare(
-      `INSERT OR IGNORE INTO job_observations(
+    db.prepare(`INSERT OR IGNORE INTO job_lineage(child_job_id, parent_job_id, linked_at)
+       VALUES (?, ?, ?)`).run(jobId, observation.parentJobId, observation.observedAt);
+    db.prepare(`INSERT OR IGNORE INTO job_observations(
          child_job_id, parent_job_id, source_session_id, observed_at
-       ) VALUES (?, ?, ?, ?)`,
-    ).run(jobId, observation.parentJobId, observation.sourceSessionId, observation.observedAt);
-    db.prepare(
-      `WITH RECURSIVE descendants(child_job_id, parent_job_id) AS (
+       ) VALUES (?, ?, ?, ?)`).run(
+      jobId,
+      observation.parentJobId,
+      observation.sourceSessionId,
+      observation.observedAt,
+    );
+    db.prepare(`WITH RECURSIVE descendants(child_job_id, parent_job_id) AS (
          SELECT child_job_id, parent_job_id FROM job_lineage WHERE parent_job_id = ?
          UNION
          SELECT lineage.child_job_id, lineage.parent_job_id
@@ -97,29 +96,26 @@ export function createDurableJobStore(
        INSERT OR IGNORE INTO job_observations(
          child_job_id, parent_job_id, source_session_id, observed_at
        )
-       SELECT child_job_id, parent_job_id, ?, ? FROM descendants`,
-    ).run(jobId, observation.sourceSessionId, observation.observedAt);
+       SELECT child_job_id, parent_job_id, ?, ? FROM descendants`).run(
+      jobId,
+      observation.sourceSessionId,
+      observation.observedAt,
+    );
   };
-
   const inheritObservations = (jobId: string, parentJobId: string, observedAt: string): void => {
-    db.prepare(
-      `INSERT OR IGNORE INTO job_lineage(child_job_id, parent_job_id, linked_at)
-       VALUES (?, ?, ?)`,
-    ).run(jobId, parentJobId, observedAt);
+    db.prepare(`INSERT OR IGNORE INTO job_lineage(child_job_id, parent_job_id, linked_at)
+       VALUES (?, ?, ?)`).run(jobId, parentJobId, observedAt);
     const sessions = db
-      .prepare(
-        `SELECT source_session_id
+      .prepare(`SELECT source_session_id
          FROM job_observations
          WHERE child_job_id = ?
          GROUP BY source_session_id
-         ORDER BY min(observed_at), source_session_id`,
-      )
+         ORDER BY min(observed_at), source_session_id`)
       .all(parentJobId)
-      .map((row) => z.string().min(1).parse(Reflect.get(row, "source_session_id")));
+      .map((row) => z.string().min(1).parse(row["source_session_id"]));
     for (const sourceSessionId of sessions)
       recordObservation(jobId, { sourceSessionId, parentJobId, observedAt });
   };
-
   const enqueue = async (request: DurableJobEnqueueRequest): Promise<DurableJobRecord> => {
     const value = EnqueueSchema.parse(request);
     for (const reference of value.payloadRefs) assertReference(reference);
@@ -145,14 +141,12 @@ export function createDurableJobStore(
           inheritObservations(existing.jobId, value.inheritObservationsFromParentJobId, value.notBefore);
         return existing;
       }
-      db.prepare(
-        `INSERT INTO jobs(
+      db.prepare(`INSERT INTO jobs(
           job_id, kind, payload_json, status, lease_owner, lease_until, attempt,
           budget_remaining, created_at, updated_at, payload_refs_json, operation_id,
           idempotency_key, not_before, lease_token, max_attempts, estimated_cost,
           result_json, last_error_json, completed_at
-        ) VALUES (?, ?, ?, 'scheduled', NULL, NULL, 0, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL)`,
-      ).run(
+        ) VALUES (?, ?, ?, 'scheduled', NULL, NULL, 0, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, NULL, NULL)`).run(
         value.jobId,
         value.kind,
         JSON.stringify(value.payload),
@@ -175,14 +169,12 @@ export function createDurableJobStore(
       return created;
     });
   };
-
   const validatedLimit = (request: DurableJobListRequest): number => {
     const limit = request.limit ?? 100;
-    if (!Number.isInteger(limit) || limit < 1 || limit > 1_000)
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000)
       throw new Error("Durable job list limit must be between 1 and 1000");
     return limit;
   };
-
   const query = (request: DurableJobListRequest, limit: number): readonly DurableJobRecord[] => {
     if (request.status !== undefined && request.statuses !== undefined)
       throw new Error("Durable job list accepts either status or statuses, not both");
@@ -238,8 +230,7 @@ export function createDurableJobStore(
     }
     if (request.observedSessionId !== undefined) {
       z.string().min(1).parse(request.observedSessionId);
-      clauses.push(
-        `job_id IN (
+      clauses.push(`job_id IN (
            WITH RECURSIVE scoped_jobs(job_id, source_session_id) AS (
              SELECT child_job_id, source_session_id
              FROM job_observations
@@ -252,8 +243,7 @@ export function createDurableJobStore(
               AND observations.source_session_id = scoped_jobs.source_session_id
            )
            SELECT job_id FROM scoped_jobs
-         )`,
-      );
+         )`);
       values.push(request.observedSessionId);
     }
     if (request.payloadExperimentIds !== undefined) {
@@ -287,26 +277,29 @@ export function createDurableJobStore(
       .all(...values, limit)
       .map(decodeDurableJob);
   };
-
   const list = async (request: DurableJobListRequest = {}): Promise<readonly DurableJobRecord[]> =>
     query(request, validatedLimit(request));
-
   const listPage = async (request: DurableJobListRequest = {}): Promise<DurableJobPage> => {
     const limit = validatedLimit(request);
     const lookahead = query(request, limit + 1);
     const records = Object.freeze(lookahead.slice(0, limit));
     const last = records.at(-1);
-    return Object.freeze({
-      records,
-      exhausted: lookahead.length <= limit,
-      ...(last
-        ? {
-            nextCursor: Object.freeze({ createdAt: last.createdAt, jobId: last.jobId }),
-          }
-        : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        records,
+        exhausted: lookahead.length <= limit,
+      } as const)
+        .addOptional(
+          last
+            ? {
+                nextCursor: Object.freeze({ createdAt: last.createdAt, jobId: last.jobId }),
+              }
+            : undefined,
+        )
+        .finish(),
+    );
   };
-
   const claim = async (request: {
     readonly workerId: string;
     readonly now: string;
@@ -328,41 +321,38 @@ export function createDurableJobStore(
         retryable: false,
         ambiguous: false,
       });
-      db.prepare(
-        `UPDATE jobs SET status = 'failed', lease_owner = NULL, lease_token = NULL,
+      db.prepare(`UPDATE jobs SET status = 'failed', lease_owner = NULL, lease_token = NULL,
           lease_until = NULL, last_error_json = ?, updated_at = ?, completed_at = ?
          WHERE status IN ('scheduled', 'running') AND attempt >= max_attempts
-           AND (status = 'scheduled' OR lease_until <= ?)`,
-      ).run(JSON.stringify(exhaustedError), request.now, request.now, request.now);
-      db.prepare(
-        `UPDATE jobs SET status = 'budget_exhausted', lease_owner = NULL, lease_token = NULL,
+           AND (status = 'scheduled' OR lease_until <= ?)`).run(
+        JSON.stringify(exhaustedError),
+        request.now,
+        request.now,
+        request.now,
+      );
+      db.prepare(`UPDATE jobs SET status = 'budget_exhausted', lease_owner = NULL, lease_token = NULL,
           lease_until = NULL, updated_at = ?, completed_at = ?
          WHERE status IN ('scheduled', 'running') AND estimated_cost > budget_remaining
-           AND (status = 'scheduled' OR lease_until <= ?)`,
-      ).run(request.now, request.now, request.now);
+           AND (status = 'scheduled' OR lease_until <= ?)`).run(request.now, request.now, request.now);
       const kindClause = kinds.length === 0 ? "" : ` AND kind IN (${kinds.map(() => "?").join(", ")})`;
       const row = db
-        .prepare(
-          `SELECT job_id FROM jobs
+        .prepare(`SELECT job_id FROM jobs
            WHERE ((status = 'scheduled' AND not_before <= ?)
              OR (status = 'running' AND lease_until <= ?))
              AND attempt < max_attempts
              AND estimated_cost <= budget_remaining
              AND estimated_cost <= ?${kindClause}
-           ORDER BY not_before, created_at, job_id LIMIT 1`,
-        )
+           ORDER BY not_before, created_at, job_id LIMIT 1`)
         .get(request.now, request.now, request.maximumCost, ...kinds);
       if (row === undefined) return undefined;
       const jobId = requiredString(row, "job_id");
       const leaseToken = `lease_${randomUUID()}`;
       const updated = db
-        .prepare(
-          `UPDATE jobs SET status = 'running', lease_owner = ?, lease_token = ?, lease_until = ?,
+        .prepare(`UPDATE jobs SET status = 'running', lease_owner = ?, lease_token = ?, lease_until = ?,
             attempt = attempt + 1, budget_remaining = budget_remaining - estimated_cost,
             updated_at = ?, last_error_json = NULL
            WHERE job_id = ? AND ((status = 'scheduled' AND not_before <= ?)
-             OR (status = 'running' AND lease_until <= ?))`,
-        )
+             OR (status = 'running' AND lease_until <= ?))`)
         .run(request.workerId, leaseToken, request.leaseUntil, request.now, jobId, request.now, request.now);
       if (updated.changes !== 1) return undefined;
       recordActivity(actor, "coordinator.job_claimed", "job", jobId);
@@ -371,7 +361,6 @@ export function createDurableJobStore(
       return claimed;
     });
   };
-
   const renew = async (request: {
     readonly jobId: string;
     readonly leaseToken: string;
@@ -380,14 +369,11 @@ export function createDurableJobStore(
   }): Promise<boolean> =>
     database.transaction(() => {
       const result = db
-        .prepare(
-          `UPDATE jobs SET lease_until = ?, updated_at = ?
-           WHERE job_id = ? AND status = 'running' AND lease_token = ? AND lease_until > ?`,
-        )
+        .prepare(`UPDATE jobs SET lease_until = ?, updated_at = ?
+           WHERE job_id = ? AND status = 'running' AND lease_token = ? AND lease_until > ?`)
         .run(request.leaseUntil, request.now, request.jobId, request.leaseToken, request.now);
       return result.changes === 1;
     });
-
   const complete = async (request: {
     readonly jobId: string;
     readonly leaseToken: string;
@@ -397,11 +383,9 @@ export function createDurableJobStore(
     const resultValue = request.result === undefined ? undefined : JsonValueSchema.parse(request.result);
     return database.transaction(() => {
       const result = db
-        .prepare(
-          `UPDATE jobs SET status = 'completed', result_json = ?, lease_owner = NULL,
+        .prepare(`UPDATE jobs SET status = 'completed', result_json = ?, lease_owner = NULL,
             lease_token = NULL, lease_until = NULL, updated_at = ?, completed_at = ?
-           WHERE job_id = ? AND status = 'running' AND lease_token = ?`,
-        )
+           WHERE job_id = ? AND status = 'running' AND lease_token = ?`)
         .run(
           resultValue === undefined ? null : JSON.stringify(resultValue),
           request.now,
@@ -413,7 +397,6 @@ export function createDurableJobStore(
       return result.changes === 1;
     });
   };
-
   const fail = async (request: {
     readonly jobId: string;
     readonly leaseToken: string;
@@ -437,11 +420,9 @@ export function createDurableJobStore(
         : failure.retryable && !failure.ambiguous && current.budgetRemaining < current.estimatedCost
           ? "budget_exhausted"
           : "failed";
-      db.prepare(
-        `UPDATE jobs SET status = ?, not_before = ?, lease_owner = NULL, lease_token = NULL,
+      db.prepare(`UPDATE jobs SET status = ?, not_before = ?, lease_owner = NULL, lease_token = NULL,
           lease_until = NULL, last_error_json = ?, updated_at = ?, completed_at = ?
-         WHERE job_id = ? AND status = 'running' AND lease_token = ?`,
-      ).run(
+         WHERE job_id = ? AND status = 'running' AND lease_token = ?`).run(
         status,
         canRetry ? request.retryAt : current.notBefore,
         JSON.stringify(failure),
@@ -461,21 +442,17 @@ export function createDurableJobStore(
       return failed;
     });
   };
-
   const cancel = async (jobId: string, now: string): Promise<DurableJobRecord | undefined> =>
     database.transaction(() => {
       const current = read(jobId);
       if (!current) return undefined;
       if (current.status === "scheduled" || current.status === "running") {
-        db.prepare(
-          `UPDATE jobs SET status = 'cancelled', lease_owner = NULL, lease_token = NULL,
-            lease_until = NULL, updated_at = ?, completed_at = ? WHERE job_id = ?`,
-        ).run(now, now, jobId);
+        db.prepare(`UPDATE jobs SET status = 'cancelled', lease_owner = NULL, lease_token = NULL,
+            lease_until = NULL, updated_at = ?, completed_at = ? WHERE job_id = ?`).run(now, now, jobId);
         recordActivity(actor, "coordinator.job_cancelled", "job", jobId);
       }
       return read(jobId);
     });
-
   const retry = async (request: {
     readonly jobId: string;
     readonly now: string;
@@ -492,18 +469,15 @@ export function createDurableJobStore(
       const budget = current.budgetRemaining + additionalBudget;
       if (budget < current.estimatedCost)
         throw new Error(`Retry budget is below the estimated cost for ${request.jobId}`);
-      db.prepare(
-        `UPDATE jobs SET status = 'scheduled', not_before = ?, max_attempts = MAX(max_attempts, attempt + 1),
+      db.prepare(`UPDATE jobs SET status = 'scheduled', not_before = ?, max_attempts = MAX(max_attempts, attempt + 1),
           budget_remaining = ?, last_error_json = NULL, completed_at = NULL, updated_at = ?
-         WHERE job_id = ?`,
-      ).run(request.now, budget, request.now, request.jobId);
+         WHERE job_id = ?`).run(request.now, budget, request.now, request.jobId);
       recordActivity(actor, "coordinator.job_manual_retry", "job", request.jobId);
       const retried = read(request.jobId);
       if (!retried) throw new Error(`Retried durable job ${request.jobId} disappeared`);
       return retried;
     });
   };
-
   return Object.freeze({
     enqueue,
     recordObservation: async (jobId: string, observation: DurableJobObservationRequest) => {
@@ -528,36 +502,45 @@ export function createDurableJobStore(
     retry,
   });
 }
-
-function decodeDurableJob(row: unknown): DurableJobRecord {
+function decodeDurableJob(row: DatabaseRow | undefined): DurableJobRecord {
   const leaseOwner = optionalString(row, "lease_owner");
   const leaseToken = optionalString(row, "lease_token");
   const leaseUntil = optionalString(row, "lease_until");
   const result = optionalString(row, "result_json");
   const lastError = optionalString(row, "last_error_json");
   const completedAt = optionalString(row, "completed_at");
-  return Object.freeze({
-    jobId: requiredString(row, "job_id"),
-    kind: requiredString(row, "kind"),
-    payload: JsonValueSchema.parse(parseJson(requiredString(row, "payload_json"))),
-    payloadRefs: Object.freeze(
-      z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "payload_refs_json"))),
-    ),
-    operationId: requiredString(row, "operation_id"),
-    idempotencyKey: requiredString(row, "idempotency_key"),
-    status: JobStatusSchema.parse(requiredString(row, "status")),
-    notBefore: requiredString(row, "not_before"),
-    ...(leaseOwner === undefined ? {} : { leaseOwner }),
-    ...(leaseToken === undefined ? {} : { leaseToken }),
-    ...(leaseUntil === undefined ? {} : { leaseUntil }),
-    attempt: requiredNumber(row, "attempt"),
-    maxAttempts: requiredNumber(row, "max_attempts"),
-    estimatedCost: requiredNumber(row, "estimated_cost"),
-    budgetRemaining: requiredNumber(row, "budget_remaining"),
-    ...(result === undefined ? {} : { result: JsonValueSchema.parse(parseJson(result)) }),
-    ...(lastError === undefined ? {} : { lastError: JobFailureSchema.parse(parseJson(lastError)) }),
-    createdAt: requiredString(row, "created_at"),
-    updatedAt: requiredString(row, "updated_at"),
-    ...(completedAt === undefined ? {} : { completedAt }),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      jobId: requiredString(row, "job_id"),
+      kind: requiredString(row, "kind"),
+      payload: JsonValueSchema.parse(parseJson(requiredString(row, "payload_json"))),
+      payloadRefs: Object.freeze(
+        z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "payload_refs_json"))),
+      ),
+      operationId: requiredString(row, "operation_id"),
+      idempotencyKey: requiredString(row, "idempotency_key"),
+      status: JobStatusSchema.parse(requiredString(row, "status")),
+      notBefore: requiredString(row, "not_before"),
+    } as const)
+      .addOptional(!(leaseOwner === undefined) ? { leaseOwner } : undefined)
+      .addOptional(!(leaseToken === undefined) ? { leaseToken } : undefined)
+      .addOptional(!(leaseUntil === undefined) ? { leaseUntil } : undefined)
+      .add({
+        attempt: requiredNumber(row, "attempt"),
+        maxAttempts: requiredNumber(row, "max_attempts"),
+        estimatedCost: requiredNumber(row, "estimated_cost"),
+        budgetRemaining: requiredNumber(row, "budget_remaining"),
+      } as const)
+      .addOptional(!(result === undefined) ? { result: JsonValueSchema.parse(parseJson(result)) } : undefined)
+      .addOptional(
+        !(lastError === undefined) ? { lastError: JobFailureSchema.parse(parseJson(lastError)) } : undefined,
+      )
+      .add({
+        createdAt: requiredString(row, "created_at"),
+        updatedAt: requiredString(row, "updated_at"),
+      } as const)
+      .addOptional(!(completedAt === undefined) ? { completedAt } : undefined)
+      .finish(),
+  );
 }

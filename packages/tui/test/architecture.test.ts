@@ -5,6 +5,7 @@ import { describe, expect, test } from "vitest";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourceRoot = join(packageRoot, "src");
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const forbiddenModules = [
   "@noesis/capabilities",
   "@noesis/ledger",
@@ -12,6 +13,7 @@ const forbiddenModules = [
   "@noesis/policy",
   "@noesis/workspace",
 ] as const;
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const forbiddenMembers = [
   "artifacts",
   "authority",
@@ -35,6 +37,7 @@ describe("TUI architecture", () => {
       for (const member of forbiddenMembers)
         if (new RegExp(`\\.${member}\\b`, "u").test(source)) violations.push(`${name}:member:${member}`);
     }
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as {
       readonly dependencies?: Readonly<Record<string, string>>;
     };

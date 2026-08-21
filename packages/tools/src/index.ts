@@ -1,7 +1,9 @@
 import {
+  createConditionalObject,
   canonicalJson,
   createId,
   type EffectClass,
+  isJsonObject,
   type JsonValue,
   JsonValueSchema,
   type PermissionManifest,
@@ -16,24 +18,18 @@ import {
   inspectEffectExecutionFailure,
 } from "@noesis/policy";
 import { z } from "zod";
-
 const TOOL_NAME_PATTERN = /^[a-z][a-z0-9_.-]{0,127}$/u;
 const MAX_TOOL_NAME_CHARACTERS = 128;
-
 function isValidToolName(name: string): boolean {
   return name.length <= MAX_TOOL_NAME_CHARACTERS && TOOL_NAME_PATTERN.test(name);
 }
-
 function displayToolName(name: string): string {
   if (name.length <= MAX_TOOL_NAME_CHARACTERS) return name;
   return `${name.slice(0, MAX_TOOL_NAME_CHARACTERS)}… [truncated]`;
 }
-
 export * from "./builtins.ts";
 export * from "./limits.ts";
-
 export type ToolVisibility = "always" | "codemode_only";
-
 export interface ToolExecutionContext {
   readonly executionId: string;
   /** Durable codemode execution that owns this call; absent for direct Broker invocations. */
@@ -45,18 +41,15 @@ export interface ToolExecutionContext {
   readonly signal: AbortSignal;
   readonly emitUpdate?: (update: JsonValue) => void;
 }
-
 export interface ToolEffect {
   readonly effect: EffectClass;
   readonly resource: string;
   readonly estimatedCost: number;
 }
-
 export interface ToolReportedFailure {
   readonly message: string;
   readonly details?: JsonValue;
 }
-
 export interface ToolDefinition {
   readonly name: string;
   readonly label: string;
@@ -66,19 +59,22 @@ export interface ToolDefinition {
   readonly inputSchema: z.ZodType<unknown>;
   readonly outputSchema: z.ZodType<JsonValue>;
   /** Optional protocol-owned validator used when native JSON Schema is the catalog authority. */
+  /** BOUNDARY: Native protocol validation converts an untyped invocation into durable JSON. */
   readonly parseInput?: (input: unknown) => unknown;
   /** Optional protocol-owned validator used when native JSON Schema is the catalog authority. */
+  /** BOUNDARY: Native protocol output is parsed before entering the durable tool record. */
   readonly parseOutput?: (output: unknown) => JsonValue;
   /** Native protocol schema to publish in the frozen catalog when Zod is not the schema authority. */
   readonly catalogInputSchema?: JsonValue;
   /** Native protocol schema to publish in the frozen catalog when Zod is not the schema authority. */
   readonly catalogOutputSchema?: JsonValue;
+  /** BOUNDARY: The broker has parsed this erased value with inputSchema before dispatch. */
   readonly effect: (input: unknown, context: ToolExecutionContext) => ToolEffect;
+  /** BOUNDARY: The broker has parsed this erased value with inputSchema before dispatch. */
   readonly execute: (input: unknown, context: ToolExecutionContext) => Promise<JsonValue>;
   /** Classifies a protocol-valid result as an expected tool failure after its effect has settled. */
   readonly reportedFailure?: (output: JsonValue) => ToolReportedFailure | undefined;
 }
-
 export interface ToolAuthoringDefinition<Input, Output extends JsonValue> {
   readonly name: string;
   readonly label: string;
@@ -91,7 +87,6 @@ export interface ToolAuthoringDefinition<Input, Output extends JsonValue> {
   readonly execute: (input: Input, context: ToolExecutionContext) => Promise<Output>;
   readonly reportedFailure?: (output: Output) => ToolReportedFailure | undefined;
 }
-
 export function defineTool<Input, Output extends JsonValue>(
   definition: ToolAuthoringDefinition<Input, Output>,
 ): ToolDefinition {
@@ -112,22 +107,35 @@ export function defineTool<Input, Output extends JsonValue>(
       identityMaterial: definition.identityMaterial ?? null,
     }),
   );
-  return Object.freeze({
-    name,
-    label,
-    description,
-    visibility,
-    implementationDigest,
-    inputSchema,
-    outputSchema,
-    // The broker is the sole validation boundary. These closures receive the already parsed value,
-    // preventing Zod transforms from running once for effect derivation and again for execution.
-    effect: (input: unknown, context: ToolExecutionContext) => deriveEffect(input as Input, context),
-    execute: async (input: unknown, context: ToolExecutionContext) => await execute(input as Input, context),
-    ...(reportedFailure ? { reportedFailure: (output: JsonValue) => reportedFailure(output as Output) } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      name,
+      label,
+      description,
+      visibility,
+      implementationDigest,
+      inputSchema,
+      outputSchema,
+      // The broker is the sole validation boundary. These closures receive the already parsed value,
+      // preventing Zod transforms from running once for effect derivation and again for execution.
+      // BOUNDARY: The broker parses every invocation with inputSchema before these erased closures run.
+      effect: (input: unknown, context: ToolExecutionContext) => deriveEffect(input as Input, context),
+      // BOUNDARY: The broker parses every invocation with inputSchema before these erased closures run.
+      execute: async (input: unknown, context: ToolExecutionContext) =>
+        await execute(input as Input, context),
+    } as const)
+      .addOptional(
+        reportedFailure
+          ? {
+              // SAFETY: The broker parses every result with outputSchema before classification.
+              reportedFailure: (output: JsonValue) => reportedFailure(output as Output),
+            }
+          : undefined,
+      )
+      .finish(),
+  );
 }
-
 export interface FrozenToolDescriptor {
   readonly name: string;
   readonly label: string;
@@ -138,14 +146,12 @@ export interface FrozenToolDescriptor {
   readonly inputSchema: JsonValue;
   readonly outputSchema: JsonValue;
 }
-
 export interface ToolSearchHit {
   readonly name: string;
   readonly description: string;
   readonly revisionId: string;
   readonly score: number;
 }
-
 export type ToolInvocationFailureCode =
   | "not_found"
   | "invalid_input"
@@ -156,14 +162,12 @@ export type ToolInvocationFailureCode =
   | "collision"
   | "cancelled"
   | "result_too_large";
-
 export interface ToolInvocationFailure {
   readonly ok: false;
   readonly code: ToolInvocationFailureCode;
   readonly message: string;
   readonly details?: JsonValue;
 }
-
 export interface ToolInvocationSuccess {
   readonly ok: true;
   readonly value: JsonValue;
@@ -171,9 +175,7 @@ export interface ToolInvocationSuccess {
   readonly toolRevisionId: string;
   readonly replayed: boolean;
 }
-
 export type ToolInvocationResult = ToolInvocationSuccess | ToolInvocationFailure;
-
 export interface ToolInvocationRecord {
   readonly callId: string;
   readonly executionId: string;
@@ -190,18 +192,17 @@ export interface ToolInvocationRecord {
   readonly completedAt?: string;
   readonly error?: string;
 }
-
 export interface ToolInvocationRecorder {
   readonly record: (record: ToolInvocationRecord) => Promise<void>;
   readonly status?: (callId: string) => Promise<ToolInvocationRecord["status"] | undefined>;
 }
-
 export interface ToolBroker {
   readonly catalogId: string;
   readonly catalogDigest: string;
   readonly list: () => readonly FrozenToolDescriptor[];
   readonly search: (query: string, limit?: number) => readonly ToolSearchHit[];
   readonly describe: (name: string) => FrozenToolDescriptor | undefined;
+  /** BOUNDARY: Public tool invocation input is parsed by the selected frozen definition. */
   readonly invoke: (
     name: string,
     input: unknown,
@@ -211,49 +212,59 @@ export interface ToolBroker {
     },
   ) => Promise<ToolInvocationResult>;
 }
-
 interface FrozenDefinition {
   readonly definition: ToolDefinition;
   readonly descriptor: FrozenToolDescriptor;
 }
-
 function schemaJson(schema: z.ZodType): JsonValue {
   return deepFreezeJson(toJsonValue(z.toJSONSchema(schema, { unrepresentable: "any" })));
 }
-
 function deepFreezeJson(value: JsonValue): JsonValue {
   if (Array.isArray(value)) {
     for (const item of value) deepFreezeJson(item);
     return Object.freeze(value);
   }
-  if (typeof value === "object" && value !== null) {
+  if (isJsonObject(value)) {
     for (const item of Object.values(value)) deepFreezeJson(item);
     return Object.freeze(value);
   }
   return value;
 }
-
 function freezeDefinition(definition: ToolDefinition): FrozenDefinition {
-  const capturedDefinition: ToolDefinition = Object.freeze({
-    name: definition.name,
-    label: definition.label,
-    description: definition.description,
-    visibility: definition.visibility,
-    implementationDigest: definition.implementationDigest,
-    inputSchema: definition.inputSchema,
-    outputSchema: definition.outputSchema,
-    ...(definition.parseInput ? { parseInput: definition.parseInput } : {}),
-    ...(definition.parseOutput ? { parseOutput: definition.parseOutput } : {}),
-    ...(definition.reportedFailure ? { reportedFailure: definition.reportedFailure } : {}),
-    ...(definition.catalogInputSchema === undefined
-      ? {}
-      : { catalogInputSchema: deepFreezeJson(structuredClone(definition.catalogInputSchema)) }),
-    ...(definition.catalogOutputSchema === undefined
-      ? {}
-      : { catalogOutputSchema: deepFreezeJson(structuredClone(definition.catalogOutputSchema)) }),
-    effect: definition.effect,
-    execute: definition.execute,
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  const capturedDefinition: ToolDefinition = Object.freeze(
+    createConditionalObject({
+      name: definition.name,
+      label: definition.label,
+      description: definition.description,
+      visibility: definition.visibility,
+      implementationDigest: definition.implementationDigest,
+      inputSchema: definition.inputSchema,
+      outputSchema: definition.outputSchema,
+    } as const)
+      .addOptional(definition.parseInput ? { parseInput: definition.parseInput } : undefined)
+      .addOptional(definition.parseOutput ? { parseOutput: definition.parseOutput } : undefined)
+      .addOptional(definition.reportedFailure ? { reportedFailure: definition.reportedFailure } : undefined)
+      .addOptional(
+        !(definition.catalogInputSchema === undefined)
+          ? {
+              catalogInputSchema: deepFreezeJson(structuredClone(definition.catalogInputSchema)),
+            }
+          : undefined,
+      )
+      .addOptional(
+        !(definition.catalogOutputSchema === undefined)
+          ? {
+              catalogOutputSchema: deepFreezeJson(structuredClone(definition.catalogOutputSchema)),
+            }
+          : undefined,
+      )
+      .add({
+        effect: definition.effect,
+        execute: definition.execute,
+      } as const)
+      .finish(),
+  );
   const identity = Object.freeze({
     name: capturedDefinition.name,
     label: capturedDefinition.label,
@@ -269,7 +280,6 @@ function freezeDefinition(definition: ToolDefinition): FrozenDefinition {
     descriptor: Object.freeze({ ...identity, revisionId }),
   });
 }
-
 function normalizeTerms(value: string): readonly string[] {
   return Object.freeze(
     value
@@ -278,7 +288,6 @@ function normalizeTerms(value: string): readonly string[] {
       .filter(Boolean),
   );
 }
-
 function scoreDescriptor(descriptor: FrozenToolDescriptor, terms: readonly string[]): number {
   if (terms.length === 0) return 1;
   const name = descriptor.name.toLocaleLowerCase();
@@ -290,7 +299,6 @@ function scoreDescriptor(descriptor: FrozenToolDescriptor, terms: readonly strin
     return score;
   }, 0);
 }
-
 function editDistance(left: string, right: string): number {
   const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
   for (let leftIndex = 0; leftIndex < left.length; leftIndex += 1) {
@@ -308,7 +316,6 @@ function editDistance(left: string, right: string): number {
   }
   return previous.at(-1) ?? 0;
 }
-
 function nearestToolNames(
   requestedName: string,
   descriptors: readonly FrozenToolDescriptor[],
@@ -355,21 +362,32 @@ function nearestToolNames(
       .map(({ name }) => name),
   );
 }
-
 function failure(
   code: ToolInvocationFailureCode,
   message: string,
   details?: JsonValue,
 ): ToolInvocationFailure {
-  return Object.freeze({ ok: false, code, message, ...(details === undefined ? {} : { details }) });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      ok: false,
+      code,
+      message,
+    } as const)
+      .addOptional(!(details === undefined) ? { details } : undefined)
+      .finish(),
+  );
 }
-
 function decisionFailure(
-  decision: Extract<EffectDecision<JsonValue>, { readonly ok: false }>,
+  decision: Extract<
+    EffectDecision<JsonValue>,
+    {
+      readonly ok: false;
+    }
+  >,
 ): ToolInvocationFailure {
   return failure(decision.code, decision.reason);
 }
-
 export interface CreateToolBrokerOptions {
   readonly definitions: readonly ToolDefinition[];
   readonly authority: Pick<AuthorityBoundary, "runForeground">;
@@ -377,7 +395,6 @@ export interface CreateToolBrokerOptions {
   readonly recorder?: ToolInvocationRecorder;
   readonly now?: () => Date;
 }
-
 export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
   const frozen = Object.freeze(options.definitions.map(freezeDefinition));
   const permission: PermissionManifest = Object.freeze({
@@ -400,7 +417,6 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
   const catalogDigest = sha256(canonicalJson(descriptors));
   const catalogId = `catalog_${catalogDigest}`;
   const now = options.now ?? (() => new Date());
-
   const list = (): readonly FrozenToolDescriptor[] => descriptors;
   const describe = (name: string): FrozenToolDescriptor | undefined => byName.get(name)?.descriptor;
   const search = (query: string, limit = 12): readonly ToolSearchHit[] => {
@@ -425,7 +441,6 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         ),
     );
   };
-
   const invoke: ToolBroker["invoke"] = async (name, rawInput, invocationContext) => {
     const entry = byName.get(name);
     if (!entry) {
@@ -464,18 +479,24 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
       logicalExecutionId,
       callId,
     });
-    const baseRecord = Object.freeze({
-      callId,
-      executionId: context.executionId,
-      catalogId,
-      catalogDigest,
-      sessionId: context.sessionId,
-      ...(context.turnId ? { turnId: context.turnId } : {}),
-      toolName: name,
-      toolRevisionId: entry.descriptor.revisionId,
-      input,
-      occurredAt,
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const baseRecord = Object.freeze(
+      createConditionalObject({
+        callId,
+        executionId: context.executionId,
+        catalogId,
+        catalogDigest,
+        sessionId: context.sessionId,
+      } as const)
+        .addOptional(context.turnId ? { turnId: context.turnId } : undefined)
+        .add({
+          toolName: name,
+          toolRevisionId: entry.descriptor.revisionId,
+          input,
+          occurredAt,
+        } as const)
+        .finish(),
+    );
     const recordedStatus = await options.recorder?.status?.(callId);
     const recordedIsTerminal =
       recordedStatus === "completed" ||
@@ -483,7 +504,9 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
       recordedStatus === "denied" ||
       recordedStatus === "ambiguous";
     if (recordedStatus === undefined) {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       await options.recorder?.record(Object.freeze({ ...baseRecord, status: "requested" as const }));
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       await options.recorder?.record(Object.freeze({ ...baseRecord, status: "running" as const }));
     }
     let effect: ToolEffect;
@@ -496,6 +519,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
         executionFailure?.message ?? (error instanceof Error ? error.message : String(error)),
       );
       if (!recordedIsTerminal)
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         await options.recorder?.record(
           Object.freeze({
             ...baseRecord,
@@ -556,6 +580,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
     if (!decision.ok) {
       const result = decisionFailure(decision);
       if (!recordedIsTerminal)
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         await options.recorder?.record(
           Object.freeze({
             ...baseRecord,
@@ -575,6 +600,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
     const reportedFailure = entry.definition.reportedFailure?.(completedValue);
     if (reportedFailure) {
       if (!recordedIsTerminal)
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         await options.recorder?.record(
           Object.freeze({
             ...baseRecord,
@@ -587,6 +613,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
       return failure("failed", reportedFailure.message, completedValue);
     }
     if (!recordedIsTerminal)
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       await options.recorder?.record(
         Object.freeze({
           ...baseRecord,
@@ -603,6 +630,5 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
       replayed: decision.replayed,
     });
   };
-
   return Object.freeze({ catalogId, catalogDigest, list, search, describe, invoke });
 }

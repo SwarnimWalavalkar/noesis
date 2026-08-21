@@ -204,6 +204,7 @@ describe("Noesis config", () => {
     await initializeNoesisConfig(home);
     await expect(initializeNoesisConfig(home)).rejects.toThrow("refusing to overwrite");
     await updateNoesisConfig(home, { provider: "openai-codex", model: "gpt-5.5" });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const persisted = JSON.parse(await readFile(noesisConfigPath(home), "utf8")) as unknown;
     expect(persisted).toEqual({
       schemaVersion: 1,
@@ -475,6 +476,7 @@ describe("Noesis config", () => {
   test("serializes concurrent global and same-project hotbar deltas without lost updates", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-concurrent-hotbar-"));
     await initializeNoesisConfig(home);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const base = {
       projectId: "project_concurrent",
       projectToolNamespace: "workflow.3333333333333333.",

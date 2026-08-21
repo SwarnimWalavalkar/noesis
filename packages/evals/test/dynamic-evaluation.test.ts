@@ -1,4 +1,5 @@
 import {
+  createConditionalObject,
   type CapabilityRevision,
   CapabilityRevisionRefSchema,
   canonicalJson,
@@ -9,6 +10,8 @@ import {
   type EvidenceRevisionRef,
   type ExperimentTrial,
   type FileRevisionRef,
+  type JsonObject,
+  JsonValueSchema,
   type PreflightPlan,
   PreflightReportSchema,
   sha256,
@@ -22,6 +25,7 @@ import {
 } from "@noesis/runtime-pi";
 import { describe, expect, test } from "vitest";
 import { createScriptedAgentRoleRunner } from "../../runtime-pi/test/support/scripted-role-runner.ts";
+import { z } from "zod";
 import {
   ALTERNATIVE_AGGREGATION_STRATEGY,
   ALTERNATIVE_GENERATOR_STRATEGY,
@@ -42,11 +46,9 @@ import {
   selectEvaluationCriteria,
   toWorkspacePreflightReport,
 } from "../src/index.ts";
-
 function digest(label: string): string {
   return sha256(label);
 }
-
 function fileRef(label: string, workingPath = `definitions/${label}.json`): FileRevisionRef {
   return Object.freeze({
     kind: "file_revision",
@@ -56,7 +58,6 @@ function fileRef(label: string, workingPath = `definitions/${label}.json`): File
     contentDigest: digest(`file:${label}`),
   });
 }
-
 const sourceDefinition = fileRef("source-case");
 const sourceEvidence = fileRef("source-evidence", "evidence/source-message.json");
 const protectedEvidence = fileRef("protected-evidence", "evidence/protected-suite.json");
@@ -69,7 +70,6 @@ const criterionEvidence = fileRef("criterion-evidence", "evidence/user-correctio
 const generatorPrompt = fileRef("generator-prompt", "config/evals/generator.md");
 const trialPrompt = fileRef("trial-prompt", "config/evals/trial.md");
 const judgePrompt = fileRef("judge-prompt", "config/evals/judge.md");
-
 function revision(revisionId: string, prompt: FileRevisionRef): CapabilityRevision {
   const router = fileRef(`router-${revisionId}`, `candidates/${revisionId}/router.json`);
   return Object.freeze({
@@ -98,17 +98,16 @@ function revision(revisionId: string, prompt: FileRevisionRef): CapabilityRevisi
     }),
   });
 }
-
 const baselineRevision = revision("cap-research-r1", fileRef("baseline-prompt"));
 const candidateRevision = revision("cap-research-r2", fileRef("candidate-prompt"));
 const baselineRef = capabilityRevisionRef(baselineRevision);
 const candidateRef = capabilityRevisionRef(candidateRevision);
 let preflightSequence = 0;
-
 function roleConfiguration(
   role: RoleVariantConfiguration["role"],
   promptRevision: FileRevisionRef,
 ): RoleVariantConfiguration {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return Object.freeze({
     variant: Object.freeze({
       variantId: `${role}-default-v1`,
@@ -123,15 +122,14 @@ function roleConfiguration(
     contextPolicy: createDefaultRoleContextPolicy(role),
   });
 }
-
 const roleConfigurations = Object.freeze([
   roleConfiguration("case_generator", generatorPrompt),
   roleConfiguration("trial", trialPrompt),
   roleConfiguration("judge_critic", judgePrompt),
 ]);
-
 function invocation(configuration: RoleVariantConfiguration): DynamicEvaluationConfig["trial"] {
   if (configuration.variant.axis !== "role") throw new Error("Test roles require role-axis variants");
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return Object.freeze({
     promptRevision: configuration.variant.configurationRefs[0] ?? fileRef("missing"),
     variant: Object.freeze({ ...configuration.variant, axis: "role" as const }),
@@ -140,7 +138,6 @@ function invocation(configuration: RoleVariantConfiguration): DynamicEvaluationC
     reasoning: configuration.reasoning,
   });
 }
-
 function config(
   overrides: {
     readonly generatorStrategy?: string;
@@ -174,7 +171,6 @@ function config(
     }),
   });
 }
-
 function criterionSet(
   instruction = "Preserve my voice and concise phrasing",
   criterionId = "voice",
@@ -209,7 +205,6 @@ function criterionSet(
     ),
   });
 }
-
 const sourceCase: EvaluationCase = Object.freeze({
   caseId: "source-correction",
   kind: "source",
@@ -220,7 +215,6 @@ const sourceCase: EvaluationCase = Object.freeze({
   definitionRevision: sourceDefinition,
   criterionRefs: Object.freeze([]),
 });
-
 const protectedCase: EvaluationCase = Object.freeze({
   caseId: "held-out-private",
   kind: "protected",
@@ -230,7 +224,6 @@ const protectedCase: EvaluationCase = Object.freeze({
   evidenceRefs: Object.freeze([protectedEvidence]),
   criterionRefs: Object.freeze([]),
 });
-
 const protectedSuite = createProtectedEvaluationSuiteRevision({
   suiteId: "protected-research",
   revision: 1,
@@ -238,48 +231,56 @@ const protectedSuite = createProtectedEvaluationSuiteRevision({
   definitionRevision: protectedSuiteDefinition,
   cases: Object.freeze([protectedCase]),
 });
-
 function input(
   overrides: Partial<
     Pick<DynamicPreflightInput, "criteria" | "config" | "candidate" | "protectedSuite" | "signal">
   > = {},
 ): DynamicPreflightInput {
   preflightSequence += 1;
-  return Object.freeze({
-    preflightId: `preflight-${preflightSequence}`,
-    experimentId: "experiment-research",
-    planId: "plan-research",
-    scope: "research",
-    behaviorObjective: "Produce an evidence-grounded concise research update",
-    baseline: Object.freeze({ ref: baselineRef, revision: baselineRevision }),
-    candidate: overrides.candidate ?? Object.freeze({ ref: candidateRef, revision: candidateRevision }),
-    criteria: overrides.criteria ?? criterionSet(),
-    sourceCases: Object.freeze([sourceCase]),
-    protectedSuite: overrides.protectedSuite ?? protectedSuite,
-    budget: Object.freeze({ maxCases: 3, maxAttemptsPerArm: 1, maxCost: 0 }),
-    config: overrides.config ?? config(),
-    ...(overrides.signal ? { signal: overrides.signal } : {}),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  return Object.freeze(
+    createConditionalObject({
+      preflightId: `preflight-${preflightSequence}`,
+      experimentId: "experiment-research",
+      planId: "plan-research",
+      scope: "research",
+      behaviorObjective: "Produce an evidence-grounded concise research update",
+      baseline: Object.freeze({ ref: baselineRef, revision: baselineRevision }),
+      candidate: overrides.candidate ?? Object.freeze({ ref: candidateRef, revision: candidateRevision }),
+      criteria: overrides.criteria ?? criterionSet(),
+      sourceCases: Object.freeze([sourceCase]),
+      protectedSuite: overrides.protectedSuite ?? protectedSuite,
+      budget: Object.freeze({ maxCases: 3, maxAttemptsPerArm: 1, maxCost: 0 }),
+      config: overrides.config ?? config(),
+    } as const)
+      .addOptional(overrides.signal ? { signal: overrides.signal } : undefined)
+      .finish(),
+  );
 }
-
 function parseRolePrompt(request: RoleBackendRequest): {
   readonly role: string;
-  readonly messages: readonly { readonly name?: string; readonly content: string }[];
+  readonly messages: readonly {
+    readonly name?: string;
+    readonly content: string;
+  }[];
 } {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return JSON.parse(request.prompt) as {
     readonly role: string;
-    readonly messages: readonly { readonly name?: string; readonly content: string }[];
+    readonly messages: readonly {
+      readonly name?: string;
+      readonly content: string;
+    }[];
   };
 }
-
-function contractFreeJson(content: string): Readonly<Record<string, unknown>> {
+function contractFreeJson(content: string): JsonObject {
   const body = content.split(/\n\n(?:Return JSON only\.|Repair the following malformed)/)[0] ?? content;
-  return JSON.parse(body) as Readonly<Record<string, unknown>>;
+  return z.record(z.string(), JsonValueSchema).parse(JSON.parse(body));
 }
-
-function criterionRefsFrom(
-  text: string,
-): readonly { readonly criterionId: string; readonly revision: number }[] {
+function criterionRefsFrom(text: string): readonly {
+  readonly criterionId: string;
+  readonly revision: number;
+}[] {
   const parsed = contractFreeJson(text);
   const { criteria } = parsed;
   if (!Array.isArray(criteria)) return Object.freeze([]);
@@ -303,7 +304,6 @@ function criterionRefsFrom(
     }),
   );
 }
-
 interface BackendScenario {
   readonly sourceRegression?: boolean;
   readonly invalidArtifact?: boolean;
@@ -314,13 +314,15 @@ interface BackendScenario {
   readonly protectedRegression?: boolean;
   readonly ambiguousJudgment?: boolean;
 }
-
 function createBackend(scenario: BackendScenario = {}) {
   const prompts: RoleBackendRequest[] = [];
-  const response = (text: string) => ({
-    text,
-    ...(scenario.latencyMs === undefined ? {} : { latencyMs: scenario.latencyMs }),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  const response = (text: string) =>
+    createConditionalObject({
+      text,
+    } as const)
+      .addOptional(!(scenario.latencyMs === undefined) ? { latencyMs: scenario.latencyMs } : undefined)
+      .finish();
   const respond = (request: RoleBackendRequest) => {
     prompts.push(request);
     const rendered = parseRolePrompt(request);
@@ -432,13 +434,11 @@ function createBackend(scenario: BackendScenario = {}) {
   };
   return { prompts, respond };
 }
-
 interface RecordedEvidence {
   readonly ref: EvidenceRevisionRef;
   readonly value: unknown;
   readonly provenanceRefs: readonly EvidenceRef[];
 }
-
 function createRecorder(): EvaluationEvidenceRecorder & {
   readonly evidence: RecordedEvidence[];
   readonly trials: ExperimentTrial[];
@@ -460,6 +460,7 @@ function createRecorder(): EvaluationEvidenceRecorder & {
     readonly provenanceRefs: readonly EvidenceRef[];
   }): Promise<EvidenceRevisionRef<Kind>> => {
     revision += 1;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const ref = Object.freeze({
       kind: "evidence_revision" as const,
       revisionId: `evidence-${revision}`,
@@ -503,7 +504,6 @@ function createRecorder(): EvaluationEvidenceRecorder & {
     events,
   });
 }
-
 function createHarness(scenario: BackendScenario = {}, maxRepairAttempts = 1) {
   const backend = createBackend(scenario);
   const runner = createScriptedAgentRoleRunner({
@@ -518,7 +518,6 @@ function createHarness(scenario: BackendScenario = {}, maxRepairAttempts = 1) {
   });
   return { backend, recorder, laboratory };
 }
-
 describe("AC-06 dynamic evaluation laboratory", () => {
   test("selects immutable criterion revisions with complete definition and provenance citations", async () => {
     const selected = await selectEvaluationCriteria(
@@ -551,7 +550,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
         candidateRevision: candidateRef,
       },
     );
-
     expect(selected.ok).toBe(true);
     if (!selected.ok) return;
     expect(selected.value.criteria[0]).toMatchObject({
@@ -562,11 +560,11 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     });
     expect(selected.value.snapshotDigest).toMatch(/^[a-f0-9]{64}$/);
   });
-
   test("composes an AC-05 authored candidate into the AC-06 preflight contract without runtime coordination", async () => {
     const learningOutputFitsHandoff: AuthorRevisionResult extends LearningAuthoredCandidate ? true : false =
       true;
     expect(learningOutputFitsHandoff).toBe(true);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const authored: LearningAuthoredCandidate = Object.freeze({
       brief: Object.freeze({
         experimentId: "experiment-research",
@@ -606,7 +604,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       budget: Object.freeze({ maxCases: 3, maxAttemptsPerArm: 1, maxCost: 0 }),
       config: config(),
     });
-
     expect(composed.ok).toBe(true);
     if (!composed.ok) return;
     expect(DynamicPreflightInputBoundarySchema.safeParse(composed.value).success).toBe(true);
@@ -634,7 +631,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       config: config(),
     });
     expect(mismatched).toMatchObject({ ok: false, error: { code: "identity_mismatch" } });
-
     const harness = createHarness();
     const result = await harness.laboratory.runPreflight(composed.value);
     expect(result.ok).toBe(true);
@@ -657,11 +653,9 @@ describe("AC-06 dynamic evaluation laboratory", () => {
         .every((request) => !JSON.stringify(request.messages).includes(candidateRef.capabilityRevisionId)),
     ).toBe(true);
   });
-
   test("passes a convincing candidate and emits a fully cited preflight report", async () => {
     const harness = createHarness();
     const result = await harness.laboratory.runPreflight(input());
-
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.decision).toBe("pass");
@@ -715,13 +709,11 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     expect(harness.recorder.plans[0]?.caseRefs).toEqual(result.value.caseEvidence);
     expect(harness.recorder.events[0]).toBe(`plan:${result.value.planId}`);
   });
-
   test("fails the boundary when the protected suite is missing and fails preflight when stale", async () => {
     const validInput = input();
     const { protectedSuite: _protectedSuite, ...withoutProtectedSuite } = validInput;
     const missing = DynamicPreflightInputBoundarySchema.safeParse(withoutProtectedSuite);
     expect(missing.success).toBe(false);
-
     const staleSuite: ProtectedEvaluationSuiteRevision = Object.freeze({
       ...protectedSuite,
       revision: protectedSuite.revision + 1,
@@ -738,11 +730,9 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     });
     expect(staleHarness.backend.prompts).toHaveLength(0);
   });
-
   test("blocks a source-overfit candidate that loses an evaluator-owned protected case", async () => {
     const harness = createHarness({ protectedRegression: true });
     const result = await harness.laboratory.runPreflight(input());
-
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.aggregation.winner).toBe("candidate");
@@ -752,11 +742,9 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       details: [`${protectedCase.caseId}:baseline`],
     });
   });
-
   test("records ambiguous comparisons as cited abstentions with no activation-eligible decision", async () => {
     const harness = createHarness({ ambiguousJudgment: true });
     const result = await harness.laboratory.runPreflight(input());
-
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.aggregation).toMatchObject({
@@ -782,11 +770,9 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       },
     });
   });
-
   test("blocks a motivating source regression even when the blind judge prefers the candidate", async () => {
     const harness = createHarness({ sourceRegression: true });
     const result = await harness.laboratory.runPreflight(input());
-
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.aggregation.winner).toBe("candidate");
@@ -796,11 +782,9 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       details: ["source-behavior"],
     });
   });
-
   test("blocks invalid candidate artifacts through a deterministic rail", async () => {
     const harness = createHarness({ invalidArtifact: true });
     const result = await harness.laboratory.runPreflight(input());
-
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.decision).toBe("block");
@@ -809,7 +793,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       details: expect.arrayContaining(["artifact failed schema validation"]),
     });
   });
-
   test("records approval_required without activating or resolving an experiment", async () => {
     const permissionCandidate = Object.freeze({
       ...candidateRevision,
@@ -827,7 +810,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
         criteria: criterionSet("Preserve my voice and concise phrasing", "voice", permissionRef),
       }),
     );
-
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.aggregation.winner).toBe("candidate");
@@ -837,7 +819,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     expect(durableReport.decision).toBe("approval_required");
     expect(PreflightReportSchema.safeParse(durableReport).success).toBe(true);
   });
-
   test("derives approval_required from manifest expansion despite a lying empty delta", async () => {
     const expandedCandidate = Object.freeze({
       ...candidateRevision,
@@ -860,8 +841,8 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     );
     expect(result).toMatchObject({ ok: true, value: { decision: "approval_required" } });
   });
-
   test("records explicit approval-required activation policy even without permission expansion", async () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const approvalCandidate = Object.freeze({
       ...candidateRevision,
       activationPolicy: Object.freeze({ mode: "approval_required" as const, scope: "research" }),
@@ -875,14 +856,12 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     );
     expect(result).toMatchObject({ ok: true, value: { decision: "approval_required" } });
   });
-
   test("an explicit criterion changes generated cases and evidence-backed judgment", async () => {
     const voiceHarness = createHarness();
     const factualHarness = createHarness();
     const voice = await voiceHarness.laboratory.runPreflight(input());
     const factualCriteria = criterionSet("Prioritize factual completeness", "factual");
     const factual = await factualHarness.laboratory.runPreflight(input({ criteria: factualCriteria }));
-
     expect(voice.ok && factual.ok).toBe(true);
     if (!voice.ok || !factual.ok) return;
     expect(voice.value.cases.find((item) => item.kind === "generated_transfer")?.input).toContain(
@@ -897,7 +876,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       { criterionId: "factual", revision: 1 },
     ]);
   });
-
   test("fails closed before role execution when the complete candidate digest is mismatched", async () => {
     const harness = createHarness();
     const mismatchedRef = Object.freeze({ ...candidateRef, bundleDigest: "0".repeat(64) });
@@ -907,14 +885,12 @@ describe("AC-06 dynamic evaluation laboratory", () => {
         criteria: criterionSet("Preserve my voice and concise phrasing", "voice", mismatchedRef),
       }),
     );
-
     expect(result).toMatchObject({
       ok: false,
       error: { code: "identity_mismatch", stage: "setup" },
     });
     expect(harness.backend.prompts).toHaveLength(0);
   });
-
   test("accepts a genesis comparison for a genuinely new scoped capability slot", async () => {
     const { predecessorRevisionId: _predecessorRevisionId, ...candidateWithoutPredecessor } =
       candidateRevision;
@@ -934,7 +910,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
         criteria: criterionSet("Preserve my voice and concise phrasing", "voice", newSlotRef),
       }),
     );
-
     expect(result).toMatchObject({
       ok: true,
       value: {
@@ -944,7 +919,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       },
     });
   });
-
   test("rejects a cross-capability replacement when the candidate claims a predecessor", async () => {
     const crossCapabilityRevision = Object.freeze({
       ...candidateRevision,
@@ -962,7 +936,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
         criteria: criterionSet("Preserve my voice and concise phrasing", "voice", crossCapabilityRef),
       }),
     );
-
     expect(result).toMatchObject({
       ok: false,
       error: {
@@ -974,13 +947,11 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     });
     expect(harness.backend.prompts).toHaveLength(0);
   });
-
   test("keeps held-out cases from candidate authors and blinds judge arm identity", async () => {
     const harness = createHarness();
     const result = await harness.laboratory.runPreflight(input());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-
     const authorView = createCandidateAuthorCaseView(result.value.cases);
     expect(authorView.sourceCases.map((item) => item.caseId)).toEqual([sourceCase.caseId]);
     expect(JSON.stringify(authorView)).not.toContain(protectedCase.input);
@@ -1003,7 +974,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       expect(request.prompt).toContain('"name": "arm_B"');
     }
   });
-
   test("swaps generator, judge, and aggregation strategies into a comparable research run", async () => {
     const defaultHarness = createHarness();
     const alternativeHarness = createHarness();
@@ -1016,7 +986,6 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     const alternativeRun = await alternativeHarness.laboratory.runPreflight(
       input({ config: alternativeConfig }),
     );
-
     expect(defaultRun.ok && alternativeRun.ok).toBe(true);
     if (!defaultRun.ok || !alternativeRun.ok) return;
     expect(alternativeRun.value.decision).toBe("pass");
@@ -1032,11 +1001,9 @@ describe("AC-06 dynamic evaluation laboratory", () => {
     });
     expect(alternativeRun.value.aggregation.summary).toContain("confidence-weighted-v1");
   });
-
   test("surfaces malformed role output with repair telemetry", async () => {
     const harness = createHarness({ malformedGenerator: true }, 1);
     const result = await harness.laboratory.runPreflight(input());
-
     expect(result).toMatchObject({
       ok: false,
       error: {
@@ -1047,11 +1014,9 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       },
     });
   });
-
   test("records successful structured-output repair telemetry in the report", async () => {
     const harness = createHarness({ repairGenerator: true }, 1);
     const result = await harness.laboratory.runPreflight(input());
-
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.roleTelemetry[0]?.telemetry).toMatchObject({
@@ -1060,14 +1025,12 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       status: "completed",
     });
   });
-
   test("surfaces cancellation with aborted role telemetry", async () => {
     const harness = createHarness({ latencyMs: 50 });
     const controller = new AbortController();
     const pending = harness.laboratory.runPreflight(input({ signal: controller.signal }));
     controller.abort("test cancellation");
     const result = await pending;
-
     expect(result).toMatchObject({
       ok: false,
       error: {
@@ -1078,11 +1041,9 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       },
     });
   });
-
   test("blocks a trial runner identity mismatch through the protected identity rail", async () => {
     const harness = createHarness({ returnedRevisionMismatch: true });
     const result = await harness.laboratory.runPreflight(input());
-
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.decision).toBe("block");

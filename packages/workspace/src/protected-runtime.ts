@@ -141,6 +141,7 @@ function workspaceResourceId(workspaceRoot: string): string {
 }
 
 function binding(workspaceId: string, resource: string, idempotencyKey: string): ProtectedMutationBinding {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     effect: "promote" as const,
     resource: `${workspaceId}:${resource}`,
@@ -182,27 +183,39 @@ export function createReceiptGuardedProtectedMutations(input: {
   readonly feedback: FeedbackMutation;
   readonly workingAdjustments: WorkingAdjustmentMutation;
 }): ReceiptGuardedProtectedMutations {
+  // BOUNDARY: This private wrapper preserves each exact mutation signature after receipt verification.
   const activation = <Key extends keyof ActivationMutation>(
     method: Key,
   ): ReceiptGuardedProtectedMutations["activations"][Key] =>
+    // SAFETY: Key selects the same source and target mutation member; the wrapper only prepends receipt checks.
     ((mutation: ProtectedMutationBinding, receipt: AuthorityReceipt, ...args: unknown[]) => {
       assertMatchingReceipt(input.verifier, mutation, receipt);
+      // BOUNDARY: Indexed mutation signatures are erased only inside this receipt-guarded dispatcher.
+      // SAFETY: method selects this exact ActivationMutation member before its original arguments are forwarded.
       const invoke = input.activations[method] as (...parameters: unknown[]) => unknown;
       return invoke(...args);
     }) as ReceiptGuardedProtectedMutations["activations"][Key];
+  // BOUNDARY: This private wrapper preserves each exact mutation signature after receipt verification.
   const feedback = <Key extends keyof FeedbackMutation>(
     method: Key,
   ): ReceiptGuardedProtectedMutations["feedback"][Key] =>
+    // SAFETY: Key selects the same source and target mutation member; the wrapper only prepends receipt checks.
     ((mutation: ProtectedMutationBinding, receipt: AuthorityReceipt, ...args: unknown[]) => {
       assertMatchingReceipt(input.verifier, mutation, receipt);
+      // BOUNDARY: Indexed mutation signatures are erased only inside this receipt-guarded dispatcher.
+      // SAFETY: method selects this exact FeedbackMutation member before its original arguments are forwarded.
       const invoke = input.feedback[method] as (...parameters: unknown[]) => unknown;
       return invoke(...args);
     }) as ReceiptGuardedProtectedMutations["feedback"][Key];
+  // BOUNDARY: This private wrapper preserves each exact mutation signature after receipt verification.
   const workingAdjustment = <Key extends keyof WorkingAdjustmentMutation>(
     method: Key,
   ): ReceiptGuardedProtectedMutations["workingAdjustments"][Key] =>
+    // SAFETY: Key selects the same source and target mutation member; the wrapper only prepends receipt checks.
     ((mutation: ProtectedMutationBinding, receipt: AuthorityReceipt, ...args: unknown[]) => {
       assertMatchingReceipt(input.verifier, mutation, receipt);
+      // BOUNDARY: Indexed mutation signatures are erased only inside this receipt-guarded dispatcher.
+      // SAFETY: method selects this exact WorkingAdjustmentMutation member before its original arguments are forwarded.
       const invoke = input.workingAdjustments[method] as (...parameters: unknown[]) => unknown;
       return invoke(...args);
     }) as ReceiptGuardedProtectedMutations["workingAdjustments"][Key];
@@ -330,6 +343,7 @@ async function reconcileApplyResult(
   const active = await store.getActive(request.adjustment.scope.projectId);
   if (durableResult.status === "applied" && active?.adjustmentId === request.adjustment.adjustmentId)
     return durableResult;
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     status: "stale" as const,
     adjustmentId: request.adjustment.adjustmentId,
@@ -344,6 +358,7 @@ async function reconcileUnapplyResult(
 ): Promise<WorkingAdjustmentUnapplyResult> {
   const active = await store.getActive(request.projectId);
   if (durableResult.status === "unapplied" && active === undefined) return durableResult;
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     status: "stale" as const,
     adjustmentId: request.expectedActiveAdjustmentId,

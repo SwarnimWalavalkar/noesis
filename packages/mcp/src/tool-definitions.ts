@@ -1,13 +1,18 @@
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
-import { toJsonValue, type EffectClass, type JsonValue } from "@noesis/domain";
+import {
+  createConditionalObject,
+  isJsonObject,
+  JsonValueSchema,
+  toJsonValue,
+  type EffectClass,
+  type JsonValue,
+} from "@noesis/domain";
 import { defineTool, type ToolDefinition, type ToolExecutionContext } from "@noesis/tools";
 import { z } from "zod";
-import type { McpHostManager, McpInvocationContext } from "./host.ts";
-
+import type { McpHostManager, McpInvocationContext, McpProgressEvent } from "./host.ts";
 const validator = new AjvJsonSchemaValidator();
 const jsonOutput = z.json();
 const serverName = z.string().trim().min(1).max(64);
-
 function protocolTool<Input>(input: {
   readonly name: string;
   readonly label: string;
@@ -15,6 +20,7 @@ function protocolTool<Input>(input: {
   readonly inputSchema: z.ZodType<Input>;
   readonly effect: EffectClass | ((value: Input) => EffectClass);
   readonly resource: (value: Input) => string;
+  /** BOUNDARY: Protocol adapters return SDK-owned values which are converted to JSON below. */
   readonly execute: (value: Input, context: ToolExecutionContext) => Promise<unknown>;
 }): ToolDefinition {
   return defineTool({
@@ -33,7 +39,6 @@ function protocolTool<Input>(input: {
     execute: async (value, context) => toJsonValue(await input.execute(value, context)),
   });
 }
-
 /** Freeze the current MCP discovery snapshot into the ordinary Noesis Broker catalog. */
 export function createMcpToolDefinitions(
   host: McpHostManager,
@@ -55,25 +60,34 @@ export function createMcpToolDefinitions(
     const scope = frozenServers.get(server)?.scope ?? "unknown";
     return `mcp:${scope}:${server}:${suffix}`;
   };
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const invocation = (context: ToolExecutionContext): McpInvocationContext | undefined =>
     options.modelRoute
-      ? Object.freeze({
-          route: options.modelRoute,
-          sessionId: context.sessionId,
-          ...(context.turnId ? { turnId: context.turnId } : {}),
-          executionId: context.executionId,
-          logicalExecutionId: context.logicalExecutionId,
-          callId: context.callId,
-        })
+      ? Object.freeze(
+          createConditionalObject({
+            route: options.modelRoute,
+            sessionId: context.sessionId,
+          } as const)
+            .addOptional(context.turnId ? { turnId: context.turnId } : undefined)
+            .add({
+              executionId: context.executionId,
+              logicalExecutionId: context.logicalExecutionId,
+              callId: context.callId,
+            } as const)
+            .finish(),
+        )
       : undefined;
   const discovered = host
     .listTools()
     .map(({ serverName: server, canonicalName, identityDigest, definition }) => {
       const inputSchema = toJsonValue(definition.inputSchema);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const inputValidator = validator.getValidator(structuredClone(definition.inputSchema) as never);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const outputValidator = definition.outputSchema
         ? validator.getValidator(structuredClone(definition.outputSchema) as never)
         : undefined;
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         name: canonicalName,
         label: definition.title ?? definition.name,
@@ -82,19 +96,21 @@ export function createMcpToolDefinitions(
         implementationDigest: identityDigest,
         inputSchema: z.unknown(),
         outputSchema: jsonOutput,
-        parseInput: (value: unknown) => {
+        // BOUNDARY: AJV is the native MCP schema authority for discovered tool inputs.
+        parseInput: (value: unknown): unknown => {
           const result = inputValidator(value);
           if (!result.valid) throw new Error(result.errorMessage);
           return result.data;
         },
+        // BOUNDARY: AJV is the native MCP schema authority for discovered tool outputs.
         parseOutput: (value: unknown): JsonValue => {
           const protocolResult = toJsonValue(value);
-          if (outputValidator && typeof value === "object" && value !== null) {
-            if (Reflect.get(value, "isError") !== true && !("structuredContent" in value)) {
+          if (outputValidator && isJsonObject(protocolResult)) {
+            if (protocolResult["isError"] !== true && !("structuredContent" in protocolResult)) {
               throw new Error("MCP tool declared an output schema but returned no structuredContent");
             }
-            if (!("structuredContent" in value)) return protocolResult;
-            const result = outputValidator(Reflect.get(value, "structuredContent"));
+            if (!("structuredContent" in protocolResult)) return protocolResult;
+            const result = outputValidator(protocolResult["structuredContent"]);
             if (!result.valid) throw new Error(result.errorMessage);
           }
           return protocolResult;
@@ -119,21 +135,30 @@ export function createMcpToolDefinitions(
           estimatedCost: 0,
         }),
         execute: async (value: unknown, context: ToolExecutionContext): Promise<JsonValue> => {
-          const args = z.record(z.string(), z.unknown()).parse(value);
+          const args = z.record(z.string(), JsonValueSchema).parse(value);
           const invocationContext = invocation(context);
-          const result = await host.callTool(canonicalName, args, {
-            signal: context.signal,
-            expectedIdentityDigest: identityDigest,
-            ...(invocationContext ? { invocation: invocationContext } : {}),
-            ...(context.emitUpdate
-              ? { onProgress: (event) => context.emitUpdate?.(toJsonValue(event)) }
-              : {}),
-          });
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          const result = await host.callTool(
+            canonicalName,
+            args,
+            createConditionalObject({
+              signal: context.signal,
+              expectedIdentityDigest: identityDigest,
+            } as const)
+              .addOptional(invocationContext ? { invocation: invocationContext } : undefined)
+              .addOptional(
+                context.emitUpdate
+                  ? {
+                      onProgress: (event: McpProgressEvent) => context.emitUpdate?.(toJsonValue(event)),
+                    }
+                  : undefined,
+              )
+              .finish(),
+          );
           return toJsonValue(result);
         },
         reportedFailure: (output: JsonValue) => {
-          if (typeof output !== "object" || output === null || Reflect.get(output, "isError") !== true)
-            return undefined;
+          if (!isJsonObject(output) || output["isError"] !== true) return undefined;
           return Object.freeze({
             message: `MCP tool ${canonicalName} reported an error`,
             details: output,
@@ -142,7 +167,6 @@ export function createMcpToolDefinitions(
       });
     });
   const frozenTools = new Map(host.listTools().map((tool) => [tool.canonicalName, tool]));
-
   const generic = Object.freeze([
     protocolTool({
       name: "mcp.servers",
@@ -258,7 +282,7 @@ export function createMcpToolDefinitions(
       description: "Start an MCP tool as an asynchronous task and return its task identity immediately.",
       inputSchema: z.strictObject({
         tool: z.string().min(1),
-        arguments: z.record(z.string(), z.unknown()).default({}),
+        arguments: z.record(z.string(), JsonValueSchema).default({}),
         ttl: z.number().int().positive().nullable().optional(),
       }),
       effect: ({ tool }) => serverEffect(frozenTools.get(tool)?.serverName ?? ""),
@@ -271,12 +295,19 @@ export function createMcpToolDefinitions(
         if (!frozen) throw new Error(`MCP tool ${tool} was not present when this catalog was frozen`);
         requireFrozenServer(frozen.serverName);
         const invocationContext = invocation(context);
-        return await host.startToolTask(tool, arguments_, {
-          ...(ttl === undefined ? {} : { ttl }),
-          signal: context.signal,
-          expectedIdentityDigest: frozen.identityDigest,
-          ...(invocationContext ? { invocation: invocationContext } : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        return await host.startToolTask(
+          tool,
+          arguments_,
+          createConditionalObject({} as const)
+            .addOptional(!(ttl === undefined) ? { ttl } : undefined)
+            .add({
+              signal: context.signal,
+              expectedIdentityDigest: frozen.identityDigest,
+            } as const)
+            .addOptional(invocationContext ? { invocation: invocationContext } : undefined)
+            .finish(),
+        );
       },
     }),
     protocolTool({

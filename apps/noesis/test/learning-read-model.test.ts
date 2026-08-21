@@ -1,4 +1,9 @@
-import { type DurableJobRecord, type DurableJobStatus, WORKING_ADJUSTMENT_LIMITS } from "@noesis/domain";
+import {
+  createConditionalObject,
+  type DurableJobRecord,
+  type DurableJobStatus,
+  WORKING_ADJUSTMENT_LIMITS,
+} from "@noesis/domain";
 import type {
   AuthorRevisionJobPayload,
   CoordinatorJobView,
@@ -13,33 +18,31 @@ import {
   loadLearningActivityForSession,
   loadLearningInspectionForSession,
 } from "../src/learning-read-model.ts";
-
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const evidence = Object.freeze({
   kind: "database_row" as const,
   table: "messages" as const,
   rowId: "message-1",
 });
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const baseline = Object.freeze({
   kind: "capability_revision" as const,
   capabilityId: "general-collaboration",
   capabilityRevisionId: "general-collaboration-v1",
   bundleDigest: "a".repeat(64),
 });
-
 function isReflectionJob(job: CoordinatorJobView): job is CoordinatorJobView & {
   readonly kind: "runtime.reflect_turn";
   readonly payload: ReflectTurnJobPayload;
 } {
   return job.kind === "runtime.reflect_turn";
 }
-
 function isExperimentJob(job: CoordinatorJobView): job is CoordinatorJobView & {
   readonly kind: "runtime.author_revision" | "runtime.preflight";
   readonly payload: AuthorRevisionJobPayload | PreflightJobPayload;
 } {
   return job.kind === "runtime.author_revision" || job.kind === "runtime.preflight";
 }
-
 function record(input: {
   readonly jobId: string;
   readonly kind: string;
@@ -49,36 +52,49 @@ function record(input: {
   readonly result?: unknown;
   readonly error?: string;
 }): DurableJobRecord {
-  return Object.freeze({
-    jobId: input.jobId,
-    kind: input.kind,
-    payload: input.payload,
-    payloadRefs: Object.freeze([evidence]),
-    operationId: `operation:${input.jobId}`,
-    idempotencyKey: `idempotency:${input.jobId}`,
-    status: input.status,
-    notBefore: "2026-08-01T00:00:00.000Z",
-    attempt: input.status === "scheduled" ? 0 : 1,
-    maxAttempts: 3,
-    estimatedCost: 1,
-    budgetRemaining: 2,
-    ...(input.result === undefined ? {} : { result: input.result }),
-    ...(input.error
-      ? {
-          lastError: Object.freeze({
-            code: "research_failed",
-            message: input.error,
-            retryable: false,
-            ambiguous: false,
-          }),
-        }
-      : {}),
-    createdAt: "2026-08-01T00:00:00.000Z",
-    updatedAt: input.updatedAt,
-    ...(input.status === "completed" || input.status === "failed" ? { completedAt: input.updatedAt } : {}),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  return Object.freeze(
+    createConditionalObject({
+      jobId: input.jobId,
+      kind: input.kind,
+      payload: input.payload,
+      payloadRefs: Object.freeze([evidence]),
+      operationId: `operation:${input.jobId}`,
+      idempotencyKey: `idempotency:${input.jobId}`,
+      status: input.status,
+      notBefore: "2026-08-01T00:00:00.000Z",
+      attempt: input.status === "scheduled" ? 0 : 1,
+      maxAttempts: 3,
+      estimatedCost: 1,
+      budgetRemaining: 2,
+    } as const)
+      .addOptional(!(input.result === undefined) ? { result: input.result } : undefined)
+      .addOptional(
+        input.error
+          ? {
+              lastError: Object.freeze({
+                code: "research_failed",
+                message: input.error,
+                retryable: false,
+                ambiguous: false,
+              }),
+            }
+          : undefined,
+      )
+      .add({
+        createdAt: "2026-08-01T00:00:00.000Z",
+        updatedAt: input.updatedAt,
+      } as const)
+      .addOptional(
+        input.status === "completed" || input.status === "failed"
+          ? {
+              completedAt: input.updatedAt,
+            }
+          : undefined,
+      )
+      .finish(),
+  );
 }
-
 function reflection(input: {
   readonly jobId: string;
   readonly sessionId: string;
@@ -111,20 +127,23 @@ function reflection(input: {
     retrievalStrategyReason: "Use relevant session history",
     routingStrategyId: "router.default.v1",
   });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return Object.freeze({
     kind: "runtime.reflect_turn",
     payload,
-    job: record({
-      jobId: input.jobId,
-      kind: "runtime.reflect_turn",
-      payload,
-      status: input.status,
-      updatedAt: input.updatedAt,
-      ...(input.result === undefined ? {} : { result: input.result }),
-    }),
+    job: record(
+      createConditionalObject({
+        jobId: input.jobId,
+        kind: "runtime.reflect_turn",
+        payload,
+        status: input.status,
+        updatedAt: input.updatedAt,
+      } as const)
+        .addOptional(!(input.result === undefined) ? { result: input.result } : undefined)
+        .finish(),
+    ),
   });
 }
-
 function author(input: {
   readonly jobId: string;
   readonly experimentId: string;
@@ -135,44 +154,62 @@ function author(input: {
   readonly sourceSessionId?: string;
   readonly parentJobId?: string;
 }): CoordinatorJobView {
-  const payload: AuthorRevisionJobPayload = Object.freeze({
-    schemaVersion: 1,
-    experimentId: input.experimentId,
-    ...(input.sourceSessionId ? { sourceSessionId: input.sourceSessionId } : {}),
-    ...(input.parentJobId ? { parentJobId: input.parentJobId } : {}),
-    hypothesisDedupeKey: `hypothesis:${input.experimentId}`,
-    retrievalStrategyId: "session-search.hybrid.v1",
-    routingStrategyId: "router.default.v1",
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  const payload: AuthorRevisionJobPayload = Object.freeze(
+    createConditionalObject({
+      schemaVersion: 1,
+      experimentId: input.experimentId,
+    } as const)
+      .addOptional(input.sourceSessionId ? { sourceSessionId: input.sourceSessionId } : undefined)
+      .addOptional(input.parentJobId ? { parentJobId: input.parentJobId } : undefined)
+      .add({
+        hypothesisDedupeKey: `hypothesis:${input.experimentId}`,
+        retrievalStrategyId: "session-search.hybrid.v1",
+        routingStrategyId: "router.default.v1",
+      } as const)
+      .finish(),
+  );
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return Object.freeze({
     kind: "runtime.author_revision",
     payload,
-    job: record({
-      jobId: input.jobId,
-      kind: "runtime.author_revision",
-      payload,
-      status: input.status,
-      updatedAt: input.updatedAt,
-      ...(input.result === undefined ? {} : { result: input.result }),
-      ...(input.error ? { error: input.error } : {}),
-    }),
+    job: record(
+      createConditionalObject({
+        jobId: input.jobId,
+        kind: "runtime.author_revision",
+        payload,
+        status: input.status,
+        updatedAt: input.updatedAt,
+      } as const)
+        .addOptional(!(input.result === undefined) ? { result: input.result } : undefined)
+        .addOptional(input.error ? { error: input.error } : undefined)
+        .finish(),
+    ),
   });
 }
-
 function preflight(
   experimentId: string,
-  lineage: { readonly sourceSessionId?: string; readonly parentJobId?: string } = {},
+  lineage: {
+    readonly sourceSessionId?: string;
+    readonly parentJobId?: string;
+  } = {},
 ): CoordinatorJobView {
-  const payload: PreflightJobPayload = Object.freeze({
-    schemaVersion: 1,
-    experimentId,
-    ...(lineage.sourceSessionId ? { sourceSessionId: lineage.sourceSessionId } : {}),
-    ...(lineage.parentJobId ? { parentJobId: lineage.parentJobId } : {}),
-    preflightId: "preflight-1",
-    planId: "plan-1",
-    retrievalStrategyId: "session-search.hybrid.v1",
-    routingStrategyId: "router.default.v1",
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  const payload: PreflightJobPayload = Object.freeze(
+    createConditionalObject({
+      schemaVersion: 1,
+      experimentId,
+    } as const)
+      .addOptional(lineage.sourceSessionId ? { sourceSessionId: lineage.sourceSessionId } : undefined)
+      .addOptional(lineage.parentJobId ? { parentJobId: lineage.parentJobId } : undefined)
+      .add({
+        preflightId: "preflight-1",
+        planId: "plan-1",
+        retrievalStrategyId: "session-search.hybrid.v1",
+        routingStrategyId: "router.default.v1",
+      } as const)
+      .finish(),
+  );
   return Object.freeze({
     kind: "runtime.preflight",
     payload,
@@ -195,7 +232,6 @@ function preflight(
     }),
   });
 }
-
 describe("ambient learning read model", () => {
   test("inspects authoritative working adjustment state and bounded served evidence", async () => {
     const projected = learningActivityForSession(
@@ -233,6 +269,7 @@ describe("ambient learning read model", () => {
         settledAt: `2026-08-01T00:00:${String(index).padStart(2, "0")}.000Z`,
       }),
     );
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const enriched = await enrichLearningActivityWithWorkingAdjustments(projected, {
       workingAdjustments: {
         get: async (adjustmentId) => (adjustmentId === adjustment.adjustmentId ? adjustment : undefined),
@@ -254,7 +291,6 @@ describe("ambient learning read model", () => {
           }),
       },
     });
-
     expect(enriched[0]?.workingAdjustment).toEqual(
       expect.objectContaining({
         adjustmentId: "adjustment-1",
@@ -277,7 +313,6 @@ describe("ambient learning read model", () => {
       outcomes: { get: async () => undefined },
     });
     expect(inactive[0]?.workingAdjustment?.status).toBe("inactive");
-
     const emptyCoordinator: Pick<RuntimeCoordinator, "listJobPage"> = {
       listJobPage: async () => Object.freeze({ jobs: Object.freeze([]), exhausted: true }),
     };
@@ -300,7 +335,6 @@ describe("ambient learning read model", () => {
     expect(fresh.currentWorkingAdjustment).toEqual(
       expect.objectContaining({ adjustmentId: "adjustment-1", status: "active" }),
     );
-
     const representedCoordinator: Pick<RuntimeCoordinator, "listJobPage"> = {
       listJobPage: async ({ kind } = {}) =>
         Object.freeze({
@@ -333,7 +367,6 @@ describe("ambient learning read model", () => {
     expect(represented.currentWorkingAdjustment?.adjustmentId).toBe("adjustment-1");
     expect(represented.activity[0]?.workingAdjustment).toBeUndefined();
   });
-
   test("builds the current adjustment from one authoritative active read", async () => {
     const adjustment = Object.freeze({
       adjustmentId: "adjustment-active-snapshot",
@@ -390,7 +423,6 @@ describe("ambient learning read model", () => {
         outcomes: { get: async () => undefined },
       },
     );
-
     expect(activeReadCount).toBe(1);
     expect(inspection.currentWorkingAdjustment).toEqual(
       expect.objectContaining({
@@ -405,7 +437,6 @@ describe("ambient learning read model", () => {
       }),
     );
   });
-
   test("keeps adjustment cache identity unambiguous across project and adjustment ids", async () => {
     const first = Object.freeze({
       adjustmentId: "gamma",
@@ -452,7 +483,6 @@ describe("ambient learning read model", () => {
       ],
       "session-1",
     );
-
     const enriched = await enrichLearningActivityWithWorkingAdjustments(projected, {
       workingAdjustments: {
         get: async (adjustmentId) =>
@@ -472,7 +502,6 @@ describe("ambient learning read model", () => {
       },
       outcomes: { get: async () => undefined },
     });
-
     expect(enriched.find(({ jobId }) => jobId === "first-adjustment")?.workingAdjustment).toEqual(
       expect.objectContaining({ projectId: "alpha:beta", adjustmentId: "gamma" }),
     );
@@ -480,7 +509,6 @@ describe("ambient learning read model", () => {
       expect.objectContaining({ projectId: "alpha", adjustmentId: "beta:gamma" }),
     );
   });
-
   test("projects authoritative job state and follows only this session's experiment chain", () => {
     const experimentId = "experiment-session-a";
     const activity = learningActivityForSession(
@@ -570,7 +598,6 @@ describe("ambient learning read model", () => {
       ],
       "session-a",
     );
-
     expect(activity.map(({ jobId }) => jobId)).toEqual([
       "preflight-complete",
       "author-failed",
@@ -623,8 +650,8 @@ describe("ambient learning read model", () => {
     expect(activity.some(({ jobId }) => jobId === "modern-foreign-author")).toBe(false);
     expect(activity.some(({ jobId }) => jobId === "modern-local-payload-only-author")).toBe(false);
   });
-
   test("fails closed when durable reflection evidence exceeds the shared limit", () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const references = Array.from({ length: WORKING_ADJUSTMENT_LIMITS.evidenceRefs }, (_, index) => ({
       kind: "database_row" as const,
       table: "messages" as const,
@@ -659,7 +686,6 @@ describe("ambient learning read model", () => {
       ],
       "session-evidence",
     );
-
     expect(activity.find(({ jobId }) => jobId === "reflection-evidence-at-limit")?.evidenceRefs).toEqual(
       references,
     );
@@ -667,9 +693,8 @@ describe("ambient learning read model", () => {
       undefined,
     );
   });
-
   test("loads a session and its experiment chain beyond one thousand older unrelated jobs", async () => {
-    const unrelated = Array.from({ length: 1_001 }, (_, index) =>
+    const unrelated = Array.from({ length: 1001 }, (_, index) =>
       reflection({
         jobId: `reflection-unrelated-${String(index).padStart(4, "0")}`,
         sessionId: `unrelated-${String(index)}`,
@@ -740,15 +765,21 @@ describe("ambient learning read model", () => {
       const limit = request.limit ?? 100;
       const page = Object.freeze(ordered.slice(0, limit));
       const last = page.at(-1)?.job;
-      return Object.freeze({
-        jobs: page,
-        exhausted: page.length < limit,
-        ...(last ? { nextCursor: Object.freeze({ createdAt: last.createdAt, jobId: last.jobId }) } : {}),
-      });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+      return Object.freeze(
+        createConditionalObject({
+          jobs: page,
+          exhausted: page.length < limit,
+        } as const)
+          .addOptional(
+            last
+              ? { nextCursor: Object.freeze({ createdAt: last.createdAt, jobId: last.jobId }) }
+              : undefined,
+          )
+          .finish(),
+      );
     };
-
     const activity = await loadLearningActivityForSession({ listJobPage }, "target-session");
-
     expect(activity.map(({ jobId }) => jobId)).toEqual([
       "preflight-complete",
       "author-target",
@@ -782,7 +813,6 @@ describe("ambient learning read model", () => {
       requests.every((request) => request.sessionId !== undefined || request.experimentIds !== undefined),
     ).toBe(true);
   });
-
   test("continues after a full raw page decodes to no coordinator jobs", async () => {
     const target = reflection({
       jobId: "reflection-after-legacy-row",
@@ -806,9 +836,7 @@ describe("ambient learning read model", () => {
         });
       return Object.freeze({ jobs: Object.freeze([target]), exhausted: true });
     };
-
     const activity = await loadLearningActivityForSession({ listJobPage }, "target-session");
-
     expect(activity).toEqual([
       expect.objectContaining({
         jobId: "reflection-after-legacy-row",
@@ -816,7 +844,6 @@ describe("ambient learning read model", () => {
       }),
     ]);
   });
-
   test("processes experiment chunks sequentially without truncating the session chain", async () => {
     const experimentIds = Array.from(
       { length: 251 },
@@ -861,9 +888,7 @@ describe("ambient learning read model", () => {
       concurrentExperimentQueries -= 1;
       return Object.freeze({ jobs: Object.freeze(jobs), exhausted: true });
     };
-
     const activity = await loadLearningActivityForSession({ listJobPage }, "target-session");
-
     expect(maximumConcurrentExperimentQueries).toBe(2);
     expect(requestedChunkSizes).toEqual([250, 250, 1, 1]);
     expect(activity.filter(({ stage }) => stage === "reflection")).toHaveLength(251);

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createConditionalObject } from "@noesis/domain";
 // Imported first so the filter is installed before any module can emit a load-time warning.
 import "./process-warnings.ts";
 import { homedir } from "node:os";
@@ -34,11 +35,11 @@ import { runFirstLaunchOnboarding, shouldAutoOnboard } from "./onboarding.ts";
 import { createSurfaceAuthCallbacks, promptsFromSurface } from "./prompt-surface.ts";
 import {
   type ApplicationRuntime,
+  type ApplicationRuntimeCompositionOptions,
   createApplicationRuntimeComposition,
   resolveActiveProject,
 } from "./runtime-composition.ts";
 import { createApplicationMcpIntegration } from "./mcp-integration.ts";
-
 interface CliInput {
   readonly args: readonly string[];
   readonly command: string;
@@ -50,21 +51,29 @@ interface CliInput {
   readonly home: string;
   readonly overrides: ConfigOverrides;
   readonly session:
-    | { readonly mode: "new" }
-    | { readonly mode: "pick" }
-    | { readonly mode: "continue" }
-    | { readonly mode: "resume"; readonly trailId: string };
+    | {
+        readonly mode: "new";
+      }
+    | {
+        readonly mode: "pick";
+      }
+    | {
+        readonly mode: "continue";
+      }
+    | {
+        readonly mode: "resume";
+        readonly trailId: string;
+      };
 }
-
 type SessionStartup = CliInput["session"];
-
 const COMMANDS = new Set(["tui", "onboard", "inspect", "rebuild", "config", "auth", "skills", "help"]);
 const CONFIG_COMMANDS = new Set(["show", "init", "set"]);
 const AUTH_COMMANDS = new Set(["status", "login", "logout"]);
 const SKILL_COMMANDS = new Set(["list", "install", "update", "remove"]);
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const AGENT_OPTIONS = ["--provider", "--model", "--thinking-level"] as const;
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const VALUE_OPTIONS = ["--home", ...AGENT_OPTIONS] as const;
-
 function parseSessionStartup(
   args: readonly string[],
   command: string,
@@ -76,7 +85,6 @@ function parseSessionStartup(
     throw new Error("Use --resume <session-id>, with a space before the session ID");
   if (args.some((argument) => argument.startsWith("--continue=")))
     throw new Error("--continue does not accept a value");
-
   const resumeIndexes = args.flatMap((argument, index) => (argument === "--resume" ? [index] : []));
   const continueIndexes = args.flatMap((argument, index) => (argument === "--continue" ? [index] : []));
   if (resumeIndexes.length > 1) throw new Error("--resume may be specified only once");
@@ -87,7 +95,6 @@ function parseSessionStartup(
     throw new Error("--resume is available only with the tui command");
   if (continueIndexes.length > 0 && command !== "tui")
     throw new Error("--continue is available only with the tui command");
-
   const consumed = new Set<number>();
   const continueIndex = continueIndexes[0];
   if (continueIndex !== undefined) {
@@ -97,7 +104,6 @@ function parseSessionStartup(
     consumed.add(continueIndex);
     return { session: { mode: "continue" }, consumed };
   }
-
   const resumeIndex = resumeIndexes[0];
   const resumeValue = resumeIndex === undefined ? undefined : args[resumeIndex + 1];
   const resumeId = resumeValue && !resumeValue.startsWith("--") ? resumeValue.trim() : undefined;
@@ -117,7 +123,6 @@ function parseSessionStartup(
     consumed,
   };
 }
-
 function parseArgs(argv: readonly string[]): CliInput {
   const args = argv[0] === "--" ? argv.slice(1) : argv;
   const command = args[0] === undefined || args[0].startsWith("--") ? "tui" : args[0];
@@ -156,7 +161,6 @@ function parseArgs(argv: readonly string[]): CliInput {
   const operands = args.filter((argument, index) => !consumed.has(index) && !argument.startsWith("--"));
   const unknownOption = args.find((argument, index) => !consumed.has(index) && argument.startsWith("--"));
   if (unknownOption) throw new Error(`Unknown ${command} option ${unknownOption}`);
-
   let subcommand: string | undefined;
   let authProvider: string | undefined;
   let skillSource: string | undefined;
@@ -182,7 +186,6 @@ function parseArgs(argv: readonly string[]): CliInput {
   } else if (operands[0]) {
     throw new Error(`Unexpected ${command} argument ${operands[0]}`);
   }
-
   const allowedOptions = new Set<string>(["--help"]);
   if (command !== "help") allowedOptions.add("--home");
   if (command === "tui" || command === "inspect" || command === "rebuild")
@@ -216,28 +219,33 @@ function parseArgs(argv: readonly string[]): CliInput {
   const provider = optionValues.get("--provider");
   const model = optionValues.get("--model");
   const thinkingLevel = optionValues.get("--thinking-level");
-  return {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return createConditionalObject({
     args,
     command,
-    ...(subcommand ? { subcommand } : {}),
-    ...(authProvider ? { authProvider } : {}),
-    ...(skillSource ? { skillSource } : {}),
-    ...(command === "skills"
-      ? {
-          skillScope: workspaceIndexes[0] === undefined ? ("personal" as const) : ("workspace" as const),
-        }
-      : {}),
-    workspaceTrusted: trustWorkspaceIndexes[0] !== undefined,
-    home,
-    session: startup.session,
-    overrides: {
-      ...(provider !== undefined ? { provider } : {}),
-      ...(model !== undefined ? { model } : {}),
-      ...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
-    },
-  };
+  } as const)
+    .addOptional(subcommand ? { subcommand } : undefined)
+    .addOptional(authProvider ? { authProvider } : undefined)
+    .addOptional(skillSource ? { skillSource } : undefined)
+    .addOptional(
+      command === "skills"
+        ? {
+            skillScope: workspaceIndexes[0] === undefined ? ("personal" as const) : ("workspace" as const),
+          }
+        : undefined,
+    )
+    .add({
+      workspaceTrusted: trustWorkspaceIndexes[0] !== undefined,
+      home,
+      session: startup.session,
+      overrides: createConditionalObject({} as const)
+        .addOptional(provider !== undefined ? { provider } : undefined)
+        .addOptional(model !== undefined ? { model } : undefined)
+        .addOptional(thinkingLevel !== undefined ? { thinkingLevel } : undefined)
+        .finish(),
+    } as const)
+    .finish();
 }
-
 const CLI_HELP = `Noesis
 
 Usage:
@@ -276,7 +284,6 @@ Workspace trust:
 The latest session is ordered by last activity, then full trail ID ascending on ties.
 A session still marked running is not recovered or resumed automatically.
 Unknown options, conflicting startup arguments, and trailing operands are rejected.`;
-
 async function createRuntime(
   config: ResolvedNoesisConfig,
   options: {
@@ -317,53 +324,63 @@ async function createRuntime(
       })
     : undefined;
   try {
-    const runtime = await createApplicationRuntimeComposition({
-      config,
-      project,
-      skills,
-      ...(mcp ? { mcp } : {}),
-      recoverInterruptedOperations: options.recoverInterruptedOperations,
-      createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
-        createPiAgentRuntime(project.root, services.models, {
-          codeExecution,
-          selfTools,
-          requirePinnedSkillSnapshot: true,
-          ...(skillLibrary ? { skills: skillLibrary } : {}),
-        }),
-      createRoleRunner: (configurations) =>
-        createPiAgentRoleRunner(project.root, services.models, configurations),
-      resolveModelContext: (provider, model) => {
-        preparePiModelSelection(services.models, Object.freeze({ provider, model }));
-        const selected = services.models.getModel(provider, model);
-        if (!selected) throw new Error(`Unknown Pi model ${provider}/${model}`);
-        return Object.freeze({
-          contextWindow: selected.contextWindow,
-          maxOutputTokens: selected.maxTokens,
-        });
-      },
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const runtime = await createApplicationRuntimeComposition(
+      createConditionalObject({
+        config,
+        project,
+        skills,
+      } as const)
+        .addOptional(mcp ? { mcp } : undefined)
+        .add({
+          recoverInterruptedOperations: options.recoverInterruptedOperations,
+          createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
+            createPiAgentRuntime(
+              project.root,
+              services.models,
+              createConditionalObject({
+                codeExecution,
+                selfTools,
+                requirePinnedSkillSnapshot: true,
+              } as const)
+                .addOptional(skillLibrary ? { skills: skillLibrary } : undefined)
+                .finish(),
+            ),
+          createRoleRunner: (configurations) =>
+            createPiAgentRoleRunner(project.root, services.models, configurations),
+          resolveModelContext: (provider, model) => {
+            preparePiModelSelection(services.models, Object.freeze({ provider, model }));
+            const selected = services.models.getModel(provider, model);
+            if (!selected) throw new Error(`Unknown Pi model ${provider}/${model}`);
+            return Object.freeze({
+              contextWindow: selected.contextWindow,
+              maxOutputTokens: selected.maxTokens,
+            });
+          },
+        } satisfies Pick<
+          ApplicationRuntimeCompositionOptions,
+          "recoverInterruptedOperations" | "createAgent" | "createRoleRunner" | "resolveModelContext"
+        >)
+        .finish(),
+    );
     return Object.freeze({ runtime, mcpInteractionBridge });
   } catch (error) {
     await mcp?.close().catch(() => undefined);
     throw error;
   }
 }
-
 const openAuthUrl = createBrowserUrlOpener({
   enabled: process.env["NOESIS_DISABLE_BROWSER_OPEN"] !== "1",
 });
-
 function surfaceAuthCallbacks(surface: OnboardingSurface) {
   return createSurfaceAuthCallbacks(surface, {
     openUrl: openAuthUrl,
     renderOAuthCallbackPage: renderNoesisOAuthCallbackPage,
   });
 }
-
 function requireInteractiveTerminal(message: string): void {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(message);
 }
-
 async function runSetupSurface<T>(
   run: (surface: OnboardingSurface) => Promise<T>,
   options: {
@@ -383,7 +400,6 @@ async function runSetupSurface<T>(
     process.exit(1);
   }
 }
-
 function hasExplicitAgentSettings(input: CliInput): boolean {
   return (
     Object.values(input.overrides).some((value) => value !== undefined) ||
@@ -392,7 +408,6 @@ function hasExplicitAgentSettings(input: CliInput): boolean {
     )
   );
 }
-
 async function runOnboarding(input: CliInput): Promise<void> {
   const services = createPiModelServices(input.home);
   await runSetupSurface(
@@ -412,7 +427,6 @@ async function runOnboarding(input: CliInput): Promise<void> {
     },
   );
 }
-
 async function runAuth(input: CliInput, auth: PiAuthOperations): Promise<void> {
   const action = input.subcommand ?? "status";
   const provider = input.authProvider;
@@ -444,7 +458,6 @@ async function runAuth(input: CliInput, auth: PiAuthOperations): Promise<void> {
   }
   throw new Error("Unknown auth command. Use auth login, auth status, or auth logout.");
 }
-
 async function runConfig(input: CliInput): Promise<void> {
   const action = input.subcommand ?? "show";
   if (action === "show") {
@@ -471,7 +484,6 @@ async function runConfig(input: CliInput): Promise<void> {
   }
   throw new Error("Unknown config command. Use config show, config init, or config set.");
 }
-
 async function runSkills(input: CliInput): Promise<void> {
   const library = createPiSkillLibrary({
     cwd: process.cwd(),
@@ -513,7 +525,6 @@ async function runSkills(input: CliInput): Promise<void> {
   }
   throw new Error("Unknown skills command. Use skills list, install, update, or remove.");
 }
-
 async function main(): Promise<void> {
   const input = parseArgs(process.argv.slice(2));
   if (input.args.includes("--help") || input.command === "help") {
@@ -603,8 +614,7 @@ async function main(): Promise<void> {
     await runtime.shutdown();
   }
 }
-
-await main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error));
+await main().catch((cause: unknown) => {
+  console.error(cause instanceof Error ? cause.message : String(cause));
   process.exitCode = 1;
 });

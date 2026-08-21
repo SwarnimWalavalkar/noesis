@@ -1,6 +1,10 @@
 import { readFile, readdir } from "node:fs/promises";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLOutputValue } from "node:sqlite";
+import { type JsonValue, JsonValueSchema } from "@noesis/domain";
+import { z } from "zod";
 import type { WorkspacePaths } from "./types.ts";
+
+export type DatabaseRow = Readonly<Record<string, SQLOutputValue>>;
 
 export interface WorkspaceDatabase {
   readonly connection: DatabaseSync;
@@ -44,8 +48,8 @@ async function applyMigrations(connection: DatabaseSync, now: () => string): Pro
   const applied = new Set<number>();
   if (existingTable !== undefined) {
     for (const row of connection.prepare("SELECT version FROM schema_migrations").all()) {
-      const version = Reflect.get(row, "version");
-      if (typeof version === "number") applied.add(version);
+      const version = z.number().int().safeParse(row["version"]);
+      if (version.success) applied.add(version.data);
     }
   }
 
@@ -71,29 +75,26 @@ async function applyMigrations(connection: DatabaseSync, now: () => string): Pro
   }
 }
 
-export function parseJson(value: unknown): unknown {
-  if (typeof value !== "string") throw new Error("Expected stored JSON text");
-  return JSON.parse(value);
+export function parseJson(value: SQLOutputValue): JsonValue {
+  const text = z.string().parse(value);
+  return JsonValueSchema.parse(JSON.parse(text));
 }
 
-export function requiredString(row: unknown, field: string): string {
-  if (row === null || typeof row !== "object") throw new Error(`Expected a row containing ${field}`);
-  const value = Reflect.get(row, field);
-  if (typeof value !== "string") throw new Error(`Expected text column ${field}`);
-  return value;
+export function requiredString(row: DatabaseRow | undefined, field: string): string {
+  if (row === undefined) throw new Error(`Expected a row containing ${field}`);
+  return z.string().parse(row[field]);
 }
 
-export function optionalString(row: unknown, field: string): string | undefined {
-  if (row === null || typeof row !== "object") throw new Error(`Expected a row containing ${field}`);
-  const value = Reflect.get(row, field);
-  if (value === null) return undefined;
-  if (typeof value !== "string") throw new Error(`Expected nullable text column ${field}`);
-  return value;
+export function optionalString(row: DatabaseRow | undefined, field: string): string | undefined {
+  if (row === undefined) throw new Error(`Expected a row containing ${field}`);
+  return z
+    .string()
+    .nullable()
+    .transform((value) => value ?? undefined)
+    .parse(row[field]);
 }
 
-export function requiredNumber(row: unknown, field: string): number {
-  if (row === null || typeof row !== "object") throw new Error(`Expected a row containing ${field}`);
-  const value = Reflect.get(row, field);
-  if (typeof value !== "number") throw new Error(`Expected numeric column ${field}`);
-  return value;
+export function requiredNumber(row: DatabaseRow | undefined, field: string): number {
+  if (row === undefined) throw new Error(`Expected a row containing ${field}`);
+  return z.number().parse(row[field]);
 }

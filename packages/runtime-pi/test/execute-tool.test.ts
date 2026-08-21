@@ -1,4 +1,4 @@
-import { sha256 } from "@noesis/domain";
+import { createConditionalObject, sha256 } from "@noesis/domain";
 import { describe, expect, test } from "vitest";
 import {
   createPiExecuteTool,
@@ -6,28 +6,31 @@ import {
   type PiWorkflowSummary,
   type PreparedPiCodeExecution,
 } from "../src/index.ts";
-
 function executeDescription(
   workflowSummaries?: readonly PiWorkflowSummary[],
   mcpServerSummaries?: readonly PiMcpServerSummary[],
 ): string {
-  const prepared: PreparedPiCodeExecution = {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  const prepared: PreparedPiCodeExecution = createConditionalObject({
     catalog: Object.freeze({
       catalogId: "catalog-workflow-index",
       catalogDigest: sha256("catalog-workflow-index"),
       tools: Object.freeze([]),
     }),
-    ...(workflowSummaries ? { workflowSummaries } : {}),
-    ...(mcpServerSummaries ? { mcpServerSummaries } : {}),
-    execute: async () =>
-      Object.freeze({
-        executionId: "execution-workflow-index",
-        value: null,
-        calls: 0,
-        durationMs: 0,
-      }),
-    close: async () => undefined,
-  };
+  } as const)
+    .addOptional(workflowSummaries ? { workflowSummaries } : undefined)
+    .addOptional(mcpServerSummaries ? { mcpServerSummaries } : undefined)
+    .add({
+      execute: async () =>
+        Object.freeze({
+          executionId: "execution-workflow-index",
+          value: null,
+          calls: 0,
+          durationMs: 0,
+        }),
+      close: async () => undefined,
+    } as const)
+    .finish();
   return createPiExecuteTool({
     prepared,
     turnId: "turn-workflow-index",
@@ -35,14 +38,12 @@ function executeDescription(
     emit: () => undefined,
   }).description;
 }
-
 function workflowIndexFrom(description: string): string {
   const start = description.indexOf("<available_workflows>");
   const end = description.indexOf(" Use store(key, value)", start);
   if (start < 0 || end < 0) throw new Error("Execute description has no workflow index");
   return description.slice(start, end);
 }
-
 describe("execute workflow discovery index", () => {
   test("shows a bounded escaped MCP capability summary without server instructions", () => {
     const servers = Array.from({ length: 80 }, (_, index) => ({
@@ -71,7 +72,6 @@ describe("execute workflow discovery index", () => {
         toolName: "workflow.0123456789abcdef.research-brief",
       }),
     ]);
-
     expect(description).toContain(
       "<available_workflows>research-brief [tool: workflow.0123456789abcdef.research-brief] — Research a topic and write a brief.</available_workflows>",
     );
@@ -80,7 +80,6 @@ describe("execute workflow discovery index", () => {
     expect(description).toContain("workflows.describe(name)");
     expect(description).not.toContain("workflows.list");
   });
-
   test("normalizes each entry to one escaped line and sorts deterministically", () => {
     const description = executeDescription([
       Object.freeze({
@@ -95,14 +94,12 @@ describe("execute workflow discovery index", () => {
       }),
     ]);
     const index = workflowIndexFrom(description);
-
     expect(index).toContain(
       "alpha&lt;&amp;&quot;&apos; [tool: workflow.0123456789abcdef.alpha&lt;&amp;&quot;&apos;] — First &lt;workflow&gt; &amp; its contract; zeta [tool: workflow.0123456789abcdef.zeta] — Second workflow",
     );
     expect(index).not.toContain("\n");
     expect(index).not.toContain("\t");
   });
-
   test("bounds descriptions, entry count, and the complete index", () => {
     const summaries = Array.from({ length: 80 }, (_, index) =>
       Object.freeze({
@@ -124,7 +121,6 @@ describe("execute workflow discovery index", () => {
     );
     const boundedDescription = /\] — (.*)<\/available_workflows>/u.exec(singleIndex)?.[1];
     if (!boundedDescription) throw new Error("Expected the bounded workflow description");
-
     expect(listedEntries.length).toBeLessThanOrEqual(32);
     expect(listedEntries.length).toBeGreaterThan(0);
     expect(new TextEncoder().encode(boundedDescription).byteLength).toBeLessThanOrEqual(192);
@@ -132,7 +128,6 @@ describe("execute workflow discovery index", () => {
     expect(index).toContain("More saved workflows are available; use workflows.list");
     expect(index).toContain("…");
   });
-
   test("omits the index when the frozen turn has no saved workflows", () => {
     expect(executeDescription()).not.toContain("available_workflows");
     expect(executeDescription([])).not.toContain("available_workflows");

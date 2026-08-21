@@ -149,18 +149,18 @@ export const SemanticTurnObservationSchema = z.strictObject({
 });
 export type SemanticTurnObservation = Readonly<z.infer<typeof SemanticTurnObservationSchema>>;
 
-const ReflectorObservationShape = {
+const ReflectorObservationFields = {
   observation: SemanticTurnObservationSchema,
 };
 
 export const ReflectorOutputSchema = z.discriminatedUnion("decision", [
   z.strictObject({
-    ...ReflectorObservationShape,
+    ...ReflectorObservationFields,
     decision: z.literal("no_change"),
     reason: z.string().min(1),
   }),
   z.strictObject({
-    ...ReflectorObservationShape,
+    ...ReflectorObservationFields,
     decision: z.literal("apply_working_adjustment"),
     expectedActiveAdjustmentId: z.string().min(1).nullable(),
     rationale: z.string().min(1).max(WORKING_ADJUSTMENT_LIMITS.observationChars),
@@ -169,14 +169,14 @@ export const ReflectorOutputSchema = z.discriminatedUnion("decision", [
     evidenceCitationIndexes: z.array(z.number().int().nonnegative()).min(1).max(12),
   }),
   z.strictObject({
-    ...ReflectorObservationShape,
+    ...ReflectorObservationFields,
     decision: z.literal("unapply_working_adjustment"),
     expectedActiveAdjustmentId: z.string().min(1),
     reason: z.string().min(1).max(WORKING_ADJUSTMENT_LIMITS.observationChars),
     evidenceCitationIndexes: z.array(z.number().int().nonnegative()).min(1).max(12),
   }),
   z.strictObject({
-    ...ReflectorObservationShape,
+    ...ReflectorObservationFields,
     decision: z.literal("experiment"),
     title: z.string().min(1),
     hypothesis: z.string().min(1),

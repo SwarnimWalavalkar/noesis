@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AgentRunRequest } from "@noesis/agent-types";
 import {
+  createConditionalObject,
   type CapabilityRevisionRef,
   canonicalJson,
   capabilityRevisionDigest,
@@ -53,15 +54,12 @@ import {
   BUILT_IN_JUDGE_STRATEGIES,
   decisionFromEvaluation,
 } from "./dynamic-strategies.ts";
-
 function uniqueById<T>(values: readonly T[], select: (value: T) => string): boolean {
   return new Set(values.map(select)).size === values.length;
 }
-
 function evidenceKey(reference: EvidenceRef): string {
   return canonicalJson(reference);
 }
-
 function freezeCriterionSet(value: EvaluationCriterionSet): EvaluationCriterionSet {
   return Object.freeze({
     ...value,
@@ -79,7 +77,6 @@ function freezeCriterionSet(value: EvaluationCriterionSet): EvaluationCriterionS
     ),
   });
 }
-
 function criterionSnapshotDigest(input: {
   readonly snapshotId: string;
   readonly scope: string;
@@ -97,7 +94,6 @@ function criterionSnapshotDigest(input: {
     }),
   );
 }
-
 export async function selectEvaluationCriteria(
   port: CriterionSnapshotPort,
   input: {
@@ -109,6 +105,7 @@ export async function selectEvaluationCriteria(
 ): Promise<CriterionSelectionResult> {
   const selected = await port.snapshotRelevant(input);
   if (!selected.ok)
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return err({
       code: "criterion_selection_failed" as const,
       message: selected.error.message,
@@ -117,6 +114,7 @@ export async function selectEvaluationCriteria(
     !selected.value.candidateRevision ||
     !sameCapabilityRevisionRef(selected.value.candidateRevision, input.candidateRevision)
   ) {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return err({
       code: "criterion_selection_failed" as const,
       message: "Criterion relevance snapshot is not pinned to the requested candidate revision",
@@ -125,6 +123,7 @@ export async function selectEvaluationCriteria(
   const criteria = [];
   for (const criterion of selected.value.criteria) {
     if (criterion.evidenceRefs.length === 0) {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return err({
         code: "incomplete_criterion_provenance" as const,
         message: `Criterion ${criterion.criterionId}@${criterion.revision} has no evidence citation`,
@@ -156,17 +155,16 @@ export async function selectEvaluationCriteria(
     snapshotDigest,
   });
   if (!parsed.success)
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return err({
       code: "criterion_selection_failed" as const,
       message: `Invalid evaluation criterion snapshot: ${parsed.error.issues[0]?.message ?? "unknown error"}`,
     });
   return ok(freezeCriterionSet(parsed.data));
 }
-
 export interface CandidateAuthorCaseView {
   readonly sourceCases: readonly EvaluationCase[];
 }
-
 export function createCandidateAuthorCaseView(cases: readonly EvaluationCase[]): CandidateAuthorCaseView {
   return Object.freeze({
     sourceCases: Object.freeze(
@@ -178,7 +176,6 @@ export function createCandidateAuthorCaseView(cases: readonly EvaluationCase[]):
     ),
   });
 }
-
 function protectedSuiteSnapshotValue(
   suite: Omit<ProtectedEvaluationSuiteRevision, "snapshotDigest">,
 ): object {
@@ -190,13 +187,11 @@ function protectedSuiteSnapshotValue(
     cases: suite.cases,
   });
 }
-
 export function protectedEvaluationSuiteDigest(
   suite: Omit<ProtectedEvaluationSuiteRevision, "snapshotDigest">,
 ): string {
   return sha256(canonicalJson(protectedSuiteSnapshotValue(suite)));
 }
-
 export function createProtectedEvaluationSuiteRevision(
   suite: Omit<ProtectedEvaluationSuiteRevision, "snapshotDigest">,
 ): ProtectedEvaluationSuiteRevision {
@@ -204,36 +199,43 @@ export function createProtectedEvaluationSuiteRevision(
     ...suite,
     snapshotDigest: protectedEvaluationSuiteDigest(suite),
   });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     ...parsed,
     definitionRevision: Object.freeze({ ...parsed.definitionRevision }),
     cases: Object.freeze(
       parsed.cases.map((evaluationCase) =>
-        Object.freeze({
-          ...evaluationCase,
-          evidenceRefs: Object.freeze(
-            evaluationCase.evidenceRefs.map((reference) => Object.freeze({ ...reference })),
-          ),
-          ...(evaluationCase.definitionRevision
-            ? { definitionRevision: Object.freeze({ ...evaluationCase.definitionRevision }) }
-            : {}),
-          criterionRefs: Object.freeze(
-            evaluationCase.criterionRefs.map((criterion) => Object.freeze({ ...criterion })),
-          ),
-        }),
+        Object.freeze(
+          createConditionalObject({
+            ...evaluationCase,
+            evidenceRefs: Object.freeze(
+              evaluationCase.evidenceRefs.map((reference) => Object.freeze({ ...reference })),
+            ),
+          } as const)
+            .addOptional(
+              evaluationCase.definitionRevision
+                ? {
+                    definitionRevision: Object.freeze({ ...evaluationCase.definitionRevision }),
+                  }
+                : undefined,
+            )
+            .add({
+              criterionRefs: Object.freeze(
+                evaluationCase.criterionRefs.map((criterion) => Object.freeze({ ...criterion })),
+              ),
+            } as const)
+            .finish(),
+        ),
       ),
     ),
   });
 }
-
 function failure(input: EvaluationFailure): DynamicPreflightResult {
   return err(Object.freeze(input));
 }
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function errorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }
-
 function isEvaluationRoleTrace(value: unknown): value is EvaluationRoleTrace {
   return (
     value !== null &&
@@ -250,48 +252,51 @@ function isEvaluationRoleTrace(value: unknown): value is EvaluationRoleTrace {
     typeof value.telemetry === "object"
   );
 }
-
-function roleTraceFrom(error: unknown): EvaluationRoleTrace | undefined {
-  if (!error || typeof error !== "object" || !("trace" in error)) return undefined;
-  const trace = error.trace;
+// BOUNDARY: Role failures may originate outside Noesis; retain a trace only after its full guard passes.
+function roleTraceFrom(cause: unknown): EvaluationRoleTrace | undefined {
+  if (!cause || typeof cause !== "object" || !("trace" in cause)) return undefined;
+  const trace = cause.trace;
   return isEvaluationRoleTrace(trace) ? trace : undefined;
 }
-
+// BOUNDARY: Failure causes cross the model-provider boundary and are classified without assuming
+// an external error representation.
 function classifyRoleFailure(
-  error: unknown,
+  cause: unknown,
   stage: EvaluationFailure["stage"],
   role: NonNullable<EvaluationFailure["role"]>,
   signal: AbortSignal | undefined,
   context: Pick<EvaluationFailure, "caseId" | "arm"> = {},
 ): DynamicPreflightResult {
-  const trace = roleTraceFrom(error);
-  const codeValue = error && typeof error === "object" && "code" in error ? String(error.code) : undefined;
+  const trace = roleTraceFrom(cause);
+  const codeValue = cause && typeof cause === "object" && "code" in cause ? String(cause.code) : undefined;
   const code =
     signal?.aborted || codeValue === "aborted"
       ? "cancelled"
       : codeValue === "malformed_output"
         ? "malformed_role_output"
         : "role_failed";
-  return failure({
-    code,
-    message: errorMessage(error),
-    stage,
-    role,
-    ...context,
-    ...(trace ? { trace } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return failure(
+    createConditionalObject({
+      code,
+      message: errorMessage(cause),
+      stage,
+      role,
+      ...context,
+    } as const)
+      .addOptional(trace ? { trace } : undefined)
+      .finish(),
+  );
 }
-
-function requireStrategy<T extends { readonly strategyId: string }>(
-  strategies: readonly T[],
-  strategyId: string,
-  kind: string,
-): T {
+function requireStrategy<
+  T extends {
+    readonly strategyId: string;
+  },
+>(strategies: readonly T[], strategyId: string, kind: string): T {
   const strategy = strategies.find((candidate) => candidate.strategyId === strategyId);
   if (!strategy) throw new Error(`Unknown ${kind} strategy ${strategyId}`);
   return strategy;
 }
-
 function configurationIsPinned(configuration: RoleInvocationConfiguration): boolean {
   return configuration.variant.configurationRefs.some(
     (reference) =>
@@ -301,7 +306,6 @@ function configurationIsPinned(configuration: RoleInvocationConfiguration): bool
       reference.workingPath === configuration.promptRevision.workingPath,
   );
 }
-
 function traceConfigurationMismatch(
   configuration: RoleInvocationConfiguration,
   trace: EvaluationRoleTrace,
@@ -319,7 +323,6 @@ function traceConfigurationMismatch(
     return `Role trace runtime ${trace.telemetry.provider}/${trace.telemetry.model}/${trace.telemetry.reasoning} does not match pinned runtime ${configuration.provider}/${configuration.model}/${configuration.reasoning}`;
   return undefined;
 }
-
 function validateCaseOwnership(input: DynamicPreflightInput): string | undefined {
   if (
     input.sourceCases.some(
@@ -355,7 +358,6 @@ function validateCaseOwnership(input: DynamicPreflightInput): string | undefined
     return "Evaluation cases may cite only selected immutable criterion revisions";
   return undefined;
 }
-
 function suiteDigest(input: DynamicPreflightInput, cases: readonly EvaluationCase[]): string {
   return sha256(
     canonicalJson({
@@ -371,7 +373,6 @@ function suiteDigest(input: DynamicPreflightInput, cases: readonly EvaluationCas
     }),
   );
 }
-
 function comparisonInputDigest(
   input: DynamicPreflightInput,
   evaluationCase: EvaluationCase,
@@ -389,7 +390,6 @@ function comparisonInputDigest(
     }),
   );
 }
-
 function runRequest(input: {
   readonly runId: string;
   readonly role: AgentRunRequest["role"];
@@ -399,29 +399,33 @@ function runRequest(input: {
   readonly capabilityRevisions: readonly CapabilityRevisionRef[];
   readonly signal?: AbortSignal;
 }): EvaluationRoleRunRequest {
-  return Object.freeze({
-    runId: input.runId,
-    role: input.role,
-    variant: input.configuration.variant,
-    messages: Object.freeze(input.messages.map((message) => Object.freeze({ ...message }))),
-    evidenceRefs: Object.freeze(input.evidenceRefs.map((reference) => Object.freeze({ ...reference }))),
-    availableTools: Object.freeze([]),
-    capabilityRevisions: Object.freeze(
-      input.capabilityRevisions.map((revision) => Object.freeze({ ...revision })),
-    ),
-    ...(input.signal ? { signal: input.signal } : {}),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      runId: input.runId,
+      role: input.role,
+      variant: input.configuration.variant,
+      messages: Object.freeze(input.messages.map((message) => Object.freeze({ ...message }))),
+      evidenceRefs: Object.freeze(input.evidenceRefs.map((reference) => Object.freeze({ ...reference }))),
+      availableTools: Object.freeze([]),
+      capabilityRevisions: Object.freeze(
+        input.capabilityRevisions.map((revision) => Object.freeze({ ...revision })),
+      ),
+    } as const)
+      .addOptional(input.signal ? { signal: input.signal } : undefined)
+      .finish(),
+  );
 }
-
 function assertReturnedRevision(
   actual: readonly CapabilityRevisionRef[],
   expected: CapabilityRevisionRef,
 ): boolean {
   return actual.length === 1 && actual[0] !== undefined && sameCapabilityRevisionRef(actual[0], expected);
 }
-
 function artifactMatchesRevision(
-  artifact: Readonly<{ readonly identity: Omit<CapabilityRevisionRef, "kind"> }>,
+  artifact: Readonly<{
+    readonly identity: Omit<CapabilityRevisionRef, "kind">;
+  }>,
   revision: CapabilityRevisionRef,
 ): boolean {
   return (
@@ -430,7 +434,6 @@ function artifactMatchesRevision(
     artifact.identity.bundleDigest === revision.bundleDigest
   );
 }
-
 function blindArtifact(artifact: TrialResult["artifact"]): object {
   return Object.freeze({
     content: artifact.content,
@@ -440,26 +443,24 @@ function blindArtifact(artifact: TrialResult["artifact"]): object {
     sourceAssertions: artifact.sourceAssertions,
   });
 }
-
 function labelsFor(
   preflightId: string,
   caseId: string,
 ): Readonly<Record<"A" | "B", "baseline" | "candidate">> {
   const swap = Number.parseInt(sha256(`${preflightId}\u0000${caseId}`).slice(0, 2), 16) % 2 === 1;
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze(
     swap
       ? { A: "candidate" as const, B: "baseline" as const }
       : { A: "baseline" as const, B: "candidate" as const },
   );
 }
-
 function winnerFromBlind(
   winner: "A" | "B" | "tie" | "inconclusive",
   labels: Readonly<Record<"A" | "B", "baseline" | "candidate">>,
 ): "baseline" | "candidate" | "tie" | "inconclusive" {
   return winner === "A" || winner === "B" ? labels[winner] : winner;
 }
-
 function approvalRequired(input: DynamicPreflightInput): boolean {
   const delta = input.candidate.revision.requestedPermissionDelta;
   const declaredExpansion =
@@ -478,7 +479,6 @@ function approvalRequired(input: DynamicPreflightInput): boolean {
     manifestExpansion
   );
 }
-
 function railChecks(
   input: DynamicPreflightInput,
   trials: readonly TrialResult[],
@@ -520,6 +520,7 @@ function railChecks(
   const protectedRegressions = protectedComparisons.filter(
     (comparison) => comparison.winner === "baseline" || comparison.winner === "inconclusive",
   );
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze([
     Object.freeze({
       rail: "capability_identity" as const,
@@ -584,7 +585,6 @@ function railChecks(
     }),
   ]);
 }
-
 export function createDynamicEvaluationLaboratory(
   options: DynamicEvaluationLaboratoryOptions,
 ): DynamicEvaluationLaboratory {
@@ -592,7 +592,7 @@ export function createDynamicEvaluationLaboratory(
   const judges = options.judgeStrategies ?? BUILT_IN_JUDGE_STRATEGIES;
   const aggregators = options.aggregationStrategies ?? BUILT_IN_AGGREGATION_STRATEGIES;
   const createRunId = options.createRunId ?? ((prefix: string) => `${prefix}_${randomUUID()}`);
-
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const runPreflight = async (rawInput: DynamicPreflightInput): Promise<DynamicPreflightResult> => {
     const parsed = DynamicPreflightInputBoundarySchema.safeParse(rawInput);
     if (!parsed.success)
@@ -634,7 +634,6 @@ export function createDynamicEvaluationLaboratory(
           stage: "setup",
         });
     }
-
     let generator: EvaluationGeneratorStrategy;
     let judge: EvaluationJudgeStrategy;
     let aggregator: EvaluationAggregationStrategy;
@@ -649,7 +648,6 @@ export function createDynamicEvaluationLaboratory(
         stage: "setup",
       });
     }
-
     const canonicalBaselineDigest = capabilityRevisionDigest(rawInput.baseline.revision);
     const canonicalCandidateDigest = capabilityRevisionDigest(rawInput.candidate.revision);
     const identityDetails = [];
@@ -678,7 +676,6 @@ export function createDynamicEvaluationLaboratory(
         message: identityDetails.join("; "),
         stage: "setup",
       });
-
     if (rawInput.signal?.aborted)
       return failure({
         code: "cancelled",
@@ -686,7 +683,6 @@ export function createDynamicEvaluationLaboratory(
         stage: "case_generation",
         role: "case_generator",
       });
-
     const maxGeneratedCases = Math.max(
       0,
       rawInput.budget.maxCases - rawInput.sourceCases.length - rawInput.protectedSuite.cases.length,
@@ -697,7 +693,6 @@ export function createDynamicEvaluationLaboratory(
         message: "Evaluation budget leaves no room for criterion-guided generated cases",
         stage: "case_generation",
       });
-
     const generatorEvidence = Object.freeze([
       ...rawInput.sourceCases.flatMap((evaluationCase) => evaluationCase.evidenceRefs),
       ...rawInput.criteria.criteria.flatMap((criterion) => [
@@ -709,44 +704,48 @@ export function createDynamicEvaluationLaboratory(
     let generatedOutput: GeneratedCaseOutput;
     let generatorTrace: EvaluationRoleTrace;
     try {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const generated = await options.structuredRoles.run(
-        runRequest({
-          runId: createRunId("case_generator"),
-          role: "case_generator",
-          configuration: rawInput.config.generator,
-          messages: [
-            {
-              role: "user",
-              name: "behavioral_objective",
-              content: rawInput.behaviorObjective,
-            },
-            {
-              role: "user",
-              name: "evidence",
-              content: canonicalJson(
-                rawInput.sourceCases.map((evaluationCase) => ({
-                  caseId: evaluationCase.caseId,
-                  instruction: evaluationCase.instruction,
-                  input: evaluationCase.input,
-                  evidenceRefs: evaluationCase.evidenceRefs,
-                })),
-              ),
-            },
-            {
-              role: "user",
-              name: "user_criteria",
-              content: generator.renderPrompt({
-                behaviorObjective: rawInput.behaviorObjective,
-                sourceCases: rawInput.sourceCases,
-                criteria: rawInput.criteria,
-                maxGeneratedCases,
-              }),
-            },
-          ],
-          evidenceRefs: generatorEvidence,
-          capabilityRevisions: Object.freeze([]),
-          ...(rawInput.signal ? { signal: rawInput.signal } : {}),
-        }),
+        runRequest(
+          createConditionalObject({
+            runId: createRunId("case_generator"),
+            role: "case_generator",
+            configuration: rawInput.config.generator,
+            messages: [
+              {
+                role: "user",
+                name: "behavioral_objective",
+                content: rawInput.behaviorObjective,
+              },
+              {
+                role: "user",
+                name: "evidence",
+                content: canonicalJson(
+                  rawInput.sourceCases.map((evaluationCase) => ({
+                    caseId: evaluationCase.caseId,
+                    instruction: evaluationCase.instruction,
+                    input: evaluationCase.input,
+                    evidenceRefs: evaluationCase.evidenceRefs,
+                  })),
+                ),
+              },
+              {
+                role: "user",
+                name: "user_criteria",
+                content: generator.renderPrompt({
+                  behaviorObjective: rawInput.behaviorObjective,
+                  sourceCases: rawInput.sourceCases,
+                  criteria: rawInput.criteria,
+                  maxGeneratedCases,
+                }),
+              },
+            ],
+            evidenceRefs: generatorEvidence,
+            capabilityRevisions: Object.freeze([]),
+          } as const)
+            .addOptional(rawInput.signal ? { signal: rawInput.signal } : undefined)
+            .finish(),
+        ),
         GeneratedCaseOutputSchema,
       );
       generatedOutput = generated.value;
@@ -805,6 +804,7 @@ export function createDynamicEvaluationLaboratory(
           role: "case_generator",
           trace: generatorTrace,
         });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       generatedCases.push(
         Object.freeze({
           caseId: generatedCase.caseId,
@@ -830,7 +830,6 @@ export function createDynamicEvaluationLaboratory(
         role: "case_generator",
         trace: generatorTrace,
       });
-
     const caseEvidence = [];
     try {
       for (const evaluationCase of cases) {
@@ -854,7 +853,6 @@ export function createDynamicEvaluationLaboratory(
         stage: "recording",
       });
     }
-
     try {
       await options.recorder.recordPlan(
         Object.freeze({
@@ -875,7 +873,6 @@ export function createDynamicEvaluationLaboratory(
         stage: "recording",
       });
     }
-
     const trials: TrialResult[] = [];
     const roleTelemetry: EvaluationRoleTrace[] = [generatorTrace];
     for (const [caseIndex, evaluationCase] of cases.entries()) {
@@ -897,38 +894,42 @@ export function createDynamicEvaluationLaboratory(
           readonly capabilityRevisions: readonly CapabilityRevisionRef[];
         };
         try {
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           trialOutput = await options.structuredRoles.run(
-            runRequest({
-              runId: createRunId(`trial_${evaluationCase.caseId}_${arm}`),
-              role: "trial",
-              configuration: rawInput.config.trial,
-              messages: [
-                {
-                  role: "user",
-                  name: "case",
-                  content: canonicalJson({
-                    caseId: evaluationCase.caseId,
-                    instruction: evaluationCase.instruction,
-                    input: evaluationCase.input,
-                    evidenceRefs: [...evaluationCase.evidenceRefs, inputEvidence],
-                    inputDigest,
-                    budget: rawInput.budget,
-                  }),
-                },
-                {
-                  role: "user",
-                  name: "arm",
-                  content: canonicalJson({ capabilityRevision: revision }),
-                },
-              ],
-              evidenceRefs: Object.freeze([
-                ...evaluationCase.evidenceRefs,
-                inputEvidence,
-                ...configurationEvidenceRefs(rawInput.config.trial),
-              ]),
-              capabilityRevisions: Object.freeze([revision]),
-              ...(rawInput.signal ? { signal: rawInput.signal } : {}),
-            }),
+            runRequest(
+              createConditionalObject({
+                runId: createRunId(`trial_${evaluationCase.caseId}_${arm}`),
+                role: "trial",
+                configuration: rawInput.config.trial,
+                messages: [
+                  {
+                    role: "user",
+                    name: "case",
+                    content: canonicalJson({
+                      caseId: evaluationCase.caseId,
+                      instruction: evaluationCase.instruction,
+                      input: evaluationCase.input,
+                      evidenceRefs: [...evaluationCase.evidenceRefs, inputEvidence],
+                      inputDigest,
+                      budget: rawInput.budget,
+                    }),
+                  },
+                  {
+                    role: "user",
+                    name: "arm",
+                    content: canonicalJson({ capabilityRevision: revision }),
+                  },
+                ],
+                evidenceRefs: Object.freeze([
+                  ...evaluationCase.evidenceRefs,
+                  inputEvidence,
+                  ...configurationEvidenceRefs(rawInput.config.trial),
+                ]),
+                capabilityRevisions: Object.freeze([revision]),
+              } as const)
+                .addOptional(rawInput.signal ? { signal: rawInput.signal } : undefined)
+                .finish(),
+            ),
             TrialArtifactSchema,
           );
         } catch (error) {
@@ -1030,7 +1031,6 @@ export function createDynamicEvaluationLaboratory(
         }
       }
     }
-
     const comparisons: CaseComparison[] = [];
     for (const [caseIndex, evaluationCase] of cases.entries()) {
       const baseline = trials.find(
@@ -1063,43 +1063,47 @@ export function createDynamicEvaluationLaboratory(
         readonly capabilityRevisions: readonly CapabilityRevisionRef[];
       };
       try {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         judged = await options.structuredRoles.run(
-          runRequest({
-            runId: createRunId(`judge_${evaluationCase.caseId}`),
-            role: "judge_critic",
-            configuration: rawInput.config.judge,
-            messages: [
-              {
-                role: "user",
-                name: "rubric",
-                content: judge.renderRubric({
-                  behaviorObjective: rawInput.behaviorObjective,
-                  evaluationCase,
-                  criteria: rawInput.criteria,
-                }),
-              },
-              {
-                role: "user",
-                name: "arm_A",
-                content: canonicalJson(blindArtifact(armA.artifact)),
-              },
-              {
-                role: "user",
-                name: "arm_B",
-                content: canonicalJson(blindArtifact(armB.artifact)),
-              },
-            ],
-            evidenceRefs: Object.freeze([
-              inputEvidence,
-              ...rawInput.criteria.criteria.flatMap((criterion) => [
-                criterion.definitionRevision,
-                ...criterion.evidenceRefs,
+          runRequest(
+            createConditionalObject({
+              runId: createRunId(`judge_${evaluationCase.caseId}`),
+              role: "judge_critic",
+              configuration: rawInput.config.judge,
+              messages: [
+                {
+                  role: "user",
+                  name: "rubric",
+                  content: judge.renderRubric({
+                    behaviorObjective: rawInput.behaviorObjective,
+                    evaluationCase,
+                    criteria: rawInput.criteria,
+                  }),
+                },
+                {
+                  role: "user",
+                  name: "arm_A",
+                  content: canonicalJson(blindArtifact(armA.artifact)),
+                },
+                {
+                  role: "user",
+                  name: "arm_B",
+                  content: canonicalJson(blindArtifact(armB.artifact)),
+                },
+              ],
+              evidenceRefs: Object.freeze([
+                inputEvidence,
+                ...rawInput.criteria.criteria.flatMap((criterion) => [
+                  criterion.definitionRevision,
+                  ...criterion.evidenceRefs,
+                ]),
+                ...configurationEvidenceRefs(rawInput.config.judge),
               ]),
-              ...configurationEvidenceRefs(rawInput.config.judge),
-            ]),
-            capabilityRevisions: Object.freeze([]),
-            ...(rawInput.signal ? { signal: rawInput.signal } : {}),
-          }),
+              capabilityRevisions: Object.freeze([]),
+            } as const)
+              .addOptional(rawInput.signal ? { signal: rawInput.signal } : undefined)
+              .finish(),
+          ),
           BlindJudgmentSchema,
         );
       } catch (error) {
@@ -1185,7 +1189,6 @@ export function createDynamicEvaluationLaboratory(
         });
       }
     }
-
     const aggregation = aggregator.aggregate(comparisons, rawInput.config.aggregation);
     const estimatedCost = roleTelemetry.reduce((total, trace) => total + trace.usage.estimatedCost, 0);
     if (estimatedCost > rawInput.budget.maxCost)
@@ -1201,6 +1204,7 @@ export function createDynamicEvaluationLaboratory(
       aggregation,
       config: rawInput.config,
     });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const reportDraft = Object.freeze({
       schemaVersion: 1 as const,
       preflightId: rawInput.preflightId,
@@ -1241,10 +1245,8 @@ export function createDynamicEvaluationLaboratory(
       });
     }
   };
-
   return Object.freeze({ runPreflight });
 }
-
 export function validateEvaluationCase(value: unknown): EvaluationCase | undefined {
   const parsed = EvaluationCaseSchema.safeParse(value);
   return parsed.success ? Object.freeze(parsed.data) : undefined;

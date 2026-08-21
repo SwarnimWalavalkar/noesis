@@ -25,6 +25,7 @@ function activity(
   });
 }
 
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const settledTrail: TrailState = Object.freeze({
   trailId: "trail-1",
   title: "Trail 1",
@@ -53,6 +54,7 @@ const waitForAsyncPresentation = async (): Promise<void> => {
 };
 
 describe("working-adjustment notice presentation", () => {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["adjusted", "adjusted · adjusted summary"],
     ["replaced", "adjusted · replaced summary"],
@@ -94,6 +96,7 @@ describe("working-adjustment notice presentation", () => {
         }),
       ),
     ).toBe("reflection:job-stale");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     expect(
       learningAuditFocusId(
         Object.freeze({
@@ -106,6 +109,7 @@ describe("working-adjustment notice presentation", () => {
   });
 
   test("includes the applied strategy and tracks a running reflection without a transcript placeholder", async () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const adjusted = Object.freeze({
       ...activity("adjusted"),
       workingAdjustment: Object.freeze({
@@ -121,6 +125,7 @@ describe("working-adjustment notice presentation", () => {
       "strategy · Verify observable state before claiming completion.",
     );
 
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const presentation = await settledTurnPresentation(
       {
         getTranscript: async () => Object.freeze([]),
@@ -153,6 +158,7 @@ describe("working-adjustment notice presentation", () => {
     );
   });
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each(["idle", "thinking"] as const)(
     "keeps a %s foreground state intact while surfacing an auxiliary learning read failure",
     async (foregroundState) => {
@@ -167,6 +173,7 @@ describe("working-adjustment notice presentation", () => {
       if (foregroundState === "thinking")
         state = reduceTui(state, { type: "prompt-submitted", text: "newer" });
       const reported: unknown[] = [];
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       reconcileSettledTurnPresentation(
         {
           getTranscript: async () =>

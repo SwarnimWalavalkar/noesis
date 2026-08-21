@@ -7,7 +7,7 @@ export interface BrowserOpenCommand {
 }
 
 interface BrowserProcess {
-  once(event: "error", listener: () => void): unknown;
+  once(event: "error", listener: () => void): BrowserProcess;
   unref(): void;
 }
 

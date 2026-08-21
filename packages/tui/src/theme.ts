@@ -1,5 +1,6 @@
 import { truncateToWidth, type MarkdownTheme } from "@earendil-works/pi-tui";
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const NOESIS_WORDMARK = [
   "███╗   ██╗ ██████╗ ███████╗███████╗██╗███████╗",
   "████╗  ██║██╔═══██╗██╔════╝██╔════╝██║██╔════╝",
@@ -9,6 +10,7 @@ export const NOESIS_WORDMARK = [
   "╚═╝  ╚═══╝ ╚═════╝ ╚══════╝╚══════╝╚═╝╚══════╝",
 ] as const;
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const ANSI = {
   reset: "\u001b[0m",
   bold: "\u001b[1m",

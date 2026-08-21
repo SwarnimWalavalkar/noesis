@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import type {
   Capability,
   CapabilityActivationReadModel,
@@ -22,14 +23,12 @@ import {
   createInMemoryCapabilityControlStore,
   createWorkspaceCapabilityControlStore,
 } from "../src/index.ts";
-
 const capability: Capability = {
   capabilityId: "source-research",
   name: "Source research",
   scope: "research",
   intent: "Find and cite primary evidence",
 };
-
 const fileRef = (name: string, byte: string): FileRevisionRef => ({
   kind: "file_revision",
   revisionId: name,
@@ -37,28 +36,35 @@ const fileRef = (name: string, byte: string): FileRevisionRef => ({
   snapshotPath: `revisions/${name}`,
   contentDigest: byte.repeat(64),
 });
-
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const construction = (
   capabilityRevisionId: string,
-  bytes: { readonly prompt: string; readonly tool: string; readonly router: string },
+  bytes: {
+    readonly prompt: string;
+    readonly tool: string;
+    readonly router: string;
+  },
   predecessorRevisionId?: string,
-): CapabilityRevisionConstruction => ({
-  definitionState: "candidate",
-  capabilityRevisionId,
-  capabilityId: capability.capabilityId,
-  ...(predecessorRevisionId ? { predecessorRevisionId } : {}),
-  promptModules: [fileRef("prompt.md", bytes.prompt)],
-  skills: [fileRef("skill.md", "b")],
-  tools: [fileRef("tool.mjs", bytes.tool)],
-  routerRevision: fileRef("router.json", bytes.router),
-  routerStrategyId: "research-router",
-  activationPolicy: { mode: "automatic_low_risk", scope: "research" },
-  permissionManifest: { effects: ["read"], resourcePatterns: ["workspace:"], credentialRefs: [] },
-  evidenceRefs: [],
-  sourceEvaluationDefinitions: [fileRef("eval.json", "e")],
-  requestedPermissionDelta: { addedEffects: [], widenedResources: [], addedCredentialRefs: [] },
-});
-
+): CapabilityRevisionConstruction =>
+  createConditionalObject({
+    definitionState: "candidate",
+    capabilityRevisionId,
+    capabilityId: capability.capabilityId,
+  } as const)
+    .addOptional(predecessorRevisionId ? { predecessorRevisionId } : undefined)
+    .add({
+      promptModules: [fileRef("prompt.md", bytes.prompt)],
+      skills: [fileRef("skill.md", "b")],
+      tools: [fileRef("tool.mjs", bytes.tool)],
+      routerRevision: fileRef("router.json", bytes.router),
+      routerStrategyId: "research-router",
+      activationPolicy: { mode: "automatic_low_risk", scope: "research" },
+      permissionManifest: { effects: ["read"], resourcePatterns: ["workspace:"], credentialRefs: [] },
+      evidenceRefs: [],
+      sourceEvaluationDefinitions: [fileRef("eval.json", "e")],
+      requestedPermissionDelta: { addedEffects: [], widenedResources: [], addedCredentialRefs: [] },
+    } as const)
+    .finish();
 describe("atomic capability registry", () => {
   test("binds every coupled prompt, tool, and router byte into revision identity", () => {
     const byteVariants: readonly {
@@ -76,10 +82,8 @@ describe("atomic capability registry", () => {
       registry.registerCapability(capability);
       return registry.constructRevision(construction("revision-1", bytes));
     });
-
     expect(new Set(refs.map((ref) => ref.bundleDigest)).size).toBe(byteVariants.length);
   });
-
   test("preserves predecessor lineage and rejects cross-capability predecessors", () => {
     const registry = createAtomicCapabilityRegistry({ controlStore: createInMemoryCapabilityControlStore() });
     registry.registerCapability(capability);
@@ -89,7 +93,6 @@ describe("atomic capability registry", () => {
     const second = registry.constructRevision(
       construction("revision-2", { prompt: "4", tool: "2", router: "3" }, first.capabilityRevisionId),
     );
-
     expect(registry.getRevision(second)?.predecessorRevisionId).toBe(first.capabilityRevisionId);
     expect(registry.listRevisionLineage(capability.capabilityId)).toEqual([first, second]);
     expect(() =>
@@ -98,7 +101,6 @@ describe("atomic capability registry", () => {
       ),
     ).toThrow("predecessor");
   });
-
   test("freezes the complete recorded revision bundle", () => {
     const registry = createAtomicCapabilityRegistry();
     registry.registerCapability(capability);
@@ -106,7 +108,6 @@ describe("atomic capability registry", () => {
       construction("revision-1", { prompt: "1", tool: "2", router: "3" }),
     );
     const revision = registry.getRevision(ref);
-
     expect(Object.isFrozen(revision)).toBe(true);
     expect(Object.isFrozen(revision?.promptModules)).toBe(true);
     expect(Object.isFrozen(revision?.promptModules[0])).toBe(true);
@@ -115,7 +116,6 @@ describe("atomic capability registry", () => {
     expect(Object.isFrozen(revision?.permissionManifest.effects)).toBe(true);
     expect(Object.isFrozen(revision?.requestedPermissionDelta)).toBe(true);
   });
-
   test("keeps candidate definitions separate from externally owned active state", async () => {
     let externallyActive: ReturnType<typeof capabilityRevisionRef> | null = null;
     const registry = createAtomicCapabilityRegistry({
@@ -136,14 +136,12 @@ describe("atomic capability registry", () => {
     const before = await registry.read(capability.capabilityId);
     expect(before?.candidateRevisions[0]?.definitionState).toBe("candidate");
     expect(before?.activation.activeRevision).toBeNull();
-
     externallyActive = candidate;
     const after = await registry.read(capability.capabilityId);
     expect(after?.candidateRevisions[0]?.definitionState).toBe("candidate");
     expect(after?.activation.activeRevision).toEqual(candidate);
     expect("activate" in registry).toBe(false);
   });
-
   test("tracks pin and predecessor-rooted veto metadata without mutating activation", async () => {
     const registry = createAtomicCapabilityRegistry({
       controlStore: createInMemoryCapabilityControlStore(),
@@ -161,7 +159,6 @@ describe("atomic capability registry", () => {
       rootRevision: first,
       reason: "user veto",
     });
-
     const readModel = await registry.read(capability.capabilityId);
     expect(readModel?.candidateRevisions.map(({ pinned, vetoed }) => ({ pinned, vetoed }))).toEqual([
       { pinned: true, vetoed: true },
@@ -174,7 +171,6 @@ describe("atomic capability registry", () => {
     });
     expect("activate" in ((await registry.readControls(capability.capabilityId)) ?? {})).toBe(false);
   });
-
   test("binds pin and veto controls to the canonical capability revision digest", async () => {
     const registry = createAtomicCapabilityRegistry({ controlStore: createInMemoryCapabilityControlStore() });
     registry.registerCapability(capability);
@@ -182,7 +178,6 @@ describe("atomic capability registry", () => {
       construction("revision-1", { prompt: "1", tool: "2", router: "3" }),
     );
     const digestMismatch = { ...revision, bundleDigest: "f".repeat(64) };
-
     expect(
       await registry.pin({
         capabilityId: capability.capabilityId,
@@ -203,7 +198,6 @@ describe("atomic capability registry", () => {
       vetoes: [],
     });
   });
-
   test("reloads canonical-file pin and veto controls through WorkspaceStore revisions", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-capability-controls-"));
     try {
@@ -230,7 +224,6 @@ describe("atomic capability registry", () => {
         }),
       ).resolves.toMatchObject({ ok: true });
       firstWorkspace.close();
-
       const secondWorkspace = await createWorkspaceStore(root);
       const secondRegistry = createAtomicCapabilityRegistry({
         controlStore: createWorkspaceCapabilityControlStore(secondWorkspace),
@@ -260,7 +253,6 @@ describe("atomic capability registry", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-
   test("links only explicit children of the canonical Experiment lifecycle", async () => {
     let experiment: Experiment | undefined;
     let trial: ExperimentTrial | undefined;
@@ -370,7 +362,6 @@ describe("atomic capability registry", () => {
       trialRefs: [row("experiment_trials", trial.trialId)],
       evaluationRefs: [row("evaluations", evaluation.evaluationId)],
     });
-
     expect((await registry.read(capability.capabilityId))?.candidateRevisions[1]?.researchRefs).toEqual({
       experimentId: "experiment-1",
       trialRefs: [row("experiment_trials", "trial-1")],
@@ -384,7 +375,6 @@ describe("atomic capability registry", () => {
       }),
     ).rejects.toThrow("canonical Experiment");
   });
-
   test("rejects a reused revision id with different coupled bytes", () => {
     const registry = createAtomicCapabilityRegistry();
     registry.registerCapability(capability);

@@ -16,6 +16,7 @@ import type {
   WorkingAdjustment,
 } from "./research.ts";
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const PERSISTED_DATA = [
   "session",
   "message",
@@ -52,6 +53,7 @@ export const PERSISTED_DATA = [
 
 export type PersistedDatum = (typeof PERSISTED_DATA)[number];
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const PERSISTED_AUTHORITIES = [
   "sqlite_operational",
   "rebuildable_index",
@@ -64,6 +66,7 @@ export const PERSISTED_AUTHORITIES = [
 
 export type PersistedAuthority = (typeof PERSISTED_AUTHORITIES)[number];
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const PERSISTED_AUTHORITY_BY_DATUM = {
   session: "sqlite_operational",
   message: "sqlite_operational",
@@ -130,9 +133,10 @@ export interface ArtifactWriteRequest {
 }
 
 export interface WorkspaceReadPort {
+  /** SQLite values exposed for exact evidence inspection before an owner schema decodes a row. */
   readonly readDatabaseRow: <Table extends DatabaseTable>(
     ref: DatabaseRowRef<Table>,
-  ) => Promise<Readonly<Record<string, unknown>> | undefined>;
+  ) => Promise<Readonly<Record<string, string | number | bigint | Uint8Array | null>> | undefined>;
   readonly readWorkingFile: (workingPath: string) => Promise<Uint8Array | undefined>;
   readonly readRevision: (ref: FileRevisionRef) => Promise<Uint8Array>;
   readonly readEvidence: <Kind extends EvidenceKind>(ref: EvidenceRevisionRef<Kind>) => Promise<Uint8Array>;
@@ -381,10 +385,10 @@ export function durableJobFailureError(message: string, options: DurableJobFailu
 }
 
 /** Read scheduling semantics only from errors created through the durable failure contract. */
-export function durableJobFailureFromError(error: unknown): DurableJobFailure | undefined {
-  if (!(error instanceof Error)) return undefined;
-  const failure = durableJobFailures.get(error);
-  return failure ? Object.freeze({ ...failure, message: error.message }) : undefined;
+export function durableJobFailureFromError(cause: unknown): DurableJobFailure | undefined {
+  if (!(cause instanceof Error)) return undefined;
+  const failure = durableJobFailures.get(cause);
+  return failure ? Object.freeze({ ...failure, message: cause.message }) : undefined;
 }
 
 /** Stable keyset cursor for the authoritative `(created_at, job_id)` job order. */

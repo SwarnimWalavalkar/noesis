@@ -176,6 +176,7 @@ const candidate: CapabilityRevisionRef = {
 };
 
 function variant(definition: FileRevisionRef, name: string) {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return { variantId: `${name}-v1`, axis: "role" as const, configurationRefs: [definition] };
 }
 
@@ -209,6 +210,7 @@ function report(input: {
       status: "completed",
     },
   };
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const config = {
     schemaVersion: 1 as const,
     generator: {

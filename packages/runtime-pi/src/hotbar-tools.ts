@@ -248,6 +248,7 @@ export function createPiHotbarTools(input: {
               );
               throw error;
             }
+            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             return {
               content: [{ type: "text" as const, text: JSON.stringify(value) }],
               details: Object.freeze({

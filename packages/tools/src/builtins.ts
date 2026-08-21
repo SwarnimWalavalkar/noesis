@@ -3,16 +3,15 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, matchesGlob, relative, resolve } from "node:path";
-import { type JsonValue, sha256 } from "@noesis/domain";
+import { createConditionalObject, type JsonValue, sha256 } from "@noesis/domain";
 import { createEffectExecutionFailure } from "@noesis/policy";
 import { z } from "zod";
 import { defineTool, type ToolDefinition } from "./index.ts";
 import { MAX_TOOL_TEXT_BYTES } from "./limits.ts";
-
 const textBound = z.string().max(MAX_TOOL_TEXT_BYTES);
-const pathSchema = z.string().trim().min(1).max(4_096);
+const pathSchema = z.string().trim().min(1).max(4096);
 const PROCESS_TERMINATION_GRACE_MS = 500;
-const FALLBACK_SEARCH_MAX_FILES = 10_000;
+const FALLBACK_SEARCH_MAX_FILES = 10000;
 const FALLBACK_SEARCH_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 const FALLBACK_SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const FALLBACK_SEARCH_MAX_LINE_BYTES = 4 * 1024;
@@ -30,11 +29,9 @@ const FALLBACK_SEARCH_IGNORED_DIRECTORIES = new Set([
   "target",
   "vendor",
 ]);
-
 function resolvedPath(cwd: string, path: string): string {
   return resolve(cwd, path);
 }
-
 interface ProcessResult {
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
@@ -42,7 +39,6 @@ interface ProcessResult {
   readonly stderr: string;
   readonly truncated: boolean;
 }
-
 async function runProcess(input: {
   readonly command: string;
   readonly args: readonly string[];
@@ -128,11 +124,11 @@ async function runProcess(input: {
       if (forceKillTimer) clearTimeout(forceKillTimer);
       input.signal.removeEventListener("abort", cancel);
     };
-    const rejectOnce = (error: unknown): void => {
+    const rejectOnce = (cause: unknown): void => {
       if (settled) return;
       settled = true;
       cleanup();
-      reject(error);
+      reject(cause);
     };
     const timer = setTimeout(() => terminate("timeout"), input.timeoutMs);
     const cancel = (): void => terminate("cancelled");
@@ -158,7 +154,6 @@ async function runProcess(input: {
     });
   });
 }
-
 async function readBoundedFile(
   path: string,
   startLine: number,
@@ -220,7 +215,6 @@ async function readBoundedFile(
       offset = newline + 1;
     }
   };
-
   for await (const chunk of createReadStream(path)) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     hash.update(bytes);
@@ -237,7 +231,6 @@ async function readBoundedFile(
     truncated: outputTruncated || (endLine !== undefined && endLine < totalLines),
   });
 }
-
 function truncateUtf8(value: string, maximumBytes: number): string {
   if (maximumBytes <= 0) return "";
   if (Buffer.byteLength(value, "utf8") <= maximumBytes) return value;
@@ -251,10 +244,10 @@ function truncateUtf8(value: string, maximumBytes: number): string {
   }
   return accepted;
 }
-
-async function readBoundedResponseBody(
-  response: Response,
-): Promise<{ readonly body: string; readonly truncated: boolean }> {
+async function readBoundedResponseBody(response: Response): Promise<{
+  readonly body: string;
+  readonly truncated: boolean;
+}> {
   if (!response.body) return Object.freeze({ body: "", truncated: false });
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -286,7 +279,6 @@ async function readBoundedResponseBody(
     truncated,
   });
 }
-
 async function searchWithoutRipgrep(input: {
   readonly cwd: string;
   readonly path: string;
@@ -295,17 +287,24 @@ async function searchWithoutRipgrep(input: {
   readonly maxMatches: number;
   readonly signal: AbortSignal;
 }): Promise<{
-  readonly matches: readonly { readonly path: string; readonly line: number; readonly text: string }[];
+  readonly matches: readonly {
+    readonly path: string;
+    readonly line: number;
+    readonly text: string;
+  }[];
   readonly truncated: boolean;
 }> {
   const root = resolvedPath(input.cwd, input.path);
-  const matches: { path: string; line: number; text: string }[] = [];
+  const matches: {
+    path: string;
+    line: number;
+    text: string;
+  }[] = [];
   let visitedFiles = 0;
   let scannedBytes = 0;
   let retainedBytes = 0;
   let truncated = false;
   let stopTraversal = false;
-
   async function* files(path: string): AsyncGenerator<string> {
     if (input.signal.aborted) throw createEffectExecutionFailure("cancelled", "File search was cancelled");
     const metadata = await lstat(path);
@@ -326,7 +325,6 @@ async function searchWithoutRipgrep(input: {
       else if (entry.isFile()) yield absolute;
     }
   }
-
   for await (const file of files(root)) {
     if (visitedFiles >= FALLBACK_SEARCH_MAX_FILES || scannedBytes >= FALLBACK_SEARCH_MAX_TOTAL_BYTES) {
       truncated = true;
@@ -345,7 +343,11 @@ async function searchWithoutRipgrep(input: {
     let matchSuffix = "";
     let binary = false;
     let stopped = false;
-    const fileMatches: { path: string; line: number; text: string }[] = [];
+    const fileMatches: {
+      path: string;
+      line: number;
+      text: string;
+    }[] = [];
     let fileRetainedBytes = 0;
     const retainMatch = (): void => {
       if (!lineMatched || binary || stopped) return;
@@ -442,7 +444,6 @@ async function searchWithoutRipgrep(input: {
   }
   return Object.freeze({ matches: Object.freeze(matches), truncated });
 }
-
 export interface CreateLocalWorkToolsOptions {
   readonly cwd: string;
   readonly searchCommand?: string;
@@ -452,7 +453,6 @@ export interface CreateLocalWorkToolsOptions {
     readonly contentDigest: string;
   }>;
 }
-
 export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): readonly ToolDefinition[] {
   const cwd = resolve(options.cwd);
   const searchCommand = options.searchCommand ?? "rg";
@@ -528,6 +528,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     execute: async ({ path = "." }) => {
       const absolute = resolvedPath(cwd, path);
       const entries = await readdir(absolute, { withFileTypes: true });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return {
         path: absolute,
         entries: entries
@@ -552,10 +553,10 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     visibility: "codemode_only",
     identityMaterial: identity("files.search", { searchCommand }),
     inputSchema: z.strictObject({
-      query: z.string().min(1).max(1_000),
+      query: z.string().min(1).max(1000),
       path: pathSchema.optional(),
-      glob: z.string().min(1).max(1_000).optional(),
-      maxMatches: z.number().int().min(1).max(1_000).optional(),
+      glob: z.string().min(1).max(1000).optional(),
+      maxMatches: z.number().int().min(1).max(1000).optional(),
     }),
     outputSchema: z.strictObject({
       matches: z.array(
@@ -591,18 +592,24 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
           args,
           cwd,
           signal: context.signal,
-          timeoutMs: 30_000,
+          timeoutMs: 30000,
         });
       } catch (error) {
         if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")
-          return await searchWithoutRipgrep({
-            cwd,
-            path,
-            query,
-            ...(glob ? { glob } : {}),
-            maxMatches,
-            signal: context.signal,
-          });
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+          return await searchWithoutRipgrep(
+            createConditionalObject({
+              cwd,
+              path,
+              query,
+            } as const)
+              .addOptional(glob ? { glob } : undefined)
+              .add({
+                maxMatches,
+                signal: context.signal,
+              } as const)
+              .finish(),
+          );
         throw error;
       }
       if (result.exitCode !== 0 && result.exitCode !== 1)
@@ -689,9 +696,9 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     visibility: "codemode_only",
     identityMaterial: identity("shell.run", { shellPath }),
     inputSchema: z.strictObject({
-      command: z.string().trim().min(1).max(32_768),
+      command: z.string().trim().min(1).max(32768),
       cwd: pathSchema.optional(),
-      timeoutMs: z.number().int().min(100).max(600_000).optional(),
+      timeoutMs: z.number().int().min(100).max(600000).optional(),
     }),
     outputSchema: z.strictObject({
       exitCode: z.number().int().nullable(),
@@ -705,7 +712,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
       resource: `shell:${resolvedPath(cwd, requestedCwd)}:${sha256(command)}`,
       estimatedCost: 1,
     }),
-    execute: async ({ command, cwd: requestedCwd = ".", timeoutMs = 120_000 }, context) =>
+    execute: async ({ command, cwd: requestedCwd = ".", timeoutMs = 120000 }, context) =>
       await runProcess({
         command: shellPath,
         args: ["-c", command],
@@ -771,10 +778,8 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     }),
     execute: async ({ path, content }) => await writeArtifact({ path, content }),
   });
-
   return Object.freeze([read, list, search, write, edit, shell, fetchTool, artifact]);
 }
-
 export function jsonOutputSchema(): z.ZodType<JsonValue> {
   return z.json();
 }

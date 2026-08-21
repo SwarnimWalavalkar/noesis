@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import {
   Container,
   matchesKey,
@@ -29,7 +30,6 @@ import {
   createNoesisView,
   createQueuedInputsView,
   createRunInspectorOverlay,
-  createStaticLineView,
   createStatusView,
 } from "./rendering.ts";
 import {
@@ -42,19 +42,20 @@ import {
 } from "./runtime-port.ts";
 import { createSafeEditor, createSelectTheme, enrichEditorSkills } from "./safe-editor.ts";
 import {
-  createResponsiveSessionPicker,
-  createSessionPickerItems,
+  resolveTuiSessionRequest,
   resumableTrail,
+  selectSessionTrailId,
   type TuiStartOptions,
 } from "./session-picker.ts";
 import {
   executionForInteractionPhase,
   initialTuiState,
   interactionViewFromSnapshot,
+  type NoesisTuiAction,
   timelineActions,
 } from "./state.ts";
-import { createStreamDeltaBuffer } from "./stream-delta-buffer.ts";
-import { ANSI, safeTerminalText, shouldUseColor, styled } from "./theme.ts";
+import { type ActiveTurnToken, createStreamDeltaBuffer } from "./stream-delta-buffer.ts";
+import { safeTerminalText, shouldUseColor } from "./theme.ts";
 export * from "./action-summary.ts";
 export * from "./agent-event.ts";
 export * from "./commands.ts";
@@ -74,18 +75,7 @@ export async function startNoesisTui(
   options: TuiStartOptions = {},
   terminal: Terminal = new ProcessTerminal(),
 ): Promise<void> {
-  const requestedSession = options.session ?? { mode: "new" };
-  const session =
-    requestedSession.mode === "continue"
-      ? (() => {
-          const latest = runtime.listTrailSummaries()[0];
-          if (!latest)
-            throw new Error(
-              `No saved sessions were found in ${runtime.home ?? "the configured Noesis home"}. Start a new session with noesis (without --continue).`,
-            );
-          return { mode: "resume" as const, trailId: latest.trailId };
-        })()
-      : requestedSession;
+  const session = resolveTuiSessionRequest(runtime, options.session);
   const tui = new TUI(terminal);
   tui.setClearOnShrink(false);
   const root = new Container();
@@ -105,15 +95,15 @@ export async function startNoesisTui(
     () => terminal.rows,
   );
   const editor = createSafeEditor(tui, colorEnabled, selectTheme, () => terminal.rows);
-  const reportFailure = (error: unknown): void => {
+  const reportFailure = (cause: unknown): void => {
     view.dispatch({
       type: "failed",
-      error: safeTerminalText(error instanceof Error ? error.message : String(error)),
+      error: safeTerminalText(cause instanceof Error ? cause.message : String(cause)),
     });
     tui.requestRender();
   };
-  const reportLearningDiagnostic = (error: unknown): void => {
-    view.dispatch({ type: "system-message", text: learningDiagnosticNotice(error) });
+  const reportLearningDiagnostic = (cause: unknown): void => {
+    view.dispatch({ type: "system-message", text: learningDiagnosticNotice(cause) });
     tui.requestRender();
   };
   const headerView = createHeaderView(colorEnabled, () => terminal.rows);
@@ -126,22 +116,30 @@ export async function startNoesisTui(
     },
   );
   let inspectorHandle: OverlayHandle | undefined;
-  const mcp = createTuiMcpOrchestration({
-    runtime,
-    tui,
-    colorEnabled,
-    height: () => terminal.rows,
-    ...(options.mcpInteractionBridge ? { interactionBridge: options.mcpInteractionBridge } : {}),
-    ...(options.openUrl ? { openUrl: options.openUrl } : {}),
-    mutationsEnabled: () => view.state.interaction.phase === "idle",
-    reportUnavailable: (text) => view.dispatch({ type: "system-message", text }),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  const mcp = createTuiMcpOrchestration(
+    createConditionalObject({
+      runtime,
+      tui,
+      colorEnabled,
+      height: () => terminal.rows,
+    } as const)
+      .addOptional(
+        options.mcpInteractionBridge ? { interactionBridge: options.mcpInteractionBridge } : undefined,
+      )
+      .addOptional(options.openUrl ? { openUrl: options.openUrl } : undefined)
+      .add({
+        mutationsEnabled: () => view.state.interaction.phase === "idle",
+        reportUnavailable: (text: string) => view.dispatch({ type: "system-message", text }),
+      } as const)
+      .finish(),
+  );
   const learning = createTuiLearningOrchestration({
     runtime,
     tui,
     colorEnabled,
     height: () => terminal.rows,
-    reportUnavailable: (text) => view.dispatch({ type: "system-message", text }),
+    reportUnavailable: (text: string) => view.dispatch({ type: "system-message", text }),
   });
   const statusView = createStatusView(view, () => terminal.rows);
   const queuedInputsView = createQueuedInputsView(view, () => terminal.rows);
@@ -153,7 +151,6 @@ export async function startNoesisTui(
   let externalEditorActive = false;
   let turnGeneration = 0;
   let inspectorGeneration = 0;
-  type ActiveTurnToken = Readonly<{ generation: number; trailId: string; turnId: string }>;
   let activeTurnToken: ActiveTurnToken | undefined;
   const isCurrentTurn = (token: ActiveTurnToken): boolean =>
     phase === "main" &&
@@ -178,7 +175,7 @@ export async function startNoesisTui(
   let cancelPicker: (() => void) | undefined;
   let shutdownPromise: Promise<void> | undefined;
   let resolveShutdown: (() => void) | undefined;
-  let rejectShutdown: ((error: unknown) => void) | undefined;
+  let rejectShutdown: ((cause: unknown) => void) | undefined;
   const shutdownCompleted = new Promise<void>((resolve, reject) => {
     resolveShutdown = resolve;
     rejectShutdown = reject;
@@ -200,7 +197,7 @@ export async function startNoesisTui(
       editor.onSubmit = (): void => undefined;
       removeExitInputListener();
       try {
-        await terminal.drainInput(1_000);
+        await terminal.drainInput(1000);
       } finally {
         if (!terminalStopped) {
           terminalStopped = true;
@@ -209,13 +206,17 @@ export async function startNoesisTui(
       }
       const trailId = view.state.trailId;
       const exclusiveCommand = exclusiveCommands?.activeWork();
-      let shutdownFailure: { readonly error: unknown } | undefined;
+      let shutdownFailure:
+        | {
+            readonly error: unknown;
+          }
+        | undefined;
       if (trailId && view.state.interaction.phase !== "idle") {
         const abortAndSettle = runtime
           .interact(trailId, stopVisibleInteraction(visibleTurnId))
           .then<ShutdownSettlement, ShutdownSettlement>(
             () => ({ status: "settled" }),
-            (error: unknown) => ({ status: "rejected", error }),
+            (cause: unknown) => ({ status: "rejected", error: cause }),
           );
         let graceTimer: NodeJS.Timeout | undefined;
         const settlement = await Promise.race<ShutdownSettlement>([
@@ -263,11 +264,15 @@ export async function startNoesisTui(
     const executionId = action ? executionIdOf(action) : undefined;
     const settle = (detail?: Awaited<ReturnType<NonNullable<typeof runtime.inspectExecution>>>): void => {
       inspectorMaxScroll = 0;
-      view.dispatch({
-        type: "inspector-loaded",
-        actionId,
-        ...(detail ? { detail } : {}),
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      view.dispatch(
+        createConditionalObject({
+          type: "inspector-loaded",
+          actionId,
+        } as const)
+          .addOptional(detail ? { detail } : undefined)
+          .finish(),
+      );
       tui.requestRender();
     };
     if (!trailId || !executionId || !runtime.inspectExecution) {
@@ -429,10 +434,16 @@ export async function startNoesisTui(
     trailId: string,
     command: TuiInteractionCommand,
   ): Promise<TuiInteractionResult> => {
-    const result = await runtime.interact(trailId, command, {
-      onEvent: onInteractionEvent,
-      ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const result = await runtime.interact(
+      trailId,
+      command,
+      createConditionalObject({
+        onEvent: onInteractionEvent,
+      } as const)
+        .addOptional(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : undefined)
+        .finish(),
+    );
     applyInteractionSnapshot(result.snapshot);
     return result;
   };
@@ -456,7 +467,6 @@ export async function startNoesisTui(
     }
     return interact(stopVisibleInteraction(visibleTurnId));
   };
-
   editor.createStandaloneEscapeHandler = () => {
     if (phase !== "main") return undefined;
     const inspectedActionId = view.state.inspector?.actionId;
@@ -482,7 +492,6 @@ export async function startNoesisTui(
       return true;
     };
   };
-
   const restoreNewestQueuedInput = (): void => {
     void interact({ type: "restore-newest" }).then((result) => {
       if (result.effect !== "restored" || !result.restoredText) return;
@@ -491,17 +500,22 @@ export async function startNoesisTui(
       tui.requestRender();
     }, reportFailure);
   };
-
   const openExternalEditor = (): void => {
     if (externalEditorActive) return;
     externalEditorActive = true;
     const original = editor.getText();
     editor.disableSubmit = true;
     tui.stop();
-    void editTextInExternalEditor({
-      content: original,
-      ...(options.externalEditorCommand ? { configuredCommand: options.externalEditorCommand } : {}),
-    })
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    void editTextInExternalEditor(
+      createConditionalObject({
+        content: original,
+      } as const)
+        .addOptional(
+          options.externalEditorCommand ? { configuredCommand: options.externalEditorCommand } : undefined,
+        )
+        .finish(),
+    )
       .then((result) => {
         if (phase !== "main") return;
         if (result.status === "edited") editor.setText(result.content);
@@ -601,10 +615,14 @@ export async function startNoesisTui(
       }
       if (normalizedInput === "/steer" || normalizedInput.startsWith("/steer ")) {
         const steeringText = normalizedInput.slice("/steer".length).trim();
-        const result = await interact({
-          type: "steer",
-          ...(steeringText ? { text: steeringText } : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        const result = await interact(
+          createConditionalObject({
+            type: "steer",
+          } as const)
+            .addOptional(steeringText ? { text: steeringText } : undefined)
+            .finish(),
+        );
         const feedback = steerFeedback(result, Boolean(steeringText));
         if (feedback) view.dispatch({ type: "system-message", text: feedback });
         if (result.restoredText) editor.setText(result.restoredText);
@@ -633,24 +651,34 @@ export async function startNoesisTui(
       }
       let handled = false;
       if (isSlashCommandSubmission(text)) {
-        const commandWork = runSlashCommand(normalizedInput, {
-          runtime,
-          trailId: submittedTrailId,
-          publishInspector,
-          prepareTrailSelection: async (trailId) => await exclusiveCommands?.prepareDestination(trailId),
-          dispatch: (action) => {
-            if (!isCurrentSubmission()) return;
-            view.dispatch(action);
-            if (action.type === "trail-selected") ownedTrailId = action.trail.trailId;
-          },
-          requestRender: () => {
-            if (isCurrentSubmission()) tui.requestRender();
-          },
-          openMcpManager: mcp.openManager,
-          ...(runtime.inspectLearningAudit
-            ? { openLearningAudit: () => learning.open(submittedTrailId) }
-            : {}),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        const commandWork = runSlashCommand(
+          normalizedInput,
+          createConditionalObject({
+            runtime,
+            trailId: submittedTrailId,
+            publishInspector,
+            prepareTrailSelection: async (trailId: string) =>
+              await exclusiveCommands?.prepareDestination(trailId),
+            dispatch: (action: NoesisTuiAction) => {
+              if (!isCurrentSubmission()) return;
+              view.dispatch(action);
+              if (action.type === "trail-selected") ownedTrailId = action.trail.trailId;
+            },
+            requestRender: () => {
+              if (isCurrentSubmission()) tui.requestRender();
+            },
+            openMcpManager: mcp.openManager,
+          } as const)
+            .addOptional(
+              runtime.inspectLearningAudit
+                ? {
+                    openLearningAudit: () => learning.open(submittedTrailId),
+                  }
+                : undefined,
+            )
+            .finish(),
+        );
         handled = await commandWork;
       }
       if (handled) {
@@ -671,11 +699,10 @@ export async function startNoesisTui(
         }
         return;
       }
-
       await interact({ type: "submit", text });
     };
-    const reportSubmissionFailure = (error: unknown): void => {
-      if (isCurrentSubmission()) reportFailure(error);
+    const reportSubmissionFailure = (cause: unknown): void => {
+      if (isCurrentSubmission()) reportFailure(cause);
     };
     if (exclusiveScope)
       exclusiveCommands?.start({
@@ -715,49 +742,22 @@ export async function startNoesisTui(
     tui.setFocus(editor);
     tui.requestRender();
   };
-
   try {
     if (session.mode === "pick") {
-      const items = createSessionPickerItems(runtime.listTrailSummaries());
-      if (items.length === 0)
-        throw new Error(
-          `No saved sessions were found in ${runtime.home ?? "the configured Noesis home"}. Start a new session with noesis (without --resume).`,
-        );
-      const picker = createResponsiveSessionPicker(items, () => terminal.rows, selectTheme);
-      const selected = new Promise<string | undefined>((resolve) => {
-        let settled = false;
-        const finish = (trailId: string | undefined): void => {
-          if (settled) return;
-          settled = true;
-          resolve(trailId);
-        };
-        cancelPicker = () => finish(undefined);
-        picker.onSelect = (item) => finish(item.value);
-        picker.onCancel = () => {
-          finish(undefined);
+      const trailId = await selectSessionTrailId({
+        runtime,
+        tui,
+        root,
+        terminal,
+        theme: selectTheme,
+        colorEnabled,
+        registerCancel: (cancel) => {
+          cancelPicker = cancel;
+        },
+        onCancel: () => {
           void shutdown();
-        };
+        },
       });
-      root.addChild(
-        createStaticLineView(
-          `${styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "NOESIS")}  ${styled(
-            colorEnabled,
-            ANSI.dim,
-            "resume a session",
-          )}`,
-          () => terminal.rows >= 2,
-        ),
-      );
-      root.addChild(
-        createStaticLineView(
-          styled(colorEnabled, ANSI.dim, "↑/↓ navigate · Enter resume · Esc cancel"),
-          () => terminal.rows >= 3,
-        ),
-      );
-      root.addChild(picker);
-      tui.setFocus(picker);
-      tui.start();
-      const trailId = await selected;
       if (!trailId) {
         await shutdown();
         await shutdownCompleted;

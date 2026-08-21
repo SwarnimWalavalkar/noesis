@@ -15,8 +15,8 @@ const DEFAULT_LOCK_TIMEOUT = 5_000;
 const DEFAULT_STALE_AFTER = 30_000;
 const LOCK_RETRY_DELAY = 20;
 
-function isCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+function isCode(cause: unknown, code: string): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === code;
 }
 
 function processIsAlive(pid: number): boolean {
@@ -79,13 +79,13 @@ async function removeStaleLock(path: string, staleAfter: number): Promise<void> 
     if (Date.now() - metadata.mtimeMs <= staleAfter) return;
     const record = await readLockRecord(path);
     if (record?.hostname === hostname() && processIsAlive(record.pid)) return;
-    await unlink(path).catch((error: unknown) => {
-      if (!isCode(error, "ENOENT")) throw error;
+    await unlink(path).catch((cause: unknown) => {
+      if (!isCode(cause, "ENOENT")) throw cause;
     });
   } finally {
     await reaper.close();
-    await unlink(reaperPath).catch((error: unknown) => {
-      if (!isCode(error, "ENOENT")) throw error;
+    await unlink(reaperPath).catch((cause: unknown) => {
+      if (!isCode(cause, "ENOENT")) throw cause;
     });
   }
 }
@@ -98,8 +98,8 @@ async function hasActiveReaper(path: string, staleAfter: number): Promise<boolea
       throw new Error(`${path}.reap: MCP lock reaper path must be a regular file`);
     }
     if (Date.now() - metadata.mtimeMs <= staleAfter) return true;
-    await unlink(reaperPath).catch((error: unknown) => {
-      if (!isCode(error, "ENOENT")) throw error;
+    await unlink(reaperPath).catch((cause: unknown) => {
+      if (!isCode(cause, "ENOENT")) throw cause;
     });
     return false;
   } catch (error) {
@@ -157,8 +157,8 @@ export async function withMcpFileLock<T>(
   } finally {
     const current = await readLockRecord(lockPath);
     if (current?.token === record.token) {
-      await unlink(lockPath).catch((error: unknown) => {
-        if (!isCode(error, "ENOENT")) throw error;
+      await unlink(lockPath).catch((cause: unknown) => {
+        if (!isCode(cause, "ENOENT")) throw cause;
       });
     }
   }

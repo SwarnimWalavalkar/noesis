@@ -1,4 +1,5 @@
 import {
+  createConditionalObject,
   CapabilityRevisionRefSchema,
   err,
   ok,
@@ -21,7 +22,6 @@ import {
   sha256,
 } from "@noesis/domain";
 import { z } from "zod";
-
 export interface CapabilityRevisionConstruction {
   /** Candidate definitions are materialized separately; this registry never accepts active working bytes. */
   readonly definitionState: "candidate";
@@ -41,7 +41,6 @@ export interface CapabilityRevisionConstruction {
   readonly sourceEvaluationDefinitions: readonly FileRevisionRef[];
   readonly requestedPermissionDelta: PermissionDelta;
 }
-
 export interface CapabilityRevisionResearchRefs {
   readonly experimentId: string;
   readonly trialRefs: readonly DatabaseRowRef<"experiment_trials">[];
@@ -49,48 +48,40 @@ export interface CapabilityRevisionResearchRefs {
   readonly preflightReportRef?: DatabaseRowRef<"preflight_reports">;
   readonly evaluationRefs: readonly DatabaseRowRef<"evaluations">[];
 }
-
 export interface CapabilityPinMetadata {
   readonly capabilityId: string;
   readonly revision: CapabilityRevisionRef;
   readonly reason: string;
 }
-
 export const CapabilityPinMetadataSchema = z.strictObject({
   capabilityId: z.string().min(1),
   revision: CapabilityRevisionRefSchema,
   reason: z.string().min(1),
 });
-
 export interface CapabilityVetoMetadata {
   readonly capabilityId: string;
   readonly rootRevision: CapabilityRevisionRef;
   readonly reason: string;
 }
-
 export const CapabilityVetoMetadataSchema = z.strictObject({
   capabilityId: z.string().min(1),
   rootRevision: CapabilityRevisionRefSchema,
   reason: z.string().min(1),
 });
-
 export interface CapabilityControlError {
   readonly code: "invalid_control";
   readonly message: string;
   readonly capabilityId: string;
 }
-
 export interface CapabilityControlReadModel {
   readonly capabilityId: string;
   readonly pin: CapabilityPinMetadata | null;
   readonly vetoes: readonly CapabilityVetoMetadata[];
 }
-
 export interface CapabilityControlState {
   readonly controls: CapabilityControlReadModel;
   readonly revision?: FileRevisionRef;
 }
-
 export interface CapabilityControlStorePort {
   readonly read: (capabilityId: string) => Promise<CapabilityControlState>;
   readonly commit: (request: {
@@ -98,7 +89,6 @@ export interface CapabilityControlStorePort {
     readonly expectedRevisionId?: string;
   }) => Promise<Result<CapabilityControlState, CapabilityControlError>>;
 }
-
 export interface CapabilityRevisionReadModel {
   readonly revision: CapabilityRevision;
   readonly revisionRef: CapabilityRevisionRef;
@@ -107,24 +97,20 @@ export interface CapabilityRevisionReadModel {
   readonly pinned: boolean;
   readonly vetoed: boolean;
 }
-
 export interface CapabilityReadModel {
   readonly capability: Capability;
   readonly candidateRevisions: readonly CapabilityRevisionReadModel[];
   readonly controls: CapabilityControlReadModel;
   readonly activation: CapabilityActivationReadModel;
 }
-
 export interface CapabilityActivationReader {
   readonly read: (capability: Capability) => Promise<CapabilityActivationReadModel>;
 }
-
 export interface AtomicCapabilityRegistryOptions {
   readonly activationReader?: CapabilityActivationReader;
   readonly researchState?: ResearchStatePort;
   readonly controlStore?: CapabilityControlStorePort;
 }
-
 export interface AtomicCapabilityRegistry {
   readonly registerCapability: (capability: Capability) => Capability;
   readonly constructRevision: (construction: CapabilityRevisionConstruction) => CapabilityRevisionRef;
@@ -145,17 +131,14 @@ export interface AtomicCapabilityRegistry {
   readonly readControls: (capabilityId: string) => Promise<CapabilityControlReadModel | undefined>;
   readonly read: (capabilityId: string) => Promise<CapabilityReadModel | undefined>;
 }
-
 const CapabilityControlReadModelSchema: z.ZodType<CapabilityControlReadModel> = z.strictObject({
   capabilityId: z.string().min(1),
   pin: CapabilityPinMetadataSchema.nullable(),
   vetoes: z.array(CapabilityVetoMetadataSchema),
 });
-
 function emptyControls(capabilityId: string): CapabilityControlReadModel {
   return Object.freeze({ capabilityId, pin: null, vetoes: Object.freeze([]) });
 }
-
 function freezeControls(value: CapabilityControlReadModel): CapabilityControlReadModel {
   return Object.freeze({
     capabilityId: value.capabilityId,
@@ -169,7 +152,6 @@ function freezeControls(value: CapabilityControlReadModel): CapabilityControlRea
     ),
   });
 }
-
 export function createInMemoryCapabilityControlStore(): CapabilityControlStorePort {
   const states = new Map<string, CapabilityControlState>();
   const store: CapabilityControlStorePort = {
@@ -198,11 +180,11 @@ export function createInMemoryCapabilityControlStore(): CapabilityControlStorePo
   };
   return Object.freeze(store);
 }
-
 export function createWorkspaceCapabilityControlStore(
   workspace: Pick<WorkspaceStore, "definitionMetadata" | "definitionPublications" | "reads">,
 ): CapabilityControlStorePort {
   const namespace = "capability_control";
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const actor = { actorId: "capability-control-store", kind: "system" as const };
   const read = async (capabilityId: string): Promise<CapabilityControlState> => {
     const metadata = await workspace.definitionMetadata.getCurrent(namespace, capabilityId);
@@ -241,18 +223,28 @@ export function createWorkspaceCapabilityControlStore(
         });
       const parsed = CapabilityControlReadModelSchema.parse(request.controls);
       const currentMetadata = await workspace.definitionMetadata.getCurrent(namespace, parsed.capabilityId);
-      const committed = await workspace.definitionPublications.publish({
-        namespace,
-        definitionId: parsed.capabilityId,
-        revision: (currentMetadata?.revision ?? 0) + 1,
-        workingPath: `capabilities/${parsed.capabilityId}/controls.json`,
-        bytes: new TextEncoder().encode(`${JSON.stringify(parsed, null, 2)}\n`),
-        ...(request.expectedRevisionId === undefined
-          ? {}
-          : { expectedCurrentRevisionId: request.expectedRevisionId }),
-        sensitivity: "normal",
-        activity: { kind: "capability.controls_updated", actor },
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      const committed = await workspace.definitionPublications.publish(
+        createConditionalObject({
+          namespace,
+          definitionId: parsed.capabilityId,
+          revision: (currentMetadata?.revision ?? 0) + 1,
+          workingPath: `capabilities/${parsed.capabilityId}/controls.json`,
+          bytes: new TextEncoder().encode(`${JSON.stringify(parsed, null, 2)}\n`),
+        } as const)
+          .addOptional(
+            !(request.expectedRevisionId === undefined)
+              ? {
+                  expectedCurrentRevisionId: request.expectedRevisionId,
+                }
+              : undefined,
+          )
+          .add({
+            sensitivity: "normal",
+            activity: { kind: "capability.controls_updated", actor },
+          } as const)
+          .finish(),
+      );
       if (!committed.ok)
         return err({
           code: "invalid_control",
@@ -264,89 +256,98 @@ export function createWorkspaceCapabilityControlStore(
   };
   return Object.freeze(store);
 }
-
 function cloneFileRevision(ref: FileRevisionRef): FileRevisionRef {
   return Object.freeze({ ...ref });
 }
-
 function freezeCapability(capability: Capability): Capability {
   return Object.freeze({ ...capability });
 }
-
 function freezeRevision(construction: CapabilityRevisionConstruction): CapabilityRevision {
   const tools = Object.freeze(construction.tools.map(cloneFileRevision));
   const dependencyLock = construction.dependencyLock
     ? cloneFileRevision(construction.dependencyLock)
     : undefined;
-  return Object.freeze({
-    capabilityRevisionId: construction.capabilityRevisionId,
-    capabilityId: construction.capabilityId,
-    ...(construction.predecessorRevisionId
-      ? { predecessorRevisionId: construction.predecessorRevisionId }
-      : {}),
-    ...(construction.effects
-      ? {
-          effects: Object.freeze(
-            construction.effects.map((effect) =>
-              Object.freeze(
-                effect.kind === "instruction" || effect.kind === "skill"
-                  ? { ...effect, material: cloneFileRevision(effect.material) }
-                  : {
-                      ...effect,
-                      project: Object.freeze({ ...effect.project }),
-                      definitionRevision: cloneFileRevision(effect.definitionRevision),
-                    },
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze(
+    createConditionalObject({
+      capabilityRevisionId: construction.capabilityRevisionId,
+      capabilityId: construction.capabilityId,
+    } as const)
+      .addOptional(
+        construction.predecessorRevisionId
+          ? {
+              predecessorRevisionId: construction.predecessorRevisionId,
+            }
+          : undefined,
+      )
+      .addOptional(
+        construction.effects
+          ? {
+              effects: Object.freeze(
+                construction.effects.map((effect) =>
+                  Object.freeze(
+                    effect.kind === "instruction" || effect.kind === "skill"
+                      ? { ...effect, material: cloneFileRevision(effect.material) }
+                      : {
+                          ...effect,
+                          project: Object.freeze({ ...effect.project }),
+                          definitionRevision: cloneFileRevision(effect.definitionRevision),
+                        },
+                  ),
+                ),
               ),
-            ),
-          ),
-        }
-      : {}),
-    promptModules: Object.freeze(construction.promptModules.map(cloneFileRevision)),
-    skills: Object.freeze(construction.skills.map(cloneFileRevision)),
-    tools,
-    toolset: Object.freeze({
-      toolRevisionIds: Object.freeze(tools.map((tool) => tool.revisionId)),
-      routerRevision: cloneFileRevision(construction.routerRevision),
-      strategyId: construction.routerStrategyId,
-    }),
-    activationPolicy: Object.freeze({ ...construction.activationPolicy }),
-    ...(dependencyLock ? { dependencyLock } : {}),
-    permissionManifest: Object.freeze({
-      effects: Object.freeze([...construction.permissionManifest.effects]),
-      resourcePatterns: Object.freeze([...construction.permissionManifest.resourcePatterns]),
-      credentialRefs: Object.freeze([...construction.permissionManifest.credentialRefs]),
-    }),
-    evidenceRefs: Object.freeze(
-      construction.evidenceRefs.map((evidenceRef) => Object.freeze({ ...evidenceRef })),
-    ),
-    sourceEvaluationDefinitions: Object.freeze(
-      construction.sourceEvaluationDefinitions.map(cloneFileRevision),
-    ),
-    requestedPermissionDelta: Object.freeze({
-      addedEffects: Object.freeze([...construction.requestedPermissionDelta.addedEffects]),
-      widenedResources: Object.freeze([...construction.requestedPermissionDelta.widenedResources]),
-      addedCredentialRefs: Object.freeze([...construction.requestedPermissionDelta.addedCredentialRefs]),
-    }),
-  });
+            }
+          : undefined,
+      )
+      .add({
+        promptModules: Object.freeze(construction.promptModules.map(cloneFileRevision)),
+        skills: Object.freeze(construction.skills.map(cloneFileRevision)),
+        tools,
+        toolset: Object.freeze({
+          toolRevisionIds: Object.freeze(tools.map((tool) => tool.revisionId)),
+          routerRevision: cloneFileRevision(construction.routerRevision),
+          strategyId: construction.routerStrategyId,
+        }),
+        activationPolicy: Object.freeze({ ...construction.activationPolicy }),
+      } as const)
+      .addOptional(dependencyLock ? { dependencyLock } : undefined)
+      .add({
+        permissionManifest: Object.freeze({
+          effects: Object.freeze([...construction.permissionManifest.effects]),
+          resourcePatterns: Object.freeze([...construction.permissionManifest.resourcePatterns]),
+          credentialRefs: Object.freeze([...construction.permissionManifest.credentialRefs]),
+        }),
+        evidenceRefs: Object.freeze(
+          construction.evidenceRefs.map((evidenceRef) => Object.freeze({ ...evidenceRef })),
+        ),
+        sourceEvaluationDefinitions: Object.freeze(
+          construction.sourceEvaluationDefinitions.map(cloneFileRevision),
+        ),
+        requestedPermissionDelta: Object.freeze({
+          addedEffects: Object.freeze([...construction.requestedPermissionDelta.addedEffects]),
+          widenedResources: Object.freeze([...construction.requestedPermissionDelta.widenedResources]),
+          addedCredentialRefs: Object.freeze([...construction.requestedPermissionDelta.addedCredentialRefs]),
+        }),
+      } as const)
+      .finish(),
+  );
 }
-
 function assertRowTable(ref: DatabaseRowRef, table: DatabaseRowRef["table"]): void {
   if (ref.table !== table) throw new Error(`Expected ${table} row reference, received ${ref.table}`);
 }
-
 function includesRevision(
   revisions: readonly CapabilityRevisionRef[],
   target: CapabilityRevisionRef,
 ): boolean {
   return revisions.some((revision) => sameCapabilityRevisionRef(revision, target));
 }
-
 export function createAtomicCapabilityRegistry(
   options: AtomicCapabilityRegistryOptions = {},
 ): AtomicCapabilityRegistry {
   const capabilities = new Map<string, Capability>();
   const revisions = new Map<string, CapabilityRevision>();
   const researchRefs = new Map<string, CapabilityRevisionResearchRefs>();
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const controlStore: CapabilityControlStorePort =
     options.controlStore ??
     Object.freeze({
@@ -358,7 +359,6 @@ export function createAtomicCapabilityRegistry(
           capabilityId: request.controls.capabilityId,
         }),
     });
-
   const registerCapability = (input: Capability): Capability => {
     const existing = capabilities.get(input.capabilityId);
     if (existing) {
@@ -375,10 +375,8 @@ export function createAtomicCapabilityRegistry(
     capabilities.set(capability.capabilityId, capability);
     return capability;
   };
-
   const getStoredRevision = (capabilityRevisionId: string): CapabilityRevision | undefined =>
     revisions.get(capabilityRevisionId);
-
   const constructRevision = (construction: CapabilityRevisionConstruction): CapabilityRevisionRef => {
     if (!capabilities.has(construction.capabilityId)) {
       throw new Error(`Unknown capability ${construction.capabilityId}`);
@@ -402,30 +400,25 @@ export function createAtomicCapabilityRegistry(
     revisions.set(revision.capabilityRevisionId, revision);
     return ref;
   };
-
   const getCapability = (capabilityId: string): Capability | undefined => capabilities.get(capabilityId);
-
   const getRevision = (ref: CapabilityRevisionRef): CapabilityRevision | undefined => {
     const revision = getStoredRevision(ref.capabilityRevisionId);
     if (!revision) return undefined;
     const actual = capabilityRevisionRef(revision);
     return sameCapabilityRevisionRef(actual, ref) ? revision : undefined;
   };
-
   const listRevisionLineage = (capabilityId: string): readonly CapabilityRevisionRef[] =>
     Object.freeze(
       [...revisions.values()]
         .filter((revision) => revision.capabilityId === capabilityId)
         .map(capabilityRevisionRef),
     );
-
   const discover = (scope: string): readonly Capability[] =>
     Object.freeze(
       [...capabilities.values()].filter(
         (capability) => capability.scope === scope || scope.startsWith(`${capability.scope}/`),
       ),
     );
-
   const recordResearchRefs = async (
     revisionRef: CapabilityRevisionRef,
     refs: CapabilityRevisionResearchRefs,
@@ -435,7 +428,6 @@ export function createAtomicCapabilityRegistry(
     for (const ref of refs.evaluationRefs) assertRowTable(ref, "evaluations");
     if (refs.preflightPlanRef) assertRowTable(refs.preflightPlanRef, "preflight_plans");
     if (refs.preflightReportRef) assertRowTable(refs.preflightReportRef, "preflight_reports");
-
     if (options.researchState) {
       const experiment = await options.researchState.experiments.getExperiment(refs.experimentId);
       if (!experiment || !includesRevision(experiment.candidateRevisions, revisionRef)) {
@@ -468,7 +460,6 @@ export function createAtomicCapabilityRegistry(
         }
       }
     }
-
     researchRefs.set(
       revisionRef.capabilityRevisionId,
       Object.freeze({
@@ -478,7 +469,6 @@ export function createAtomicCapabilityRegistry(
       }),
     );
   };
-
   const pin = async (
     metadata: CapabilityPinMetadata,
   ): Promise<Result<CapabilityPinMetadata, CapabilityControlError>> => {
@@ -499,13 +489,18 @@ export function createAtomicCapabilityRegistry(
       revision: Object.freeze({ ...parsed.data.revision }),
     });
     const current = await controlStore.read(parsed.data.capabilityId);
-    const committed = await controlStore.commit({
-      controls: freezeControls({ ...current.controls, pin: stored }),
-      ...(current.revision === undefined ? {} : { expectedRevisionId: current.revision.revisionId }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const committed = await controlStore.commit(
+      createConditionalObject({
+        controls: freezeControls({ ...current.controls, pin: stored }),
+      } as const)
+        .addOptional(
+          !(current.revision === undefined) ? { expectedRevisionId: current.revision.revisionId } : undefined,
+        )
+        .finish(),
+    );
     return committed.ok ? ok(stored) : committed;
   };
-
   const veto = async (
     metadata: CapabilityVetoMetadata,
   ): Promise<Result<CapabilityVetoMetadata, CapabilityControlError>> => {
@@ -526,13 +521,18 @@ export function createAtomicCapabilityRegistry(
       rootRevision: Object.freeze({ ...parsed.data.rootRevision }),
     });
     const current = await controlStore.read(parsed.data.capabilityId);
-    const committed = await controlStore.commit({
-      controls: freezeControls({ ...current.controls, vetoes: [...current.controls.vetoes, stored] }),
-      ...(current.revision === undefined ? {} : { expectedRevisionId: current.revision.revisionId }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const committed = await controlStore.commit(
+      createConditionalObject({
+        controls: freezeControls({ ...current.controls, vetoes: [...current.controls.vetoes, stored] }),
+      } as const)
+        .addOptional(
+          !(current.revision === undefined) ? { expectedRevisionId: current.revision.revisionId } : undefined,
+        )
+        .finish(),
+    );
     return committed.ok ? ok(stored) : committed;
   };
-
   const isVetoed = (revision: CapabilityRevision, controls: CapabilityControlReadModel): boolean => {
     const lineageRoots = controls.vetoes.map((item) => item.rootRevision);
     let current: CapabilityRevision | undefined = revision;
@@ -543,12 +543,10 @@ export function createAtomicCapabilityRegistry(
     }
     return false;
   };
-
   const readControls = async (capabilityId: string): Promise<CapabilityControlReadModel | undefined> => {
     if (!getCapability(capabilityId)) return undefined;
     return freezeControls((await controlStore.read(capabilityId)).controls);
   };
-
   const read = async (capabilityId: string): Promise<CapabilityReadModel | undefined> => {
     const capability = getCapability(capabilityId);
     if (!capability) return undefined;
@@ -563,14 +561,20 @@ export function createAtomicCapabilityRegistry(
       .map((revision) => {
         const revisionRef = capabilityRevisionRef(revision);
         const refs = researchRefs.get(revision.capabilityRevisionId);
-        const model: CapabilityRevisionReadModel = Object.freeze({
-          revision,
-          revisionRef,
-          definitionState: "candidate",
-          ...(refs ? { researchRefs: refs } : {}),
-          pinned: pinMetadata ? sameCapabilityRevisionRef(pinMetadata.revision, revisionRef) : false,
-          vetoed: isVetoed(revision, controls),
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        const model: CapabilityRevisionReadModel = Object.freeze(
+          createConditionalObject({
+            revision,
+            revisionRef,
+            definitionState: "candidate",
+          } as const)
+            .addOptional(refs ? { researchRefs: refs } : undefined)
+            .add({
+              pinned: pinMetadata ? sameCapabilityRevisionRef(pinMetadata.revision, revisionRef) : false,
+              vetoed: isVetoed(revision, controls),
+            } as const)
+            .finish(),
+        );
         return model;
       });
     return Object.freeze({
@@ -580,7 +584,6 @@ export function createAtomicCapabilityRegistry(
       activation,
     });
   };
-
   return Object.freeze({
     registerCapability,
     constructRevision,

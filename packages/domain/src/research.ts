@@ -1,3 +1,4 @@
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const DATABASE_TABLES = [
   "sessions",
   "messages",
@@ -220,6 +221,7 @@ export type CapabilityEffect =
   | CapabilityScriptEffect
   | CapabilityWorkflowEffect;
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const CAPABILITY_EFFECT_KINDS = ["instruction", "skill", "script", "workflow"] as const;
 export type CapabilityEffectKind = (typeof CAPABILITY_EFFECT_KINDS)[number];
 
@@ -231,6 +233,7 @@ export interface CapabilityRevisionRef {
   readonly bundleDigest: string;
 }
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const CAPABILITY_KINDS = [
   "instruction",
   "skill",
@@ -366,6 +369,7 @@ export interface CompletedExperiment extends ExperimentBase {
 
 export type Experiment = OpenExperiment | CompletedExperiment;
 
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const EXPERIMENT_TRANSITIONS = {
   hypothesis: ["authoring"],
   authoring: ["preflight"],

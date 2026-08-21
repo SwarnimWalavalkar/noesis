@@ -1,3 +1,4 @@
+import type { DatabaseRow } from "./database.ts";
 import { type FrozenTurnPlan, validateFrozenTurnPlan } from "@noesis/agent-types";
 import {
   type ActorRef,
@@ -11,7 +12,9 @@ import {
   ExperimentSchema,
   type FileRevisionRef,
   FileRevisionRefSchema,
+  JsonValueSchema,
   sameCapabilityRevisionRef,
+  isJsonObject,
   sha256,
 } from "@noesis/domain";
 import { z } from "zod";
@@ -38,13 +41,14 @@ import type {
 } from "./types.ts";
 import { capabilityBindingAdmissionConflictError, workingAdjustmentAdmissionConflictError } from "./types.ts";
 
+/** BOUNDARY: Activity references are serialized by the authoritative workspace activity writer. */
 type RecordActivity = (
   actor: ActorRef,
   activityKind: string,
   subjectKind: string,
   subjectId: string,
   references?: unknown,
-) => unknown;
+) => DatabaseRowRef<"activity_log">;
 
 interface CreateProtectedActivationStoreOptions {
   readonly database: WorkspaceDatabase;
@@ -99,7 +103,7 @@ const ActivationOperationStatusSchema = z.enum([
   "rejected",
   "committed",
 ]);
-const ActivationPolicySnapshotSchema = z.record(z.string(), z.unknown());
+const ActivationPolicySnapshotSchema = z.record(z.string(), JsonValueSchema);
 
 const databaseRef = <Table extends DatabaseTable>(table: Table, rowId: string): DatabaseRowRef<Table> => ({
   kind: "database_row",
@@ -135,7 +139,7 @@ export async function createProtectedActivationStore(
         ),
     );
 
-  const decodeActivationOperation = (row: unknown): ActivationOperationRecord =>
+  const decodeActivationOperation = (row: DatabaseRow | undefined): ActivationOperationRecord =>
     decodeActivationOperationRow(row, materializationsFor(requiredString(row, "operation_id")));
 
   const getActivationOperation = async (
@@ -814,17 +818,16 @@ export async function createProtectedActivationStore(
           );
           if (!sameCapabilityRevisionRef(reference, selection.revision)) return false;
           const scope = parseJson(requiredString(bindingRow, "scope_json"));
-          if (scope === null || typeof scope !== "object") return false;
-          const kind = Reflect.get(scope, "kind");
+          if (!isJsonObject(scope)) return false;
+          const kind = scope["kind"];
           if (kind === "global") return true;
-          if (kind === "session") return Reflect.get(scope, "sessionId") === plan.sessionId;
+          if (kind === "session") return scope["sessionId"] === plan.sessionId;
           if (kind !== "project" || plan.project === undefined) return false;
-          const project = Reflect.get(scope, "project");
+          const project = scope["project"];
           return (
-            project !== null &&
-            typeof project === "object" &&
-            Reflect.get(project, "projectId") === plan.project.projectId &&
-            Reflect.get(project, "root") === plan.project.root
+            isJsonObject(project) &&
+            project["projectId"] === plan.project.projectId &&
+            project["root"] === plan.project.root
           );
         })();
         if (!(bindingRow === undefined ? legacyActive : lifecycleActive))

@@ -149,6 +149,7 @@ describe("Pi request token budgeting", () => {
 
   test("returns to authoritative provider usage after a projected request completes", () => {
     const projector = createPiRequestBudgetProjector();
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const toolResult = {
       role: "toolResult" as const,
       toolCallId: "call-large",

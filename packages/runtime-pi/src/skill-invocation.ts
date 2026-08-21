@@ -1,5 +1,5 @@
 import { formatSkillInvocation, type Skill } from "@earendil-works/pi-agent-core";
-import { type JsonValue, toJsonValue } from "@noesis/domain";
+import { isJsonObject, type JsonValue, toJsonValue } from "@noesis/domain";
 import { toAgentActionPayload } from "./action-payload.ts";
 import type { PiSkillResource } from "./skill-library.ts";
 
@@ -12,13 +12,7 @@ export interface ResolvedPiSkillInvocation {
 
 function actionEvidence(evidence: JsonValue, authority: JsonValue): JsonValue {
   const normalized = toAgentActionPayload(evidence);
-  if (
-    typeof normalized !== "object" ||
-    normalized === null ||
-    Array.isArray(normalized) ||
-    Reflect.get(normalized, "truncated") !== true
-  )
-    return normalized;
+  if (!isJsonObject(normalized) || normalized["truncated"] !== true) return normalized;
   return toAgentActionPayload({ authority, evidence: normalized });
 }
 

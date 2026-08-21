@@ -63,6 +63,7 @@ function pair(
   };
 }
 
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const query = {
   window: {
     from: "2026-07-01T00:00:00.000Z",

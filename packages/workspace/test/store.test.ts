@@ -4,12 +4,14 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { type FrozenTurnPlan, frozenTurnPlanDigest } from "@noesis/agent-types";
 import {
+  createConditionalObject,
   type CapabilityRevisionRef,
   canonicalJson,
   type Experiment,
   type ExperimentTrial,
   effectOperationFingerprint,
   eventChecksum,
+  type JsonValue,
   type LedgerEvent,
   type PreflightPlan,
   type PreflightReport,
@@ -26,12 +28,11 @@ import {
 } from "../src/index.ts";
 import { decodeWorkflowRun } from "../src/decoders.ts";
 import { createWorkspaceRuntimeInternals } from "../src/protected-runtime.ts";
-
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const actor = { actorId: "test-user", kind: "user" as const };
 const text = (value: string): Uint8Array => Buffer.from(value);
 const digest = (character: string): string => character.repeat(64);
 const authority = (store: NoesisWorkspaceStore) => createWorkspaceRuntimeInternals(store).authority;
-
 const runningTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
   const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
     schemaVersion: 1,
@@ -52,7 +53,6 @@ const runningTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
   };
   return Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) });
 };
-
 const admitAndSettleSourceTurn = async (
   store: NoesisWorkspaceStore,
   sessionId: string,
@@ -96,11 +96,13 @@ const admitAndSettleSourceTurn = async (
     settledAt: "2026-07-26T00:00:00.500Z",
   });
 };
-
 const seedWorkspaceThroughMigration = async (
   root: string,
   maximumVersion: number,
-): Promise<{ readonly databasePath: string; readonly database: DatabaseSync }> => {
+): Promise<{
+  readonly databasePath: string;
+  readonly database: DatabaseSync;
+}> => {
   await mkdir(join(root, "database"), { recursive: true });
   const databasePath = join(root, "database", "noesis.sqlite");
   const database = new DatabaseSync(databasePath);
@@ -117,26 +119,26 @@ const seedWorkspaceThroughMigration = async (
   }
   return Object.freeze({ databasePath, database });
 };
-
 const seedWorkspaceThroughMigration32 = async (
   root: string,
-): Promise<{ readonly databasePath: string; readonly database: DatabaseSync }> =>
-  seedWorkspaceThroughMigration(root, 32);
-
+): Promise<{
+  readonly databasePath: string;
+  readonly database: DatabaseSync;
+}> => seedWorkspaceThroughMigration(root, 32);
 const seedLegacyWorkflowDependencyRun = (
   database: DatabaseSync,
   suffix: string,
   definitionDependenciesDigest: string | Uint8Array,
-): { readonly runId: string } => {
+): {
+  readonly runId: string;
+} => {
   const sessionId = `session-workflow-digest-${suffix}`;
   const revisionId = `revision-workflow-digest-${suffix}`;
   const runId = `workflow-run-digest-${suffix}`;
   database
-    .prepare(
-      `INSERT INTO sessions(
+    .prepare(`INSERT INTO sessions(
         session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(
       sessionId,
       `Workflow digest ${suffix}`,
@@ -149,12 +151,10 @@ const seedLegacyWorkflowDependencyRun = (
       "{}",
     );
   database
-    .prepare(
-      `INSERT INTO file_revisions(
+    .prepare(`INSERT INTO file_revisions(
         revision_id, revision_kind, working_path, snapshot_path, content_digest,
         actor_id, actor_kind, recorded_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(
       revisionId,
       "definition",
@@ -166,13 +166,11 @@ const seedLegacyWorkflowDependencyRun = (
       "2026-07-26T00:00:00.000Z",
     );
   database
-    .prepare(
-      `INSERT INTO workflow_runs(
+    .prepare(`INSERT INTO workflow_runs(
         run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
         definition_dependencies_digest, session_id, status, current_phase, input_json,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(
       runId,
       `project-workflow-digest-${suffix}`,
@@ -189,27 +187,23 @@ const seedLegacyWorkflowDependencyRun = (
     );
   return Object.freeze({ runId });
 };
-
 describe("WorkspaceStore", () => {
   let roots: string[] = [];
-
   beforeEach(() => {
     roots = [];
   });
-
   afterEach(async () => {
     await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
   });
-
   const temporary = async (name: string): Promise<string> => {
     const root = await mkdtemp(join(tmpdir(), `noesis-${name}-`));
     roots.push(root);
     return root;
   };
-
   test("indexes tool calls only after they reach an immutable terminal status", async () => {
     const store = await createWorkspaceStore(await temporary("search-terminal-tool-calls"));
     await store.operational.sessions.put(session("session-search"));
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const running = {
       toolCallId: "tool-call-search",
       sessionId: "session-search",
@@ -220,7 +214,6 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-08-10T00:00:00.000Z",
     };
     await store.operational.toolCalls.put(running);
-
     expect(
       (await store.search.rebuildDocuments()).some(
         (document) =>
@@ -229,7 +222,6 @@ describe("WorkspaceStore", () => {
           document.source.rowId === running.toolCallId,
       ),
     ).toBe(false);
-
     await store.operational.toolCalls.put({
       ...running,
       response: Object.freeze({ hits: 2 }),
@@ -246,11 +238,11 @@ describe("WorkspaceStore", () => {
     expect(indexed?.body).toContain('"hits":2');
     store.close();
   });
-
   test("atomically activates immutable context checkpoints and preserves raw transcript rows", async () => {
     const root = await temporary("context-checkpoints");
     const store = await createWorkspaceStore(root);
     await store.operational.sessions.put(session("session-context"));
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const messages = [
       Object.freeze({
         messageId: "context-message-1",
@@ -277,6 +269,7 @@ describe("WorkspaceStore", () => {
         Object.freeze({ messageId: message.messageId, contentDigest: sha256(message.content) }),
       ),
     );
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const checkpoint = Object.freeze({
       checkpointId: "context-checkpoint-1",
       sessionId: "session-context",
@@ -285,7 +278,7 @@ describe("WorkspaceStore", () => {
       sourceDigest: sha256(canonicalJson(sources)),
       sources,
       lastCoveredMessageId: "context-message-2",
-      tokenBudget: 160_000,
+      tokenBudget: 160000,
       estimatedSummaryTokens: 8,
       sensitivity: "private" as const,
       provider: "controlled",
@@ -294,7 +287,6 @@ describe("WorkspaceStore", () => {
       usage: Object.freeze({ inputTokens: 10, outputTokens: 8, totalTokens: 18, estimatedCost: 0 }),
       createdAt: "2026-08-13T00:00:02.000Z",
     });
-
     const expectedContextMessageIds = Object.freeze(messages.map((message) => message.messageId));
     const first = sources[0];
     if (!first) throw new Error("Expected a checkpoint source fixture");
@@ -324,7 +316,6 @@ describe("WorkspaceStore", () => {
         expectedContextMessageIds,
       }),
     ).rejects.toThrow("cannot repeat a source message");
-
     await expect(
       store.operational.contextCheckpoints.activate({ checkpoint, expectedContextMessageIds }),
     ).resolves.toMatchObject({
@@ -341,6 +332,7 @@ describe("WorkspaceStore", () => {
     expect(
       (await store.operational.messages.listForSession("session-context")).map(({ content }) => content),
     ).toEqual(messages.map(({ content }) => content));
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const successorMessage = Object.freeze({
       messageId: "context-message-successor",
       sessionId: "session-context",
@@ -357,6 +349,7 @@ describe("WorkspaceStore", () => {
         contentDigest: sha256(successorMessage.content),
       }),
     ]);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const successor = Object.freeze({
       ...checkpoint,
       checkpointId: "context-checkpoint-2",
@@ -428,26 +421,20 @@ describe("WorkspaceStore", () => {
     ).toThrow("context checkpoint is immutable");
     expect(() =>
       integrityDatabase
-        .prepare(
-          `INSERT OR REPLACE INTO context_checkpoints
-           SELECT * FROM context_checkpoints WHERE checkpoint_id = ?`,
-        )
+        .prepare(`INSERT OR REPLACE INTO context_checkpoints
+           SELECT * FROM context_checkpoints WHERE checkpoint_id = ?`)
         .run(checkpoint.checkpointId),
     ).toThrow("context checkpoint identity already exists");
     expect(() =>
       integrityDatabase
-        .prepare(
-          `INSERT OR REPLACE INTO context_checkpoint_seals(checkpoint_id, sealed_at)
-           VALUES (?, ?)`,
-        )
+        .prepare(`INSERT OR REPLACE INTO context_checkpoint_seals(checkpoint_id, sealed_at)
+           VALUES (?, ?)`)
         .run(checkpoint.checkpointId, "2026-08-13T00:00:07.000Z"),
     ).toThrow("context checkpoint seal identity already exists");
     integrityDatabase
-      .prepare(
-        `INSERT INTO messages(
+      .prepare(`INSERT INTO messages(
           message_id, session_id, role, content, sensitivity, created_at, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(
         "context-message-appended",
         "session-context",
@@ -459,10 +446,8 @@ describe("WorkspaceStore", () => {
       );
     expect(() =>
       integrityDatabase
-        .prepare(
-          `INSERT INTO context_checkpoint_sources(checkpoint_id, ordinal, message_id, content_digest)
-           VALUES (?, ?, ?, ?)`,
-        )
+        .prepare(`INSERT INTO context_checkpoint_sources(checkpoint_id, ordinal, message_id, content_digest)
+           VALUES (?, ?, ?, ?)`)
         .run(
           checkpoint.checkpointId,
           checkpoint.sources.length,
@@ -472,7 +457,6 @@ describe("WorkspaceStore", () => {
     ).toThrow("sealed context checkpoint sources are immutable");
     integrityDatabase.close();
     store.close();
-
     const reopened = await createWorkspaceStore(root);
     await expect(reopened.operational.contextCheckpoints.get(checkpoint.checkpointId)).resolves.toEqual(
       checkpoint,
@@ -482,16 +466,13 @@ describe("WorkspaceStore", () => {
     );
     reopened.close();
   });
-
   test("rejects dangling checkpoint references when upgrading an applied migration 36 workspace", async () => {
     const root = await temporary("context-checkpoint-dangling-upgrade");
     const { databasePath, database } = await seedWorkspaceThroughMigration(root, 36);
     database
-      .prepare(
-        `INSERT INTO sessions(
+      .prepare(`INSERT INTO sessions(
           session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         "session-context-dangling",
         "Dangling context",
@@ -504,11 +485,9 @@ describe("WorkspaceStore", () => {
         "{}",
       );
     database
-      .prepare(
-        `INSERT INTO messages(
+      .prepare(`INSERT INTO messages(
           message_id, session_id, role, content, sensitivity, created_at, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`)
       .run(
         "context-message-dangling",
         "session-context-dangling",
@@ -523,13 +502,11 @@ describe("WorkspaceStore", () => {
       contentDigest: sha256("This source is removed by a corrupted legacy workspace."),
     });
     database
-      .prepare(
-        `INSERT INTO context_checkpoints(
+      .prepare(`INSERT INTO context_checkpoints(
           checkpoint_id, session_id, summary, summary_digest, source_digest,
           last_covered_message_id, token_budget, estimated_summary_tokens, sensitivity,
           provider, model, thinking_level, usage_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         "context-checkpoint-dangling",
         "session-context-dangling",
@@ -537,7 +514,7 @@ describe("WorkspaceStore", () => {
         sha256("Legacy summary."),
         sha256(canonicalJson(Object.freeze([source]))),
         source.messageId,
-        160_000,
+        160000,
         4,
         "normal",
         "controlled",
@@ -547,15 +524,12 @@ describe("WorkspaceStore", () => {
         "2026-08-13T00:00:01.000Z",
       );
     database
-      .prepare(
-        `INSERT INTO context_checkpoint_sources(checkpoint_id, ordinal, message_id, content_digest)
-         VALUES (?, ?, ?, ?)`,
-      )
+      .prepare(`INSERT INTO context_checkpoint_sources(checkpoint_id, ordinal, message_id, content_digest)
+         VALUES (?, ?, ?, ?)`)
       .run("context-checkpoint-dangling", 0, source.messageId, source.contentDigest);
     database.exec("PRAGMA foreign_keys = OFF");
     database.prepare("DELETE FROM messages WHERE message_id = ?").run(source.messageId);
     database.close();
-
     await expect(createWorkspaceStore(root)).rejects.toThrow(
       "Workspace migration 037_context_checkpoint_session_immutability.sql failed",
     );
@@ -565,7 +539,6 @@ describe("WorkspaceStore", () => {
     });
     inspection.close();
   });
-
   test("activates a checkpoint when expected context spans multiple SQLite parameter chunks", async () => {
     const store = await createWorkspaceStore(await temporary("context-checkpoint-chunked-context"));
     await store.operational.sessions.put(session("session-context-chunked"));
@@ -592,6 +565,7 @@ describe("WorkspaceStore", () => {
         contentDigest: sha256("Chunked context message 0"),
       }),
     ]);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const checkpoint = Object.freeze({
       checkpointId: "context-checkpoint-chunked",
       sessionId: "session-context-chunked",
@@ -601,7 +575,7 @@ describe("WorkspaceStore", () => {
       sources,
       firstRetainedMessageId,
       lastCoveredMessageId: firstMessageId,
-      tokenBudget: 160_000,
+      tokenBudget: 160000,
       estimatedSummaryTokens: 12,
       sensitivity: "normal" as const,
       provider: "controlled",
@@ -610,7 +584,6 @@ describe("WorkspaceStore", () => {
       usage: Object.freeze({ inputTokens: 10, outputTokens: 12, totalTokens: 22, estimatedCost: 0 }),
       createdAt: "2026-08-13T09:00:00.000Z",
     });
-
     await expect(
       store.operational.contextCheckpoints.activate({
         checkpoint,
@@ -622,7 +595,6 @@ describe("WorkspaceStore", () => {
     );
     store.close();
   });
-
   test("never re-indexes history retrieval tool calls as derived evidence", async () => {
     const store = await createWorkspaceStore(await temporary("search-history-tool-calls"));
     await store.operational.sessions.put(session("session-history-search"));
@@ -661,7 +633,6 @@ describe("WorkspaceStore", () => {
         completedAt: "2026-08-10T00:00:05.000Z",
       }),
     ]);
-
     const documents = await store.search.rebuildDocuments();
     const indexedToolCallIds = documents.flatMap((document) =>
       document.source.kind === "database_row" && document.source.table === "tool_calls"
@@ -674,7 +645,6 @@ describe("WorkspaceStore", () => {
     expect(JSON.stringify(documents)).not.toContain("private retrieved fragment");
     store.close();
   });
-
   test("rebuilds file revisions with more than 64 authoritative provenance references", async () => {
     const store = await createWorkspaceStore(await temporary("search-large-provenance"));
     await Promise.all([
@@ -697,6 +667,7 @@ describe("WorkspaceStore", () => {
         createdAt: `2026-08-10T00:00:${String(index % 60).padStart(2, "0")}.000Z`,
         metadata: Object.freeze({}),
       });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       refs.push({ kind: "database_row" as const, table: "messages" as const, rowId: messageId });
     }
     const oneSessionEvidence = await store.evidence.appendEvidence({
@@ -715,7 +686,6 @@ describe("WorkspaceStore", () => {
       sensitivity: "normal",
       provenanceRefs: refs,
     });
-
     const documents = await store.search.rebuildDocuments();
     const revisionDocument = (revisionId: string) =>
       documents.find(
@@ -731,7 +701,6 @@ describe("WorkspaceStore", () => {
     expect(JSON.parse(String(authoritativeRow?.["provenance_refs_json"]))).toHaveLength(66);
     store.close();
   });
-
   test("projects late private and secret provenance before ordinary search candidates", async () => {
     const store = await createWorkspaceStore(await temporary("search-provenance-sensitivity"));
     await store.operational.sessions.put(session("session-sensitive-provenance"));
@@ -769,7 +738,6 @@ describe("WorkspaceStore", () => {
       sensitivity: "normal",
       provenanceRefs: refs,
     });
-
     const rebuilt = await store.search.rebuildDocuments();
     const revisionDocument = (revisionId: string) =>
       rebuilt.find(
@@ -796,6 +764,7 @@ describe("WorkspaceStore", () => {
     expect(ordinaryLexical.every((candidate) => !sensitiveDocumentIds.includes(candidate.documentId))).toBe(
       true,
     );
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await store.search.putEmbeddings(
       "sensitivity-test",
       new Map(rebuilt.map((document) => [document.documentId, [1, 0] as const])),
@@ -811,7 +780,7 @@ describe("WorkspaceStore", () => {
     );
     store.close();
   });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test("applies typed source scopes before lexical and semantic candidate limits", async () => {
     const store = await createWorkspaceStore(await temporary("search-source-scopes"));
     await store.operational.sessions.put({
@@ -858,6 +827,7 @@ describe("WorkspaceStore", () => {
         metadata: Object.freeze({}),
       }),
     ]);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const experimentBase = Object.freeze({
       experimentId: "experiment-source-scope",
       hypothesis: "Scope eligibility sentinel completed experiment.",
@@ -876,7 +846,6 @@ describe("WorkspaceStore", () => {
       status: "completed",
       outcome: "keep",
     });
-
     const documents = await store.search.rebuildDocuments();
     const lexical = async (
       sourceScope: "session_or_outcome" | "corrected_outcome" | "completed_experiment",
@@ -902,7 +871,6 @@ describe("WorkspaceStore", () => {
     expect(await lexical("completed_experiment")).toMatchObject([
       { source: { kind: "database_row", table: "experiments", rowId: "experiment-source-scope" } },
     ]);
-
     const embeddings = new Map<string, readonly number[]>();
     for (const document of documents)
       embeddings.set(
@@ -937,13 +905,13 @@ describe("WorkspaceStore", () => {
     ]);
     store.close();
   });
-
   test("applies, replaces, and unapplies immutable project adjustments with stale-safe CAS", async () => {
     const root = await temporary("working-adjustments");
     const store = await createWorkspaceStore(root);
     await store.operational.sessions.put(session("session-adjustment"));
     await admitAndSettleSourceTurn(store, "session-adjustment", "turn-source");
     const protectedRuntime = createWorkspaceRuntimeInternals(store).protectedRuntime;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const evidence = Object.freeze({
       kind: "database_row" as const,
       table: "sessions" as const,
@@ -963,7 +931,6 @@ describe("WorkspaceStore", () => {
     const first = adjustment("adjustment-a", "Verify observable state before claiming success.");
     const second = adjustment("adjustment-b", "Compare the output with the user's stated contract.");
     const replacement = adjustment("adjustment-c", "Compare the output with the user's stated contract.");
-
     await expect(
       protectedRuntime.workingAdjustments.apply({
         adjustment: first,
@@ -1034,13 +1001,11 @@ describe("WorkspaceStore", () => {
         expectedActiveAdjustmentId: "adjustment-c",
       }),
     ).resolves.toEqual({ status: "unapplied", adjustmentId: "adjustment-c" });
-
     expect(await store.workingAdjustments.get("adjustment-a")).toEqual(first);
     expect(await store.workingAdjustments.get("adjustment-b")).toBeUndefined();
     expect(await store.workingAdjustments.get("adjustment-c")).toEqual(replacement);
     expect(await store.workingAdjustments.getActive(project.projectId)).toBeUndefined();
     store.close();
-
     const reopened = await createWorkspaceStore(root);
     expect(await reopened.workingAdjustments.get("adjustment-a")).toEqual(first);
     expect(await reopened.workingAdjustments.get("adjustment-b")).toBeUndefined();
@@ -1048,7 +1013,6 @@ describe("WorkspaceStore", () => {
     expect(await reopened.workingAdjustments.getActive(project.projectId)).toBeUndefined();
     reopened.close();
   });
-
   test("admits only the current project adjustment and derives settled serving evidence", async () => {
     const store = await createWorkspaceStore(await temporary("working-adjustment-admission"));
     await store.operational.sessions.put(session("session-adjustment-admission"));
@@ -1063,6 +1027,7 @@ describe("WorkspaceStore", () => {
       activeDefinitions: Object.freeze({}),
     });
     await admitAndSettleSourceTurn(store, "session-adjustment-admission", "turn-source");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const evidence = Object.freeze({
       kind: "database_row" as const,
       table: "sessions" as const,
@@ -1098,7 +1063,6 @@ describe("WorkspaceStore", () => {
       adjustment: adjustment("adjustment-admission-b"),
       expectedActiveAdjustmentId: "adjustment-admission-a",
     });
-
     await expect(runtime.activations.admitTurnPlan(stalePlan)).rejects.toSatisfy(
       isWorkingAdjustmentAdmissionConflictError,
     );
@@ -1119,7 +1083,6 @@ describe("WorkspaceStore", () => {
       status: "completed",
       settledAt: "2026-07-26T00:00:01.000Z",
     });
-
     await expect(
       store.workingAdjustments.listSettledEvidence({
         projectId: project.projectId,
@@ -1137,7 +1100,6 @@ describe("WorkspaceStore", () => {
     ]);
     store.close();
   });
-
   test("classifies one canonical turn outcome with an idempotent semantic transition", async () => {
     const store = await createWorkspaceStore(await temporary("semantic-outcome"));
     await store.operational.sessions.put({
@@ -1161,6 +1123,7 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-08-05T00:00:01.000Z",
       metadata: Object.freeze({ source: "turn-settlement" }),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = Object.freeze({
       outcomeId: "outcome-semantic",
       sessionId: "session-semantic",
@@ -1168,7 +1131,6 @@ describe("WorkspaceStore", () => {
       classification: "correction" as const,
       reason: "The model identified a correction to prior assistant behavior.",
     });
-
     await expect(store.operational.outcomes.classify(request)).resolves.toMatchObject({
       status: "corrected",
       metadata: { semanticObservation: { kind: "correction" } },
@@ -1185,7 +1147,6 @@ describe("WorkspaceStore", () => {
     expect(await store.operational.outcomes.listForSession("session-semantic")).toHaveLength(1);
     store.close();
   });
-
   test("records direct edits as immutable predecessor-linked revisions", async () => {
     const store = await createWorkspaceStore(await temporary("revision"));
     const first = await store.definitions.recordWorkingDefinition({
@@ -1195,7 +1156,6 @@ describe("WorkspaceStore", () => {
     });
     await writeFile(join(store.paths.definitions, "prompts", "research.md"), "second bytes");
     const second = await store.recordDirectEdit("definitions/prompts/research.md", actor, "external edit");
-
     expect(second.revisionId).not.toBe(first.revisionId);
     expect(Buffer.from(await store.reads.readRevision(first)).toString()).toBe("first bytes");
     expect(Buffer.from(await store.reads.readRevision(second)).toString()).toBe("second bytes");
@@ -1207,7 +1167,6 @@ describe("WorkspaceStore", () => {
     expect(row?.["predecessor_revision_id"]).toBe(first.revisionId);
     store.close();
   });
-
   test("keeps candidate and active staging separate and cleans abandoned stages", async () => {
     const store = await createWorkspaceStore(await temporary("staging"));
     const abandoned = await store.stageDefinition({
@@ -1223,7 +1182,6 @@ describe("WorkspaceStore", () => {
       actor,
     });
     const active = await store.registerStagedDefinition(selected.stageId);
-
     expect(active.workingPath).toBe("definitions/active/capabilities/selected.json");
     expect(await readFile(join(store.paths.active, "capabilities", "selected.json"), "utf8")).toBe(
       '{"selected":true}',
@@ -1234,7 +1192,6 @@ describe("WorkspaceStore", () => {
     });
     store.close();
   });
-
   test("rehydrates unfinished codemode executions as interrupted", async () => {
     const root = await temporary("codemode-recovery");
     const first = await createWorkspaceStore(root, {
@@ -1251,6 +1208,7 @@ describe("WorkspaceStore", () => {
       updatedAt: "2026-07-26T00:00:00.000Z",
       metadata: Object.freeze({}),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const unfinishedSource = await first.artifacts.writeArtifact({
       path: "codemode/execution-unfinished/source.mjs",
       mediaType: "text/javascript",
@@ -1273,12 +1231,10 @@ describe("WorkspaceStore", () => {
       startedAt: "2026-07-26T00:00:00.000Z",
     });
     first.close();
-
     const recovered = await createWorkspaceStore(root, {
       now: () => "2026-07-26T00:01:00.000Z",
       recoverInterruptedOperations: true,
     });
-
     expect(await recovered.operational.codeExecutions.get("execution-unfinished")).toMatchObject({
       status: "interrupted",
       error: "Process exited before execution settled",
@@ -1286,7 +1242,6 @@ describe("WorkspaceStore", () => {
     });
     recovered.close();
   });
-
   test("recovers orphaned foreground turns and their actions under the successor runtime owner", async () => {
     const root = await temporary("foreground-turn-recovery");
     const first = await createWorkspaceStore(root, {
@@ -1327,13 +1282,11 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-07-26T00:00:01.000Z",
     });
     first.close();
-
     const recovered = await createWorkspaceStore(root, {
       now: () => "2026-07-26T00:01:00.000Z",
       recoverInterruptedOperations: true,
       runtimeOwnerId: "successor-owner",
     });
-
     expect(await recovered.operational.sessions.get("session-interrupted-turn")).toMatchObject({
       status: "aborted",
       updatedAt: "2026-07-26T00:01:00.000Z",
@@ -1354,7 +1307,7 @@ describe("WorkspaceStore", () => {
     expect(await recovered.operational.outcomes.listForSession("session-interrupted-turn")).toEqual([]);
     recovered.close();
   });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test("recovers running sessions on both sides of foreground admission without changing settled sessions", async () => {
     const root = await temporary("runtime-session-recovery-windows");
     const first = await createWorkspaceStore(root, {
@@ -1378,7 +1331,6 @@ describe("WorkspaceStore", () => {
     await first.operational.sessions.put(session("session-completed", "completed"));
     await first.operational.sessions.put(session("session-aborted", "aborted"));
     await first.operational.sessions.put(session("session-failed", "failed"));
-
     const protectedRuntime = createWorkspaceRuntimeInternals(first).protectedRuntime;
     await protectedRuntime.activations.bootstrapGenesis({
       capabilityRevision: {
@@ -1412,13 +1364,11 @@ describe("WorkspaceStore", () => {
     // the owning runtime persisted its final idle trail state.
     await first.operational.sessions.put(session("session-after-settlement", "running"));
     first.close();
-
     const recovered = await createWorkspaceStore(root, {
       now: () => "2026-07-26T00:01:00.000Z",
       recoverInterruptedOperations: true,
       runtimeOwnerId: "successor-owner",
     });
-
     for (const sessionId of ["session-before-admission", "session-after-settlement"])
       expect(await recovered.operational.sessions.get(sessionId)).toMatchObject({
         status: "aborted",
@@ -1434,15 +1384,12 @@ describe("WorkspaceStore", () => {
         status,
         updatedAt: "2026-07-26T00:00:00.000Z",
       });
-
     const inspection = new DatabaseSync(recovered.unsafeDatabasePathForTesting, { readOnly: true });
     const recoveryActivities = inspection
-      .prepare(
-        `SELECT activity_kind, subject_id, references_json
+      .prepare(`SELECT activity_kind, subject_id, references_json
          FROM activity_log
          WHERE activity_kind = 'session.interrupted'
-         ORDER BY subject_id`,
-      )
+         ORDER BY subject_id`)
       .all();
     inspection.close();
     expect(recoveryActivities).toMatchObject([
@@ -1459,7 +1406,6 @@ describe("WorkspaceStore", () => {
     ]);
     recovered.close();
   });
-
   test("keeps one live mutating runtime owner while allowing non-recovering readers", async () => {
     const root = await temporary("runtime-owner");
     const owner = await createWorkspaceStore(root, {
@@ -1477,6 +1423,7 @@ describe("WorkspaceStore", () => {
       updatedAt: "2026-07-26T00:00:00.000Z",
       metadata: Object.freeze({}),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const source = await owner.artifacts.writeArtifact({
       path: "codemode/execution-live-owner/source.mjs",
       mediaType: "text/javascript",
@@ -1502,14 +1449,12 @@ describe("WorkspaceStore", () => {
     expect(await reader.operational.codeExecutions.get("execution-live-owner")).toMatchObject({
       status: "running",
     });
-
     await expect(
       createWorkspaceStore(root, {
         recoverInterruptedOperations: true,
         runtimeOwnerId: "owner-two",
       }),
     ).rejects.toThrow("live runtime owner");
-
     reader.close();
     owner.close();
     const successor = await createWorkspaceStore(root, {
@@ -1518,7 +1463,6 @@ describe("WorkspaceStore", () => {
     });
     successor.close();
   });
-
   test("releases its runtime owner when initialization fails after acquisition", async () => {
     const root = await temporary("runtime-owner-initialization-failure");
     await expect(
@@ -1530,20 +1474,17 @@ describe("WorkspaceStore", () => {
         },
       }),
     ).rejects.toThrow("injected initialization failure");
-
     const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(database.prepare("SELECT COUNT(*) AS count FROM runtime_owner").get()).toMatchObject({
       count: 0,
     });
     database.close();
-
     const successor = await createWorkspaceStore(root, {
       recoverInterruptedOperations: true,
       runtimeOwnerId: "successor-owner",
     });
     successor.close();
   });
-
   test("takes over a stale runtime owner after an ESRCH liveness result", async () => {
     const root = await temporary("runtime-owner-stale");
     const initialized = await createWorkspaceStore(root);
@@ -1551,10 +1492,10 @@ describe("WorkspaceStore", () => {
     const database = new DatabaseSync(join(root, "database", "noesis.sqlite"));
     database
       .prepare("INSERT INTO runtime_owner(singleton, owner_id, pid, acquired_at) VALUES (1, ?, ?, ?)")
-      .run("stale-owner", 999_999, "2026-07-26T00:00:00.000Z");
+      .run("stale-owner", 999999, "2026-07-26T00:00:00.000Z");
     database.close();
     const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
-      if (pid === 999_999 && signal === 0)
+      if (pid === 999999 && signal === 0)
         throw Object.assign(new Error("No such process"), { code: "ESRCH" });
       return true;
     });
@@ -1575,7 +1516,6 @@ describe("WorkspaceStore", () => {
       kill.mockRestore();
     }
   });
-
   test("pins exact codemode source and log artifacts across terminal updates", async () => {
     const store = await createWorkspaceStore(await temporary("codemode-artifacts"));
     await store.operational.sessions.put({
@@ -1589,6 +1529,7 @@ describe("WorkspaceStore", () => {
       updatedAt: "2026-07-26T00:00:00.000Z",
       metadata: Object.freeze({}),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const relationshipRefs = Object.freeze([
       {
         kind: "database_row" as const,
@@ -1665,7 +1606,6 @@ describe("WorkspaceStore", () => {
       actor,
       relationshipRefs,
     });
-
     expect(await store.operational.codeExecutions.get("execution-artifacts")).toMatchObject({
       sourceArtifactId: source.artifactId,
       stdoutArtifactId: stdout.artifactId,
@@ -1698,7 +1638,6 @@ describe("WorkspaceStore", () => {
     lineageDatabase.close();
     store.close();
   });
-
   test("validates workflow definition dependency digests at SQL and decoder boundaries", async () => {
     const root = await temporary("workflow-definition-dependency-digest");
     const store = await createWorkspaceStore(root);
@@ -1708,6 +1647,7 @@ describe("WorkspaceStore", () => {
       bytes: text('{"name":"digest"}'),
       actor,
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const invalidDigests = [
       digest("A"),
       "a".repeat(63),
@@ -1715,7 +1655,6 @@ describe("WorkspaceStore", () => {
       `${digest("a")}\0z`,
       `${"a".repeat(63)}\0`,
     ] as const;
-
     await store.operational.workflows.putRun({
       runId: "workflow-run-valid-digest",
       projectId: "project-workflow-digest",
@@ -1733,7 +1672,6 @@ describe("WorkspaceStore", () => {
     await expect(store.operational.workflows.getRun("workflow-run-valid-digest")).resolves.toMatchObject({
       definitionDependenciesDigest: digest("a"),
     });
-
     for (const [index, definitionDependenciesDigest] of invalidDigests.entries()) {
       await expect(
         store.operational.workflows.putRun({
@@ -1751,7 +1689,6 @@ describe("WorkspaceStore", () => {
           updatedAt: "2026-07-26T00:00:00.000Z",
         }),
       ).rejects.toThrow(/64 lowercase hexadecimal ASCII bytes/iu);
-
       expect(() =>
         decodeWorkflowRun({
           run_id: `workflow-run-corrupt-digest-${String(index)}`,
@@ -1779,19 +1716,16 @@ describe("WorkspaceStore", () => {
         }),
       ).toThrow();
     }
-
     const database = new DatabaseSync(store.unsafeDatabasePathForTesting);
     database.exec("PRAGMA busy_timeout = 5000");
     const blobDigest = Buffer.from(digest("a"));
     expect(() =>
       database
-        .prepare(
-          `INSERT INTO workflow_runs(
+        .prepare(`INSERT INTO workflow_runs(
             run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
             definition_dependencies_digest, session_id, status, current_phase, input_json,
             created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(
           "workflow-run-blob-digest",
           "project-workflow-digest",
@@ -1813,16 +1747,13 @@ describe("WorkspaceStore", () => {
         .run(blobDigest, "workflow-run-valid-digest"),
     ).toThrow(/64 lowercase hexadecimal ASCII bytes|cannot store BLOB value in TEXT column/iu);
     database.close();
-
     store.close();
   });
-
   test("hardens workflow definition dependency digests after migrations 31 and 32 were recorded", async () => {
     const root = await temporary("workflow-definition-dependency-digest-upgrade");
     const { databasePath, database } = await seedWorkspaceThroughMigration32(root);
     const legacy = seedLegacyWorkflowDependencyRun(database, "upgrade", digest("a"));
     database.close();
-
     const upgraded = await createWorkspaceStore(root);
     await expect(upgraded.operational.workflows.getRun(legacy.runId)).resolves.toMatchObject({
       definitionDependenciesDigest: digest("a"),
@@ -1850,14 +1781,12 @@ describe("WorkspaceStore", () => {
       ).rejects.toThrow(/64 lowercase hexadecimal ASCII bytes/iu);
     }
     upgraded.close();
-
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
     ).toEqual({ version: 43 });
     inspection.close();
   });
-
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
     const root = await temporary("workflow-definition-dependency-digest-invalid-upgrade");
     const { database } = await seedWorkspaceThroughMigration32(root);
@@ -1866,7 +1795,6 @@ describe("WorkspaceStore", () => {
       new URL("../migrations/033_workflow_definition_dependency_digest.sql", import.meta.url),
       "utf8",
     );
-
     let migrationError: unknown;
     database.exec("BEGIN IMMEDIATE");
     try {
@@ -1879,7 +1807,6 @@ describe("WorkspaceStore", () => {
       migrationError = error;
       database.exec("ROLLBACK");
     }
-
     expect(migrationError).toBeInstanceOf(Error);
     expect(String(migrationError)).toMatch(/check constraint failed/iu);
     expect(database.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
@@ -1892,38 +1819,31 @@ describe("WorkspaceStore", () => {
     ).toEqual({ definition_dependencies_digest: digest("A") });
     expect(
       database
-        .prepare(
-          `SELECT name FROM sqlite_master
-           WHERE type = 'trigger' AND name = 'workflow_definition_dependency_digest_insert'`,
-        )
+        .prepare(`SELECT name FROM sqlite_master
+           WHERE type = 'trigger' AND name = 'workflow_definition_dependency_digest_insert'`)
         .get(),
     ).toBeUndefined();
     expect(
       database
-        .prepare(
-          `SELECT name FROM sqlite_master
-           WHERE type = 'table' AND name = 'migration_033_workflow_digest_validation'`,
-        )
+        .prepare(`SELECT name FROM sqlite_master
+           WHERE type = 'table' AND name = 'migration_033_workflow_digest_validation'`)
         .get(),
     ).toBeUndefined();
     database.close();
   });
-
   test("aborts migration 33 when an older workspace contains a BLOB workflow dependency digest", async () => {
     const root = await temporary("workflow-definition-dependency-blob-upgrade");
     const seeded = await seedWorkspaceThroughMigration32(root);
     const schemaRow = seeded.database
       .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'workflow_runs'")
       .get();
-    const strictSchemaSql =
-      schemaRow && typeof schemaRow === "object" ? Reflect.get(schemaRow, "sql") : undefined;
+    const strictSchemaSql = schemaRow && typeof schemaRow === "object" ? schemaRow["sql"] : undefined;
     if (typeof strictSchemaSql !== "string") throw new Error("Expected workflow_runs schema SQL");
     const relaxedSchemaSql = strictSchemaSql.replace(/\s+STRICT$/u, "");
     if (relaxedSchemaSql === strictSchemaSql) throw new Error("Expected a strict workflow_runs table");
     const replaceWorkflowSchema = (database: DatabaseSync, sql: string): void => {
       const versionRow = database.prepare("PRAGMA schema_version").get();
-      const version =
-        versionRow && typeof versionRow === "object" ? Reflect.get(versionRow, "schema_version") : undefined;
+      const version = versionRow && typeof versionRow === "object" ? versionRow["schema_version"] : undefined;
       if (typeof version !== "number") throw new Error("Expected a numeric SQLite schema version");
       database.exec("PRAGMA writable_schema = ON");
       database.prepare("UPDATE sqlite_schema SET sql = ? WHERE name = 'workflow_runs'").run(sql);
@@ -1932,20 +1852,16 @@ describe("WorkspaceStore", () => {
     };
     replaceWorkflowSchema(seeded.database, relaxedSchemaSql);
     seeded.database.close();
-
     const corrupt = new DatabaseSync(seeded.databasePath);
     const blobDigest = Buffer.from(digest("a"));
     const legacy = seedLegacyWorkflowDependencyRun(corrupt, "blob-upgrade", blobDigest);
     replaceWorkflowSchema(corrupt, strictSchemaSql);
     corrupt.close();
-
     const database = new DatabaseSync(seeded.databasePath);
     expect(
       database
-        .prepare(
-          `SELECT typeof(definition_dependencies_digest) AS storage_class
-           FROM workflow_runs WHERE run_id = ?`,
-        )
+        .prepare(`SELECT typeof(definition_dependencies_digest) AS storage_class
+           FROM workflow_runs WHERE run_id = ?`)
         .get(legacy.runId),
     ).toEqual({ storage_class: "blob" });
     const migration = await readFile(
@@ -1964,7 +1880,6 @@ describe("WorkspaceStore", () => {
       migrationError = error;
       database.exec("ROLLBACK");
     }
-
     expect(migrationError).toBeInstanceOf(Error);
     expect(String(migrationError)).toMatch(/check constraint failed/iu);
     expect(database.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
@@ -1972,15 +1887,13 @@ describe("WorkspaceStore", () => {
     });
     expect(
       database
-        .prepare(
-          `SELECT typeof(definition_dependencies_digest) AS storage_class
-           FROM workflow_runs WHERE run_id = ?`,
-        )
+        .prepare(`SELECT typeof(definition_dependencies_digest) AS storage_class
+           FROM workflow_runs WHERE run_id = ?`)
         .get(legacy.runId),
     ).toEqual({ storage_class: "blob" });
     database.close();
   });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test("claims legacy workflow runs only through an exact visible definition revision", async () => {
     const store = await createWorkspaceStore(await temporary("legacy-workflow-run-project-claim"));
     await store.operational.sessions.put({
@@ -2016,12 +1929,10 @@ describe("WorkspaceStore", () => {
       publish("workflow", "global"),
     ]);
     const database = new DatabaseSync(store.unsafeDatabasePathForTesting);
-    const insertLegacyRun = database.prepare(
-      `INSERT INTO workflow_runs(
+    const insertLegacyRun = database.prepare(`INSERT INTO workflow_runs(
         run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
         session_id, status, current_phase, input_json, created_at, updated_at
-      ) VALUES (?, NULL, ?, 1, ?, 'session-legacy-workflows', 'paused', 0, '{}', ?, ?)`,
-    );
+      ) VALUES (?, NULL, ?, 1, ?, 'session-legacy-workflows', 'paused', 0, '{}', ?, ?)`);
     for (const [runId, workflowName, revisionId] of [
       ["legacy-visible", "visible", visibleRevision.revisionId],
       ["legacy-foreign", "foreign", foreignRevision.revisionId],
@@ -2035,7 +1946,6 @@ describe("WorkspaceStore", () => {
         "2026-07-26T00:00:00.000Z",
       );
     database.close();
-
     await expect(
       store.operational.workflows.claimPausedRun(
         "legacy-foreign",
@@ -2070,7 +1980,6 @@ describe("WorkspaceStore", () => {
     ).resolves.toMatchObject({ runId: "legacy-global", status: "running" });
     store.close();
   });
-
   test("rehydrates unfinished workflows as paused with their phase identity intact", async () => {
     const root = await temporary("workflow-recovery");
     const first = await createWorkspaceStore(root, {
@@ -2092,6 +2001,7 @@ describe("WorkspaceStore", () => {
       bytes: text('{"name":"recover"}'),
       actor,
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const workflowSource = await first.artifacts.writeArtifact({
       path: "codemode/execution-workflow-unfinished/source.mjs",
       mediaType: "text/javascript",
@@ -2185,6 +2095,7 @@ describe("WorkspaceStore", () => {
       updatedAt: "2026-07-26T00:00:00.000Z",
       metadata: Object.freeze({}),
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const otherSource = await first.artifacts.writeArtifact({
       path: "codemode/execution-other-session/source.mjs",
       mediaType: "text/javascript",
@@ -2247,12 +2158,10 @@ describe("WorkspaceStore", () => {
     ).toThrow();
     lineageDatabase.close();
     first.close();
-
     const recovered = await createWorkspaceStore(root, {
       now: () => "2026-07-26T00:01:00.000Z",
       recoverInterruptedOperations: true,
     });
-
     expect(await recovered.operational.workflows.getRun("workflow-run-unfinished")).toMatchObject({
       status: "paused",
       error: "Process exited before workflow settled",
@@ -2301,7 +2210,6 @@ describe("WorkspaceStore", () => {
         "2026-07-26T00:02:00.000Z",
       ),
     ).resolves.toBeUndefined();
-
     await recovered.operational.workflows.putPhase({
       runId: "workflow-run-unfinished",
       phaseIndex: 0,
@@ -2348,17 +2256,14 @@ describe("WorkspaceStore", () => {
     const retryDatabase = new DatabaseSync(recovered.unsafeDatabasePathForTesting);
     expect(() =>
       retryDatabase
-        .prepare(
-          `UPDATE workflow_phase_runs
+        .prepare(`UPDATE workflow_phase_runs
            SET logical_execution_id = ?
-           WHERE run_id = ? AND phase_index = 0`,
-        )
+           WHERE run_id = ? AND phase_index = 0`)
         .run("logical-arbitrary-mutation", "workflow-run-unfinished"),
     ).toThrow("lineage is immutable");
     retryDatabase.close();
     recovered.close();
   });
-
   test("upgrades a version-1 workspace and keeps migrations idempotent", async () => {
     const root = await temporary("migrations");
     await mkdir(join(root, "database"), { recursive: true });
@@ -2377,12 +2282,11 @@ describe("WorkspaceStore", () => {
     const versions = database
       .prepare("SELECT version FROM schema_migrations ORDER BY version")
       .all()
-      .map((row) => Reflect.get(row, "version"));
+      .map((row) => row["version"]);
     database.close();
     expect(versions).toEqual(Array.from({ length: versions.length }, (_, index) => index + 1));
     expect(versions.at(-1)).toBeGreaterThanOrEqual(9);
   });
-
   test("upgrades an old version-20 workspace through corrected execution lineage contracts", async () => {
     const root = await temporary("development-migrations");
     await mkdir(join(root, "database"), { recursive: true });
@@ -2399,23 +2303,19 @@ describe("WorkspaceStore", () => {
         .run(version, name, "2026-07-26T00:00:00.000Z");
     }
     seed
-      .prepare(
-        `INSERT INTO sessions(
+      .prepare(`INSERT INTO sessions(
            session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
-         ) VALUES (?, ?, 'idle', '', '', '', ?, ?, '{}')`,
-      )
+         ) VALUES (?, ?, 'idle', '', '', '', ?, ?, '{}')`)
       .run(
         "session-observed-before-lineage",
         "Observed before lineage",
         "2026-07-26T00:00:00.000Z",
         "2026-07-26T00:00:00.000Z",
       );
-    const insertJob = seed.prepare(
-      `INSERT INTO jobs(
+    const insertJob = seed.prepare(`INSERT INTO jobs(
          job_id, kind, payload_json, status, attempt, budget_remaining, created_at, updated_at,
          operation_id, idempotency_key, not_before
-       ) VALUES (?, ?, ?, 'completed', 1, 0, ?, ?, ?, ?, ?)`,
-    );
+       ) VALUES (?, ?, ?, 'completed', 1, 0, ?, ?, ?, ?, ?)`);
     insertJob.run(
       "reflection-before-lineage",
       "runtime.reflect_turn",
@@ -2440,67 +2340,54 @@ describe("WorkspaceStore", () => {
       "2026-07-26T00:00:01.000Z",
     );
     seed.close();
-
     const upgraded = await createWorkspaceStore(root);
     upgraded.close();
-
     const database = new DatabaseSync(join(root, "database", "noesis.sqlite"));
     const versions = database
       .prepare("SELECT version FROM schema_migrations ORDER BY version")
       .all()
-      .map((row) => Reflect.get(row, "version"));
+      .map((row) => row["version"]);
     const ownerTable = database
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'runtime_owner'")
       .get();
     const lineageTrigger = database
-      .prepare(
-        `SELECT name, sql
+      .prepare(`SELECT name, sql
          FROM sqlite_master
-         WHERE type = 'trigger' AND name = 'codemode_execution_lineage_immutable'`,
-      )
+         WHERE type = 'trigger' AND name = 'codemode_execution_lineage_immutable'`)
       .get();
     const phaseLineageTrigger = database
-      .prepare(
-        `SELECT name
+      .prepare(`SELECT name
          FROM sqlite_master
-         WHERE type = 'trigger' AND name = 'workflow_phase_lineage_immutable'`,
-      )
+         WHERE type = 'trigger' AND name = 'workflow_phase_lineage_immutable'`)
       .get();
     const sequenceTrigger = database
-      .prepare(
-        `SELECT name
+      .prepare(`SELECT name
          FROM sqlite_master
-         WHERE type = 'trigger' AND name = 'tool_call_action_sequence_required'`,
-      )
+         WHERE type = 'trigger' AND name = 'tool_call_action_sequence_required'`)
       .get();
     const jobListIndexes = database
-      .prepare(
-        `SELECT name FROM sqlite_master
+      .prepare(`SELECT name FROM sqlite_master
          WHERE type = 'index' AND name IN (
            'jobs_created_status_kind',
            'jobs_reflection_session_created',
            'jobs_experiment_created',
            'job_lineage_parent_child'
          )
-         ORDER BY name`,
-      )
+         ORDER BY name`)
       .all();
     const jobListPlan = database
       .prepare("EXPLAIN QUERY PLAN SELECT * FROM jobs ORDER BY created_at, job_id LIMIT 100")
       .all()
-      .map((row) => String(Reflect.get(row, "detail")));
+      .map((row) => String(row["detail"]));
     const experimentJobPlan = database
-      .prepare(
-        `EXPLAIN QUERY PLAN
+      .prepare(`EXPLAIN QUERY PLAN
          SELECT * FROM jobs
          WHERE kind = ? AND json_extract(payload_json, '$.experimentId') IN (?)
-         ORDER BY created_at, job_id LIMIT 100`,
-      )
+         ORDER BY created_at, job_id LIMIT 100`)
       .all("runtime.author_revision", "experiment-1")
-      .map((row) => String(Reflect.get(row, "detail")));
+      .map((row) => String(row["detail"]));
     const sourceSessionJobPlan = database
-      .prepare(
-        `EXPLAIN QUERY PLAN
+      .prepare(`EXPLAIN QUERY PLAN
          SELECT * FROM jobs
          WHERE kind = ? AND job_id IN (
            WITH RECURSIVE scoped_jobs(job_id, source_session_id) AS (
@@ -2516,31 +2403,24 @@ describe("WorkspaceStore", () => {
            )
            SELECT job_id FROM scoped_jobs
          )
-         ORDER BY created_at, job_id LIMIT 100`,
-      )
+         ORDER BY created_at, job_id LIMIT 100`)
       .all("runtime.author_revision", "session-1")
-      .map((row) => String(Reflect.get(row, "detail")));
+      .map((row) => String(row["detail"]));
     const backfilledObservation = database
-      .prepare(
-        `SELECT child_job_id, parent_job_id, source_session_id
-         FROM job_observations WHERE child_job_id = 'author-before-lineage'`,
-      )
+      .prepare(`SELECT child_job_id, parent_job_id, source_session_id
+         FROM job_observations WHERE child_job_id = 'author-before-lineage'`)
       .get();
     const toolCallTurnPlan = database
-      .prepare(
-        `EXPLAIN QUERY PLAN
+      .prepare(`EXPLAIN QUERY PLAN
          SELECT * FROM tool_calls
          WHERE session_id = ? AND turn_id = ?
-         ORDER BY action_sequence, tool_call_id`,
-      )
+         ORDER BY action_sequence, tool_call_id`)
       .all("session-null-sequence", "turn-null-sequence")
-      .map((row) => String(Reflect.get(row, "detail")));
+      .map((row) => String(row["detail"]));
     database
-      .prepare(
-        `INSERT INTO sessions(
+      .prepare(`INSERT INTO sessions(
           session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         "session-null-sequence",
         "Null sequence",
@@ -2554,11 +2434,9 @@ describe("WorkspaceStore", () => {
       );
     expect(() =>
       database
-        .prepare(
-          `INSERT INTO tool_calls(
+        .prepare(`INSERT INTO tool_calls(
             tool_call_id, session_id, tool_name, request_json, status, sensitivity, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .run(
           "action-null-sequence",
           "session-null-sequence",
@@ -2570,7 +2448,6 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-
     expect(versions.at(-1)).toBe(43);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
@@ -2600,7 +2477,6 @@ describe("WorkspaceStore", () => {
     });
     expect(toolCallTurnPlan.some((detail) => detail.includes("tool_calls_turn_created"))).toBe(true);
   });
-
   test("upgrades a version-24 workspace with planner-usable job scope indexes", async () => {
     const root = await temporary("jobs-keyset-migration");
     await mkdir(join(root, "database"), { recursive: true });
@@ -2620,10 +2496,8 @@ describe("WorkspaceStore", () => {
       seed.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'jobs_created'").get(),
     ).toBeUndefined();
     seed.close();
-
     const upgraded = await createWorkspaceStore(root);
     upgraded.close();
-
     const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     const keysetMigration = database
       .prepare("SELECT version, name FROM schema_migrations WHERE version = 25")
@@ -2641,33 +2515,28 @@ describe("WorkspaceStore", () => {
       .prepare("SELECT version, name FROM schema_migrations WHERE version = 29")
       .get();
     const indexes = database
-      .prepare(
-        `SELECT name, sql FROM sqlite_master
+      .prepare(`SELECT name, sql FROM sqlite_master
          WHERE type = 'index' AND name IN (
            'jobs_created_status_kind',
            'jobs_experiment_created',
            'job_lineage_parent_child',
            'job_observations_session_child',
            'job_observations_parent_child'
-         ) ORDER BY name`,
-      )
+         ) ORDER BY name`)
       .all();
     const keysetPlan = database
       .prepare("EXPLAIN QUERY PLAN SELECT * FROM jobs ORDER BY created_at, job_id LIMIT 100")
       .all()
-      .map((row) => String(Reflect.get(row, "detail")));
+      .map((row) => String(row["detail"]));
     const experimentPlan = database
-      .prepare(
-        `EXPLAIN QUERY PLAN
+      .prepare(`EXPLAIN QUERY PLAN
          SELECT * FROM jobs
          WHERE kind = ? AND json_extract(payload_json, '$.experimentId') IN (?)
-         ORDER BY created_at, job_id LIMIT 100`,
-      )
+         ORDER BY created_at, job_id LIMIT 100`)
       .all("runtime.preflight", "experiment-1")
-      .map((row) => String(Reflect.get(row, "detail")));
+      .map((row) => String(row["detail"]));
     const sourceSessionPlan = database
-      .prepare(
-        `EXPLAIN QUERY PLAN
+      .prepare(`EXPLAIN QUERY PLAN
          SELECT * FROM jobs
          WHERE kind = ? AND job_id IN (
            WITH RECURSIVE scoped_jobs(job_id, source_session_id) AS (
@@ -2683,17 +2552,14 @@ describe("WorkspaceStore", () => {
            )
            SELECT job_id FROM scoped_jobs
          )
-         ORDER BY created_at, job_id LIMIT 100`,
-      )
+         ORDER BY created_at, job_id LIMIT 100`)
       .all("runtime.author_revision", "session-1")
-      .map((row) => String(Reflect.get(row, "detail")));
+      .map((row) => String(row["detail"]));
     const runtimeScanPlan = database
-      .prepare(
-        `EXPLAIN QUERY PLAN
+      .prepare(`EXPLAIN QUERY PLAN
          SELECT * FROM jobs INDEXED BY jobs_created_status_kind
          WHERE status IN (?, ?) AND kind IN (?, ?, ?, ?)
-         ORDER BY created_at, job_id LIMIT 100`,
-      )
+         ORDER BY created_at, job_id LIMIT 100`)
       .all(
         "scheduled",
         "running",
@@ -2702,9 +2568,8 @@ describe("WorkspaceStore", () => {
         "runtime.preflight",
         "runtime.outcome_judge",
       )
-      .map((row) => String(Reflect.get(row, "detail")));
+      .map((row) => String(row["detail"]));
     database.close();
-
     expect(keysetMigration).toEqual({ version: 25, name: "025_jobs_keyset_index.sql" });
     expect(scopeMigration).toEqual({ version: 26, name: "026_job_lineage_indexes.sql" });
     expect(observationMigration).toEqual({ version: 27, name: "027_job_observations.sql" });
@@ -2727,7 +2592,6 @@ describe("WorkspaceStore", () => {
     expect(runtimeScanPlan.some((detail) => detail.includes("jobs_created_status_kind"))).toBe(true);
     expect(runtimeScanPlan.some((detail) => detail.includes("USE TEMP B-TREE"))).toBe(false);
   });
-
   test("migration 29 deterministically keeps the earliest inherited observation", async () => {
     const root = await temporary("job-lineage-observation-deduplication");
     await mkdir(join(root, "database"), { recursive: true });
@@ -2744,24 +2608,20 @@ describe("WorkspaceStore", () => {
         .run(version, name, "2026-07-26T00:00:00.000Z");
     }
     seed
-      .prepare(
-        `INSERT INTO sessions(
+      .prepare(`INSERT INTO sessions(
            session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
-         ) VALUES (?, ?, 'idle', '', '', '', ?, ?, '{}')`,
-      )
+         ) VALUES (?, ?, 'idle', '', '', '', ?, ?, '{}')`)
       .run(
         "session-duplicate-inheritance",
         "Duplicate inheritance",
         "2026-07-26T00:00:00.000Z",
         "2026-07-26T00:00:00.000Z",
       );
-    const insertJob = seed.prepare(
-      `INSERT INTO jobs(
+    const insertJob = seed.prepare(`INSERT INTO jobs(
          job_id, kind, payload_json, status, attempt, budget_remaining, created_at, updated_at,
          operation_id, idempotency_key, not_before
-       ) VALUES (?, ?, ?, 'completed', 1, 0, ?, ?, ?, ?, ?)`,
-    );
-    const insert = (jobId: string, payload: object, createdAt: string): void => {
+       ) VALUES (?, ?, ?, 'completed', 1, 0, ?, ?, ?, ?, ?)`);
+    const insert = (jobId: string, payload: JsonValue, createdAt: string): void => {
       insertJob.run(
         jobId,
         "fixture.job",
@@ -2777,11 +2637,9 @@ describe("WorkspaceStore", () => {
     insert("lineage-root-late", {}, "2026-07-26T00:00:00.001Z");
     insert("lineage-parent", {}, "2026-07-26T00:00:00.002Z");
     insert("lineage-child", { parentJobId: "lineage-parent" }, "2026-07-26T00:00:00.003Z");
-    const insertObservation = seed.prepare(
-      `INSERT INTO job_observations(
+    const insertObservation = seed.prepare(`INSERT INTO job_observations(
          child_job_id, parent_job_id, source_session_id, observed_at
-       ) VALUES (?, ?, ?, ?)`,
-    );
+       ) VALUES (?, ?, ?, ?)`);
     insertObservation.run(
       "lineage-parent",
       "lineage-root-late",
@@ -2795,16 +2653,13 @@ describe("WorkspaceStore", () => {
       "2026-07-26T00:00:01.000Z",
     );
     seed.close();
-
     const upgraded = await createWorkspaceStore(root);
     upgraded.close();
     const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(
       database
-        .prepare(
-          `SELECT parent_job_id, source_session_id, observed_at
-           FROM job_observations WHERE child_job_id = ?`,
-        )
+        .prepare(`SELECT parent_job_id, source_session_id, observed_at
+           FROM job_observations WHERE child_job_id = ?`)
         .all("lineage-child"),
     ).toEqual([
       {
@@ -2815,7 +2670,6 @@ describe("WorkspaceStore", () => {
     ]);
     database.close();
   });
-
   test("reports exact-limit terminal job pages as exhausted without exceeding the page limit", async () => {
     const store = await createWorkspaceStore(await temporary("job-page-lookahead"));
     const enqueue = async (jobId: string, createdAt: string): Promise<void> => {
@@ -2834,38 +2688,42 @@ describe("WorkspaceStore", () => {
     };
     await enqueue("job-a", "2026-07-26T00:00:00.000Z");
     await enqueue("job-b", "2026-07-26T00:00:01.000Z");
-
     const exactTerminal = await store.jobs.listPage({ kind: "fixture.job", limit: 2 });
     expect(exactTerminal.records.map(({ jobId }) => jobId)).toEqual(["job-a", "job-b"]);
     expect(exactTerminal.exhausted).toBe(true);
-
     await enqueue("job-c", "2026-07-26T00:00:02.000Z");
     const first = await store.jobs.listPage({ kind: "fixture.job", limit: 2 });
     expect(first.records.map(({ jobId }) => jobId)).toEqual(["job-a", "job-b"]);
     expect(first.exhausted).toBe(false);
     expect(first.nextCursor).toBeDefined();
-    const final = await store.jobs.listPage({
-      kind: "fixture.job",
-      limit: 2,
-      ...(first.nextCursor ? { after: first.nextCursor } : {}),
-    });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    const final = await store.jobs.listPage(
+      createConditionalObject({
+        kind: "fixture.job",
+        limit: 2,
+      } as const)
+        .addOptional(first.nextCursor ? { after: first.nextCursor } : undefined)
+        .finish(),
+    );
     expect(final.records.map(({ jobId }) => jobId)).toEqual(["job-c"]);
     expect(final.exhausted).toBe(true);
-
     const newest = await store.jobs.listPage({ kind: "fixture.job", order: "newest", limit: 2 });
     expect(newest.records.map(({ jobId }) => jobId)).toEqual(["job-c", "job-b"]);
     expect(newest.exhausted).toBe(false);
-    const older = await store.jobs.listPage({
-      kind: "fixture.job",
-      order: "newest",
-      limit: 2,
-      ...(newest.nextCursor ? { after: newest.nextCursor } : {}),
-    });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    const older = await store.jobs.listPage(
+      createConditionalObject({
+        kind: "fixture.job",
+        order: "newest",
+        limit: 2,
+      } as const)
+        .addOptional(newest.nextCursor ? { after: newest.nextCursor } : undefined)
+        .finish(),
+    );
     expect(older.records.map(({ jobId }) => jobId)).toEqual(["job-a"]);
     expect(older.exhausted).toBe(true);
     store.close();
   });
-
   test("uses the project expression index for newest reflection scans", async () => {
     const root = await temporary("job-project-index");
     const store = await createWorkspaceStore(root);
@@ -2889,20 +2747,16 @@ describe("WorkspaceStore", () => {
       budget: 0,
     });
     store.close();
-
     const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     const plan = database
-      .prepare(
-        `EXPLAIN QUERY PLAN SELECT * FROM jobs
+      .prepare(`EXPLAIN QUERY PLAN SELECT * FROM jobs
          WHERE kind = ? AND json_extract(payload_json, '$.turn.project.projectId') = ?
-         ORDER BY created_at DESC, job_id DESC LIMIT ?`,
-      )
+         ORDER BY created_at DESC, job_id DESC LIMIT ?`)
       .all("runtime.reflect_turn", "project-indexed", 1)
-      .map((row) => String(Reflect.get(row, "detail")));
+      .map((row) => String(row["detail"]));
     expect(plan.join("\n")).toContain("jobs_reflection_project_created");
     database.close();
   });
-
   test("keeps recursive job observations isolated to their source session", async () => {
     const store = await createWorkspaceStore(await temporary("job-observation-session-isolation"));
     await store.operational.sessions.put(session("session-observation-a"));
@@ -2917,19 +2771,23 @@ describe("WorkspaceStore", () => {
         readonly observedAt: string;
       },
     ): Promise<void> => {
-      await store.jobs.enqueue({
-        jobId,
-        kind,
-        payload: Object.freeze({}),
-        payloadRefs: Object.freeze([]),
-        operationId: `operation:${jobId}`,
-        idempotencyKey: `idempotency:${jobId}`,
-        notBefore: createdAt,
-        maxAttempts: 1,
-        estimatedCost: 0,
-        budget: 0,
-        ...(observation ? { observations: [observation] } : {}),
-      });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+      await store.jobs.enqueue(
+        createConditionalObject({
+          jobId,
+          kind,
+          payload: Object.freeze({}),
+          payloadRefs: Object.freeze([]),
+          operationId: `operation:${jobId}`,
+          idempotencyKey: `idempotency:${jobId}`,
+          notBefore: createdAt,
+          maxAttempts: 1,
+          estimatedCost: 0,
+          budget: 0,
+        } as const)
+          .addOptional(observation ? { observations: [observation] } : undefined)
+          .finish(),
+      );
     };
     await enqueue("root-observation-a", "fixture.root", "2026-07-26T00:00:00.000Z");
     await enqueue("root-observation-b", "fixture.root", "2026-07-26T00:00:01.000Z");
@@ -2953,7 +2811,6 @@ describe("WorkspaceStore", () => {
       parentJobId: "shared-observation-parent",
       observedAt: "2026-07-26T00:00:05.000Z",
     });
-
     const observedByA = await store.jobs.list({
       kind: "fixture.observed",
       observedSessionId: "session-observation-a",
@@ -2962,7 +2819,6 @@ describe("WorkspaceStore", () => {
       kind: "fixture.observed",
       observedSessionId: "session-observation-b",
     });
-
     expect(observedByA.map(({ jobId }) => jobId)).toEqual([
       "shared-observation-parent",
       "observation-child-a",
@@ -2973,7 +2829,6 @@ describe("WorkspaceStore", () => {
     ]);
     store.close();
   });
-
   test("inherits unbounded parent observations and propagates observations recorded after child enqueue", async () => {
     const store = await createWorkspaceStore(await temporary("job-observation-inheritance"));
     const sessionIds = Array.from(
@@ -3019,18 +2874,16 @@ describe("WorkspaceStore", () => {
       kind: "fixture.preflight",
       inheritObservationsFromParentJobId: "observation-author",
     });
-
     const database = new DatabaseSync(store.unsafeDatabasePathForTesting, { readOnly: true });
     const observationCount = (jobId: string): number => {
       const row = database
         .prepare("SELECT count(*) AS count FROM job_observations WHERE child_job_id = ?")
         .get(jobId);
       if (!row) throw new Error(`Missing observation count for ${jobId}`);
-      return Number(Reflect.get(row, "count"));
+      return Number(row["count"]);
     };
     expect(observationCount("observation-author")).toBe(300);
     expect(observationCount("observation-preflight")).toBe(300);
-
     await store.jobs.recordObservation("observation-author", {
       sourceSessionId: "session-inherited-late",
       parentJobId: "observation-root",
@@ -3040,20 +2893,17 @@ describe("WorkspaceStore", () => {
     expect(observationCount("observation-preflight")).toBe(301);
     expect(
       database
-        .prepare(
-          `SELECT parent_job_id FROM job_observations
-           WHERE child_job_id = ? AND source_session_id = ?`,
-        )
+        .prepare(`SELECT parent_job_id FROM job_observations
+           WHERE child_job_id = ? AND source_session_id = ?`)
         .get("observation-preflight", "session-inherited-late"),
     ).toEqual({ parent_job_id: "observation-author" });
     database.close();
     store.close();
   });
-
   test("keeps a running job visible when it becomes scheduled between active-stream pages", async () => {
     const store = await createWorkspaceStore(await temporary("job-active-status-transition"));
     const start = Date.parse("2026-07-26T00:00:00.000Z");
-    for (let index = 0; index < 1_000; index += 1) {
+    for (let index = 0; index < 1000; index += 1) {
       const jobId = `active-filler-${String(index).padStart(4, "0")}`;
       await store.jobs.enqueue({
         jobId,
@@ -3075,32 +2925,33 @@ describe("WorkspaceStore", () => {
       payloadRefs: Object.freeze([]),
       operationId: "operation:active-transition-target",
       idempotencyKey: "idempotency:active-transition-target",
-      notBefore: new Date(start + 2_000).toISOString(),
+      notBefore: new Date(start + 2000).toISOString(),
       maxAttempts: 2,
       estimatedCost: 1,
       budget: 2,
     });
     const claimed = await store.jobs.claim({
       workerId: "status-transition-worker",
-      now: new Date(start + 3_000).toISOString(),
-      leaseUntil: new Date(start + 4_000).toISOString(),
+      now: new Date(start + 3000).toISOString(),
+      leaseUntil: new Date(start + 4000).toISOString(),
       maximumCost: 1,
       kinds: ["runtime.preflight"],
     });
     if (!claimed?.leaseToken) throw new Error("Expected transition target lease");
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const filter = {
       statuses: ["scheduled", "running"] as const,
       kinds: ["runtime.author_revision", "runtime.preflight"] as const,
-      limit: 1_000,
+      limit: 1000,
     };
     const first = await store.jobs.listPage(filter);
     expect(first.exhausted).toBe(false);
-    expect(first.records).toHaveLength(1_000);
+    expect(first.records).toHaveLength(1000);
     await store.jobs.fail({
       jobId: claimed.jobId,
       leaseToken: claimed.leaseToken,
-      now: new Date(start + 3_500).toISOString(),
-      retryAt: new Date(start + 5_000).toISOString(),
+      now: new Date(start + 3500).toISOString(),
+      retryAt: new Date(start + 5000).toISOString(),
       failure: { code: "retry", message: "retry", retryable: true, ambiguous: false },
     });
     if (!first.nextCursor) throw new Error("Expected active stream cursor");
@@ -3108,8 +2959,7 @@ describe("WorkspaceStore", () => {
     expect(second.records.map(({ jobId }) => jobId)).toEqual(["active-transition-target"]);
     expect(second.exhausted).toBe(true);
     store.close();
-  }, 30_000);
-
+  }, 30000);
   test("keeps authority grants, reservations, completions, and replay in SQLite", async () => {
     const root = await temporary("durable-authority");
     const first = await createWorkspaceStore(root);
@@ -3117,7 +2967,7 @@ describe("WorkspaceStore", () => {
       await authority(first).issueSchedulerGrant(
         "durable",
         2,
-        new Date(Date.now() + 60_000).toISOString(),
+        new Date(Date.now() + 60000).toISOString(),
         receipt,
       );
       return null;
@@ -3130,7 +2980,6 @@ describe("WorkspaceStore", () => {
       }),
     ).resolves.toMatchObject({ ok: true, replayed: false, value: "finished" });
     first.close();
-
     const recovered = await createWorkspaceStore(root);
     await expect(
       authority(recovered).runScheduled("durable", 1, "durable-fingerprint", async () => {
@@ -3152,14 +3001,11 @@ describe("WorkspaceStore", () => {
       }),
     ).resolves.toMatchObject({ ok: false, code: "denied" });
     expect(executions).toBe(2);
-
     const database = new DatabaseSync(recovered.unsafeDatabasePathForTesting, { readOnly: true });
     expect(
       database
-        .prepare(
-          `SELECT status, receipt_lineage_id FROM authority_operations
-           WHERE principal = 'scheduler' AND effect = 'execute'`,
-        )
+        .prepare(`SELECT status, receipt_lineage_id FROM authority_operations
+           WHERE principal = 'scheduler' AND effect = 'execute'`)
         .get(),
     ).toMatchObject({
       status: "completed",
@@ -3168,10 +3014,10 @@ describe("WorkspaceStore", () => {
     database.close();
     recovered.close();
   });
-
   test("replays a durable foreground operation without persisting an unused grant", async () => {
     const store = await createWorkspaceStore(await temporary("foreground-authority-replay"));
     let executions = 0;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = Object.freeze({
       operationId: "operation-foreground-durable-replay",
       effect: "read" as const,
@@ -3189,7 +3035,6 @@ describe("WorkspaceStore", () => {
       resourcePatterns: ["tool:durable-replay"],
       credentialRefs: [],
     };
-
     await expect(authority(store).runForeground(request, permission)).resolves.toMatchObject({
       ok: true,
       replayed: false,
@@ -3205,7 +3050,6 @@ describe("WorkspaceStore", () => {
     expect(countRows(store, "authority_grants")).toBe(1);
     store.close();
   });
-
   test("fails closed for durable collisions, failures, and unresolved reservations", async () => {
     const store = await createWorkspaceStore(await temporary("authority-fail-closed"));
     await expect(
@@ -3214,7 +3058,6 @@ describe("WorkspaceStore", () => {
     await expect(
       authority(store).promote("capability:other", "shared-key", async () => "must-not-run"),
     ).resolves.toMatchObject({ ok: false, code: "collision" });
-
     let failedExecutions = 0;
     await expect(
       authority(store).promote("capability:failure", "failure-key", async () => {
@@ -3229,7 +3072,6 @@ describe("WorkspaceStore", () => {
       }),
     ).resolves.toMatchObject({ ok: false, code: "failed" });
     expect(failedExecutions).toBe(1);
-
     let release: (() => void) | undefined;
     const blocked = new Promise<void>((resolve) => {
       release = resolve;
@@ -3251,7 +3093,6 @@ describe("WorkspaceStore", () => {
     await expect(first).resolves.toMatchObject({ ok: true, value: "settled" });
     store.close();
   });
-
   test("rejects forged and stale receipts at the exact operation boundary", async () => {
     const store = await createWorkspaceStore(await temporary("receipt-binding"));
     let firstReceipt: AuthorityReceipt | undefined;
@@ -3293,13 +3134,11 @@ describe("WorkspaceStore", () => {
     });
     store.close();
   });
-
   test("writes the operational cutover marker only after strict legacy validation", async () => {
     const root = await temporary("strict-cutover");
     await mkdir(join(root, "ledger"), { recursive: true });
     await writeFile(join(root, "ledger", "events.jsonl"), "{ definitely-not-json }\n");
     const store = await createWorkspaceStore(root);
-
     await expect(store.cutoverLegacyOperationalAuthority(root, actor)).rejects.toThrow(
       "malformed legacy journal line 1",
     );
@@ -3310,7 +3149,6 @@ describe("WorkspaceStore", () => {
     database.close();
     store.close();
   });
-
   test("rolls back repository activity when a foreign-key write fails", async () => {
     const store = await createWorkspaceStore(await temporary("transaction"));
     const before = countRows(store, "activity_log");
@@ -3329,7 +3167,6 @@ describe("WorkspaceStore", () => {
     expect(countRows(store, "activity_log")).toBe(before);
     store.close();
   });
-
   test("preserves message insertion order when one turn shares a timestamp", async () => {
     const store = await createWorkspaceStore(await temporary("message-order"));
     await store.operational.sessions.put(session("session-message-order"));
@@ -3352,7 +3189,6 @@ describe("WorkspaceStore", () => {
       createdAt,
       metadata: { turnId: "turn-1" },
     });
-
     expect(
       (await store.operational.messages.listForSession("session-message-order")).map(
         (message) => message.role,
@@ -3360,7 +3196,6 @@ describe("WorkspaceStore", () => {
     ).toEqual(["user", "assistant"]);
     store.close();
   });
-
   test("keeps queued turns and explicit steers durable, ordered, and session isolated", async () => {
     const store = await createWorkspaceStore(await temporary("user-intents"));
     await store.operational.sessions.put(session("session-intents"));
@@ -3371,7 +3206,6 @@ describe("WorkspaceStore", () => {
       status: "running",
       admittedAt: "2026-01-01T00:00:00.000Z",
     });
-
     await store.operational.userIntents.enqueue({
       intentId: "intent-z-first",
       sessionId: "session-intents",
@@ -3392,7 +3226,6 @@ describe("WorkspaceStore", () => {
       text: "other session",
       createdAt: "2026-01-01T00:00:00.000Z",
     });
-
     expect(
       (await store.operational.userIntents.listPending("session-intents")).map((intent) => intent.intentId),
     ).toEqual(["intent-z-first", "intent-a-second"]);
@@ -3425,7 +3258,6 @@ describe("WorkspaceStore", () => {
         releasedAt: "2026-01-01T00:05:00.000Z",
       }),
     ).resolves.toBeUndefined();
-
     await expect(
       store.operational.userIntents.enqueueAndPromoteToSteer({
         sessionId: "session-intents",
@@ -3469,7 +3301,6 @@ describe("WorkspaceStore", () => {
       },
       timelineSequence: 1,
     });
-
     await store.operational.userIntents.enqueue({
       intentId: "intent-third",
       sessionId: "session-intents",
@@ -3514,7 +3345,6 @@ describe("WorkspaceStore", () => {
     ).toEqual(["intent-other"]);
     store.close();
   });
-
   test("atomically reroutes pending intents across sessions while retaining source provenance", async () => {
     const root = await temporary("reroute-user-intents");
     const store = await createWorkspaceStore(root);
@@ -3532,7 +3362,7 @@ describe("WorkspaceStore", () => {
       text: "second",
       createdAt: "2026-01-01T00:02:00.000Z",
     });
-
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = {
       sourceSessionId: "session-reroute-source",
       destinationSessionId: "session-reroute-destination",
@@ -3554,12 +3384,10 @@ describe("WorkspaceStore", () => {
     const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(
       database
-        .prepare(
-          `SELECT intent_id, status, withdrawn_at
+        .prepare(`SELECT intent_id, status, withdrawn_at
            FROM user_intents
            WHERE session_id = ?
-           ORDER BY queue_sequence`,
-        )
+           ORDER BY queue_sequence`)
         .all("session-reroute-source"),
     ).toEqual([
       {
@@ -3576,7 +3404,6 @@ describe("WorkspaceStore", () => {
     database.close();
     store.close();
   });
-
   test("atomically enqueues and promotes an explicit steer with idempotent identity", async () => {
     const root = await temporary("atomic-explicit-steer");
     const store = await createWorkspaceStore(root);
@@ -3587,6 +3414,7 @@ describe("WorkspaceStore", () => {
       status: "running",
       admittedAt: "2026-01-01T00:00:00.000Z",
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = {
       intentId: "intent-atomic-steer",
       sessionId: "session-atomic-steer",
@@ -3595,7 +3423,6 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-01-01T00:01:00.000Z",
       promotedAt: "2026-01-01T00:01:00.001Z",
     } as const;
-
     await expect(store.operational.userIntents.enqueueAndPromoteToSteer(request)).resolves.toMatchObject({
       intentId: "intent-atomic-steer",
       deliveryMode: "steer",
@@ -3611,7 +3438,6 @@ describe("WorkspaceStore", () => {
       attemptCount: 1,
     });
     expect(await store.operational.userIntents.listPending("session-atomic-steer")).toEqual([]);
-
     const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(
       database
@@ -3620,12 +3446,10 @@ describe("WorkspaceStore", () => {
     ).toMatchObject({ count: 1 });
     expect(
       database
-        .prepare(
-          `SELECT activity_kind
+        .prepare(`SELECT activity_kind
            FROM activity_log
            WHERE subject_kind = 'user_intent' AND subject_id = ?
-           ORDER BY rowid`,
-        )
+           ORDER BY rowid`)
         .all("intent-atomic-steer"),
     ).toEqual([
       { activity_kind: "user_intent.enqueued" },
@@ -3634,7 +3458,7 @@ describe("WorkspaceStore", () => {
     database.close();
     store.close();
   });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test("does not enqueue an explicit steer when its target cannot be bound", async () => {
     const root = await temporary("atomic-explicit-steer-target");
     const store = await createWorkspaceStore(root);
@@ -3653,7 +3477,6 @@ describe("WorkspaceStore", () => {
       status: "running",
       admittedAt: "2026-01-01T00:00:00.000Z",
     });
-
     for (const [intentId, targetTurnId] of [
       ["intent-target-missing", "turn-steer-missing"],
       ["intent-target-settled", "turn-steer-completed"],
@@ -3670,7 +3493,6 @@ describe("WorkspaceStore", () => {
         }),
       ).resolves.toBeUndefined();
     }
-
     const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(database.prepare("SELECT count(*) AS count FROM user_intents").get()).toMatchObject({ count: 0 });
     expect(
@@ -3679,7 +3501,6 @@ describe("WorkspaceStore", () => {
     database.close();
     store.close();
   });
-
   test("does not mutate queued work when steer promotion races turn settlement", async () => {
     const store = await createWorkspaceStore(await temporary("queued-steer-settlement-race"));
     await store.operational.sessions.put(session("session-steer-race"));
@@ -3696,7 +3517,6 @@ describe("WorkspaceStore", () => {
       text: "keep me queued",
       createdAt: "2026-01-01T00:00:02.000Z",
     });
-
     await expect(
       store.operational.userIntents.promoteNewestPendingToSteer({
         sessionId: "session-steer-race",
@@ -3709,7 +3529,6 @@ describe("WorkspaceStore", () => {
     ]);
     store.close();
   });
-
   test("does not hold an explicit steer when a previously running target settles first", async () => {
     const root = await temporary("held-explicit-steer-settlement-race");
     const store = await createWorkspaceStore(root);
@@ -3720,17 +3539,13 @@ describe("WorkspaceStore", () => {
       status: "running",
       admittedAt: "2026-01-01T00:00:00.000Z",
     });
-
     const settlement = new DatabaseSync(store.unsafeDatabasePathForTesting);
     settlement
-      .prepare(
-        `UPDATE foreground_turns
+      .prepare(`UPDATE foreground_turns
          SET status = 'completed', settled_at = ?
-         WHERE turn_id = ? AND status = 'running'`,
-      )
+         WHERE turn_id = ? AND status = 'running'`)
       .run("2026-01-01T00:00:01.000Z", "turn-held-explicit-race");
     settlement.close();
-
     await expect(
       store.operational.userIntents.holdExplicitSteer({
         intentId: "intent-held-explicit-race",
@@ -3741,7 +3556,6 @@ describe("WorkspaceStore", () => {
         heldAt: "2026-01-01T00:00:02.000Z",
       }),
     ).resolves.toBeUndefined();
-
     const inspection = new DatabaseSync(store.unsafeDatabasePathForTesting, { readOnly: true });
     expect(inspection.prepare("SELECT count(*) AS count FROM user_intents").get()).toMatchObject({
       count: 0,
@@ -3754,7 +3568,6 @@ describe("WorkspaceStore", () => {
     inspection.close();
     store.close();
   });
-
   test("holds pre-ready steers durably and restores each origin without FIFO delivery", async () => {
     const store = await createWorkspaceStore(await temporary("held-steers"));
     await store.operational.sessions.put(session("session-held-steers"));
@@ -3802,7 +3615,6 @@ describe("WorkspaceStore", () => {
       { intentId: "intent-queued-held" },
       { intentId: "intent-explicit-held" },
     ]);
-
     await expect(
       store.operational.userIntents.activateHeldSteer({
         sessionId: "session-held-steers",
@@ -3822,7 +3634,6 @@ describe("WorkspaceStore", () => {
     expect(await store.operational.userIntents.listUnresolved("session-held-steers")).toEqual([]);
     store.close();
   });
-
   test("recovers held explicit steers as inspectable uncertainty and held queued steers as pending", async () => {
     const store = await createWorkspaceStore(await temporary("held-steer-recovery"));
     await store.operational.sessions.put(session("session-held-recovery"));
@@ -3851,7 +3662,6 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-01-01T00:00:03.000Z",
       heldAt: "2026-01-01T00:00:03.000Z",
     });
-
     await expect(
       store.operational.userIntents.recoverDispatching({
         sessionId: "session-held-recovery",
@@ -3874,7 +3684,6 @@ describe("WorkspaceStore", () => {
     expect(await store.operational.userIntents.listHeld("session-held-recovery")).toEqual([]);
     store.close();
   });
-
   test("rolls back an explicit steer when promotion provenance cannot be recorded", async () => {
     const root = await temporary("atomic-explicit-steer-rollback");
     const store = await createWorkspaceStore(root);
@@ -3894,7 +3703,6 @@ describe("WorkspaceStore", () => {
         SELECT RAISE(ABORT, 'reject atomic steer activity');
       END;
     `);
-
     await expect(
       store.operational.userIntents.enqueueAndPromoteToSteer({
         intentId: "intent-steer-rollback",
@@ -3918,7 +3726,6 @@ describe("WorkspaceStore", () => {
     database.close();
     store.close();
   });
-
   test("atomically withdraws a proven-unconsumed explicit steer without exposing pending work", async () => {
     const root = await temporary("atomic-explicit-steer-withdraw");
     const store = await createWorkspaceStore(root);
@@ -3937,13 +3744,13 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-01-01T00:01:00.000Z",
       promotedAt: "2026-01-01T00:01:00.001Z",
     });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = {
       sessionId: "session-steer-withdraw",
       intentId: "intent-steer-withdraw",
       targetTurnId: "turn-steer-withdraw",
       withdrawnAt: "2026-01-01T00:02:00.000Z",
     } as const;
-
     await expect(
       store.operational.userIntents.withdrawUnconsumedSteerDispatch(request),
     ).resolves.toMatchObject({
@@ -3960,7 +3767,6 @@ describe("WorkspaceStore", () => {
       text: "restore this exact text",
     });
     expect(await store.operational.userIntents.listPending("session-steer-withdraw")).toEqual([]);
-
     const database = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(
       database
@@ -3970,7 +3776,6 @@ describe("WorkspaceStore", () => {
     database.close();
     store.close();
   });
-
   test("rolls back unconsumed steer withdrawal without exposing pending work", async () => {
     const root = await temporary("atomic-explicit-steer-withdraw-rollback");
     const store = await createWorkspaceStore(root);
@@ -3998,7 +3803,6 @@ describe("WorkspaceStore", () => {
         SELECT RAISE(ABORT, 'reject atomic steer withdrawal');
       END;
     `);
-
     await expect(
       store.operational.userIntents.withdrawUnconsumedSteerDispatch({
         sessionId: "session-steer-withdraw-rollback",
@@ -4020,7 +3824,6 @@ describe("WorkspaceStore", () => {
     database.close();
     store.close();
   });
-
   test("allocates unique explicit-steer sequence numbers across store instances", async () => {
     const root = await temporary("atomic-explicit-steer-contention");
     const first = await createWorkspaceStore(root);
@@ -4040,7 +3843,6 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-01-01T00:01:00.000Z",
       promotedAt: "2026-01-01T00:01:00.001Z",
     });
-
     const [one, two] = await Promise.all([
       first.operational.userIntents.enqueueAndPromoteToSteer(request("intent-steer-one")),
       second.operational.userIntents.enqueueAndPromoteToSteer(request("intent-steer-two")),
@@ -4051,11 +3853,9 @@ describe("WorkspaceStore", () => {
       second.operational.userIntents.enqueueAndPromoteToSteer(request("intent-steer-one")),
     ]);
     expect(repeated.map((intent) => intent?.queueSequence)).toEqual([one?.queueSequence, one?.queueSequence]);
-
     second.close();
     first.close();
   });
-
   test("records immutable turn timeline sequence for same-millisecond steer delivery", async () => {
     const store = await createWorkspaceStore(await temporary("steer-interaction-sequence"));
     await store.operational.sessions.put(session("session-steer-sequence"));
@@ -4087,7 +3887,6 @@ describe("WorkspaceStore", () => {
         deliveredAt,
       });
     }
-
     const steers = (await store.operational.messages.listForSession("session-steer-sequence")).filter(
       (message) => message.metadata["deliveryMode"] === "steer",
     );
@@ -4103,7 +3902,6 @@ describe("WorkspaceStore", () => {
     ).toEqual(["intent-steer-second", "intent-steer-first"]);
     store.close();
   });
-
   test("commits steer text to its canonical message atomically and protects intent identity", async () => {
     const root = await temporary("user-intent-canonical-text");
     const store = await createWorkspaceStore(root);
@@ -4122,7 +3920,6 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-01-01T00:01:00.000Z",
       promotedAt: "2026-01-01T00:02:00.000Z",
     });
-
     await expect(
       store.operational.userIntents.recordSteerDelivery({
         sessionId: "session-canonical-text",
@@ -4137,7 +3934,6 @@ describe("WorkspaceStore", () => {
     await expect(
       store.operational.messages.get("turn-canonical-text:steer:intent-canonical-text"),
     ).resolves.toBeUndefined();
-
     const delivered = await store.operational.userIntents.recordSteerDelivery({
       sessionId: "session-canonical-text",
       intentId: "intent-canonical-text",
@@ -4185,7 +3981,6 @@ describe("WorkspaceStore", () => {
       text: "pending text",
       createdAt: "2026-01-01T00:05:00.000Z",
     });
-
     const database = new DatabaseSync(join(root, "database", "noesis.sqlite"));
     expect(() =>
       database
@@ -4205,7 +4000,6 @@ describe("WorkspaceStore", () => {
     database.close();
     store.close();
   });
-
   test("claims one pending user intent exactly once across store instances", async () => {
     const root = await temporary("user-intent-claim-contention");
     const first = await createWorkspaceStore(root);
@@ -4217,7 +4011,6 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
     });
     const second = await createWorkspaceStore(root);
-
     const claims = await Promise.all([
       first.operational.userIntents.claimOldestPending({
         sessionId: "session-claim",
@@ -4230,17 +4023,17 @@ describe("WorkspaceStore", () => {
         claimedAt: "2026-01-01T00:01:00.000Z",
       }),
     ]);
-
     expect(claims.filter((claim) => claim !== undefined)).toHaveLength(1);
     expect(claims.filter((claim) => claim === undefined)).toHaveLength(1);
     expect(await first.operational.userIntents.listPending("session-claim")).toEqual([]);
     second.close();
     first.close();
   });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test("recovers dispatching user intents from durable message provenance", async () => {
     const store = await createWorkspaceStore(await temporary("user-intent-recovery"));
     await store.operational.sessions.put(session("session-recovery"));
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const targets = [
       ["intent-missing", "turn-missing"],
       ["intent-completed", "turn-completed"],
@@ -4303,7 +4096,6 @@ describe("WorkspaceStore", () => {
         metadata: { turnId, sourceIntentId: intentId },
       });
     }
-
     await expect(
       store.operational.userIntents.recoverDispatching({
         sessionId: "session-recovery",
@@ -4345,7 +4137,6 @@ describe("WorkspaceStore", () => {
     ).resolves.toEqual({ released: 0, delivered: 0, unresolved: 0 });
     store.close();
   });
-
   test("fails closed when durable message provenance has the wrong content", async () => {
     const store = await createWorkspaceStore(await temporary("user-intent-digest-mismatch"));
     await store.operational.sessions.put(session("session-digest-mismatch"));
@@ -4369,7 +4160,6 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-01-01T00:02:00.000Z",
       metadata: { turnId: "turn-digest-mismatch", sourceIntentId: "intent-digest-mismatch" },
     });
-
     await expect(
       store.operational.userIntents.recoverDispatching({
         sessionId: "session-digest-mismatch",
@@ -4379,7 +4169,6 @@ describe("WorkspaceStore", () => {
     expect(await store.operational.userIntents.listPending("session-digest-mismatch")).toEqual([]);
     store.close();
   });
-
   test("round-trips the experiment, trials, preflight, evaluation, and feedback lifecycle", async () => {
     const store = await createWorkspaceStore(await temporary("experiment"));
     const [caseEvidence, baselineEvidence, candidateEvidence, judgmentEvidence, reportEvidence] =
@@ -4430,7 +4219,6 @@ describe("WorkspaceStore", () => {
     await store.research.experiments.putExperiment(experiment);
     await store.research.experiments.putExperiment({ ...experiment, status: "authoring" });
     await store.research.experiments.putExperiment({ ...experiment, status: "preflight" });
-
     const plan: PreflightPlan = {
       planId: "plan-1",
       experimentId: experiment.experimentId,
@@ -4505,7 +4293,6 @@ describe("WorkspaceStore", () => {
     };
     await store.research.experiments.putExperiment({ ...experiment, status: "observing" });
     await store.research.experiments.putExperiment(completed);
-
     expect(await store.research.experiments.getExperiment(experiment.experimentId)).toEqual(completed);
     expect(await store.research.experiments.listExperiments({ status: "completed", limit: 10 })).toEqual([
       completed,
@@ -4526,7 +4313,6 @@ describe("WorkspaceStore", () => {
     ).rejects.toThrow();
     store.close();
   });
-
   test("retries the exact completing experiment write against its merged stored provenance", async () => {
     const store = await createWorkspaceStore(await temporary("experiment-completion-retry"));
     const [initialEvidence, authoringEvidence, completingEvidence] = await Promise.all([
@@ -4581,7 +4367,6 @@ describe("WorkspaceStore", () => {
       status: "completed",
       outcome: "keep",
     };
-
     await store.research.experiments.putExperiment(completing);
     const completed = await store.research.experiments.getExperiment(initial.experimentId);
     await expect(store.research.experiments.putExperiment(completing)).resolves.toEqual({
@@ -4600,7 +4385,6 @@ describe("WorkspaceStore", () => {
       table: "experiments",
       rowId: initial.experimentId,
     });
-
     expect(await store.research.experiments.getExperiment(initial.experimentId)).toEqual(completed);
     expect(completed).toMatchObject({
       evidenceRefs: [initialEvidence, authoringEvidence, completingEvidence],
@@ -4611,7 +4395,6 @@ describe("WorkspaceStore", () => {
     ).rejects.toThrow(`Completed experiment ${initial.experimentId} is immutable`);
     store.close();
   });
-
   test("backs up and restores authoritative files and reports missing and orphan refs", async () => {
     const sourceRoot = await temporary("backup-source");
     const backupRoot = await temporary("backup-copy");
@@ -4645,7 +4428,6 @@ describe("WorkspaceStore", () => {
     const backup = await store.backup(backupRoot);
     expect(backup.missingFiles).toEqual([]);
     store.close();
-
     const restored = await restoreWorkspaceBackup(backupRoot, restoreRoot);
     expect(restored.missingFiles).toEqual([]);
     const restoredStore = await createWorkspaceStore(restoreRoot);
@@ -4668,7 +4450,6 @@ describe("WorkspaceStore", () => {
     expect(missingBackup.missingFiles).toContain(artifact.path);
     restoredStore.close();
   });
-
   test("imports a legacy home once without continuing dual writes", async () => {
     const legacyRoot = await temporary("legacy");
     const workspaceRoot = await temporary("imported");
@@ -4684,7 +4465,6 @@ describe("WorkspaceStore", () => {
     const store = await createWorkspaceStore(workspaceRoot);
     const first = await store.importLegacyWorkspace(legacyRoot, actor);
     const second = await store.importLegacyWorkspace(legacyRoot, actor);
-
     expect(first).toMatchObject({ sessions: 1, messages: 2, outcomes: 1, definitions: 2 });
     expect(second.alreadyImported).toBe(true);
     expect(await store.operational.messages.listForSession("trail-legacy")).toHaveLength(2);
@@ -4697,7 +4477,6 @@ describe("WorkspaceStore", () => {
     );
     store.close();
   });
-
   test("cuts over the full legacy authority graph before writing its independent marker", async () => {
     const legacyRoot = await temporary("legacy-authority");
     const workspaceRoot = await temporary("authority-cutover");
@@ -4710,7 +4489,6 @@ describe("WorkspaceStore", () => {
     const store = await createWorkspaceStore(workspaceRoot);
     const first = await store.cutoverLegacyOperationalAuthority(legacyRoot, actor);
     const second = await store.cutoverLegacyOperationalAuthority(legacyRoot, actor);
-
     expect(first).toMatchObject({
       cutoverVersion: 1,
       alreadyCompleted: false,
@@ -4742,7 +4520,6 @@ describe("WorkspaceStore", () => {
     store.close();
   });
 });
-
 function seedForegroundTurn(
   store: NoesisWorkspaceStore,
   input: {
@@ -4756,11 +4533,9 @@ function seedForegroundTurn(
   const database = new DatabaseSync(store.unsafeDatabasePathForTesting);
   database.exec("PRAGMA foreign_keys = OFF");
   database
-    .prepare(
-      `INSERT INTO foreground_turns(
+    .prepare(`INSERT INTO foreground_turns(
         turn_id, session_id, plan_id, status, outcome_id, admitted_at, settled_at
-      ) VALUES (?, ?, ?, ?, NULL, ?, ?)`,
-    )
+      ) VALUES (?, ?, ?, ?, NULL, ?, ?)`)
     .run(
       input.turnId,
       input.sessionId,
@@ -4771,8 +4546,8 @@ function seedForegroundTurn(
     );
   database.close();
 }
-
 function session(sessionId: string) {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return {
     sessionId,
     title: `Session ${sessionId}`,
@@ -4785,7 +4560,6 @@ function session(sessionId: string) {
     metadata: {},
   };
 }
-
 function revision(id: string, digestCharacter: string): CapabilityRevisionRef {
   return {
     kind: "capability_revision",
@@ -4794,7 +4568,6 @@ function revision(id: string, digestCharacter: string): CapabilityRevisionRef {
     bundleDigest: digest(digestCharacter),
   };
 }
-
 function trial(
   trialId: string,
   arm: ExperimentTrial["arm"],
@@ -4815,16 +4588,14 @@ function trial(
     status: "planned",
   };
 }
-
 function countRows(store: NoesisWorkspaceStore, table: string): number {
   const database = new DatabaseSync(store.unsafeDatabasePathForTesting, { readOnly: true });
   const row = database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get();
   database.close();
-  const value = row && typeof row === "object" ? Reflect.get(row, "count") : undefined;
+  const value = row && typeof row === "object" ? row["count"] : undefined;
   if (typeof value !== "number") throw new Error(`Could not count ${table}`);
   return value;
 }
-
 function legacyEvents(): readonly LedgerEvent[] {
   const unsignedStart: Omit<LedgerEvent, "checksum"> = {
     schemaVersion: SCHEMA_VERSION,
@@ -4851,8 +4622,8 @@ function legacyEvents(): readonly LedgerEvent[] {
   };
   return [start, { ...unsignedTurn, checksum: eventChecksum(unsignedTurn) }];
 }
-
 function legacyAuthorityEvents(): readonly LedgerEvent[] {
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const identity = {
     operationId: "operation-legacy",
     idempotencyKey: "legacy-run-1",

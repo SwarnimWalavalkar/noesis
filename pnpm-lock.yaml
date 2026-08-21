@@ -317,6 +317,9 @@ importers:
       '@noesis/context':
         specifier: workspace:*
         version: link:../context
+      '@noesis/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@noesis/runtime':
         specifier: workspace:*
         version: link:../runtime

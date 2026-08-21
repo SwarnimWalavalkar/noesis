@@ -8,6 +8,7 @@ import { createWorkspaceStore, type NoesisWorkspaceStore } from "../src/index.ts
 import { createWorkspaceRuntimeInternals } from "../src/protected-runtime.ts";
 import type { CommitExperimentOutcomeRequest } from "../src/types.ts";
 
+// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const actor = Object.freeze({ actorId: "revert-publication-test", kind: "system" as const });
 const encoder = new TextEncoder();
 const permissionManifest = Object.freeze({
@@ -82,6 +83,7 @@ async function createRevertFixture(
   const sourceActivationId = "activation-revert-source";
   const currentActivationId = "activation-revert-current";
   const timestamp = "2026-07-25T00:00:00.000Z";
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const experiment = Object.freeze({
     experimentId,
     hypothesis: "Restore the exact prior active definition set",
@@ -198,6 +200,7 @@ async function createRevertFixture(
     );
   seed.close();
 
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const digestInput = Object.freeze({
     operationId: "outcome-operation-revert-publication",
     idempotencyKey: "outcome-idempotency-revert-publication",

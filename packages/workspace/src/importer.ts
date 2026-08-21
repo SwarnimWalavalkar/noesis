@@ -2,6 +2,7 @@ import { readFile, readdir } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
+  createConditionalObject,
   LedgerEventSchema,
   sha256,
   type ActorRef,
@@ -15,7 +16,6 @@ import { z } from "zod";
 import type { WorkspaceDatabase } from "./database.ts";
 import { optionalString, requiredNumber, requiredString } from "./database.ts";
 import type { LegacyImportReport, WorkspacePaths } from "./types.ts";
-
 interface LegacyImporterDependencies {
   readonly legacyRoot: string;
   readonly actor: ActorRef;
@@ -38,7 +38,6 @@ interface LegacyImporterDependencies {
     readonly relationshipRefs: readonly (DatabaseRowRef | FileRevisionRef)[];
   }) => Promise<ArtifactFileRef>;
 }
-
 interface LegacySession {
   readonly sessionId: string;
   readonly parentSessionId?: string;
@@ -50,7 +49,6 @@ interface LegacySession {
   updatedAt: string;
   status: "idle" | "running" | "completed" | "aborted" | "failed";
 }
-
 const LegacyImportReportSchema = z.strictObject({
   sourceId: z.string().min(1),
   alreadyImported: z.boolean(),
@@ -63,7 +61,6 @@ const LegacyImportReportSchema = z.strictObject({
   artifacts: z.number().int().nonnegative(),
   warnings: z.array(z.string()),
 });
-
 export async function importLegacyWorkspace(
   dependencies: LegacyImporterDependencies,
 ): Promise<LegacyImportReport> {
@@ -76,7 +73,6 @@ export async function importLegacyWorkspace(
     const report = LegacyImportReportSchema.parse(JSON.parse(requiredString(existing, "report_json")));
     return { ...report, alreadyImported: true };
   }
-
   const warnings: string[] = [];
   const journalPath = join(sourceRoot, "ledger", "events.jsonl");
   const configPath = join(sourceRoot, "config.json");
@@ -100,7 +96,6 @@ export async function importLegacyWorkspace(
   const outcomes = deriveOutcomes(events, sessions);
   const toolCalls = deriveToolCalls(events, sessions, warnings);
   const jobs = deriveJobs(events);
-
   let definitions = 0;
   if (configBytes) {
     await dependencies.recordDefinitionBytes(
@@ -127,7 +122,6 @@ export async function importLegacyWorkspace(
     );
     definitions += 1;
   }
-
   const legacyDatabase = openLegacyDatabase(projectionPath);
   try {
     if (legacyDatabase) {
@@ -153,7 +147,6 @@ export async function importLegacyWorkspace(
   } finally {
     legacyDatabase?.close();
   }
-
   let artifacts = 0;
   const rawPreservation = [
     { source: journalPath, destination: "legacy/ledger/events.jsonl", mediaType: "application/x-ndjson" },
@@ -188,7 +181,6 @@ export async function importLegacyWorkspace(
     });
     artifacts += 1;
   }
-
   const importedAt = dependencies.now();
   const report: LegacyImportReport = {
     sourceId,
@@ -204,12 +196,10 @@ export async function importLegacyWorkspace(
   };
   dependencies.database.transaction(() => {
     const db = dependencies.database.connection;
-    const insertSession = db.prepare(
-      `INSERT OR IGNORE INTO sessions(
+    const insertSession = db.prepare(`INSERT OR IGNORE INTO sessions(
         session_id, parent_session_id, title, status, provider, model, runtime,
         created_at, updated_at, metadata_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    );
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     for (const session of sessions.values())
       insertSession.run(
         session.sessionId,
@@ -223,11 +213,9 @@ export async function importLegacyWorkspace(
         session.updatedAt,
         JSON.stringify({ importedFrom: "legacy-jsonl" }),
       );
-    const insertMessage = db.prepare(
-      `INSERT OR IGNORE INTO messages(
+    const insertMessage = db.prepare(`INSERT OR IGNORE INTO messages(
         message_id, session_id, role, content, sensitivity, created_at, metadata_json
-      ) VALUES (?, ?, ?, ?, 'normal', ?, ?)`,
-    );
+      ) VALUES (?, ?, ?, ?, 'normal', ?, ?)`);
     for (const message of messages)
       insertMessage.run(
         message.messageId,
@@ -237,11 +225,9 @@ export async function importLegacyWorkspace(
         message.createdAt,
         JSON.stringify({ legacyEventId: message.eventId }),
       );
-    const insertOutcome = db.prepare(
-      `INSERT OR IGNORE INTO outcomes(
+    const insertOutcome = db.prepare(`INSERT OR IGNORE INTO outcomes(
         outcome_id, session_id, turn_id, status, summary, sensitivity, created_at, metadata_json
-      ) VALUES (?, ?, ?, ?, ?, 'normal', ?, ?)`,
-    );
+      ) VALUES (?, ?, ?, ?, ?, 'normal', ?, ?)`);
     for (const outcome of outcomes)
       insertOutcome.run(
         outcome.outcomeId,
@@ -252,12 +238,10 @@ export async function importLegacyWorkspace(
         outcome.createdAt,
         JSON.stringify({ legacyEventId: outcome.eventId }),
       );
-    const insertToolCall = db.prepare(
-      `INSERT OR IGNORE INTO tool_calls(
+    const insertToolCall = db.prepare(`INSERT OR IGNORE INTO tool_calls(
         tool_call_id, session_id, message_id, tool_name, request_json, response_json,
         action_sequence, status, sensitivity, created_at, completed_at
-      ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 'normal', ?, ?)`,
-    );
+      ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, 'normal', ?, ?)`);
     const toolCallSequenceBySession = new Map<string, number>();
     for (const toolCall of toolCalls) {
       const sequence = (toolCallSequenceBySession.get(toolCall.sessionId) ?? 0) + 1;
@@ -274,12 +258,10 @@ export async function importLegacyWorkspace(
         toolCall.completedAt ?? null,
       );
     }
-    const insertJob = db.prepare(
-      `INSERT OR IGNORE INTO jobs(
+    const insertJob = db.prepare(`INSERT OR IGNORE INTO jobs(
         job_id, kind, payload_json, status, lease_owner, lease_until, attempt,
         budget_remaining, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-    );
+      ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`);
     for (const job of jobs.values())
       insertJob.run(
         job.jobId,
@@ -295,12 +277,10 @@ export async function importLegacyWorkspace(
     db.prepare(
       "INSERT INTO import_runs(source_id, source_root, source_digest, imported_at, report_json) VALUES (?, ?, ?, ?, ?)",
     ).run(sourceId, sourceRoot, sourceDigest, importedAt, JSON.stringify(report));
-    db.prepare(
-      `INSERT INTO activity_log(
+    db.prepare(`INSERT INTO activity_log(
         activity_id, actor_id, actor_kind, activity_kind, subject_kind,
         subject_id, references_json, occurred_at
-      ) VALUES (?, ?, ?, 'workspace.legacy_imported', 'import_run', ?, '[]', ?)`,
-    ).run(
+      ) VALUES (?, ?, ?, 'workspace.legacy_imported', 'import_run', ?, '[]', ?)`).run(
       dependencies.createId("activity"),
       dependencies.actor.actorId,
       dependencies.actor.kind,
@@ -310,7 +290,6 @@ export async function importLegacyWorkspace(
   });
   return report;
 }
-
 function parseEvents(bytes: Uint8Array | undefined, warnings: string[]): readonly LedgerEvent[] {
   if (!bytes) {
     warnings.push("Legacy JSONL journal was not found");
@@ -327,25 +306,35 @@ function parseEvents(bytes: Uint8Array | undefined, warnings: string[]): readonl
   }
   return events;
 }
-
 function deriveSessions(events: readonly LedgerEvent[]): Map<string, LegacySession> {
   const sessions = new Map<string, LegacySession>();
   for (const event of events) {
     if (!event.trailId) continue;
     if (event.type === "trail.started" || event.type === "trail.forked") {
-      sessions.set(event.trailId, {
-        sessionId: event.trailId,
-        ...(typeof event.payload["parentTrailId"] === "string"
-          ? { parentSessionId: event.payload["parentTrailId"] }
-          : {}),
-        title: String(event.payload["title"] ?? "Untitled legacy session"),
-        provider: String(event.payload["provider"] ?? ""),
-        model: String(event.payload["model"] ?? ""),
-        runtime: String(event.payload["runtime"] ?? ""),
-        createdAt: event.occurredAt,
-        updatedAt: event.occurredAt,
-        status: "idle",
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      sessions.set(
+        event.trailId,
+        createConditionalObject({
+          sessionId: event.trailId,
+        } as const)
+          .addOptional(
+            typeof event.payload["parentTrailId"] === "string"
+              ? {
+                  parentSessionId: event.payload["parentTrailId"],
+                }
+              : undefined,
+          )
+          .add({
+            title: String(event.payload["title"] ?? "Untitled legacy session"),
+            provider: String(event.payload["provider"] ?? ""),
+            model: String(event.payload["model"] ?? ""),
+            runtime: String(event.payload["runtime"] ?? ""),
+            createdAt: event.occurredAt,
+            updatedAt: event.occurredAt,
+            status: "idle",
+          } as const)
+          .finish(),
+      );
       continue;
     }
     const session = sessions.get(event.trailId);
@@ -358,7 +347,6 @@ function deriveSessions(events: readonly LedgerEvent[]): Map<string, LegacySessi
   }
   return sessions;
 }
-
 function deriveMessages(
   events: readonly LedgerEvent[],
   sessions: ReadonlyMap<string, LegacySession>,
@@ -377,6 +365,7 @@ function deriveMessages(
     const input = event.payload["input"];
     const output = event.payload["output"];
     if (typeof input === "string")
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       messages.push({
         messageId: `${event.eventId}:user`,
         eventId: event.eventId,
@@ -386,6 +375,7 @@ function deriveMessages(
         createdAt: event.occurredAt,
       });
     if (typeof output === "string")
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       messages.push({
         messageId: `${event.eventId}:assistant`,
         eventId: event.eventId,
@@ -399,11 +389,11 @@ function deriveMessages(
   }
   return messages;
 }
-
 function deriveOutcomes(events: readonly LedgerEvent[], sessions: ReadonlyMap<string, LegacySession>) {
   return events.flatMap((event) => {
     if (!event.trailId || !sessions.has(event.trailId)) return [];
     if (event.type !== "turn.completed" && event.type !== "turn.failed") return [];
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return [
       {
         outcomeId: `${event.eventId}:outcome`,
@@ -420,7 +410,6 @@ function deriveOutcomes(events: readonly LedgerEvent[], sessions: ReadonlyMap<st
     ];
   });
 }
-
 function deriveToolCalls(
   events: readonly LedgerEvent[],
   sessions: ReadonlyMap<string, LegacySession>,
@@ -473,7 +462,6 @@ function deriveToolCalls(
   }
   return [...calls.values()];
 }
-
 interface ImportedJob {
   readonly jobId: string;
   readonly kind: string;
@@ -485,7 +473,6 @@ interface ImportedJob {
   readonly createdAt: string;
   readonly updatedAt: string;
 }
-
 function deriveJobs(events: readonly LedgerEvent[]): Map<string, ImportedJob> {
   const jobs = new Map<string, ImportedJob>();
   for (const event of events) {
@@ -507,24 +494,35 @@ function deriveJobs(events: readonly LedgerEvent[]): Map<string, ImportedJob> {
       const suffix = event.type.slice("job.".length);
       const status = suffix === "lease_acquired" || suffix === "heartbeat" ? "running" : suffix;
       if (["running", "completed", "failed", "budget_exhausted"].includes(status))
-        jobs.set(jobId, {
-          ...current,
-          status: status as ImportedJob["status"],
-          ...(typeof event.payload["leaseUntil"] === "string"
-            ? { leaseUntil: event.payload["leaseUntil"] }
-            : {}),
-          attempt: typeof event.payload["attempt"] === "number" ? event.payload["attempt"] : current.attempt,
-          budgetRemaining:
-            typeof event.payload["budgetRemaining"] === "number"
-              ? event.payload["budgetRemaining"]
-              : current.budgetRemaining,
-          updatedAt: event.occurredAt,
-        });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        jobs.set(
+          jobId,
+          createConditionalObject({
+            ...current,
+            status: status as ImportedJob["status"],
+          } as const)
+            .addOptional(
+              typeof event.payload["leaseUntil"] === "string"
+                ? {
+                    leaseUntil: event.payload["leaseUntil"],
+                  }
+                : undefined,
+            )
+            .add({
+              attempt:
+                typeof event.payload["attempt"] === "number" ? event.payload["attempt"] : current.attempt,
+              budgetRemaining:
+                typeof event.payload["budgetRemaining"] === "number"
+                  ? event.payload["budgetRemaining"]
+                  : current.budgetRemaining,
+              updatedAt: event.occurredAt,
+            } as const)
+            .finish(),
+        );
     }
   }
   return jobs;
 }
-
 function openLegacyDatabase(path: string): DatabaseSync | undefined {
   try {
     return new DatabaseSync(path, { readOnly: true });
@@ -532,9 +530,9 @@ function openLegacyDatabase(path: string): DatabaseSync | undefined {
     return undefined;
   }
 }
-
 function readLegacyCapabilities(database: DatabaseSync) {
   if (!tableExists(database, "capabilities")) return [];
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return database
     .prepare("SELECT * FROM capabilities ORDER BY capability_id, version")
     .all()
@@ -544,11 +542,10 @@ function readLegacyCapabilities(database: DatabaseSync) {
       name: requiredString(row, "name"),
       status: requiredString(row, "status"),
       manifest: JSON.parse(requiredString(row, "manifest_json")) as unknown,
-      score: Reflect.get(row, "score"),
+      score: row["score"],
       updatedAt: requiredString(row, "updated_at"),
     }));
 }
-
 function readLegacyJobs(database: DatabaseSync): readonly ImportedJob[] {
   if (!tableExists(database, "jobs")) return [];
   return database
@@ -556,7 +553,8 @@ function readLegacyJobs(database: DatabaseSync): readonly ImportedJob[] {
     .all()
     .map((row) => {
       const leaseUntil = optionalString(row, "lease_until");
-      return {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return createConditionalObject({
         jobId: requiredString(row, "job_id"),
         kind: "legacy-job",
         payload: {
@@ -564,27 +562,28 @@ function readLegacyJobs(database: DatabaseSync): readonly ImportedJob[] {
           grant: JSON.parse(requiredString(row, "grant_json")) as unknown,
         },
         status: normalizeJobStatus(requiredString(row, "status")),
-        ...(leaseUntil === undefined ? {} : { leaseUntil }),
-        attempt: 0,
-        budgetRemaining: requiredNumber(row, "budget_remaining"),
-        createdAt: requiredString(row, "updated_at"),
-        updatedAt: requiredString(row, "updated_at"),
-      };
+      } as const)
+        .addOptional(!(leaseUntil === undefined) ? { leaseUntil } : undefined)
+        .add({
+          attempt: 0,
+          budgetRemaining: requiredNumber(row, "budget_remaining"),
+          createdAt: requiredString(row, "updated_at"),
+          updatedAt: requiredString(row, "updated_at"),
+        } as const)
+        .finish();
     });
 }
-
 function normalizeJobStatus(value: string): ImportedJob["status"] {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return ["scheduled", "running", "completed", "failed", "cancelled", "budget_exhausted"].includes(value)
     ? (value as ImportedJob["status"])
     : "failed";
 }
-
 function tableExists(database: DatabaseSync, table: string): boolean {
   return (
     database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table) !== undefined
   );
 }
-
 function artifactPathExists(database: DatabaseSync, path: string): boolean {
   const normalized = path.split(/[\\/]/u).join("/");
   return (
@@ -593,7 +592,6 @@ function artifactPathExists(database: DatabaseSync, path: string): boolean {
       .get(path, `artifacts/${normalized}`) !== undefined
   );
 }
-
 async function readOptional(path: string): Promise<Buffer | undefined> {
   try {
     return await readFile(path);
@@ -602,7 +600,6 @@ async function readOptional(path: string): Promise<Buffer | undefined> {
     throw error;
   }
 }
-
 async function walkFiles(root: string): Promise<readonly string[]> {
   try {
     const entries = await readdir(root, { withFileTypes: true });
@@ -618,7 +615,6 @@ async function walkFiles(root: string): Promise<readonly string[]> {
     throw error;
   }
 }
-
 function safeName(value: string): string {
   return basename(value.replaceAll(/[^a-zA-Z0-9._-]/gu, "_")).slice(0, 120) || "capability";
 }

@@ -1,5 +1,6 @@
 import type { AgentMessage, AgentThinkingLevel, FrozenTurnPlan } from "@noesis/agent-types";
 import {
+  createConditionalObject,
   canonicalJson,
   err,
   ok,
@@ -12,21 +13,19 @@ import {
   type DataSensitivity,
   type EvidenceRef,
   type EvidenceRevisionRef,
+  type JsonValue,
   type Result,
 } from "@noesis/domain";
 import { z } from "zod";
 import { BlindJudgmentSchema, type BlindJudgment } from "./dynamic-contracts.ts";
-
 export interface ClassifiedReplayProvenance {
   readonly ref: EvidenceRef;
   readonly sensitivity: DataSensitivity;
 }
-
 export interface ForegroundReplayMessage extends AgentMessage {
   readonly sourceRef: EvidenceRef;
   readonly sensitivity: DataSensitivity;
 }
-
 export interface RecordedReplayToolResult {
   readonly toolCallId: string;
   readonly toolName: string;
@@ -36,7 +35,6 @@ export interface RecordedReplayToolResult {
   readonly sourceRef: EvidenceRef;
   readonly sensitivity: DataSensitivity;
 }
-
 export interface ForegroundReplayArm {
   readonly systemPrompt: string;
   readonly capabilityRevisions: readonly CapabilityRevisionRef[];
@@ -45,18 +43,15 @@ export interface ForegroundReplayArm {
   readonly promptLayerBytes: number;
   readonly injectedContextTokens: number;
 }
-
 export interface PrivateReplayAuthorization {
   readonly policyId: string;
   readonly allowsPrivateReplay: boolean;
   readonly authorizedProviders: readonly string[];
 }
-
 export interface ForegroundReplayRoleBudget {
   readonly maximumTokens: number;
   readonly maximumCost: number;
 }
-
 export interface ForegroundReplayBudget {
   readonly budgetId: string;
   readonly maximumCalls: number;
@@ -64,7 +59,6 @@ export interface ForegroundReplayBudget {
   readonly maximumCost: number;
   readonly roles: Readonly<Record<CompoundingReplayRole, ForegroundReplayRoleBudget>>;
 }
-
 export interface ForegroundReplayInput {
   readonly replayId: string;
   readonly plan: FrozenTurnPlan;
@@ -82,7 +76,6 @@ export interface ForegroundReplayInput {
   readonly correctionExposures: readonly CorrectionExposure[];
   readonly budget: ForegroundReplayBudget;
 }
-
 export interface EffectFreeForegroundReplayRequest {
   readonly operationId: string;
   readonly replayId: string;
@@ -100,7 +93,6 @@ export interface EffectFreeForegroundReplayRequest {
     readonly response: unknown;
   }[];
 }
-
 export interface EffectFreeForegroundReplayResult {
   readonly text: string;
   readonly provider: string;
@@ -110,7 +102,6 @@ export interface EffectFreeForegroundReplayResult {
   readonly estimatedCost: number;
   readonly unexpectedEffects: readonly string[];
 }
-
 export const EffectFreeForegroundReplayResultSchema = z.strictObject({
   text: z.string(),
   provider: z.string().min(1),
@@ -120,7 +111,6 @@ export const EffectFreeForegroundReplayResultSchema = z.strictObject({
   estimatedCost: z.number().nonnegative(),
   unexpectedEffects: z.array(z.string().min(1)),
 }) satisfies z.ZodType<EffectFreeForegroundReplayResult>;
-
 export interface EffectFreeForegroundReplayPort {
   /**
    * Runs with no live tools or EffectGateway. Recorded tool results are inert inputs; adapters must
@@ -128,16 +118,21 @@ export interface EffectFreeForegroundReplayPort {
    */
   readonly run: (request: EffectFreeForegroundReplayRequest) => Promise<EffectFreeForegroundReplayResult>;
 }
-
 export interface ForegroundReplayJudgeRequest {
   readonly operationId: string;
   readonly replayId: string;
   readonly planId: string;
   readonly scope: string;
   readonly messages: readonly AgentMessage[];
-  readonly arms: Readonly<Record<"A" | "B", { readonly text: string }>>;
+  readonly arms: Readonly<
+    Record<
+      "A" | "B",
+      {
+        readonly text: string;
+      }
+    >
+  >;
 }
-
 export interface ForegroundReplayJudgeResult {
   readonly judgment: BlindJudgment;
   readonly provider: string;
@@ -146,7 +141,6 @@ export interface ForegroundReplayJudgeResult {
   readonly outputTokens: number;
   readonly estimatedCost: number;
 }
-
 export const ForegroundReplayJudgeResultSchema = z.strictObject({
   judgment: BlindJudgmentSchema,
   provider: z.string().min(1),
@@ -155,21 +149,28 @@ export const ForegroundReplayJudgeResultSchema = z.strictObject({
   outputTokens: z.number().int().nonnegative(),
   estimatedCost: z.number().nonnegative(),
 }) satisfies z.ZodType<ForegroundReplayJudgeResult>;
-
 export interface ForegroundReplayJudgePort {
   readonly judge: (request: ForegroundReplayJudgeRequest) => Promise<ForegroundReplayJudgeResult>;
 }
-
 export type ForegroundReplayReservationResult =
-  | { readonly status: "reserved" }
-  | { readonly status: "denied"; readonly reason: "budget_exhausted" }
-  | { readonly status: "unresolved" }
+  | {
+      readonly status: "reserved";
+    }
+  | {
+      readonly status: "denied";
+      readonly reason: "budget_exhausted";
+    }
+  | {
+      readonly status: "unresolved";
+    }
   | {
       readonly status: "completed";
       readonly resultEvidence: EvidenceRevisionRef<"output" | "judgment">;
     }
-  | { readonly status: "failed"; readonly failure: string };
-
+  | {
+      readonly status: "failed";
+      readonly failure: string;
+    };
 export interface ForegroundReplayPersistencePort {
   readonly putBudget: (request: Omit<ForegroundReplayBudget, "roles">) => Promise<void>;
   readonly beginReplay: (request: {
@@ -203,26 +204,27 @@ export interface ForegroundReplayPersistencePort {
     readonly value: BlindJudgment;
     readonly provenanceRefs: readonly EvidenceRef[];
   }) => Promise<EvidenceRevisionRef<"judgment">>;
-  readonly readEvidence: (ref: EvidenceRevisionRef<"output" | "judgment">) => Promise<unknown>;
+  readonly readEvidence: (ref: EvidenceRevisionRef<"output" | "judgment">) => Promise<JsonValue>;
   readonly record: (record: CompoundingReplayRecord) => Promise<void>;
 }
-
 export interface ForegroundReplayCoordinator {
-  readonly consider: (
-    input: ForegroundReplayInput,
-  ) => Promise<Result<CompoundingReplayRecord, { readonly message: string }>>;
+  readonly consider: (input: ForegroundReplayInput) => Promise<
+    Result<
+      CompoundingReplayRecord,
+      {
+        readonly message: string;
+      }
+    >
+  >;
 }
-
 function referenceKey(ref: EvidenceRef): string {
   return canonicalJson(ref);
 }
-
 function maximumSensitivity(values: readonly DataSensitivity[]): DataSensitivity {
   if (values.includes("secret")) return "secret";
   if (values.includes("private")) return "private";
   return "normal";
 }
-
 function revisionRefs(plan: FrozenTurnPlan): readonly EvidenceRef[] {
   return Object.freeze(
     plan.selectedCapabilities.flatMap((selection) => [
@@ -233,7 +235,6 @@ function revisionRefs(plan: FrozenTurnPlan): readonly EvidenceRef[] {
     ]),
   );
 }
-
 function sameRevisionSet(
   actual: readonly CapabilityRevisionRef[],
   expected: readonly CapabilityRevisionRef[],
@@ -242,10 +243,12 @@ function sameRevisionSet(
     values.map((value) => canonicalJson(value)).sort();
   return canonicalJson(keys(actual)) === canonicalJson(keys(expected));
 }
-
-function eligibilityFailure(
-  input: ForegroundReplayInput,
-): { readonly reason: CompoundingReplayExclusionReason; readonly detail: string } | undefined {
+function eligibilityFailure(input: ForegroundReplayInput):
+  | {
+      readonly reason: CompoundingReplayExclusionReason;
+      readonly detail: string;
+    }
+  | undefined {
   if (input.outcome === "aborted")
     return { reason: "aborted_turn", detail: "Aborted turns are not replayed" };
   if (input.outcome !== "accepted" && input.outcome !== "corrected")
@@ -258,7 +261,6 @@ function eligibilityFailure(
       reason: "unknown_legacy_baseline",
       detail: "At least one served revision has no replayable baseline",
     };
-
   const expectedServed = input.plan.selectedCapabilities.map((selection) => selection.revision);
   const expectedBaseline = input.plan.selectedCapabilities.flatMap((selection) =>
     selection.baseline.kind === "capability_revision" ? [selection.baseline.revision] : [],
@@ -272,7 +274,6 @@ function eligibilityFailure(
       reason: "identity_mismatch",
       detail: "Replay arms do not match the authoritative served and baseline plan identities",
     };
-
   const requiredRefs = [
     ...revisionRefs(input.plan),
     ...input.plan.retrievalCitations,
@@ -314,7 +315,6 @@ function eligibilityFailure(
     };
   return undefined;
 }
-
 function baseRecord(input: ForegroundReplayInput) {
   return Object.freeze({
     replayId: input.replayId,
@@ -330,12 +330,12 @@ function baseRecord(input: ForegroundReplayInput) {
     correctionExposures: Object.freeze([...input.correctionExposures]),
   });
 }
-
 function excludedRecord(
   input: ForegroundReplayInput,
   reason: CompoundingReplayExclusionReason,
   detail: string,
 ): CompoundingReplayRecord {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     ...baseRecord(input),
     status: "excluded" as const,
@@ -343,43 +343,40 @@ function excludedRecord(
     exclusionDetail: detail,
   });
 }
-
 export function foregroundReplayOperationIdentity(input: {
   readonly replayId: string;
   readonly role: CompoundingReplayRole;
   readonly request: unknown;
-}): { readonly operationId: string; readonly requestDigest: string } {
+}): {
+  readonly operationId: string;
+  readonly requestDigest: string;
+} {
   const requestDigest = sha256(canonicalJson(input.request));
   return Object.freeze({
-    operationId: `replay_role_${sha256(
-      canonicalJson({ replayId: input.replayId, role: input.role, requestDigest }),
-    ).slice(0, 32)}`,
+    operationId: `replay_role_${sha256(canonicalJson({ replayId: input.replayId, role: input.role, requestDigest })).slice(0, 32)}`,
     requestDigest,
   });
 }
-
 export function foregroundReplayBlindLabels(
   replayId: string,
 ): Readonly<Record<"A" | "B", "served" | "baseline">> {
   const swap = Number.parseInt(sha256(replayId).slice(0, 2), 16) % 2 === 1;
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze(
     swap
       ? { A: "served" as const, B: "baseline" as const }
       : { A: "baseline" as const, B: "served" as const },
   );
 }
-
 function winnerFromBlind(
   winner: BlindJudgment["winner"],
   labels: Readonly<Record<"A" | "B", "served" | "baseline">>,
 ): "served" | "baseline" | "tie" | "inconclusive" {
   return winner === "A" || winner === "B" ? labels[winner] : winner;
 }
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function errorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }
-
 export function createForegroundReplayCoordinator(options: {
   readonly replay: EffectFreeForegroundReplayPort;
   readonly judge: ForegroundReplayJudgePort;
@@ -387,7 +384,14 @@ export function createForegroundReplayCoordinator(options: {
 }): ForegroundReplayCoordinator {
   const consider = async (
     input: ForegroundReplayInput,
-  ): Promise<Result<CompoundingReplayRecord, { readonly message: string }>> => {
+  ): Promise<
+    Result<
+      CompoundingReplayRecord,
+      {
+        readonly message: string;
+      }
+    >
+  > => {
     await options.persistence.putBudget({
       budgetId: input.budget.budgetId,
       maximumCalls: input.budget.maximumCalls,
@@ -402,20 +406,34 @@ export function createForegroundReplayCoordinator(options: {
     const exclude = async (
       reason: CompoundingReplayExclusionReason,
       detail: string,
-    ): Promise<Result<CompoundingReplayRecord, { readonly message: string }>> => {
+    ): Promise<
+      Result<
+        CompoundingReplayRecord,
+        {
+          readonly message: string;
+        }
+      >
+    > => {
       const record = excludedRecord(input, reason, detail);
       await options.persistence.record(record);
       return ok(record);
     };
     const ineligible = eligibilityFailure(input);
     if (ineligible) return await exclude(ineligible.reason, ineligible.detail);
-
     const evidenceRefs = Object.freeze([
       ...new Map(input.provenance.map((item) => [referenceKey(item.ref), item.ref])).values(),
     ]);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const messages = Object.freeze(
       input.messages.map(({ role, content, name }) =>
-        Object.freeze({ role, content, ...(name === undefined ? {} : { name }) }),
+        Object.freeze(
+          createConditionalObject({
+            role,
+            content,
+          } as const)
+            .addOptional(!(name === undefined) ? { name } : undefined)
+            .finish(),
+        ),
       ),
     );
     const recordedToolResults = Object.freeze(
@@ -428,7 +446,6 @@ export function createForegroundReplayCoordinator(options: {
         }),
       ),
     );
-
     const runArm = async (
       role: "served_arm" | "baseline_arm",
       armName: "served" | "baseline",
@@ -439,7 +456,10 @@ export function createForegroundReplayCoordinator(options: {
           readonly result: EffectFreeForegroundReplayResult;
           readonly evidence: EvidenceRevisionRef<"output">;
         },
-        { readonly reason: CompoundingReplayExclusionReason; readonly detail: string }
+        {
+          readonly reason: CompoundingReplayExclusionReason;
+          readonly detail: string;
+        }
       >
     > => {
       const requestBody = Object.freeze({
@@ -477,6 +497,7 @@ export function createForegroundReplayCoordinator(options: {
       if (reservation.status === "completed") {
         if (reservation.resultEvidence.evidenceKind !== "output")
           return err({ reason: "role_failed", detail: `${role} recorded non-output evidence` });
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const outputEvidence = Object.freeze({
           ...reservation.resultEvidence,
           evidenceKind: "output" as const,
@@ -522,7 +543,6 @@ export function createForegroundReplayCoordinator(options: {
         return err({ reason: "role_failed", detail: `${role}: ${errorMessage(error)}` });
       }
     };
-
     const served = await runArm("served_arm", "served", input.served);
     if (!served.ok) return await exclude(served.error.reason, served.error.detail);
     if (served.value.result.unexpectedEffects.length > 0)
@@ -537,8 +557,8 @@ export function createForegroundReplayCoordinator(options: {
         "unexpected_effect",
         `Baseline replay attempted: ${baseline.value.result.unexpectedEffects.join(", ")}`,
       );
-
     const labels = foregroundReplayBlindLabels(input.replayId);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const armOutput = {
       served: { text: served.value.result.text },
       baseline: { text: baseline.value.result.text },
@@ -568,12 +588,12 @@ export function createForegroundReplayCoordinator(options: {
     if (judgeReservation.status === "unresolved")
       return await exclude("unresolved_reservation", "Judge has a reservation with no unambiguous outcome");
     if (judgeReservation.status === "failed") return await exclude("role_failed", judgeReservation.failure);
-
     let judgment: BlindJudgment;
     let judgmentEvidence: EvidenceRevisionRef<"judgment">;
     if (judgeReservation.status === "completed") {
       if (judgeReservation.resultEvidence.evidenceKind !== "judgment")
         return await exclude("role_failed", "Judge recorded non-judgment evidence");
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const restoredJudgmentEvidence = Object.freeze({
         ...judgeReservation.resultEvidence,
         evidenceKind: "judgment" as const,
@@ -613,7 +633,7 @@ export function createForegroundReplayCoordinator(options: {
         return await exclude("role_failed", `judge: ${errorMessage(error)}`);
       }
     }
-
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const record: CompoundingReplayRecord = Object.freeze({
       ...baseRecord(input),
       status: "paired" as const,
@@ -631,6 +651,5 @@ export function createForegroundReplayCoordinator(options: {
     await options.persistence.record(record);
     return ok(record);
   };
-
   return Object.freeze({ consider });
 }

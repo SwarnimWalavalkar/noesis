@@ -392,6 +392,7 @@ describe("research role isolation", () => {
       variants: [configuration("capability_router", "router-context-v1")],
     });
     const longContent = "x".repeat(12_000);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const messages = [
       Object.freeze({
         role: "user" as const,
@@ -419,6 +420,7 @@ describe("research role isolation", () => {
       { messageId: "history-long", content: longContent },
     ]);
 
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await expect(
       runner.run(
         request("capability_router", "router-context-v1", [

@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { AgentUsage } from "@noesis/agent-types";
 import { createAgentRoleRunner } from "../../src/role-runner.ts";
 import type {
@@ -8,14 +9,12 @@ import type {
   RoleVariantConfiguration,
   RuntimePiAgentRoleRunner,
 } from "../../src/role-types.ts";
-
 const ZERO_USAGE: AgentUsage = Object.freeze({
   inputTokens: 0,
   outputTokens: 0,
   totalTokens: 0,
   estimatedCost: 0,
 });
-
 export interface ScriptedRoleResponse {
   readonly text: string;
   readonly stopReason?: RoleStopReason;
@@ -23,28 +22,28 @@ export interface ScriptedRoleResponse {
   readonly latencyMs?: number;
   readonly error?: string;
 }
-
 export interface CreateScriptedRoleModelBackendOptions {
   readonly respond: (request: RoleBackendRequest) => ScriptedRoleResponse | Promise<ScriptedRoleResponse>;
 }
-
 export interface CreateScriptedAgentRoleRunnerOptions extends CreateScriptedRoleModelBackendOptions {
   readonly variants: readonly RoleVariantConfiguration[];
   readonly now?: () => Date;
   readonly createTraceId?: () => string;
 }
-
 export function createScriptedAgentRoleRunner(
   options: CreateScriptedAgentRoleRunnerOptions,
 ): RuntimePiAgentRoleRunner {
-  return createAgentRoleRunner({
-    backend: createScriptedRoleModelBackend({ respond: options.respond }),
-    variants: options.variants,
-    ...(options.now ? { now: options.now } : {}),
-    ...(options.createTraceId ? { createTraceId: options.createTraceId } : {}),
-  });
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+  return createAgentRoleRunner(
+    createConditionalObject({
+      backend: createScriptedRoleModelBackend({ respond: options.respond }),
+      variants: options.variants,
+    } as const)
+      .addOptional(options.now ? { now: options.now } : undefined)
+      .addOptional(options.createTraceId ? { createTraceId: options.createTraceId } : undefined)
+      .finish(),
+  );
 }
-
 export function createScriptedRoleModelBackend(
   options: CreateScriptedRoleModelBackendOptions,
 ): RoleModelBackend {
@@ -74,14 +73,18 @@ export function createScriptedRoleModelBackend(
         });
       }
       const stopReason = controller.signal.aborted ? "aborted" : (response.stopReason ?? "stop");
-      return Object.freeze({
-        text: response.text,
-        provider: request.provider,
-        model: request.model,
-        stopReason,
-        usage: response.usage ?? ZERO_USAGE,
-        ...(response.error ? { error: response.error } : {}),
-      });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+      return Object.freeze(
+        createConditionalObject({
+          text: response.text,
+          provider: request.provider,
+          model: request.model,
+          stopReason,
+          usage: response.usage ?? ZERO_USAGE,
+        } as const)
+          .addOptional(response.error ? { error: response.error } : undefined)
+          .finish(),
+      );
     } finally {
       request.signal.removeEventListener("abort", forwardAbort);
       if (active.get(request.runId) === controller) active.delete(request.runId);

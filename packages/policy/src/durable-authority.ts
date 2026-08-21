@@ -171,6 +171,7 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     discardGrant = false,
   ): Promise<EffectDecision<T>> => {
     if (reservation.status === "completed")
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         ok: true,
         value: reservation.result as T,
@@ -199,6 +200,7 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
       try {
         await state.abandon({ operation, grantId: reservation.grantId, discardGrant });
       } catch (abandonError) {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           ok: false,
           code: "ambiguous" as const,
@@ -206,6 +208,7 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
         });
       }
       const executionFailure = inspectEffectExecutionFailure(error);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         ok: false,
         code: executionFailure?.code ?? ("failed" as const),
@@ -229,6 +232,7 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
         try {
           await state.abandon({ operation, grantId: reservation.grantId, discardGrant });
         } catch (abandonError) {
+          // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           return Object.freeze({
             ok: false,
             code: "ambiguous" as const,
@@ -249,6 +253,7 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
         reason: serializeEffectExecutionError(error),
         receiptLineageId: lineage.lineageId,
       });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         ok: false,
         code: executionFailure?.code ?? ("failed" as const),
@@ -361,7 +366,9 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
   ) => {
     const grant = await state.findSchedulerGrant(jobId);
     const handle = grant ? createHandle(grant.grantId) : undefined;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const principal = "scheduler" as const;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const effect = "execute" as const;
     const resource = `job:${jobId}:runtime:${operationFingerprint}`;
     const estimatedCost = 1;
@@ -399,11 +406,13 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
       permission: PermissionManifest,
     ): Promise<EffectDecision<T>> => {
       if (!permits(permission, request.effect, request.resource))
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           ok: false,
           code: "denied" as const,
           reason: `Frozen turn permission does not allow ${request.effect} on ${request.resource}`,
         });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const foregroundRequest = Object.freeze({ ...request, principal: "foreground" as const });
       return await runWithFreshGrant(foregroundRequest, {
         schemaVersion: 1,

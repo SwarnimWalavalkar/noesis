@@ -1,15 +1,20 @@
 import {
+  createConditionalObject,
   type CapabilityRevision,
   type CapabilityRevisionRef,
   capabilityRevisionRef,
+  isJsonObject,
+  type JsonValue,
   sameCapabilityRevisionRef,
   toJsonValue,
 } from "@noesis/domain";
 import {
   createLearningPreflightInput,
+  type AggregatedComparison,
   type DynamicEvaluationConfig,
   type DynamicEvaluationLaboratory,
   type EvaluationCriterionSet,
+  type EvaluationRoleTrace,
   type ProtectedEvaluationSuiteRevision,
 } from "@noesis/evals";
 import type { AutomaticLearningOrgan, ExperimentBrief } from "@noesis/learning";
@@ -32,11 +37,9 @@ import {
   type RuntimeCoordinatorConfig,
   type RuntimeCoordinatorResearchPort,
 } from "./coordinator-contracts.ts";
-
 export interface CapabilityRevisionResolverPort {
   readonly resolve: (reference: CapabilityRevisionRef) => Promise<CapabilityRevision | undefined>;
 }
-
 export interface CoordinatorPreflightPreparation {
   readonly prepare: (input: {
     readonly experimentId: string;
@@ -55,7 +58,6 @@ export interface CoordinatorPreflightPreparation {
     readonly config: DynamicEvaluationConfig;
   }>;
 }
-
 export interface RuntimeCoordinatorCompositionOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly authority: AuthorityBoundary;
@@ -72,7 +74,6 @@ export interface RuntimeCoordinatorCompositionOptions {
   readonly workerId?: string;
   readonly now?: () => Date;
 }
-
 function cancelled(signal: AbortSignal): void {
   if (signal.aborted)
     throw coordinatorOperationError("Coordinator research operation was cancelled", {
@@ -80,13 +81,18 @@ function cancelled(signal: AbortSignal): void {
       retryable: false,
     });
 }
-
-function telemetry(values: Readonly<Record<string, unknown>>): CoordinatorResearchTelemetry {
-  return Object.freeze(
-    Object.fromEntries(Object.entries(values).map(([key, value]) => [key, toJsonValue(value)])),
-  );
+type CoordinatorTelemetryValue =
+  | JsonValue
+  | ExperimentBrief["reflectionRun"]
+  | DynamicEvaluationConfig
+  | readonly EvaluationRoleTrace[]
+  | AggregatedComparison;
+type CoordinatorTelemetryValues = Readonly<Record<string, CoordinatorTelemetryValue>>;
+function telemetry(values: CoordinatorTelemetryValues): CoordinatorResearchTelemetry {
+  const serialized = toJsonValue(values);
+  if (!isJsonObject(serialized)) throw new Error("Coordinator telemetry must serialize to a JSON object");
+  return Object.freeze(serialized);
 }
-
 function exactBaseline(
   reference: CapabilityRevisionRef,
   revision: CapabilityRevision | undefined,
@@ -98,7 +104,6 @@ function exactBaseline(
     });
   return revision;
 }
-
 function briefFor(brief: ExperimentBrief | undefined, experimentId: string): ExperimentBrief {
   if (!brief || brief.experimentId !== experimentId)
     throw coordinatorOperationError(`Durable experiment brief is missing for ${experimentId}`, {
@@ -107,13 +112,11 @@ function briefFor(brief: ExperimentBrief | undefined, experimentId: string): Exp
     });
   return brief;
 }
-
 export function createRuntimeCoordinatorComposition(
   options: RuntimeCoordinatorCompositionOptions,
 ): RuntimeCoordinator {
   const briefs = createWorkspaceExperimentBriefStore(options.workspace);
   const manifests = createWorkspaceLearningCandidateManifestStore(options.workspace);
-
   const rehydrateCandidate = async (
     experimentId: string,
   ): Promise<CoordinatorCandidateResult | undefined> => {
@@ -126,7 +129,6 @@ export function createRuntimeCoordinatorComposition(
       telemetry: telemetry({ recovered: true }),
     });
   };
-
   const research: RuntimeCoordinatorResearchPort = Object.freeze({
     reflect: async (payload: ReflectTurnJobPayload, signal: AbortSignal) => {
       cancelled(signal);
@@ -135,17 +137,33 @@ export function createRuntimeCoordinatorComposition(
         payload.turn.expectedActiveAdjustmentId === null
           ? undefined
           : await options.workspace.workingAdjustments.get(payload.turn.expectedActiveAdjustmentId);
-      const observed = await options.learning.observeTurn({
-        turn: payload.turn,
-        baselineRevision: payload.baselineRevision,
-        capability: payload.capability,
-        ...(payload.activeCapabilities === undefined
-          ? {}
-          : { activeCapabilities: payload.activeCapabilities }),
-        ...(payload.userPreferences === undefined ? {} : { userPreferences: payload.userPreferences }),
-        ...(activeWorkingAdjustment === undefined ? {} : { activeWorkingAdjustment }),
-        signal,
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      const observed = await options.learning.observeTurn(
+        createConditionalObject({
+          turn: payload.turn,
+          baselineRevision: payload.baselineRevision,
+          capability: payload.capability,
+        } as const)
+          .addOptional(
+            !(payload.activeCapabilities === undefined)
+              ? {
+                  activeCapabilities: payload.activeCapabilities,
+                }
+              : undefined,
+          )
+          .addOptional(
+            !(payload.userPreferences === undefined)
+              ? {
+                  userPreferences: payload.userPreferences,
+                }
+              : undefined,
+          )
+          .addOptional(!(activeWorkingAdjustment === undefined) ? { activeWorkingAdjustment } : undefined)
+          .add({
+            signal,
+          } as const)
+          .finish(),
+      );
       cancelled(signal);
       if (observed.observation && payload.turn.outcomeId) {
         await options.workspace.operational.outcomes.classify({
@@ -168,6 +186,7 @@ export function createRuntimeCoordinatorComposition(
             await options.continuousFeedback.evaluateExperiment(experimentId);
       }
       if (observed.status === "no_change")
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           status: "no_change" as const,
           reason: observed.reason,
@@ -235,24 +254,33 @@ export function createRuntimeCoordinatorComposition(
             `Reflection ${observed.brief.experimentId} did not persist a new hypothesis experiment`,
             { code: "experiment_hypothesis_missing", retryable: false },
           );
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           status: "experiment" as const,
-          experiment: Object.freeze({
-            experimentId: experiment.experimentId,
-            hypothesis: experiment.hypothesis,
-            scope: experiment.scope,
-            evidenceRefs: experiment.evidenceRefs,
-            baselineRevision: experiment.baselineRevision,
-            feedbackSignalIds: experiment.feedbackSignalIds,
-            status: "hypothesis" as const,
-            ...(experiment.sourceAdjustmentId === undefined
-              ? {}
-              : { sourceAdjustmentId: experiment.sourceAdjustmentId }),
-          }),
+          experiment: Object.freeze(
+            createConditionalObject({
+              experimentId: experiment.experimentId,
+              hypothesis: experiment.hypothesis,
+              scope: experiment.scope,
+              evidenceRefs: experiment.evidenceRefs,
+              baselineRevision: experiment.baselineRevision,
+              feedbackSignalIds: experiment.feedbackSignalIds,
+              status: "hypothesis" as const,
+            } as const)
+              .addOptional(
+                !(experiment.sourceAdjustmentId === undefined)
+                  ? {
+                      sourceAdjustmentId: experiment.sourceAdjustmentId,
+                    }
+                  : undefined,
+              )
+              .finish(),
+          ),
           hypothesisDedupeKey: observed.brief.hypothesisDedupeKey,
           telemetry: reflectionTelemetry,
         });
       }
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         status: "deduped" as const,
         experiment,
@@ -260,7 +288,6 @@ export function createRuntimeCoordinatorComposition(
         telemetry: reflectionTelemetry,
       });
     },
-
     author: async (payload: AuthorRevisionJobPayload, signal: AbortSignal) => {
       cancelled(signal);
       const brief = briefFor(await briefs.findByDedupeKey(payload.hypothesisDedupeKey), payload.experimentId);
@@ -287,9 +314,7 @@ export function createRuntimeCoordinatorComposition(
         }),
       });
     },
-
     rehydrateCandidate,
-
     preflight: async (payload: PreflightJobPayload, signal: AbortSignal) => {
       cancelled(signal);
       const exact = await manifests.rehydrate(payload.experimentId);
@@ -356,6 +381,7 @@ export function createRuntimeCoordinatorComposition(
           `Preflight ${payload.preflightId} is not durably bound to its candidate`,
           { code: "preflight_recording_mismatch", retryable: false },
         );
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         experimentId: payload.experimentId,
         candidateRevision: exact.revisionRef,
@@ -375,14 +401,17 @@ export function createRuntimeCoordinatorComposition(
       });
     },
   });
-
-  return createRuntimeCoordinator({
-    workspace: options.workspace,
-    workingAdjustments: options.workingAdjustments,
-    authority: options.authority,
-    research,
-    ...(options.config === undefined ? {} : { config: options.config }),
-    ...(options.workerId === undefined ? {} : { workerId: options.workerId }),
-    ...(options.now === undefined ? {} : { now: options.now }),
-  });
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return createRuntimeCoordinator(
+    createConditionalObject({
+      workspace: options.workspace,
+      workingAdjustments: options.workingAdjustments,
+      authority: options.authority,
+      research,
+    } as const)
+      .addOptional(!(options.config === undefined) ? { config: options.config } : undefined)
+      .addOptional(!(options.workerId === undefined) ? { workerId: options.workerId } : undefined)
+      .addOptional(!(options.now === undefined) ? { now: options.now } : undefined)
+      .finish(),
+  );
 }

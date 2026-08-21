@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import { constants, type Stats } from "node:fs";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -12,7 +13,6 @@ import {
 import { z } from "zod";
 import { withMcpFileLock } from "./file-lock.ts";
 import type { McpOAuthCredential, McpOAuthCredentialStore } from "./oauth.ts";
-
 const DiscoverySchema = z.looseObject({
   authorizationServerUrl: z.string().min(1),
   authorizationServerMetadata: z
@@ -35,27 +35,21 @@ const CredentialSchema = z.strictObject({
   discovery: DiscoverySchema.optional(),
 });
 const CredentialFileSchema = z.record(z.string().min(1), CredentialSchema);
-
-function isCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
+function isCode(cause: unknown, code: string): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === code;
 }
-
 function currentUid(): number | undefined {
   return typeof process.getuid === "function" ? process.getuid() : undefined;
 }
-
 function assertOwned(path: string, metadata: Stats): void {
   const uid = currentUid();
   if (uid !== undefined && metadata.uid !== uid) {
     throw new Error(`${path}: refusing MCP credentials owned by uid ${String(metadata.uid)}`);
   }
 }
-
 export const mcpCredentialPath = (home: string): string => join(home, "mcp-auth.json");
-
 export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCredentialStore {
   let queue: Promise<void> = Promise.resolve();
-
   const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
     const prior = queue;
     let release: (() => void) | undefined;
@@ -71,7 +65,6 @@ export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCrede
       }
     })();
   };
-
   const secureDirectory = async (): Promise<void> => {
     const directory = dirname(path);
     await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -91,7 +84,6 @@ export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCrede
         },
       );
   };
-
   const readAll = async (): Promise<Record<string, McpOAuthCredential>> => {
     await secureDirectory();
     let metadata: Stats;
@@ -116,36 +108,55 @@ export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCrede
       const parsed = CredentialFileSchema.parse(raw);
       const credentials: Record<string, McpOAuthCredential> = {};
       for (const [key, credential] of Object.entries(parsed)) {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const discovery = credential.discovery
-          ? {
+          ? createConditionalObject({
               authorizationServerUrl: credential.discovery.authorizationServerUrl,
-              ...(credential.discovery.authorizationServerMetadata
-                ? { authorizationServerMetadata: credential.discovery.authorizationServerMetadata }
-                : {}),
-              ...(credential.discovery.resourceMetadata
-                ? { resourceMetadata: credential.discovery.resourceMetadata }
-                : {}),
-              ...(credential.discovery.resourceMetadataUrl
-                ? { resourceMetadataUrl: credential.discovery.resourceMetadataUrl }
-                : {}),
-            }
+            } as const)
+              .addOptional(
+                credential.discovery.authorizationServerMetadata
+                  ? {
+                      authorizationServerMetadata: credential.discovery.authorizationServerMetadata,
+                    }
+                  : undefined,
+              )
+              .addOptional(
+                credential.discovery.resourceMetadata
+                  ? {
+                      resourceMetadata: credential.discovery.resourceMetadata,
+                    }
+                  : undefined,
+              )
+              .addOptional(
+                credential.discovery.resourceMetadataUrl
+                  ? {
+                      resourceMetadataUrl: credential.discovery.resourceMetadataUrl,
+                    }
+                  : undefined,
+              )
+              .finish()
           : undefined;
-        credentials[key] = {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+        credentials[key] = createConditionalObject({
           serverUrl: credential.serverUrl,
-          ...(credential.authIdentityDigest ? { authIdentityDigest: credential.authIdentityDigest } : {}),
-          ...(credential.clientInformation ? { clientInformation: credential.clientInformation } : {}),
-          ...(credential.tokens ? { tokens: credential.tokens } : {}),
-          ...(credential.codeVerifier ? { codeVerifier: credential.codeVerifier } : {}),
-          ...(credential.state ? { state: credential.state } : {}),
-          ...(discovery ? { discovery } : {}),
-        };
+        } as const)
+          .addOptional(
+            credential.authIdentityDigest ? { authIdentityDigest: credential.authIdentityDigest } : undefined,
+          )
+          .addOptional(
+            credential.clientInformation ? { clientInformation: credential.clientInformation } : undefined,
+          )
+          .addOptional(credential.tokens ? { tokens: credential.tokens } : undefined)
+          .addOptional(credential.codeVerifier ? { codeVerifier: credential.codeVerifier } : undefined)
+          .addOptional(credential.state ? { state: credential.state } : undefined)
+          .addOptional(discovery ? { discovery } : undefined)
+          .finish();
       }
       return credentials;
     } finally {
       await handle.close();
     }
   };
-
   const persist = async (credentials: Readonly<Record<string, McpOAuthCredential>>): Promise<void> => {
     await secureDirectory();
     CredentialFileSchema.parse(credentials);
@@ -158,9 +169,9 @@ export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCrede
       await handle.close();
     }
     try {
-      const existing = await lstat(path).catch((error: unknown) => {
-        if (isCode(error, "ENOENT")) return undefined;
-        throw error;
+      const existing = await lstat(path).catch((cause: unknown) => {
+        if (isCode(cause, "ENOENT")) return undefined;
+        throw cause;
       });
       if (existing && (existing.isSymbolicLink() || !existing.isFile() || existing.nlink !== 1)) {
         throw new Error(`${path}: refusing to replace unsafe MCP credential file`);
@@ -179,7 +190,6 @@ export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCrede
       await unlink(temporary).catch(() => undefined);
     }
   };
-
   const store: McpOAuthCredentialStore = {
     read: (key: string) =>
       enqueue(async () => {

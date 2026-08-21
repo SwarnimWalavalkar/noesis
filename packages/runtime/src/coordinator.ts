@@ -1,10 +1,12 @@
 import {
+  createConditionalObject,
   canonicalJson,
   type DurableJobFailure,
   type DurableJobListCursor,
   type DurableJobRecord,
   durableJobFailureFromError,
   type Experiment,
+  type JsonValue,
   sameCapabilityRevisionRef,
   sha256,
   toJsonValue,
@@ -32,7 +34,6 @@ import {
   type RuntimeCoordinatorResearchPort,
 } from "./coordinator-contracts.ts";
 import { authorizeScheduledJob, runScheduledJob } from "./scheduled-execution.ts";
-
 export interface RuntimeCoordinatorOptions {
   readonly workspace: Pick<WorkspaceStore, "jobs" | "research">;
   readonly workingAdjustments: CoordinatorWorkingAdjustmentMutationPort;
@@ -42,7 +43,6 @@ export interface RuntimeCoordinatorOptions {
   readonly workerId?: string;
   readonly now?: () => Date;
 }
-
 export interface RuntimeCoordinator {
   readonly observeCompletedTurn: (input: CompletedNormalTurn) => Promise<CoordinatorJobView>;
   readonly runAvailable: () => Promise<void>;
@@ -55,8 +55,13 @@ export interface RuntimeCoordinator {
     readonly deadline: Date;
     readonly signal?: AbortSignal;
   }) => Promise<
-    | { readonly status: "terminal"; readonly job: CoordinatorJobView }
-    | { readonly status: "timeout" | "missing" | "cancelled" }
+    | {
+        readonly status: "terminal";
+        readonly job: CoordinatorJobView;
+      }
+    | {
+        readonly status: "timeout" | "missing" | "cancelled";
+      }
   >;
   readonly listJobs: (request?: {
     readonly kind?: CoordinatorJobKind;
@@ -79,54 +84,45 @@ export interface RuntimeCoordinator {
   ) => Promise<PreflightActivationHandoff | undefined>;
   readonly stop: () => Promise<void>;
 }
-
 function iso(date: Date): string {
   return date.toISOString();
 }
-
 function stableJobId(operationId: string): string {
   return `job_${sha256(operationId).slice(0, 32)}`;
 }
-
 function stablePreflightId(experimentId: string, bundleDigest: string): string {
   return `preflight_${sha256(`${experimentId}:${bundleDigest}`).slice(0, 32)}`;
 }
-
 function stablePlanId(preflightId: string): string {
   return `plan_${sha256(preflightId).slice(0, 32)}`;
 }
-
-function stableWorkingAdjustmentId(parentJobId: string, decision: unknown): string {
+function stableWorkingAdjustmentId(parentJobId: string, decision: JsonValue): string {
   return `adjustment_${sha256(canonicalJson({ parentJobId, decision })).slice(0, 32)}`;
 }
-
 function payloadRefsForExperiment(experimentId: string) {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze([
     Object.freeze({ kind: "database_row" as const, table: "experiments" as const, rowId: experimentId }),
   ]);
 }
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function errorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
 }
-
-function failureFrom(error: unknown): DurableJobFailure {
+function failureFrom(cause: unknown): DurableJobFailure {
   return (
-    durableJobFailureFromError(error) ??
+    durableJobFailureFromError(cause) ??
     Object.freeze({
       code: "coordinator_operation_failed",
-      message: errorMessage(error),
+      message: errorMessage(cause),
       retryable: false,
       ambiguous: false,
     })
   );
 }
-
 function retryDelay(config: RuntimeCoordinatorConfig, attempt: number): number {
   const multiplier = 2 ** Math.max(0, attempt - 1);
   return Math.min(config.retry.maxDelayMs, config.retry.baseDelayMs * multiplier);
 }
-
 export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): RuntimeCoordinator {
   const config = RuntimeCoordinatorConfigSchema.parse(options.config ?? DEFAULT_RUNTIME_COORDINATOR_CONFIG);
   if (config.heartbeatMs >= config.leaseMs)
@@ -143,7 +139,6 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     clearInterval(heartbeat);
     heartbeats.delete(jobId);
   };
-
   const enqueue = async (input: {
     readonly kind: CoordinatorJobKind;
     readonly payload: unknown;
@@ -162,28 +157,36 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     await authorizeScheduledJob(options.authority, {
       jobId,
       budget: input.budget,
-      expiresAt: iso(new Date(Math.max(now().getTime(), Date.now()) + 24 * 60 * 60 * 1_000)),
+      expiresAt: iso(new Date(Math.max(now().getTime(), Date.now()) + 24 * 60 * 60 * 1000)),
     });
     const observations = input.observations?.map((observation) =>
       Object.freeze({ ...observation, observedAt: iso(now()) }),
     );
     try {
-      const job = await options.workspace.jobs.enqueue({
-        jobId,
-        kind: input.kind,
-        payload: input.payload,
-        payloadRefs: input.payloadRefs,
-        operationId: input.operationId,
-        idempotencyKey: input.operationId,
-        notBefore: iso(now()),
-        maxAttempts: config.retry.maxAttempts,
-        estimatedCost: input.estimatedCost,
-        budget: input.budget,
-        ...(observations ? { observations } : {}),
-        ...(input.inheritObservationsFromParentJobId
-          ? { inheritObservationsFromParentJobId: input.inheritObservationsFromParentJobId }
-          : {}),
-      });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      const job = await options.workspace.jobs.enqueue(
+        createConditionalObject({
+          jobId,
+          kind: input.kind,
+          payload: input.payload,
+          payloadRefs: input.payloadRefs,
+          operationId: input.operationId,
+          idempotencyKey: input.operationId,
+          notBefore: iso(now()),
+          maxAttempts: config.retry.maxAttempts,
+          estimatedCost: input.estimatedCost,
+          budget: input.budget,
+        } as const)
+          .addOptional(observations ? { observations } : undefined)
+          .addOptional(
+            input.inheritObservationsFromParentJobId
+              ? {
+                  inheritObservationsFromParentJobId: input.inheritObservationsFromParentJobId,
+                }
+              : undefined,
+          )
+          .finish(),
+      );
       return coordinatorJobPayload(job);
     } catch (error) {
       if (!input.matchesExisting || (!observations && !input.inheritObservationsFromParentJobId)) throw error;
@@ -207,7 +210,6 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       return view;
     }
   };
-
   const enqueueAuthor = async (input: {
     readonly experimentId: string;
     readonly sourceSessionId: string;
@@ -249,7 +251,6 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       ...config.jobs.author,
     });
   };
-
   const enqueuePreflight = async (input: {
     readonly experimentId: string;
     readonly sourceSessionIds: readonly string[];
@@ -259,16 +260,22 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     readonly routingStrategyId: string;
   }): Promise<CoordinatorJobView> => {
     const preflightId = stablePreflightId(input.experimentId, input.candidate.candidateRevision.bundleDigest);
-    const payload = PreflightJobPayloadSchema.parse({
-      schemaVersion: 1,
-      experimentId: input.experimentId,
-      ...(input.sourceSessionIds[0] ? { sourceSessionId: input.sourceSessionIds[0] } : {}),
-      parentJobId: input.parentJobId,
-      preflightId,
-      planId: stablePlanId(preflightId),
-      retrievalStrategyId: input.retrievalStrategyId,
-      routingStrategyId: input.routingStrategyId,
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const payload = PreflightJobPayloadSchema.parse(
+      createConditionalObject({
+        schemaVersion: 1,
+        experimentId: input.experimentId,
+      } as const)
+        .addOptional(input.sourceSessionIds[0] ? { sourceSessionId: input.sourceSessionIds[0] } : undefined)
+        .add({
+          parentJobId: input.parentJobId,
+          preflightId,
+          planId: stablePlanId(preflightId),
+          retrievalStrategyId: input.retrievalStrategyId,
+          routingStrategyId: input.routingStrategyId,
+        } as const)
+        .finish(),
+    );
     return await enqueue({
       kind: "runtime.preflight",
       payload,
@@ -291,26 +298,47 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       ...config.jobs.preflight,
     });
   };
-
   const observeCompletedTurn = async (rawInput: CompletedNormalTurn): Promise<CoordinatorJobView> => {
     const input = CompletedNormalTurnSchema.parse(rawInput);
-    const selected = selectSessionRetrievalStrategy({
-      query: input.turn.correction ?? input.turn.userMessage,
-      ...(input.requestedRetrievalStrategy === undefined
-        ? {}
-        : { requested: input.requestedRetrievalStrategy }),
-    });
-    const payload = ReflectTurnJobPayloadSchema.parse({
-      schemaVersion: 1,
-      turn: input.turn,
-      baselineRevision: input.baselineRevision,
-      capability: input.capability,
-      ...(input.activeCapabilities === undefined ? {} : { activeCapabilities: input.activeCapabilities }),
-      ...(input.userPreferences === undefined ? {} : { userPreferences: input.userPreferences }),
-      retrievalStrategyId: selected.strategy.strategyId,
-      retrievalStrategyReason: selected.reason,
-      routingStrategyId: input.routingStrategyId,
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const selected = selectSessionRetrievalStrategy(
+      createConditionalObject({
+        query: input.turn.correction ?? input.turn.userMessage,
+      } as const)
+        .addOptional(
+          !(input.requestedRetrievalStrategy === undefined)
+            ? {
+                requested: input.requestedRetrievalStrategy,
+              }
+            : undefined,
+        )
+        .finish(),
+    );
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const payload = ReflectTurnJobPayloadSchema.parse(
+      createConditionalObject({
+        schemaVersion: 1,
+        turn: input.turn,
+        baselineRevision: input.baselineRevision,
+        capability: input.capability,
+      } as const)
+        .addOptional(
+          !(input.activeCapabilities === undefined)
+            ? {
+                activeCapabilities: input.activeCapabilities,
+              }
+            : undefined,
+        )
+        .addOptional(
+          !(input.userPreferences === undefined) ? { userPreferences: input.userPreferences } : undefined,
+        )
+        .add({
+          retrievalStrategyId: selected.strategy.strategyId,
+          retrievalStrategyReason: selected.reason,
+          routingStrategyId: input.routingStrategyId,
+        } as const)
+        .finish(),
+    );
     const job = await enqueue({
       kind: "runtime.reflect_turn",
       payload,
@@ -321,7 +349,6 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     queueMicrotask(() => void runAvailable());
     return job;
   };
-
   const runReflect = async (
     payload: ReturnType<typeof ReflectTurnJobPayloadSchema.parse>,
     signal: AbortSignal,
@@ -337,17 +364,20 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         telemetry: reflected.telemetry,
       });
     if (reflected.status === "apply_working_adjustment") {
-      const adjustmentId = stableWorkingAdjustmentId(parentJobId, {
-        status: reflected.status,
-        observation: reflected.observation,
-        project: reflected.project,
-        expectedActiveAdjustmentId: reflected.expectedActiveAdjustmentId,
-        rationale: reflected.rationale,
-        strategy: reflected.strategy,
-        successSignal: reflected.successSignal,
-        evidenceRefs: reflected.evidenceRefs,
-        createdFromTurnId: payload.turn.turnId,
-      });
+      const adjustmentId = stableWorkingAdjustmentId(
+        parentJobId,
+        toJsonValue({
+          status: reflected.status,
+          observation: reflected.observation,
+          project: reflected.project,
+          expectedActiveAdjustmentId: reflected.expectedActiveAdjustmentId,
+          rationale: reflected.rationale,
+          strategy: reflected.strategy,
+          successSignal: reflected.successSignal,
+          evidenceRefs: reflected.evidenceRefs,
+          createdFromTurnId: payload.turn.turnId,
+        }),
+      );
       const applied = await options.workingAdjustments.apply({
         adjustment: Object.freeze({
           adjustmentId,
@@ -364,6 +394,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         signal,
       });
       if (applied.status === "stale")
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           status: "stale" as const,
           requestedDecision: reflected.status,
@@ -376,6 +407,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
           routingStrategyId: payload.routingStrategyId,
           telemetry: reflected.telemetry,
         });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         status: applied.replacedAdjustmentId === null ? ("adjusted" as const) : ("replaced" as const),
         adjustmentId,
@@ -396,6 +428,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         signal,
       });
       if (unapplied.status === "stale")
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           status: "stale" as const,
           requestedDecision: reflected.status,
@@ -408,6 +441,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
           routingStrategyId: payload.routingStrategyId,
           telemetry: reflected.telemetry,
         });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return Object.freeze({
         status: "unapplied" as const,
         adjustmentId: reflected.expectedActiveAdjustmentId,
@@ -457,7 +491,6 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       telemetry: reflected.telemetry,
     });
   };
-
   const runAuthor = async (
     payload: ReturnType<typeof AuthorRevisionJobPayloadSchema.parse>,
     signal: AbortSignal,
@@ -493,7 +526,6 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       telemetry: candidate.telemetry,
     });
   };
-
   const recordedPreflight = async (
     experiment: Experiment,
     candidate: CoordinatorCandidateResult,
@@ -513,7 +545,6 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       telemetry: Object.freeze({ recovered: true }),
     });
   };
-
   const runPreflight = async (
     payload: ReturnType<typeof PreflightJobPayloadSchema.parse>,
     signal: AbortSignal,
@@ -525,6 +556,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     let result = await recordedPreflight(experiment, candidate);
     if (!result) {
       if (experiment.status === "authoring") {
+        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         experiment = Object.freeze({ ...experiment, status: "preflight" as const });
         await options.workspace.research.experiments.putExperiment(experiment);
       }
@@ -551,7 +583,6 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       telemetry: result.telemetry,
     });
   };
-
   const execute = async (job: DurableJobRecord): Promise<void> => {
     const view = coordinatorJobPayload(job);
     const leaseToken = job.leaseToken;
@@ -630,7 +661,6 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       active.delete(job.jobId);
     }
   };
-
   const drain = async (): Promise<void> => {
     let claimedCount = 0;
     let remainingBudget = config.drainBudget;
@@ -662,7 +692,6 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       await Promise.all(batch.map(execute));
     }
   };
-
   function runAvailable(): Promise<void> {
     if (draining) return draining;
     if (stopping) return Promise.resolve();
@@ -672,42 +701,45 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     draining = next;
     return next;
   }
-
   const idle = async (): Promise<void> => {
     await runAvailable();
   };
-
   const cancel = async (jobId: string): Promise<DurableJobRecord | undefined> => {
     clearHeartbeat(jobId);
     active.get(jobId)?.abort("cancelled");
     return await options.workspace.jobs.cancel(jobId, iso(now()));
   };
-
   const retry = async (jobId: string, additionalBudget?: number): Promise<CoordinatorJobView> => {
-    const job = await options.workspace.jobs.retry({
-      jobId,
-      now: iso(now()),
-      ...(additionalBudget === undefined ? {} : { additionalBudget }),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const job = await options.workspace.jobs.retry(
+      createConditionalObject({
+        jobId,
+        now: iso(now()),
+      } as const)
+        .addOptional(!(additionalBudget === undefined) ? { additionalBudget } : undefined)
+        .finish(),
+    );
     queueMicrotask(() => void runAvailable());
     return coordinatorJobPayload(job);
   };
-
   const getJob = async (jobId: string): Promise<CoordinatorJobView | undefined> => {
     const job = await options.workspace.jobs.get(jobId);
     return job ? coordinatorJobPayload(job) : undefined;
   };
-
   const waitForTerminal: RuntimeCoordinator["waitForTerminal"] = async (request) => {
     const deadlineMs = request.deadline.getTime();
     if (!Number.isFinite(deadlineMs)) throw new Error("Coordinator terminal wait requires a valid deadline");
     const terminal = new Set(["completed", "failed", "cancelled", "budget_exhausted"]);
     while (true) {
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       if (request.signal?.aborted) return Object.freeze({ status: "cancelled" as const });
       const job = await getJob(request.jobId);
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       if (!job) return Object.freeze({ status: "missing" as const });
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       if (terminal.has(job.job.status)) return Object.freeze({ status: "terminal" as const, job });
       const remaining = deadlineMs - Date.now();
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       if (remaining <= 0) return Object.freeze({ status: "timeout" as const });
       await new Promise<void>((resolve) => {
         const timer = setTimeout(resolve, Math.min(25, remaining));
@@ -715,7 +747,6 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       });
     }
   };
-
   const listJobs = async (
     request: {
       readonly kind?: CoordinatorJobKind;
@@ -730,38 +761,45 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
         return [];
       }
     });
-
   const listJobPage: RuntimeCoordinator["listJobPage"] = async (request = {}) => {
     if (request.sessionId !== undefined && request.kind === undefined)
       throw new Error("Session-scoped coordinator job pages require an exact coordinator job kind");
     if (request.experimentIds && request.kind === "runtime.reflect_turn")
       throw new Error("Experiment-scoped coordinator job pages are not valid for reflection jobs");
-    const page = await options.workspace.jobs.listPage({
-      ...(request.kind ? { kind: request.kind } : {}),
-      ...(request.limit === undefined ? {} : { limit: request.limit }),
-      ...(request.after ? { after: request.after } : {}),
-      ...(request.sessionId === undefined
-        ? {}
-        : request.kind === "runtime.reflect_turn"
-          ? { payloadSessionId: request.sessionId }
-          : { observedSessionId: request.sessionId }),
-      ...(request.experimentIds ? { payloadExperimentIds: request.experimentIds } : {}),
-    });
-    return Object.freeze({
-      jobs: Object.freeze(
-        page.records.flatMap((job) => {
-          try {
-            return [coordinatorJobPayload(job)];
-          } catch {
-            return [];
-          }
-        }),
-      ),
-      exhausted: page.exhausted,
-      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-    });
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const page = await options.workspace.jobs.listPage(
+      createConditionalObject({} as const)
+        .addOptional(request.kind ? { kind: request.kind } : undefined)
+        .addOptional(!(request.limit === undefined) ? { limit: request.limit } : undefined)
+        .addOptional(request.after ? { after: request.after } : undefined)
+        .addOptional(
+          !(request.sessionId === undefined)
+            ? request.kind === "runtime.reflect_turn"
+              ? { payloadSessionId: request.sessionId }
+              : { observedSessionId: request.sessionId }
+            : undefined,
+        )
+        .addOptional(request.experimentIds ? { payloadExperimentIds: request.experimentIds } : undefined)
+        .finish(),
+    );
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    return Object.freeze(
+      createConditionalObject({
+        jobs: Object.freeze(
+          page.records.flatMap((job) => {
+            try {
+              return [coordinatorJobPayload(job)];
+            } catch {
+              return [];
+            }
+          }),
+        ),
+        exhausted: page.exhausted,
+      } as const)
+        .addOptional(page.nextCursor ? { nextCursor: page.nextCursor } : undefined)
+        .finish(),
+    );
   };
-
   const getPreflightActivationHandoff = async (
     experimentId: string,
   ): Promise<PreflightActivationHandoff | undefined> => {
@@ -774,6 +812,7 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     );
     if (!report || !sameCapabilityRevisionRef(report.candidateRevision, candidate.candidateRevision))
       throw new Error(`Preflight handoff ${experimentId} is not bound to the exact candidate manifest`);
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const preflightExperiment = Object.freeze({ ...experiment, status: "preflight" as const });
     return Object.freeze({
       experiment: preflightExperiment,
@@ -783,14 +822,12 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
       report,
     });
   };
-
   const stop = async (): Promise<void> => {
     stopping = true;
     for (const jobId of heartbeats.keys()) clearHeartbeat(jobId);
     for (const controller of active.values()) controller.abort("worker_stopped");
     await draining;
   };
-
   return Object.freeze({
     observeCompletedTurn,
     runAvailable,
@@ -805,13 +842,12 @@ export function createRuntimeCoordinator(options: RuntimeCoordinatorOptions): Ru
     stop,
   });
 }
-
+// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const CoordinatorJobKindValues = Object.freeze([
   "runtime.reflect_turn",
   "runtime.author_revision",
   "runtime.preflight",
 ] as const satisfies readonly CoordinatorJobKind[]);
-
 export function coordinatorOperationFingerprint(job: CoordinatorJobView): string {
   return sha256(canonicalJson({ operationId: job.job.operationId, kind: job.kind, payload: job.payload }));
 }

@@ -26,9 +26,7 @@ export async function inspectWorkspaceIntegrity(
 ): Promise<IntegrityReport> {
   const integrityRow = database.prepare("PRAGMA integrity_check").get();
   const integrity =
-    integrityRow && typeof integrityRow === "object"
-      ? Reflect.get(integrityRow, "integrity_check")
-      : undefined;
+    integrityRow && typeof integrityRow === "object" ? integrityRow["integrity_check"] : undefined;
   const databaseIntegrity = typeof integrity === "string" ? integrity : "unknown integrity result";
   const expected = new Set<string>();
   for (const row of database.prepare("SELECT snapshot_path FROM file_revisions").all())
@@ -100,6 +98,7 @@ export async function createBackup(
     throw error;
   }
 
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const manifest = {
     format: "noesis-workspace-backup-v1" as const,
     createdAt,
@@ -168,6 +167,6 @@ async function walkFiles(root: string, workspaceRoot: string): Promise<readonly 
   }
 }
 
-function isMissing(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
+function isMissing(cause: unknown): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
 }

@@ -216,6 +216,7 @@ describe("application MCP integration", () => {
         },
       }),
     );
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const controlledSampling: PiMcpSamplingPort = Object.freeze({
       sample: async () => ({
         role: "assistant" as const,

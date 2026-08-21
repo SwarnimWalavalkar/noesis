@@ -1,3 +1,4 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { AgentSteerResult } from "@noesis/agent-types";
 import type { UserIntentRecord } from "@noesis/workspace";
 import { describe, expect, test } from "vitest";
@@ -7,12 +8,9 @@ import {
   type TurnInteractionEvent,
   type TurnInteractionIntentStore,
 } from "../src/index.ts";
-
 const timestamp = (tick: number): string => `2026-07-31T00:00:${String(tick).padStart(2, "0")}.000Z`;
-
 const consumedSteer = (): AgentSteerResult =>
   Object.freeze({ status: "consumed", timelineSequence: 1, consumedAt: timestamp(59) });
-
 function createIntentStore(): TurnInteractionIntentStore & {
   readonly records: () => readonly UserIntentRecord[];
 } {
@@ -29,23 +27,31 @@ function createIntentStore(): TurnInteractionIntentStore & {
         (left, right) =>
           left.createdAt.localeCompare(right.createdAt) || left.intentId.localeCompare(right.intentId),
       );
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const store: TurnInteractionIntentStore & {
     readonly records: () => readonly UserIntentRecord[];
   } = {
     enqueue: async (request) =>
-      update({
-        intentId: request.intentId,
-        sessionId: request.sessionId,
-        text: request.text,
-        contentDigest: `digest:${request.text}`,
-        deliveryMode: "turn",
-        status: "pending",
-        queueSequence: records.size + 1,
-        ...(request.queuedBehindTurnId ? { queuedBehindTurnId: request.queuedBehindTurnId } : {}),
-        createdAt: request.createdAt,
-        updatedAt: request.createdAt,
-        attemptCount: 0,
-      }),
+      update(
+        createConditionalObject({
+          intentId: request.intentId,
+          sessionId: request.sessionId,
+          text: request.text,
+          contentDigest: `digest:${request.text}`,
+          deliveryMode: "turn",
+          status: "pending",
+          queueSequence: records.size + 1,
+        } as const)
+          .addOptional(
+            request.queuedBehindTurnId ? { queuedBehindTurnId: request.queuedBehindTurnId } : undefined,
+          )
+          .add({
+            createdAt: request.createdAt,
+            updatedAt: request.createdAt,
+            attemptCount: 0,
+          } as const)
+          .finish(),
+      ),
     reroutePending: async ({ sourceSessionId, destinationSessionId, intents, reroutedAt }) => {
       const rerouted: UserIntentRecord[] = [];
       for (const { sourceIntentId, destinationIntentId } of intents) {
@@ -286,13 +292,15 @@ function createIntentStore(): TurnInteractionIntentStore & {
   };
   return Object.freeze(store);
 }
-
 function createScheduler(): {
   readonly schedule: NonNullable<TurnInteractionControllerOptions["schedule"]>;
   readonly flushOne: () => void;
   readonly size: () => number;
 } {
-  const tasks: { task: () => void; cancelled: boolean }[] = [];
+  const tasks: {
+    task: () => void;
+    cancelled: boolean;
+  }[] = [];
   return {
     schedule: (task) => {
       const scheduled = { task, cancelled: false };
@@ -308,7 +316,6 @@ function createScheduler(): {
     size: () => tasks.filter((task) => !task.cancelled).length,
   };
 }
-
 async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<void> {
   for (let index = 0; index < 100; index += 1) {
     if (await predicate()) return;
@@ -316,14 +323,13 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<v
   }
   throw new Error("Timed out waiting for interaction state");
 }
-
 function deferred<T>(): {
   readonly promise: Promise<T>;
   readonly resolve: (value: T) => void;
-  readonly reject: (error: unknown) => void;
+  readonly reject: (cause: unknown) => void;
 } {
   let resolvePromise: ((value: T) => void) | undefined;
-  let rejectPromise: ((error: unknown) => void) | undefined;
+  let rejectPromise: ((cause: unknown) => void) | undefined;
   const promise = new Promise<T>((resolve, reject) => {
     resolvePromise = resolve;
     rejectPromise = reject;
@@ -334,7 +340,6 @@ function deferred<T>(): {
     reject: (error) => rejectPromise?.(error),
   };
 }
-
 describe("TurnInteractionController", () => {
   test("durably enqueues without resuming delivery until the existing queue is released", async () => {
     const intents = createIntentStore();
@@ -356,10 +361,8 @@ describe("TurnInteractionController", () => {
       recordSteerDelivery: async () => undefined,
       interrupt: async () => undefined,
     });
-
     await controller.dispatch("session-1", { type: "enqueue", text: "first" });
     await controller.dispatch("session-1", { type: "enqueue", text: "second" });
-
     expect(scheduler.size()).toBe(0);
     await expect(controller.inspect("session-1")).resolves.toMatchObject({
       queuePaused: true,
@@ -372,7 +375,6 @@ describe("TurnInteractionController", () => {
     expect(requests).toEqual(["first", "second"]);
     await controller.close();
   });
-
   test("atomically reroutes exact queued intents into a destination without starting delivery", async () => {
     const intents = createIntentStore();
     let id = 0;
@@ -392,7 +394,6 @@ describe("TurnInteractionController", () => {
     const first = await controller.dispatch("source", { type: "enqueue", text: "first" });
     const second = await controller.dispatch("source", { type: "enqueue", text: "second" });
     if (!first.intentId || !second.intentId) throw new Error("Expected durable intent identities");
-
     await expect(
       controller.dispatch("destination", {
         type: "reroute-pending",
@@ -416,11 +417,12 @@ describe("TurnInteractionController", () => {
     ).toEqual(["withdrawn", "withdrawn"]);
     await controller.close();
   });
-
   test("returns after enqueue and keeps one replaceable observer for later background events", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
-    const turn = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const turn = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     const runRequests: string[] = [];
     const firstEvents: TurnInteractionEvent[] = [];
     const replacementEvents: TurnInteractionEvent[] = [];
@@ -448,7 +450,6 @@ describe("TurnInteractionController", () => {
       },
       interrupt: async () => undefined,
     });
-
     const queued = await controller.dispatch(
       "session-1",
       { type: "submit", text: "first" },
@@ -459,7 +460,6 @@ describe("TurnInteractionController", () => {
       { type: "submit", text: "second" },
       { onEvent: (event) => replacementEvents.push(event) },
     );
-
     expect(queued.effect).toBe("queued");
     expect(second.effect).toBe("queued");
     expect(runRequests).toEqual([]);
@@ -477,12 +477,16 @@ describe("TurnInteractionController", () => {
     await waitUntil(() => intents.records().some((record) => record.status === "delivered"));
     await controller.close();
   });
-
   test("drains FIFO as distinct ordinary turns and catches an enqueue at settlement", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
-    const first = deferred<{ readonly outcome: "completed" | "aborted" }>();
-    const requests: { text: string; turnId: string }[] = [];
+    const first = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
+    const requests: {
+      text: string;
+      turnId: string;
+    }[] = [];
     let id = 0;
     const controller = createTurnInteractionController({
       intents,
@@ -514,13 +518,12 @@ describe("TurnInteractionController", () => {
     first.resolve({ outcome: "completed" });
     await waitUntil(() => requests.length === 3);
     await waitUntil(() => intents.records().filter((record) => record.status === "delivered").length === 3);
-
     expect(requests.map((request) => request.text)).toEqual(["one", "two", "three"]);
     expect(new Set(requests.map((request) => request.turnId)).size).toBe(3);
     expect(intents.records().filter((record) => record.status === "delivered")).toHaveLength(3);
     await controller.close();
   });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["aborted", { outcome: "aborted" as const }],
     ["failed", new Error("model failed")],
@@ -560,13 +563,11 @@ describe("TurnInteractionController", () => {
       return current.queuePaused && current.pending.length === 2;
     });
     const current = await controller.inspect("session-1");
-
     expect(requests).toEqual(["one"]);
     expect(current.queuePaused).toBe(true);
     expect(current.pending.map((intent) => intent.text)).toEqual(["one", "two"]);
     await controller.close();
   });
-
   test("promotes the newest queued turn and restores an explicit failed steer without entering FIFO", async () => {
     const baseIntents = createIntentStore();
     const releaseUnconsumedDispatch = baseIntents.releaseUnconsumedDispatch;
@@ -583,9 +584,15 @@ describe("TurnInteractionController", () => {
       },
     });
     const scheduler = createScheduler();
-    const active = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const active = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     const steered: string[] = [];
-    const recorded: { intentId: string; turnId: string; text: string }[] = [];
+    const recorded: {
+      intentId: string;
+      turnId: string;
+      text: string;
+    }[] = [];
     let id = 0;
     let failSteer = false;
     const controller = createTurnInteractionController({
@@ -600,6 +607,7 @@ describe("TurnInteractionController", () => {
       },
       steer: async (_sessionId, text) => {
         if (failSteer)
+          // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
           return Object.freeze({ status: "not-consumed" as const, reason: "turn-ended" as const });
         steered.push(text);
         return consumedSteer();
@@ -615,7 +623,6 @@ describe("TurnInteractionController", () => {
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "running");
     await controller.dispatch("session-1", { type: "submit", text: "older" });
     await controller.dispatch("session-1", { type: "submit", text: "newest" });
-
     const promoted = await controller.dispatch("session-1", { type: "steer" });
     expect(promoted.effect).toBe("steered");
     expect(steered).toEqual(["newest"]);
@@ -627,7 +634,6 @@ describe("TurnInteractionController", () => {
       },
     ]);
     expect((await controller.inspect("session-1")).pending.map((intent) => intent.text)).toEqual(["older"]);
-
     failSteer = true;
     await expect(
       controller.dispatch("session-1", { type: "steer", text: "explicit steer" }),
@@ -638,11 +644,12 @@ describe("TurnInteractionController", () => {
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "idle");
     await controller.close();
   });
-
   test("a submission racing aborted settlement unpauses and drains the preserved FIFO queue", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
-    const first = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const first = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     const requests: string[] = [];
     let id = 0;
     const controller = createTurnInteractionController({
@@ -670,18 +677,15 @@ describe("TurnInteractionController", () => {
     await controller.dispatch("session-1", { type: "submit", text: "active" });
     scheduler.flushOne();
     await waitUntil(() => requests.length === 1);
-
     await controller.dispatch("session-1", { type: "submit", text: "new submission" });
     first.resolve({ outcome: "aborted" });
     await waitUntil(() => scheduler.size() === 1);
     scheduler.flushOne();
     await waitUntil(() => requests.length === 3);
-
     expect(requests).toEqual(["active", "active", "new submission"]);
     expect((await controller.inspect("session-1")).pending).toEqual([]);
     await controller.close();
   });
-
   test("observes an interrupt requested before the agent becomes ready", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
@@ -715,18 +719,15 @@ describe("TurnInteractionController", () => {
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "running");
     const visibleTurnId = (await controller.inspect("session-1")).active?.turnId;
     if (!visibleTurnId) throw new Error("Expected an active turn");
-
     const interrupt = controller.dispatch("session-1", { type: "interrupt", turnId: visibleTurnId });
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "interrupting");
     releasePlanning.resolve();
     await interrupt;
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "idle");
-
     expect(interrupted).toBe(true);
     expect((await controller.inspect("session-1")).queuePaused).toBe(true);
     await controller.close();
   });
-
   test("releases a claim which resolves after an interrupt without starting the turn", async () => {
     const baseIntents = createIntentStore();
     const scheduler = createScheduler();
@@ -764,13 +765,11 @@ describe("TurnInteractionController", () => {
     await controller.dispatch("session-1", { type: "submit", text: "cancel before install" });
     scheduler.flushOne();
     await claimStarted.promise;
-
     await expect(controller.dispatch("session-1", { type: "pause-queue" })).resolves.toMatchObject({
       effect: "idle",
     });
     allowClaim.resolve();
     await waitUntil(() => intents.records().some((record) => record.status === "pending"));
-
     expect(requests).toEqual([]);
     await expect(controller.inspect("session-1")).resolves.toMatchObject({
       phase: "idle",
@@ -779,7 +778,6 @@ describe("TurnInteractionController", () => {
     });
     await controller.close();
   });
-
   test("does not revive an interrupted claim when a later submission resumes the queue", async () => {
     const baseIntents = createIntentStore();
     const scheduler = createScheduler();
@@ -824,18 +822,15 @@ describe("TurnInteractionController", () => {
     await claimStarted.promise;
     await controller.dispatch("session-1", { type: "pause-queue" });
     await controller.dispatch("session-1", { type: "submit", text: "second" });
-
     allowClaim.resolve();
     await waitUntil(() => scheduler.size() === 1);
     expect(requests).toEqual([]);
     scheduler.flushOne();
     await waitUntil(() => requests.length === 2);
-
     expect(requests).toEqual(["first", "second"]);
     expect(claims).toBeGreaterThanOrEqual(3);
     await controller.close();
   });
-
   test("releases a claim which resolves during close without starting the turn", async () => {
     const baseIntents = createIntentStore();
     const scheduler = createScheduler();
@@ -873,7 +868,6 @@ describe("TurnInteractionController", () => {
     await controller.dispatch("session-1", { type: "submit", text: "close before install" });
     scheduler.flushOne();
     await claimStarted.promise;
-
     let didClose = false;
     const closing = controller.close().then(() => {
       didClose = true;
@@ -882,13 +876,11 @@ describe("TurnInteractionController", () => {
     expect(didClose).toBe(false);
     allowClaim.resolve();
     await closing;
-
     expect(requests).toEqual([]);
     expect(intents.records()).toEqual([
       expect.objectContaining({ text: "close before install", status: "pending" }),
     ]);
   });
-
   test("restores the newest exact multiline draft and leaves recovered startup work inert", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
@@ -922,7 +914,6 @@ describe("TurnInteractionController", () => {
       },
       interrupt: async () => undefined,
     });
-
     const initial = await controller.inspect("session-1");
     expect(initial.queuePaused).toBe(true);
     expect(initial.pending.map((intent) => intent.text)).toEqual(["persisted across restart"]);
@@ -936,7 +927,6 @@ describe("TurnInteractionController", () => {
     expect(requests).toEqual([]);
     await controller.close();
   });
-
   test("restores explicit steering text when no turn is active without creating queued work", async () => {
     const intents = createIntentStore();
     let id = 0;
@@ -950,7 +940,6 @@ describe("TurnInteractionController", () => {
       recordSteerDelivery: async () => undefined,
       interrupt: async () => undefined,
     });
-
     await expect(
       controller.dispatch("session-1", { type: "steer", text: "keep this exact draft  " }),
     ).resolves.toMatchObject({
@@ -960,7 +949,6 @@ describe("TurnInteractionController", () => {
     expect(intents.records()).toEqual([]);
     await controller.close();
   });
-
   test("restores a pre-ready explicit steer when its durable target can no longer be bound", async () => {
     const baseIntents = createIntentStore();
     const intents: TurnInteractionIntentStore & {
@@ -970,7 +958,9 @@ describe("TurnInteractionController", () => {
       holdExplicitSteer: async () => undefined,
     });
     const scheduler = createScheduler();
-    const active = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const active = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     const runEntered = deferred<void>();
     let id = 0;
     const controller = createTurnInteractionController({
@@ -987,11 +977,9 @@ describe("TurnInteractionController", () => {
       recordSteerDelivery: async () => undefined,
       interrupt: async () => undefined,
     });
-
     await controller.dispatch("session-1", { type: "submit", text: "active" });
     scheduler.flushOne();
     await runEntered.promise;
-
     await expect(
       controller.dispatch("session-1", { type: "steer", text: "keep this in the editor" }),
     ).resolves.toMatchObject({
@@ -1000,16 +988,16 @@ describe("TurnInteractionController", () => {
     });
     expect(intents.records()).toHaveLength(1);
     expect(intents.records()[0]).toMatchObject({ text: "active", status: "dispatching" });
-
     active.resolve({ outcome: "aborted" });
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "idle");
     await controller.close();
   });
-
   test("does not present an unacknowledged steer as queued after interrupt", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
-    const active = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const active = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     const steering = deferred<never>();
     let id = 0;
     const controller = createTurnInteractionController({
@@ -1034,7 +1022,6 @@ describe("TurnInteractionController", () => {
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "running");
     const visibleTurnId = (await controller.inspect("session-1")).active?.turnId;
     if (!visibleTurnId) throw new Error("Expected an active turn");
-
     const steer = controller.dispatch("session-1", { type: "steer", text: "uncertain steering" });
     await waitUntil(() =>
       intents.records().some((record) => record.deliveryMode === "steer" && record.status === "dispatching"),
@@ -1053,11 +1040,12 @@ describe("TurnInteractionController", () => {
     );
     await controller.close();
   });
-
   test("keeps shutdown owned until an active turn has durably settled", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
-    const active = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const active = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     let interruptCount = 0;
     let id = 0;
     const controller = createTurnInteractionController({
@@ -1079,7 +1067,6 @@ describe("TurnInteractionController", () => {
     await controller.dispatch("session-1", { type: "submit", text: "active" });
     scheduler.flushOne();
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "running");
-
     let closed = false;
     const closing = controller.close().then(() => {
       closed = true;
@@ -1092,11 +1079,12 @@ describe("TurnInteractionController", () => {
     expect(closed).toBe(true);
     expect(intents.records().find((record) => record.text === "active")?.status).toBe("pending");
   });
-
   test("commits a consumed steer before the next queued turn starts", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
-    const first = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const first = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     const allowSteerCommit = deferred<void>();
     const steerCommitStarted = deferred<void>();
     const requests: string[] = [];
@@ -1140,7 +1128,7 @@ describe("TurnInteractionController", () => {
     expect(requests).toEqual(["first", "second"]);
     await controller.close();
   });
-
+  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["completed", { outcome: "completed" as const }],
     ["aborted", { outcome: "aborted" as const }],
@@ -1187,21 +1175,18 @@ describe("TurnInteractionController", () => {
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "running");
     const steering = controller.dispatch("session-1", { type: "steer", text: "guide" });
     await steerCommitStarted.promise;
-
     turnEnding.resolve();
     await Promise.resolve();
     expect(events.some((event) => event.type === "turn-settled")).toBe(false);
     allowSteerCommit.resolve();
     await steering;
     await waitUntil(() => events.some((event) => event.type === "turn-settled"));
-
     const deliveredIndex = events.findIndex((event) => event.type === "steer-delivered");
     const settledIndex = events.findIndex((event) => event.type === "turn-settled");
     expect(deliveredIndex).toBeGreaterThanOrEqual(0);
     expect(settledIndex).toBeGreaterThan(deliveredIndex);
     await controller.close();
   });
-
   test("pauses the queue and reports failure when a steer cannot reach a durable terminal state", async () => {
     const baseIntents = createIntentStore();
     const intents: TurnInteractionIntentStore & {
@@ -1213,7 +1198,9 @@ describe("TurnInteractionController", () => {
       },
     });
     const scheduler = createScheduler();
-    const active = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const active = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     const requests: string[] = [];
     const events: TurnInteractionEvent[] = [];
     let id = 0;
@@ -1242,13 +1229,11 @@ describe("TurnInteractionController", () => {
     scheduler.flushOne();
     await waitUntil(() => requests.length === 1);
     await controller.dispatch("session-1", { type: "submit", text: "must stay queued" });
-
     await expect(controller.dispatch("session-1", { type: "steer", text: "ambiguous" })).rejects.toThrow(
       "cannot persist unresolved steer",
     );
     active.resolve({ outcome: "completed" });
     await waitUntil(() => events.some((event) => event.type === "turn-settled"));
-
     expect(requests).toEqual(["active"]);
     await expect(controller.inspect("session-1")).resolves.toMatchObject({
       queuePaused: true,
@@ -1260,11 +1245,12 @@ describe("TurnInteractionController", () => {
     });
     await controller.close();
   });
-
   test("holds pre-ready steers durably and delivers them in command order once the turn is ready", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
-    const active = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const active = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     const runEntered = deferred<void>();
     const delivered: string[] = [];
     let signalReady: (() => void) | undefined;
@@ -1298,7 +1284,6 @@ describe("TurnInteractionController", () => {
     scheduler.flushOne();
     await runEntered.promise;
     await controller.dispatch("session-1", { type: "submit", text: "queued steer" });
-
     const explicit = controller.dispatch("session-1", { type: "steer", text: "explicit steer" });
     const promoted = controller.dispatch("session-1", { type: "steer" });
     await waitUntil(async () => {
@@ -1306,23 +1291,22 @@ describe("TurnInteractionController", () => {
       return snapshot.pending.filter((intent) => intent.status === "held").length === 2;
     });
     expect(delivered).toEqual([]);
-
     signalReady?.();
     await expect(Promise.all([explicit, promoted])).resolves.toEqual([
       expect.objectContaining({ effect: "steered" }),
       expect.objectContaining({ effect: "steered" }),
     ]);
     expect(delivered).toEqual(["explicit steer", "queued steer"]);
-
     active.resolve({ outcome: "completed" });
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "idle");
     await controller.close();
   });
-
   test("releases held steers without loss when a turn settles before becoming steerable", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
-    const active = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const active = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     const runEntered = deferred<void>();
     const delivered: string[] = [];
     let id = 0;
@@ -1355,7 +1339,6 @@ describe("TurnInteractionController", () => {
       );
       return held.length === 2;
     });
-
     active.resolve({ outcome: "completed" });
     await expect(explicit).resolves.toMatchObject({
       effect: "restored",
@@ -1363,7 +1346,6 @@ describe("TurnInteractionController", () => {
     });
     await expect(promoted).resolves.toMatchObject({ effect: "queued" });
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "idle");
-
     expect(delivered).toEqual([]);
     expect(intents.records()).toEqual(
       expect.arrayContaining([
@@ -1373,7 +1355,6 @@ describe("TurnInteractionController", () => {
     );
     await controller.close();
   });
-
   test("returns conversational steer results when an authoritative target can no longer be bound", async () => {
     const baseIntents = createIntentStore();
     const intents: TurnInteractionIntentStore & {
@@ -1384,7 +1365,9 @@ describe("TurnInteractionController", () => {
       promoteNewestPendingToSteer: async () => undefined,
     });
     const scheduler = createScheduler();
-    const active = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const active = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     let id = 0;
     const controller = createTurnInteractionController({
       intents,
@@ -1404,7 +1387,6 @@ describe("TurnInteractionController", () => {
     scheduler.flushOne();
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "running");
     await controller.dispatch("session-1", { type: "submit", text: "still queued" });
-
     await expect(
       controller.dispatch("session-1", { type: "steer", text: "keep in editor" }),
     ).resolves.toMatchObject({ effect: "idle", restoredText: "keep in editor" });
@@ -1414,17 +1396,19 @@ describe("TurnInteractionController", () => {
     await expect(controller.inspect("session-1")).resolves.toMatchObject({
       pending: [expect.objectContaining({ text: "still queued", status: "pending" })],
     });
-
     active.resolve({ outcome: "completed" });
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "idle");
     await controller.close();
   });
-
   test("a delayed interrupt targeting a settled turn never aborts its successor", async () => {
     const intents = createIntentStore();
     const scheduler = createScheduler();
-    const first = deferred<{ readonly outcome: "completed" | "aborted" }>();
-    const second = deferred<{ readonly outcome: "completed" | "aborted" }>();
+    const first = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
+    const second = deferred<{
+      readonly outcome: "completed" | "aborted";
+    }>();
     const requests: string[] = [];
     const interruptedSessions: string[] = [];
     let id = 0;
@@ -1454,14 +1438,12 @@ describe("TurnInteractionController", () => {
     await expect(controller.dispatch("session-1", { type: "interrupt", turnId: "" })).rejects.toThrow(
       "visible active turn identity",
     );
-
     first.resolve({ outcome: "completed" });
     await waitUntil(() => requests.length === 2);
     const stale = await controller.dispatch("session-1", {
       type: "interrupt",
       turnId: firstTurnId,
     });
-
     expect(stale.effect).toBe("idle");
     expect(interruptedSessions).toEqual([]);
     await expect(controller.inspect("session-1")).resolves.toMatchObject({
@@ -1473,7 +1455,6 @@ describe("TurnInteractionController", () => {
     await waitUntil(async () => (await controller.inspect("session-1")).phase === "idle");
     await controller.close();
   });
-
   test("owns background drain rejection, pauses fail-closed, and reports it again on close", async () => {
     const baseIntents = createIntentStore();
     const intents: TurnInteractionIntentStore & {
@@ -1505,7 +1486,6 @@ describe("TurnInteractionController", () => {
     );
     scheduler.flushOne();
     await waitUntil(() => events.some((event) => event.type === "interaction-failed"));
-
     await expect(controller.inspect("session-1")).resolves.toMatchObject({
       phase: "idle",
       queuePaused: true,

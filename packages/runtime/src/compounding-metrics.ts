@@ -1,5 +1,6 @@
 import {
   canonicalJson,
+  JsonValueSchema,
   type CapabilityRevisionRef,
   type CompoundingReplayRecord,
   type CorrectionExposure,
@@ -258,6 +259,7 @@ export function computeCompoundingMetrics(
   });
 }
 
+// BOUNDARY: Evidence records cross into byte storage through canonical JSON serialization.
 function jsonBytes(value: unknown): Uint8Array {
   return Buffer.from(canonicalJson(value), "utf8");
 }
@@ -295,7 +297,7 @@ export function createWorkspaceForegroundReplayPersistence(
         provenanceRefs: request.provenanceRefs,
       }),
     readEvidence: async (ref) =>
-      JSON.parse(Buffer.from(await store.reads.readEvidence(ref)).toString("utf8")),
+      JsonValueSchema.parse(JSON.parse(Buffer.from(await store.reads.readEvidence(ref)).toString("utf8"))),
     record: measurements.record,
   };
   return Object.freeze(persistence);

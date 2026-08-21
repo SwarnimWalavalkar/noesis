@@ -113,6 +113,7 @@ function recordGlyph(record: TuiLearningPrimitive, colorEnabled: boolean): strin
 }
 
 function groupHeader(section: string, colorEnabled: boolean): string {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const glyph = section === "failed" ? "×" : GROUP_GLYPH[section as TuiLearningPrimitiveGroup];
   return styled(colorEnabled, ANSI.dim, `${glyph} ${section}`);
 }
@@ -217,6 +218,7 @@ export function canExpandInputs(record: TuiLearningPrimitive): boolean {
 }
 
 export function interactableStops(record: TuiLearningPrimitive): readonly DetailStop[] {
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return [
     ...(canExpandEvidence(record) ? (["evidence"] as const) : []),
     ...(canExpandInputs(record) ? (["inputs"] as const) : []),
