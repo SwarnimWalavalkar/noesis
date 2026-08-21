@@ -1268,6 +1268,192 @@ describe("WorkspaceStore", () => {
     });
     recovered.close();
   });
+  test("enforces workflow context pins and model-call identity at the database boundary", async () => {
+    const store = await createWorkspaceStore(await temporary("context-model-integrity"));
+    await store.operational.sessions.put({
+      sessionId: "session-context-model-integrity",
+      title: "Context and model integrity",
+      status: "running",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const workflowDefinition = await store.definitions.recordWorkingDefinition({
+      workingPath: "workflows/context-model-integrity/workflow.json",
+      bytes: text('{"name":"context-model-integrity","phases":[]}'),
+      actor,
+    });
+    const contextBytes = text('{"role":"user","content":"frozen context"}\n');
+    const contextArtifact = await store.artifacts.writeArtifact({
+      path: "context/session-context-model-integrity.ndjson",
+      mediaType: "application/x-ndjson",
+      bytes: contextBytes,
+      actor,
+      relationshipRefs: Object.freeze([
+        {
+          kind: "database_row" as const,
+          table: "sessions" as const,
+          rowId: "session-context-model-integrity",
+        },
+      ]),
+    });
+    const database = new DatabaseSync(store.unsafeDatabasePathForTesting);
+    database.exec("PRAGMA busy_timeout = 5000");
+    const insertWorkflowRun = database.prepare(`INSERT INTO workflow_runs(
+        run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
+        context_artifact_id, context_digest, context_character_length, context_byte_length,
+        session_id, status, current_phase, input_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+    const workflowValues = [
+      "project-context-model-integrity",
+      "context-model-integrity",
+      1,
+      workflowDefinition.revisionId,
+    ] as const;
+    expect(() =>
+      insertWorkflowRun.run(
+        "workflow-partial-context",
+        ...workflowValues,
+        contextArtifact.artifactId,
+        null,
+        null,
+        null,
+        "session-context-model-integrity",
+        "running",
+        0,
+        "{}",
+        "2026-07-26T00:00:00.000Z",
+        "2026-07-26T00:00:00.000Z",
+      ),
+    ).toThrow(/Invalid workflow context pin/iu);
+    expect(() =>
+      insertWorkflowRun.run(
+        "workflow-mismatched-context",
+        ...workflowValues,
+        contextArtifact.artifactId,
+        digest("f"),
+        contextBytes.length,
+        contextBytes.byteLength,
+        "session-context-model-integrity",
+        "running",
+        0,
+        "{}",
+        "2026-07-26T00:00:00.000Z",
+        "2026-07-26T00:00:00.000Z",
+      ),
+    ).toThrow(/Invalid workflow context pin/iu);
+    database.close();
+    await store.operational.workflows.putRun({
+      runId: "workflow-valid-context",
+      projectId: "project-context-model-integrity",
+      workflowName: "context-model-integrity",
+      workflowRevision: 1,
+      definitionRevisionId: workflowDefinition.revisionId,
+      contextPin: Object.freeze({
+        artifactId: contextArtifact.artifactId,
+        digest: sha256(contextBytes),
+        characterLength: contextBytes.length,
+        byteLength: contextBytes.byteLength,
+      }),
+      sessionId: "session-context-model-integrity",
+      status: "running",
+      currentPhase: 0,
+      input: Object.freeze({}),
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+    });
+    const source = await store.artifacts.writeArtifact({
+      path: "codemode/execution-context-model-integrity/source.mjs",
+      mediaType: "text/javascript",
+      bytes: text('return await models.query("test");'),
+      actor,
+      relationshipRefs: Object.freeze([
+        {
+          kind: "database_row" as const,
+          table: "sessions" as const,
+          rowId: "session-context-model-integrity",
+        },
+      ]),
+    });
+    await store.operational.codeExecutions.put({
+      executionId: "execution-context-model-integrity",
+      logicalExecutionId: "logical-context-model-integrity",
+      sessionId: "session-context-model-integrity",
+      catalogId: "catalog-context-model-integrity",
+      catalogDigest: digest("a"),
+      sourceDigest: sha256(text('return await models.query("test");')),
+      sourceArtifactId: source.artifactId,
+      status: "running",
+      callCount: 1,
+      startedAt: "2026-07-26T00:00:01.000Z",
+    });
+    const requestArtifact = await store.artifacts.writeArtifact({
+      path: "model-calls/call-context-model-integrity/request.json",
+      mediaType: "application/json",
+      bytes: text('{"prompt":"test"}'),
+      actor,
+      relationshipRefs: Object.freeze([
+        {
+          kind: "database_row" as const,
+          table: "sessions" as const,
+          rowId: "session-context-model-integrity",
+        },
+      ]),
+    });
+    const outputArtifact = await store.artifacts.writeArtifact({
+      path: "model-calls/call-context-model-integrity/output.json",
+      mediaType: "application/json",
+      bytes: text('{"text":"done"}'),
+      actor,
+      relationshipRefs: Object.freeze([
+        {
+          kind: "database_row" as const,
+          table: "sessions" as const,
+          rowId: "session-context-model-integrity",
+        },
+      ]),
+    });
+    const runningModelCall = Object.freeze({
+      modelCallId: "call-context-model-integrity",
+      parentExecutionId: "execution-context-model-integrity",
+      sessionId: "session-context-model-integrity",
+      requestArtifactId: requestArtifact.artifactId,
+      provider: "controlled",
+      model: "controlled",
+      thinkingLevel: "off" as const,
+      contextRefs: Object.freeze([]),
+      status: "running" as const,
+      startedAt: "2026-07-26T00:00:01.500Z",
+    });
+    await store.operational.modelCalls.put(runningModelCall);
+    const modelDatabase = new DatabaseSync(store.unsafeDatabasePathForTesting);
+    modelDatabase.exec("PRAGMA busy_timeout = 5000");
+    expect(() =>
+      modelDatabase
+        .prepare("UPDATE model_calls SET status = 'completed', completed_at = ? WHERE model_call_id = ?")
+        .run("2026-07-26T00:00:02.000Z", runningModelCall.modelCallId),
+    ).toThrow();
+    expect(() =>
+      modelDatabase
+        .prepare("INSERT OR REPLACE INTO model_calls SELECT * FROM model_calls WHERE model_call_id = ?")
+        .run(runningModelCall.modelCallId),
+    ).toThrow(/Model call identity already exists/iu);
+    modelDatabase.close();
+    await store.operational.modelCalls.put({
+      ...runningModelCall,
+      outputArtifactId: outputArtifact.artifactId,
+      status: "completed",
+      completedAt: "2026-07-26T00:00:02.000Z",
+    });
+    await expect(store.operational.modelCalls.get(runningModelCall.modelCallId)).resolves.toMatchObject({
+      outputArtifactId: outputArtifact.artifactId,
+      status: "completed",
+    });
+    store.close();
+  });
   test("recovers orphaned foreground turns and their actions under the successor runtime owner", async () => {
     const root = await temporary("foreground-turn-recovery");
     const first = await createWorkspaceStore(root, {

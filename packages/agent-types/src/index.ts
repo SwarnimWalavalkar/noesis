@@ -10,6 +10,7 @@ import type {
   ProjectRef,
 } from "@noesis/domain";
 import {
+  ArtifactFileRefSchema,
   createConditionalObject,
   CapabilityRevisionRefSchema,
   canonicalJson,
@@ -312,10 +313,7 @@ const FrozenContextCheckpointSchema = z.strictObject({
 });
 const FrozenContextDocumentSchema = z.strictObject({
   documentId: z.string().min(1),
-  artifact: z.strictObject({
-    kind: z.literal("artifact_file"),
-    artifactId: z.string().min(1),
-    path: z.string().min(1),
+  artifact: ArtifactFileRefSchema.extend({
     mediaType: z.literal("application/x-ndjson"),
   }),
   format: z.literal("noesis-session-context-v1"),

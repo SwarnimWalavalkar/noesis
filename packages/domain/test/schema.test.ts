@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  ArtifactFileRefSchema,
   GrantSchema,
   LedgerEventSchema,
   StableEffectOperationAttemptSchema,
@@ -52,6 +53,24 @@ describe("domain Zod schemas", () => {
     });
     expect(() => toJsonValue({ value: undefined })).toThrow();
     expect(() => toJsonValue(Number.POSITIVE_INFINITY)).toThrow();
+  });
+
+  test("rejects artifact paths that can escape their workspace", () => {
+    const artifact = {
+      kind: "artifact_file" as const,
+      artifactId: "artifact-1",
+      path: "artifacts/context.jsonl",
+      mediaType: "application/x-ndjson",
+    };
+
+    expect(ArtifactFileRefSchema.safeParse(artifact).success).toBe(true);
+    for (const path of [
+      "/tmp/context.jsonl",
+      "../context.jsonl",
+      "artifacts/../../context.jsonl",
+      "C:\\context.jsonl",
+    ])
+      expect(ArtifactFileRefSchema.safeParse({ ...artifact, path }).success).toBe(false);
   });
 
   test("binds stable effect-operation identity to the request authority tuple", () => {

@@ -3284,43 +3284,51 @@ function createOperationalRepositories(
         )
           throw new Error(`Terminal model call ${record.modelCallId} is immutable`);
       }
-      db.prepare(`INSERT INTO model_calls(
-          model_call_id, parent_execution_id, session_id, turn_id, context_artifact_id,
-          request_artifact_id, output_artifact_id, provider, model, thinking_level,
-          context_refs_json, status, input_tokens, output_tokens, total_tokens,
-          estimated_cost, latency_ms, error, started_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(model_call_id) DO UPDATE SET
-          output_artifact_id = excluded.output_artifact_id,
-          status = excluded.status,
-          input_tokens = excluded.input_tokens,
-          output_tokens = excluded.output_tokens,
-          total_tokens = excluded.total_tokens,
-          estimated_cost = excluded.estimated_cost,
-          latency_ms = excluded.latency_ms,
-          error = excluded.error,
-          completed_at = excluded.completed_at`).run(
-        record.modelCallId,
-        record.parentExecutionId,
-        record.sessionId,
-        record.turnId ?? null,
-        record.contextArtifactId ?? null,
-        record.requestArtifactId,
-        record.outputArtifactId ?? null,
-        record.provider,
-        record.model,
-        record.thinkingLevel,
-        JSON.stringify(record.contextRefs),
-        record.status,
-        record.usage?.inputTokens ?? null,
-        record.usage?.outputTokens ?? null,
-        record.usage?.totalTokens ?? null,
-        record.usage?.estimatedCost ?? null,
-        record.latencyMs ?? null,
-        record.error ?? null,
-        record.startedAt,
-        record.completedAt ?? null,
-      );
+      if (currentRow === undefined) {
+        db.prepare(`INSERT INTO model_calls(
+            model_call_id, parent_execution_id, session_id, turn_id, context_artifact_id,
+            request_artifact_id, output_artifact_id, provider, model, thinking_level,
+            context_refs_json, status, input_tokens, output_tokens, total_tokens,
+            estimated_cost, latency_ms, error, started_at, completed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          record.modelCallId,
+          record.parentExecutionId,
+          record.sessionId,
+          record.turnId ?? null,
+          record.contextArtifactId ?? null,
+          record.requestArtifactId,
+          record.outputArtifactId ?? null,
+          record.provider,
+          record.model,
+          record.thinkingLevel,
+          JSON.stringify(record.contextRefs),
+          record.status,
+          record.usage?.inputTokens ?? null,
+          record.usage?.outputTokens ?? null,
+          record.usage?.totalTokens ?? null,
+          record.usage?.estimatedCost ?? null,
+          record.latencyMs ?? null,
+          record.error ?? null,
+          record.startedAt,
+          record.completedAt ?? null,
+        );
+      } else {
+        db.prepare(`UPDATE model_calls SET
+            output_artifact_id = ?, status = ?, input_tokens = ?, output_tokens = ?,
+            total_tokens = ?, estimated_cost = ?, latency_ms = ?, error = ?, completed_at = ?
+          WHERE model_call_id = ?`).run(
+          record.outputArtifactId ?? null,
+          record.status,
+          record.usage?.inputTokens ?? null,
+          record.usage?.outputTokens ?? null,
+          record.usage?.totalTokens ?? null,
+          record.usage?.estimatedCost ?? null,
+          record.latencyMs ?? null,
+          record.error ?? null,
+          record.completedAt ?? null,
+          record.modelCallId,
+        );
+      }
       recordActivity(
         systemActor,
         `model_call.${record.status}`,

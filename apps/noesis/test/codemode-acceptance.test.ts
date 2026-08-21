@@ -2,7 +2,12 @@ import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveNoesisConfig } from "@noesis/config";
-import { createPiAgentRuntime, type PiModelQueryRequest, projectWorkflowToolName } from "@noesis/runtime-pi";
+import {
+  createAmbiguousModelQueryOutcomeError,
+  createPiAgentRuntime,
+  type PiModelQueryRequest,
+  projectWorkflowToolName,
+} from "@noesis/runtime-pi";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   CONTROLLED_PI_MODEL,
@@ -45,6 +50,14 @@ describe("production codemode journey", () => {
             },
             "call-query-oversized",
           );
+        if (lastUserText.includes("Ambiguous"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: 'return await models.query("Trigger ambiguous timeout.");',
+            },
+            "call-query-ambiguous",
+          );
         return controlledToolCallResponse(
           "execute",
           {
@@ -63,6 +76,7 @@ describe("production codemode journey", () => {
       modelQuery: Object.freeze({
         query: async (request: PiModelQueryRequest) => {
           nestedRequests.push(request);
+          if (request.prompt === "Trigger ambiguous timeout.") throw createAmbiguousModelQueryOutcomeError();
           return Object.freeze({
             text: "cobalt",
             provider: request.provider,
@@ -123,6 +137,14 @@ describe("production codemode journey", () => {
     expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
       1,
     );
+    await runtime.debug.runTurn(trail.trailId, "Ambiguous nested request.");
+    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toMatchObject([
+      { status: "completed" },
+      {
+        status: "interrupted",
+        error: "Nested model query timed out before its provider outcome was observed",
+      },
+    ]);
     await runtime.shutdown();
   });
 

@@ -3,7 +3,11 @@ ALTER TABLE workflow_runs
 
 ALTER TABLE workflow_runs
   ADD COLUMN context_digest TEXT CHECK (
-    context_digest IS NULL OR length(context_digest) = 64
+    context_digest IS NULL OR (
+      typeof(context_digest) = 'text'
+      AND length(CAST(context_digest AS BLOB)) = 64
+      AND context_digest NOT GLOB '*[^0-9a-f]*'
+    )
   );
 
 ALTER TABLE workflow_runs
@@ -25,6 +29,27 @@ WHEN OLD.context_artifact_id IS NOT NEW.context_artifact_id
   OR OLD.context_byte_length IS NOT NEW.context_byte_length
 BEGIN
   SELECT RAISE(ABORT, 'Workflow context pin is immutable');
+END;
+
+CREATE TRIGGER workflow_context_pin_insert_valid
+BEFORE INSERT ON workflow_runs
+WHEN (
+  (NEW.context_artifact_id IS NULL) +
+  (NEW.context_digest IS NULL) +
+  (NEW.context_character_length IS NULL) +
+  (NEW.context_byte_length IS NULL)
+) NOT IN (0, 4)
+OR (
+  NEW.context_artifact_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1
+    FROM artifacts
+    WHERE artifact_id = NEW.context_artifact_id
+      AND content_digest = NEW.context_digest
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'Invalid workflow context pin');
 END;
 
 CREATE TABLE model_calls (
@@ -54,6 +79,9 @@ CREATE TABLE model_calls (
     (status = 'running' AND completed_at IS NULL)
     OR
     (status != 'running' AND completed_at IS NOT NULL)
+  ),
+  CHECK (
+    status != 'completed' OR output_artifact_id IS NOT NULL
   )
 ) STRICT;
 
@@ -74,6 +102,15 @@ WHEN NOT EXISTS (
 )
 BEGIN
   SELECT RAISE(ABORT, 'Model call does not belong to its parent execution');
+END;
+
+CREATE TRIGGER model_call_identity_insert_once
+BEFORE INSERT ON model_calls
+WHEN EXISTS (
+  SELECT 1 FROM model_calls WHERE model_call_id = NEW.model_call_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'Model call identity already exists');
 END;
 
 CREATE TRIGGER model_call_identity_immutable

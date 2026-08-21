@@ -12,7 +12,19 @@ import type {
 import { DATABASE_TABLES, WORKING_ADJUSTMENT_LIMITS } from "./research.ts";
 
 const ContentDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
-const StoredPathSchema = z.string().min(1);
+const WindowsAbsolutePathPattern = /^[a-z]:[\\/]/iu;
+export const StoredPathSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      !value.startsWith("/") &&
+      !value.startsWith("\\") &&
+      !WindowsAbsolutePathPattern.test(value) &&
+      !value.includes("\0") &&
+      !value.split(/[\\/]/u).includes(".."),
+    "Stored paths must be relative and remain within the workspace",
+  );
 
 export const DatabaseRowRefSchema = z.strictObject({
   kind: z.literal("database_row"),

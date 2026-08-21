@@ -92,6 +92,7 @@ import {
   createHotbarToolAliases,
   createRestrictedRoleContextPolicy,
   createStructuredInferencePort,
+  isAmbiguousModelQueryOutcomeError,
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
   hotbarToolAlias,
@@ -3063,7 +3064,11 @@ export async function createApplicationRuntimeComposition(
           const message = error instanceof Error ? error.message : String(error);
           await workspace.operational.modelCalls.put({
             ...base,
-            status: context.signal.aborted ? "cancelled" : "failed",
+            status: isAmbiguousModelQueryOutcomeError(error)
+              ? "interrupted"
+              : context.signal.aborted
+                ? "cancelled"
+                : "failed",
             latencyMs: Date.now() - started,
             error: message,
             completedAt: new Date().toISOString(),
