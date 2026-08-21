@@ -245,6 +245,29 @@ describe("turn intelligence", () => {
       updatedAt: "2026-07-24T23:58:00.000Z",
       metadata: Object.freeze({}),
     });
+    await workspace.operational.sessions.put({
+      sessionId: "session-unrelated",
+      title: "Unrelated routing fixture",
+      status: "idle",
+      provider: "fake",
+      model: "fake",
+      runtime: "fake",
+      createdAt: "2026-07-24T23:58:00.000Z",
+      updatedAt: "2026-07-24T23:58:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    for (const sessionId of ["session-invalid", "session-duplicate", "session-misattributed"])
+      await workspace.operational.sessions.put({
+        sessionId,
+        title: `${sessionId} routing fixture`,
+        status: "idle",
+        provider: "fake",
+        model: "fake",
+        runtime: "fake",
+        createdAt: "2026-07-24T23:58:00.000Z",
+        updatedAt: "2026-07-24T23:58:00.000Z",
+        metadata: Object.freeze({}),
+      });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const priorHistory = Object.freeze([
       Object.freeze({

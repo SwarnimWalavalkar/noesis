@@ -56,7 +56,7 @@ const UserIntentStatusSchema = z.enum([
 const UserIntentSteerOriginSchema = z.enum(["explicit", "queued"]);
 const ToolCallStatusSchema = z.enum(["requested", "running", "completed", "failed", "denied", "ambiguous"]);
 const CodeExecutionStatusSchema = z.enum(["running", "completed", "failed", "cancelled", "interrupted"]);
-const ModelCallStatusSchema = z.enum(["running", "completed", "failed", "cancelled"]);
+const ModelCallStatusSchema = z.enum(["running", "completed", "failed", "cancelled", "interrupted"]);
 const WorkflowRunStatusSchema = z.enum(["running", "paused", "completed", "failed", "cancelled"]);
 const WorkflowPhaseStatusSchema = z.enum(["pending", "running", "completed", "failed", "cancelled"]);
 const OutcomeStatusSchema = z.enum(["accepted", "corrected", "failed", "unknown"]);
@@ -274,8 +274,12 @@ export function decodeModelCall(row: DatabaseRow | undefined): ModelCallRecord {
   const latencyMs = row?.["latency_ms"] ?? null;
   const error = optionalString(row, "error");
   const completedAt = optionalString(row, "completed_at");
+  const usageColumns = [inputTokens, outputTokens, totalTokens, estimatedCost];
+  const presentUsageColumns = usageColumns.filter((value) => value !== null).length;
+  if (presentUsageColumns !== 0 && presentUsageColumns !== usageColumns.length)
+    throw new Error(`Model call ${String(row?.["model_call_id"])} has partial usage columns`);
   const usage =
-    inputTokens === null || outputTokens === null || totalTokens === null || estimatedCost === null
+    presentUsageColumns === 0
       ? undefined
       : Object.freeze({
           inputTokens: z.number().int().nonnegative().parse(inputTokens),
@@ -300,7 +304,27 @@ export function decodeModelCall(row: DatabaseRow | undefined): ModelCallRecord {
       thinkingLevel: z
         .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
         .parse(requiredString(row, "thinking_level")),
-      contextRefs: JsonValueSchema.parse(parseJson(requiredString(row, "context_refs_json"))),
+      contextRefs: Object.freeze(
+        z
+          .array(
+            z.union([
+              z.string(),
+              z.strictObject({
+                __noesisContext: z.strictObject({
+                  documentId: z.string().min(1),
+                  start: z.number().int().nonnegative(),
+                  end: z.number().int().nonnegative(),
+                }),
+              }),
+            ]),
+          )
+          .parse(parseJson(requiredString(row, "context_refs_json")))
+          .map((part) =>
+            typeof part === "string"
+              ? part
+              : Object.freeze({ __noesisContext: Object.freeze({ ...part.__noesisContext }) }),
+          ),
+      ),
       status: ModelCallStatusSchema.parse(requiredString(row, "status")),
     } as const)
     .addOptional(!(usage === undefined) ? { usage } : undefined)
@@ -328,6 +352,21 @@ export function decodeWorkflowRun(row: DatabaseRow | undefined): WorkflowRunReco
   const contextDigest = optionalString(row, "context_digest");
   const contextCharacterLength = row?.["context_character_length"] ?? null;
   const contextByteLength = row?.["context_byte_length"] ?? null;
+  const contextPinColumns = [contextArtifactId, contextDigest, contextCharacterLength, contextByteLength];
+  const presentContextPinColumns = contextPinColumns.filter(
+    (value) => value !== undefined && value !== null,
+  ).length;
+  if (presentContextPinColumns !== 0 && presentContextPinColumns !== contextPinColumns.length)
+    throw new Error(`Workflow run ${String(row?.["run_id"])} has partial context pin columns`);
+  const contextPin =
+    presentContextPinColumns === 0
+      ? undefined
+      : Object.freeze({
+          artifactId: z.string().min(1).parse(contextArtifactId),
+          digest: DigestSchema.parse(contextDigest),
+          characterLength: z.number().int().nonnegative().parse(contextCharacterLength),
+          byteLength: z.number().int().nonnegative().parse(contextByteLength),
+        });
   const output = optionalString(row, "output_json");
   const error = optionalString(row, "error");
   const completedAt = optionalString(row, "completed_at");
@@ -362,20 +401,7 @@ export function decodeWorkflowRun(row: DatabaseRow | undefined): WorkflowRunReco
           }
         : undefined,
     )
-    .addOptional(!(contextArtifactId === undefined) ? { contextArtifactId } : undefined)
-    .addOptional(
-      !(contextDigest === undefined) ? { contextDigest: DigestSchema.parse(contextDigest) } : undefined,
-    )
-    .addOptional(
-      !(contextCharacterLength === null || contextCharacterLength === undefined)
-        ? { contextCharacterLength: z.number().int().nonnegative().parse(contextCharacterLength) }
-        : undefined,
-    )
-    .addOptional(
-      !(contextByteLength === null || contextByteLength === undefined)
-        ? { contextByteLength: z.number().int().nonnegative().parse(contextByteLength) }
-        : undefined,
-    )
+    .addOptional(!(contextPin === undefined) ? { contextPin } : undefined)
     .add({
       sessionId: requiredString(row, "session_id"),
     } as const)

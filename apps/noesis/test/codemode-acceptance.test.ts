@@ -37,6 +37,14 @@ describe("production codemode journey", () => {
       respond: ({ context, lastUserText }) => {
         if (lastUserText.includes("Seed")) return "The durable seed is cobalt.";
         if (context.messages.at(-1)?.role === "toolResult") return "The nested analysis is complete.";
+        if (lastUserText.includes("Oversized"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: 'return await models.query("Analyze this.", "x".repeat(2_000_000));',
+            },
+            "call-query-oversized",
+          );
         return controlledToolCallResponse(
           "execute",
           {
@@ -110,6 +118,11 @@ describe("production codemode journey", () => {
     ]);
     const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
     expect(calls.map((call) => call.toolName)).toEqual(["execute", "models.query"]);
+    await runtime.debug.runTurn(trail.trailId, "Oversized nested request.");
+    expect(nestedRequests).toHaveLength(1);
+    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
+      1,
+    );
     await runtime.shutdown();
   });
 

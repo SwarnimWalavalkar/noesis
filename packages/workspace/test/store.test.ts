@@ -26,7 +26,7 @@ import {
   type NoesisWorkspaceStore,
   restoreWorkspaceBackup,
 } from "../src/index.ts";
-import { decodeWorkflowRun } from "../src/decoders.ts";
+import { decodeModelCall, decodeWorkflowRun } from "../src/decoders.ts";
 import { createWorkspaceRuntimeInternals } from "../src/protected-runtime.ts";
 // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
 const actor = { actorId: "test-user", kind: "user" as const };
@@ -1262,8 +1262,8 @@ describe("WorkspaceStore", () => {
       completedAt: "2026-07-26T00:01:00.000Z",
     });
     expect(await recovered.operational.modelCalls.get("call-unfinished")).toMatchObject({
-      status: "failed",
-      error: "Process exited before model call settled",
+      status: "interrupted",
+      error: "Process exited before model call outcome was observed",
       completedAt: "2026-07-26T00:01:00.000Z",
     });
     recovered.close();
@@ -4553,6 +4553,86 @@ describe("WorkspaceStore", () => {
     });
     database.close();
     store.close();
+  });
+  test("rejects partial model usage and workflow context pins while decoding", () => {
+    expect(() =>
+      decodeModelCall({
+        model_call_id: "model-call-partial-usage",
+        parent_execution_id: "execution-partial-usage",
+        session_id: "session-partial-usage",
+        turn_id: null,
+        context_artifact_id: null,
+        request_artifact_id: "artifact-request",
+        output_artifact_id: null,
+        provider: "controlled",
+        model: "controlled",
+        thinking_level: "off",
+        context_refs_json: "[]",
+        status: "completed",
+        input_tokens: 1,
+        output_tokens: null,
+        total_tokens: null,
+        estimated_cost: null,
+        latency_ms: null,
+        error: null,
+        started_at: "2026-07-26T00:00:00.000Z",
+        completed_at: "2026-07-26T00:00:01.000Z",
+      }),
+    ).toThrow(/partial usage columns/iu);
+    expect(() =>
+      decodeModelCall({
+        model_call_id: "model-call-invalid-context",
+        parent_execution_id: "execution-invalid-context",
+        session_id: "session-invalid-context",
+        turn_id: null,
+        context_artifact_id: null,
+        request_artifact_id: "artifact-request",
+        output_artifact_id: null,
+        provider: "controlled",
+        model: "controlled",
+        thinking_level: "off",
+        context_refs_json: '[{"unexpected":true}]',
+        status: "completed",
+        input_tokens: null,
+        output_tokens: null,
+        total_tokens: null,
+        estimated_cost: null,
+        latency_ms: null,
+        error: null,
+        started_at: "2026-07-26T00:00:00.000Z",
+        completed_at: "2026-07-26T00:00:01.000Z",
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeWorkflowRun({
+        run_id: "workflow-run-partial-context",
+        project_id: null,
+        workflow_name: "partial-context",
+        workflow_revision: 1,
+        definition_revision_id: "definition-partial-context",
+        catalog_id: null,
+        catalog_digest: null,
+        definition_dependencies_digest: null,
+        permission_digest: null,
+        provider: null,
+        model: null,
+        thinking_level: null,
+        context_artifact_id: "artifact-context",
+        context_digest: null,
+        context_character_length: null,
+        context_byte_length: null,
+        session_id: "session-partial-context",
+        turn_id: null,
+        status: "running",
+        current_phase: 0,
+        input_json: "{}",
+        output_json: null,
+        error: null,
+        created_at: "2026-07-26T00:00:00.000Z",
+        updated_at: "2026-07-26T00:00:00.000Z",
+        completed_at: null,
+      }),
+    ).toThrow(/partial context pin columns/iu);
   });
 });
 function seedForegroundTurn(

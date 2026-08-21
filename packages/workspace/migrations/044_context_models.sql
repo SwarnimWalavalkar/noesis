@@ -41,7 +41,7 @@ CREATE TABLE model_calls (
     thinking_level IN ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
   ),
   context_refs_json TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'cancelled', 'interrupted')),
   input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
   output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
   total_tokens INTEGER CHECK (total_tokens IS NULL OR total_tokens >= 0),

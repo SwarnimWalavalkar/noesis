@@ -36,6 +36,7 @@ const isolatedRoleMessageNames = {
 export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPolicy {
   const foreground = role === "foreground";
   const compactor = role === "session_compactor";
+  // Structured inference appends output_contract after the single compaction_input message.
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze(
     createConditionalObject({

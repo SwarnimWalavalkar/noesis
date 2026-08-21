@@ -174,10 +174,12 @@ export interface WorkflowRunRecord {
   readonly provider?: string;
   readonly model?: string;
   readonly thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-  readonly contextArtifactId?: string;
-  readonly contextDigest?: string;
-  readonly contextCharacterLength?: number;
-  readonly contextByteLength?: number;
+  readonly contextPin?: {
+    readonly artifactId: string;
+    readonly digest: string;
+    readonly characterLength: number;
+    readonly byteLength: number;
+  };
   readonly sessionId: string;
   readonly turnId?: string;
   readonly status: "running" | "paused" | "completed" | "failed" | "cancelled";
@@ -201,8 +203,17 @@ export interface ModelCallRecord {
   readonly provider: string;
   readonly model: string;
   readonly thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-  readonly contextRefs: JsonValue;
-  readonly status: "running" | "completed" | "failed" | "cancelled";
+  readonly contextRefs: readonly (
+    | string
+    | {
+        readonly __noesisContext: {
+          readonly documentId: string;
+          readonly start: number;
+          readonly end: number;
+        };
+      }
+  )[];
+  readonly status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
   readonly usage?: {
     readonly inputTokens: number;
     readonly outputTokens: number;

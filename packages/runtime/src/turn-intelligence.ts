@@ -89,6 +89,9 @@ function optionalJsonFields(
   for (const [key, item] of Object.entries(value)) if (item !== undefined) present[key] = item;
   return Object.freeze(present);
 }
+function compareCodePoints(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
 async function freezeContextDocument(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
@@ -244,23 +247,22 @@ async function freezeContextDocument(
     );
   lines.sort(
     (left, right) =>
-      left.occurredAt.localeCompare(right.occurredAt) ||
+      compareCodePoints(left.occurredAt, right.occurredAt) ||
       left.kindOrder - right.kindOrder ||
-      left.stableId.localeCompare(right.stableId),
+      compareCodePoints(left.stableId, right.stableId),
   );
   const content = lines.length === 0 ? "" : `${lines.map((line) => canonicalJson(line.value)).join("\n")}\n`;
   const bytes = new TextEncoder().encode(content);
   const contentDigest = sha256(bytes);
+  if (!session) throw new Error(`Context document requires session ${sessionId}`);
   const artifact = await workspace.artifacts.writeArtifact({
     path: `context-documents/${sha256(sessionId).slice(0, 32)}/${contentDigest}.jsonl`,
     mediaType: "application/x-ndjson",
     bytes,
     actor: Object.freeze({ actorId: "turn-context", kind: "system" as const }),
-    relationshipRefs: session
-      ? Object.freeze([
-          Object.freeze({ kind: "database_row" as const, table: "sessions" as const, rowId: sessionId }),
-        ])
-      : Object.freeze([]),
+    relationshipRefs: Object.freeze([
+      Object.freeze({ kind: "database_row" as const, table: "sessions" as const, rowId: sessionId }),
+    ]),
   });
   return Object.freeze({
     documentId: `context_document_${contentDigest}`,

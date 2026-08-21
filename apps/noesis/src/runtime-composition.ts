@@ -97,8 +97,10 @@ import {
   hotbarToolAlias,
   isProjectWorkflowToolForProject,
   isProjectWorkflowToolName,
+  PI_MODEL_QUERY_SYSTEM_PROMPT,
   type PiCodeExecutionAdapter,
   type PiModelQueryRunner,
+  renderPiModelQueryPrompt,
   type PiSelfToolAdapter,
   type PiSkillLibrary,
   type PiSkillSnapshot,
@@ -154,6 +156,7 @@ const HISTORY_RERANK_MIN_EXCERPT_CHARACTERS = 32;
 const HISTORY_RERANK_MAX_EXCERPT_CHARACTERS = 480;
 const HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE = 4096;
 const LATE_REFLECTION_REFRESH_MS = 5000;
+const MAX_MODEL_QUERY_PROMPT_CHARACTERS = 1_000_000;
 const BASE_SYSTEM_PROMPT = [
   "Follow the user's instructions, use tools when useful, and finish the work.",
   "Before asking the user to repeat relevant prior work, search previous sessions when it could help.",
@@ -2193,24 +2196,18 @@ export async function createApplicationRuntimeComposition(
     const restoreWorkflowContextDocument = async (
       run: WorkflowRunRecord,
     ): Promise<RuntimeExecutionContextDocument> => {
-      if (
-        !run.contextArtifactId ||
-        !run.contextDigest ||
-        run.contextCharacterLength === undefined ||
-        run.contextByteLength === undefined
-      )
-        throw new Error(`Workflow run ${run.runId} has no frozen context document pin`);
-      const artifact = await workspace.getArtifactMetadata(run.contextArtifactId);
+      if (!run.contextPin) throw new Error(`Workflow run ${run.runId} has no frozen context document pin`);
+      const artifact = await workspace.getArtifactMetadata(run.contextPin.artifactId);
       if (!artifact || artifact.mediaType !== "application/x-ndjson")
         throw new Error(`Workflow run ${run.runId} has an unavailable context document`);
       return registerContextDocument(
         Object.freeze({
-          documentId: `context_document_${run.contextDigest}`,
+          documentId: `context_document_${run.contextPin.digest}`,
           artifact: Object.freeze({ ...artifact, mediaType: "application/x-ndjson" as const }),
           format: "noesis-session-context-v1",
-          characterLength: run.contextCharacterLength,
-          byteLength: run.contextByteLength,
-          contentDigest: run.contextDigest,
+          characterLength: run.contextPin.characterLength,
+          byteLength: run.contextPin.byteLength,
+          contentDigest: run.contextPin.digest,
         }),
       );
     };
@@ -2930,7 +2927,7 @@ export async function createApplicationRuntimeComposition(
       z.array(z.union([z.string(), contextHandleSchema])),
     ]);
     const modelQueryInputSchema = z.strictObject({
-      prompt: z.string().trim().min(1),
+      prompt: z.string().trim().min(1).max(MAX_MODEL_QUERY_PROMPT_CHARACTERS),
       context: modelQueryContextSchema.optional(),
     });
     type ModelQueryContextPart = string | z.infer<typeof contextHandleSchema>;
@@ -2976,6 +2973,15 @@ export async function createApplicationRuntimeComposition(
             throw new Error("ContextView range is outside the frozen context document");
           expanded.push((await activeContext.read()).slice(handle.start, handle.end));
         }
+        if (plan.requestTokenBudget === undefined)
+          throw new Error("Nested model queries require a frozen request token budget");
+        const renderedRequest = renderPiModelQueryPrompt(input.prompt, expanded);
+        const estimatedRequestTokens =
+          estimateContextTokens(PI_MODEL_QUERY_SYSTEM_PROMPT) + estimateContextTokens(renderedRequest);
+        if (estimatedRequestTokens > plan.requestTokenBudget)
+          throw new Error(
+            `Nested model query exceeds its frozen request token budget of ${String(plan.requestTokenBudget)} tokens`,
+          );
         const startedAt = new Date().toISOString();
         const artifactDirectory = `model-calls/${sha256(context.callId).slice(0, 32)}`;
         const actor = Object.freeze({ actorId: "noesis-model-query", kind: "noesis" as const });
@@ -3012,7 +3018,13 @@ export async function createApplicationRuntimeComposition(
               provider: plan.provider,
               model: plan.model,
               thinkingLevel: plan.thinkingLevel,
-              contextRefs: toJsonValue(input.context ?? []),
+              contextRefs: Object.freeze(
+                refs.map((ref) =>
+                  typeof ref === "string"
+                    ? ref
+                    : Object.freeze({ __noesisContext: Object.freeze({ ...ref.__noesisContext }) }),
+                ),
+              ),
               startedAt,
             } as const)
             .finish(),
@@ -3366,10 +3378,12 @@ export async function createApplicationRuntimeComposition(
           provider: plan.provider,
           model: plan.model,
           thinkingLevel: plan.thinkingLevel,
-          contextArtifactId: workflowContext.frozen.artifact.artifactId,
-          contextDigest: workflowContext.frozen.contentDigest,
-          contextCharacterLength: workflowContext.frozen.characterLength,
-          contextByteLength: workflowContext.frozen.byteLength,
+          contextPin: Object.freeze({
+            artifactId: workflowContext.frozen.artifact.artifactId,
+            digest: workflowContext.frozen.contentDigest,
+            characterLength: workflowContext.frozen.characterLength,
+            byteLength: workflowContext.frozen.byteLength,
+          }),
           sessionId: plan.sessionId,
           turnId: plan.turnId,
           status: "running",

@@ -3257,10 +3257,11 @@ function createOperationalRepositories(
       if (currentRow !== undefined) {
         const current = decodeModelCall(currentRow);
         const transitions = {
-          running: ["running", "completed", "failed", "cancelled"],
+          running: ["running", "completed", "failed", "cancelled", "interrupted"],
           completed: ["completed"],
           failed: ["failed"],
           cancelled: ["cancelled"],
+          interrupted: ["interrupted"],
         } satisfies Readonly<Record<ModelCallRecord["status"], readonly ModelCallRecord["status"][]>>;
         if (!permitsTransition(transitions, current.status, record.status))
           throw new Error(`Invalid model-call transition ${current.status} -> ${record.status}`);
@@ -3396,10 +3397,10 @@ function createOperationalRepositories(
         record.provider ?? null,
         record.model ?? null,
         record.thinkingLevel ?? null,
-        record.contextArtifactId ?? null,
-        record.contextDigest ?? null,
-        record.contextCharacterLength ?? null,
-        record.contextByteLength ?? null,
+        record.contextPin?.artifactId ?? null,
+        record.contextPin?.digest ?? null,
+        record.contextPin?.characterLength ?? null,
+        record.contextPin?.byteLength ?? null,
         record.sessionId,
         record.turnId ?? null,
         record.status,
@@ -3842,7 +3843,7 @@ function createOperationalRepositories(
             const modelCallId = requiredString(row, "model_call_id");
             const parentExecutionId = requiredString(row, "parent_execution_id");
             db.prepare(`UPDATE model_calls
-               SET status = 'failed', error = 'Process exited before model call settled', completed_at = ?
+               SET status = 'interrupted', error = 'Process exited before model call outcome was observed', completed_at = ?
                WHERE model_call_id = ? AND status = 'running'`).run(interruptedAt, modelCallId);
             recordActivity(systemActor, "model_call.interrupted", "codemode_execution", parentExecutionId, [
               { modelCallId },
