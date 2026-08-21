@@ -264,9 +264,13 @@ async function freezeContextDocument(
       Object.freeze({ kind: "database_row" as const, table: "sessions" as const, rowId: sessionId }),
     ]),
   });
+  if (artifact.mediaType !== "application/x-ndjson")
+    throw new Error(
+      `Context document artifact ${artifact.artifactId} has unexpected media type ${artifact.mediaType}`,
+    );
   return Object.freeze({
     documentId: `context_document_${contentDigest}`,
-    artifact: Object.freeze({ ...artifact, mediaType: "application/x-ndjson" as const }),
+    artifact: Object.freeze({ ...artifact, mediaType: artifact.mediaType }),
     format: "noesis-session-context-v1",
     characterLength: content.length,
     byteLength: bytes.length,

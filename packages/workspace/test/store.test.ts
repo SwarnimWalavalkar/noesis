@@ -1286,7 +1286,8 @@ describe("WorkspaceStore", () => {
       bytes: text('{"name":"context-model-integrity","phases":[]}'),
       actor,
     });
-    const contextBytes = text('{"role":"user","content":"frozen context"}\n');
+    const contextText = '{"role":"user","content":"frozen context é"}\n';
+    const contextBytes = text(contextText);
     const contextArtifact = await store.artifacts.writeArtifact({
       path: "context/session-context-model-integrity.ndjson",
       mediaType: "application/x-ndjson",
@@ -1335,7 +1336,7 @@ describe("WorkspaceStore", () => {
         ...workflowValues,
         contextArtifact.artifactId,
         digest("f"),
-        contextBytes.length,
+        contextText.length,
         contextBytes.byteLength,
         "session-context-model-integrity",
         "running",
@@ -1390,7 +1391,7 @@ describe("WorkspaceStore", () => {
       contextPin: Object.freeze({
         artifactId: contextArtifact.artifactId,
         digest: sha256(contextBytes),
-        characterLength: contextBytes.length,
+        characterLength: contextText.length,
         byteLength: contextBytes.byteLength,
       }),
       sessionId: "session-context-model-integrity",
@@ -1459,7 +1460,15 @@ describe("WorkspaceStore", () => {
       provider: "controlled",
       model: "controlled",
       thinkingLevel: "off" as const,
-      contextRefs: Object.freeze([]),
+      contextRefs: Object.freeze([
+        Object.freeze({
+          __noesisContext: Object.freeze({
+            documentId: "context-document-integrity-fixture",
+            start: 0,
+            end: contextText.length,
+          }),
+        }),
+      ]),
       status: "running" as const,
       startedAt: "2026-07-26T00:00:01.500Z",
     });
@@ -1468,9 +1477,14 @@ describe("WorkspaceStore", () => {
     modelDatabase.exec("PRAGMA busy_timeout = 5000");
     expect(() =>
       modelDatabase
+        .prepare("UPDATE model_calls SET input_tokens = 1 WHERE model_call_id = ?")
+        .run(runningModelCall.modelCallId),
+    ).toThrow(/CHECK constraint failed/iu);
+    expect(() =>
+      modelDatabase
         .prepare("UPDATE model_calls SET status = 'completed', completed_at = ? WHERE model_call_id = ?")
         .run("2026-07-26T00:00:02.000Z", runningModelCall.modelCallId),
-    ).toThrow();
+    ).toThrow(/CHECK constraint failed.*output_artifact_id/iu);
     expect(() =>
       modelDatabase
         .prepare("INSERT OR REPLACE INTO model_calls SELECT * FROM model_calls WHERE model_call_id = ?")
@@ -1484,6 +1498,15 @@ describe("WorkspaceStore", () => {
       completedAt: "2026-07-26T00:00:02.000Z",
     });
     await expect(store.operational.modelCalls.get(runningModelCall.modelCallId)).resolves.toMatchObject({
+      contextRefs: [
+        {
+          __noesisContext: {
+            documentId: "context-document-integrity-fixture",
+            start: 0,
+            end: contextText.length,
+          },
+        },
+      ],
       outputArtifactId: outputArtifact.artifactId,
       status: "completed",
     });
@@ -2402,7 +2425,31 @@ describe("WorkspaceStore", () => {
       lineageDatabase
         .prepare("UPDATE workflow_phase_runs SET execution_id = ? WHERE run_id = ? AND phase_index = 0")
         .run("execution-other-session", "workflow-run-unfinished"),
-    ).toThrow();
+    ).toThrow("Workflow phase run and execution lineage is immutable");
+    expect(() =>
+      decodeModelCall({
+        model_call_id: "model-call-inverted-context",
+        parent_execution_id: "execution-inverted-context",
+        session_id: "session-inverted-context",
+        turn_id: null,
+        context_artifact_id: null,
+        request_artifact_id: "artifact-request",
+        output_artifact_id: null,
+        provider: "controlled",
+        model: "controlled",
+        thinking_level: "off",
+        context_refs_json: '[{"__noesisContext":{"documentId":"context-document","start":2,"end":1}}]',
+        status: "failed",
+        input_tokens: null,
+        output_tokens: null,
+        total_tokens: null,
+        estimated_cost: null,
+        latency_ms: null,
+        error: "invalid context",
+        started_at: "2026-07-26T00:00:00.000Z",
+        completed_at: "2026-07-26T00:00:01.000Z",
+      }),
+    ).toThrow(/Context range end must not precede start/iu);
     lineageDatabase.close();
     first.close();
     const recovered = await createWorkspaceStore(root, {

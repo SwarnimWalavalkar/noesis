@@ -58,6 +58,17 @@ describe("production codemode journey", () => {
             },
             "call-query-ambiguous",
           );
+        if (lastUserText.includes("Repeated"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: [
+                "const full = context.slice(0);",
+                'return await models.query("Analyze this.", Array.from({ length: 33 }, () => full));',
+              ].join("\n"),
+            },
+            "call-query-repeated-context",
+          );
         return controlledToolCallResponse(
           "execute",
           {
@@ -133,6 +144,11 @@ describe("production codemode journey", () => {
     const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
     expect(calls.map((call) => call.toolName)).toEqual(["execute", "models.query"]);
     await runtime.debug.runTurn(trail.trailId, "Oversized nested request.");
+    expect(nestedRequests).toHaveLength(1);
+    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
+      1,
+    );
+    await runtime.debug.runTurn(trail.trailId, "Repeated full context nested request.");
     expect(nestedRequests).toHaveLength(1);
     expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
       1,

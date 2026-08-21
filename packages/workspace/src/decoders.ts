@@ -20,6 +20,7 @@ import type {
   ActivationRecord,
   CanonicalSearchSource,
   CodeExecutionRecord,
+  ModelCallContextRef,
   ModelCallRecord,
   MessageRecord,
   OutcomeRecord,
@@ -263,6 +264,19 @@ export function decodeCodeExecution(row: DatabaseRow | undefined): CodeExecution
     .addOptional(!(completedAt === undefined) ? { completedAt } : undefined)
     .finish();
 }
+const ModelCallContextRefSchema = z.union([
+  z.string(),
+  z.strictObject({
+    __noesisContext: z
+      .strictObject({
+        documentId: z.string().min(1),
+        start: z.number().int().nonnegative(),
+        end: z.number().int().nonnegative(),
+      })
+      .refine((range) => range.end >= range.start, "Context range end must not precede start"),
+  }),
+]) satisfies z.ZodType<ModelCallContextRef>;
+
 export function decodeModelCall(row: DatabaseRow | undefined): ModelCallRecord {
   const turnId = optionalString(row, "turn_id");
   const contextArtifactId = optionalString(row, "context_artifact_id");
@@ -306,18 +320,7 @@ export function decodeModelCall(row: DatabaseRow | undefined): ModelCallRecord {
         .parse(requiredString(row, "thinking_level")),
       contextRefs: Object.freeze(
         z
-          .array(
-            z.union([
-              z.string(),
-              z.strictObject({
-                __noesisContext: z.strictObject({
-                  documentId: z.string().min(1),
-                  start: z.number().int().nonnegative(),
-                  end: z.number().int().nonnegative(),
-                }),
-              }),
-            ]),
-          )
+          .array(ModelCallContextRefSchema)
           .parse(parseJson(requiredString(row, "context_refs_json")))
           .map((part) =>
             typeof part === "string"

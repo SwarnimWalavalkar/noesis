@@ -192,6 +192,17 @@ export interface WorkflowRunRecord {
   readonly completedAt?: string;
 }
 
+export type ModelCallContextRef =
+  | string
+  | {
+      readonly __noesisContext: {
+        readonly documentId: string;
+        readonly start: number;
+        /** UTF-16 offset greater than or equal to start. */
+        readonly end: number;
+      };
+    };
+
 export interface ModelCallRecord {
   readonly modelCallId: string;
   readonly parentExecutionId: string;
@@ -203,16 +214,7 @@ export interface ModelCallRecord {
   readonly provider: string;
   readonly model: string;
   readonly thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-  readonly contextRefs: readonly (
-    | string
-    | {
-        readonly __noesisContext: {
-          readonly documentId: string;
-          readonly start: number;
-          readonly end: number;
-        };
-      }
-  )[];
+  readonly contextRefs: readonly ModelCallContextRef[];
   readonly status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
   readonly usage?: {
     readonly inputTokens: number;

@@ -158,6 +158,7 @@ const HISTORY_RERANK_MAX_EXCERPT_CHARACTERS = 480;
 const HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE = 4096;
 const LATE_REFLECTION_REFRESH_MS = 5000;
 const MAX_MODEL_QUERY_PROMPT_CHARACTERS = 1_000_000;
+const MAX_MODEL_QUERY_CONTEXT_PARTS = 32;
 const BASE_SYSTEM_PROMPT = [
   "Follow the user's instructions, use tools when useful, and finish the work.",
   "Before asking the user to repeat relevant prior work, search previous sessions when it could help.",
@@ -2916,16 +2917,18 @@ export async function createApplicationRuntimeComposition(
       },
     });
     const contextHandleSchema = z.strictObject({
-      __noesisContext: z.strictObject({
-        documentId: z.string().min(1),
-        start: z.number().int().nonnegative(),
-        end: z.number().int().nonnegative(),
-      }),
+      __noesisContext: z
+        .strictObject({
+          documentId: z.string().min(1),
+          start: z.number().int().nonnegative(),
+          end: z.number().int().nonnegative(),
+        })
+        .refine((range) => range.end >= range.start, "ContextView end must not precede start"),
     });
     const modelQueryContextSchema = z.union([
       z.string(),
       contextHandleSchema,
-      z.array(z.union([z.string(), contextHandleSchema])),
+      z.array(z.union([z.string(), contextHandleSchema])).max(MAX_MODEL_QUERY_CONTEXT_PARTS),
     ]);
     const modelQueryInputSchema = z.strictObject({
       prompt: z.string().trim().min(1).max(MAX_MODEL_QUERY_PROMPT_CHARACTERS),
@@ -2957,11 +2960,18 @@ export async function createApplicationRuntimeComposition(
       }),
       execute: async (input, context) => {
         if (!options.modelQuery) throw new Error("Nested model queries are unavailable in this runtime");
+        if (plan.requestTokenBudget === undefined)
+          throw new Error("Nested model queries require a frozen request token budget");
         const activeContext = activeExecutionContexts.get(context.executionId);
         const refs = modelQueryContextParts(input.context);
         const expanded: string[] = [];
+        const maximumExpandedCharacters = plan.requestTokenBudget * 4;
+        let expandedCharacters = 0;
         for (const ref of refs) {
           if (typeof ref === "string") {
+            if (ref.length > maximumExpandedCharacters - expandedCharacters)
+              throw new Error("Nested model query context exceeds its pre-render character budget");
+            expandedCharacters += ref.length;
             expanded.push(ref);
             continue;
           }
@@ -2972,10 +2982,12 @@ export async function createApplicationRuntimeComposition(
             throw new Error("ContextView does not belong to this codemode execution");
           if (handle.start > handle.end || handle.end > activeContext.frozen.characterLength)
             throw new Error("ContextView range is outside the frozen context document");
+          const partLength = handle.end - handle.start;
+          if (partLength > maximumExpandedCharacters - expandedCharacters)
+            throw new Error("Nested model query context exceeds its pre-render character budget");
+          expandedCharacters += partLength;
           expanded.push((await activeContext.read()).slice(handle.start, handle.end));
         }
-        if (plan.requestTokenBudget === undefined)
-          throw new Error("Nested model queries require a frozen request token budget");
         const renderedRequest = renderPiModelQueryPrompt(input.prompt, expanded);
         const estimatedRequestTokens =
           estimateContextTokens(PI_MODEL_QUERY_SYSTEM_PROMPT) + estimateContextTokens(renderedRequest);

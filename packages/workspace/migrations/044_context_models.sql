@@ -83,6 +83,14 @@ CREATE TABLE model_calls (
   ),
   CHECK (
     status != 'completed' OR output_artifact_id IS NOT NULL
+  ),
+  CHECK (
+    (
+      (input_tokens IS NULL) +
+      (output_tokens IS NULL) +
+      (total_tokens IS NULL) +
+      (estimated_cost IS NULL)
+    ) IN (0, 4)
   )
 ) STRICT;
 

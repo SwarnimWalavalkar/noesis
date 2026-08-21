@@ -3254,8 +3254,8 @@ function createOperationalRepositories(
       const currentRow = db
         .prepare("SELECT * FROM model_calls WHERE model_call_id = ?")
         .get(record.modelCallId);
-      if (currentRow !== undefined) {
-        const current = decodeModelCall(currentRow);
+      const current = currentRow === undefined ? undefined : decodeModelCall(currentRow);
+      if (current !== undefined) {
         const transitions = {
           running: ["running", "completed", "failed", "cancelled", "interrupted"],
           completed: ["completed"],
@@ -3284,7 +3284,7 @@ function createOperationalRepositories(
         )
           throw new Error(`Terminal model call ${record.modelCallId} is immutable`);
       }
-      if (currentRow === undefined) {
+      if (current === undefined) {
         db.prepare(`INSERT INTO model_calls(
             model_call_id, parent_execution_id, session_id, turn_id, context_artifact_id,
             request_artifact_id, output_artifact_id, provider, model, thinking_level,
@@ -3313,21 +3313,26 @@ function createOperationalRepositories(
           record.completedAt ?? null,
         );
       } else {
-        db.prepare(`UPDATE model_calls SET
+        const updated = db
+          .prepare(`UPDATE model_calls SET
             output_artifact_id = ?, status = ?, input_tokens = ?, output_tokens = ?,
             total_tokens = ?, estimated_cost = ?, latency_ms = ?, error = ?, completed_at = ?
-          WHERE model_call_id = ?`).run(
-          record.outputArtifactId ?? null,
-          record.status,
-          record.usage?.inputTokens ?? null,
-          record.usage?.outputTokens ?? null,
-          record.usage?.totalTokens ?? null,
-          record.usage?.estimatedCost ?? null,
-          record.latencyMs ?? null,
-          record.error ?? null,
-          record.completedAt ?? null,
-          record.modelCallId,
-        );
+          WHERE model_call_id = ? AND status = ?`)
+          .run(
+            record.outputArtifactId ?? null,
+            record.status,
+            record.usage?.inputTokens ?? null,
+            record.usage?.outputTokens ?? null,
+            record.usage?.totalTokens ?? null,
+            record.usage?.estimatedCost ?? null,
+            record.latencyMs ?? null,
+            record.error ?? null,
+            record.completedAt ?? null,
+            record.modelCallId,
+            current.status,
+          );
+        if (Number(updated.changes) !== 1)
+          throw new Error(`Model call ${record.modelCallId} changed during persistence`);
       }
       recordActivity(
         systemActor,
