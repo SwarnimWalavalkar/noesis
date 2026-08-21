@@ -7,6 +7,7 @@ ALTER TABLE workflow_runs
       typeof(context_digest) = 'text'
       AND length(CAST(context_digest AS BLOB)) = 64
       AND context_digest NOT GLOB '*[^0-9a-f]*'
+      AND instr(CAST(context_digest AS BLOB), X'00') = 0
     )
   );
 

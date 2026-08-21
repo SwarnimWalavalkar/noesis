@@ -69,6 +69,7 @@ describe("domain Zod schemas", () => {
       "../context.jsonl",
       "artifacts/../../context.jsonl",
       "C:\\context.jsonl",
+      "C:context.jsonl",
     ])
       expect(ArtifactFileRefSchema.safeParse({ ...artifact, path }).success).toBe(false);
   });

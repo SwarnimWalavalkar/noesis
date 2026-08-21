@@ -1345,6 +1345,41 @@ describe("WorkspaceStore", () => {
         "2026-07-26T00:00:00.000Z",
       ),
     ).toThrow(/Invalid workflow context pin/iu);
+    const nulDigest = `${"a".repeat(63)}\0`;
+    database.exec("PRAGMA ignore_check_constraints = ON");
+    database
+      .prepare(`INSERT INTO artifacts(
+          artifact_id, path, media_type, byte_length, content_digest, actor_id, actor_kind,
+          relationship_refs_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        "artifact-nul-context-digest",
+        "artifacts/nul-context-digest.jsonl",
+        "application/x-ndjson",
+        0,
+        nulDigest,
+        "test-user",
+        "user",
+        "[]",
+        "2026-07-26T00:00:00.000Z",
+      );
+    database.exec("PRAGMA ignore_check_constraints = OFF");
+    expect(() =>
+      insertWorkflowRun.run(
+        "workflow-nul-context-digest",
+        ...workflowValues,
+        "artifact-nul-context-digest",
+        nulDigest,
+        0,
+        0,
+        "session-context-model-integrity",
+        "running",
+        0,
+        "{}",
+        "2026-07-26T00:00:00.000Z",
+        "2026-07-26T00:00:00.000Z",
+      ),
+    ).toThrow(/context_digest/iu);
     database.close();
     await store.operational.workflows.putRun({
       runId: "workflow-valid-context",
