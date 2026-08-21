@@ -218,6 +218,7 @@ export function createPiExecuteTool(input: {
       "Execute JavaScript on the user's machine and compose work tools through the injected SDK.",
       "Discover before guessing: return await noesis.search(query), then return await noesis.describe(exactName) to inspect its input schema.",
       "Invoke with return await tools.<family>.<operation>(input), or return await noesis.invoke(exactName, input).",
+      "For large-session analysis, context is a lazy immutable view of the complete pre-turn session timeline: inspect context.length, take context.slice(start, end), and await view.text() only when raw text is needed. Use await models.query(prompt, contextOrViews) for isolated tool-free subqueries on the frozen model route.",
       "emit(value) and notify(value) show progress to the user but do not return that value to you; use return for the final result that should enter conversation context.",
       "When the user asks you to create a reusable capability, or a reusable project-local program would materially help the current work, implement it immediately as a script with scripts.save, or as a workflow with workflows.save when it needs durable phases. Do not defer executable project-local work to reflection or evaluation. Verify a new script immediately with scripts.run in the same execution and return the save receipt, verification, and reuse instructions.",
       ...(availableWorkflows ? [availableWorkflows] : []),

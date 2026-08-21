@@ -13,6 +13,7 @@ The systems described by these plans have shipped:
 - [Durable session compaction](noesis-session-compaction-design.html)
 - [Self-improvement explorer](noesis-self-improvement-explorer-design.html)
 - [Tools, codemode, scripts, and workflows](noesis-tools-codemode-workflows-plan.html)
+- [Codemode context and nested models](noesis-context-models-api.html)
 - [First complete iteration](noesis-first-complete-iteration.html)
 - [Autonomous compounding](noesis-autonomous-compounding-implementation-plan.html)
 - [High leverage correction](noesis-high-leverage-correction-plan.html)

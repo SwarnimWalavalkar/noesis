@@ -51,6 +51,10 @@ If tool results make an active turn exceed its budget, only the next model reque
 
 `/compact [optional focus]` creates a checkpoint. Noesis also compacts before a future turn when eligible history exceeds its allocation. A failed or cancelled compaction leaves the active context unchanged.
 
+Codemode has a separate analytical context surface. Each frozen turn plan pins a complete pre-turn session document as immutable JSONL. It contains visible user and assistant messages plus recorded tool calls, code executions, nested model calls, and workflow runs. It excludes the system prompt, current request, credentials, and internal background jobs.
+
+This document does not enter the foreground model request. The codemode child opens it lazily through `context.length`, `context.slice(start, end)`, and `await context.text()`. The host verifies its digest and lengths before returning text. A workflow pins the document from the run that started it and restores that same document after resume.
+
 ## Model decisions and reflection
 
 Use a capable model when a decision depends on meaning. Do not use keywords or regular expressions to decide whether a message is a correction, preference, learning request, change of intent, or useful adaptation.
@@ -115,6 +119,10 @@ The Broker does not impose a generic byte ceiling on a valid tool result. Each t
 Normal cross-session search is available without requesting private history. Private retrieval is limited to one exact authorized session. Search snippets and exact evidence opening share one small, hard retrieval allowance. Part of that allowance is reserved for opening a citation, so a successful search can never make its own evidence impossible to inspect.
 
 These tools keep common tasks to one call. The model can use `execute` to find more tools, combine calls, write loops, or create reusable programs. Its description includes a small fixed list of saved project workflow names and descriptions. Full input and output shapes remain available through `workflows.describe`.
+
+Inside `execute`, `models.query(prompt, context?)` delegates to the canonical `models.query` Broker tool. The optional context may be text, a lazy `ContextView`, or an array of either. The host expands context views only after checking that they belong to the active execution's frozen document.
+
+Each nested query is isolated, tool-free, cancellable, and pinned to the foreground turn's provider, model, and thinking level. SQLite records its parent code execution, route, status, context references, usage, cost, latency, and artifact references for the exact request and output. The ergonomic global never creates another model invocation path.
 
 `adapt` supports two immediate actions:
 

@@ -70,6 +70,7 @@ import {
   decodeFeedbackSignal,
   decodeFileRevisionRef,
   decodeMessage,
+  decodeModelCall,
   decodeOptional,
   decodeOutcome,
   decodeSearchConfiguration,
@@ -103,6 +104,7 @@ import type {
   CodeExecutionRecord,
   ContextCheckpointRecord,
   MessageRecord,
+  ModelCallRecord,
   NoesisWorkspaceStore,
   OperationalCutoverReport,
   OutcomeRecord,
@@ -719,6 +721,7 @@ export async function createWorkspaceStore(
     ActorSchema.parse(request.actor);
     for (const ref of request.relationshipRefs) assertStoredReference(db, ref);
     const artifactAbsolute = pathInside(paths.artifacts, request.path);
+    const storedPath = workspaceRelative(paths, artifactAbsolute);
     const bytes = Uint8Array.from(request.bytes);
     const contentDigest = sha256(bytes);
     try {
@@ -729,7 +732,27 @@ export async function createWorkspaceStore(
       if (!isMissing(error)) throw error;
       await persistAtomically(artifactAbsolute, bytes);
     }
-    const storedPath = workspaceRelative(paths, artifactAbsolute);
+    const existingArtifact = db
+      .prepare(`SELECT artifact_id, media_type, content_digest, actor_id, actor_kind,
+          relationship_refs_json FROM artifacts WHERE path = ?`)
+      .get(storedPath);
+    if (existingArtifact !== undefined) {
+      if (
+        requiredString(existingArtifact, "media_type") !== request.mediaType ||
+        requiredString(existingArtifact, "content_digest") !== contentDigest ||
+        requiredString(existingArtifact, "actor_id") !== request.actor.actorId ||
+        requiredString(existingArtifact, "actor_kind") !== request.actor.kind ||
+        requiredString(existingArtifact, "relationship_refs_json") !==
+          JSON.stringify(request.relationshipRefs)
+      )
+        throw new Error(`Artifact path already belongs to different metadata: ${request.path}`);
+      return {
+        kind: "artifact_file",
+        artifactId: requiredString(existingArtifact, "artifact_id"),
+        path: storedPath,
+        mediaType: request.mediaType,
+      };
+    }
     const artifactId = createId("artifact");
     database.transaction(() => {
       db.prepare(`INSERT INTO artifacts(
@@ -1523,6 +1546,7 @@ export async function createWorkspaceStore(
     if (options.recoverInterruptedOperations) {
       const interruptedAt = now();
       recoverInterruptedRuntimeSessions(interruptedAt);
+      await operational.modelCalls.interruptRunning(interruptedAt);
       await operational.codeExecutions.interruptRunning(interruptedAt);
       await operational.workflows.interruptRunning(interruptedAt);
     }
@@ -3205,6 +3229,119 @@ function createOperationalRepositories(
       );
     });
   };
+  const putModelCall = async (record: ModelCallRecord): Promise<void> => {
+    database.transaction(() => {
+      const parent = db
+        .prepare("SELECT session_id, turn_id FROM codemode_executions WHERE execution_id = ?")
+        .get(record.parentExecutionId);
+      if (
+        parent === undefined ||
+        requiredString(parent, "session_id") !== record.sessionId ||
+        optionalString(parent, "turn_id") !== record.turnId
+      )
+        throw new Error(`Model call ${record.modelCallId} does not belong to its parent execution`);
+      for (const artifactId of [
+        record.contextArtifactId,
+        record.requestArtifactId,
+        record.outputArtifactId,
+      ]) {
+        if (
+          artifactId &&
+          db.prepare("SELECT 1 FROM artifacts WHERE artifact_id = ?").get(artifactId) === undefined
+        )
+          throw new Error(`Model call ${record.modelCallId} references unknown artifact ${artifactId}`);
+      }
+      const currentRow = db
+        .prepare("SELECT * FROM model_calls WHERE model_call_id = ?")
+        .get(record.modelCallId);
+      const current = currentRow === undefined ? undefined : decodeModelCall(currentRow);
+      if (current !== undefined) {
+        const transitions = {
+          running: ["running", "completed", "failed", "cancelled", "interrupted"],
+          completed: ["completed"],
+          failed: ["failed"],
+          cancelled: ["cancelled"],
+          interrupted: ["interrupted"],
+        } satisfies Readonly<Record<ModelCallRecord["status"], readonly ModelCallRecord["status"][]>>;
+        if (!permitsTransition(transitions, current.status, record.status))
+          throw new Error(`Invalid model-call transition ${current.status} -> ${record.status}`);
+        const currentIdentity = {
+          ...current,
+          outputArtifactId: record.outputArtifactId,
+          status: record.status,
+          usage: record.usage,
+          latencyMs: record.latencyMs,
+          error: record.error,
+          completedAt: record.completedAt,
+        };
+        if (
+          !isDeepStrictEqual(JSON.parse(JSON.stringify(currentIdentity)), JSON.parse(JSON.stringify(record)))
+        )
+          throw new Error(`Model call ${record.modelCallId} changed its immutable identity`);
+        if (
+          current.status !== "running" &&
+          !isDeepStrictEqual(JSON.parse(JSON.stringify(current)), JSON.parse(JSON.stringify(record)))
+        )
+          throw new Error(`Terminal model call ${record.modelCallId} is immutable`);
+      }
+      if (current === undefined) {
+        db.prepare(`INSERT INTO model_calls(
+            model_call_id, parent_execution_id, session_id, turn_id, context_artifact_id,
+            request_artifact_id, output_artifact_id, provider, model, thinking_level,
+            context_refs_json, status, input_tokens, output_tokens, total_tokens,
+            estimated_cost, latency_ms, error, started_at, completed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          record.modelCallId,
+          record.parentExecutionId,
+          record.sessionId,
+          record.turnId ?? null,
+          record.contextArtifactId ?? null,
+          record.requestArtifactId,
+          record.outputArtifactId ?? null,
+          record.provider,
+          record.model,
+          record.thinkingLevel,
+          JSON.stringify(record.contextRefs),
+          record.status,
+          record.usage?.inputTokens ?? null,
+          record.usage?.outputTokens ?? null,
+          record.usage?.totalTokens ?? null,
+          record.usage?.estimatedCost ?? null,
+          record.latencyMs ?? null,
+          record.error ?? null,
+          record.startedAt,
+          record.completedAt ?? null,
+        );
+      } else {
+        const updated = db
+          .prepare(`UPDATE model_calls SET
+            output_artifact_id = ?, status = ?, input_tokens = ?, output_tokens = ?,
+            total_tokens = ?, estimated_cost = ?, latency_ms = ?, error = ?, completed_at = ?
+          WHERE model_call_id = ? AND status = ?`)
+          .run(
+            record.outputArtifactId ?? null,
+            record.status,
+            record.usage?.inputTokens ?? null,
+            record.usage?.outputTokens ?? null,
+            record.usage?.totalTokens ?? null,
+            record.usage?.estimatedCost ?? null,
+            record.latencyMs ?? null,
+            record.error ?? null,
+            record.completedAt ?? null,
+            record.modelCallId,
+            current.status,
+          );
+        if (Number(updated.changes) !== 1)
+          throw new Error(`Model call ${record.modelCallId} changed during persistence`);
+      }
+      recordActivity(
+        systemActor,
+        `model_call.${record.status}`,
+        "codemode_execution",
+        record.parentExecutionId,
+      );
+    });
+  };
   const putWorkflowRun = async (record: WorkflowRunRecord): Promise<void> => {
     database.transaction(() => {
       if (record.turnId) {
@@ -3252,10 +3389,11 @@ function createOperationalRepositories(
       db.prepare(`INSERT INTO workflow_runs(
           run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
           catalog_id, catalog_digest, definition_dependencies_digest,
-          permission_digest, provider, model, thinking_level, session_id,
+          permission_digest, provider, model, thinking_level,
+          context_artifact_id, context_digest, context_character_length, context_byte_length, session_id,
           turn_id, status, current_phase, input_json, output_json, error,
           created_at, updated_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(run_id) DO UPDATE SET
           status = excluded.status, current_phase = excluded.current_phase,
           output_json = excluded.output_json, error = excluded.error,
@@ -3272,6 +3410,10 @@ function createOperationalRepositories(
         record.provider ?? null,
         record.model ?? null,
         record.thinkingLevel ?? null,
+        record.contextPin?.artifactId ?? null,
+        record.contextPin?.digest ?? null,
+        record.contextPin?.characterLength ?? null,
+        record.contextPin?.byteLength ?? null,
         record.sessionId,
         record.turnId ?? null,
         record.status,
@@ -3682,6 +3824,43 @@ function createOperationalRepositories(
                    completed_at = ?
                WHERE execution_id = ? AND status = 'running'`).run(interruptedAt, executionId);
             recordActivity(systemActor, "codemode_execution.interrupted", "codemode_execution", executionId);
+          }
+          return running.length;
+        }),
+    }),
+    modelCalls: Object.freeze({
+      get: async (modelCallId: string) =>
+        decodeOptional(
+          db.prepare("SELECT * FROM model_calls WHERE model_call_id = ?").get(modelCallId),
+          decodeModelCall,
+        ),
+      put: putModelCall,
+      listForExecution: async (executionId: string) =>
+        db
+          .prepare(
+            "SELECT * FROM model_calls WHERE parent_execution_id = ? ORDER BY started_at, model_call_id",
+          )
+          .all(executionId)
+          .map(decodeModelCall),
+      listForSession: async (sessionId: string) =>
+        db
+          .prepare("SELECT * FROM model_calls WHERE session_id = ? ORDER BY started_at, model_call_id")
+          .all(sessionId)
+          .map(decodeModelCall),
+      interruptRunning: async (interruptedAt: string) =>
+        database.transaction(() => {
+          const running = db
+            .prepare("SELECT model_call_id, parent_execution_id FROM model_calls WHERE status = 'running'")
+            .all();
+          for (const row of running) {
+            const modelCallId = requiredString(row, "model_call_id");
+            const parentExecutionId = requiredString(row, "parent_execution_id");
+            db.prepare(`UPDATE model_calls
+               SET status = 'interrupted', error = 'Process exited before model call outcome was observed', completed_at = ?
+               WHERE model_call_id = ? AND status = 'running'`).run(interruptedAt, modelCallId);
+            recordActivity(systemActor, "model_call.interrupted", "codemode_execution", parentExecutionId, [
+              { modelCallId },
+            ]);
           }
           return running.length;
         }),

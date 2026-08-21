@@ -9,6 +9,7 @@ import {
   createDefaultRoleContextPolicy,
   createRestrictedRoleContextPolicy,
   createStructuredInferencePort,
+  applyRoleContextPolicy,
   isRoleRunError,
   type RoleBackendRequest,
   type RoleStopReason,
@@ -340,6 +341,28 @@ describe("adapter-neutral role runner", () => {
 });
 
 describe("research role isolation", () => {
+  test("admits the compaction input and output contract but rejects a third message", () => {
+    const policy = createDefaultRoleContextPolicy("session_compactor");
+    const messages = [
+      { role: "user" as const, name: "compaction_input", content: "compact this session" },
+      { role: "user" as const, name: "output_contract", content: "return the summary schema" },
+    ];
+
+    expect(policy.maxMessages).toBe(2);
+    expect(
+      applyRoleContextPolicy(request("session_compactor", "compact-v1", messages), policy).messages,
+    ).toEqual(messages);
+    expect(() =>
+      applyRoleContextPolicy(
+        request("session_compactor", "compact-v1", [
+          ...messages,
+          { role: "user", name: "output_contract", content: "unexpected third message" },
+        ]),
+        policy,
+      ),
+    ).toThrow("rejects messages beyond its message bound");
+  });
+
   test("restricts capability routing to the current turn payload", () => {
     const policy = createRestrictedRoleContextPolicy("capability_router");
 

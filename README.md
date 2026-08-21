@@ -31,6 +31,7 @@ New Capabilities apply anywhere they are relevant. You can narrow one to a proje
 - Open a new session, continue the last one, resume an older one, or fork the current session. If you type while a turn is running, those messages wait in order.
 - Search previous sessions with citations. You can compact older turns without changing the transcript you see.
 - Use files, directories, the shell, workflows, and session search as tools. Combine them in JavaScript with `execute`.
+- Inspect the complete pre-turn session lazily in `execute`, and ask isolated models to analyze selected slices.
 - Save project scripts and multi-phase workflows and reuse them.
 - Connect local and remote MCP servers, including OAuth, from `/mcp`.
 - Inspect what Noesis learned with `/learning`, and restore any earlier version.
@@ -92,6 +93,22 @@ Noesis stores local state under `~/.noesis/` by default. The default context bud
 The budget covers the whole model request, not only the transcript. Noesis keeps it below the selected model's context window. It also reserves room for the model's maximum output.
 
 `/compact` writes a summary checkpoint and keeps a recent raw tail. Noesis also compacts automatically when history would exceed the budget. Resume and session search still use the original messages.
+
+## Program over session context
+
+Codemode exposes two small globals:
+
+```js
+const recent = context.slice(-20000);
+const answer = await models.query("Find the unresolved decisions.", recent);
+return answer;
+```
+
+`context` is an immutable, lazy view of the complete session before the current turn. It contains the visible messages and recorded tool, code, model, and workflow activity. Use `context.length`, `context.slice(start, end)`, or `await context.text()`.
+
+`models.query(prompt, context?)` runs an isolated, tool-free model call on the current turn's frozen provider, model, and thinking level. It accepts text, a context slice, or an array of either. The call uses the same Broker, permission, cancellation, and durable recording path as other codemode tools.
+
+Saved workflows keep the context document and model route from the run that started them, including after resume.
 
 ## Connect MCP servers
 

@@ -71,6 +71,7 @@ type ParentMessage =
       readonly source: string;
       readonly storeEntries: readonly (readonly [string, JsonValue])[];
       readonly input?: JsonValue;
+      readonly contextDocument?: CodeExecutionContextDocument;
     }
   | {
       readonly type: "sdk-result";
@@ -145,6 +146,14 @@ export interface CodeExecutionRequest {
   readonly turnId?: string;
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
+  readonly contextDocument?: CodeExecutionContextDocument;
+}
+export interface CodeExecutionContextDocument {
+  readonly documentId: string;
+  readonly path: string;
+  readonly characterLength: number;
+  readonly byteLength: number;
+  readonly contentDigest: string;
 }
 export interface CodeExecutionResult {
   readonly executionId: string;
@@ -573,6 +582,11 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                   storeEntries: [...(sessionStores.get(request.sessionId) ?? new Map()).entries()],
                 } as const)
                   .addOptional(!(request.input === undefined) ? { input: request.input } : undefined)
+                  .addOptional(
+                    !(request.contextDocument === undefined)
+                      ? { contextDocument: request.contextDocument }
+                      : undefined,
+                  )
                   .finish(),
               );
             } else if (message.type === "sdk-call") {

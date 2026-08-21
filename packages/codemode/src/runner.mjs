@@ -1,4 +1,6 @@
 import { createConditionalObject } from "@noesis/domain";
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import process from "node:process";
 const pending = new Map();
 let sequence = 0;
@@ -122,6 +124,82 @@ const noesis = Object.freeze({
       input,
     }),
 });
+function normalizeSliceIndex(value, length, fallback) {
+  if (value === undefined) return fallback;
+  const number = Number(value);
+  if (Number.isNaN(number)) return 0;
+  if (number === Infinity) return length;
+  if (number === -Infinity) return 0;
+  const integer = Math.trunc(number);
+  return integer < 0 ? Math.max(length + integer, 0) : Math.min(integer, length);
+}
+function createContextView(document, start = 0, end = document.characterLength) {
+  const viewStart = normalizeSliceIndex(start, document.characterLength, 0);
+  const viewEnd = Math.max(
+    viewStart,
+    normalizeSliceIndex(end, document.characterLength, document.characterLength),
+  );
+  const view = {
+    get length() {
+      return viewEnd - viewStart;
+    },
+    slice(nextStart, nextEnd) {
+      const length = viewEnd - viewStart;
+      const relativeStart = normalizeSliceIndex(nextStart, length, 0);
+      const relativeEnd = Math.max(relativeStart, normalizeSliceIndex(nextEnd, length, length));
+      return createContextView(document, viewStart + relativeStart, viewStart + relativeEnd);
+    },
+    async text() {
+      const content = await document.read();
+      return content.slice(viewStart, viewEnd);
+    },
+    toJSON() {
+      return {
+        __noesisContext: {
+          documentId: document.documentId,
+          start: viewStart,
+          end: viewEnd,
+        },
+      };
+    },
+  };
+  return Object.freeze(view);
+}
+function createContextDocument(raw) {
+  if (!raw || typeof raw !== "object") {
+    return Object.freeze({
+      documentId: "context_document_empty",
+      characterLength: 0,
+      read: async () => "",
+    });
+  }
+  let cached;
+  const read = async () => {
+    if (!cached) {
+      cached = readFile(raw.path, "utf8").then((content) => {
+        const digest = createHash("sha256").update(content, "utf8").digest("hex");
+        if (digest !== raw.contentDigest) throw new Error("Frozen context document failed verification");
+        if (content.length !== raw.characterLength)
+          throw new Error("Frozen context document character length changed");
+        if (Buffer.byteLength(content, "utf8") !== raw.byteLength)
+          throw new Error("Frozen context document byte length changed");
+        return content;
+      });
+    }
+    return await cached;
+  };
+  return Object.freeze({
+    documentId: String(raw.documentId),
+    characterLength: Number(raw.characterLength),
+    read,
+  });
+}
+function encodeModelContext(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) return value.map(encodeModelContext);
+  if (value && typeof value === "object" && typeof value.toJSON === "function") return value.toJSON();
+  throw new TypeError("models.query context must be a string, ContextView, or an array of them");
+}
 process.on("message", async (message) => {
   if (!message || typeof message !== "object") return;
   if (message.type === "sdk-result" && typeof message.requestId === "string") {
@@ -162,6 +240,16 @@ process.on("message", async (message) => {
     storeMutations.set(normalizedKey, safeValue);
   };
   const load = (key) => sessionStore.get(String(key));
+  const context = createContextView(createContextDocument(message.contextDocument));
+  const models = Object.freeze({
+    query: async (prompt, queryContext) => {
+      if (typeof prompt !== "string" || prompt.trim().length === 0)
+        throw new TypeError("models.query prompt must be a non-empty string");
+      const input =
+        queryContext === undefined ? { prompt } : { prompt, context: encodeModelContext(queryContext) };
+      return await delegate("invoke", { name: "models.query", input });
+    },
+  });
   try {
     const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
     const execute = new AsyncFunction(
@@ -172,9 +260,21 @@ process.on("message", async (message) => {
       "store",
       "load",
       "input",
+      "context",
+      "models",
       `"use strict";\n${message.source}`,
     );
-    const value = await execute(tools, noesis, emit, notify, store, load, message.input ?? null);
+    const value = await execute(
+      tools,
+      noesis,
+      emit,
+      notify,
+      store,
+      load,
+      message.input ?? null,
+      context,
+      models,
+    );
     send({
       type: "result",
       value: jsonSafe(value),

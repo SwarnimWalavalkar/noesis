@@ -245,6 +245,29 @@ describe("turn intelligence", () => {
       updatedAt: "2026-07-24T23:58:00.000Z",
       metadata: Object.freeze({}),
     });
+    await workspace.operational.sessions.put({
+      sessionId: "session-unrelated",
+      title: "Unrelated routing fixture",
+      status: "idle",
+      provider: "fake",
+      model: "fake",
+      runtime: "fake",
+      createdAt: "2026-07-24T23:58:00.000Z",
+      updatedAt: "2026-07-24T23:58:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    for (const sessionId of ["session-invalid", "session-duplicate", "session-misattributed"])
+      await workspace.operational.sessions.put({
+        sessionId,
+        title: `${sessionId} routing fixture`,
+        status: "idle",
+        provider: "fake",
+        model: "fake",
+        runtime: "fake",
+        createdAt: "2026-07-24T23:58:00.000Z",
+        updatedAt: "2026-07-24T23:58:00.000Z",
+        metadata: Object.freeze({}),
+      });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const priorHistory = Object.freeze([
       Object.freeze({
@@ -317,6 +340,21 @@ describe("turn intelligence", () => {
         contentDigest: sha256(priorAssistant.content),
       },
     ]);
+    const contextDocument = related.contextDocument;
+    if (!contextDocument) throw new Error("Expected a frozen context document");
+    const contextText = new TextDecoder().decode(
+      await workspace.reads.readArtifact(contextDocument.artifact),
+    );
+    expect(contextDocument).toMatchObject({
+      documentId: `context_document_${sha256(contextText)}`,
+      format: "noesis-session-context-v1",
+      characterLength: contextText.length,
+      byteLength: Buffer.byteLength(contextText, "utf8"),
+      contentDigest: sha256(contextText),
+    });
+    expect(contextText).toContain("Prepare a research brief about the current repository");
+    expect(contextText).toContain("I will implement the proposed changes.");
+    expect(contextText).not.toContain("No, keep it review-only");
     expect(related.permissionSnapshot).toEqual({
       effects: ["read", "execute"],
       resourcePatterns: ["*"],

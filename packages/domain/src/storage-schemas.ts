@@ -13,6 +13,19 @@ import { DATABASE_TABLES, WORKING_ADJUSTMENT_LIMITS } from "./research.ts";
 
 const ContentDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const StoredPathSchema = z.string().min(1);
+const WindowsDrivePathPattern = /^[a-z]:/iu;
+const WorkspaceContainedStoredPathSchema = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      !value.startsWith("/") &&
+      !value.startsWith("\\") &&
+      !WindowsDrivePathPattern.test(value) &&
+      !value.includes("\0") &&
+      !value.split(/[\\/]/u).includes(".."),
+    "Stored paths must be relative and remain within the workspace",
+  );
 
 export const DatabaseRowRefSchema = z.strictObject({
   kind: z.literal("database_row"),
@@ -69,7 +82,7 @@ const PreflightReportRowRefSchema = databaseRowRefSchema("preflight_reports");
 export const ArtifactFileRefSchema = z.strictObject({
   kind: z.literal("artifact_file"),
   artifactId: z.string().min(1),
-  path: StoredPathSchema,
+  path: WorkspaceContainedStoredPathSchema,
   mediaType: z.string().min(1),
 });
 

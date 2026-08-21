@@ -820,7 +820,13 @@ describe("apps/noesis production control-plane composition", () => {
              WHERE idempotency_key LIKE 'mcp-artifact:%' AND status = 'completed'`)
             .get(),
         ).toMatchObject({ count: 0 });
-        expect(database.prepare("SELECT COUNT(*) AS count FROM artifacts").get()).toMatchObject({ count: 0 });
+        expect(
+          database
+            .prepare(
+              "SELECT COUNT(*) AS count FROM artifacts WHERE path NOT LIKE 'artifacts/context-documents/%'",
+            )
+            .get(),
+        ).toMatchObject({ count: 0 });
       } finally {
         database.close();
       }

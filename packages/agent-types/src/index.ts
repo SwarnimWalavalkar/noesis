@@ -10,6 +10,7 @@ import type {
   ProjectRef,
 } from "@noesis/domain";
 import {
+  ArtifactFileRefSchema,
   createConditionalObject,
   CapabilityRevisionRefSchema,
   canonicalJson,
@@ -162,6 +163,20 @@ export interface FrozenContextCheckpoint {
   readonly sensitivity: "normal" | "private" | "secret";
   readonly createdAt: string;
 }
+export interface FrozenContextDocument {
+  readonly documentId: string;
+  readonly artifact: {
+    readonly kind: "artifact_file";
+    readonly artifactId: string;
+    readonly path: string;
+    readonly mediaType: "application/x-ndjson";
+  };
+  readonly format: "noesis-session-context-v1";
+  /** UTF-16 code units, matching JavaScript String.length and String.slice. */
+  readonly characterLength: number;
+  readonly byteLength: number;
+  readonly contentDigest: string;
+}
 export const MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES = 512;
 export const MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS = 96000;
 export const MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS = 4000000;
@@ -191,6 +206,8 @@ export interface FrozenTurnPlan {
   readonly conversationHistory?: readonly FrozenConversationHistoryEntry[];
   /** Immutable summary checkpoint served before the exact raw history tail. */
   readonly contextCheckpoint?: FrozenContextCheckpoint;
+  /** Complete immutable pre-turn session timeline exposed lazily to codemode. */
+  readonly contextDocument?: FrozenContextDocument;
   /** Estimated-token budget shared by the checkpoint summary and raw history tail. */
   readonly contextTokenBudget?: number;
   /** Estimated-token ceiling for the complete provider request, including tools and current input. */
@@ -294,6 +311,16 @@ const FrozenContextCheckpointSchema = z.strictObject({
   sensitivity: z.enum(["normal", "private", "secret"]),
   createdAt: z.string().min(1),
 });
+const FrozenContextDocumentSchema = z.strictObject({
+  documentId: z.string().min(1),
+  artifact: ArtifactFileRefSchema.extend({
+    mediaType: z.literal("application/x-ndjson"),
+  }),
+  format: z.literal("noesis-session-context-v1"),
+  characterLength: z.number().int().nonnegative(),
+  byteLength: z.number().int().nonnegative(),
+  contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+});
 export const FrozenTurnPlanSchema = z.strictObject({
   schemaVersion: z.literal(1),
   planId: z.string().min(1),
@@ -306,6 +333,7 @@ export const FrozenTurnPlanSchema = z.strictObject({
   selectedCapabilities: z.array(FrozenCapabilitySelectionSchema),
   conversationHistory: z.array(FrozenConversationHistoryEntrySchema).optional(),
   contextCheckpoint: FrozenContextCheckpointSchema.optional(),
+  contextDocument: FrozenContextDocumentSchema.optional(),
   contextTokenBudget: z.number().int().positive().max(1000000).optional(),
   requestTokenBudget: z.number().int().positive().max(1000000).optional(),
   renderedSystemPrompt: z.string().min(1),
@@ -335,6 +363,7 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
   const {
     conversationHistory,
     contextCheckpoint,
+    contextDocument,
     contextTokenBudget,
     requestTokenBudget,
     project,
@@ -369,6 +398,16 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
         !(contextCheckpoint === undefined)
           ? {
               contextCheckpoint: Object.freeze({ ...contextCheckpoint }),
+            }
+          : undefined,
+      )
+      .addOptional(
+        !(contextDocument === undefined)
+          ? {
+              contextDocument: Object.freeze({
+                ...contextDocument,
+                artifact: Object.freeze({ ...contextDocument.artifact }),
+              }),
             }
           : undefined,
       )
@@ -441,6 +480,12 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
       throw new Error(`Frozen turn plan ${plan.planId} has a mismatched context checkpoint reference`);
     if (sha256(plan.contextCheckpoint.summary) !== plan.contextCheckpoint.summaryDigest)
       throw new Error(`Frozen turn plan ${plan.planId} context checkpoint failed summary verification`);
+  }
+  if (plan.contextDocument !== undefined) {
+    if (plan.contextDocument.documentId !== `context_document_${plan.contextDocument.contentDigest}`)
+      throw new Error(`Frozen turn plan ${plan.planId} has a mismatched context document identity`);
+    if (plan.contextDocument.artifact.mediaType !== "application/x-ndjson")
+      throw new Error(`Frozen turn plan ${plan.planId} has an unsupported context document type`);
   }
   if (plan.contextTokenBudget !== undefined) {
     const estimatedContextTokens =

@@ -174,6 +174,12 @@ export interface WorkflowRunRecord {
   readonly provider?: string;
   readonly model?: string;
   readonly thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  readonly contextPin?: {
+    readonly artifactId: string;
+    readonly digest: string;
+    readonly characterLength: number;
+    readonly byteLength: number;
+  };
   readonly sessionId: string;
   readonly turnId?: string;
   readonly status: "running" | "paused" | "completed" | "failed" | "cancelled";
@@ -183,6 +189,42 @@ export interface WorkflowRunRecord {
   readonly error?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+  readonly completedAt?: string;
+}
+
+export type ModelCallContextRef =
+  | string
+  | {
+      readonly __noesisContext: {
+        readonly documentId: string;
+        readonly start: number;
+        /** UTF-16 offset greater than or equal to start. */
+        readonly end: number;
+      };
+    };
+
+export interface ModelCallRecord {
+  readonly modelCallId: string;
+  readonly parentExecutionId: string;
+  readonly sessionId: string;
+  readonly turnId?: string;
+  readonly contextArtifactId?: string;
+  readonly requestArtifactId: string;
+  readonly outputArtifactId?: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+  readonly contextRefs: readonly ModelCallContextRef[];
+  readonly status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  readonly usage?: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly totalTokens: number;
+    readonly estimatedCost: number;
+  };
+  readonly latencyMs?: number;
+  readonly error?: string;
+  readonly startedAt: string;
   readonly completedAt?: string;
 }
 
@@ -764,6 +806,13 @@ export interface OperationalRepositories {
     readonly get: (executionId: string) => Promise<CodeExecutionRecord | undefined>;
     readonly put: (record: CodeExecutionRecord) => Promise<void>;
     readonly listForSession: (sessionId: string) => Promise<readonly CodeExecutionRecord[]>;
+    readonly interruptRunning: (interruptedAt: string) => Promise<number>;
+  };
+  readonly modelCalls: {
+    readonly get: (modelCallId: string) => Promise<ModelCallRecord | undefined>;
+    readonly put: (record: ModelCallRecord) => Promise<void>;
+    readonly listForExecution: (executionId: string) => Promise<readonly ModelCallRecord[]>;
+    readonly listForSession: (sessionId: string) => Promise<readonly ModelCallRecord[]>;
     readonly interruptRunning: (interruptedAt: string) => Promise<number>;
   };
   readonly workflows: {
