@@ -1,11 +1,13 @@
 # Noesis product documentation
 
-This directory contains the current product direction and behavior. Read the page that matches the part of Noesis you are changing.
+These documents describe the current product. Use the document whose purpose matches your question.
 
-- [Product thesis](product-thesis.md) explains the problem, primary user, and product principles.
-- [Product experience](product-experience.md) explains how Noesis works with a user and describes the main user flows.
-- [Agent intelligence](agent-intelligence-and-experience.md) explains the prompt, model judgment, direct tools, session recall, and project adaptation.
+- [Product thesis](product-thesis.md) explains who Noesis is for, which problem it addresses, and how the product decides what belongs.
+- [Product experience](product-experience.md) explains how sessions, turn traces, reflection, Capabilities, and user control fit together.
+- [How a Noesis turn works](agent-intelligence-and-experience.md) is the architecture reference for turn plans, traces, model calls, tools, MCP, saved programs, and Capability selection.
 
-The root [README](../README.md) is the short product introduction and setup guide. Engineering invariants live in [AGENTS.md](../AGENTS.md).
+The root [README](../README.md) introduces the product and shows how to run it. [AGENTS.md](../AGENTS.md) defines the engineering rules that implementation must preserve.
 
-Implementation plans live in [plans/](../plans/README.md). They record decisions made while building the system. They do not describe the current product.
+[Implementation plans](../plans/README.md) record the decisions and constraints behind shipped systems. Plans are historical records. They are not the source of truth for current behavior.
+
+The source for the README diagram is [noesis-compounding-loop.tldraw](noesis-compounding-loop.tldraw). The committed image is [noesis-compounding-loop.jpg](noesis-compounding-loop.jpg).

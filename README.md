@@ -6,91 +6,78 @@ Noesis learns how you think and work. It uses that shared experience to find bet
 
 It is built for hackers, researchers, writers, and other curious people who move between thinking and making.
 
-![Creative work leaves traces. Noesis uses selected traces to develop new ways to help.](docs/noesis-compounding-loop.jpg)
+![The Noesis compounding loop. Every turn returns a result. Some turns teach Noesis a new way to help.](docs/noesis-compounding-loop.jpg)
 
-The aim is for you and Noesis to develop together. Noesis adapts as your goals and judgment change. You gain new understanding and better ways to work.
+You get a result from the current turn before any learning runs. After the turn settles, Noesis reflects. Most turns change nothing. When the evidence supports it, Noesis creates or revises a Capability. Later turns can use that Capability when it is relevant. You can inspect, pause, or restore any Capability with `/learning`.
 
-## What makes Noesis different
+If a problem is unclear, Noesis thinks with you. If the outcome is clear, it does the work. You can change that balance in ordinary conversation.
 
-Noesis treats your ongoing collaboration with it as the core product loop. It can act now, learn from the work, and change how it helps.
+## Capabilities
 
-It can search previous sessions when their context may help. It can turn useful code into a project script or workflow. After every settled turn, quiet reflection may create or revise an inspectable Capability that changes how Noesis helps.
+A Capability is an ability Noesis can reuse. Each version has one or more exact effects:
 
-Noesis is built for people who move between open questions and direct execution. It can think with you when the problem is unclear. When the outcome is clear, it can do the work. You can change this balance through ordinary conversation.
+- **Instruction** adds trusted instructions to a matching turn.
+- **Skill** exposes an instructional package that the model loads only when needed.
+- **Script** uses one saved project script.
+- **Workflow** uses one saved project workflow.
 
-## Two paths for improvement
+Script and Workflow effects use the same saved programs you create during a turn. They stay in the project that owns that definition.
 
-Noesis uses two direct paths to improve:
+New Capabilities apply anywhere they are relevant. You can narrow one to a project or session, or make it always active.
 
-1. It can save a project script or workflow and use it at once with its current permissions.
-2. It can create or revise a Capability with exact instruction, skill, saved-script, or saved-workflow effects. Ordinary revisions become active immediately and remain visible, reversible, and open to feedback.
+## What you can do today
 
-A Capability that uses a script or workflow references the same immutable saved definition used by the ordinary runner. It does not create a second program or execution system.
+- Work in a local terminal with streaming responses and visible tool activity.
+- Open a new session, continue the last one, resume an older one, or fork the current session. If you type while a turn is running, those messages wait in order.
+- Search previous sessions with citations. You can compact older turns without changing the transcript you see.
+- Use files, directories, the shell, workflows, and session search as tools. Combine them in JavaScript with `execute`.
+- Save project scripts and multi-phase workflows and reuse them.
+- Connect local and remote MCP servers, including OAuth, from `/mcp`.
+- Inspect what Noesis learned with `/learning`, and restore any earlier version.
 
-## What is available today
+Noesis is an early research preview. Its interfaces and internal design will change with use.
 
-Noesis currently includes:
-
-- a local terminal interface with streaming responses and visible tool activity
-- new, continued, and interactively resumed sessions
-- durable session compaction with a complete original transcript
-- search across previous sessions with source citations
-- direct tools for files, directories, shell commands, saved workflows, and session search
-- `execute` for combining tools with JavaScript
-- local and remote MCP servers with OAuth, project overrides, and TUI management
-- project scripts and durable workflows with immutable execution revisions
-- ambient reflection after every settled foreground turn
-- versioned Capabilities with exact instruction, skill, saved-script, and saved-workflow effects
-- immediate activation, feedback, pause, scope changes, and exact restoration
-- an interactive `/learning` explorer for inspecting each Capability, its concrete effects, evidence, and history
-- SQLite storage for operational state, with ordinary files for editable definitions and artifacts.
-
-Noesis is an early research preview. Its interfaces and internal design will change as we use it.
-
-## Trust and control
-
-Generated code can use the permissions already granted to the current turn. It can create project scripts and workflows, and reflection may attach an exact saved program to a Capability. Credential export, recovery and audit control, and irreversible external actions without foreground user intent remain protected.
-
-Protected code controls durable state, effect settlement, recovery, and exact restoration. Each turn and execution records the exact revision it used. Later inspection does not depend on files that may have changed. The ordinary learning loop does not wait for speculative evaluation; a future evaluation system can be added when it executes real candidate behavior.
-
-Changes remain attributable and reversible. The user can inspect what changed, why it changed, where it applies, and which evidence supported it.
-
-## Quick start
+## Start Noesis
 
 Noesis requires Node.js 22.19 or newer and pnpm 10.
 
 ```sh
 pnpm install
-pnpm check
 pnpm start
 ```
 
-The first launch guides you through model selection and authentication. A normal start creates a new session.
-Supported providers are OpenAI Codex, Claude through Anthropic, OpenRouter, and OpenCode Zen.
+The first launch asks you to choose a model and authenticate. Noesis supports OpenAI Codex, Anthropic, OpenRouter, and OpenCode Zen.
 
-Choose a prior session interactively:
-
-```sh
-pnpm start -- --resume
-```
-
-Resume an exact session:
-
-```sh
-pnpm start -- --resume SESSION_ID
-```
-
-Continue the most recently active session:
+Reopen a session:
 
 ```sh
 pnpm start -- --continue
+pnpm start -- --resume
+pnpm start -- --resume SESSION_ID
 ```
 
-Noesis stores local state in `~/.noesis/` by default.
+`--continue` opens the most recently active session. `--resume` without an ID opens the session picker.
 
-Use `/compact` to summarize older completed turns while keeping recent turns raw. The original transcript remains intact for resume and search. Noesis also compacts automatically before a future turn would exceed its history budget.
+Project skills and project MCP servers stay disabled unless you start with `--trust-workspace`.
 
-The default history budget is 160,000 tokens. Override it in `~/.noesis/config.json` when a smaller model or a different working style calls for another limit:
+## Commands
+
+| Command                                      | Result                                                                                       |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `/learning`                                  | Inspect and manage Capabilities, reflection, feedback, and history.                          |
+| `/mcp`                                       | Add, authenticate, inspect, enable, disable, or remove MCP servers.                          |
+| `/compact [FOCUS]`                           | Compact older settled turns for future model context. The visible transcript stays complete. |
+| `/context`                                   | Inspect the context for the current session.                                                 |
+| `/capabilities`                              | Inspect the Capabilities selected for the current turn.                                      |
+| `/skills`, `/scripts`, `/workflows`, `/runs` | Inspect those resources and their run records.                                               |
+| `/fork`                                      | Create a new session from the current session.                                               |
+| `/queue resume`                              | Resume a queue that you paused.                                                              |
+
+Press `?` in the terminal for the full command and keyboard reference.
+
+## Local state and context
+
+Noesis stores local state under `~/.noesis/` by default. The default context budget is 160,000 tokens. Set another positive value in `~/.noesis/config.json`:
 
 ```json
 {
@@ -102,15 +89,15 @@ The default history budget is 160,000 tokens. Override it in `~/.noesis/config.j
 }
 ```
 
-Noesis caps the effective budget below the selected model's context window and reserves that model's maximum output allowance.
-After a model response, Noesis uses the provider's reported usage. Before then, it uses a provider-neutral estimate of roughly four UTF-8 bytes per token. Tool-heavy turns can replace older tool results in the next model request with bounded digest-backed references; the complete results remain available in the transcript.
+The budget covers the whole model request, not only the transcript. Noesis keeps it below the selected model's context window. It also reserves room for the model's maximum output.
 
-## MCP servers
+`/compact` writes a summary checkpoint and keeps a recent raw tail. Noesis also compacts automatically when history would exceed the budget. Resume and session search still use the original messages.
 
-Use `/mcp` to add a local or remote server. The same screen lets you authenticate, enable or disable a server, reconnect, edit its settings, remove it, and inspect what it provides.
+## Connect MCP servers
 
-Global servers live in `~/.noesis/mcp.json`. Project servers live in `./.noesis/mcp.json`. A project server replaces a global server with the same name while you work in that project.
-Project servers remain disabled until the workspace is trusted.
+Use `/mcp` to add a local or remote server. Global servers live in `~/.noesis/mcp.json`. Project servers live in `./.noesis/mcp.json`. A project entry replaces a global entry with the same name while that project is active.
+
+This example configures a remote OAuth server:
 
 ```json
 {
@@ -124,8 +111,26 @@ Project servers remain disabled until the workspace is trusted.
 }
 ```
 
-Connected MCP tools join the same tool catalog as built-in tools. The agent can call them through `execute`, add one to its direct tool set with `adapt`, or use one from a saved script or workflow.
+Connected MCP tools join the same catalog as built-in tools. The model can call them through `execute`, add one as a direct tool with `adapt`, or use one from a saved script or workflow.
+
+## Trust
+
+Generated code uses only the permissions granted for the current turn. It can save project scripts and workflows. Reflection can attach a saved program to a Capability.
+
+Noesis asks before credential export, recovery or audit control, and irreversible external actions that you did not request in the current turn.
+
+You can inspect every Capability, challenge it, pause it, or restore an earlier version.
+
+## Develop Noesis
+
+Run the complete local check before sending a change:
+
+```sh
+pnpm check
+```
+
+The check formats, lints, type-checks, and tests the repository. Tests use controlled providers and do not require paid credentials.
 
 ## Documentation
 
-Current product documentation lives in [docs/](docs/README.md). Implementation plans and historical design records live in `plans/` and are not required reading for using Noesis.
+[Product documentation](docs/README.md) describes the current product and architecture. [Implementation plans](plans/README.md) record the decisions behind shipped systems. You do not need the plans to use Noesis.
