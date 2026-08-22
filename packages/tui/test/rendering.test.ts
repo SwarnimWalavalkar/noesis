@@ -551,6 +551,63 @@ describe("Noesis transcript rendering", () => {
     expect(visibleWidth(selected)).toBe(visibleWidth(plain));
   });
 
+  test("keeps the selected action inside a bounded transcript navigation window", () => {
+    let state = initialTuiState("fake");
+    for (let index = 1; index <= 12; index += 1)
+      state = {
+        ...state,
+        timeline: [
+          ...state.timeline,
+          {
+            kind: "action",
+            actionId: `action-${String(index)}`,
+            name: "files.read",
+            status: "completed",
+            input: { path: `file-${String(index)}.ts` },
+          },
+        ],
+      };
+    state = {
+      ...state,
+      actionCursor: "action-12",
+    };
+    const renderer = createTranscriptRenderer(() => 0);
+
+    const newest = renderer.renderWindow(state, 72, 5).join("\n");
+    const earlier = renderer.renderWindow({ ...state, actionCursor: "action-2" }, 72, 5).join("\n");
+
+    expect(newest).toContain("file-12.ts");
+    expect(newest).not.toContain("file-1.ts");
+    expect(earlier).toContain("file-2.ts");
+    expect(earlier).not.toContain("file-12.ts");
+  });
+
+  test("scrolls the ordinary transcript view to the selected action without changing its height", () => {
+    let state = initialTuiState("fake");
+    for (let index = 1; index <= 24; index += 1)
+      state = {
+        ...state,
+        timeline: [
+          ...state.timeline,
+          {
+            kind: "action",
+            actionId: `action-${String(index)}`,
+            name: "files.read",
+            status: "completed",
+            input: { path: `file-${String(index)}.ts` },
+          },
+        ],
+      };
+    const ordinary = renderNoesisState(state, 72, 20);
+    const navigated = renderNoesisState({ ...state, actionCursor: "action-2" }, 72, 20);
+    const visibleTail = navigated.slice(-10).join("\n");
+
+    expect(navigated).toHaveLength(ordinary.length);
+    expect(visibleTail).toContain("file-2.ts");
+    expect(visibleTail).not.toContain("file-24.ts");
+    expect(visibleTail).not.toContain("TRANSCRIPT");
+  });
+
   test("wraps long prose to the actual display width", () => {
     const paragraph = Array.from({ length: 32 }, (_, index) => `word-${index}`).join(" ");
     const lines = renderMessageBlock({ role: "assistant", text: paragraph }, 36);

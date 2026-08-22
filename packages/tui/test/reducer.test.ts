@@ -25,7 +25,44 @@ describe("Noesis TUI reducer", () => {
     expect(executionForInteractionPhase("tool", "running")).toBeUndefined();
     expect(executionForInteractionPhase("error", "idle")).toBeUndefined();
     expect(executionForInteractionPhase("compacting", "idle")).toBeUndefined();
+    expect(executionForInteractionPhase("closing", "idle")).toBeUndefined();
     expect(executionForInteractionPhase("streaming", "interrupting")).toBe("aborting");
+  });
+
+  test("reconciles an immediate prompt echo with its admitted turn without duplicating it", () => {
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "prompt-submitted",
+      text: "show this immediately",
+      localSubmissionId: "local-1",
+    });
+
+    expect(state.timeline).toEqual([
+      {
+        kind: "message",
+        role: "user",
+        text: "show this immediately",
+        localSubmissionId: "local-1",
+      },
+    ]);
+
+    state = reduceTui(state, {
+      type: "prompt-admitted",
+      localSubmissionId: "local-1",
+      turnId: "turn-1",
+    });
+    expect(state.timeline).toEqual([
+      { kind: "message", role: "user", text: "show this immediately", turnId: "turn-1" },
+    ]);
+
+    const rejected = reduceTui(
+      reduceTui(state, {
+        type: "prompt-submitted",
+        text: "will fail admission",
+        localSubmissionId: "local-2",
+      }),
+      { type: "prompt-rejected", localSubmissionId: "local-2" },
+    );
+    expect(rejected.timeline).toEqual(state.timeline);
   });
 
   test("uses the built-in Codex model and reasoning defaults", () => {
@@ -339,6 +376,16 @@ describe("Noesis TUI reducer", () => {
 
     expect(helpHint(state)).toBe("enter queue · waiting for compaction · alt+↑ edit newest");
     expect(helpHint(state)).not.toContain("/queue resume");
+  });
+
+  test("communicates session shutdown through the status and help surfaces", () => {
+    const state = reduceTui(initialTuiState("fake"), {
+      type: "execution-changed",
+      execution: "closing",
+    });
+
+    expect(renderBottomChrome(state, 80, 24).join("\n")).toContain("● CLOSING");
+    expect(helpHint(state)).toBe("closing session…");
   });
 
   test("maps lifecycle actions to supported execution states", () => {

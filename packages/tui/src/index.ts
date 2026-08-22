@@ -23,6 +23,7 @@ import { learningDiagnosticNotice, reconcileSettledTurnPresentation } from "./le
 import { boundedInspectorText, type ShutdownSettlement } from "./lifecycle-utils.ts";
 import { createTuiLearningOrchestration } from "./learning.ts";
 import { createTuiMcpOrchestration } from "./mcp.ts";
+import { createOptimisticPromptEcho } from "./optimistic-prompt.ts";
 import {
   createHeaderView,
   createHelpView,
@@ -56,6 +57,7 @@ import {
 } from "./state.ts";
 import { type ActiveTurnToken, createStreamDeltaBuffer } from "./stream-delta-buffer.ts";
 import { safeTerminalText, shouldUseColor } from "./theme.ts";
+import { createTranscriptInputHandler } from "./transcript-input.ts";
 export * from "./action-summary.ts";
 export * from "./agent-event.ts";
 export * from "./commands.ts";
@@ -69,7 +71,7 @@ export * from "./runtime-port.ts";
 export * from "./safe-editor.ts";
 export * from "./session-picker.ts";
 export * from "./state.ts";
-const [SHUTDOWN_GRACE_MS, INTERRUPT_FEEDBACK_MS, INSPECTOR_PAGE_ROWS] = [250, 20, 10];
+const [SHUTDOWN_GRACE_MS, INTERRUPT_FEEDBACK_MS, CLOSING_FEEDBACK_MS] = [250, 20, 20];
 export async function startNoesisTui(
   runtime: NoesisTuiRuntime,
   options: TuiStartOptions = {},
@@ -116,6 +118,7 @@ export async function startNoesisTui(
     },
   );
   let inspectorHandle: OverlayHandle | undefined;
+  const optimisticPrompts = createOptimisticPromptEcho(view, () => tui.requestRender());
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const mcp = createTuiMcpOrchestration(
     createConditionalObject({
@@ -190,12 +193,16 @@ export async function startNoesisTui(
       activeTurnToken = undefined;
       inspectorHandle?.hide();
       inspectorHandle = undefined;
-      learning.dispose();
-      await mcp.dispose();
-      streamDeltas.clear();
+      optimisticPrompts.clear();
+      view.dispatch({ type: "execution-changed", execution: "closing" });
       editor.disableSubmit = true;
       editor.onSubmit = (): void => undefined;
       removeExitInputListener();
+      tui.requestRender();
+      await new Promise<void>((resolve) => setTimeout(resolve, CLOSING_FEEDBACK_MS));
+      learning.dispose();
+      await mcp.dispose();
+      streamDeltas.clear();
       try {
         await terminal.drainInput(1000);
       } finally {
@@ -284,68 +291,22 @@ export async function startNoesisTui(
       () => settle(),
     );
   };
-  const handleTranscriptKey = (data: string): boolean => {
-    const state = view.state;
-    if (state.inspector) {
-      if (matchesKey(data, "up"))
-        view.dispatch({
-          type: "inspector-scrolled",
-          delta: -1,
-          maxScroll: inspectorMaxScroll,
-        });
-      else if (matchesKey(data, "down"))
-        view.dispatch({
-          type: "inspector-scrolled",
-          delta: 1,
-          maxScroll: inspectorMaxScroll,
-        });
-      else if (matchesKey(data, "pageUp"))
-        view.dispatch({
-          type: "inspector-scrolled",
-          delta: -INSPECTOR_PAGE_ROWS,
-          maxScroll: inspectorMaxScroll,
-        });
-      else if (matchesKey(data, "pageDown"))
-        view.dispatch({
-          type: "inspector-scrolled",
-          delta: INSPECTOR_PAGE_ROWS,
-          maxScroll: inspectorMaxScroll,
-        });
-      else if (matchesKey(data, "space")) view.dispatch({ type: "inspector-view-toggled" });
-      else return false;
-      tui.requestRender();
-      return true;
-    }
-    if (state.actionCursor) {
-      if (matchesKey(data, "ctrl+o")) view.dispatch({ type: "action-cursor-cleared" });
-      else if (matchesKey(data, "up")) view.dispatch({ type: "action-cursor-moved", direction: "previous" });
-      else if (matchesKey(data, "down")) view.dispatch({ type: "action-cursor-moved", direction: "next" });
-      else if (matchesKey(data, "space"))
-        view.dispatch({
-          type: "action-expansion-toggled",
-          actionId: state.actionCursor,
-        });
-      else if (matchesKey(data, "enter")) {
-        openRunInspector(state.actionCursor);
-        return true;
-      } else return false;
-      tui.requestRender();
-      return true;
-    }
-    if (matchesKey(data, "ctrl+o")) {
-      view.dispatch({ type: "action-cursor-moved", direction: "previous" });
-      tui.requestRender();
-      return true;
-    }
-    return false;
-  };
+  const handleTranscriptKey = createTranscriptInputHandler({
+    tui,
+    view,
+    inspectorMaxScroll: () => inspectorMaxScroll,
+    openRunInspector,
+  });
   const applyInteractionSnapshot = (snapshot: TuiInteractionSnapshot): void => {
     if (view.state.trailId !== snapshot.sessionId) return;
     view.dispatch({
       type: "interaction-changed",
       interaction: interactionViewFromSnapshot(snapshot),
     });
-    const execution = executionForInteractionPhase(view.state.execution, snapshot.phase);
+    const execution =
+      snapshot.phase === "idle" && optimisticPrompts.hasPending()
+        ? undefined
+        : executionForInteractionPhase(view.state.execution, snapshot.phase);
     if (execution) view.dispatch({ type: "execution-changed", execution });
     tui.requestRender(snapshot.phase === "interrupting");
   };
@@ -377,6 +338,7 @@ export async function startNoesisTui(
     }
     if (interactionEvent.sessionId !== view.state.trailId) return;
     if (interactionEvent.type === "interaction-failed") {
+      optimisticPrompts.rejectForTrail(interactionEvent.sessionId);
       reportFailure(interactionEvent.error);
       return;
     }
@@ -388,7 +350,12 @@ export async function startNoesisTui(
         turnId: interactionEvent.turnId,
       };
       activeTurnToken = token;
-      view.dispatch({ type: "prompt-submitted", text: interactionEvent.text });
+      const echoed = optimisticPrompts.admit(
+        interactionEvent.sessionId,
+        interactionEvent.text,
+        interactionEvent.turnId,
+      );
+      if (!echoed) view.dispatch({ type: "prompt-submitted", text: interactionEvent.text });
       tui.requestRender();
       return;
     }
@@ -478,8 +445,10 @@ export async function startNoesisTui(
     const selectedActionId = view.state.actionCursor;
     if (selectedActionId)
       return () => {
-        if (view.state.actionCursor === selectedActionId) view.dispatch({ type: "action-cursor-cleared" });
-        tui.requestRender();
+        if (view.state.actionCursor === selectedActionId) {
+          view.dispatch({ type: "action-cursor-cleared" });
+          tui.requestRender();
+        }
         return true;
       };
     if (view.state.interaction.phase === "idle") return undefined;
@@ -699,7 +668,13 @@ export async function startNoesisTui(
         }
         return;
       }
-      await interact({ type: "submit", text });
+      const optimisticId = optimisticPrompts.echoIfIdle(view.state.interaction, submittedTrailId, text);
+      try {
+        await interact({ type: "submit", text });
+      } catch (error) {
+        if (optimisticId) optimisticPrompts.reject(optimisticId);
+        throw error;
+      }
     };
     const reportSubmissionFailure = (cause: unknown): void => {
       if (isCurrentSubmission()) reportFailure(cause);
@@ -724,6 +699,7 @@ export async function startNoesisTui(
     cancelPicker = undefined;
     inspectorHandle?.hide();
     inspectorHandle = undefined;
+    optimisticPrompts.clear();
     view.dispatch({ type: "trail-selected", trail });
     view.dispatch({
       type: "transcript-hydrated",

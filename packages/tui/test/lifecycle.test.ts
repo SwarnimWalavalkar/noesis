@@ -7,6 +7,7 @@ import {
   INSPECTOR_PREVIEW_CHARACTERS,
   paginateInspectorText,
   startNoesisTui,
+  type NoesisTuiRuntime,
 } from "../src/index.ts";
 import type { TuiLearningActivitySummary } from "../src/runtime-port.ts";
 import { createInMemoryTestRuntime, type TestNoesisRuntime } from "./support/in-memory-runtime.ts";
@@ -712,6 +713,49 @@ describe("Noesis TUI lifecycle", () => {
       });
     },
   );
+
+  test("echoes a prompt before durable admission finishes and renders it only once", async () => {
+    let releaseAdmission: (() => void) | undefined;
+    const admissionGate = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    let turnStarted = false;
+    const base = await createRuntime({
+      name: "delayed-admission-scripted",
+      async run(request) {
+        turnStarted = true;
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const delayedInteract: NoesisTuiRuntime["interact"] = async (trailId, command, options) => {
+      if (command.type === "submit") await admissionGate;
+      return await base.interact(trailId, command, options);
+    };
+    const runtime = Object.freeze({ ...base, interact: delayedInteract });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    const beforeSubmit = terminal.output.length;
+    terminal.type("show this immediately\r");
+    await vi.waitFor(() => expect(terminal.output.slice(beforeSubmit)).toContain("│ show this immediately"));
+    expect(turnStarted).toBe(false);
+
+    releaseAdmission?.();
+    await vi.waitFor(() => expect(terminal.output).toContain("reply:show this immediately"));
+    const transcript = await runtime.getTranscript(runtime.listTrails()[0]?.trailId ?? "missing");
+    expect(transcript.filter((entry) => entry.kind === "message" && entry.role === "user")).toHaveLength(1);
+    terminal.type("/quit\n");
+    await running;
+  });
 
   test("queues prompts submitted during a turn and drains them in FIFO order", async () => {
     let releaseTurn: (() => void) | undefined;
@@ -1522,7 +1566,7 @@ describe("Noesis TUI lifecycle", () => {
     expect(terminal.output).toContain("tools.shell.run");
 
     terminal.send("\u001b");
-    await vi.waitFor(() => expect(terminal.output).toContain("↑/↓ select"));
+    await vi.waitFor(() => expect(terminal.output).toContain("↑/↓ scroll"));
 
     terminal.send("\u001b");
     terminal.type("/quit\n");
@@ -2160,6 +2204,46 @@ describe("Noesis TUI lifecycle", () => {
 
     await expect(running).resolves.toBeUndefined();
     expect(terminal.drains).toBe(1);
+    expect(terminal.stops).toBe(1);
+  });
+
+  test("shows closing while shutdown cleanup is still in progress", async () => {
+    const runtime = await createRuntime({
+      name: "closing-scripted",
+      async run(request) {
+        return {
+          text: "done",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const terminal = createTestTerminal();
+    const originalDrain = terminal.drainInput.bind(terminal);
+    let releaseDrain: (() => void) | undefined;
+    const drainGate = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    Object.defineProperty(terminal, "drainInput", {
+      value: async (timeoutMs?: number) => {
+        await drainGate;
+        await originalDrain(timeoutMs);
+      },
+    });
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("/quit\n");
+    await vi.waitFor(() => expect(terminal.output).toContain("● CLOSING"));
+    expect(terminal.output).toContain("closing session…");
+    expect(terminal.stops).toBe(0);
+
+    releaseDrain?.();
+    await running;
     expect(terminal.stops).toBe(1);
   });
 

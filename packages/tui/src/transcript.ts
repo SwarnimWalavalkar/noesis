@@ -201,6 +201,16 @@ export interface TranscriptRenderer {
    * scrollback rather than being cropped, so no transcript content is ever unreachable.
    */
   readonly render: (state: NoesisTuiState, width: number, maxBodyRows?: number) => readonly string[];
+  /**
+   * Renders a bounded window around the selected action for navigation in the ordinary transcript
+   * view. The full transcript remains unbounded so native terminal scrollback is preserved.
+   */
+  readonly renderWindow: (
+    state: NoesisTuiState,
+    width: number,
+    height: number,
+    maxBodyRows?: number,
+  ) => readonly string[];
   readonly metrics: () => TranscriptRenderMetrics;
 }
 
@@ -276,17 +286,54 @@ export function createTranscriptRenderer(random: () => number = Math.random): Tr
     cache.set(entry, { key, block });
     return block;
   };
+  const renderTimeline = (
+    state: NoesisTuiState,
+    width: number,
+    maxBodyRows: number,
+  ): readonly {
+    readonly entry: TuiTimelineEntry;
+    readonly lines: readonly string[];
+  }[] => {
+    const actions = timelineActions(state.timeline);
+    return state.timeline.map((entry, index) => {
+      // Nested codemode calls read as a list under their parent, so they are not separated.
+      const separated = index > 0 && !(entry.kind === "action" && entry.parentActionId);
+      return {
+        entry,
+        lines: [...(separated ? [""] : []), ...renderBlock(entry, actions, width, state, maxBodyRows).lines],
+      };
+    });
+  };
   return {
     render(state, width, maxBodyRows = DEFAULT_EXPANDED_BODY_ROWS) {
       if (width <= 0) return [];
       if (state.timeline.length === 0)
         return [elideText(styled(state.colorEnabled, ANSI.dim, emptyTranscriptHint), width)];
-      const actions = timelineActions(state.timeline);
-      return state.timeline.flatMap((entry, index) => {
-        // Nested codemode calls read as a list under their parent, so they are not separated.
-        const separated = index > 0 && !(entry.kind === "action" && entry.parentActionId);
-        return [...(separated ? [""] : []), ...renderBlock(entry, actions, width, state, maxBodyRows).lines];
-      });
+      return renderTimeline(state, width, maxBodyRows).flatMap((block) => block.lines);
+    },
+    renderWindow(state, width, height, maxBodyRows = DEFAULT_EXPANDED_BODY_ROWS) {
+      const rowBudget = Math.max(0, Math.floor(height));
+      if (width <= 0 || rowBudget <= 0) return [];
+      const blocks = renderTimeline(state, width, maxBodyRows);
+      const lines = blocks.flatMap((block) => block.lines);
+      if (lines.length <= rowBudget) return lines;
+
+      let offset = 0;
+      let selectedLine: number | undefined;
+      for (const block of blocks) {
+        if (block.entry.kind === "action" && block.entry.actionId === state.actionCursor) {
+          // A leading blank separator is part of the block; anchor the action header itself.
+          selectedLine = offset + (block.lines[0] === "" ? 1 : 0);
+          break;
+        }
+        offset += block.lines.length;
+      }
+      const lastStart = Math.max(0, lines.length - rowBudget);
+      const start =
+        selectedLine === undefined
+          ? lastStart
+          : Math.min(lastStart, Math.max(0, selectedLine - Math.floor(rowBudget / 2)));
+      return lines.slice(start, start + rowBudget);
     },
     metrics: () => ({ parsedBlocks, cacheHits }),
   };

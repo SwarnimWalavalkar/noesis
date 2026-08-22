@@ -11,6 +11,8 @@ export type Pane = "trail" | "context" | "capabilities";
 export interface TuiMessage {
   readonly role: "user" | "assistant" | "system";
   readonly text: string;
+  /** View-local identity used only until the runtime admits a submitted prompt. */
+  readonly localSubmissionId?: string;
   readonly messageId?: string;
   readonly turnId?: string;
   readonly createdAt?: string;
@@ -95,13 +97,22 @@ export function isTuiMessageEntry(entry: TuiTimelineEntry): entry is TuiMessageE
 export function isTuiAgentActionEntry(entry: TuiTimelineEntry): entry is TuiAgentActionEntry {
   return entry.kind === "action";
 }
-export type ExecutionState = "idle" | "thinking" | "streaming" | "tool" | "compacting" | "aborting" | "error";
+export type ExecutionState =
+  | "idle"
+  | "thinking"
+  | "streaming"
+  | "tool"
+  | "compacting"
+  | "aborting"
+  | "closing"
+  | "error";
 export function executionForInteractionPhase(
   current: ExecutionState,
   phase: TuiInteractionView["phase"],
 ): ExecutionState | undefined {
   if (phase === "interrupting") return "aborting";
-  if (phase === "idle" && current !== "error" && current !== "compacting") return "idle";
+  if (phase === "idle" && current !== "error" && current !== "compacting" && current !== "closing")
+    return "idle";
   if (phase === "running" && (current === "idle" || current === "aborting")) return "thinking";
   return undefined;
 }
@@ -193,6 +204,16 @@ export type NoesisTuiAction =
   | {
       readonly type: "prompt-submitted";
       readonly text: string;
+      readonly localSubmissionId?: string;
+    }
+  | {
+      readonly type: "prompt-admitted";
+      readonly localSubmissionId: string;
+      readonly turnId: string;
+    }
+  | {
+      readonly type: "prompt-rejected";
+      readonly localSubmissionId: string;
     }
   | {
       readonly type: "steer-delivered";
@@ -404,12 +425,35 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       };
     case "prompt-submitted": {
       const { error: _error, notification: _notification, ...rest } = state;
+      const message = createConditionalObject({
+        kind: "message",
+        role: "user",
+        text: action.text,
+      } as const)
+        .addOptional(action.localSubmissionId ? { localSubmissionId: action.localSubmissionId } : undefined)
+        .finish();
       return {
         ...rest,
         execution: "thinking",
-        timeline: [...state.timeline, { kind: "message", role: "user", text: action.text }],
+        timeline: [...state.timeline, message],
       };
     }
+    case "prompt-admitted":
+      return {
+        ...state,
+        timeline: state.timeline.map((entry) => {
+          if (entry.kind !== "message" || entry.localSubmissionId !== action.localSubmissionId) return entry;
+          const { localSubmissionId: _localSubmissionId, ...message } = entry;
+          return { ...message, turnId: action.turnId };
+        }),
+      };
+    case "prompt-rejected":
+      return {
+        ...state,
+        timeline: state.timeline.filter(
+          (entry) => entry.kind !== "message" || entry.localSubmissionId !== action.localSubmissionId,
+        ),
+      };
     case "steer-delivered":
       return {
         ...state,
@@ -517,7 +561,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       return moveCursor(state, action.direction);
     case "action-cursor-cleared": {
       const { actionCursor: _actionCursor, ...rest } = state;
-      return rest;
+      return { ...rest, expandedActionIds: NO_EXPANDED_ACTIONS };
     }
     case "inspector-opened":
       return {

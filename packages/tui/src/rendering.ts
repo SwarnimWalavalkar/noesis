@@ -103,7 +103,7 @@ function colorStatusLine(state: NoesisTuiState, fields: readonly string[]): stri
       ? ANSI.red
       : state.execution === "idle"
         ? ANSI.green
-        : state.execution === "compacting" || state.execution === "aborting"
+        : state.execution === "compacting" || state.execution === "aborting" || state.execution === "closing"
           ? ANSI.yellow
           : ANSI.cyan;
   return fields
@@ -122,9 +122,10 @@ export function renderStatusLine(state: NoesisTuiState, width: number, height = 
 
 /** Keys change meaning while the transcript is navigable, so the hint follows the mode. */
 export function helpHint(state: NoesisTuiState): string {
+  if (state.execution === "closing") return "closing session…";
   if (state.inspector)
     return `↑/↓ scroll · space ${state.inspector.view === "raw" ? "semantic" : "exact"} · esc close`;
-  if (state.actionCursor) return "↑/↓ select · space expand · enter inspect · esc leave · ctrl+c quit";
+  if (state.actionCursor) return "↑/↓ scroll · space expand · enter inspect · esc leave · ctrl+c quit";
   if (state.interaction.phase !== "idle")
     return "enter queue · /steer redirect · alt+↑ edit newest · esc interrupt";
   if (state.execution === "compacting" && state.interaction.queuedInputs.length > 0)
@@ -241,8 +242,17 @@ export function renderNoesisState(
   const inner = terminalWidth > 2 ? terminalWidth - 2 : terminalWidth;
   if (inner <= 0) return [];
   const layout = createTuiLayout(terminalWidth, height);
+  const transcriptState = mainTranscriptState(state);
+  const transcript = transcriptRenderer.render(transcriptState, inner, layout.expandedRowBudget);
+  const visibleTranscript = state.actionCursor
+    ? renderTranscriptNavigationWindow(
+        transcript,
+        transcriptRenderer.renderWindow(state, inner, layout.expandedRowBudget, layout.expandedRowBudget),
+        layout.expandedRowBudget,
+      )
+    : transcript;
   return [
-    ...transcriptRenderer.render(state, inner, layout.expandedRowBudget),
+    ...visibleTranscript,
     ...paneLines(state, layout).map((line) => elideText(line, inner)),
     ...(state.error
       ? [styled(state.colorEnabled, `${ANSI.bold}${ANSI.red}`, elideText(`Error · ${state.error}`, inner))]
@@ -251,6 +261,36 @@ export function renderNoesisState(
 }
 
 const defaultTranscriptRenderer = createTranscriptRenderer();
+const NO_NAVIGATION_EXPANSIONS: ReadonlySet<string> = new Set<string>();
+
+/**
+ * Keeps the ordinary transcript's off-screen prefix intact while replacing only its visible tail
+ * with the window around the selected action. Short transcripts may grow to the viewport budget
+ * so an expanded action remains useful; long transcripts keep exactly the same line count. This
+ * makes Ctrl-O feel like the existing view scrolled to the action without introducing a modal.
+ */
+const renderTranscriptNavigationWindow = (
+  transcript: readonly string[],
+  window: readonly string[],
+  rowBudget: number,
+): readonly string[] => {
+  const visibleRows = Math.max(0, Math.floor(rowBudget));
+  if (visibleRows === 0) return transcript;
+  const prefixRows = Math.max(0, transcript.length - visibleRows);
+  const targetRows = Math.max(transcript.length, visibleRows);
+  const shown = window.slice(-visibleRows);
+  return [
+    ...transcript.slice(0, prefixRows),
+    ...Array.from({ length: targetRows - prefixRows - shown.length }, () => ""),
+    ...shown,
+  ];
+};
+
+const mainTranscriptState = (state: NoesisTuiState): NoesisTuiState => {
+  if (!state.actionCursor) return state;
+  const { actionCursor: _actionCursor, ...rest } = state;
+  return { ...rest, expandedActionIds: NO_NAVIGATION_EXPANSIONS };
+};
 
 export interface NoesisView extends Component {
   readonly state: NoesisTuiState;
