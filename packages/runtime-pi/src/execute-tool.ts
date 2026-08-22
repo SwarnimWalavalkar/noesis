@@ -18,6 +18,13 @@ const MAX_WORKFLOW_INDEX_BYTES = 4 * 1024;
 const MAX_WORKFLOW_NAME_BYTES = 96;
 const MAX_WORKFLOW_TOOL_NAME_BYTES = 128;
 const MAX_WORKFLOW_DESCRIPTION_BYTES = 192;
+const CODEMODE_STARTER_CALLS = Object.freeze([
+  Object.freeze({ name: "files.read", call: "tools.files.read({ path })" }),
+  Object.freeze({ name: "files.list", call: 'tools.files.list({ path: "." })' }),
+  Object.freeze({ name: "shell.run", call: "tools.shell.run({ command })" }),
+  Object.freeze({ name: "workflows.run", call: "tools.workflows.run({ name, input })" }),
+  Object.freeze({ name: "history.search_sessions", call: "tools.history.search_sessions({ query })" }),
+]);
 export interface PiWorkflowSummary {
   readonly name: string;
   readonly description: string;
@@ -203,6 +210,13 @@ function mcpIndex(summaries: readonly PiMcpServerSummary[] | undefined): string 
   }
   return "MCP servers are available. Use mcp.servers, mcp.inspect, and noesis.search for progressive discovery.";
 }
+function codemodeStarterKit(catalog: PiFrozenToolCatalog): string {
+  const available = new Set(catalog.tools.map((tool) => tool.name));
+  const calls = CODEMODE_STARTER_CALLS.filter(({ name }) => available.has(name)).map(({ call }) => call);
+  if (calls.length === 0)
+    return "For an unknown tool, return await noesis.search(query), then return await noesis.describe(exactName) to inspect its input schema.";
+  return `Known starter tools—invoke these directly without search or describe: ${calls.join("; ")}. For any other tool, return await noesis.search(query), then return await noesis.describe(exactName) to inspect its input schema.`;
+}
 export function createPiExecuteTool(input: {
   readonly prepared: PreparedPiCodeExecution;
   readonly turnId: string;
@@ -211,16 +225,18 @@ export function createPiExecuteTool(input: {
 }): AgentTool<typeof executeParametersJsonSchema, PiExecuteToolDetails> {
   const availableWorkflows = workflowIndex(input.prepared.workflowSummaries);
   const availableMcp = mcpIndex(input.prepared.mcpServerSummaries);
+  const starterKit = codemodeStarterKit(input.prepared.catalog);
   const tool: AgentTool<typeof executeParametersJsonSchema, PiExecuteToolDetails> = {
     name: "execute",
     label: "Execute JavaScript",
     description: [
       "Execute JavaScript on the user's machine and compose work tools through the injected SDK.",
-      "Discover before guessing: return await noesis.search(query), then return await noesis.describe(exactName) to inspect its input schema.",
+      "Compose related calls and transformations into one coherent program; do not use execute merely to wrap one known tool call.",
+      starterKit,
       "Invoke with return await tools.<family>.<operation>(input), or return await noesis.invoke(exactName, input).",
       "For large-session analysis, context is a lazy immutable view of the complete pre-turn session timeline: inspect context.length, take context.slice(start, end), and await view.text() only when raw text is needed. Use await models.query(prompt, contextOrViews) for isolated tool-free subqueries on the frozen model route.",
       "emit(value) and notify(value) show progress to the user but do not return that value to you; use return for the final result that should enter conversation context.",
-      "When the user asks you to create a reusable capability, or a reusable project-local program would materially help the current work, implement it immediately as a script with scripts.save, or as a workflow with workflows.save when it needs durable phases. Do not defer executable project-local work to reflection or evaluation. Verify a new script immediately with scripts.run in the same execution and return the save receipt, verification, and reuse instructions.",
+      "For reusable computation, save a typed Script with scripts.save; for durable or resumable phases, save a Workflow with workflows.save. Do not defer foreground program creation to reflection. Verify newly saved programs immediately.",
       ...(availableWorkflows ? [availableWorkflows] : []),
       ...(availableMcp ? [availableMcp] : []),
       "Use store(key, value)/load(key) for codemode-session scratch state.",

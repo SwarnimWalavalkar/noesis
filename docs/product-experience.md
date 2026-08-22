@@ -140,7 +140,7 @@ The learning system works best when `no_change` stays out of the way. Not every 
 
 ### Useful execution becomes an inspectable program
 
-The user asks Noesis to investigate a repository, change files, run commands, search the web, or create an artifact. Noesis uses a small set of direct tools for common tasks. It uses `execute` to discover and combine more tools with JavaScript.
+The user asks Noesis to investigate a repository, change files, run commands, search the web, or create an artifact. One simple operation can use a direct tool. Work that requires multiple tool calls or transforms intermediate results normally runs as one coherent JavaScript program through `execute`, rather than one wrapper for each known call. Basic file, shell, workflow, and session-search calls are named in the `execute` contract; broader tools remain progressively discoverable.
 
 The conversation gets the final result. The user can still inspect each tool call and revision.
 

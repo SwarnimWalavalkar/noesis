@@ -153,6 +153,25 @@ function emptyCatalog(catalogId: string) {
   });
 }
 
+function catalogWithTools(catalogId: string, names: readonly string[]): PiFrozenToolCatalog {
+  return Object.freeze({
+    catalogId,
+    catalogDigest: sha256(catalogId),
+    tools: Object.freeze(
+      names.map((name) =>
+        Object.freeze({
+          name,
+          label: name,
+          description: name,
+          revisionId: `${name}-v1`,
+          inputSchema: Object.freeze({ type: "object" }),
+          outputSchema: Object.freeze({ type: "object" }),
+        }),
+      ),
+    ),
+  });
+}
+
 function controlledCodeExecution(
   resolver: FrozenSessionToolResolver,
   marker: string,
@@ -908,7 +927,13 @@ describe("agent runtime factories", () => {
     const active = new AbortController();
     const byteBounded = createPiExecuteTool({
       prepared: {
-        catalog: emptyCatalog("catalog"),
+        catalog: catalogWithTools("catalog", [
+          "files.read",
+          "files.list",
+          "shell.run",
+          "workflows.run",
+          "history.search_sessions",
+        ]),
         execute: async () => {
           executions += 1;
           return {
@@ -929,11 +954,19 @@ describe("agent runtime factories", () => {
     );
     expect(byteBounded.description).toContain("return await noesis.search(query)");
     expect(byteBounded.description).toContain("return await noesis.describe(exactName)");
+    expect(byteBounded.description).toContain("one coherent program");
+    expect(byteBounded.description).toContain("do not use execute merely to wrap one known tool call");
+    expect(byteBounded.description).toContain("tools.files.read({ path })");
+    expect(byteBounded.description).toContain('tools.files.list({ path: "." })');
+    expect(byteBounded.description).toContain("tools.shell.run({ command })");
+    expect(byteBounded.description).toContain("tools.workflows.run({ name, input })");
+    expect(byteBounded.description).toContain("tools.history.search_sessions({ query })");
+    expect(byteBounded.description).toContain("For any other tool");
     expect(byteBounded.description).toContain("do not return that value to you");
-    expect(byteBounded.description).toContain("a reusable project-local program would materially help");
-    expect(byteBounded.description).toContain("script with scripts.save");
-    expect(byteBounded.description).toContain("Do not defer executable project-local work");
-    expect(byteBounded.description).toContain("Verify a new script immediately with scripts.run");
+    expect(byteBounded.description).toContain("typed Script with scripts.save");
+    expect(byteBounded.description).toContain("Workflow with workflows.save");
+    expect(byteBounded.description).toContain("Do not defer foreground program creation to reflection");
+    expect(byteBounded.description).toContain("Verify newly saved programs immediately");
     expect(byteBounded.description).toContain("store(key, value)");
     expect(executions).toBe(0);
   });

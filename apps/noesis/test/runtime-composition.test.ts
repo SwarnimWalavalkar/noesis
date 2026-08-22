@@ -3007,6 +3007,12 @@ describe("apps/noesis production control-plane composition", () => {
     expect(requests[0]?.systemPrompt).toContain(
       "Before asking the user to repeat relevant prior work, search previous sessions when it could help.",
     );
+    expect(requests[0]?.systemPrompt).toContain(
+      "for multi-call work, prefer one coherent `execute` program that composes tools in code",
+    );
+    expect(requests[0]?.systemPrompt).toContain(
+      "Save reusable computations as Scripts and durable, inspectable, resumable multi-phase procedures as Workflows.",
+    );
     const sessionCatalogTools = [
       "history.search_sessions",
       "history.open_session_evidence",
