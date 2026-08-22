@@ -1,0 +1,43 @@
+#!/bin/sh
+
+set -eu
+
+script_path=$0
+while [ -L "$script_path" ]; do
+  link_target=$(readlink "$script_path")
+  case "$link_target" in
+    /*) script_path=$link_target ;;
+    *) script_path=$(dirname "$script_path")/$link_target ;;
+  esac
+done
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$script_path")/.." && pwd)
+source_path="$repo_root/scripts/noesis-dev"
+bin_dir=${NOESIS_DEV_BIN_DIR:-"$HOME/.local/bin"}
+command_path="$bin_dir/noesis-dev"
+
+mkdir -p "$repo_root/.noesis" "$bin_dir"
+
+if [ -L "$command_path" ]; then
+  existing_target=$(readlink "$command_path")
+  if [ "$existing_target" != "$source_path" ]; then
+    echo "$command_path already links to $existing_target; leaving it unchanged." >&2
+    exit 1
+  fi
+elif [ -e "$command_path" ]; then
+  echo "$command_path already exists and is not a symlink; leaving it unchanged." >&2
+  exit 1
+else
+  ln -s "$source_path" "$command_path"
+fi
+
+echo "Installed noesis-dev at $command_path"
+echo "Development state: $repo_root/.noesis"
+
+case ":$PATH:" in
+  *":$bin_dir:"*) ;;
+  *)
+    echo "$bin_dir is not on PATH. Add it to your shell configuration:" >&2
+    echo "  export PATH=\"$bin_dir:\$PATH\"" >&2
+    ;;
+esac

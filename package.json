@@ -6,6 +6,8 @@
   "scripts": {
     "build": "tsc --noEmit",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
+    "dev": "./scripts/noesis-dev",
+    "dev:install": "./scripts/install-noesis-dev",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",

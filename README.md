@@ -49,6 +49,15 @@ pnpm start
 
 The first launch asks you to choose a model and authenticate. Noesis supports OpenAI Codex, Anthropic, OpenRouter, and OpenCode Zen.
 
+For development, install the repository-owned `noesis-dev` command:
+
+```sh
+pnpm dev:install
+noesis-dev
+```
+
+The installer links `scripts/noesis-dev` into `~/.local/bin`. Set `NOESIS_DEV_BIN_DIR` to install the link elsewhere. The command runs the current checkout directly through its pinned `tsx`, works from any directory, and keeps its config, credentials, sessions, and other development state in this repository's ignored `.noesis/` directory. Run it without installing the link with `pnpm dev`.
+
 Reopen a session:
 
 ```sh

@@ -1,0 +1,25 @@
+#!/bin/sh
+
+set -eu
+
+script_path=$0
+while [ -L "$script_path" ]; do
+  link_target=$(readlink "$script_path")
+  case "$link_target" in
+    /*) script_path=$link_target ;;
+    *) script_path=$(dirname "$script_path")/$link_target ;;
+  esac
+done
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$script_path")/.." && pwd)
+tsx="$repo_root/node_modules/.bin/tsx"
+
+if [ ! -x "$tsx" ]; then
+  echo "Noesis dependencies are not installed in $repo_root." >&2
+  echo "Run: pnpm --dir $repo_root install" >&2
+  exit 1
+fi
+
+mkdir -p "$repo_root/.noesis"
+cd "$repo_root"
+exec "$tsx" "$repo_root/apps/noesis/src/cli.ts" "$@" --home "$repo_root/.noesis"
