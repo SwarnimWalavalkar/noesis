@@ -3008,7 +3008,7 @@ describe("apps/noesis production control-plane composition", () => {
       "search this installation's previous sessions through `execute` when it could help.",
     );
     expect(requests[0]?.systemPrompt).toContain("For multi-call work, use one coherent `execute` program");
-    expect(requests[0]?.systemPrompt).toContain("use `models.query` when evidence needs semantic synthesis");
+    expect(requests[0]?.systemPrompt).toContain("use `agents.run` when a bounded independent agent can help");
     expect(requests[0]?.systemPrompt).toContain("Treat explicit truncation as incomplete evidence");
     expect(requests[0]?.systemPrompt).toContain(
       "use one coherent follow-up instead of a series of direct calls",

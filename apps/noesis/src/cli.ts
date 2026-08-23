@@ -16,7 +16,7 @@ import {
   createPiAgentRoleRunner,
   createPiAgentRuntime,
   createPiMcpSamplingPort,
-  createPiModelQueryRunner,
+  createPiSubAgentRunner,
   createPiModelServices,
   createPiSkillLibrary,
   NOESIS_PROVIDER_IDS,
@@ -300,6 +300,7 @@ async function createRuntime(
 > {
   const services = createPiModelServices(config.home);
   preparePiModelSelection(services.models, config.agent);
+  preparePiModelSelection(services.models, config.agents);
   const project = await resolveActiveProject(process.cwd());
   const skills = createPiSkillLibrary({
     cwd: project.root,
@@ -349,7 +350,7 @@ async function createRuntime(
             ),
           createRoleRunner: (configurations) =>
             createPiAgentRoleRunner(project.root, services.models, configurations),
-          modelQuery: createPiModelQueryRunner(project.root, services.models),
+          subAgent: createPiSubAgentRunner(project.root, services.models),
           resolveModelContext: (provider, model) => {
             preparePiModelSelection(services.models, Object.freeze({ provider, model }));
             const selected = services.models.getModel(provider, model);
@@ -364,7 +365,7 @@ async function createRuntime(
           | "recoverInterruptedOperations"
           | "createAgent"
           | "createRoleRunner"
-          | "modelQuery"
+          | "subAgent"
           | "resolveModelContext"
         >)
         .finish(),

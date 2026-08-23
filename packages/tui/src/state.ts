@@ -6,6 +6,7 @@ import type {
   RuntimeTranscriptEntry,
   TrailState,
 } from "@noesis/runtime";
+import { EXECUTE_ACTION_NAME, SUBAGENT_ACTION_NAME } from "./action-summary.ts";
 import type { TuiExecutionDetail, TuiInteractionSnapshot } from "./runtime-port.ts";
 export type Pane = "trail" | "context" | "capabilities";
 export interface TuiMessage {
@@ -364,8 +365,64 @@ export function childActions(
 ): readonly TuiAgentAction[] {
   return actions.filter((action) => action.parentActionId === actionId);
 }
+/** Child activity remains inspectable through its subagent but does not become chat transcript noise. */
+export function isSubAgentChildAction(action: TuiAgentAction, actions: readonly TuiAgentAction[]): boolean {
+  let parentId = action.parentActionId;
+  const visited = new Set<string>();
+  while (parentId && !visited.has(parentId)) {
+    visited.add(parentId);
+    const parent = actions.find((candidate) => candidate.actionId === parentId);
+    if (!parent) return false;
+    if (parent.name === SUBAGENT_ACTION_NAME) return true;
+    parentId = parent.parentActionId;
+  }
+  return false;
+}
+export function visibleTranscriptActions(
+  timeline: readonly TuiTimelineEntry[],
+): readonly TuiAgentActionEntry[] {
+  const actions = timelineActions(timeline);
+  return actions.filter((action) => !isSubAgentChildAction(action, actions));
+}
+/** The fixed surface always shows active agents and adds the run selected in transcript inspection. */
+export function subAgentsForSurface(
+  timeline: readonly TuiTimelineEntry[],
+  actionCursor?: string,
+): readonly TuiAgentActionEntry[] {
+  const actions = timelineActions(timeline);
+  const includedIds = new Set(
+    actions
+      .filter((action) => action.name === SUBAGENT_ACTION_NAME && action.status === "running")
+      .map((action) => action.actionId),
+  );
+  let selected = actionCursor ? actions.find((action) => action.actionId === actionCursor) : undefined;
+  const visited = new Set<string>();
+  while (selected && !visited.has(selected.actionId)) {
+    visited.add(selected.actionId);
+    if (selected.name === EXECUTE_ACTION_NAME) {
+      const byId = new Map(actions.map((action) => [action.actionId, action]));
+      for (const action of actions) {
+        if (action.name !== SUBAGENT_ACTION_NAME) continue;
+        let parentId = action.parentActionId;
+        const ancestry = new Set<string>();
+        while (parentId && !ancestry.has(parentId)) {
+          if (parentId === selected.actionId) {
+            includedIds.add(action.actionId);
+            break;
+          }
+          ancestry.add(parentId);
+          parentId = byId.get(parentId)?.parentActionId;
+        }
+      }
+      break;
+    }
+    const parentActionId = selected.parentActionId;
+    selected = parentActionId ? actions.find((action) => action.actionId === parentActionId) : undefined;
+  }
+  return actions.filter((action) => includedIds.has(action.actionId));
+}
 function moveCursor(state: NoesisTuiState, direction: "previous" | "next"): NoesisTuiState {
-  const actions = timelineActions(state.timeline);
+  const actions = visibleTranscriptActions(state.timeline);
   if (actions.length === 0) return state;
   const currentIndex = actions.findIndex((action) => action.actionId === state.actionCursor);
   // Entering navigation with no cursor selects the most recent action, which is what the user

@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveNoesisConfig } from "@noesis/config";
 import {
-  createAmbiguousModelQueryOutcomeError,
+  createAmbiguousSubAgentOutcomeError,
   createPiAgentRuntime,
-  type PiModelQueryRequest,
+  createPiSubAgentRunner,
+  type PiSubAgentRunRequest,
   projectWorkflowToolName,
 } from "@noesis/runtime-pi";
 import { afterEach, describe, expect, test } from "vitest";
@@ -26,27 +27,28 @@ afterEach(async () => {
 
 describe("production codemode journey", () => {
   test("codemode queries the frozen pre-turn context through the canonical Broker path", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-model-query-acceptance-"));
+    const home = await mkdtemp(join(tmpdir(), "noesis-subagent-query-acceptance-"));
     roots.push(home);
     const resolved = await resolveNoesisConfig({
       home,
       env: Object.freeze({}),
-      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+      cli: Object.freeze({ provider: "stale-default-provider", model: "stale-default-model" }),
     });
     const config = Object.freeze({
       ...resolved,
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
-    const nestedRequests: PiModelQueryRequest[] = [];
+    const nestedRequests: PiSubAgentRunRequest[] = [];
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText }) => {
+        if (context.systemPrompt?.includes("bounded subagent")) return "cobalt";
         if (lastUserText.includes("Seed")) return "The durable seed is cobalt.";
         if (context.messages.at(-1)?.role === "toolResult") return "The nested analysis is complete.";
         if (lastUserText.includes("Oversized"))
           return controlledToolCallResponse(
             "execute",
             {
-              source: 'return await models.query("Analyze this.", "x".repeat(2_000_000));',
+              source: 'return await agents.run({ prompt: "x".repeat(2_000_000) });',
             },
             "call-query-oversized",
           );
@@ -54,7 +56,7 @@ describe("production codemode journey", () => {
           return controlledToolCallResponse(
             "execute",
             {
-              source: 'return await models.query("Trigger ambiguous timeout.");',
+              source: 'return await agents.run({ prompt: "Trigger ambiguous timeout." });',
             },
             "call-query-ambiguous",
           );
@@ -64,17 +66,25 @@ describe("production codemode journey", () => {
             {
               source: [
                 "const full = context.slice(0);",
-                'return await models.query("Analyze this.", Array.from({ length: 33 }, () => full));',
+                "return await agents.run({ prompt: Array.from({ length: 33 }, () => full) });",
               ].join("\n"),
             },
             "call-query-repeated-context",
+          );
+        if (lastUserText.includes("Recursive"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: 'return await agents.run({ prompt: "Re-enter directly.", tools: ["agents.run"] });',
+            },
+            "call-query-recursion",
           );
         return controlledToolCallResponse(
           "execute",
           {
             source: [
               "const selected = context.slice(0);",
-              'const answer = await models.query("Return the durable seed word.", selected);',
+              'const answer = await agents.run({ prompt: ["Return the durable seed word.", selected] });',
               "return { contextLength: context.length, answer };",
             ].join("\n"),
           },
@@ -84,23 +94,23 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      modelQuery: Object.freeze({
-        query: async (request: PiModelQueryRequest) => {
+      subAgent: Object.freeze({
+        run: async (request: PiSubAgentRunRequest) => {
           nestedRequests.push(request);
-          if (request.prompt === "Trigger ambiguous timeout.") throw createAmbiguousModelQueryOutcomeError();
-          return Object.freeze({
-            text: "cobalt",
-            provider: request.provider,
-            model: request.model,
-            thinkingLevel: request.thinkingLevel,
-            stopReason: "stop" as const,
-            usage: Object.freeze({
-              inputTokens: 23,
-              outputTokens: 1,
-              totalTokens: 24,
-              estimatedCost: 0,
-            }),
-          });
+          if (request.plan.prompt === "Trigger ambiguous timeout.") {
+            request.onTelemetry?.({
+              usage: {
+                inputTokens: 13,
+                outputTokens: 5,
+                totalTokens: 18,
+                estimatedCost: 0.25,
+              },
+              modelCalls: 1,
+              toolCalls: 0,
+            });
+            throw createAmbiguousSubAgentOutcomeError();
+          }
+          return await createPiSubAgentRunner(process.cwd(), controlled.models).run(request);
         },
       }),
       createAgent: (_sessionTools, codeExecution, selfTools) =>
@@ -113,36 +123,48 @@ describe("production codemode journey", () => {
           }),
         }),
     });
-    const trail = await runtime.startTrail({ title: "Nested model query acceptance" });
+    const trail = await runtime.startTrail({
+      title: "Nested model query acceptance",
+      provider: CONTROLLED_PI_PROVIDER,
+      model: CONTROLLED_PI_MODEL,
+    });
 
     await runtime.debug.runTurn(trail.trailId, "Seed the session with cobalt.");
     const result = await runtime.debug.runTurn(
       trail.trailId,
       "Use codemode to ask a model about the previous session context.",
+      { thinkingLevel: "xhigh" },
     );
 
     expect(result.output).toBe("The nested analysis is complete.");
     expect(nestedRequests).toHaveLength(1);
     const nested = nestedRequests[0];
     if (!nested) throw new Error("Expected one nested model request");
-    expect(nested.prompt).toBe("Return the durable seed word.");
-    expect(nested.context).toHaveLength(1);
-    expect(nested.context[0]).toContain("Seed the session with cobalt.");
-    expect(nested.context[0]).toContain("The durable seed is cobalt.");
-    expect(nested.context[0]).not.toContain("Use codemode to ask a model");
+    expect(nested.plan.prompt).toContain("Return the durable seed word.");
+    expect(nested.plan.prompt).toContain("Seed the session with cobalt.");
+    expect(nested.plan.prompt).toContain("The durable seed is cobalt.");
+    expect(nested.plan.prompt).not.toContain("Use codemode to ask a model");
+    expect(nested.plan.systemPrompt).toContain("You are a bounded subagent inside Noesis.");
+    expect(nested.plan.route).toEqual({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL });
+    expect(nested.plan.thinkingLevel).toBe("xhigh");
+    expect(result.frozenTurnPlan?.subAgentDefaults).toMatchObject({
+      provider: CONTROLLED_PI_PROVIDER,
+      model: CONTROLLED_PI_MODEL,
+      thinkingLevel: "xhigh",
+    });
     const modelCalls = await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId);
     expect(modelCalls).toMatchObject([
       {
         status: "completed",
         provider: CONTROLLED_PI_PROVIDER,
         model: CONTROLLED_PI_MODEL,
-        usage: { inputTokens: 23, outputTokens: 1, totalTokens: 24, estimatedCost: 0 },
+        usage: expect.objectContaining({ totalTokens: expect.any(Number) }),
         requestArtifactId: expect.any(String),
         outputArtifactId: expect.any(String),
       },
     ]);
     const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
-    expect(calls.map((call) => call.toolName)).toEqual(["execute", "models.query"]);
+    expect(calls.map((call) => call.toolName)).toEqual(["execute", "agents.run"]);
     await runtime.debug.runTurn(trail.trailId, "Oversized nested request.");
     expect(nestedRequests).toHaveLength(1);
     expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
@@ -153,14 +175,222 @@ describe("production codemode journey", () => {
     expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
       1,
     );
+    await runtime.debug.runTurn(trail.trailId, "Recursive subagent request.");
+    expect(nestedRequests).toHaveLength(1);
+    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
+      1,
+    );
     await runtime.debug.runTurn(trail.trailId, "Ambiguous nested request.");
     expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toMatchObject([
       { status: "completed" },
       {
         status: "interrupted",
-        error: "Nested model query timed out before its provider outcome was observed",
+        error: "Subagent timed out before its provider outcome was observed",
+        usage: {
+          inputTokens: 13,
+          outputTokens: 5,
+          totalTokens: 18,
+          estimatedCost: 0.25,
+        },
       },
     ]);
+    await runtime.shutdown();
+  });
+
+  test("a tool-using subagent remains visible as one nested durable action tree", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-subagent-tools-acceptance-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context, systemPrompt }) => {
+        if (systemPrompt.includes("bounded subagent"))
+          return context.messages.at(-1)?.role === "toolResult"
+            ? "The package metadata was read by the subagent."
+            : controlledToolCallResponse(
+                "file_read",
+                { path: "package.json", startLine: 1, endLine: 4 },
+                "call-subagent-read",
+              );
+        return context.messages.at(-1)?.role === "toolResult"
+          ? "The foreground received the subagent result."
+          : controlledToolCallResponse(
+              "execute",
+              {
+                source:
+                  'return await agents.run({ systemPrompt: "Inspect one file.", prompt: "Read the package metadata.", tools: ["files.read"], thinkingLevel: "low" });',
+              },
+              "call-run-subagent",
+            );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgent: createPiSubAgentRunner(process.cwd(), controlled.models),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Tool-using subagent acceptance" });
+
+    const result = await runtime.debug.runTurn(trail.trailId, "Delegate one bounded file read.");
+
+    expect(result.output).toBe("The foreground received the subagent result.");
+    const transcriptActions = (await runtime.getTranscript(trail.trailId)).filter(
+      (entry) => entry.kind === "action",
+    );
+    expect(transcriptActions.map((action) => action.name)).toEqual(["execute", "agents.run", "files.read"]);
+    const [executeAction, subAgentAction, childAction] = transcriptActions;
+    expect(subAgentAction).toMatchObject({ parentActionId: executeAction?.actionId, status: "completed" });
+    expect(childAction).toMatchObject({ parentActionId: subAgentAction?.actionId, status: "completed" });
+    const modelCalls = await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId);
+    expect(modelCalls).toMatchObject([
+      {
+        modelCallId: subAgentAction?.actionId,
+        provider: CONTROLLED_PI_PROVIDER,
+        model: CONTROLLED_PI_MODEL,
+        thinkingLevel: "low",
+        status: "completed",
+      },
+    ]);
+    const inspected = subAgentAction
+      ? await runtime.inspectExecution?.(trail.trailId, subAgentAction.actionId)
+      : undefined;
+    expect(inspected).toMatchObject({
+      kind: "subagent",
+      prompt: "Read the package metadata.",
+      systemPrompt: expect.stringContaining("Inspect one file."),
+      provider: CONTROLLED_PI_PROVIDER,
+      model: CONTROLLED_PI_MODEL,
+      thinkingLevel: "low",
+      toolNames: ["files.read"],
+      callCount: 1,
+      status: "completed",
+    });
+    await runtime.shutdown();
+  });
+
+  test("subagents may run safe saved programs but actual descendant delegation fails closed", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-subagent-program-recursion-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const nestedRequests: PiSubAgentRunRequest[] = [];
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText, systemPrompt }) => {
+        if (systemPrompt.includes("bounded subagent")) {
+          if (context.messages.at(-1)?.role === "toolResult") return "Saved program attempt settled.";
+          return controlledToolCallResponse(
+            "scripts_run",
+            {
+              name: lastUserText.includes("safe") ? "safe-subagent-program" : "recursive-subagent-program",
+              input: {},
+            },
+            lastUserText.includes("safe") ? "call-subagent-safe-script" : "call-subagent-recursive-script",
+          );
+        }
+        if (context.messages.at(-1)?.role === "toolResult") return "Foreground delegation settled.";
+        if (lastUserText.includes("Save"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: [
+                "await tools.scripts.save({",
+                '  name: "safe-subagent-program", description: "Return a local value.",',
+                '  source: "return { safe: true };",',
+                '  inputSchema: { type: "object", properties: {}, additionalProperties: false },',
+                '  outputSchema: { type: "object", properties: { safe: { type: "boolean" } }, required: ["safe"], additionalProperties: false },',
+                "  requiredTools: []",
+                "});",
+                "await tools.scripts.save({",
+                '  name: "recursive-subagent-program", description: "Attempt descendant delegation.",',
+                '  source: "return await agents.run({ prompt: \\"Nested recursion.\\" });",',
+                '  inputSchema: { type: "object", properties: {}, additionalProperties: false },',
+                '  outputSchema: { type: "string" },',
+                '  requiredTools: ["agents.run"]',
+                "});",
+                "return null;",
+              ].join("\n"),
+            },
+            "call-save-subagent-programs",
+          );
+        return controlledToolCallResponse(
+          "execute",
+          {
+            source: `return await agents.run({ prompt: ${JSON.stringify(
+              lastUserText.includes("safe")
+                ? "Run the safe saved program."
+                : "Run the recursive saved program.",
+            )}, tools: ["scripts.run"] });`,
+          },
+          lastUserText.includes("safe") ? "call-safe-program-subagent" : "call-recursive-program-subagent",
+        );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgent: Object.freeze({
+        run: async (request: PiSubAgentRunRequest) => {
+          nestedRequests.push(request);
+          return await createPiSubAgentRunner(process.cwd(), controlled.models).run(request);
+        },
+      }),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Saved-program subagent recursion acceptance" });
+
+    await runtime.debug.runTurn(trail.trailId, "Save subagent programs.");
+    await expect(
+      runtime.debug.runTurn(trail.trailId, "Run the safe program through a subagent."),
+    ).resolves.toMatchObject({ output: "Foreground delegation settled." });
+    await expect(
+      runtime.debug.runTurn(trail.trailId, "Run the recursive program through a subagent."),
+    ).resolves.toMatchObject({ output: "Foreground delegation settled." });
+
+    expect(nestedRequests).toHaveLength(2);
+    expect(nestedRequests.map((request) => request.plan.tools)).toEqual([["scripts.run"], ["scripts.run"]]);
+    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toMatchObject([
+      { status: "completed" },
+      { status: "completed" },
+    ]);
+    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    const scriptCalls = calls.filter((call) => call.toolName === "scripts.run");
+    expect(scriptCalls).toMatchObject([{ status: "completed" }, { status: "failed" }]);
+    const descendantDelegation = calls.find(
+      (call) => call.toolName === "agents.run" && call.status === "failed",
+    );
+    expect(descendantDelegation).toMatchObject({
+      parentToolCallId: scriptCalls[1]?.toolCallId,
+      response: { error: "Subagents cannot recursively invoke agents.run" },
+    });
     await runtime.shutdown();
   });
 
@@ -289,8 +519,26 @@ describe("production codemode journey", () => {
         projectHotbars: Object.freeze({ [project.projectId]: Object.freeze([workflowTool]) }),
       }),
     });
+    const savedProgramSubAgentPrompts: string[] = [];
+    let releaseFirstSubAgent = (): void => undefined;
+    const firstSubAgentGate = new Promise<void>((resolve) => {
+      releaseFirstSubAgent = resolve;
+    });
+    let markFirstSubAgentStarted = (): void => undefined;
+    const firstSubAgentStarted = new Promise<void>((resolve) => {
+      markFirstSubAgentStarted = resolve;
+    });
+    let firstSubAgent = true;
     const controlled = createControlledPiModels({
-      respond: ({ context, lastUserText }) => {
+      respond: ({ context, lastUserText, systemPrompt }) => {
+        if (systemPrompt.includes("bounded subagent"))
+          return context.messages.at(-1)?.role === "toolResult"
+            ? "saved-program-subagent-ok"
+            : controlledToolCallResponse(
+                "file_read",
+                { path: "package.json", startLine: 1, endLine: 2 },
+                "call-saved-program-read",
+              );
         if (context.messages.at(-1)?.role === "toolResult") return `Completed: ${lastUserText}`;
         if (lastUserText.includes("Save"))
           return controlledToolCallResponse(
@@ -299,16 +547,16 @@ describe("production codemode journey", () => {
               source: [
                 "await tools.scripts.save({",
                 '  name: "direct-double", description: "Double one value.",',
-                '  source: "return { doubled: input.value * 2 };",',
+                '  source: "const answer = await agents.run({ prompt: \\"script subagent\\", tools: [\\"files.read\\"] }); return { doubled: input.value * 2, answer };",',
                 '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
-                '  outputSchema: { type: "object", properties: { doubled: { type: "number" } }, required: ["doubled"], additionalProperties: false },',
-                "  requiredTools: []",
+                '  outputSchema: { type: "object", properties: { doubled: { type: "number" }, answer: { type: "string" } }, required: ["doubled", "answer"], additionalProperties: false },',
+                '  requiredTools: ["agents.run", "files.read"]',
                 "});",
                 "await tools.workflows.save({",
                 '  name: "direct-increment", description: "Increment one value.",',
                 '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
                 '  outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
-                '  phases: [{ name: "increment", description: "Increment.", source: "return { value: input.value + 1 };", inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: [] }]',
+                '  phases: [{ name: "increment", description: "Increment.", source: "await agents.run({ prompt: \\"workflow subagent\\", tools: [\\"files.read\\"] }); return { value: input.value + 1 };", inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: ["agents.run", "files.read"] }]',
                 "});",
                 "return null;",
               ].join("\n"),
@@ -337,6 +585,17 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       project,
+      subAgent: Object.freeze({
+        run: async (request: PiSubAgentRunRequest) => {
+          savedProgramSubAgentPrompts.push(request.plan.prompt);
+          if (firstSubAgent) {
+            firstSubAgent = false;
+            markFirstSubAgentStarted();
+            await firstSubAgentGate;
+          }
+          return await createPiSubAgentRunner(process.cwd(), controlled.models).run(request);
+        },
+      }),
       createAgent: (_sessionTools, codeExecution, selfTools) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
       createRoleRunner: (configurations) =>
@@ -350,7 +609,25 @@ describe("production codemode journey", () => {
     const trail = await runtime.startTrail({ title: "Direct saved-code acceptance" });
 
     await runtime.debug.runTurn(trail.trailId, "Save a script and workflow.");
-    await runtime.debug.runTurn(trail.trailId, "Run the generic workflow hotbar tool.");
+    const liveEvents: {
+      readonly type: string;
+      readonly actionId?: string;
+      readonly parentActionId?: string;
+      readonly name?: string;
+    }[] = [];
+    const genericWorkflowRun = runtime.debug.runTurn(trail.trailId, "Run the generic workflow hotbar tool.", {
+      onEvent: (event) => liveEvents.push(event),
+    });
+    await firstSubAgentStarted;
+    const liveWorkflow = liveEvents.find(
+      (event) => event.type === "tool-start" && event.name === "workflows.run",
+    );
+    const liveSubAgent = liveEvents.find(
+      (event) => event.type === "tool-start" && event.name === "agents.run",
+    );
+    expect(liveSubAgent).toMatchObject({ parentActionId: liveWorkflow?.actionId });
+    releaseFirstSubAgent();
+    await genericWorkflowRun;
     await runtime.debug.runTurn(trail.trailId, "Run the saved workflow hotbar tool.");
     await runtime.debug.runTurn(trail.trailId, "Run the saved script hotbar tool.");
 
@@ -373,7 +650,35 @@ describe("production codemode journey", () => {
     const executions = await runtime.debug.workspace.operational.codeExecutions.listForSession(trail.trailId);
     expect(executions).toHaveLength(4);
     expect(executions.every((execution) => execution.parentExecutionId === undefined)).toBe(true);
-    expect(executions.some((execution) => JSON.stringify(execution.result) === '{"doubled":42}')).toBe(true);
+    expect(
+      executions.some(
+        (execution) =>
+          JSON.stringify(execution.result) === '{"doubled":42,"answer":"saved-program-subagent-ok"}',
+      ),
+    ).toBe(true);
+    expect(savedProgramSubAgentPrompts).toEqual([
+      "workflow subagent",
+      "workflow subagent",
+      "script subagent",
+    ]);
+    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toMatchObject([
+      { status: "completed" },
+      { status: "completed" },
+      { status: "completed" },
+    ]);
+    const savedProgramCalls = calls.filter((call) =>
+      ["workflows.run", workflowTool, "scripts.run", "agents.run", "files.read"].includes(call.toolName),
+    );
+    const savedProgramSubAgents = savedProgramCalls.filter((call) => call.toolName === "agents.run");
+    expect(savedProgramSubAgents).toHaveLength(3);
+    for (const subAgentCall of savedProgramSubAgents) {
+      expect(subAgentCall.parentToolCallId).toBeDefined();
+      expect(
+        savedProgramCalls.find(
+          (call) => call.toolName === "files.read" && call.parentToolCallId === subAgentCall.toolCallId,
+        ),
+      ).toBeDefined();
+    }
     const directActions = (await runtime.getTranscript(trail.trailId)).filter(
       (entry) =>
         entry.kind === "action" && ["workflows.run", workflowTool, "scripts.run"].includes(entry.name),
@@ -382,7 +687,25 @@ describe("production codemode journey", () => {
     expect(
       directActions.every((action) => action.kind === "action" && action.parentActionId === undefined),
     ).toBe(true);
+    const transcriptBeforeRestart = await runtime.getTranscript(trail.trailId);
     await runtime.shutdown();
+
+    const reopened = await createApplicationRuntimeComposition({
+      config,
+      project,
+      subAgent: createPiSubAgentRunner(process.cwd(), controlled.models),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    expect(await reopened.getTranscript(trail.trailId)).toEqual(transcriptBeforeRestart);
+    await reopened.shutdown();
   });
 
   test("Pi sees the default hotbar and nested execute calls use the recorded broker path", async () => {

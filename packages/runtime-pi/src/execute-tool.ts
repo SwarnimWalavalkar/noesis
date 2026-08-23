@@ -109,12 +109,14 @@ export interface PreparedPiCodeExecution {
       readonly callId: string;
     },
     emitUpdate?: (update: JsonValue) => void,
+    emitEvent?: (event: PiCodeExecutionEvent, parentToolCallId?: string, recordedByBroker?: boolean) => void,
+    origin?: "foreground" | "subagent",
   ) => Promise<JsonValue>;
   readonly execute: (
     source: string,
     timeoutMs: number | undefined,
     signal: AbortSignal,
-    emit: (event: PiCodeExecutionEvent) => void,
+    emit: (event: PiCodeExecutionEvent, parentToolCallId?: string, recordedByBroker?: boolean) => void,
     identity?: {
       readonly logicalExecutionId: string;
     },
@@ -319,7 +321,7 @@ export function createPiExecuteTool(input: {
   readonly prepared: PreparedPiCodeExecution;
   readonly turnId: string;
   readonly signal: AbortSignal;
-  readonly emit: (event: PiCodeExecutionEvent, parentToolCallId: string) => void;
+  readonly emit: (event: PiCodeExecutionEvent, parentToolCallId: string, recordedByBroker?: boolean) => void;
 }): AgentTool<typeof executeParametersJsonSchema, PiExecuteToolDetails> {
   const availableWorkflows = workflowIndex(input.prepared.workflowSummaries);
   const availableMcp = mcpIndex(input.prepared.mcpServerSummaries);
@@ -332,10 +334,10 @@ export function createPiExecuteTool(input: {
       "Compose the complete related operation in one program; do not wrap one known tool call or split one task across serial execute calls.",
       starterKit,
       "Invoke with return await tools.<family>.<operation>(input), or return await noesis.invoke(exactName, input).",
-      "Batch independent calls with Promise.all. Keep intermediate results in code; when collected evidence needs judgment, pass it to one models.query call instead of repeatedly rewriting retrieval queries across foreground rounds.",
-      "Inspect explicit completeness fields before models.query. Recover required truncated evidence through returned recovery fields or bounded recollection; if saved evidence is itself incomplete, narrow or safely rerun the collection. Never treat omitted output as proof that requested evidence is absent. Prefer several bounded independent calls over one aggregate command whose early output can crowd out later sections.",
+      "Batch independent calls with Promise.all. Keep intermediate results in code; when collected evidence needs independent judgment, use one agents.run call instead of repeatedly rewriting retrieval queries across foreground rounds.",
+      "Inspect explicit completeness fields before agents.run. Recover required truncated evidence through returned recovery fields or bounded recollection; if saved evidence is itself incomplete, narrow or safely rerun the collection. Never treat omitted output as proof that requested evidence is absent. Prefer several bounded independent calls over one aggregate command whose early output can crowd out later sections.",
       "For retrieval, one precise hybrid query normally suffices. Select and open the strongest citation in the same program. An empty or irrelevant result means only that this bounded search found no relevant evidence; report that bounded miss instead of cycling through paraphrases.",
-      "For large-session analysis, context is a lazy immutable view of the complete pre-turn session timeline: inspect context.length, take context.slice(start, end), and await view.text() only when raw text is needed. Use await models.query(prompt, contextOrViews) for isolated tool-free subqueries on the frozen model route.",
+      "For large-session analysis, context is a lazy immutable view of the complete pre-turn session timeline: inspect context.length, take context.slice(start, end), and await view.text() only when raw text is needed. Use await agents.run({ prompt: contextOrViews }) for an isolated query, or add canonical tool names when the subagent needs tools.",
       "emit(value) and notify(value) show progress to the user but do not return that value to you; use return for the final result that should enter conversation context.",
       "For reusable computation, save a typed Script with scripts.save; for durable or resumable phases, save a Workflow with workflows.save. Do not defer foreground program creation to reflection. Verify newly saved programs immediately.",
       ...(availableWorkflows ? [availableWorkflows] : []),
@@ -362,9 +364,9 @@ export function createPiExecuteTool(input: {
           params.source,
           params.timeoutMs,
           controller.signal,
-          (event) => {
+          (event, parentToolCallId, recordedByBroker) => {
             if (event.type === "started") executionId = event.executionId;
-            input.emit(event, toolCallId);
+            input.emit(event, parentToolCallId ?? toolCallId, recordedByBroker);
             // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
             onUpdate?.({
               content: [],

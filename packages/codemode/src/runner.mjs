@@ -194,11 +194,11 @@ function createContextDocument(raw) {
     read,
   });
 }
-function encodeModelContext(value) {
+function encodeAgentPrompt(value) {
   if (typeof value === "string") return value;
-  if (Array.isArray(value)) return value.map(encodeModelContext);
+  if (Array.isArray(value)) return value.map(encodeAgentPrompt);
   if (value && typeof value === "object" && typeof value.toJSON === "function") return value.toJSON();
-  throw new TypeError("models.query context must be a string, ContextView, or an array of them");
+  throw new TypeError("agents.run prompt must be a string, ContextView, or an array of them");
 }
 process.on("message", async (message) => {
   if (!message || typeof message !== "object") return;
@@ -241,13 +241,17 @@ process.on("message", async (message) => {
   };
   const load = (key) => sessionStore.get(String(key));
   const context = createContextView(createContextDocument(message.contextDocument));
-  const models = Object.freeze({
-    query: async (prompt, queryContext) => {
-      if (typeof prompt !== "string" || prompt.trim().length === 0)
-        throw new TypeError("models.query prompt must be a non-empty string");
-      const input =
-        queryContext === undefined ? { prompt } : { prompt, context: encodeModelContext(queryContext) };
-      return await delegate("invoke", { name: "models.query", input });
+  const agents = Object.freeze({
+    run: async (intent) => {
+      if (!intent || typeof intent !== "object" || Array.isArray(intent))
+        throw new TypeError("agents.run requires an intent object");
+      return await delegate("invoke", {
+        name: "agents.run",
+        input: {
+          ...intent,
+          prompt: encodeAgentPrompt(intent.prompt),
+        },
+      });
     },
   });
   try {
@@ -261,7 +265,7 @@ process.on("message", async (message) => {
       "load",
       "input",
       "context",
-      "models",
+      "agents",
       `"use strict";\n${message.source}`,
     );
     const value = await execute(
@@ -273,7 +277,7 @@ process.on("message", async (message) => {
       load,
       message.input ?? null,
       context,
-      models,
+      agents,
     );
     send({
       type: "result",

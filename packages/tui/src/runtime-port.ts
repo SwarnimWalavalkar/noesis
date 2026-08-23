@@ -28,7 +28,7 @@ export interface TuiSkillDetail extends TuiSkillSummary {
 }
 
 export interface TuiExecutionSummary {
-  readonly kind: "codemode" | "workflow";
+  readonly kind: "codemode" | "workflow" | "subagent";
   readonly executionId: string;
   readonly label: string;
   readonly status: "running" | "paused" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -90,6 +90,11 @@ export interface TuiExecutionDetail extends TuiExecutionSummary {
   readonly stderrArtifact?: TuiExecutionArtifact;
   readonly result?: string;
   readonly error?: string;
+  readonly provider?: string;
+  readonly model?: string;
+  readonly thinkingLevel?: string;
+  readonly systemPrompt?: string;
+  readonly prompt?: string;
   readonly phases?: readonly {
     readonly index: number;
     readonly name: string;

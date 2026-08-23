@@ -65,6 +65,38 @@ describe("Noesis TUI reducer", () => {
     expect(rejected.timeline).toEqual(state.timeline);
   });
 
+  test("transcript navigation skips tool calls owned by a subagent", () => {
+    const state = {
+      ...initialTuiState("fake"),
+      timeline: [
+        {
+          kind: "action" as const,
+          actionId: "execute-1",
+          name: "execute",
+          status: "running" as const,
+        },
+        {
+          kind: "action" as const,
+          actionId: "subagent-1",
+          parentActionId: "execute-1",
+          name: "agents.run",
+          status: "running" as const,
+        },
+        {
+          kind: "action" as const,
+          actionId: "subagent-tool-1",
+          parentActionId: "subagent-1",
+          name: "files.read",
+          status: "completed" as const,
+        },
+      ],
+    };
+
+    expect(reduceTui(state, { type: "action-cursor-moved", direction: "previous" }).actionCursor).toBe(
+      "subagent-1",
+    );
+  });
+
   test("uses the built-in Codex model and reasoning defaults", () => {
     expect(initialTuiState("pi")).toMatchObject({
       provider: "openai-codex",

@@ -55,6 +55,42 @@ describe("Noesis config", () => {
     });
   });
 
+  test("subagent defaults inherit the resolved foreground route and allow explicit overrides", async () => {
+    const inheritedHome = await mkdtemp(join(tmpdir(), "noesis-config-agents-inherited-"));
+    const configuredHome = await mkdtemp(join(tmpdir(), "noesis-config-agents-explicit-"));
+    await writeFile(
+      noesisConfigPath(configuredHome),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: { provider: "foreground-provider", model: "foreground-model", thinkingLevel: "high" },
+        agents: { model: "subagent-model", thinkingLevel: "low" },
+      }),
+    );
+
+    const inherited = await resolveNoesisConfig({
+      home: inheritedHome,
+      env: { NOESIS_PROVIDER: "env-provider", NOESIS_MODEL: "env-model" },
+    });
+    const configured = await resolveNoesisConfig({ home: configuredHome, env: {} });
+
+    expect(inherited.agents).toEqual(inherited.agent);
+    expect(inherited.agentsSources).toEqual({
+      provider: "foreground",
+      model: "foreground",
+      thinkingLevel: "foreground",
+    });
+    expect(configured.agents).toEqual({
+      provider: "foreground-provider",
+      model: "subagent-model",
+      thinkingLevel: "low",
+    });
+    expect(configured.agentsSources).toEqual({
+      provider: "foreground",
+      model: "configured",
+      thinkingLevel: "configured",
+    });
+  });
+
   test.each(["off", "low"])("preserves the explicit %s thinking level", async (thinkingLevel) => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-level-"));
     await writeFile(noesisConfigPath(home), JSON.stringify({ schemaVersion: 1, agent: { thinkingLevel } }));

@@ -145,12 +145,16 @@ export function createPiHotbarTools(input: {
   readonly prepared: PreparedPiCodeExecution;
   readonly turnId: string;
   readonly signal: AbortSignal;
+  readonly maximumCalls?: number;
+  readonly descriptionSuffix?: string;
+  readonly origin?: "foreground" | "subagent";
   readonly emit: (event: PiCodeExecutionEvent, parentToolCallId?: string, recordedByBroker?: boolean) => void;
 }): readonly AgentTool[] {
   const invoke = input.prepared.invoke;
   if (!invoke && input.prepared.catalog.tools.length > 0)
     throw new Error("Direct tools require a prepared Broker invocation path");
   const aliases = createHotbarToolAliases(input.prepared.catalog);
+  let callCount = 0;
   return Object.freeze(
     input.prepared.catalog.tools.map((descriptor) => {
       const alias = aliases.get(descriptor.name);
@@ -168,10 +172,13 @@ export function createPiHotbarTools(input: {
       const tool: AgentTool<typeof parameters, PiHotbarToolDetails> = {
         name: alias,
         label: descriptor.label,
-        description: `${descriptor.description} Direct access to ${descriptor.name}; use adapt to change the hotbar.`,
+        description: `${descriptor.description} ${input.descriptionSuffix ?? `Direct access to ${descriptor.name}; use adapt to change the hotbar.`}`,
         parameters,
         executionMode: "sequential",
         execute: async (toolCallId, rawInput, toolSignal) => {
+          callCount += 1;
+          if (input.maximumCalls !== undefined && callCount > input.maximumCalls)
+            throw new Error(`Tool-call limit of ${String(input.maximumCalls)} exceeded`);
           assertJsonValue(rawInput);
           if (localInputSchema) localInputSchema.parse(rawInput);
           const inputValue = rawInput;
@@ -220,6 +227,8 @@ export function createPiHotbarTools(input: {
                     undefined,
                     true,
                   ),
+                input.emit,
+                input.origin,
               );
               input.emit(
                 {

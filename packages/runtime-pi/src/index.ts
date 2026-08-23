@@ -57,7 +57,6 @@ export { frozenPlanMaterialUses, resolveFrozenSessionToolDefinitions } from "./f
 export * from "./hotbar-tools.ts";
 export * from "./model-selection.ts";
 export * from "./mcp-sampling.ts";
-export * from "./model-query.ts";
 export * from "./pi-role-backend.ts";
 export * from "./role-context.ts";
 export * from "./role-runner.ts";
@@ -65,6 +64,7 @@ export * from "./role-types.ts";
 export * from "./self-tools.ts";
 export * from "./skill-invocation.ts";
 export * from "./skill-library.ts";
+export * from "./subagent-run.ts";
 function assistantText(message: { readonly content: readonly unknown[] }): string {
   return message.content
     .flatMap((part) => {

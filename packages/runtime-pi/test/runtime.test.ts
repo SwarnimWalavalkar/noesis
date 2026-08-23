@@ -22,7 +22,9 @@ import {
   createPiAgentRuntime,
   createPiExecuteTool,
   createPiHotbarTools,
+  createPiSubAgentRunner,
   createPiSelfTools,
+  type FrozenSubAgentRunPlan,
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
   isProjectWorkflowToolForProject,
@@ -197,6 +199,60 @@ function controlledCodeExecution(
 }
 
 describe("agent runtime factories", () => {
+  test("cancellation during authentication settles before subagent provider work starts", async () => {
+    let providerRequests = 0;
+    const controlled = createControlledPiModels({
+      respond: () => {
+        providerRequests += 1;
+        return "This response must not be requested.";
+      },
+    });
+    let authenticationStarted = (): void => undefined;
+    const started = new Promise<void>((resolve) => {
+      authenticationStarted = resolve;
+    });
+    const pendingAuthentication = new Promise<Awaited<ReturnType<typeof controlled.models.getAuth>>>(
+      () => undefined,
+    );
+    vi.spyOn(controlled.models, "getAuth").mockImplementation(async () => {
+      authenticationStarted();
+      return await pendingAuthentication;
+    });
+    const controller = new AbortController();
+    const plan: FrozenSubAgentRunPlan = Object.freeze({
+      runId: "subagent-pre-aborted",
+      systemPrompt: "Exact frozen subagent prompt.",
+      prompt: "Do not run.",
+      tools: Object.freeze([]),
+      thinkingLevel: "off",
+      route: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+      frozenTools: Object.freeze([]),
+      authority: Object.freeze({
+        parentExecutionId: "execution-parent",
+        parentToolCallId: "tool-call-parent",
+      }),
+      budget: Object.freeze({ requestTokenBudget: 2_000, maxModelCalls: 8, maxToolCalls: 32 }),
+    });
+    const prepared: PreparedPiCodeExecution = Object.freeze({
+      catalog: emptyCatalog("catalog-subagent-pre-aborted"),
+      execute: async () => Object.freeze({ executionId: "unused", value: null, calls: 0, durationMs: 0 }),
+      close: async () => undefined,
+    });
+
+    const run = createPiSubAgentRunner(process.cwd(), controlled.models).run({
+      plan,
+      prepared,
+      turnId: "turn-subagent-pre-aborted",
+      signal: controller.signal,
+      emit: () => undefined,
+    });
+    await started;
+    controller.abort(new Error("cancel during authentication"));
+
+    await expect(run).rejects.toThrow("Subagent was cancelled");
+    expect(providerRequests).toBe(0);
+  });
+
   test("reconciles durable hotbar preferences with the current frozen catalog", () => {
     const catalog: PiFrozenToolCatalog = Object.freeze({
       catalogId: "catalog-reconciled-hotbar",
@@ -988,7 +1044,7 @@ describe("agent runtime factories", () => {
     );
     expect(byteBounded.description).toContain("one precise hybrid query normally suffices");
     expect(byteBounded.description).toContain("Batch independent calls with Promise.all");
-    expect(byteBounded.description).toContain("pass it to one models.query call");
+    expect(byteBounded.description).toContain("use one agents.run call");
     expect(byteBounded.description).toContain("Recover required truncated evidence");
     expect(byteBounded.description).toContain("Prefer several bounded independent calls");
     expect(byteBounded.description).toContain("report that bounded miss");

@@ -1,9 +1,16 @@
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { isJsonObject, type JsonValue } from "@noesis/domain";
-import { EXECUTE_ACTION_NAME, formatCount, sourceOf, summarizeAction } from "./action-summary.ts";
+import {
+  EXECUTE_ACTION_NAME,
+  formatCount,
+  sourceOf,
+  SUBAGENT_ACTION_NAME,
+  summarizeAction,
+} from "./action-summary.ts";
 import { renderRichText } from "./rich-text.ts";
 import {
   childActions,
+  isSubAgentChildAction,
   type NoesisTuiState,
   type TuiAgentAction,
   type TuiMessage,
@@ -76,6 +83,29 @@ function actionDetailSource(action: TuiAgentAction): string {
     ...(action.update === undefined ? [] : [actionDetailSection("progress", action.update)]),
     ...(action.output === undefined ? [] : [actionDetailSection("result", action.output)]),
   ].join("\n\n");
+}
+
+function subagentCallLines(
+  action: TuiAgentAction,
+  actions: readonly TuiAgentAction[],
+  colorEnabled: boolean,
+): readonly string[] {
+  if (action.name !== SUBAGENT_ACTION_NAME) return [];
+  const children = childActions(actions, action.actionId);
+  return [
+    styled(
+      colorEnabled,
+      ANSI.bold,
+      `calls · ${formatCount(children.length, "tool call")}${children.length > 0 ? " · enter for full inspector" : ""}`,
+    ),
+    ...(children.length === 0
+      ? [styled(colorEnabled, ANSI.dim, "No tool calls")]
+      : children.map((child) => {
+          const summary = summarizeAction(child, childActions(actions, child.actionId));
+          const trailing = [summary.subject, summary.outcome].filter((part): part is string => Boolean(part));
+          return `${styled(colorEnabled, `${ANSI.bold}${statusColor(child.status)}`, statusGlyph(child.status))} ${styled(colorEnabled, ANSI.bold, summary.name)}${trailing.length > 0 ? `  ${styled(colorEnabled, ANSI.dim, trailing.join(" · "))}` : ""}`;
+        })),
+  ];
 }
 
 export function actionDepth(action: TuiAgentAction, actions: readonly TuiAgentAction[]): number {
@@ -159,7 +189,7 @@ export function renderAgentActionBlock(
   const source = action.name === EXECUTE_ACTION_NAME ? sourceOf(action) : undefined;
   // The codemode program is the substance of an execute call, so render it as code rather than as
   // one more quoted JSON field.
-  const body = source
+  const payloadBody = source
     ? [
         ...renderRichText(`\`\`\`js\n${safeTerminalText(source)}\n\`\`\``, bodyWidth, colorEnabled),
         ...(action.output === undefined
@@ -171,6 +201,8 @@ export function renderAgentActionBlock(
     : actionDetailSource(action)
         .split("\n")
         .flatMap((line) => wrapTextWithAnsi(line, bodyWidth));
+  const calls = subagentCallLines(action, actions, colorEnabled);
+  const body = [...calls, ...(calls.length > 0 && payloadBody.length > 0 ? [""] : []), ...payloadBody];
   const budget = options.maxBodyRows ?? DEFAULT_EXPANDED_BODY_ROWS;
   const shown = body.length > budget ? body.slice(0, Math.max(1, budget - 1)) : body;
   const overflow =
@@ -295,7 +327,10 @@ export function createTranscriptRenderer(random: () => number = Math.random): Tr
     readonly lines: readonly string[];
   }[] => {
     const actions = timelineActions(state.timeline);
-    return state.timeline.map((entry, index) => {
+    const visibleTimeline = state.timeline.filter(
+      (entry) => entry.kind !== "action" || !isSubAgentChildAction(entry, actions),
+    );
+    return visibleTimeline.map((entry, index) => {
       // Nested codemode calls read as a list under their parent, so they are not separated.
       const separated = index > 0 && !(entry.kind === "action" && entry.parentActionId);
       return {
@@ -307,9 +342,10 @@ export function createTranscriptRenderer(random: () => number = Math.random): Tr
   return {
     render(state, width, maxBodyRows = DEFAULT_EXPANDED_BODY_ROWS) {
       if (width <= 0) return [];
-      if (state.timeline.length === 0)
+      const blocks = renderTimeline(state, width, maxBodyRows);
+      if (blocks.length === 0)
         return [elideText(styled(state.colorEnabled, ANSI.dim, emptyTranscriptHint), width)];
-      return renderTimeline(state, width, maxBodyRows).flatMap((block) => block.lines);
+      return blocks.flatMap((block) => block.lines);
     },
     renderWindow(state, width, height, maxBodyRows = DEFAULT_EXPANDED_BODY_ROWS) {
       const rowBudget = Math.max(0, Math.floor(height));

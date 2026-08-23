@@ -48,6 +48,7 @@ export interface TurnPlanningRequest {
   readonly contextCheckpointId?: string;
   readonly contextTokenBudget?: number;
   readonly requestTokenBudget?: number;
+  readonly subAgentDefaults?: FrozenTurnPlan["subAgentDefaults"];
   readonly retrievalCitations?: readonly EvidenceRef[];
 }
 async function freezeContextCheckpoint(
@@ -699,6 +700,11 @@ export function createTurnIntelligencePlanner(
             ? {
                 requestTokenBudget: request.requestTokenBudget,
               }
+            : undefined,
+        )
+        .addOptional(
+          !(request.subAgentDefaults === undefined)
+            ? { subAgentDefaults: Object.freeze({ ...request.subAgentDefaults }) }
             : undefined,
         )
         .add({

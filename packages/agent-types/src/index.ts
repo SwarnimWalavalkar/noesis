@@ -216,6 +216,13 @@ export interface FrozenTurnPlan {
   readonly provider: string;
   readonly model: string;
   readonly thinkingLevel: AgentThinkingLevel;
+  /** User-configured default route frozen for agents.run calls admitted during this turn. */
+  readonly subAgentDefaults?: {
+    readonly provider: string;
+    readonly model: string;
+    readonly thinkingLevel: AgentThinkingLevel;
+    readonly requestTokenBudget: number;
+  };
   readonly permissionSnapshot: PermissionManifest;
   readonly retrievalCitations: readonly EvidenceRef[];
   readonly routing: {
@@ -340,6 +347,14 @@ export const FrozenTurnPlanSchema = z.strictObject({
   provider: z.string().min(1),
   model: z.string().min(1),
   thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+  subAgentDefaults: z
+    .strictObject({
+      provider: z.string().min(1),
+      model: z.string().min(1),
+      thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+      requestTokenBudget: z.number().int().positive().max(1000000),
+    })
+    .optional(),
   permissionSnapshot: PermissionManifestSchema,
   retrievalCitations: z.array(EvidenceRefSchema),
   routing: z.strictObject({
@@ -368,6 +383,7 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     requestTokenBudget,
     project,
     workingAdjustmentId,
+    subAgentDefaults,
     routing,
     ...base
   } = decoded;
@@ -415,6 +431,11 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
       .addOptional(!(requestTokenBudget === undefined) ? { requestTokenBudget } : undefined)
       .addOptional(!(project === undefined) ? { project: Object.freeze({ ...project }) } : undefined)
       .addOptional(!(workingAdjustmentId === undefined) ? { workingAdjustmentId } : undefined)
+      .addOptional(
+        !(subAgentDefaults === undefined)
+          ? { subAgentDefaults: Object.freeze({ ...subAgentDefaults }) }
+          : undefined,
+      )
       .add({
         routing: Object.freeze(
           createConditionalObject({

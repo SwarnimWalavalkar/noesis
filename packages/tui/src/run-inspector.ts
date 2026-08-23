@@ -315,6 +315,21 @@ function provenanceSection(
   ];
   return [{ label: "provenance", lines: keyValueLines(entries, colorEnabled) }];
 }
+function subagentSection(detail: TuiExecutionDetail | undefined, colorEnabled: boolean): readonly Section[] {
+  if (detail?.kind !== "subagent") return [];
+  const route = [detail.provider, detail.model].filter((part): part is string => Boolean(part)).join("/");
+  const entries: (readonly [string, string])[] = [
+    ...(route ? ([["route", safeInspectorScalar(route)]] as const) : []),
+    ...(detail.thinkingLevel ? ([["thinking", safeInspectorScalar(detail.thinkingLevel)]] as const) : []),
+  ];
+  return [
+    ...(entries.length > 0 ? [{ label: "agent", lines: keyValueLines(entries, colorEnabled) }] : []),
+    ...(detail.systemPrompt
+      ? [{ label: "system prompt", lines: exactText(detail.systemPrompt).split("\n") }]
+      : []),
+    ...(detail.prompt ? [{ label: "prompt", lines: exactText(detail.prompt).split("\n") }] : []),
+  ];
+}
 function errorText(action: TuiAgentAction, detail: TuiExecutionDetail | undefined): string | undefined {
   if (detail?.error) return detail.error;
   if (action.status !== "failed") return undefined;
@@ -365,6 +380,7 @@ function buildSections(
         ]
       : []),
     ...phasesSection(detail, colorEnabled),
+    ...subagentSection(detail, colorEnabled),
     ...callsSection(children, colorEnabled),
   ];
   if (view === "raw")

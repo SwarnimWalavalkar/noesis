@@ -15,6 +15,7 @@ import {
   renderMessageBlock,
   renderNoesisState,
   renderRichText,
+  renderSubagents,
   selectEmptyTranscriptHint,
   safeTerminalText,
   sanitizeEditorText,
@@ -512,6 +513,165 @@ describe("Noesis transcript rendering", () => {
     );
 
     expect(summary).toMatchObject({ outcome: "2 items" });
+  });
+
+  test("keeps subagents fixed near the composer and their child tools out of the transcript", () => {
+    const execute = {
+      actionId: "execute-1",
+      name: "execute",
+      status: "running" as const,
+    };
+    const subagent = {
+      actionId: "tool-call-subagent",
+      parentActionId: "execute-1",
+      name: "agents.run",
+      status: "running" as const,
+      input: { prompt: "Inspect the package metadata." },
+    };
+    const child = {
+      actionId: "tool-call-subagent:files-read",
+      parentActionId: subagent.actionId,
+      name: "files.read",
+      status: "completed" as const,
+      input: { path: "package.json" },
+      output: { path: "package.json", totalLines: 24 },
+    };
+
+    expect(summarizeAction(subagent, [child])).toEqual({
+      name: "subagent",
+      subject: "Inspect the package metadata.",
+      outcome: "1 tool call",
+    });
+    const state: NoesisTuiState = {
+      ...initialTuiState("fake"),
+      timeline: [
+        { kind: "action", ...execute },
+        { kind: "action", ...subagent },
+        { kind: "action", ...child },
+      ],
+    };
+    const transcript = stripAnsi(renderTranscriptLines(state, 72).join("\n"));
+    expect(transcript).toContain("execute");
+    expect(transcript).toContain("subagent");
+    expect(transcript).not.toContain("files.read");
+    expect(transcript).not.toContain("package.json");
+
+    const fixed = stripAnsi(renderSubagents(state, 72, 30).join("\n"));
+    expect(fixed).toContain("SUBAGENTS · 1");
+    expect(fixed).toContain("Inspect the package metadata.");
+    expect(fixed).toContain("running · 1 tool call");
+
+    const inspecting: NoesisTuiState = {
+      ...state,
+      actionCursor: subagent.actionId,
+      expandedActionIds: new Set([subagent.actionId]),
+    };
+    const selectedPanel = stripAnsi(renderSubagents(inspecting, 72, 30).join("\n"));
+    expect(selectedPanel).toContain("▸ ● Inspect the package metadata.");
+    const expanded = stripAnsi(renderTranscriptLines(inspecting, 72).join("\n"));
+    expect(expanded).toContain("calls · 1 tool call · enter for full inspector");
+    expect(expanded).toContain("✓ files.read  package.json · 24 lines");
+  });
+
+  test("shows only active subagents until Ctrl+O reveals the selected run", () => {
+    const running = {
+      actionId: "tool-call-running-subagent",
+      parentActionId: "execute-1",
+      name: "agents.run",
+      status: "running" as const,
+      input: { prompt: "Watch the active migration." },
+    };
+    const completed = {
+      actionId: "tool-call-completed-subagent",
+      parentActionId: "execute-1",
+      name: "agents.run",
+      status: "completed" as const,
+      input: { prompt: "Review the finished migration." },
+      output: { text: "No issues found." },
+      durationMs: 420,
+    };
+    const state: NoesisTuiState = {
+      ...initialTuiState("fake"),
+      timeline: [
+        { kind: "action", actionId: "execute-1", name: "execute", status: "running" },
+        { kind: "action", ...running },
+        { kind: "action", ...completed },
+      ],
+    };
+
+    const collapsed = stripAnsi(renderSubagents(state, 120, 30).join("\n"));
+    expect(collapsed).toContain("SUBAGENTS · 1");
+    expect(collapsed).toContain("1 running subagent · ctrl+o inspect");
+    expect(collapsed).toContain("Watch the active migration.");
+    expect(collapsed).not.toContain("completed subagent");
+    expect(collapsed).not.toContain("Review the finished migration.");
+
+    const inspecting: NoesisTuiState = {
+      ...state,
+      actionCursor: completed.actionId,
+    };
+    const expanded = stripAnsi(renderSubagents(inspecting, 120, 30).join("\n"));
+    expect(expanded).toContain("SUBAGENTS · 2");
+    expect(expanded).toContain("1 running subagent · 1 completed subagent");
+    expect(expanded).toContain("space expand · enter inspect");
+    expect(expanded).toContain("Watch the active migration.");
+    expect(expanded).toContain("▸ ✓ Review the finished migration.");
+  });
+
+  test("restores an earlier run's settled subagents when Ctrl+O selects that run", () => {
+    const state: NoesisTuiState = {
+      ...initialTuiState("fake"),
+      timeline: [
+        { kind: "action", actionId: "execute-earlier", name: "execute", status: "completed" },
+        {
+          kind: "action",
+          actionId: "subagent-earlier",
+          parentActionId: "execute-earlier",
+          name: "agents.run",
+          status: "completed",
+          input: { prompt: "Inspect the earlier run." },
+        },
+        { kind: "action", actionId: "execute-latest", name: "execute", status: "completed" },
+      ],
+    };
+
+    expect(renderSubagents(state, 120, 30)).toEqual([]);
+    expect(renderSubagents({ ...state, actionCursor: "execute-latest" }, 120, 30)).toEqual([]);
+
+    const inspectingEarlier = stripAnsi(
+      renderSubagents({ ...state, actionCursor: "execute-earlier" }, 120, 30).join("\n"),
+    );
+    expect(inspectingEarlier).toContain("SUBAGENTS · 1");
+    expect(inspectingEarlier).toContain("Inspect the earlier run.");
+  });
+
+  test("restores settled subagents nested inside a saved program in the selected execute tree", () => {
+    const state: NoesisTuiState = {
+      ...initialTuiState("fake"),
+      timeline: [
+        { kind: "action", actionId: "execute-parent", name: "execute", status: "completed" },
+        {
+          kind: "action",
+          actionId: "saved-script",
+          parentActionId: "execute-parent",
+          name: "scripts.run",
+          status: "completed",
+        },
+        {
+          kind: "action",
+          actionId: "nested-subagent",
+          parentActionId: "saved-script",
+          name: "agents.run",
+          status: "completed",
+          input: { prompt: "Inspect from the saved script." },
+        },
+      ],
+      actionCursor: "execute-parent",
+    };
+
+    const rendered = stripAnsi(renderSubagents(state, 120, 30).join("\n"));
+    expect(rendered).toContain("SUBAGENTS · 1");
+    expect(rendered).toContain("Inspect from the saved script.");
   });
 
   test("indents nested codemode SDK calls under execute", () => {

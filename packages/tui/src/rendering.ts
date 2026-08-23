@@ -1,6 +1,16 @@
 import { type Component, visibleWidth } from "@earendil-works/pi-tui";
+import { formatCount, summarizeAction } from "./action-summary.ts";
 import { renderRunInspectorFrame } from "./run-inspector.ts";
-import { type NoesisTuiAction, type NoesisTuiState, reduceTui, type TuiContextUsage } from "./state.ts";
+import {
+  childActions,
+  type NoesisTuiAction,
+  type NoesisTuiState,
+  reduceTui,
+  subAgentsForSurface,
+  type TuiAgentAction,
+  type TuiContextUsage,
+  timelineActions,
+} from "./state.ts";
 import { ANSI, elideText, NOESIS_WORDMARK, safeTerminalText, styled } from "./theme.ts";
 import { createTranscriptRenderer, type TranscriptRenderer } from "./transcript.ts";
 
@@ -21,6 +31,8 @@ export interface TuiLayout {
   readonly paneRows: number;
   /** Upper bound on an inline expanded action body, keeping its header on screen. */
   readonly expandedRowBudget: number;
+  /** Fixed subagent activity stays useful without consuming the whole terminal. */
+  readonly subagentRows: number;
 }
 
 export function createTuiLayout(width: number, height: number): TuiLayout {
@@ -33,6 +45,7 @@ export function createTuiLayout(width: number, height: number): TuiLayout {
     paneRows: Math.max(1, Math.floor(height / 3)),
     // Six rows of bottom chrome plus a little breathing room above the expanded block.
     expandedRowBudget: Math.max(3, height - 10),
+    subagentRows: Math.max(1, Math.min(6, Math.floor(height / 5))),
   };
 }
 
@@ -163,6 +176,103 @@ export function renderQueuedInputs(state: NoesisTuiState, width: number, maxVisi
 const safeTerminalQueueText = (text: string): string =>
   safeTerminalText(text).replaceAll(/\s+/gu, " ").trim() || "(empty)";
 
+const subagentStatusGlyph = (status: TuiAgentAction["status"]): string =>
+  status === "running" ? "●" : status === "completed" ? "✓" : status === "failed" ? "×" : "■";
+
+const subagentStatusColor = (status: TuiAgentAction["status"]): string =>
+  status === "running"
+    ? ANSI.cyan
+    : status === "completed"
+      ? ANSI.green
+      : status === "failed"
+        ? ANSI.red
+        : ANSI.yellow;
+
+/** A footer-adjacent projection inspired by agent tabs/panels, never a second state authority. */
+export function renderSubagents(state: NoesisTuiState, width: number, height = 30): readonly string[] {
+  const safeWidth = Math.max(0, Math.floor(width));
+  const subagents = subAgentsForSurface(state.timeline, state.actionCursor);
+  if (safeWidth <= 0 || subagents.length === 0 || height < 10) return [];
+  const actions = timelineActions(state.timeline);
+  const running = subagents.filter((action) => action.status === "running");
+  const failed = subagents.filter((action) => action.status === "failed");
+  const interrupted = subagents.filter(
+    (action) => action.status !== "running" && action.status !== "completed" && action.status !== "failed",
+  );
+  const completed = subagents.filter((action) => action.status === "completed");
+  const maximumRows = createTuiLayout(safeWidth, height).subagentRows;
+  const inspecting = state.actionCursor !== undefined;
+  const selected = inspecting
+    ? subagents.find((action) => action.actionId === state.actionCursor)
+    : undefined;
+  const priority = [
+    ...(selected ? [selected] : []),
+    ...running.filter((action) => action.actionId !== selected?.actionId),
+  ].slice(0, maximumRows);
+  const priorityIds = new Set(priority.map((action) => action.actionId));
+  const additionalCapacity = Math.max(0, maximumRows - priority.length);
+  const additional =
+    !inspecting || additionalCapacity === 0
+      ? []
+      : subagents.filter((action) => !priorityIds.has(action.actionId)).slice(-additionalCapacity);
+  const shownIds = new Set([...priority, ...additional].map((action) => action.actionId));
+  const candidates = inspecting ? subagents : running;
+  const shown = candidates.filter((action) => shownIds.has(action.actionId));
+  const hidden = candidates.length - shown.length;
+  const collapsed = inspecting ? 0 : subagents.length - running.length;
+  const headerColor =
+    running.length > 0
+      ? ANSI.cyan
+      : failed.length > 0
+        ? ANSI.red
+        : interrupted.length > 0
+          ? ANSI.yellow
+          : ANSI.green;
+  const headerStatus = [
+    ...(running.length > 0 ? [formatCount(running.length, "running subagent")] : []),
+    ...(failed.length > 0 ? [formatCount(failed.length, "failed subagent")] : []),
+    ...(interrupted.length > 0 ? [formatCount(interrupted.length, "stopped subagent")] : []),
+    ...(completed.length > 0 ? [formatCount(completed.length, "completed subagent")] : []),
+  ].join(" · ");
+  const headerHint = inspecting
+    ? "space expand · enter inspect"
+    : collapsed > 0
+      ? "ctrl+o expand"
+      : "ctrl+o inspect";
+  return [
+    elideText(
+      `${styled(state.colorEnabled, `${ANSI.bold}${headerColor}`, `SUBAGENTS · ${String(subagents.length)}`)}${headerStatus ? `  ${styled(state.colorEnabled, ANSI.dim, `${headerStatus} · ${headerHint}`)}` : ""}`,
+      safeWidth,
+    ),
+    ...shown.map((action, index) => {
+      const summary = summarizeAction(action, childActions(actions, action.actionId));
+      const selected = state.actionCursor === action.actionId;
+      const subject = safeTerminalText(summary.subject ?? `Subagent ${String(index + 1)}`)
+        .replaceAll(/\s+/gu, " ")
+        .trim();
+      const outcome = [action.status === "running" ? "running" : undefined, summary.outcome]
+        .filter((part): part is string => Boolean(part))
+        .join(" · ");
+      return elideText(
+        `${selected ? "▸" : " "} ${styled(state.colorEnabled, `${ANSI.bold}${subagentStatusColor(action.status)}`, subagentStatusGlyph(action.status))} ${styled(state.colorEnabled, selected ? `${ANSI.bold}${ANSI.underline}` : "", subject)}${outcome ? `  ${styled(state.colorEnabled, ANSI.dim, outcome)}` : ""}`,
+        safeWidth,
+      );
+    }),
+    ...(hidden > 0
+      ? [
+          elideText(
+            styled(
+              state.colorEnabled,
+              ANSI.dim,
+              `  … ${formatCount(hidden, inspecting ? "more subagent" : "more active subagent")} in this run · ${headerHint}`,
+            ),
+            safeWidth,
+          ),
+        ]
+      : []),
+  ];
+}
+
 export function renderBottomChrome(state: NoesisTuiState, width: number, height = 30): string[] {
   const safeWidth = Math.max(0, Math.floor(width));
   const notificationColor =
@@ -172,6 +282,7 @@ export function renderBottomChrome(state: NoesisTuiState, width: number, height 
         ? ANSI.yellow
         : ANSI.cyan;
   return [
+    ...renderSubagents(state, safeWidth, height),
     ...(state.notification
       ? [
           elideText(
@@ -390,6 +501,15 @@ export function createQueuedInputsView(view: NoesisView, height: () => number): 
     render(width) {
       if (height() < 7) return [];
       return [...renderQueuedInputs(view.state, Math.max(0, width))];
+    },
+  };
+}
+
+export function createSubagentsView(view: NoesisView, height: () => number): Component {
+  return {
+    invalidate() {},
+    render(width) {
+      return [...renderSubagents(view.state, Math.max(0, width), height())];
     },
   };
 }

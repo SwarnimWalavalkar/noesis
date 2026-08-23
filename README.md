@@ -93,6 +93,11 @@ Noesis stores local state under `~/.noesis/` by default. The default context bud
 {
   "schemaVersion": 1,
   "agent": {},
+  "agents": {
+    "provider": "openai-codex",
+    "model": "gpt-5.6-sol",
+    "thinkingLevel": "medium"
+  },
   "context": {
     "tokenBudget": 160000
   }
@@ -105,17 +110,21 @@ The budget covers the whole model request, not only the transcript. Noesis keeps
 
 ## Program over session context
 
-Codemode exposes two small globals:
+Codemode exposes a lazy context view and one composable agent API:
 
 ```js
 const recent = context.slice(-20000);
-const answer = await models.query("Find the unresolved decisions.", recent);
+const answer = await agents.run({
+  prompt: ["Find the unresolved decisions.", recent],
+});
 return answer;
 ```
 
 `context` is an immutable, lazy view of the complete session before the current turn. It contains the visible messages and recorded tool, code, model, and workflow activity. Use `context.length`, `context.slice(start, end)`, or `await context.text()`.
 
-`models.query(prompt, context?)` runs an isolated, tool-free model call on the current turn's frozen provider, model, and thinking level. It accepts text, a context slice, or an array of either. The call uses the same Broker, permission, cancellation, and durable recording path as other codemode tools.
+`agents.run({ systemPrompt?, prompt, tools?, thinkingLevel? })` runs one bounded subagent. With no tools it is an isolated model query. `prompt` accepts text, a context slice, or an array of either; `tools` accepts canonical names from the frozen Tool Catalog. The default subagent route comes from `agents` in `config.json`, with omitted fields inheriting the foreground `agent` route. The parent may choose tools, prompt, and thinking level, but not the provider or model.
+
+Subagents use the same Broker, authority, cancellation, and durable recording path as other codemode tools. Saved programs may be selected as tools, but an actual descendant `agents.run` is rejected, including indirect re-entry through Script, Workflow, or Capability program runners. A bounded `SUBAGENTS` surface stays fixed above the composer while agents are running, including across transcript navigation. Settled agents do not leave stale footer state behind. In `Ctrl+O`, selecting an `execute` run or one of its subagents restores that run's settled agents as navigable rows; use the arrow keys to select a subagent, press Space for its bounded prompt/result and child-call summaries, or Enter for the complete run inspector. The main transcript keeps one compact `subagent` row per run but suppresses its child tool calls.
 
 Saved workflows keep the context document and model route from the run that started them, including after resume.
 

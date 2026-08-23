@@ -67,6 +67,8 @@ export interface ResolvedToolConfig {
 export const NoesisConfigSchema = z.strictObject({
   schemaVersion: z.literal(NOESIS_CONFIG_SCHEMA_VERSION),
   agent: AgentConfigSchema,
+  /** Default route for agents.run. Unspecified fields inherit the foreground agent route. */
+  agents: AgentConfigSchema.optional(),
   learning: LearningConfigSchema.optional(),
   context: ContextConfigSchema.optional(),
   autonomy: AutonomyConfigSchema.optional(),
@@ -80,11 +82,15 @@ export interface ResolvedAgentConfig {
   readonly thinkingLevel: ThinkingLevel;
 }
 export type ConfigSource = "cli" | "environment" | "config" | "default";
+export type AgentDefaultSource = "configured" | "foreground";
 export interface ResolvedNoesisConfig {
   readonly schemaVersion: 1;
   readonly home: string;
   readonly configPath: string;
   readonly agent: ResolvedAgentConfig;
+  readonly agents: ResolvedAgentConfig;
+  /** Whether each effective subagent default was explicit or inherited from the foreground route. */
+  readonly agentsSources: Readonly<Record<keyof ResolvedAgentConfig, AgentDefaultSource>>;
   readonly learning: Required<LearningConfig>;
   readonly context: Required<ContextConfig>;
   readonly autonomy: Required<AutonomyConfig>;
@@ -307,6 +313,7 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
   const cli = input.cli ?? {};
   const env = input.env ?? process.env;
   const file = loaded.value.config?.agent ?? {};
+  const configuredAgents = loaded.value.config?.agents ?? {};
   const learning = loaded.value.config?.learning ?? {};
   const context = loaded.value.config?.context ?? {};
   const autonomy = loaded.value.config?.autonomy ?? {};
@@ -327,6 +334,16 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
     home: input.home,
     configPath: path,
     agent: { provider, model, thinkingLevel },
+    agents: {
+      provider: configuredAgents.provider ?? provider,
+      model: configuredAgents.model ?? model,
+      thinkingLevel: configuredAgents.thinkingLevel ?? thinkingLevel,
+    },
+    agentsSources: {
+      provider: configuredAgents.provider === undefined ? "foreground" : "configured",
+      model: configuredAgents.model === undefined ? "foreground" : "configured",
+      thinkingLevel: configuredAgents.thinkingLevel === undefined ? "foreground" : "configured",
+    },
     learning: {
       enabled: learning.enabled ?? BUILT_IN_LEARNING_DEFAULTS.enabled,
       notifications: learning.notifications ?? BUILT_IN_LEARNING_DEFAULTS.notifications,

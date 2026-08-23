@@ -1404,7 +1404,7 @@ describe("WorkspaceStore", () => {
     const source = await store.artifacts.writeArtifact({
       path: "codemode/execution-context-model-integrity/source.mjs",
       mediaType: "text/javascript",
-      bytes: text('return await models.query("test");'),
+      bytes: text('return await agents.run({ prompt: "test" });'),
       actor,
       relationshipRefs: Object.freeze([
         {
@@ -1420,7 +1420,7 @@ describe("WorkspaceStore", () => {
       sessionId: "session-context-model-integrity",
       catalogId: "catalog-context-model-integrity",
       catalogDigest: digest("a"),
-      sourceDigest: sha256(text('return await models.query("test");')),
+      sourceDigest: sha256(text('return await agents.run({ prompt: "test" });')),
       sourceArtifactId: source.artifactId,
       status: "running",
       callCount: 1,

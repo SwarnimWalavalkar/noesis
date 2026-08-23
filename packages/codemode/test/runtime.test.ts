@@ -16,7 +16,7 @@ import { z } from "zod";
 import { type CodeExecutionEvent, type CodeModeRuntime, createCodeModeRuntime } from "../src/index.ts";
 const runtimes = new Set<CodeModeRuntime>();
 const roots = new Set<string>();
-type ControlledModelQueryContext =
+type ControlledAgentPrompt =
   | string
   | Readonly<{
       __noesisContext: Readonly<{ documentId: string; start: number; end: number }>;
@@ -27,9 +27,8 @@ type ControlledModelQueryContext =
           __noesisContext: Readonly<{ documentId: string; start: number; end: number }>;
         }>
     )[];
-interface ControlledModelQueryInput {
-  readonly prompt: string;
-  readonly context?: ControlledModelQueryContext | undefined;
+interface ControlledAgentRunInput {
+  readonly prompt: ControlledAgentPrompt;
 }
 afterEach(async () => {
   await Promise.all([...runtimes].map(async (code) => await code.shutdown()));
@@ -60,10 +59,10 @@ function runtime(
     readonly beforeDouble?: () => Promise<void>;
     readonly doubleProgress?: JsonValue;
     readonly overrideInvocationResult?: ToolInvocationResult;
-    readonly queryModel?: (input: ControlledModelQueryInput) => Promise<string>;
+    readonly runAgent?: (input: ControlledAgentRunInput) => Promise<string>;
   } = {},
 ) {
-  const queryModel = options.queryModel;
+  const runAgent = options.runAgent;
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const broker = createToolBroker(
     createConditionalObject({
@@ -88,43 +87,40 @@ function runtime(
             return { value: value * 2 };
           },
         }),
-        ...(queryModel
+        ...(runAgent
           ? [
               defineTool({
-                name: "models.query",
-                label: "Query model",
-                description: "Controlled nested model query",
+                name: "agents.run",
+                label: "Run subagent",
+                description: "Controlled subagent run",
                 visibility: "codemode_only",
                 inputSchema: z.strictObject({
-                  prompt: z.string(),
-                  context: z
-                    .union([
-                      z.string(),
-                      z.strictObject({
-                        __noesisContext: z.strictObject({
-                          documentId: z.string(),
-                          start: z.number().int(),
-                          end: z.number().int(),
-                        }),
+                  prompt: z.union([
+                    z.string(),
+                    z.strictObject({
+                      __noesisContext: z.strictObject({
+                        documentId: z.string(),
+                        start: z.number().int(),
+                        end: z.number().int(),
                       }),
-                      z.array(
-                        z.union([
-                          z.string(),
-                          z.strictObject({
-                            __noesisContext: z.strictObject({
-                              documentId: z.string(),
-                              start: z.number().int(),
-                              end: z.number().int(),
-                            }),
+                    }),
+                    z.array(
+                      z.union([
+                        z.string(),
+                        z.strictObject({
+                          __noesisContext: z.strictObject({
+                            documentId: z.string(),
+                            start: z.number().int(),
+                            end: z.number().int(),
                           }),
-                        ]),
-                      ),
-                    ])
-                    .optional(),
+                        }),
+                      ]),
+                    ),
+                  ]),
                 }),
                 outputSchema: z.string(),
                 effect: () => ({ effect: "read", resource: "model:query", estimatedCost: 0 }),
-                execute: async (input) => await queryModel(input),
+                execute: async (input) => await runAgent(input),
               }),
             ]
           : []),
@@ -142,7 +138,7 @@ function runtime(
   return code;
 }
 describe("codemode runtime", () => {
-  it("exposes a lazy immutable context view and the models.query alias", async () => {
+  it("exposes a lazy immutable context view through agents.run", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-codemode-context-"));
     roots.add(root);
     const content = '{"type":"message","content":"first"}\n{"type":"message","content":"second"}\n';
@@ -152,7 +148,7 @@ describe("codemode runtime", () => {
     const contentDigest = sha256(content);
     const documentId = `context_document_${contentDigest}`;
     const code = runtime({
-      queryModel: async (input) => {
+      runAgent: async (input) => {
         queries.push(toJsonValue(input));
         return "nested answer";
       },
@@ -163,7 +159,7 @@ describe("codemode runtime", () => {
         return {
           length: context.length,
           selected: await selected.text(),
-          answer: await models.query("Summarize the last entry", [selected, "Be concise"])
+          answer: await agents.run({ prompt: ["Summarize the last entry", selected, "Be concise"] })
         };
       `,
       sessionId: "session-context",
@@ -182,8 +178,8 @@ describe("codemode runtime", () => {
     });
     expect(queries).toEqual([
       {
-        prompt: "Summarize the last entry",
-        context: [
+        prompt: [
+          "Summarize the last entry",
           {
             __noesisContext: {
               documentId,

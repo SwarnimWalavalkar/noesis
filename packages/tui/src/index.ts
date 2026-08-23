@@ -32,6 +32,7 @@ import {
   createQueuedInputsView,
   createRunInspectorOverlay,
   createStatusView,
+  createSubagentsView,
 } from "./rendering.ts";
 import {
   type NoesisTuiRuntime,
@@ -145,6 +146,7 @@ export async function startNoesisTui(
     reportUnavailable: (text: string) => view.dispatch({ type: "system-message", text }),
   });
   const statusView = createStatusView(view, () => terminal.rows);
+  const subagentsView = createSubagentsView(view, () => terminal.rows);
   const queuedInputsView = createQueuedInputsView(view, () => terminal.rows);
   const inputLabelView = createInputLabelView(view, () => terminal.rows);
   const helpView = createHelpView(view, () => terminal.rows);
@@ -710,6 +712,7 @@ export async function startNoesisTui(
     root.clear();
     root.addChild(headerView);
     root.addChild(view);
+    root.addChild(subagentsView);
     root.addChild(queuedInputsView);
     root.addChild(inputLabelView);
     root.addChild(editor);
