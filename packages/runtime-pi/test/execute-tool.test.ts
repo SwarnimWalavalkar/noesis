@@ -77,7 +77,7 @@ describe("execute workflow discovery index", () => {
     );
     expect(description).toContain("exact listed tool name with adapt for project-safe hotbar pinning");
     expect(description).toContain("`workflows.run` is the generic runner");
-    expect(description).toContain("workflows.describe(name)");
+    expect(description).toContain("tools.workflows.describe({ name })");
     expect(description).not.toContain("workflows.list");
   });
   test("normalizes each entry to one escaped line and sorts deterministically", () => {

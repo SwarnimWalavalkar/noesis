@@ -1,6 +1,6 @@
 import { createConditionalObject } from "@noesis/domain";
 import { createHash } from "node:crypto";
-import { access, chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { JsonValue } from "@noesis/domain";
@@ -70,19 +70,36 @@ function tool(definitions: readonly ToolDefinition[], name: string): ToolDefinit
   if (!definition) throw new Error(`Missing ${name}`);
   return definition;
 }
-function toolsAt(cwd: string, searchCommand?: string): readonly ToolDefinition[] {
+function toolsAt(
+  cwd: string,
+  searchCommand?: string,
+  maxShellOutputArtifactBytes?: number,
+): readonly ToolDefinition[] {
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return createLocalWorkTools(
     createConditionalObject({
       cwd,
     } as const)
       .addOptional(searchCommand ? { searchCommand } : undefined)
+      .addOptional(maxShellOutputArtifactBytes !== undefined ? { maxShellOutputArtifactBytes } : undefined)
       .add({
         writeArtifact: async ({ path, content }: { readonly path: string; readonly content: string }) => ({
           path,
           bytes: Buffer.byteLength(content, "utf8"),
           contentDigest: createHash("sha256").update(content).digest("hex"),
         }),
+        importArtifact: async ({
+          path,
+          sourcePath,
+        }: {
+          readonly path: string;
+          readonly sourcePath: string;
+        }) => {
+          const destination = join(cwd, ".noesis", "artifacts", path);
+          await mkdir(resolve(destination, ".."), { recursive: true });
+          await copyFile(sourcePath, destination);
+          return { path: destination };
+        },
       } as const)
       .finish(),
   );
@@ -208,10 +225,48 @@ describe("local work tools", () => {
       tool(toolsAt(cwd), "shell.run").execute({ command, timeoutMs: 2000 }, context()),
     ).resolves.toMatchObject({
       exitCode: 0,
-      stdout: "€",
-      stderr: "😀",
+      output: "€😀",
+      fullOutputLength: 3,
       truncated: false,
+      fullOutputComplete: true,
     });
+  });
+  it("saves valid decoded text when split pipe sequences interleave", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-utf8-artifact-"));
+    const script = [
+      `process.stdout.write("x".repeat(${String(MAX_TOOL_TEXT_BYTES)}))`,
+      "process.stdout.write(Buffer.from([0xe2]))",
+      "process.stderr.write(Buffer.from([0xf0, 0x9f]))",
+      "setTimeout(() => {",
+      "process.stdout.write(Buffer.from([0x82, 0xac]))",
+      "process.stderr.write(Buffer.from([0x98, 0x80]))",
+      "}, 50)",
+    ].join(";");
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+    const result = await tool(toolsAt(cwd), "shell.run").execute({ command, timeoutMs: 2000 }, context());
+    expect(result).toMatchObject({
+      output: expect.any(String),
+      fullOutputLength: MAX_TOOL_TEXT_BYTES + 3,
+      truncated: true,
+      fullOutputComplete: true,
+      fullOutputPath: expect.any(String),
+    });
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("output" in result) ||
+      typeof result["output"] !== "string" ||
+      !("fullOutputPath" in result) ||
+      typeof result["fullOutputPath"] !== "string"
+    )
+      throw new Error("shell.run did not return a decoded output artifact");
+    expect(result["output"]).toContain("€");
+    expect(result["output"]).toContain("😀");
+    const savedBytes = await readFile(result["fullOutputPath"]);
+    const saved = new TextDecoder("utf8", { fatal: true }).decode(savedBytes);
+    expect(saved).toHaveLength(MAX_TOOL_TEXT_BYTES + 3);
+    expect(saved).toContain("€");
+    expect(saved).toContain("😀");
   });
   it("bounds decoded UTF-8 output when invalid or incomplete bytes expand during decoding", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-utf8-bounds-"));
@@ -224,21 +279,75 @@ describe("local work tools", () => {
       if (
         typeof result !== "object" ||
         result === null ||
-        !("stdout" in result) ||
-        typeof result["stdout"] !== "string"
+        !("output" in result) ||
+        typeof result["output"] !== "string"
       )
         throw new Error("shell.run returned an unexpected value");
-      expect(Buffer.byteLength(result["stdout"], "utf8")).toBeLessThanOrEqual(MAX_TOOL_TEXT_BYTES);
-      expect(result).toMatchObject({ truncated: true });
+      expect(Buffer.byteLength(result["output"], "utf8")).toBeLessThanOrEqual(MAX_TOOL_TEXT_BYTES);
+      expect(result).toMatchObject({ truncated: true, fullOutputPath: expect.any(String) });
     }
     if (
       typeof boundary !== "object" ||
       boundary === null ||
-      !("stdout" in boundary) ||
-      typeof boundary["stdout"] !== "string"
+      !("output" in boundary) ||
+      typeof boundary["output"] !== "string" ||
+      !("fullOutputPath" in boundary) ||
+      typeof boundary["fullOutputPath"] !== "string"
     )
       throw new Error("shell.run returned an unexpected boundary value");
-    expect(boundary["stdout"]).not.toContain("\ufffd");
+    expect(boundary["output"]).toMatch(/\ufffd$/u);
+    const savedBoundary = await readFile(boundary["fullOutputPath"]);
+    expect(() => new TextDecoder("utf8", { fatal: true }).decode(savedBoundary)).not.toThrow();
+    expect(savedBoundary.toString("utf8")).toMatch(/\ufffd$/u);
+  });
+  it("saves complete oversized shell output for ordinary filesystem inspection", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shell-output-"));
+    const fullOutputLength = MAX_TOOL_TEXT_BYTES + 100;
+    const script = `process.stdout.write("x".repeat(${String(fullOutputLength - 4)})); setTimeout(() => process.stdout.write("tail"), 50)`;
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+    const result = await tool(toolsAt(cwd), "shell.run").execute({ command, timeoutMs: 2000 }, context());
+    expect(result).toMatchObject({
+      exitCode: 0,
+      output: expect.stringMatching(/tail$/u),
+      fullOutputLength,
+      truncated: true,
+      fullOutputPath: expect.any(String),
+      fullOutputComplete: true,
+    });
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("fullOutputPath" in result) ||
+      typeof result["fullOutputPath"] !== "string"
+    )
+      throw new Error("shell.run did not return a full output path");
+    const saved = await readFile(result["fullOutputPath"], "utf8");
+    expect(saved).toHaveLength(fullOutputLength);
+    expect(saved.endsWith("tail")).toBe(true);
+  });
+  it("terminates shell output at the artifact limit and marks the saved evidence incomplete", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shell-output-limit-"));
+    const captureLimit = 1024;
+    const script = 'process.stdout.write("x".repeat(4096)); setInterval(() => {}, 1000)';
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+    const result = await tool(toolsAt(cwd, undefined, captureLimit), "shell.run").execute(
+      { command, timeoutMs: 5000 },
+      context(),
+    );
+    expect(result).toMatchObject({
+      truncated: true,
+      fullOutputComplete: false,
+      terminationReason: "output_limit",
+      fullOutputPath: expect.any(String),
+    });
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("fullOutputPath" in result) ||
+      typeof result["fullOutputPath"] !== "string"
+    )
+      throw new Error("shell.run did not return the limited output artifact");
+    expect(await readFile(result["fullOutputPath"])).toHaveLength(captureLimit);
   });
   it("uses literal search semantics in the primary ripgrep execution path", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-primary-search-"));

@@ -290,7 +290,7 @@
       <section id="decision">
         <h2>The recommendation</h2>
         <div class="callout good">
-          <strong>Give the model four ordinary tools:</strong>
+          <strong>Give the model four permanent tools:</strong>
           <code>inspect_self</code>, <code>remember</code>,
           <code>adapt</code>, and <code>execute</code>. The first three are small,
           semantic operations over Noesis itself. <code>execute</code> executes
@@ -305,6 +305,12 @@
           existing architecture: codemode is an execution client, not a second
           permission system, tool registry, persistence layer, or authority
           boundary.
+        </p>
+        <p>
+          The shipped default also keeps file read, directory list, and shell run
+          directly available for atomic work. Session search and generic workflow
+          execution remain named inside <code>execute</code>; users may pin either
+          deliberately through <code>adapt</code>.
         </p>
         <div class="grid">
           <article class="card">
@@ -510,8 +516,9 @@
                   effects, such as reading a file or running a command.
                 </td>
                 <td>
-                  Canonical Tool Catalog plus host adapter. Model-accessible only
-                  through codemode.
+                  Canonical Tool Catalog plus host adapter. Model-accessible
+                  through codemode, or through the small direct hotbar when
+                  explicitly selected.
                 </td>
               </tr>
               <tr>
@@ -944,8 +951,9 @@ Pi AgentHarness
         <h3>Agent and user invocation</h3>
         <ul>
           <li>
-            At turn start, Pi-formatted <code>&lt;available_skills&gt;</code>
-            metadata remains in the prompt. The always-visible
+            At turn start, compact <code>&lt;available_skills&gt;</code> metadata
+            remains in the prompt without presenting internal storage paths as
+            project files. The always-visible
             <code>execute</code> tool description carries an analogous bounded,
             frozen <code>&lt;available_workflows&gt;</code> index containing only
             names and short descriptions.
@@ -953,8 +961,8 @@ Pi AgentHarness
           <li>
             When the agent recognizes a match, it calls
             <code>execute</code> and uses
-            <code>noesis.skills.load(name)</code> or
-            <code>noesis.workflows.describe(name)</code>. The full content then
+            <code>tools.skills.load({ name })</code> or
+            <code>tools.workflows.describe({ name })</code>. The full content then
             returns through the normal tool loop.
           </li>
           <li>
@@ -970,8 +978,8 @@ Pi AgentHarness
             <code>execute</code>.
           </li>
           <li>
-            The generic <code>workflows.run</code> runner is in the default
-            hotbar. Each frozen saved workflow also appears under an exact,
+            The generic <code>workflows.run</code> runner is named in the
+            <code>execute</code> contract. Each frozen saved workflow also appears under an exact,
             project-qualified Tool Catalog identity shown in the workflow index.
             Pinning it with <code>adapt</code> exposes a friendly
             <code>workflow_&lt;name&gt;</code> tool with its typed contract, without
@@ -1661,14 +1669,14 @@ revisions/scripts/&lt;revision-id&gt;/
           <dl>
             <dt>Outcome</dt>
             <dd>
-              Pi sees exactly the three self tools plus <code>execute</code>; the
-              code session sees only the frozen codemode catalog.
+              Pi sees the three self tools, <code>execute</code>, and the small
+              atomic direct hotbar; the code session sees the frozen catalog.
             </dd>
             <dt>Work</dt>
             <dd>
               Extend <code>FrozenTurnPlan</code> with exact catalog/permission
-              identity, compose the broker at the application root, replace
-              direct session-search registrations, stream nested activity through
+              identity, compose the broker at the application root, keep session
+              search codemode-only by default, stream nested activity through
               existing runtime events, and close code sessions during normal
               shutdown.
             </dd>
@@ -1727,7 +1735,7 @@ revisions/scripts/&lt;revision-id&gt;/
               Add the adapter-neutral skill library; Pi ResourceLoader and
               DefaultPackageManager adapters; personal/workspace precedence;
               npm/git/URL/local sources; frozen skill snapshots; compact prompt
-              metadata; <code>noesis.skills.load</code>; explicit
+              metadata; <code>tools.skills.load</code>; explicit
               <code>/skill:name</code>; diagnostics; and the complete
               <code>/skills</code> library and detail view. Ignore package
               extensions/tools unless separately registered through the Noesis
@@ -1934,8 +1942,10 @@ Wave 5                   TCW-11 compounding loop
                 <td>“Find every TODO in this repository and summarize themes.”</td>
                 <td>
                   One outer <code>execute</code> call composes search/read, keeps
-                  file bodies out of model context, and returns cited synthesis
-                  input.
+                  file bodies out of model context, checks explicit truncation
+                  signals before synthesis, and returns complete cited synthesis
+                  input. Independent size-risk sections use bounded calls so one
+                  large result cannot crowd later evidence out of the tool result.
                 </td>
               </tr>
               <tr>

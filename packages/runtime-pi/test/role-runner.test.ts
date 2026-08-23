@@ -486,7 +486,7 @@ describe("research role isolation", () => {
     expect(result.trace.capabilityRevisions).toEqual([capabilityRevision]);
   });
 
-  test("keeps a large structured-output contract separate from reflector evidence", async () => {
+  test("reserves reflector headroom for a large structured-output contract", async () => {
     let capturedPrompt = "";
     const backend = createScriptedRoleModelBackend({
       respond(backendRequest) {
@@ -504,7 +504,7 @@ describe("research role isolation", () => {
             policyId: "reflector-contract-bounded-v1",
             maxMessages: 12,
             maxCharactersPerMessage: 12_000,
-            maxTotalCharacters: 48_000,
+            maxTotalCharacters: 64_000,
           }),
         },
       ],
@@ -515,10 +515,11 @@ describe("research role isolation", () => {
     await expect(
       structured.run(
         request("reflector", "reflect-contract-v1", [
-          { role: "user", name: "settled_turn", content: "s".repeat(7_000) },
-          { role: "user", name: "current_capabilities", content: "c".repeat(7_000) },
-          { role: "user", name: "current_capability_materials", content: "m".repeat(7_000) },
-          { role: "user", name: "available_saved_programs", content: "p".repeat(4_000) },
+          { role: "user", name: "settled_turn", content: "s".repeat(10_000) },
+          { role: "user", name: "current_capabilities", content: "c".repeat(10_000) },
+          { role: "user", name: "foreground_capability_surface", content: "f".repeat(10_000) },
+          { role: "user", name: "current_capability_materials", content: "m".repeat(10_000) },
+          { role: "user", name: "available_saved_programs", content: "p".repeat(7_000) },
           { role: "user", name: "evidence", content: evidence },
         ]),
         z.strictObject({ answer: z.string().describe("x".repeat(5_000)) }),

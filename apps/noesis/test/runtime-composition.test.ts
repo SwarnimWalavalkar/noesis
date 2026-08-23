@@ -3005,11 +3005,15 @@ describe("apps/noesis production control-plane composition", () => {
     const result = await runtime.debug.runTurn(trail.trailId, "Record this ordinary turn");
     expect(result.outcome).toBe("completed");
     expect(requests[0]?.systemPrompt).toContain(
-      "Before asking the user to repeat relevant prior work, search previous sessions when it could help.",
+      "search this installation's previous sessions through `execute` when it could help.",
     );
+    expect(requests[0]?.systemPrompt).toContain("For multi-call work, use one coherent `execute` program");
+    expect(requests[0]?.systemPrompt).toContain("use `models.query` when evidence needs semantic synthesis");
+    expect(requests[0]?.systemPrompt).toContain("Treat explicit truncation as incomplete evidence");
     expect(requests[0]?.systemPrompt).toContain(
-      "for multi-call work, prefer one coherent `execute` program that composes tools in code",
+      "use one coherent follow-up instead of a series of direct calls",
     );
+    expect(requests[0]?.systemPrompt).toContain("Do not split related work across wrapper executions");
     expect(requests[0]?.systemPrompt).toContain(
       "Save reusable computations as Scripts and durable, inspectable, resumable multi-phase procedures as Workflows.",
     );
@@ -3677,8 +3681,11 @@ describe("apps/noesis production control-plane composition", () => {
         if (!input.systemPrompt.includes("role:")) {
           if (!input.context.messages.some((message) => message.role === "toolResult"))
             return controlledToolCallResponse(
-              "search_sessions",
-              { query: "malformed reranking sentinel", maxResults: 2 },
+              "execute",
+              {
+                source:
+                  'return await tools.history.search_sessions({ query: "malformed reranking sentinel", maxResults: 2 });',
+              },
               "malformed-history-search",
             );
           return "The failed history tool call remained contained in the foreground turn.";

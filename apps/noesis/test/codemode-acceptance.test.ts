@@ -285,7 +285,7 @@ describe("production codemode journey", () => {
       ...resolved,
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
       tools: Object.freeze({
-        hotbar: Object.freeze([...resolved.tools.hotbar, "scripts.run"]),
+        hotbar: Object.freeze([...resolved.tools.hotbar, "workflows.run", "scripts.run"]),
         projectHotbars: Object.freeze({ [project.projectId]: Object.freeze([workflowTool]) }),
       }),
     });
@@ -445,9 +445,7 @@ describe("production codemode journey", () => {
       "inspect_self",
       "list_dir",
       "remember",
-      "search_sessions",
       "shell",
-      "workflows_run",
     ]);
     const storedCalls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
     const nestedCall = storedCalls.find((call) => call.toolName === "files.read");
@@ -572,9 +570,78 @@ describe("production codemode journey", () => {
       response: {
         output: {
           exitCode: 0,
-          stdout: `${physicalOutsideCwd}\n`,
+          output: `${physicalOutsideCwd}\n`,
+          fullOutputLength: physicalOutsideCwd.length + 1,
+          truncated: false,
         },
       },
+    });
+    await runtime.shutdown();
+  });
+
+  test("oversized shell output is recoverable from the configured Noesis workspace", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-shell-output-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const outputScript = 'process.stdout.write("line\\n".repeat(30_000) + "tail\\n")';
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(outputScript)}`;
+    const controlled = createControlledPiModels({
+      respond: ({ context }) => {
+        if (context.messages.at(-1)?.role === "toolResult") return "Oversized output recovered.";
+        return controlledToolCallResponse(
+          "execute",
+          {
+            source: [
+              `const shell = await tools.shell.run({ command: ${JSON.stringify(command)} });`,
+              'if (!shell.truncated) throw new Error("Expected oversized output");',
+              'if (!shell.fullOutputComplete) throw new Error("Expected complete saved output");',
+              "const recovered = await tools.files.read({ path: shell.fullOutputPath, startLine: 30001, endLine: 30001 });",
+              "return { shell, recovered };",
+            ].join("\n"),
+          },
+          "call-shell-output-recovery",
+        );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Shell output recovery acceptance" });
+
+    await expect(
+      runtime.debug.runTurn(trail.trailId, "Recover oversized shell output."),
+    ).resolves.toMatchObject({ output: "Oversized output recovered." });
+    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    expect(calls.find((call) => call.toolName === "shell.run")).toMatchObject({
+      status: "completed",
+      response: {
+        output: {
+          truncated: true,
+          fullOutputComplete: true,
+          fullOutputPath: expect.stringContaining(join(home, "artifacts", "tool-output")),
+        },
+      },
+    });
+    expect(calls.find((call) => call.toolName === "files.read")).toMatchObject({
+      status: "completed",
+      response: { output: { content: "tail", truncated: false } },
     });
     await runtime.shutdown();
   });

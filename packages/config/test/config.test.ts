@@ -82,13 +82,7 @@ describe("Noesis config", () => {
     });
     expect(resolved.experiments).toEqual({ maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 });
     expect(resolved.context).toEqual({ tokenBudget: 160_000 });
-    expect(resolved.tools.hotbar).toEqual([
-      "files.read",
-      "files.list",
-      "shell.run",
-      "workflows.run",
-      "history.search_sessions",
-    ]);
+    expect(resolved.tools.hotbar).toEqual(["files.read", "files.list", "shell.run"]);
     expect(await readFile(noesisConfigPath(home), "utf8")).toBe(legacy);
   });
 
@@ -108,11 +102,52 @@ describe("Noesis config", () => {
     });
   });
 
-  test("defaults workflow and session search tools without changing explicit persisted choices", async () => {
+  test("defaults atomic tools and migrates the old exact default without changing custom choices", async () => {
     const missing = await mkdtemp(join(tmpdir(), "noesis-config-default-hotbar-"));
+    const legacyDefault = await mkdtemp(join(tmpdir(), "noesis-config-legacy-default-hotbar-"));
+    const legacyWithProjectPin = await mkdtemp(join(tmpdir(), "noesis-config-legacy-pinned-hotbar-"));
+    const explicitFormerDefault = await mkdtemp(join(tmpdir(), "noesis-config-explicit-former-default-"));
     const oldPersisted = await mkdtemp(join(tmpdir(), "noesis-config-old-hotbar-"));
     const customPersisted = await mkdtemp(join(tmpdir(), "noesis-config-custom-hotbar-"));
     const explicitlyEmpty = await mkdtemp(join(tmpdir(), "noesis-config-empty-hotbar-"));
+    await writeFile(
+      noesisConfigPath(legacyDefault),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        tools: {
+          hotbar: ["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"],
+        },
+      }),
+    );
+    await writeFile(
+      noesisConfigPath(legacyWithProjectPin),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        tools: {
+          hotbar: [
+            "files.read",
+            "files.list",
+            "shell.run",
+            "workflows.run",
+            "history.search_sessions",
+            "workflow.1111111111111111.pinned",
+          ],
+        },
+      }),
+    );
+    await writeFile(
+      noesisConfigPath(explicitFormerDefault),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        tools: {
+          hotbar: ["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"],
+          hotbarDefaultsRevision: 2,
+        },
+      }),
+    );
     await writeFile(
       noesisConfigPath(oldPersisted),
       JSON.stringify({
@@ -135,6 +170,22 @@ describe("Noesis config", () => {
     );
 
     expect((await resolveNoesisConfig({ home: missing, env: {} })).tools.hotbar).toEqual([
+      "files.read",
+      "files.list",
+      "shell.run",
+    ]);
+    expect((await resolveNoesisConfig({ home: legacyDefault, env: {} })).tools.hotbar).toEqual([
+      "files.read",
+      "files.list",
+      "shell.run",
+    ]);
+    expect((await resolveNoesisConfig({ home: legacyWithProjectPin, env: {} })).tools.hotbar).toEqual([
+      "files.read",
+      "files.list",
+      "shell.run",
+      "workflow.1111111111111111.pinned",
+    ]);
+    expect((await resolveNoesisConfig({ home: explicitFormerDefault, env: {} })).tools.hotbar).toEqual([
       "files.read",
       "files.list",
       "shell.run",
@@ -223,7 +274,8 @@ describe("Noesis config", () => {
       context: { tokenBudget: 160_000 },
       experiments: { maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 },
       tools: {
-        hotbar: ["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"],
+        hotbar: ["files.read", "files.list", "shell.run"],
+        hotbarDefaultsRevision: 2,
       },
     });
   });
@@ -340,6 +392,47 @@ describe("Noesis config", () => {
     });
     expect((await resolveNoesisConfig({ home, env: {} })).tools.projectHotbars).toEqual({
       project_beta: ["workflow.2222222222222222.beta"],
+    });
+  });
+
+  test("does not remigrate legacy defaults after the user explicitly restores removed tools", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-explicit-legacy-tools-"));
+    await writeFile(
+      noesisConfigPath(home),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        tools: {
+          hotbar: ["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"],
+        },
+      }),
+    );
+    const update = {
+      projectId: "project_alpha",
+      projectToolNamespace: "workflow.1111111111111111.",
+      scope: "global" as const,
+      action: "add" as const,
+      legacyGlobalProjectTools: Object.freeze([]),
+      legacyActiveProjectTools: Object.freeze([]),
+    };
+
+    expect((await resolveNoesisConfig({ home, env: {} })).tools.hotbar).toEqual([
+      "files.read",
+      "files.list",
+      "shell.run",
+    ]);
+    await updateToolHotbar(home, { ...update, tool: "workflows.run" });
+    await updateToolHotbar(home, { ...update, tool: "history.search_sessions" });
+
+    expect((await resolveNoesisConfig({ home, env: {} })).tools.hotbar).toEqual([
+      "files.read",
+      "files.list",
+      "shell.run",
+      "workflows.run",
+      "history.search_sessions",
+    ]);
+    expect(JSON.parse(await readFile(noesisConfigPath(home), "utf8"))).toMatchObject({
+      tools: { hotbarDefaultsRevision: 2 },
     });
   });
 
@@ -502,15 +595,7 @@ describe("Noesis config", () => {
 
     const resolved = await resolveNoesisConfig({ home, env: {} });
     expect(resolved.tools.hotbar).toEqual(
-      expect.arrayContaining([
-        "files.read",
-        "files.list",
-        "shell.run",
-        "workflows.run",
-        "history.search_sessions",
-        "files.write",
-        "artifacts.write",
-      ]),
+      expect.arrayContaining(["files.read", "files.list", "shell.run", "files.write", "artifacts.write"]),
     );
     expect(resolved.tools.projectHotbars["project_concurrent"]).toHaveLength(2);
     expect(resolved.tools.projectHotbars["project_concurrent"]).toEqual(

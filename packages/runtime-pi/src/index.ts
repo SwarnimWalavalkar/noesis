@@ -1,5 +1,5 @@
 import { createConditionalObject } from "@noesis/domain";
-import { AgentHarness, formatSkillsForSystemPrompt, type Skill } from "@earendil-works/pi-agent-core";
+import { AgentHarness, type Skill } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { AssistantMessage, MutableModels, UserMessage } from "@earendil-works/pi-ai";
 import {
@@ -83,6 +83,31 @@ function userMessageText(message: { readonly content: string | readonly unknown[
       return typeof part.text === "string" ? [part.text] : [];
     })
     .join("");
+}
+function escapeSkillPromptXml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
+}
+function formatSkillsForNoesisPrompt(skills: readonly Skill[], canLoad: boolean): string {
+  const visible = skills.filter((skill) => !skill.disableModelInvocation);
+  if (!canLoad || visible.length === 0) return "";
+  return [
+    "The following skills provide specialized instructions for matching tasks.",
+    "Load the full frozen instructions through `execute` with `tools.skills.load({ name })`; do not read a listed skill as a project file.",
+    "",
+    "<available_skills>",
+    ...visible.flatMap((skill) => [
+      "  <skill>",
+      `    <name>${escapeSkillPromptXml(skill.name)}</name>`,
+      `    <description>${escapeSkillPromptXml(skill.description)}</description>`,
+      "  </skill>",
+    ]),
+    "</available_skills>",
+  ].join("\n");
 }
 function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | undefined {
   if (!request.frozenTurnPlan) return undefined;
@@ -572,7 +597,7 @@ export function createPiAgentRuntime(
       }
       const agentTools = executeTool ? [...selfTools, executeTool, ...hotbarTools] : [...selfTools];
       const initialActiveToolNames = activeNames(initialHotbar);
-      const skillsSystemPrompt = formatSkillsForSystemPrompt(piSkills);
+      const skillsSystemPrompt = formatSkillsForNoesisPrompt(piSkills, executeTool !== undefined);
       const completeSystemPrompt = [request.systemPrompt, skillsSystemPrompt].filter(Boolean).join("\n\n");
       harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),

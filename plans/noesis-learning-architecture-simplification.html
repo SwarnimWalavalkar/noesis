@@ -492,6 +492,10 @@ later work
           <li>the exact settled user and assistant messages, including unfinished-turn labels;</li>
           <li>bounded tool calls, failures, outcome facts, and runtime telemetry;</li>
           <li>the exact Capability revisions selected by the frozen turn plan;</li>
+          <li>
+            an exact foreground Capability surface distinguishing initially injected instructions,
+            metadata-only skills, completed skill loads, and saved-program adapters;
+          </li>
           <li>explicit conversational feedback from the current turn;</li>
           <li>bounded, opened cross-session evidence chosen for relevance;</li>
           <li>active Capability descriptors and likely conflicts or overlaps;</li>
@@ -499,6 +503,12 @@ later work
           <li>the bounded catalog of saved project scripts and workflows that may be referenced;</li>
           <li>the user’s direct remembered criteria when relevant.</li>
         </ul>
+        <p>
+          Predecessor material bytes are authoring data, not evidence that the foreground model saw
+          them. The foreground surface is authoritative for delivery: an effects-first skill begins
+          as compact metadata and becomes full instructions only after a completed
+          <code>skills.load</code>.
+        </p>
         <p>Its structured decision is:</p>
         <pre><code>no_change
 create_capability

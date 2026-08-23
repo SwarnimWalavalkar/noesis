@@ -274,6 +274,7 @@ describe("Capability learning loop", () => {
     expect(inference.requests()[0]?.messages.map((message) => message.name)).toEqual([
       "settled_turn",
       "current_capabilities",
+      "foreground_capability_surface",
       "current_capability_materials",
       "available_saved_programs",
       "evidence",
@@ -282,6 +283,23 @@ describe("Capability learning loop", () => {
     expect(inference.requests()[0]?.messages.at(-1)?.content).toContain(
       "I kept the research summary concise",
     );
+
+    const activeBinding = await workspace.capabilities.getBinding("capability-1");
+    if (!activeBinding) throw new Error("Expected the reflected Capability to be active");
+    await workspace.operational.toolCalls.put({
+      toolCallId: "turn-2:skill-load",
+      sessionId: "session-1",
+      toolName: "skills.load",
+      request: Object.freeze({
+        executionId: "execution-turn-2",
+        input: Object.freeze({ name: "concise-evidence-synthesis" }),
+      }),
+      response: Object.freeze({ output: Object.freeze({ name: "concise-evidence-synthesis" }) }),
+      status: "completed",
+      sensitivity: "normal",
+      createdAt: "2026-08-18T00:30:00.500Z",
+      completedAt: "2026-08-18T00:30:00.750Z",
+    });
 
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const pending = await module.reflectSettledTurn(
@@ -301,16 +319,32 @@ describe("Capability learning loop", () => {
               table: "messages" as const,
               rowId: "turn-2:user",
             }),
+            Object.freeze({
+              kind: "database_row" as const,
+              table: "tool_calls" as const,
+              rowId: "turn-2:skill-load",
+            }),
           ],
           telemetry: Object.freeze({ retryCount: 0, toolFailureCount: 0, aborted: false }),
           occurredAt: "2026-08-18T00:30:00.000Z",
         }),
         project: Object.freeze({ projectId: "project-1", root }),
-        selectedCapabilities: Object.freeze([]),
+        selectedCapabilities: Object.freeze([activeBinding.revision]),
       }),
       new AbortController().signal,
     );
     expect(pending).toMatchObject({ status: "pending", capabilityId: "capability-1" });
+    const foregroundSurface =
+      inference.requests()[1]?.messages.find((message) => message.name === "foreground_capability_surface")
+        ?.content ?? "";
+    expect(foregroundSurface).toContain('"initialForegroundExposure":"name_and_description_only"');
+    expect(foregroundSurface).toContain('"fullBodyExposure":"after_completed_skills.load"');
+    expect(foregroundSurface).toContain('"loadedDuringSettledTurn":true');
+    expect(foregroundSurface).toContain('"omittedCount":0');
+    const predecessorMaterials =
+      inference.requests()[1]?.messages.find((message) => message.name === "current_capability_materials")
+        ?.content ?? "";
+    expect(predecessorMaterials).toContain("does not mean the foreground model received the material");
     const changed = await module.manage(
       {
         type: "change",
@@ -388,7 +422,16 @@ describe("Capability learning loop", () => {
         sessionId: "session-dense",
         toolName: "mcp.exa.web_search_exa",
         request: Object.freeze({ query: `provider ${String(index)} ${"q".repeat(1_000)}` }),
-        response: Object.freeze({ results: [{ title: `Source ${String(index)}`, text: "x".repeat(2_000) }] }),
+        response: Object.freeze({
+          results: [
+            {
+              title: `Source ${String(index)}`,
+              text: "x".repeat(2_000),
+              truncated: index === 1,
+            },
+          ],
+          truncated: index === 0,
+        }),
         status: "completed",
         sensitivity: "normal",
         createdAt: `2026-08-20T19:4${String(index % 10)}:00.000Z`,
@@ -516,6 +559,8 @@ describe("Capability learning loop", () => {
     expect(request?.messages.every((message) => message.content.length <= 10_000)).toBe(true);
     const evidence = request?.messages.find((message) => message.name === "evidence")?.content ?? "";
     expect(evidence).toContain('"count":40');
+    expect(evidence).toContain('"truncatedResultCount":1');
+    expect(evidence).toContain("resultTruncated");
     expect(evidence).toContain("scripts.save");
     expect(evidence).toContain("scripts.run");
     expect(evidence).toContain("mcp.exa.web_search_exa");

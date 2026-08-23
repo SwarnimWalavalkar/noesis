@@ -1,14 +1,17 @@
 import type { DatabaseRow } from "./database.ts";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { copyFile, link, mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import {
   createConditionalObject,
+  type ArtifactImportRequest,
   type ActorRef,
   type ArtifactFileRef,
   ArtifactFileRefSchema,
+  type ArtifactWriteRequest,
   canonicalJson,
   type DatabaseRowRef,
   type DatabaseTable,
@@ -506,6 +509,61 @@ export async function createWorkspaceStore(
       await unlink(temporary).catch(ignoreMissing);
     }
   };
+  const inspectFile = async (
+    path: string,
+  ): Promise<{ readonly byteLength: number; readonly contentDigest: string }> => {
+    const hash = createHash("sha256");
+    let byteLength = 0;
+    for await (const chunk of createReadStream(path)) {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      hash.update(bytes);
+      byteLength += bytes.byteLength;
+    }
+    return Object.freeze({ byteLength, contentDigest: hash.digest("hex") });
+  };
+  const persistFileAtomically = async (
+    path: string,
+    sourcePath: string,
+  ): Promise<{ readonly byteLength: number; readonly contentDigest: string }> => {
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      await copyFile(sourcePath, temporary);
+      const inspected = await inspectFile(temporary);
+      try {
+        const existing = await inspectFile(path);
+        if (existing.contentDigest !== inspected.contentDigest)
+          throw new Error(`Artifact path already contains different bytes: ${path}`);
+        return inspected;
+      } catch (error) {
+        if (!isMissing(error)) throw error;
+      }
+      const handle = await open(temporary, "r");
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      try {
+        await link(temporary, path);
+      } catch (error) {
+        if (!isAlreadyExists(error)) throw error;
+        const existing = await inspectFile(path);
+        if (existing.contentDigest !== inspected.contentDigest)
+          throw new Error(`Artifact path already contains different bytes: ${path}`);
+        return existing;
+      }
+      const directory = await open(dirname(path), "r");
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
+      return inspected;
+    } finally {
+      await unlink(temporary).catch(ignoreMissing);
+    }
+  };
   const latestRevisionFor = (workingPath: string): FileRevisionRef | undefined => {
     const row = db
       .prepare(`SELECT revision_id, working_path, snapshot_path, content_digest
@@ -711,27 +769,12 @@ export async function createWorkspaceStore(
       evidenceKind: request.evidenceKind,
     };
   };
-  const writeArtifact = async (request: {
-    readonly path: string;
-    readonly mediaType: string;
-    readonly bytes: Uint8Array;
-    readonly actor: ActorRef;
-    readonly relationshipRefs: readonly (DatabaseRowRef | FileRevisionRef)[];
-  }): Promise<ArtifactFileRef> => {
-    ActorSchema.parse(request.actor);
-    for (const ref of request.relationshipRefs) assertStoredReference(db, ref);
-    const artifactAbsolute = pathInside(paths.artifacts, request.path);
-    const storedPath = workspaceRelative(paths, artifactAbsolute);
-    const bytes = Uint8Array.from(request.bytes);
-    const contentDigest = sha256(bytes);
-    try {
-      const existing = await readFile(artifactAbsolute);
-      if (sha256(existing) !== contentDigest)
-        throw new Error(`Artifact path already contains different bytes: ${request.path}`);
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-      await persistAtomically(artifactAbsolute, bytes);
-    }
+  const recordArtifact = (
+    request: Pick<ArtifactWriteRequest, "path" | "mediaType" | "actor" | "relationshipRefs">,
+    storedPath: string,
+    byteLength: number,
+    contentDigest: string,
+  ): ArtifactFileRef => {
     const existingArtifact = db
       .prepare(`SELECT artifact_id, media_type, content_digest, actor_id, actor_kind,
           relationship_refs_json FROM artifacts WHERE path = ?`)
@@ -762,7 +805,7 @@ export async function createWorkspaceStore(
         artifactId,
         storedPath,
         request.mediaType,
-        bytes.length,
+        byteLength,
         contentDigest,
         request.actor.actorId,
         request.actor.kind,
@@ -772,6 +815,31 @@ export async function createWorkspaceStore(
       recordActivity(request.actor, "artifact.recorded", "artifact", artifactId, request.relationshipRefs);
     });
     return { kind: "artifact_file", artifactId, path: storedPath, mediaType: request.mediaType };
+  };
+  const writeArtifact = async (request: ArtifactWriteRequest): Promise<ArtifactFileRef> => {
+    ActorSchema.parse(request.actor);
+    for (const ref of request.relationshipRefs) assertStoredReference(db, ref);
+    const artifactAbsolute = pathInside(paths.artifacts, request.path);
+    const storedPath = workspaceRelative(paths, artifactAbsolute);
+    const bytes = Uint8Array.from(request.bytes);
+    const contentDigest = sha256(bytes);
+    try {
+      const existing = await readFile(artifactAbsolute);
+      if (sha256(existing) !== contentDigest)
+        throw new Error(`Artifact path already contains different bytes: ${request.path}`);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      await persistAtomically(artifactAbsolute, bytes);
+    }
+    return recordArtifact(request, storedPath, bytes.length, contentDigest);
+  };
+  const importArtifact = async (request: ArtifactImportRequest): Promise<ArtifactFileRef> => {
+    ActorSchema.parse(request.actor);
+    for (const ref of request.relationshipRefs) assertStoredReference(db, ref);
+    const artifactAbsolute = pathInside(paths.artifacts, request.path);
+    const storedPath = workspaceRelative(paths, artifactAbsolute);
+    const inspected = await persistFileAtomically(artifactAbsolute, request.sourcePath);
+    return recordArtifact(request, storedPath, inspected.byteLength, inspected.contentDigest);
   };
   const readVerifiedFile = async (storedPath: string, expectedDigest?: string): Promise<Uint8Array> => {
     const bytes = await readFile(pathInside(paths.root, storedPath));
@@ -1503,7 +1571,7 @@ export async function createWorkspaceStore(
     definitionPublications,
     revisions: Object.freeze({ resolveRevision, removeUnregisteredSnapshots }),
     evidence: Object.freeze({ appendEvidence }),
-    artifacts: Object.freeze({ writeArtifact }),
+    artifacts: Object.freeze({ writeArtifact, importArtifact }),
     research,
     jobs,
     workingAdjustments: Object.freeze({
@@ -4851,6 +4919,9 @@ function ftsQuery(query: string): string {
 }
 function isMissing(cause: unknown): boolean {
   return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
+}
+function isAlreadyExists(cause: unknown): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === "EEXIST";
 }
 function ignoreMissing(cause: unknown): void {
   if (!isMissing(cause)) throw cause;
