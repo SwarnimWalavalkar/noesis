@@ -602,6 +602,7 @@ describe("production codemode journey", () => {
             source: [
               `const shell = await tools.shell.run({ command: ${JSON.stringify(command)} });`,
               'if (!shell.truncated) throw new Error("Expected oversized output");',
+              'if (!shell.fullOutputComplete) throw new Error("Expected complete saved output");',
               "const recovered = await tools.files.read({ path: shell.fullOutputPath, startLine: 30001, endLine: 30001 });",
               "return { shell, recovered };",
             ].join("\n"),
@@ -633,6 +634,7 @@ describe("production codemode journey", () => {
       response: {
         output: {
           truncated: true,
+          fullOutputComplete: true,
           fullOutputPath: expect.stringContaining(join(home, "artifacts", "tool-output")),
         },
       },

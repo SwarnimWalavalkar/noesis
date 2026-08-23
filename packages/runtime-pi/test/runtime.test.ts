@@ -820,16 +820,31 @@ describe("agent runtime factories", () => {
 
   test("leaves unknown slash prompts untouched", async () => {
     const prompt = "/not-installed preserve this exact text";
+    const content = "Instructions that require progressive loading.";
+    const discoveredSkill = Object.freeze({
+      name: "progressive-only",
+      description: "A skill that needs the execute path",
+      content,
+      filePath: "/skills/progressive-only/SKILL.md",
+      contentDigest: sha256(content),
+      disableModelInvocation: false,
+    });
+    const snapshot = Object.freeze({
+      skills: Object.freeze([discoveredSkill]),
+      diagnostics: Object.freeze([]),
+    });
     const controlled = createControlledPiModels({
-      respond: ({ lastUserText }) => {
+      respond: ({ lastUserText, systemPrompt }) => {
         expect(lastUserText).toBe(prompt);
+        expect(systemPrompt).not.toContain("tools.skills.load({ name })");
+        expect(systemPrompt).not.toContain(discoveredSkill.name);
         return "ordinary prompt";
       },
     });
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
       skills: {
-        snapshot: async () => Object.freeze({ skills: Object.freeze([]), diagnostics: Object.freeze([]) }),
-        pinSnapshot: async () => Object.freeze({ skills: Object.freeze([]), diagnostics: Object.freeze([]) }),
+        snapshot: async () => snapshot,
+        pinSnapshot: async () => snapshot,
         claimPinnedSnapshot: () => undefined,
         discardPinnedSnapshot: () => undefined,
         install: async () => undefined,
@@ -974,7 +989,7 @@ describe("agent runtime factories", () => {
     expect(byteBounded.description).toContain("one precise hybrid query normally suffices");
     expect(byteBounded.description).toContain("Batch independent calls with Promise.all");
     expect(byteBounded.description).toContain("pass it to one models.query call");
-    expect(byteBounded.description).toContain("If a required result reports truncated: true");
+    expect(byteBounded.description).toContain("Recover required truncated evidence");
     expect(byteBounded.description).toContain("Prefer several bounded independent calls");
     expect(byteBounded.description).toContain("report that bounded miss");
     expect(byteBounded.description).toContain("repeatedly rewriting retrieval queries");
@@ -991,17 +1006,33 @@ describe("agent runtime factories", () => {
   test("derives the bounded shell starter result contract from its frozen output schema", () => {
     const shellOutputSchema = toJsonValue(
       z.toJSONSchema(
-        z.discriminatedUnion("truncated", [
+        z.union([
           z.strictObject({
+            exitCode: z.number().int().nullable(),
+            signal: z.string().nullable(),
             output: z.string(),
             fullOutputLength: z.number().int().nonnegative(),
             truncated: z.literal(false),
+            fullOutputComplete: z.literal(true),
           }),
           z.strictObject({
+            exitCode: z.number().int().nullable(),
+            signal: z.string().nullable(),
             output: z.string(),
             fullOutputLength: z.number().int().nonnegative(),
             truncated: z.literal(true),
             fullOutputPath: z.string(),
+            fullOutputComplete: z.literal(true),
+          }),
+          z.strictObject({
+            exitCode: z.number().int().nullable(),
+            signal: z.string().nullable(),
+            output: z.string(),
+            fullOutputLength: z.number().int().nonnegative(),
+            truncated: z.literal(true),
+            fullOutputPath: z.string(),
+            fullOutputComplete: z.literal(false),
+            terminationReason: z.literal("output_limit"),
           }),
         ]),
       ),
@@ -1037,9 +1068,11 @@ describe("agent runtime factories", () => {
       });
 
     const execute = createExecute(shellOutputSchema);
-    expect(execute.description).toContain(
-      "Schema-derived starter result contract: shell.run returns {output:string;fullOutputLength:number;truncated:false}|{output:string;fullOutputLength:number;truncated:true;fullOutputPath:string}.",
-    );
+    expect(execute.description).toContain("Schema-derived starter result contract: shell.run returns");
+    expect(execute.description).toContain("fullOutputComplete:true");
+    expect(execute.description).toContain("fullOutputComplete:false");
+    expect(execute.description).toContain('terminationReason:"output_limit"');
+    expect(execute.description).not.toContain('Use noesis.describe("shell.run")');
     expect(execute.description).not.toContain("stdout");
 
     const oversizedOutputSchema = toJsonValue({

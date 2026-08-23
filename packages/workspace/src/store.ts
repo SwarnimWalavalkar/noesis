@@ -1,7 +1,7 @@
 import type { DatabaseRow } from "./database.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { copyFile, mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
+import { copyFile, link, mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
@@ -544,7 +544,15 @@ export async function createWorkspaceStore(
       } finally {
         await handle.close();
       }
-      await rename(temporary, path);
+      try {
+        await link(temporary, path);
+      } catch (error) {
+        if (!isAlreadyExists(error)) throw error;
+        const existing = await inspectFile(path);
+        if (existing.contentDigest !== inspected.contentDigest)
+          throw new Error(`Artifact path already contains different bytes: ${path}`);
+        return existing;
+      }
       const directory = await open(dirname(path), "r");
       try {
         await directory.sync();
@@ -4911,6 +4919,9 @@ function ftsQuery(query: string): string {
 }
 function isMissing(cause: unknown): boolean {
   return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
+}
+function isAlreadyExists(cause: unknown): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === "EEXIST";
 }
 function ignoreMissing(cause: unknown): void {
   if (!isMissing(cause)) throw cause;

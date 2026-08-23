@@ -279,7 +279,7 @@ function workflowIndex(summaries: readonly PiWorkflowSummary[] | undefined): str
     return [
       `<available_workflows>${compactEntries}</available_workflows>`,
       "Use each exact listed tool name with adapt for project-safe hotbar pinning.",
-      "`workflows.run` is the generic runner; use `workflows.describe(name)` for the full workflow contract.",
+      "`workflows.run` is the generic runner; use `tools.workflows.describe({ name })` for the full workflow contract.",
       ...(truncated ? ["More saved workflows are available; use workflows.list to inspect them."] : []),
     ].join(" ");
   };
@@ -333,8 +333,8 @@ export function createPiExecuteTool(input: {
       starterKit,
       "Invoke with return await tools.<family>.<operation>(input), or return await noesis.invoke(exactName, input).",
       "Batch independent calls with Promise.all. Keep intermediate results in code; when collected evidence needs judgment, pass it to one models.query call instead of repeatedly rewriting retrieval queries across foreground rounds.",
-      "Inspect explicit completeness fields before models.query. If a required result reports truncated: true, recover it before synthesis; for shell.run, inspect fullOutputPath with files.read line ranges or ordinary Unix tools instead of rerunning the command. Narrow or recollect other incomplete evidence; never treat omitted output as proof that requested evidence is absent. Prefer several bounded independent calls over one aggregate command whose early output can crowd out later sections.",
-      "For retrieval, one precise hybrid query normally suffices. Select and open the strongest citation in the same program. Empty or irrelevant results mean the current installation has no answer; report that bounded miss instead of cycling through paraphrases.",
+      "Inspect explicit completeness fields before models.query. Recover required truncated evidence through returned recovery fields or bounded recollection; if saved evidence is itself incomplete, narrow or safely rerun the collection. Never treat omitted output as proof that requested evidence is absent. Prefer several bounded independent calls over one aggregate command whose early output can crowd out later sections.",
+      "For retrieval, one precise hybrid query normally suffices. Select and open the strongest citation in the same program. An empty or irrelevant result means only that this bounded search found no relevant evidence; report that bounded miss instead of cycling through paraphrases.",
       "For large-session analysis, context is a lazy immutable view of the complete pre-turn session timeline: inspect context.length, take context.slice(start, end), and await view.text() only when raw text is needed. Use await models.query(prompt, contextOrViews) for isolated tool-free subqueries on the frozen model route.",
       "emit(value) and notify(value) show progress to the user but do not return that value to you; use return for the final result that should enter conversation context.",
       "For reusable computation, save a typed Script with scripts.save; for durable or resumable phases, save a Workflow with workflows.save. Do not defer foreground program creation to reflection. Verify newly saved programs immediately.",

@@ -1399,7 +1399,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       name: "search_sessions",
       label: "Search sessions",
       description:
-        "Run hybrid lexical and semantic retrieval with reranking over this installation's previous sessions and return bounded evidence with exact citations. One precise query normally suffices; empty or irrelevant results mean this installation has no answer. Normal cross-session search needs no private flag; private retrieval requires one exact authorized sessionId.",
+        "Run hybrid lexical and semantic retrieval with reranking over this installation's previous sessions and return bounded evidence with exact citations. One precise query normally suffices; an empty or irrelevant result means only that this bounded search found no relevant evidence. Normal cross-session search needs no private flag; private retrieval requires one exact authorized sessionId.",
       inputSchema: SearchSessionsInputSchema,
       execute: searchSessions,
     }),

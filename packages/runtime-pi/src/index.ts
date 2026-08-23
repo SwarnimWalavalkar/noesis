@@ -92,9 +92,9 @@ function escapeSkillPromptXml(value: string): string {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
 }
-function formatSkillsForNoesisPrompt(skills: readonly Skill[]): string {
+function formatSkillsForNoesisPrompt(skills: readonly Skill[], canLoad: boolean): string {
   const visible = skills.filter((skill) => !skill.disableModelInvocation);
-  if (visible.length === 0) return "";
+  if (!canLoad || visible.length === 0) return "";
   return [
     "The following skills provide specialized instructions for matching tasks.",
     "Load the full frozen instructions through `execute` with `tools.skills.load({ name })`; do not read a listed skill as a project file.",
@@ -597,7 +597,7 @@ export function createPiAgentRuntime(
       }
       const agentTools = executeTool ? [...selfTools, executeTool, ...hotbarTools] : [...selfTools];
       const initialActiveToolNames = activeNames(initialHotbar);
-      const skillsSystemPrompt = formatSkillsForNoesisPrompt(piSkills);
+      const skillsSystemPrompt = formatSkillsForNoesisPrompt(piSkills, executeTool !== undefined);
       const completeSystemPrompt = [request.systemPrompt, skillsSystemPrompt].filter(Boolean).join("\n\n");
       harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),

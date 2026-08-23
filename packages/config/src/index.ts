@@ -46,10 +46,12 @@ export const ExperimentDefaultsSchema = z.strictObject({
 });
 export type ExperimentDefaults = Readonly<z.infer<typeof ExperimentDefaultsSchema>>;
 export const MAX_DIRECT_TOOL_HOTBAR_TOOLS = 16;
+const TOOL_HOTBAR_DEFAULTS_REVISION = 2;
 export const ToolConfigSchema = z.strictObject({
   // Version 1 briefly stored project-qualified workflow pins here. Keep those
   // legacy entries readable; the active global + project union is bounded below.
   hotbar: z.array(z.string().trim().min(1).max(128)).max(256).optional(),
+  hotbarDefaultsRevision: z.literal(TOOL_HOTBAR_DEFAULTS_REVISION).optional(),
   projectHotbars: z
     .record(
       z.string().trim().min(1).max(128),
@@ -152,12 +154,23 @@ export const BUILT_IN_TOOL_DEFAULTS: ResolvedToolConfig = {
 const LEGACY_BUILT_IN_TOOL_HOTBARS = Object.freeze([
   Object.freeze(["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"]),
 ]);
+const projectWorkflowNamespacePattern = /^(workflow\.[a-f0-9]{16}\.)/u;
 function isSameHotbar(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((tool, index) => tool === right[index]);
 }
-function resolveConfiguredHotbar(hotbar: readonly string[] | undefined): readonly string[] {
-  if (!hotbar || LEGACY_BUILT_IN_TOOL_HOTBARS.some((legacy) => isSameHotbar(hotbar, legacy)))
-    return BUILT_IN_TOOL_DEFAULTS.hotbar;
+function resolveConfiguredHotbar(tools: ToolConfig | undefined): readonly string[] {
+  const hotbar = tools?.hotbar;
+  if (!hotbar) return BUILT_IN_TOOL_DEFAULTS.hotbar;
+  if (tools?.hotbarDefaultsRevision === TOOL_HOTBAR_DEFAULTS_REVISION) return hotbar;
+  for (const legacy of LEGACY_BUILT_IN_TOOL_HOTBARS) {
+    const formerDefault = hotbar.slice(0, legacy.length);
+    const legacyProjectPins = hotbar.slice(legacy.length);
+    if (
+      isSameHotbar(formerDefault, legacy) &&
+      legacyProjectPins.every((tool) => projectWorkflowNamespacePattern.test(tool))
+    )
+      return Object.freeze([...BUILT_IN_TOOL_DEFAULTS.hotbar, ...legacyProjectPins]);
+  }
   return hotbar;
 }
 export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
@@ -167,7 +180,10 @@ export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
   context: { ...BUILT_IN_CONTEXT_DEFAULTS },
   autonomy: { ...BUILT_IN_AUTONOMY_DEFAULTS },
   experiments: { ...BUILT_IN_EXPERIMENT_DEFAULTS },
-  tools: { hotbar: [...BUILT_IN_TOOL_DEFAULTS.hotbar] },
+  tools: {
+    hotbar: [...BUILT_IN_TOOL_DEFAULTS.hotbar],
+    hotbarDefaultsRevision: TOOL_HOTBAR_DEFAULTS_REVISION,
+  },
 };
 export const noesisConfigPath = (home: string): string => join(home, "config.json");
 const delay = (milliseconds: number): Promise<void> =>
@@ -331,7 +347,7 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
       maxCost: experiments.maxCost ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxCost,
     },
     tools: {
-      hotbar: Object.freeze([...resolveConfiguredHotbar(tools.hotbar)]),
+      hotbar: Object.freeze([...resolveConfiguredHotbar(tools)]),
       projectHotbars: Object.freeze(
         Object.fromEntries(
           Object.entries(tools.projectHotbars ?? {}).map(([projectId, hotbar]) => [
@@ -507,7 +523,18 @@ export async function updateUserControlConfig(
       .addOptional(
         patch.experiments ? { experiments: { ...current.experiments, ...patch.experiments } } : undefined,
       )
-      .addOptional(patch.tools ? { tools: { ...current.tools, ...patch.tools } } : undefined)
+      .addOptional(
+        patch.tools
+          ? {
+              tools: {
+                ...current.tools,
+                ...patch.tools,
+                hotbar: [...(patch.tools.hotbar ?? resolveConfiguredHotbar(current.tools))],
+                hotbarDefaultsRevision: TOOL_HOTBAR_DEFAULTS_REVISION,
+              },
+            }
+          : undefined,
+      )
       .finish();
     const decoded = decodeConfig(path, candidate);
     if (!decoded.ok) throw decoded.error;
@@ -540,7 +567,6 @@ function applyHotbarDelta(
     ? Object.freeze([...new Set([...current, tool])])
     : Object.freeze(current.filter((name) => name !== tool));
 }
-const projectWorkflowNamespacePattern = /^(workflow\.[a-f0-9]{16}\.)/u;
 function assertEffectiveHotbarBounds(
   path: string,
   global: readonly string[],
@@ -587,7 +613,7 @@ export async function updateToolHotbar(
     if (!loaded.ok) throw loaded.error;
     const path = noesisConfigPath(home);
     const current = loaded.value.config ?? DEFAULT_NOESIS_CONFIG;
-    const rawGlobal = resolveConfiguredHotbar(current.tools?.hotbar);
+    const rawGlobal = resolveConfiguredHotbar(current.tools);
     const projectHotbars = { ...current.tools?.projectHotbars };
     const legacyGlobal = new Set(update.legacyGlobalProjectTools);
     const legacyActive = new Set(update.legacyActiveProjectTools);
@@ -615,7 +641,8 @@ export async function updateToolHotbar(
       ...current,
       tools: createConditionalObject({
         hotbar: [...new Set([...nextGlobal, ...inactiveLegacy])],
-      })
+        hotbarDefaultsRevision: TOOL_HOTBAR_DEFAULTS_REVISION,
+      } satisfies ToolConfig)
         .addOptional(Object.keys(projectHotbars).length > 0 ? { projectHotbars } : undefined)
         .finish(),
     };

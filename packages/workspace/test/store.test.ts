@@ -4708,6 +4708,41 @@ describe("WorkspaceStore", () => {
     expect(Buffer.from(await store.reads.readArtifact(artifact)).toString()).toBe(content);
     store.close();
   });
+  test("concurrent artifact imports cannot replace different bytes", async () => {
+    const workspaceRoot = await temporary("artifact-import-race-workspace");
+    const sourceRoot = await temporary("artifact-import-race-source");
+    const firstSource = join(sourceRoot, "first.log");
+    const secondSource = join(sourceRoot, "second.log");
+    const firstContent = `first:${"a".repeat(1024 * 1024)}`;
+    const secondContent = `second:${"b".repeat(1024 * 1024)}`;
+    await Promise.all([
+      writeFile(firstSource, firstContent, "utf8"),
+      writeFile(secondSource, secondContent, "utf8"),
+    ]);
+    const store = await createWorkspaceStore(workspaceRoot);
+    const request = (sourcePath: string) => ({
+      path: "tool-output/concurrent.log",
+      mediaType: "text/plain",
+      sourcePath,
+      actor,
+      relationshipRefs: Object.freeze([]),
+    });
+
+    const settled = await Promise.allSettled([
+      store.artifacts.importArtifact(request(firstSource)),
+      store.artifacts.importArtifact(request(secondSource)),
+    ]);
+    const fulfilled = settled.filter((result) => result.status === "fulfilled");
+    const rejected = settled.filter((result) => result.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String(rejected[0]?.reason)).toContain("different bytes");
+    const artifact = fulfilled[0]?.value;
+    if (!artifact) throw new Error("Expected one successful concurrent artifact import");
+    const stored = Buffer.from(await store.reads.readArtifact(artifact)).toString();
+    expect([firstContent, secondContent]).toContain(stored);
+    store.close();
+  });
   test("backs up and restores authoritative files and reports missing and orphan refs", async () => {
     const sourceRoot = await temporary("backup-source");
     const backupRoot = await temporary("backup-copy");

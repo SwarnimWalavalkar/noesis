@@ -295,7 +295,9 @@ const CURRENT_CAPABILITIES_MAX_CHARACTERS = REFLECTOR_MESSAGE_MAX_CHARACTERS;
 const CURRENT_CAPABILITIES_MAX_ITEMS = 64;
 const CURRENT_MATERIALS_MAX_CHARACTERS = REFLECTOR_MESSAGE_MAX_CHARACTERS;
 const CURRENT_MATERIAL_EXCERPT_CHARACTERS = 4000;
-const AVAILABLE_PROGRAMS_MAX_CHARACTERS = 8000;
+// Six reflector producer messages may use at most 57k, reserving 7k of the role's
+// 64k total for the structured output contract appended by the inference boundary.
+const AVAILABLE_PROGRAMS_MAX_CHARACTERS = 7000;
 const AVAILABLE_PROGRAMS_MAX_ITEMS = 64;
 function currentCapabilitiesMessage(
   definitions: readonly CapabilityDefinition[],
@@ -389,17 +391,11 @@ const SkillLoadRequestSchema = z.union([
   z.object({ name: z.string().min(1) }),
   z.object({ input: z.object({ name: z.string().min(1) }) }),
 ]);
-function containsTruncationSignal(value: JsonValue): boolean {
-  if (Array.isArray(value)) return value.some(containsTruncationSignal);
-  if (!isJsonObject(value)) return false;
-  for (const [key, child] of Object.entries(value)) {
-    if (key === "truncated" && child === true) return true;
-    if (containsTruncationSignal(child)) return true;
-  }
-  return false;
-}
 function reportsTruncatedResult(value: JsonValue | undefined): boolean {
-  return value !== undefined && containsTruncationSignal(value);
+  if (!isJsonObject(value)) return false;
+  if (value["truncated"] === true) return true;
+  const output = value["output"];
+  return isJsonObject(output) && output["truncated"] === true;
 }
 function requestedSkillName(value: JsonValue | undefined): string | undefined {
   const request = SkillLoadRequestSchema.safeParse(value);
@@ -787,6 +783,12 @@ function foregroundCapabilitySurfaceMessage(
       "A selected effect skill starts as name-and-description metadata only. One completed skills.load is the expected transition that exposes its full frozen body; immutable bytes in the turn plan or reflector context do not make that load redundant.",
   });
   const capabilities: unknown[] = [];
+  const encode = (projected: readonly unknown[]): string =>
+    canonicalJson({
+      contract,
+      capabilities: projected,
+      omittedCount: Math.max(0, selectedRevisions.length - projected.length),
+    });
   for (const selected of selectedRevisions) {
     const lifecycle = selected.lifecycle;
     if (!lifecycle) {
@@ -800,11 +802,7 @@ function foregroundCapabilitySurfaceMessage(
           }),
         ]),
       });
-      if (
-        canonicalJson({ contract, capabilities: [...capabilities, item] }).length >
-        FOREGROUND_CAPABILITY_SURFACE_MAX_CHARACTERS
-      )
-        break;
+      if (encode([...capabilities, item]).length > FOREGROUND_CAPABILITY_SURFACE_MAX_CHARACTERS) break;
       capabilities.push(item);
       continue;
     }
@@ -859,14 +857,10 @@ function foregroundCapabilitySurfaceMessage(
       capabilityRevisionId: lifecycle.reference.capabilityRevisionId,
       effects: exposure,
     });
-    if (
-      canonicalJson({ contract, capabilities: [...capabilities, item] }).length >
-      FOREGROUND_CAPABILITY_SURFACE_MAX_CHARACTERS
-    )
-      break;
+    if (encode([...capabilities, item]).length > FOREGROUND_CAPABILITY_SURFACE_MAX_CHARACTERS) break;
     capabilities.push(item);
   }
-  return canonicalJson({ contract, capabilities });
+  return encode(capabilities);
 }
 function availableProgramsMessage(programs: Awaited<ReturnType<CapabilityProgramLibrary["list"]>>): string {
   const projected = [...programs]

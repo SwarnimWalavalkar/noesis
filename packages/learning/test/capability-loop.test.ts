@@ -340,6 +340,7 @@ describe("Capability learning loop", () => {
     expect(foregroundSurface).toContain('"initialForegroundExposure":"name_and_description_only"');
     expect(foregroundSurface).toContain('"fullBodyExposure":"after_completed_skills.load"');
     expect(foregroundSurface).toContain('"loadedDuringSettledTurn":true');
+    expect(foregroundSurface).toContain('"omittedCount":0');
     const predecessorMaterials =
       inference.requests()[1]?.messages.find((message) => message.name === "current_capability_materials")
         ?.content ?? "";
@@ -422,7 +423,13 @@ describe("Capability learning loop", () => {
         toolName: "mcp.exa.web_search_exa",
         request: Object.freeze({ query: `provider ${String(index)} ${"q".repeat(1_000)}` }),
         response: Object.freeze({
-          results: [{ title: `Source ${String(index)}`, text: "x".repeat(2_000) }],
+          results: [
+            {
+              title: `Source ${String(index)}`,
+              text: "x".repeat(2_000),
+              truncated: index === 1,
+            },
+          ],
           truncated: index === 0,
         }),
         status: "completed",
