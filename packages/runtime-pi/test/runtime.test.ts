@@ -717,6 +717,8 @@ describe("agent runtime factories", () => {
       respond: ({ systemPrompt }) => {
         expect(systemPrompt).toContain("evidence-synthesis");
         expect(systemPrompt).toContain("Inspect cited sources before producing a synthesis.");
+        expect(systemPrompt).toContain("tools.skills.load({ name })");
+        expect(systemPrompt).not.toContain(capabilitySkill.revision.workingPath);
         expect(systemPrompt).not.toContain("PRIVATE CAPABILITY SKILL BODY");
         return "Capability skill is discoverable.";
       },
@@ -932,7 +934,9 @@ describe("agent runtime factories", () => {
           "files.list",
           "shell.run",
           "workflows.run",
+          "skills.load",
           "history.search_sessions",
+          "history.open_session_evidence",
         ]),
         execute: async () => {
           executions += 1;
@@ -954,13 +958,26 @@ describe("agent runtime factories", () => {
     );
     expect(byteBounded.description).toContain("return await noesis.search(query)");
     expect(byteBounded.description).toContain("return await noesis.describe(exactName)");
-    expect(byteBounded.description).toContain("one coherent program");
-    expect(byteBounded.description).toContain("do not use execute merely to wrap one known tool call");
+    expect(byteBounded.description).toContain("complete input and output contract");
+    expect(byteBounded.description).toContain("complete related operation in one program");
+    expect(byteBounded.description).toContain("do not wrap one known tool call");
+    expect(byteBounded.description).toContain("split one task across serial execute calls");
     expect(byteBounded.description).toContain("tools.files.read({ path })");
     expect(byteBounded.description).toContain('tools.files.list({ path: "." })');
     expect(byteBounded.description).toContain("tools.shell.run({ command })");
     expect(byteBounded.description).toContain("tools.workflows.run({ name, input })");
+    expect(byteBounded.description).toContain("tools.skills.load({ name })");
     expect(byteBounded.description).toContain("tools.history.search_sessions({ query })");
+    expect(byteBounded.description).toContain(
+      "tools.history.open_session_evidence({ citation: search.fragments[0].citation })",
+    );
+    expect(byteBounded.description).toContain("one precise hybrid query normally suffices");
+    expect(byteBounded.description).toContain("Batch independent calls with Promise.all");
+    expect(byteBounded.description).toContain("pass it to one models.query call");
+    expect(byteBounded.description).toContain("If a required result reports truncated: true");
+    expect(byteBounded.description).toContain("Prefer several bounded independent calls");
+    expect(byteBounded.description).toContain("report that bounded miss");
+    expect(byteBounded.description).toContain("repeatedly rewriting retrieval queries");
     expect(byteBounded.description).toContain("For any other tool");
     expect(byteBounded.description).toContain("do not return that value to you");
     expect(byteBounded.description).toContain("typed Script with scripts.save");
@@ -969,6 +986,78 @@ describe("agent runtime factories", () => {
     expect(byteBounded.description).toContain("Verify newly saved programs immediately");
     expect(byteBounded.description).toContain("store(key, value)");
     expect(executions).toBe(0);
+  });
+
+  test("derives the bounded shell starter result contract from its frozen output schema", () => {
+    const shellOutputSchema = toJsonValue(
+      z.toJSONSchema(
+        z.discriminatedUnion("truncated", [
+          z.strictObject({
+            output: z.string(),
+            fullOutputLength: z.number().int().nonnegative(),
+            truncated: z.literal(false),
+          }),
+          z.strictObject({
+            output: z.string(),
+            fullOutputLength: z.number().int().nonnegative(),
+            truncated: z.literal(true),
+            fullOutputPath: z.string(),
+          }),
+        ]),
+      ),
+    );
+    const createExecute = (outputSchema: JsonValue) =>
+      createPiExecuteTool({
+        prepared: {
+          catalog: Object.freeze({
+            catalogId: "catalog-shell-contract",
+            catalogDigest: sha256(canonicalJson(outputSchema)),
+            tools: Object.freeze([
+              Object.freeze({
+                name: "shell.run",
+                label: "Run shell command",
+                description: "Run a shell command",
+                revisionId: "shell-run-v1",
+                inputSchema: Object.freeze({ type: "object" }),
+                outputSchema,
+              }),
+            ]),
+          }),
+          execute: async () => ({
+            executionId: "unused",
+            value: null,
+            calls: 0,
+            durationMs: 0,
+          }),
+          close: async () => undefined,
+        },
+        turnId: "turn-shell-contract",
+        signal: new AbortController().signal,
+        emit: () => undefined,
+      });
+
+    const execute = createExecute(shellOutputSchema);
+    expect(execute.description).toContain(
+      "Schema-derived starter result contract: shell.run returns {output:string;fullOutputLength:number;truncated:false}|{output:string;fullOutputLength:number;truncated:true;fullOutputPath:string}.",
+    );
+    expect(execute.description).not.toContain("stdout");
+
+    const oversizedOutputSchema = toJsonValue({
+      type: "object",
+      properties: Object.fromEntries(
+        Array.from({ length: 80 }, (_, index) => [
+          `unboundedPromptGrowthSentinel${String(index)}`,
+          { type: "string" },
+        ]),
+      ),
+      required: Array.from({ length: 80 }, (_, index) => `unboundedPromptGrowthSentinel${String(index)}`),
+      additionalProperties: false,
+    });
+    const bounded = createExecute(oversizedOutputSchema);
+    expect(bounded.description).toContain(
+      'Use noesis.describe("shell.run") before depending on its result shape.',
+    );
+    expect(bounded.description).not.toContain("unboundedPromptGrowthSentinel");
   });
 
   test("scopes codemode logical execution identity by turn when Pi reuses a tool call ID", async () => {

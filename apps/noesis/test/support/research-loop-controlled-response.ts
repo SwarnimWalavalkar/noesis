@@ -45,11 +45,11 @@ export function researchLoopControlledResponse(
     ) {
       if (!input.context.messages.some((message) => message.role === "toolResult"))
         return controlledToolCallResponse(
-          "search_sessions",
-          { query: "research brief evidence" },
+          "execute",
+          { source: 'return await tools.history.search_sessions({ query: "research brief evidence" });' },
           "acceptance-search",
         );
-      return "Served immutable research-brief behavior through the pinned search_sessions tool.";
+      return "Served immutable research-brief behavior through codemode session search.";
     }
     return `Controlled Pi completion for: ${input.lastUserText}`;
   }

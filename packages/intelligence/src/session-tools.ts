@@ -1399,7 +1399,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       name: "search_sessions",
       label: "Search sessions",
       description:
-        "Search bounded prior-session evidence with exact citations. Normal cross-session search needs no private flag; private retrieval requires one exact authorized sessionId.",
+        "Run hybrid lexical and semantic retrieval with reranking over this installation's previous sessions and return bounded evidence with exact citations. One precise query normally suffices; empty or irrelevant results mean this installation has no answer. Normal cross-session search needs no private flag; private retrieval requires one exact authorized sessionId.",
       inputSchema: SearchSessionsInputSchema,
       execute: searchSessions,
     }),
@@ -1407,7 +1407,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       name: "open_session_evidence",
       label: "Open session evidence",
       description:
-        "Open a bounded window around an exact session citation after reauthorization using the turn's reserved evidence-opening allowance.",
+        "Open a bounded window around the one strongest exact session citation after reauthorization using the turn's reserved evidence-opening allowance.",
       inputSchema: OpenSessionEvidenceInputSchema,
       execute: openSessionEvidence,
     }),

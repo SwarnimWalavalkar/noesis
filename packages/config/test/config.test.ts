@@ -82,13 +82,7 @@ describe("Noesis config", () => {
     });
     expect(resolved.experiments).toEqual({ maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 });
     expect(resolved.context).toEqual({ tokenBudget: 160_000 });
-    expect(resolved.tools.hotbar).toEqual([
-      "files.read",
-      "files.list",
-      "shell.run",
-      "workflows.run",
-      "history.search_sessions",
-    ]);
+    expect(resolved.tools.hotbar).toEqual(["files.read", "files.list", "shell.run"]);
     expect(await readFile(noesisConfigPath(home), "utf8")).toBe(legacy);
   });
 
@@ -108,11 +102,22 @@ describe("Noesis config", () => {
     });
   });
 
-  test("defaults workflow and session search tools without changing explicit persisted choices", async () => {
+  test("defaults atomic tools and migrates the old exact default without changing custom choices", async () => {
     const missing = await mkdtemp(join(tmpdir(), "noesis-config-default-hotbar-"));
+    const legacyDefault = await mkdtemp(join(tmpdir(), "noesis-config-legacy-default-hotbar-"));
     const oldPersisted = await mkdtemp(join(tmpdir(), "noesis-config-old-hotbar-"));
     const customPersisted = await mkdtemp(join(tmpdir(), "noesis-config-custom-hotbar-"));
     const explicitlyEmpty = await mkdtemp(join(tmpdir(), "noesis-config-empty-hotbar-"));
+    await writeFile(
+      noesisConfigPath(legacyDefault),
+      JSON.stringify({
+        schemaVersion: 1,
+        agent: {},
+        tools: {
+          hotbar: ["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"],
+        },
+      }),
+    );
     await writeFile(
       noesisConfigPath(oldPersisted),
       JSON.stringify({
@@ -138,8 +143,11 @@ describe("Noesis config", () => {
       "files.read",
       "files.list",
       "shell.run",
-      "workflows.run",
-      "history.search_sessions",
+    ]);
+    expect((await resolveNoesisConfig({ home: legacyDefault, env: {} })).tools.hotbar).toEqual([
+      "files.read",
+      "files.list",
+      "shell.run",
     ]);
     expect((await resolveNoesisConfig({ home: oldPersisted, env: {} })).tools.hotbar).toEqual([
       "files.read",
@@ -223,7 +231,7 @@ describe("Noesis config", () => {
       context: { tokenBudget: 160_000 },
       experiments: { maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 },
       tools: {
-        hotbar: ["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"],
+        hotbar: ["files.read", "files.list", "shell.run"],
       },
     });
   });
@@ -502,15 +510,7 @@ describe("Noesis config", () => {
 
     const resolved = await resolveNoesisConfig({ home, env: {} });
     expect(resolved.tools.hotbar).toEqual(
-      expect.arrayContaining([
-        "files.read",
-        "files.list",
-        "shell.run",
-        "workflows.run",
-        "history.search_sessions",
-        "files.write",
-        "artifacts.write",
-      ]),
+      expect.arrayContaining(["files.read", "files.list", "shell.run", "files.write", "artifacts.write"]),
     );
     expect(resolved.tools.projectHotbars["project_concurrent"]).toHaveLength(2);
     expect(resolved.tools.projectHotbars["project_concurrent"]).toEqual(

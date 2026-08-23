@@ -517,6 +517,7 @@ describe("research role isolation", () => {
         request("reflector", "reflect-contract-v1", [
           { role: "user", name: "settled_turn", content: "s".repeat(7_000) },
           { role: "user", name: "current_capabilities", content: "c".repeat(7_000) },
+          { role: "user", name: "foreground_capability_surface", content: "f".repeat(4_000) },
           { role: "user", name: "current_capability_materials", content: "m".repeat(7_000) },
           { role: "user", name: "available_saved_programs", content: "p".repeat(4_000) },
           { role: "user", name: "evidence", content: evidence },

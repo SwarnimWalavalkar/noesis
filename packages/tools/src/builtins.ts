@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, matchesGlob, relative, resolve } from "node:path";
+import { createReadStream, createWriteStream, type WriteStream } from "node:fs";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, matchesGlob, relative, resolve } from "node:path";
 import { createConditionalObject, type JsonValue, sha256 } from "@noesis/domain";
 import { createEffectExecutionFailure } from "@noesis/policy";
 import { z } from "zod";
@@ -35,9 +36,66 @@ function resolvedPath(cwd: string, path: string): string {
 interface ProcessResult {
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
+  readonly output: string;
+  readonly fullOutputLength: number;
   readonly stdout: string;
   readonly stderr: string;
   readonly truncated: boolean;
+}
+interface ProcessOutputCapture {
+  readonly append: (chunk: Buffer) => boolean;
+  readonly waitForDrain: () => Promise<void>;
+  readonly finish: () => Promise<void>;
+}
+function createProcessOutputCapture(path: string): ProcessOutputCapture {
+  const stream: WriteStream = createWriteStream(path, { flags: "wx", mode: 0o600 });
+  let failure: Error | undefined;
+  let completion: Promise<void> | undefined;
+  stream.on("error", (error) => {
+    failure = error;
+  });
+  return Object.freeze({
+    append: (chunk: Buffer) => {
+      if (failure || stream.destroyed) return false;
+      return stream.write(chunk);
+    },
+    waitForDrain: () => {
+      if (failure) return Promise.reject(failure);
+      if (!stream.writableNeedDrain) return Promise.resolve();
+      return new Promise<void>((resolveDrain, rejectDrain) => {
+        const onError = (error: Error): void => {
+          stream.off("drain", onDrain);
+          rejectDrain(error);
+        };
+        const onDrain = (): void => {
+          stream.off("error", onError);
+          resolveDrain();
+        };
+        stream.once("error", onError);
+        stream.once("drain", onDrain);
+      });
+    },
+    finish: () => {
+      completion ??= new Promise<void>((resolveFinish, rejectFinish) => {
+        if (failure) {
+          rejectFinish(failure);
+          return;
+        }
+        const onError = (error: Error): void => {
+          stream.off("finish", onFinish);
+          rejectFinish(error);
+        };
+        const onFinish = (): void => {
+          stream.off("error", onError);
+          resolveFinish();
+        };
+        stream.once("error", onError);
+        stream.once("finish", onFinish);
+        stream.end();
+      });
+      return completion;
+    },
+  });
 }
 async function runProcess(input: {
   readonly command: string;
@@ -46,10 +104,12 @@ async function runProcess(input: {
   readonly signal: AbortSignal;
   readonly timeoutMs: number;
   readonly maxOutputBytes?: number;
+  readonly fullOutputPath?: string;
 }): Promise<ProcessResult> {
   if (input.signal.aborted)
     throw createEffectExecutionFailure("cancelled", "Process was cancelled before it started");
   const maximum = input.maxOutputBytes ?? MAX_TOOL_TEXT_BYTES;
+  const capture = input.fullOutputPath ? createProcessOutputCapture(input.fullOutputPath) : undefined;
   return await new Promise<ProcessResult>((resolveResult, reject) => {
     const detached = process.platform !== "win32";
     const child = spawn(input.command, input.args, {
@@ -60,7 +120,9 @@ async function runProcess(input: {
     });
     let stdout = "";
     let stderr = "";
+    let output = "";
     let bytes = 0;
+    let fullOutputLength = 0;
     let truncated = false;
     let settled = false;
     let terminationReason: "cancelled" | "timeout" | undefined;
@@ -69,24 +131,14 @@ async function runProcess(input: {
     const stderrDecoder = new TextDecoder();
     const appendDecoded = (kind: "stdout" | "stderr", decoded: string): void => {
       if (!decoded) return;
+      fullOutputLength += decoded.length;
+      output = truncateUtf8Tail(`${output}${decoded}`, maximum);
       const remaining = Math.max(0, maximum - bytes);
       const accepted = truncateUtf8(decoded, remaining);
       if (kind === "stdout") stdout += accepted;
       else stderr += accepted;
       bytes += Buffer.byteLength(accepted, "utf8");
       if (accepted.length < decoded.length) truncated = true;
-    };
-    const append = (kind: "stdout" | "stderr", chunk: Buffer | string): void => {
-      const encoded = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
-      if (bytes >= maximum) {
-        if (encoded.byteLength > 0) truncated = true;
-        return;
-      }
-      const decoded =
-        kind === "stdout"
-          ? stdoutDecoder.decode(encoded, { stream: true })
-          : stderrDecoder.decode(encoded, { stream: true });
-      appendDecoded(kind, decoded);
     };
     const flushOutput = (): void => {
       appendDecoded("stdout", stdoutDecoder.decode());
@@ -128,7 +180,33 @@ async function runProcess(input: {
       if (settled) return;
       settled = true;
       cleanup();
-      reject(cause);
+      void (capture?.finish() ?? Promise.resolve()).then(() => reject(cause), reject);
+    };
+    let captureBackpressured = false;
+    const append = (kind: "stdout" | "stderr", chunk: Buffer | string): void => {
+      const encoded = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, "utf8");
+      const captureWritable = capture?.append(encoded) ?? true;
+      const decoded =
+        kind === "stdout"
+          ? stdoutDecoder.decode(encoded, { stream: true })
+          : stderrDecoder.decode(encoded, { stream: true });
+      appendDecoded(kind, decoded);
+      if (captureWritable || !capture || captureBackpressured) return;
+      captureBackpressured = true;
+      child.stdout.pause();
+      child.stderr.pause();
+      void capture.waitForDrain().then(
+        () => {
+          captureBackpressured = false;
+          if (settled) return;
+          child.stdout.resume();
+          child.stderr.resume();
+        },
+        (error: Error) => {
+          killTree("SIGKILL");
+          rejectOnce(error);
+        },
+      );
     };
     const timer = setTimeout(() => terminate("timeout"), input.timeoutMs);
     const cancel = (): void => terminate("cancelled");
@@ -142,15 +220,19 @@ async function runProcess(input: {
       if (terminationReason) killTree("SIGKILL");
       cleanup();
       flushOutput();
-      if (terminationReason === "cancelled" || input.signal.aborted) {
-        reject(createEffectExecutionFailure("cancelled", "Process was cancelled"));
-        return;
-      }
-      if (terminationReason === "timeout") {
-        reject(new Error(`Process timed out after ${input.timeoutMs}ms`));
-        return;
-      }
-      resolveResult(Object.freeze({ exitCode, signal, stdout, stderr, truncated }));
+      void (capture?.finish() ?? Promise.resolve()).then(() => {
+        if (terminationReason === "cancelled" || input.signal.aborted) {
+          reject(createEffectExecutionFailure("cancelled", "Process was cancelled"));
+          return;
+        }
+        if (terminationReason === "timeout") {
+          reject(new Error(`Process timed out after ${input.timeoutMs}ms`));
+          return;
+        }
+        resolveResult(
+          Object.freeze({ exitCode, signal, output, fullOutputLength, stdout, stderr, truncated }),
+        );
+      }, reject);
     });
   });
 }
@@ -243,6 +325,22 @@ function truncateUtf8(value: string, maximumBytes: number): string {
     bytes += characterBytes;
   }
   return accepted;
+}
+function truncateUtf8Tail(value: string, maximumBytes: number): string {
+  if (maximumBytes <= 0) return "";
+  if (Buffer.byteLength(value, "utf8") <= maximumBytes) return value;
+  const characters = [...value];
+  let start = characters.length;
+  let bytes = 0;
+  while (start > 0) {
+    const character = characters[start - 1];
+    if (character === undefined) break;
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maximumBytes) break;
+    start -= 1;
+    bytes += characterBytes;
+  }
+  return characters.slice(start).join("");
 }
 async function readBoundedResponseBody(response: Response): Promise<{
   readonly body: string;
@@ -452,12 +550,16 @@ export interface CreateLocalWorkToolsOptions {
     readonly bytes: number;
     readonly contentDigest: string;
   }>;
+  readonly importArtifact: (input: { readonly path: string; readonly sourcePath: string }) => Promise<{
+    readonly path: string;
+  }>;
 }
 export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): readonly ToolDefinition[] {
   const cwd = resolve(options.cwd);
   const searchCommand = options.searchCommand ?? "rg";
   const shellPath = process.env["SHELL"] ?? "/bin/sh";
   const writeArtifact = options.writeArtifact;
+  const importArtifact = options.importArtifact;
   const identity = (tool: string, extra: JsonValue = null): JsonValue =>
     Object.freeze({
       adapterRevision: "local-work-tools-v1",
@@ -692,34 +794,81 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
   const shell = defineTool({
     name: "shell.run",
     label: "Run shell command",
-    description: "Run a shell command locally with bounded output, timeout, and cancellation.",
+    description:
+      "Run a shell command locally with bounded tail output, timeout, and cancellation. When output is truncated, the complete output is saved to fullOutputPath for inspection with ordinary file or Unix tools.",
     visibility: "codemode_only",
-    identityMaterial: identity("shell.run", { shellPath }),
+    identityMaterial: identity("shell.run", { shellPath, importArtifact: importArtifact.toString() }),
     inputSchema: z.strictObject({
       command: z.string().trim().min(1).max(32768),
       cwd: pathSchema.optional(),
       timeoutMs: z.number().int().min(100).max(600000).optional(),
     }),
-    outputSchema: z.strictObject({
-      exitCode: z.number().int().nullable(),
-      signal: z.string().nullable(),
-      stdout: textBound,
-      stderr: textBound,
-      truncated: z.boolean(),
-    }),
+    outputSchema: z.discriminatedUnion("truncated", [
+      z.strictObject({
+        exitCode: z.number().int().nullable(),
+        signal: z.string().nullable(),
+        output: textBound,
+        fullOutputLength: z
+          .number()
+          .int()
+          .nonnegative()
+          .describe("Complete decoded character length before preview truncation."),
+        truncated: z.literal(false),
+      }),
+      z.strictObject({
+        exitCode: z.number().int().nullable(),
+        signal: z.string().nullable(),
+        output: textBound,
+        fullOutputLength: z
+          .number()
+          .int()
+          .nonnegative()
+          .describe("Complete decoded character length before preview truncation."),
+        truncated: z.literal(true),
+        fullOutputPath: z.string().describe("Absolute path to the complete combined process output."),
+      }),
+    ]),
     effect: ({ command, cwd: requestedCwd = "." }) => ({
       effect: "execute",
       resource: `shell:${resolvedPath(cwd, requestedCwd)}:${sha256(command)}`,
       estimatedCost: 1,
     }),
-    execute: async ({ command, cwd: requestedCwd = ".", timeoutMs = 120000 }, context) =>
-      await runProcess({
-        command: shellPath,
-        args: ["-c", command],
-        cwd: resolvedPath(cwd, requestedCwd),
-        signal: context.signal,
-        timeoutMs,
-      }),
+    execute: async ({ command, cwd: requestedCwd = ".", timeoutMs = 120000 }, context) => {
+      const temporaryDirectory = await mkdtemp(join(tmpdir(), "noesis-shell-"));
+      const temporaryOutputPath = join(temporaryDirectory, "output.log");
+      try {
+        const result = await runProcess({
+          command: shellPath,
+          args: ["-c", command],
+          cwd: resolvedPath(cwd, requestedCwd),
+          signal: context.signal,
+          timeoutMs,
+          fullOutputPath: temporaryOutputPath,
+        });
+        if (!result.truncated)
+          return {
+            exitCode: result.exitCode,
+            signal: result.signal,
+            output: result.output,
+            fullOutputLength: result.fullOutputLength,
+            truncated: false,
+          };
+        const artifact = await importArtifact({
+          path: `tool-output/${sha256(`${context.executionId}:${context.callId}`)}.log`,
+          sourcePath: temporaryOutputPath,
+        });
+        return {
+          exitCode: result.exitCode,
+          signal: result.signal,
+          output: result.output,
+          fullOutputLength: result.fullOutputLength,
+          truncated: true,
+          fullOutputPath: artifact.path,
+        };
+      } finally {
+        await rm(temporaryDirectory, { recursive: true, force: true });
+      }
+    },
   });
   const fetchTool = defineTool({
     name: "web.fetch",

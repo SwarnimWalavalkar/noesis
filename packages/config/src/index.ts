@@ -146,15 +146,20 @@ export const BUILT_IN_EXPERIMENT_DEFAULTS: Required<ExperimentDefaults> = {
   maxCost: 0,
 };
 export const BUILT_IN_TOOL_DEFAULTS: ResolvedToolConfig = {
-  hotbar: Object.freeze([
-    "files.read",
-    "files.list",
-    "shell.run",
-    "workflows.run",
-    "history.search_sessions",
-  ]),
+  hotbar: Object.freeze(["files.read", "files.list", "shell.run"]),
   projectHotbars: Object.freeze({}),
 };
+const LEGACY_BUILT_IN_TOOL_HOTBARS = Object.freeze([
+  Object.freeze(["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"]),
+]);
+function isSameHotbar(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((tool, index) => tool === right[index]);
+}
+function resolveConfiguredHotbar(hotbar: readonly string[] | undefined): readonly string[] {
+  if (!hotbar || LEGACY_BUILT_IN_TOOL_HOTBARS.some((legacy) => isSameHotbar(hotbar, legacy)))
+    return BUILT_IN_TOOL_DEFAULTS.hotbar;
+  return hotbar;
+}
 export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
   schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
   agent: { ...BUILT_IN_AGENT_DEFAULTS },
@@ -326,7 +331,7 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
       maxCost: experiments.maxCost ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxCost,
     },
     tools: {
-      hotbar: Object.freeze([...(tools.hotbar ?? BUILT_IN_TOOL_DEFAULTS.hotbar)]),
+      hotbar: Object.freeze([...resolveConfiguredHotbar(tools.hotbar)]),
       projectHotbars: Object.freeze(
         Object.fromEntries(
           Object.entries(tools.projectHotbars ?? {}).map(([projectId, hotbar]) => [
@@ -582,7 +587,7 @@ export async function updateToolHotbar(
     if (!loaded.ok) throw loaded.error;
     const path = noesisConfigPath(home);
     const current = loaded.value.config ?? DEFAULT_NOESIS_CONFIG;
-    const rawGlobal = current.tools?.hotbar ?? BUILT_IN_TOOL_DEFAULTS.hotbar;
+    const rawGlobal = resolveConfiguredHotbar(current.tools?.hotbar);
     const projectHotbars = { ...current.tools?.projectHotbars };
     const legacyGlobal = new Set(update.legacyGlobalProjectTools);
     const legacyActive = new Set(update.legacyActiveProjectTools);

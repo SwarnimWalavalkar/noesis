@@ -140,15 +140,19 @@ The learning system works best when `no_change` stays out of the way. Not every 
 
 ### Useful execution becomes an inspectable program
 
-The user asks Noesis to investigate a repository, change files, run commands, search the web, or create an artifact. One simple operation can use a direct tool. Work that requires multiple tool calls or transforms intermediate results normally runs as one coherent JavaScript program through `execute`, rather than one wrapper for each known call. Basic file, shell, workflow, and session-search calls are named in the `execute` contract; broader tools remain progressively discoverable.
+The user asks Noesis to investigate a repository, change files, run commands, search the web, or create an artifact. One simple file or shell operation can use a direct tool. Work that requires multiple tool calls or transforms intermediate results normally runs as one coherent JavaScript program through `execute`, rather than one wrapper for each known call. The program plans collection and synthesis together. It checks explicit completeness fields before synthesis: `shell.run` saves complete oversized output to an ordinary artifact file and returns its path, so the program inspects that file with bounded reads or ordinary Unix tools instead of rerunning the command. Other required evidence marked `truncated: true` is narrowed or recollected with bounded calls, and omitted output is never treated as proof of absence. Session search already combines lexical and semantic retrieval with reranking, so one precise query normally suffices. It opens its strongest evidence before returning and accepts empty or irrelevant results as a bounded miss for the current installation instead of searching through paraphrases. Basic file, shell, workflow, and session-search calls are named in the `execute` contract; broader tools remain progressively discoverable.
 
 The conversation gets the final result. The user can still inspect each tool call and revision.
 
 For analysis that benefits from more history than the foreground prompt should carry, `execute` can inspect the complete pre-turn session as a lazy immutable document. It may give one selected slice to an isolated model and combine the answer with local code or other tools. This keeps the ordinary prompt bounded without reducing the programmable surface to a short transcript tail.
 
+Session search covers only the current Noesis installation. A development installation with a project-local `.noesis` directory therefore searches its own sessions, not another installation's global history. Trusted local code may still inspect files elsewhere when the task requires it, but that is ordinary filesystem access rather than cross-installation session search.
+
 When a program has a clear use in the project, the user or the agent may save it directly. One reusable computation becomes a typed script. A multi-phase program with durable progress becomes a workflow. A workflow can pause for corrections and resume later.
 
-Skills provide portable instructions. They do not install executable access.
+Skills provide portable instructions. Their compact metadata is visible at turn start; the model loads the selected frozen body through `execute` and `tools.skills.load({ name })`. Skills do not install executable access.
+
+Ambient reflection receives a separate model-visible surface for the settled turn. It can tell that a selected skill began as metadata and whether `skills.load` exposed its body later. Predecessor bytes supplied for authoring do not count as foreground exposure.
 
 Scripts and workflows remain editable files. Once published, they are available through `execute` with the current catalog, Broker, and permissions. Each run records the exact immutable revision it used.
 

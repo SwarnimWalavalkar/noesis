@@ -247,6 +247,9 @@ function createFakeWorkspaceStore(): WorkspaceStore {
         path: request.path,
         mediaType: request.mediaType,
       }),
+      importArtifact: async () => {
+        throw new Error("unused fake artifact import");
+      },
     }),
     research: createFakeResearchState(),
     workingAdjustments: Object.freeze({

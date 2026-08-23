@@ -4689,6 +4689,25 @@ describe("WorkspaceStore", () => {
     ).rejects.toThrow(`Completed experiment ${initial.experimentId} is immutable`);
     store.close();
   });
+  test("imports an existing file as an authoritative artifact", async () => {
+    const workspaceRoot = await temporary("artifact-import-workspace");
+    const sourceRoot = await temporary("artifact-import-source");
+    const sourcePath = join(sourceRoot, "shell-output.log");
+    const content = `${"large output\n".repeat(10000)}tail`;
+    await writeFile(sourcePath, content, "utf8");
+    const store = await createWorkspaceStore(workspaceRoot);
+    const request = {
+      path: "tool-output/shell-output.log",
+      mediaType: "text/plain",
+      sourcePath,
+      actor,
+      relationshipRefs: Object.freeze([]),
+    } as const;
+    const artifact = await store.artifacts.importArtifact(request);
+    await expect(store.artifacts.importArtifact(request)).resolves.toEqual(artifact);
+    expect(Buffer.from(await store.reads.readArtifact(artifact)).toString()).toBe(content);
+    store.close();
+  });
   test("backs up and restores authoritative files and reports missing and orphan refs", async () => {
     const sourceRoot = await temporary("backup-source");
     const backupRoot = await temporary("backup-copy");

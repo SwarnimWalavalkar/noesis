@@ -82,7 +82,7 @@ describe("credential-free Pi application acceptance", () => {
       expect(relatedSelection?.revision).toEqual(firstRevision);
       expect(related.frozenTurnPlan?.canonicalDigest).toMatch(/^[a-f0-9]{64}$/u);
       expect(related.output).toBe(
-        "Served immutable research-brief behavior through the pinned search_sessions tool.",
+        "Served immutable research-brief behavior through codemode session search.",
       );
       const relatedSearchCall = (
         await runtime.debug.workspace.operational.toolCalls.listForSession(relatedSession.trailId)

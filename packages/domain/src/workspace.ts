@@ -132,6 +132,14 @@ export interface ArtifactWriteRequest {
   readonly relationshipRefs: readonly (DatabaseRowRef | FileRevisionRef)[];
 }
 
+export interface ArtifactImportRequest {
+  readonly path: string;
+  readonly mediaType: string;
+  readonly sourcePath: string;
+  readonly actor: ActorRef;
+  readonly relationshipRefs: readonly (DatabaseRowRef | FileRevisionRef)[];
+}
+
 export interface WorkspaceReadPort {
   /** SQLite values exposed for exact evidence inspection before an owner schema decodes a row. */
   readonly readDatabaseRow: <Table extends DatabaseTable>(
@@ -224,6 +232,7 @@ export interface EvidenceFilePort {
 
 export interface ArtifactFilePort {
   readonly writeArtifact: (request: ArtifactWriteRequest) => Promise<ArtifactFileRef>;
+  readonly importArtifact: (request: ArtifactImportRequest) => Promise<ArtifactFileRef>;
 }
 
 export interface ExperimentStorePort {

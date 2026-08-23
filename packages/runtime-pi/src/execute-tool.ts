@@ -1,4 +1,4 @@
-import { createConditionalObject } from "@noesis/domain";
+import { createConditionalObject, isJsonObject } from "@noesis/domain";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import type { JsonValue } from "@noesis/domain";
@@ -18,12 +18,30 @@ const MAX_WORKFLOW_INDEX_BYTES = 4 * 1024;
 const MAX_WORKFLOW_NAME_BYTES = 96;
 const MAX_WORKFLOW_TOOL_NAME_BYTES = 128;
 const MAX_WORKFLOW_DESCRIPTION_BYTES = 192;
-const CODEMODE_STARTER_CALLS = Object.freeze([
+const MAX_STARTER_OUTPUT_CONTRACT_BYTES = 512;
+interface CodemodeStarterCall {
+  readonly name: string;
+  readonly call: string;
+  readonly exposeOutputContract?: boolean;
+}
+const CODEMODE_STARTER_CALLS: readonly CodemodeStarterCall[] = Object.freeze([
   Object.freeze({ name: "files.read", call: "tools.files.read({ path })" }),
   Object.freeze({ name: "files.list", call: 'tools.files.list({ path: "." })' }),
-  Object.freeze({ name: "shell.run", call: "tools.shell.run({ command })" }),
+  Object.freeze({
+    name: "shell.run",
+    call: "tools.shell.run({ command })",
+    exposeOutputContract: true,
+  }),
   Object.freeze({ name: "workflows.run", call: "tools.workflows.run({ name, input })" }),
-  Object.freeze({ name: "history.search_sessions", call: "tools.history.search_sessions({ query })" }),
+  Object.freeze({ name: "skills.load", call: "tools.skills.load({ name })" }),
+  Object.freeze({
+    name: "history.search_sessions",
+    call: "tools.history.search_sessions({ query }) (hybrid lexical and semantic search with reranking over this installation's previous sessions; one precise query normally suffices)",
+  }),
+  Object.freeze({
+    name: "history.open_session_evidence",
+    call: "tools.history.open_session_evidence({ citation: search.fragments[0].citation }) (after search_sessions, and only when search.fragments[0] exists; opens the one strongest exact citation using the reserved evidence allowance)",
+  }),
 ]);
 export interface PiWorkflowSummary {
   readonly name: string;
@@ -157,6 +175,85 @@ function escapeXmlBounded(value: string, maxBytes: number): string {
   }
   return `${result}${ellipsis}`;
 }
+function jsonSchemaLiteral(value: JsonValue): string {
+  return JSON.stringify(value) ?? "unknown";
+}
+function jsonSchemaPropertyName(value: string): string {
+  return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(value) ? value : JSON.stringify(value);
+}
+function jsonSchemaType(schema: JsonValue, depth = 0): string | undefined {
+  if (!isJsonObject(schema) || depth > 8) return undefined;
+  if (Object.hasOwn(schema, "const")) return jsonSchemaLiteral(schema["const"] ?? null);
+  const enumValues = schema["enum"];
+  if (Array.isArray(enumValues) && enumValues.length > 0) return enumValues.map(jsonSchemaLiteral).join("|");
+  for (const unionKey of ["oneOf", "anyOf"] as const) {
+    const variants = schema[unionKey];
+    if (!Array.isArray(variants) || variants.length === 0) continue;
+    const rendered = variants.map((variant) => jsonSchemaType(variant, depth + 1));
+    if (rendered.some((variant) => variant === undefined)) return undefined;
+    return rendered.join("|");
+  }
+  const intersections = schema["allOf"];
+  if (Array.isArray(intersections) && intersections.length > 0) {
+    const rendered = intersections.map((variant) => jsonSchemaType(variant, depth + 1));
+    if (rendered.some((variant) => variant === undefined)) return undefined;
+    return rendered.join("&");
+  }
+  const declaredType = schema["type"];
+  if (Array.isArray(declaredType)) {
+    const rendered = declaredType.map((type) =>
+      typeof type === "string" ? jsonSchemaType({ type }, depth + 1) : undefined,
+    );
+    if (rendered.some((type) => type === undefined)) return undefined;
+    return rendered.join("|");
+  }
+  if (declaredType === "null") return "null";
+  if (declaredType === "string") return "string";
+  if (declaredType === "number" || declaredType === "integer") return "number";
+  if (declaredType === "boolean") return "boolean";
+  if (declaredType === "array") {
+    const itemType = jsonSchemaType(schema["items"] ?? {}, depth + 1) ?? "JsonValue";
+    return `${itemType.includes("|") || itemType.includes("&") ? `(${itemType})` : itemType}[]`;
+  }
+  if (declaredType === "object" || isJsonObject(schema["properties"])) {
+    const properties = schema["properties"];
+    if (!isJsonObject(properties)) {
+      const additional = schema["additionalProperties"];
+      if (additional === false) return "Record<string,never>";
+      const valueType = jsonSchemaType(additional ?? {}, depth + 1) ?? "JsonValue";
+      return `Record<string,${valueType}>`;
+    }
+    const requiredValue = schema["required"];
+    const required = new Set(
+      Array.isArray(requiredValue)
+        ? requiredValue.filter((value): value is string => typeof value === "string")
+        : [],
+    );
+    const fields = Object.entries(properties).map(([name, propertySchema]) => {
+      const propertyType = jsonSchemaType(propertySchema, depth + 1) ?? "JsonValue";
+      return `${jsonSchemaPropertyName(name)}${required.has(name) ? "" : "?"}:${propertyType}`;
+    });
+    const additional = schema["additionalProperties"];
+    if (additional !== false) {
+      const valueType = jsonSchemaType(additional ?? {}, depth + 1) ?? "JsonValue";
+      fields.push(`[key:string]:${valueType}`);
+    }
+    return `{${fields.join(";")}}`;
+  }
+  return "JsonValue";
+}
+function starterOutputContract(catalog: PiFrozenToolCatalog): string | undefined {
+  const starter = CODEMODE_STARTER_CALLS.find((candidate) => candidate.exposeOutputContract);
+  if (!starter) return undefined;
+  const descriptor = catalog.tools.find((tool) => tool.name === starter.name);
+  if (!descriptor) return undefined;
+  const outputType = jsonSchemaType(descriptor.outputSchema);
+  if (!outputType) return undefined;
+  const contract = `${starter.name} returns ${outputType}.`;
+  if (new TextEncoder().encode(contract).byteLength > MAX_STARTER_OUTPUT_CONTRACT_BYTES)
+    return `Use noesis.describe(${JSON.stringify(starter.name)}) before depending on its result shape.`;
+  return `Schema-derived starter result contract: ${contract}`;
+}
 function workflowIndex(summaries: readonly PiWorkflowSummary[] | undefined): string | undefined {
   if (!summaries || summaries.length === 0) return undefined;
   const normalized = summaries
@@ -214,8 +311,9 @@ function codemodeStarterKit(catalog: PiFrozenToolCatalog): string {
   const available = new Set(catalog.tools.map((tool) => tool.name));
   const calls = CODEMODE_STARTER_CALLS.filter(({ name }) => available.has(name)).map(({ call }) => call);
   if (calls.length === 0)
-    return "For an unknown tool, return await noesis.search(query), then return await noesis.describe(exactName) to inspect its input schema.";
-  return `Known starter tools—invoke these directly without search or describe: ${calls.join("; ")}. For any other tool, return await noesis.search(query), then return await noesis.describe(exactName) to inspect its input schema.`;
+    return "For an unknown tool, return await noesis.search(query), then return await noesis.describe(exactName) to inspect its complete input and output contract.";
+  const outputContract = starterOutputContract(catalog);
+  return `Known starter tools—invoke these directly without search: ${calls.join("; ")}.${outputContract ? ` ${outputContract}` : ""} For any other tool, return await noesis.search(query), then return await noesis.describe(exactName) to inspect its complete input and output contract.`;
 }
 export function createPiExecuteTool(input: {
   readonly prepared: PreparedPiCodeExecution;
@@ -231,9 +329,12 @@ export function createPiExecuteTool(input: {
     label: "Execute JavaScript",
     description: [
       "Execute JavaScript on the user's machine and compose work tools through the injected SDK.",
-      "Compose related calls and transformations into one coherent program; do not use execute merely to wrap one known tool call.",
+      "Compose the complete related operation in one program; do not wrap one known tool call or split one task across serial execute calls.",
       starterKit,
       "Invoke with return await tools.<family>.<operation>(input), or return await noesis.invoke(exactName, input).",
+      "Batch independent calls with Promise.all. Keep intermediate results in code; when collected evidence needs judgment, pass it to one models.query call instead of repeatedly rewriting retrieval queries across foreground rounds.",
+      "Inspect explicit completeness fields before models.query. If a required result reports truncated: true, recover it before synthesis; for shell.run, inspect fullOutputPath with files.read line ranges or ordinary Unix tools instead of rerunning the command. Narrow or recollect other incomplete evidence; never treat omitted output as proof that requested evidence is absent. Prefer several bounded independent calls over one aggregate command whose early output can crowd out later sections.",
+      "For retrieval, one precise hybrid query normally suffices. Select and open the strongest citation in the same program. Empty or irrelevant results mean the current installation has no answer; report that bounded miss instead of cycling through paraphrases.",
       "For large-session analysis, context is a lazy immutable view of the complete pre-turn session timeline: inspect context.length, take context.slice(start, end), and await view.text() only when raw text is needed. Use await models.query(prompt, contextOrViews) for isolated tool-free subqueries on the frozen model route.",
       "emit(value) and notify(value) show progress to the user but do not return that value to you; use return for the final result that should enter conversation context.",
       "For reusable computation, save a typed Script with scripts.save; for durable or resumable phases, save a Workflow with workflows.save. Do not defer foreground program creation to reflection. Verify newly saved programs immediately.",
