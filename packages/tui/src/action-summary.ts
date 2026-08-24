@@ -137,25 +137,24 @@ const NESTED_SUMMARIZERS = {
       .addOptional(!(status === undefined) ? { outcome: String(status) } : undefined)
       .finish();
   },
-  "scripts.run": (input, output) => {
+  "programs.run": (input, output) => {
     const name = stringField(input, "name");
+    const mode = stringField(input, "mode");
+    const status = stringField(output, "status");
     const calls = numberField(output, "calls");
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return createConditionalObject({} as const)
-      .addOptional(name ? { subject: name } : undefined)
-      .addOptional(!(calls === undefined) ? { outcome: formatCount(calls, "call") } : undefined)
+      .addOptional(name ? { subject: mode ? `${mode} · ${name}` : name } : undefined)
+      .addOptional(
+        status
+          ? { outcome: status }
+          : !(calls === undefined)
+            ? { outcome: formatCount(calls, "call") }
+            : undefined,
+      )
       .finish();
   },
-  "workflows.run": (input, output) => {
-    const name = stringField(input, "name");
-    const status = stringField(output, "status");
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    return createConditionalObject({} as const)
-      .addOptional(name ? { subject: name } : undefined)
-      .addOptional(status ? { outcome: status } : undefined)
-      .finish();
-  },
-  "workflows.resume": (input, output) => {
+  "programs.resume": (input, output) => {
     const runId = stringField(input, "runId");
     const status = stringField(output, "status");
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -197,25 +196,6 @@ const NESTED_SUMMARIZERS = {
         decision ? { subject: capabilityId ? `${decision} · ${capabilityId}` : decision } : undefined,
       )
       .addOptional(status ? { outcome: status } : undefined)
-      .finish();
-  },
-  inspect_self: (input, output) => {
-    const section = stringField(input, "section") ?? "overview";
-    const presentation = presentActionPayload("inspect_self", output);
-    const count =
-      presentation.tools?.length ??
-      (Array.isArray(presentation.value) ? presentation.value.length : undefined);
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    return createConditionalObject({
-      subject: section,
-    } as const)
-      .addOptional(
-        !(count === undefined)
-          ? {
-              outcome: formatCount(count, presentation.tools ? "tool" : "item"),
-            }
-          : undefined,
-      )
       .finish();
   },
 } satisfies Readonly<Record<string, NestedSummarizer>>;

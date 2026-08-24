@@ -69,7 +69,7 @@ Noesis should collaborate with the user when a problem is unclear or calls for j
 
 ### Changes the user can understand
 
-Noesis may change its own instructions and abilities. It can publish and use a project script or workflow during a foreground turn. Ambient reflection can create a Capability with exact Instruction, Skill, Script, or Workflow effects. The foreground agent can author the same complete Capability decision deliberately while it works with the user, without asking a second reflector to reinterpret it. Each Capability must connect an observed problem to evidence and a clear future use.
+Noesis may change its own instructions and abilities. It can publish and use a project Program in script or workflow mode during a foreground turn. Ambient reflection can create a Capability with exact Instruction, Skill, or Program effects. The foreground agent can author the same complete Capability decision deliberately while it works with the user, without asking a second reflector to reinterpret it. Each Capability must connect an observed problem to evidence and a clear future use.
 
 Useful changes should not require approval at every step. The user can still inspect, challenge, keep, or reverse them.
 
@@ -86,7 +86,7 @@ The built-in `noesis` skill explains this system progressively when the task cal
 7. Make changes understandable and reversible. The user can see what changed, why it changed, where it applies, and how to undo it.
 8. Add only what strengthens the main promise. New models, tools, interfaces, and research methods should help the user and agent develop together.
 9. Let real use change the product. Evidence may revise the primary user, interaction patterns, learning reach, continuity choices, and defaults.
-10. Prefer recovery over ceremony. Ordinary Capability revisions activate immediately. The model can publish project scripts and workflows through `execute`, and `adapt` only changes the direct tool set. Because every revision is exact and reversible, a mistake costs little. Only credential export, recovery or audit control, and irreversible external actions without foreground user intent interrupt for approval.
+10. Prefer recovery over ceremony. Ordinary Capability revisions activate immediately. The model can publish project Programs through `execute`, while the provider-facing tool set remains fixed and every other operation is progressively disclosed through the same Broker. Because every revision is exact and reversible, a mistake costs little. Only credential export, recovery or audit control, and irreversible external actions without foreground user intent interrupt for approval.
 
 ## Non-goals
 

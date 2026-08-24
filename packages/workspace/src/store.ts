@@ -5,6 +5,7 @@ import { copyFile, link, mkdir, open, readdir, readFile, rename, rm, unlink } fr
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
+import { ScriptProgramManifestSchema, WorkflowProgramManifestSchema } from "@noesis/agent-types";
 import {
   createConditionalObject,
   type ArtifactImportRequest,
@@ -476,8 +477,7 @@ export async function createWorkspaceStore(
       "skills",
       "capabilities",
       "tools",
-      "scripts",
-      "workflows",
+      "programs",
       "evals",
       "candidates",
       "active",
@@ -1016,7 +1016,7 @@ export async function createWorkspaceStore(
     return removed;
   };
   const research = createResearchRepositories(database, recordActivity, now);
-  const operational = createOperationalRepositories(database, recordActivity);
+  const operational = createOperationalRepositories(database, recordActivity, readVerifiedFile);
   const jobs = createDurableJobStore(database, recordActivity, (reference) =>
     assertStoredReference(db, reference),
   );
@@ -1864,6 +1864,7 @@ function createOperationalRepositories(
     subjectId: string,
     references?: unknown,
   ) => void,
+  readRevisionBytes: (storedPath: string, expectedDigest?: string) => Promise<Uint8Array>,
 ): NoesisWorkspaceStore["operational"] {
   const db = database.connection;
   const systemActor: ActorRef = { actorId: "workspace-store", kind: "system" };
@@ -3186,7 +3187,56 @@ function createOperationalRepositories(
     });
     return databaseRef("tool_calls", record.toolCallId);
   };
+  const readProgramDefinition = async (program: {
+    readonly mode: "script" | "workflow";
+    readonly projectId: string;
+    readonly name: string;
+    readonly revision: number;
+    readonly definitionRevisionId: string;
+  }): Promise<JsonValue> => {
+    const definition = db
+      .prepare(`SELECT revision.snapshot_path, revision.content_digest
+           FROM definition_revision_metadata AS metadata
+           JOIN file_revisions AS revision
+             ON revision.revision_id = metadata.definition_revision_id
+           WHERE metadata.namespace = ?
+             AND metadata.definition_id = ?
+             AND metadata.revision = ?
+             AND metadata.definition_revision_id = ?`)
+      .get(
+        `program:${program.projectId}:${program.mode}`,
+        program.name,
+        program.revision,
+        program.definitionRevisionId,
+      );
+    if (definition === undefined)
+      throw new Error("Operational record must reference one exact Program revision");
+    return JsonValueSchema.parse(
+      JSON.parse(
+        new TextDecoder("utf8", { fatal: true }).decode(
+          await readRevisionBytes(
+            requiredString(definition, "snapshot_path"),
+            requiredString(definition, "content_digest"),
+          ),
+        ),
+      ),
+    );
+  };
   const putCodeExecution = async (record: CodeExecutionRecord): Promise<void> => {
+    if (record.program) {
+      if (record.projectId !== record.program.projectId)
+        throw new Error(`Codemode execution ${record.executionId} Program project does not match its owner`);
+      const manifest = ScriptProgramManifestSchema.parse(await readProgramDefinition(record.program));
+      if (
+        manifest.name !== record.program.name ||
+        manifest.revision !== record.program.revision ||
+        manifest.sourceRevision.contentDigest !== record.sourceDigest
+      )
+        throw new Error(
+          `Codemode execution ${record.executionId} does not match its exact Program definition`,
+        );
+      assertStoredReference(db, manifest.sourceRevision);
+    }
     database.transaction(() => {
       const currentRow = db
         .prepare("SELECT * FROM codemode_executions WHERE execution_id = ?")
@@ -3207,17 +3257,18 @@ function createOperationalRepositories(
       }
       if (record.parentExecutionId) {
         const parent = db
-          .prepare(`SELECT session_id, turn_id
+          .prepare(`SELECT session_id, turn_id, project_id
              FROM codemode_executions
              WHERE execution_id = ?`)
           .get(record.parentExecutionId);
         if (
           parent === undefined ||
           requiredString(parent, "session_id") !== record.sessionId ||
-          optionalString(parent, "turn_id") !== record.turnId
+          optionalString(parent, "turn_id") !== record.turnId ||
+          optionalString(parent, "project_id") !== record.projectId
         )
           throw new Error(
-            `Codemode execution ${record.executionId} parent does not share its session and turn`,
+            `Codemode execution ${record.executionId} parent does not share its project, session, and turn`,
           );
       }
       if (record.turnId) {
@@ -3261,11 +3312,13 @@ function createOperationalRepositories(
           throw new Error(`Terminal codemode execution ${record.executionId} is immutable`);
       }
       db.prepare(`INSERT INTO codemode_executions(
-          execution_id, logical_execution_id, parent_execution_id, session_id, turn_id,
+          execution_id, logical_execution_id, parent_execution_id, session_id, project_id, turn_id,
           catalog_id, catalog_digest,
-          source_digest, source_artifact_id, stdout_artifact_id, stderr_artifact_id,
+          source_digest,
+          program_project_id, program_mode, program_name, program_revision, program_definition_revision_id,
+          source_artifact_id, stdout_artifact_id, stderr_artifact_id,
           status, result_json, error, call_count, started_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(execution_id) DO UPDATE SET
           status = excluded.status, result_json = excluded.result_json, error = excluded.error,
           stdout_artifact_id = excluded.stdout_artifact_id,
@@ -3275,10 +3328,16 @@ function createOperationalRepositories(
         record.logicalExecutionId,
         record.parentExecutionId ?? null,
         record.sessionId,
+        record.projectId ?? null,
         record.turnId ?? null,
         record.catalogId,
         record.catalogDigest,
         record.sourceDigest,
+        record.program?.projectId ?? null,
+        record.program?.mode ?? null,
+        record.program?.name ?? null,
+        record.program?.revision ?? null,
+        record.program?.definitionRevisionId ?? null,
         record.sourceArtifactId ?? null,
         record.stdoutArtifactId ?? null,
         record.stderrArtifactId ?? null,
@@ -3411,6 +3470,19 @@ function createOperationalRepositories(
     });
   };
   const putWorkflowRun = async (record: WorkflowRunRecord): Promise<void> => {
+    if (db.prepare("SELECT 1 FROM workflow_runs WHERE run_id = ?").get(record.runId) === undefined) {
+      const manifest = WorkflowProgramManifestSchema.parse(
+        await readProgramDefinition({
+          mode: "workflow",
+          projectId: record.projectId,
+          name: record.workflowName,
+          revision: record.workflowRevision,
+          definitionRevisionId: record.definitionRevisionId,
+        }),
+      );
+      if (manifest.name !== record.workflowName || manifest.revision !== record.workflowRevision)
+        throw new Error(`Workflow run ${record.runId} does not match its exact Program definition`);
+    }
     database.transaction(() => {
       if (record.turnId) {
         const turn = db
@@ -3420,8 +3492,6 @@ function createOperationalRepositories(
           throw new Error(`Workflow run ${record.runId} turn does not belong to its session`);
       }
       const currentRow = db.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get(record.runId);
-      if (currentRow === undefined && !record.projectId)
-        throw new Error(`New workflow run ${record.runId} requires a project`);
       if (currentRow !== undefined) {
         const current = decodeWorkflowRun(currentRow);
         const transitions = {
@@ -3467,7 +3537,7 @@ function createOperationalRepositories(
           output_json = excluded.output_json, error = excluded.error,
           updated_at = excluded.updated_at, completed_at = excluded.completed_at`).run(
         record.runId,
-        record.projectId ?? null,
+        record.projectId,
         record.workflowName,
         record.workflowRevision,
         record.definitionRevisionId,
@@ -3498,6 +3568,10 @@ function createOperationalRepositories(
   };
   const putWorkflowPhase = async (record: WorkflowPhaseRunRecord): Promise<void> => {
     database.transaction(() => {
+      if (record.status !== "pending" && !record.logicalExecutionId)
+        throw new Error(
+          `Settled or running workflow phase ${record.runId}/${String(record.phaseIndex)} requires a logical execution`,
+        );
       if (record.status === "pending" && record.startedAt !== undefined)
         throw new Error(`Pending workflow phase ${record.runId}/${String(record.phaseIndex)} cannot start`);
       if (record.status === "completed" && record.startedAt === undefined)
@@ -3506,17 +3580,26 @@ function createOperationalRepositories(
         );
       if (record.executionId) {
         const lineage = db
-          .prepare(`SELECT run.session_id AS run_session_id, execution.session_id AS execution_session_id
+          .prepare(`SELECT run.session_id AS run_session_id,
+                           run.project_id AS run_project_id,
+                           execution.session_id AS execution_session_id,
+                           execution.project_id AS execution_project_id
              FROM workflow_runs AS run
              JOIN codemode_executions AS execution ON execution.execution_id = ?
              WHERE run.run_id = ?`)
           .get(record.executionId, record.runId);
+        const runProjectId = lineage === undefined ? undefined : optionalString(lineage, "run_project_id");
+        const executionProjectId =
+          lineage === undefined ? undefined : optionalString(lineage, "execution_project_id");
         if (
           lineage === undefined ||
-          requiredString(lineage, "run_session_id") !== requiredString(lineage, "execution_session_id")
+          requiredString(lineage, "run_session_id") !== requiredString(lineage, "execution_session_id") ||
+          runProjectId === undefined ||
+          executionProjectId === undefined ||
+          runProjectId !== executionProjectId
         )
           throw new Error(
-            `Workflow phase ${record.runId}/${String(record.phaseIndex)} execution does not belong to its run session`,
+            `Workflow phase ${record.runId}/${String(record.phaseIndex)} execution does not belong to its run project and session`,
           );
       }
       const currentRow = db
@@ -3945,25 +4028,9 @@ function createOperationalRepositories(
           const claimed = db
             .prepare(`UPDATE workflow_runs
                SET status = 'running', error = NULL, updated_at = ?, completed_at = NULL
-               WHERE run_id = ? AND session_id = ?
-                 AND (
-                   project_id = ?
-                   OR (
-                     project_id IS NULL
-                     AND EXISTS (
-                       SELECT 1
-                       FROM definition_revision_metadata AS metadata
-                       WHERE metadata.definition_id = workflow_runs.workflow_name
-                         AND metadata.definition_revision_id = workflow_runs.definition_revision_id
-                         AND (
-                           metadata.namespace = 'workflow:' || ?
-                           OR metadata.namespace = 'workflow'
-                         )
-                     )
-                   )
-                 )
+               WHERE run_id = ? AND session_id = ? AND project_id = ?
                  AND status = 'paused'`)
-            .run(claimedAt, runId, sessionId, projectId, projectId);
+            .run(claimedAt, runId, sessionId, projectId);
           if (Number(claimed.changes) !== 1) return undefined;
           const row = db.prepare("SELECT * FROM workflow_runs WHERE run_id = ?").get(runId);
           if (row === undefined) throw new Error(`Claimed workflow run ${runId} disappeared`);

@@ -394,7 +394,11 @@ async function capabilityMaterialEntries(
           const entry = await materialEntry(workspace, `skill · ${effect.name}`, effect.material);
           return entry ? detailEntry(entry.label, `${effect.description}\n${entry.value}`) : entry;
         }
-        return await materialEntry(workspace, `${effect.kind} · ${effect.name}`, effect.definitionRevision);
+        return await materialEntry(
+          workspace,
+          `program (${effect.program.mode}) · ${effect.program.name}`,
+          effect.program.definitionRevision,
+        );
       }),
     );
     return Object.freeze([

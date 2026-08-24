@@ -108,7 +108,7 @@ const authCallbacks: NoesisAuthLoginCallbacks = {
 const acceptModelSelection = (): void => undefined;
 
 describe("first-launch onboarding", () => {
-  test("authenticates Codex and atomically writes the complete schema-v1 config", async () => {
+  test("authenticates Codex and atomically writes the complete schema-v2 config", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-onboarding-codex-"));
     const prompts = createDefaultPrompts([true]);
     const auth = createFakeAuth({ provider: "openai-codex", configured: false, source: "none" });

@@ -30,6 +30,12 @@ describe("built-in Noesis skill", () => {
       content: expect.stringContaining("capabilities.refine"),
     });
     expect(noesis?.description).toBe(NOESIS_BUILT_IN_SKILL.description);
+    expect(noesis?.content).toContain("capabilities.inspect");
+    expect(noesis?.content).toContain("programs.save");
+    expect(noesis?.content).toContain("foreground surface is deliberately fixed");
+    expect(noesis?.content).not.toContain("noesis.hotbar");
+    expect(noesis?.content).not.toContain("inspect_self");
+    expect(noesis?.content).not.toContain("`remember`");
     const invocation = resolvePiSkillInvocation("/refine preserve this method", snapshot.skills);
     expect(invocation).toMatchObject({ name: "noesis" });
     expect(invocation?.prompt).toContain("preserve this method");

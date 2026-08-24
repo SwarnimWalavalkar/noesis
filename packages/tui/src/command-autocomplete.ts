@@ -83,22 +83,13 @@ export const NOESIS_SLASH_COMMANDS = [
     argumentHint: "<name>",
   },
   {
-    name: "scripts",
-    description: "List reusable scripts",
+    name: "programs",
+    description: "List saved Programs",
   },
   {
-    name: "script",
-    description: "Inspect one reusable script",
-    argumentHint: "<name>",
-  },
-  {
-    name: "workflows",
-    description: "List multi-phase workflows",
-  },
-  {
-    name: "workflow",
-    description: "Inspect one workflow",
-    argumentHint: "<name>",
+    name: "program",
+    description: "Inspect one Program",
+    argumentHint: "<script|workflow> <name>",
   },
   {
     name: "runs",

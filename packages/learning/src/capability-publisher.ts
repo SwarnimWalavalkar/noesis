@@ -16,6 +16,7 @@ import {
   createConditionalObject,
   createId,
   type EvidenceRef,
+  type FileRevisionRef,
   type ProjectRef,
 } from "@noesis/domain";
 import type { CapabilityLifecycleStore, NoesisWorkspaceStore } from "@noesis/workspace";
@@ -42,29 +43,35 @@ export const CapabilityEffectDraftSchema = z.discriminatedUnion("kind", [
     instructions: z.string().trim().min(1).max(32_000),
   }),
   z.strictObject({
-    kind: z.literal("script"),
-    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-  }),
-  z.strictObject({
-    kind: z.literal("workflow"),
+    kind: z.literal("program"),
+    mode: z.enum(["script", "workflow"]),
     name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
   }),
 ]);
 
 /** The complete behavior-bearing proposal authored by either reflection or the foreground agent. */
-export const CapabilityProposalSchema = z.strictObject({
-  name: z.string().trim().min(1).max(160),
-  description: z.string().trim().min(1).max(2_048),
-  applicability: z.string().trim().min(1).max(2_048),
-  summary: z.string().trim().min(1).max(2_048),
-  rationale: z.string().trim().min(1).max(4_096),
-  anticipatedEffect: z.string().trim().min(1).max(2_048),
-  effects: z.array(CapabilityEffectDraftSchema).min(1).max(8),
-  scope: CapabilityScopeDecisionSchema.optional(),
-  activationMode: z.enum(["relevant", "always"]).optional(),
-  consequence: CapabilityConsequenceSchema,
-  consequenceDescription: z.string().trim().min(1).max(2_048),
-});
+export const CapabilityProposalSchema = z
+  .strictObject({
+    name: z.string().trim().min(1).max(160),
+    description: z.string().trim().min(1).max(2_048),
+    applicability: z.string().trim().min(1).max(2_048),
+    summary: z.string().trim().min(1).max(2_048),
+    rationale: z.string().trim().min(1).max(4_096),
+    anticipatedEffect: z.string().trim().min(1).max(2_048),
+    effects: z.array(CapabilityEffectDraftSchema).min(1).max(8),
+    scope: CapabilityScopeDecisionSchema.optional(),
+    activationMode: z.enum(["relevant", "always"]).optional(),
+    consequence: CapabilityConsequenceSchema,
+    consequenceDescription: z.string().trim().min(1).max(2_048),
+  })
+  .superRefine((proposal, context) => {
+    if (proposal.effects.filter((effect) => effect.kind === "program").length <= 1) return;
+    context.addIssue({
+      code: "custom",
+      path: ["effects"],
+      message: "A Capability may attach at most one Program effect",
+    });
+  });
 
 export type CapabilityProposal = Readonly<z.infer<typeof CapabilityProposalSchema>>;
 
@@ -136,17 +143,18 @@ export type CapabilityPublicationResult = Readonly<z.infer<typeof CapabilityPubl
 export interface CapabilityProgramLibrary {
   readonly list: (project: ProjectRef) => Promise<
     readonly {
-      readonly kind: "script" | "workflow";
+      readonly mode: "script" | "workflow";
       readonly name: string;
       readonly description: string;
       readonly revision: number;
+      readonly definitionRevision: FileRevisionRef;
     }[]
   >;
   readonly resolve: (
-    kind: "script" | "workflow",
+    mode: "script" | "workflow",
     name: string,
     project: ProjectRef,
-  ) => Promise<Extract<CapabilityEffect, { readonly kind: "script" | "workflow" }> | undefined>;
+  ) => Promise<Extract<CapabilityEffect, { readonly kind: "program" }> | undefined>;
 }
 
 export interface CapabilityPublicationContext {
@@ -212,12 +220,10 @@ function proposedScope(
   context: Pick<CapabilityPublicationContext, "project" | "sessionId">,
   current?: CapabilityScope,
 ): CapabilityScope {
-  const hasProjectProgram = proposal.effects.some(
-    (effect) => effect.kind === "script" || effect.kind === "workflow",
-  );
+  const hasProjectProgram = proposal.effects.some((effect) => effect.kind === "program");
   if (hasProjectProgram) {
     if (proposal.scope !== undefined && proposal.scope !== "current_project")
-      throw new Error("Script and workflow Capability effects require current-project scope");
+      throw new Error("Program Capability effects require current-project scope");
     return Object.freeze({ kind: "project", project: Object.freeze({ ...context.project }) });
   }
   return proposal.scope === undefined
@@ -260,13 +266,7 @@ function hostRequiresActivationGate(revision: CapabilityLifecycleRevision): bool
     // The current effect union only mounts exact guidance or a reference to an already-published
     // project program. Activating either is reversible; any later protected execution still passes
     // through that program's frozen Broker and AuthorityBoundary.
-    if (
-      effect.kind === "instruction" ||
-      effect.kind === "skill" ||
-      effect.kind === "script" ||
-      effect.kind === "workflow"
-    )
-      continue;
+    if (effect.kind === "instruction" || effect.kind === "skill" || effect.kind === "program") continue;
     const unsupported: never = effect;
     return unsupported;
   }
@@ -409,17 +409,17 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
           if (!input.project)
             throw new Error(`Capability ${draft.kind} ${draft.name} has no project authority`);
           const resolved = await (input.programResolver ?? programs).resolve(
-            draft.kind,
+            draft.mode,
             draft.name,
             input.project,
           );
-          if (!resolved) throw new Error(`Unknown saved ${draft.kind} ${draft.name}`);
+          if (!resolved) throw new Error(`Unknown saved ${draft.mode} Program ${draft.name}`);
           return resolved;
         }),
       ),
     );
     const router = await compatibilityRouter(input.evidenceRefs, input.actor);
-    const executesPrograms = effects.some((effect) => effect.kind === "script" || effect.kind === "workflow");
+    const executesPrograms = effects.some((effect) => effect.kind === "program");
     const reference = options.registry.constructRevision(
       createConditionalObject({
         definitionState: "candidate",
@@ -445,11 +445,11 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
             effects: Object.freeze(executesPrograms ? ["execute"] : []),
             resourcePatterns: Object.freeze(
               effects.flatMap((effect) =>
-                effect.kind === "script"
-                  ? [`script:${effect.project.projectId}:${effect.name}:run`, "scripts:*"]
-                  : effect.kind === "workflow"
-                    ? [`workflow:${effect.project.projectId}:${effect.name}:run`, "workflows:*"]
-                    : [],
+                effect.kind === "program"
+                  ? [
+                      `program:${effect.program.project.projectId}:${effect.program.mode}:${effect.program.name}:run`,
+                    ]
+                  : [],
               ),
             ),
             credentialRefs: Object.freeze([]),

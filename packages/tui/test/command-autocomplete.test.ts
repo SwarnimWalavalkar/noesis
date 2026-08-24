@@ -54,10 +54,10 @@ describe("Noesis slash command autocomplete", () => {
   });
 
   test("fuzzy-filters commands and includes argument hints in descriptions", async () => {
-    const workflow = await suggestionsFor("/wf");
+    const program = await suggestionsFor("/pr");
     const model = await suggestionsFor("/mod");
 
-    expect(workflow?.items.map((item) => item.value)).toContain("workflows");
+    expect(program?.items.map((item) => item.value)).toContain("programs");
     expect(model?.items).toContainEqual(
       expect.objectContaining({
         value: "model",

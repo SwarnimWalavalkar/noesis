@@ -459,7 +459,7 @@ describe("Noesis transcript rendering", () => {
     expect(renderAgentActionBlock(running, [running], 100).join("\n")).toContain("pnpm build");
   });
 
-  test("summarizes direct noesis.search arrays and inspect_self tool envelopes semantically", () => {
+  test("summarizes direct noesis.search arrays semantically", () => {
     const search = summarizeAction(
       {
         actionId: "search-tools",
@@ -473,32 +473,7 @@ describe("Noesis transcript rendering", () => {
       },
       [],
     );
-    const inspect = summarizeAction(
-      {
-        actionId: "inspect-tools",
-        name: "inspect_self",
-        status: "completed",
-        input: { section: "tools" },
-        output: {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                tools: [
-                  { name: "files.read", description: "Read files" },
-                  { name: "files.search", description: "Search files" },
-                ],
-              }),
-            },
-          ],
-          details: { semantic: true },
-        },
-      },
-      [],
-    );
-
     expect(search).toMatchObject({ subject: '"files"', outcome: "2 tools" });
-    expect(inspect).toMatchObject({ subject: "tools", outcome: "2 tools" });
   });
 
   test("pluralizes Capability inspection counts", () => {
@@ -680,7 +655,7 @@ describe("Noesis transcript rendering", () => {
           kind: "action",
           actionId: "saved-script",
           parentActionId: "execute-parent",
-          name: "scripts.run",
+          name: "programs.run",
           status: "completed",
         },
         {

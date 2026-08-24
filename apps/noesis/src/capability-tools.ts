@@ -54,16 +54,17 @@ const CapabilityRevisionSummarySchema = z.strictObject({
   summary: z.string(),
   rationale: z.string(),
   anticipatedEffect: z.string(),
-  effectKinds: z.array(z.enum(["instruction", "skill", "script", "workflow"])),
+  effectKinds: z.array(z.enum(["instruction", "skill", "program"])),
   createdAt: z.string(),
 });
 
 const CapabilityEffectInspectionSchema = z.strictObject({
   effectIndex: z.number().int().nonnegative(),
-  kind: z.enum(["instruction", "skill", "script", "workflow"]),
+  kind: z.enum(["instruction", "skill", "program"]),
   name: z.string().nullable(),
   description: z.string().nullable(),
   project: ProjectRefSchema.nullable(),
+  mode: z.enum(["script", "workflow"]).nullable(),
   revision: FileRevisionRefSchema,
 });
 
@@ -203,9 +204,10 @@ const CapabilityInspectOutputSchema = z.discriminatedUnion("view", [
         capabilityId: z.string(),
         capabilityRevisionId: z.string(),
         effectIndex: z.number().int().nonnegative(),
-        kind: z.enum(["instruction", "skill", "script", "workflow"]),
+        kind: z.enum(["instruction", "skill", "program"]),
         name: z.string().nullable(),
         description: z.string().nullable(),
+        mode: z.enum(["script", "workflow"]).nullable(),
         revision: FileRevisionRefSchema,
         content: z.string(),
         start: z.number().int().nonnegative(),
@@ -242,11 +244,15 @@ function effectInspection(effect: CapabilityEffect, effectIndex: number) {
   return Object.freeze({
     effectIndex,
     kind: effect.kind,
-    name: effect.kind === "instruction" ? null : effect.name,
+    name:
+      effect.kind === "instruction" ? null : effect.kind === "program" ? effect.program.name : effect.name,
     description: effect.kind === "skill" ? effect.description : null,
-    project: effect.kind === "script" || effect.kind === "workflow" ? effect.project : null,
+    project: effect.kind === "program" ? effect.program.project : null,
+    mode: effect.kind === "program" ? effect.program.mode : null,
     revision:
-      effect.kind === "instruction" || effect.kind === "skill" ? effect.material : effect.definitionRevision,
+      effect.kind === "instruction" || effect.kind === "skill"
+        ? effect.material
+        : effect.program.definitionRevision,
   });
 }
 
@@ -317,7 +323,6 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
     label: "Inspect Capabilities",
     description:
       "Inspect current Capability definitions and bindings, then progressively load one lifecycle or exact effect material.",
-    visibility: "codemode_only",
     inputSchema: CapabilityInspectInputSchema,
     outputSchema: CapabilityInspectOutputSchema,
     effect: (input) => ({
@@ -443,7 +448,7 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
       const revision =
         effect.kind === "instruction" || effect.kind === "skill"
           ? effect.material
-          : effect.definitionRevision;
+          : effect.program.definitionRevision;
       const content = decoder.decode(await options.workspace.reads.readRevision(revision));
       const start = Math.min(input.start ?? 0, content.length);
       const end = Math.min(start + (input.maxCharacters ?? DEFAULT_MATERIAL_CHARACTERS), content.length);
@@ -454,8 +459,14 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
           capabilityRevisionId: input.capabilityRevisionId,
           effectIndex: input.effectIndex,
           kind: effect.kind,
-          name: effect.kind === "instruction" ? null : effect.name,
+          name:
+            effect.kind === "instruction"
+              ? null
+              : effect.kind === "program"
+                ? effect.program.name
+                : effect.name,
           description: effect.kind === "skill" ? effect.description : null,
+          mode: effect.kind === "program" ? effect.program.mode : null,
           revision,
           content: content.slice(start, end),
           start,
@@ -473,7 +484,6 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
     label: "Refine Capability",
     description:
       "Publish one complete foreground Capability decision exactly as authored. The host supplies authoritative turn evidence and performs immutable recording, stale-write checks, gating, and binding updates without another model call.",
-    visibility: "codemode_only",
     inputSchema: CapabilityDecisionSchema,
     outputSchema: CapabilityPublicationResultSchema,
     effect: (decision) => ({

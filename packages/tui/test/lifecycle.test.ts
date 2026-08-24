@@ -115,7 +115,7 @@ describe("Noesis TUI lifecycle", () => {
     let inspectorStarted = false;
     const runtime = Object.freeze({
       ...base,
-      inspectScript: async () => {
+      inspectProgram: async () => {
         inspectorStarted = true;
         await inspectorGate;
         return {
@@ -123,8 +123,10 @@ describe("Noesis TUI lifecycle", () => {
           description: "STALE_INSPECTOR_RESULT",
           revision: 1,
           requiredTools: Object.freeze([]),
-          sourceDigest: "a".repeat(64),
-          workingPath: "scripts/stale/index.mjs",
+          mode: "script" as const,
+          definitionDigest: "a".repeat(64),
+          phaseNames: Object.freeze([]),
+          workingPath: "programs/projects/project-test/script/stale/program.mjs",
           source: "return null;",
           inputSchema: "{}",
           outputSchema: "{}",
@@ -135,7 +137,7 @@ describe("Noesis TUI lifecycle", () => {
     const running = startNoesisTui(runtime, {}, terminal);
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
-    terminal.type("/script stale\r");
+    terminal.type("/program script stale\r");
     await vi.waitFor(() => expect(inspectorStarted).toBe(true));
     terminal.type("new prompt\r");
     await vi.waitFor(() => expect(terminal.output).toContain("reply:new prompt"));
@@ -166,7 +168,7 @@ describe("Noesis TUI lifecycle", () => {
     let inspectorStarted = false;
     const runtime = Object.freeze({
       ...base,
-      inspectScript: async () =>
+      inspectProgram: async () =>
         await new Promise<never>((_resolve, reject) => {
           inspectorStarted = true;
           rejectInspector = reject;
@@ -178,7 +180,7 @@ describe("Noesis TUI lifecycle", () => {
     const originalTrailId = runtime.listTrails()[0]?.trailId;
     if (!originalTrailId) throw new Error("Expected the initial trail");
 
-    terminal.type("/script stale\r");
+    terminal.type("/program script stale\r");
     await vi.waitFor(() => expect(inspectorStarted).toBe(true));
     terminal.type("/fork\r");
     await vi.waitFor(() => {

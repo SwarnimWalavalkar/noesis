@@ -216,7 +216,7 @@ describe("learning audit view helpers", () => {
       kind: "capability",
       group: "capabilities",
       title: "Research and synthesize",
-      capabilityFacets: Object.freeze(["skill", "workflow"]),
+      capabilityFacets: Object.freeze(["skill", "program"]),
     });
     const document = detailDocument(
       capability,
@@ -230,7 +230,7 @@ describe("learning audit view helpers", () => {
       false,
     ).join("\n");
 
-    expect(document).toContain("Skill + Workflow capability");
+    expect(document).toContain("Skill + Program capability");
     expect(document).not.toContain("composite");
   });
 

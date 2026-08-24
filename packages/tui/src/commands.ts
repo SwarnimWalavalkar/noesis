@@ -24,11 +24,11 @@ export interface SlashCommandContext {
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const HELP_LINES = [
   "/model provider/model · /context · /capabilities",
-  "/skills · /scripts · /workflows · /runs · /learning",
+  "/skills · /programs · /runs · /learning",
   "/refine [REQUEST] deliberately improves a lasting Noesis behavior",
   "/mcp manages servers, authentication, and discovered capabilities",
   "/skill NAME inspects · /skill:NAME [instructions] invokes command-name collisions",
-  "/script NAME · /workflow NAME · /run ID",
+  "/program MODE NAME · /run ID",
   "/fork · /compact [FOCUS] · /steer [MESSAGE] · /queue resume",
   "enter queues behind active turns and commands · alt+↑ edits newest queued · esc interrupts",
   "shift+enter newline · ctrl+g external editor",
@@ -207,98 +207,67 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (command === "/scripts") {
-    if (!runtime.listScripts) {
-      publishInspector("Script inspection is unavailable in this runtime.");
+  if (command === "/programs") {
+    if (!runtime.listPrograms) {
+      publishInspector("Program inspection is unavailable in this runtime.");
       return true;
     }
-    const scripts = await runtime.listScripts();
+    const programs = await runtime.listPrograms();
     publishInspector(
-      scripts.length === 0
-        ? "No reusable scripts have been saved yet."
+      programs.length === 0
+        ? "No Programs have been saved yet."
         : [
-            `Scripts · ${String(scripts.length)}`,
-            ...scripts.map(
-              (script) =>
-                `• ${script.name} · r${String(script.revision)}\n  ${script.description}\n  ${script.requiredTools.join(", ") || "pure JavaScript"}\n  ${script.workingPath}`,
+            `Programs · ${String(programs.length)}`,
+            ...programs.map(
+              (program) =>
+                `• ${program.name} · ${program.mode} · r${String(program.revision)}${program.mode === "workflow" ? ` · ${String(program.phaseNames.length)} phases` : ""}\n  ${program.description}\n  ${program.mode === "workflow" ? program.phaseNames.join(" → ") : program.requiredTools.join(", ") || "pure JavaScript"}\n  ${program.workingPath}${program.sourceWorkingPath ? `\n  source ${program.sourceWorkingPath}` : ""}`,
             ),
             "",
-            "Ask Noesis to run one by name, or say “save that as a script” after useful work.",
+            "Ask Noesis to run one by name, or to save useful work as a Program.",
           ].join("\n"),
     );
     return true;
   }
 
-  if (command.startsWith("/script ")) {
-    const name = command.slice("/script ".length).trim();
-    if (!runtime.inspectScript) {
-      publishInspector("Script detail inspection is unavailable in this runtime.");
+  if (command.startsWith("/program ")) {
+    const [mode, ...nameParts] = command.slice("/program ".length).trim().split(/\s+/u);
+    const name = nameParts.join(" ");
+    if ((mode !== "script" && mode !== "workflow") || name.length === 0) {
+      publishInspector("Usage: /program <script|workflow> <name>");
       return true;
     }
-    const script = await runtime.inspectScript(name);
+    if (!runtime.inspectProgram) {
+      publishInspector("Program detail inspection is unavailable in this runtime.");
+      return true;
+    }
+    const program = await runtime.inspectProgram(mode, name);
     publishInspector(
-      script
+      program
         ? [
-            `${script.name} · r${String(script.revision)}`,
-            script.description,
-            script.workingPath,
-            `requires: ${script.requiredTools.join(", ") || "pure JavaScript"}`,
+            `${program.name} · ${program.mode} · r${String(program.revision)}`,
+            program.description,
+            program.workingPath,
+            `definition ${program.definitionDigest}`,
+            ...(program.sourceWorkingPath ? [`source ${program.sourceWorkingPath}`] : []),
+            ...(program.sourceDigest ? [`source digest ${program.sourceDigest}`] : []),
+            ...(program.mode === "script"
+              ? [`requires: ${program.requiredTools.join(", ") || "pure JavaScript"}`]
+              : []),
             "",
-            `Input schema\n${script.inputSchema}`,
+            `Input schema\n${program.inputSchema}`,
             "",
-            `Output schema\n${script.outputSchema}`,
+            `Output schema\n${program.outputSchema}`,
             "",
-            `Source\n${script.source}`,
+            ...(program.mode === "script" && program.source
+              ? [`Source\n${program.source}`]
+              : (program.phases ?? []).flatMap((phase, index) => [
+                  `${String(index + 1)}. ${phase.name} · ${phase.description}`,
+                  `   requires: ${phase.requiredTools.join(", ") || "pure JavaScript"}`,
+                  phase.source,
+                  "",
+                ])),
           ].join("\n")
-        : `Unknown script: ${name}`,
-    );
-    return true;
-  }
-
-  if (command === "/workflows") {
-    if (!runtime.listWorkflows) {
-      publishInspector("Workflow inspection is unavailable in this runtime.");
-      return true;
-    }
-    const workflows = await runtime.listWorkflows();
-    publishInspector(
-      workflows.length === 0
-        ? "No multi-phase workflows have been saved yet."
-        : [
-            `Workflows · ${String(workflows.length)}`,
-            ...workflows.map(
-              (workflow) =>
-                `• ${workflow.name} · r${String(workflow.revision)} · ${String(workflow.phaseNames.length)} phases\n  ${workflow.description}\n  ${workflow.phaseNames.join(" → ")}\n  ${workflow.workingPath}`,
-            ),
-            "",
-            "Ask Noesis to run or resume a workflow by name.",
-          ].join("\n"),
-    );
-    return true;
-  }
-
-  if (command.startsWith("/workflow ")) {
-    const name = command.slice("/workflow ".length).trim();
-    if (!runtime.inspectWorkflow) {
-      publishInspector("Workflow detail inspection is unavailable in this runtime.");
-      return true;
-    }
-    const workflow = await runtime.inspectWorkflow(name);
-    publishInspector(
-      workflow
-        ? [
-            `${workflow.name} · r${String(workflow.revision)}`,
-            workflow.description,
-            workflow.workingPath,
-            "",
-            ...workflow.phases.flatMap((workflowPhase, index) => [
-              `${String(index + 1)}. ${workflowPhase.name} · ${workflowPhase.description}`,
-              `   requires: ${workflowPhase.requiredTools.join(", ") || "pure JavaScript"}`,
-              workflowPhase.source,
-              "",
-            ]),
-          ].join("\n")
-        : `Unknown workflow: ${name}`,
+        : `Unknown ${mode} Program: ${name}`,
     );
     return true;
   }

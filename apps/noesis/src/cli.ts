@@ -338,13 +338,12 @@ async function createRuntime(
         .addOptional(mcp ? { mcp } : undefined)
         .add({
           recoverInterruptedOperations: options.recoverInterruptedOperations,
-          createAgent: (_sessionTools, codeExecution, selfTools, skillLibrary) =>
+          createAgent: (_sessionTools, codeExecution, skillLibrary) =>
             createPiAgentRuntime(
               project.root,
               services.models,
               createConditionalObject({
                 codeExecution,
-                selfTools,
                 requirePinnedSkillSnapshot: true,
               } as const)
                 .addOptional(skillLibrary ? { skills: skillLibrary } : undefined)

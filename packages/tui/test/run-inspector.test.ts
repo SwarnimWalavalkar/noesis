@@ -154,6 +154,29 @@ describe("run inspector panel", () => {
     expect(order.every((position) => position >= 0)).toBe(true);
     expect(order).toEqual([...order].sort((left, right) => left - right));
   });
+  test("shows exact Program provenance for script-mode executions", () => {
+    const body = render(
+      stateWithRun({
+        detail: {
+          ...DETAIL,
+          label: "evidence-scout · script r3",
+          program: {
+            mode: "script",
+            projectId: "project-review",
+            name: "evidence-scout",
+            revision: 3,
+            definitionRevisionId: "definition-review-r3",
+          },
+        },
+      }),
+      100,
+      60,
+    ).join("\n");
+
+    expect(body).toContain("evidence-scout · script r3");
+    expect(body).toContain("definition-review-r3");
+    expect(body).toContain("project-review");
+  });
   test("unwraps Pi text envelopes while keeping the exact response one keypress away", () => {
     const envelope = {
       content: [
@@ -164,7 +187,7 @@ describe("run inspector panel", () => {
       ],
       details: { semantic: true },
     };
-    const semantic = stateWithAction("inspect_self", { section: "system-prompt" }, envelope);
+    const semantic = stateWithAction("capabilities.inspect", { view: "detail" }, envelope);
     const semanticBody = render(semantic, 88, 60).join("\n");
     expect(semanticBody).toContain("first semantic line");
     expect(semanticBody).toContain("second semantic line");
@@ -216,7 +239,7 @@ describe("run inspector panel", () => {
       content: [{ type: "text", text: JSON.stringify(catalog) }],
       details: { semantic: true },
     };
-    const semantic = stateWithAction("inspect_self", { section: "tools" }, envelope);
+    const semantic = stateWithAction("capabilities.inspect", { view: "list" }, envelope);
     const semanticFrame = renderRunInspectorFrame(semantic, 100, 100);
     const semanticBody = semanticFrame.rows.join("\n");
     expect(semanticBody).toContain("18 tools");
@@ -272,7 +295,7 @@ describe("run inspector panel", () => {
       entry.kind === "action" && entry.actionId === "x1:1"
         ? {
             ...entry,
-            name: "workflows.run",
+            name: "programs.run",
             input: { name: hostileSubject },
             output: { status: hostileOutcome },
           }

@@ -10,7 +10,7 @@ import type {
 function effectIdentity(effect: CapabilityEffect): string {
   if (effect.kind === "instruction") return `instruction:${effect.material.revisionId}`;
   if (effect.kind === "skill") return `skill:${effect.name}`;
-  return `${effect.kind}:${effect.project.projectId}:${effect.name}`;
+  return `program:${effect.program.project.projectId}:${effect.program.mode}:${effect.program.name}`;
 }
 
 /** Current effects only. Legacy bundle arrays remain available to their historical consumers. */
@@ -25,7 +25,9 @@ export function capabilityEffectKinds(revision: CapabilityRevision): readonly Ca
 export function capabilityEffectReferences(revision: CapabilityRevision): readonly FileRevisionRef[] {
   return Object.freeze(
     capabilityEffects(revision).map((effect) =>
-      effect.kind === "instruction" || effect.kind === "skill" ? effect.material : effect.definitionRevision,
+      effect.kind === "instruction" || effect.kind === "skill"
+        ? effect.material
+        : effect.program.definitionRevision,
     ),
   );
 }
@@ -38,6 +40,8 @@ export function validateCapabilityEffects(effects: readonly CapabilityEffect[]):
     if (identities.has(identity)) throw new Error(`Capability revision repeats effect ${identity}`);
     identities.add(identity);
   }
+  if (effects.filter((effect) => effect.kind === "program").length > 1)
+    throw new Error("A Capability revision may attach at most one Program effect");
   return Object.freeze([...effects]);
 }
 
@@ -51,15 +55,16 @@ export function assertCapabilityEffectsEligible(input: {
   readonly project: ProjectRef;
 }): void {
   for (const effect of input.effects) {
-    if (effect.kind !== "script" && effect.kind !== "workflow") continue;
-    if (effect.project.projectId !== input.project.projectId || effect.project.root !== input.project.root)
-      throw new Error(`Capability ${effect.kind} ${effect.name} belongs to another project`);
+    if (effect.kind !== "program") continue;
+    const { program } = effect;
+    if (program.project.projectId !== input.project.projectId || program.project.root !== input.project.root)
+      throw new Error(`Capability Program ${program.name} belongs to another project`);
     if (input.scope.kind !== "project")
-      throw new Error(`Capability ${effect.kind} ${effect.name} requires a project-scoped binding`);
+      throw new Error(`Capability Program ${program.name} requires a project-scoped binding`);
     if (
-      input.scope.project.projectId !== effect.project.projectId ||
-      input.scope.project.root !== effect.project.root
+      input.scope.project.projectId !== program.project.projectId ||
+      input.scope.project.root !== program.project.root
     )
-      throw new Error(`Capability ${effect.kind} ${effect.name} does not match its binding project`);
+      throw new Error(`Capability Program ${program.name} does not match its binding project`);
   }
 }

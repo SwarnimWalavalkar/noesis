@@ -17,11 +17,11 @@ Never claim an action or system state without runtime evidence.
 
 Active Capabilities and skills may add relevant instructions. The stable core stays short.
 
-Active Capability revisions contribute exact effects frozen at turn start. An effect may add an instruction, expose a progressively loaded skill, or attach an exact saved project script or workflow.
+Active Capability revisions contribute exact effects frozen at turn start. An effect may add an instruction, expose a progressively loaded skill, or attach an exact saved project Program revision in script or workflow mode.
 
 The built-in `noesis` skill holds the operational guidance for inspecting and deliberately refining these systems. Its compact name and description appear with other skill metadata; its body loads only when relevant or when the user invokes `/noesis` or its `/refine` alias. The stable core prompt does not duplicate the publication contract.
 
-A Script or Workflow effect pins the same immutable definition revision used by the ordinary runner. Capability storage never copies the program into a second format. The model creates and revises project programs through the foreground `execute` path. Ambient reflection may attach an existing saved program to a Capability.
+A Program effect pins the same immutable definition revision used by the ordinary runner and records its script or workflow mode. Capability storage never copies the Program into a second format. The model creates and revises project Programs through the foreground `execute` path. Ambient reflection may attach an existing saved Program to a Capability.
 
 The semantic router selects global `relevant` Capabilities for matching requests. An `always` Capability enters every eligible turn.
 
@@ -88,7 +88,7 @@ A Capability states when an ability should help, why the evidence supports it, w
 
 New Capabilities are globally eligible and relevant by default. Semantic routing decides when they apply. The user may narrow the scope or make one always active.
 
-The `remember` tool records a direct lasting instruction from the user. Ambient reflection can consolidate experience into versioned Capabilities.
+Direct deliberate learning and ambient reflection both publish versioned Capabilities through the same protected publisher. A lasting user fact, preference, or criterion that should alter future behavior is represented as a Capability with an exact Instruction or Skill effect, not as a second model-facing memory primitive. Historical user criteria remain readable evaluation and audit data.
 
 Inside `execute`, `capabilities.inspect` progressively exposes the Capability list, one complete lifecycle, or one exact effect material. `capabilities.refine` accepts the complete decision schema and returns the authoritative publication result. These schemas come from the frozen Tool Catalog and remain discoverable through `noesis.describe`; they are not handwritten into the system prompt or skill body. Completed normal-sensitivity calls earlier in the same foreground execution, plus the current user message, form the bounded publication evidence set.
 
@@ -109,26 +109,20 @@ The Capability record does not copy a list of turns that used it. Every `FrozenT
 
 ## Direct tools
 
-Every admitted turn gives the model four small tools:
-
-- `inspect_self`
-- `remember`
-- `adapt`, which changes the direct tool set
-- `execute`, which invokes and combines tools from the frozen catalog.
-
-The default direct tool set also contains:
+Every admitted turn gives the model a fixed direct surface:
 
 - `file_read`, backed by `files.read`
-- `list_dir`, backed by `files.list`
-- `shell`, backed by `shell.run`.
+- `file_write`, backed by `files.write`
+- `shell`, backed by `shell.run`
+- `execute`, which composes canonical Broker tools through codemode.
 
-`files.read` may read an explicitly named file anywhere the Noesis process can read. This does not widen file writes, directory traversal, or search. Those remain bound to their declared project resources. Compact skill metadata names the skill without presenting its storage path as a project file. The model loads the frozen body through `execute` and `tools.skills.load({ name })`. Ordinary instruction files are still readable when explicitly named.
+`files.read` may read an explicitly named file anywhere the Noesis process can read. This does not widen file writes, directory traversal, or search. Those remain bound to their declared project resources. `files.write` creates or completely replaces one UTF-8 file and creates parent directories by default; exact partial edits remain available through `files.replace` or a careful shell command. Compact skill metadata names a skill without presenting its storage path as a project file. The model loads the frozen body through `execute` and `tools.skills.load({ name })`. Ordinary instruction files are still readable when explicitly named.
 
 The Broker does not impose a generic byte ceiling on a valid tool result. Each tool definition or MCP server owns the shape and context sensitivity of its result. Complete successful results remain authoritative and inspectable. The turn context allocator may project older results only when constructing a later model request.
 
 Normal cross-session search is available through `execute` without requesting private history. It searches only the sessions owned by the current Noesis installation. Private retrieval is limited to one exact authorized session. Search snippets and exact evidence opening share one small, hard retrieval allowance. Part of that allowance is reserved for opening a citation, so a successful search can never make its own evidence impossible to inspect.
 
-The atomic hotbar keeps common file and shell tasks to one call. The model uses `execute` for session search, workflow execution, broader discovery, combined calls, loops, and reusable programs. Session search already combines lexical and semantic retrieval with reranking, so one precise query normally suffices. Retrieval programs select and open their strongest citation before returning, and report an empty or irrelevant result only as a bounded search that found no relevant evidence instead of cycling through paraphrases. Its description names the common codemode APIs and includes a small fixed list of saved project workflow names and descriptions. Full input and output shapes remain available through `workflows.describe`. A user may deliberately pin another catalog tool with `adapt`; the default stays atomic.
+The fixed surface keeps common file and shell tasks to one call and preserves a stable provider prompt. The model uses `execute` for session search, Program execution, broader discovery, combined calls, loops, and every other catalog operation. Session search already combines lexical and semantic retrieval with reranking, so one precise query normally suffices. Retrieval programs select and open their strongest citation before returning, and report an empty or irrelevant result only as a bounded search that found no relevant evidence instead of cycling through paraphrases. Program names and full schemas are discovered progressively through `programs.list`, `programs.describe`, `noesis.search`, and `noesis.describe`; creating a Program never mutates the direct provider tool list.
 
 The `execute` starter surface stays deliberately small. Because correct truncation recovery depends on the exact `shell.run` result, its compact result type is generated from the frozen output schema and included under a hard byte bound. Other tool contracts remain progressively available through `noesis.describe`; the prompt never carries the full Tool Catalog or a handwritten copy of a tool schema.
 
@@ -136,20 +130,13 @@ Codemode checks explicit completeness fields before semantic synthesis. Oversize
 
 Inside `execute`, `agents.run({ systemPrompt?, prompt, tools?, thinkingLevel? })` delegates to the canonical `agents.run` Broker tool. The prompt may be text, a lazy `ContextView`, or an array of either. The host expands context views only after checking that they belong to the active execution's frozen document. With no selected tools, the same interface is an isolated model query.
 
-The foreground parent may choose the child system prompt, prompt, thinking level, and canonical tools from the turn's frozen Tool Catalog. It cannot choose provider or model. The default subagent route is user-configurable and frozen at foreground turn admission; the implementation keeps the route seam explicit so a future policy may safely admit per-run route choices. Saved programs remain selectable, but an actual descendant `agents.run` is rejected, including indirect re-entry through Script, Workflow, or Capability program runners.
+The foreground parent may choose the child system prompt, prompt, thinking level, and canonical tools from the turn's frozen Tool Catalog. It cannot choose provider or model. The default subagent route is user-configurable and frozen at foreground turn admission; the implementation keeps the route seam explicit so a future policy may safely admit per-run route choices. Saved Programs remain selectable, but an actual descendant `agents.run` is rejected, including indirect re-entry through either Program mode or a Capability-backed Program tool.
 
 Every subagent is cancellable with its parent and bounded by request, provider-call, and tool-call limits. Selected tools still execute through the canonical Broker and authority boundary. SQLite records the outer `agents.run` call as the durable run, nests child calls beneath it, and records the route, status, prompt artifact, usage, cost, and latency. The TUI projects running agents into a bounded surface fixed above the composer. Settled agents leave the ordinary footer; in `Ctrl+O`, the surface derives them from the `execute` run containing the selected action. The main transcript retains one compact, expandable `subagent` row but suppresses its child tool-call rows; the inspector exposes the complete nested activity. This ergonomic surface never creates another model or tool execution path.
 
-`adapt` supports two immediate actions:
+New project Programs are created through `execute` with `programs.save`. The selected `mode` is `script` for one bounded computation or `workflow` for a durable phased procedure. Saving returns an immutable definition revision; `programs.run` requires that exact revision, so same-turn verification cannot silently drift. Programs do not enter a proposal queue. Reflection may later use their results as evidence for a broader change.
 
-- `add_tool` adds a tool from the frozen catalog. For example, it can expose `files.write` as `file_write`.
-- `remove_tool` removes a direct tool.
-
-The change is available on the next model step in the same turn. Noesis saves it to `~/.noesis/config.json` for later turns. This changes only which catalog tools are direct. It does not add new tools, permissions, or protected authority.
-
-New project programs are created through `execute` with `scripts.save` or `workflows.save`. They do not enter a proposal queue. Reflection may later use their results as evidence for a broader change.
-
-The foreground agent may also attach a newly saved and verified program to a Capability in the same coherent execution. The Capability publisher resolves the ordinary immutable project definition; it does not accept model-authored revision IDs or executable bytes for a Script or Workflow effect.
+The foreground agent may also attach a newly saved and verified Program to a Capability in the same coherent execution. The Capability publisher resolves the ordinary immutable project definition; it does not accept model-authored revision IDs or executable bytes for a Program effect.
 
 ## MCP servers
 
@@ -159,21 +146,21 @@ Global server definitions live in `~/.noesis/mcp.json`. Project definitions live
 
 The `/mcp` screen manages both files. The user can add a server, authenticate, enable or disable it, reconnect, edit its settings, or remove it. The screen also shows connection errors and the server's tools, prompts, resources, resource templates, and instructions.
 
-MCP tools enter the same frozen Tool Catalog and Broker as built-in tools. Their names use the form `mcp.<server>.<tool>`. The model can discover and call them through `execute`. It can add a frequently used MCP tool to its direct tool set with `adapt`. Project scripts and workflows can call the same catalog entry. None of these paths creates a second permission or execution system.
+MCP tools enter the same frozen Tool Catalog and Broker as built-in tools. Their names use the form `mcp.<server>.<tool>`. The model can discover and call them through `execute`, and Programs can call the same catalog entry. None of these paths creates a second permission or execution system.
 
 The MCP host supports prompts, resources, resource templates, completion, resource subscriptions, logging, progress, and task operations. It gives servers the active project as their root. It also handles server requests for model sampling and user input. Sampling is accepted only while bound to an admitted MCP invocation and uses that turn's frozen model route and protected effect budget. Form and browser requests appear inside the TUI, and a browser URL opens only after the user accepts it. Shutdown cancels any request that is still waiting.
 
 ## Project programs
 
-When the current turn produces a reusable program, Noesis may save and publish a project script or workflow without waiting for reflection or evaluation. The program is available at once through its generic runner. It uses the same frozen Tool Catalog, Broker, and permissions as other tool calls.
+When the current turn produces reusable executable mechanics, Noesis may save a project Program without waiting for reflection or evaluation. Script mode runs bounded JavaScript; workflow mode owns durable phases and resume behavior. The Program is available at once through `programs.run`, which uses the same frozen Tool Catalog, Broker, and permissions as other tool calls.
 
-On the next turn, each saved workflow also receives a typed, project-specific catalog entry. The workflow list names this exact entry. Adding it with `adapt` creates a friendly `workflow_<name>` direct tool. The direct tool remains a small interface over the same workflow runner and immutable revision. A tool added in one project cannot point to a workflow with the same name in another project.
+Saving a Program does not itself create a new semantic tool. A Capability supplies the missing meaning: name, description, applicability, scope, activation, evidence, feedback, and restoration. When selected on a later turn, that Capability contributes a typed adapter for its exact Program revision. Tool discovery marks the implementation as a Program and identifies the Capability exposure, so the model knows it may inspect, repair, or extend the editable Program rather than treating it as an opaque built-in.
 
 The editable definition remains an ordinary file. Each execution records the exact immutable revision it used. The user can inspect, edit, or replace the definition while Noesis keeps the earlier revisions.
 
 Reflection observes workflow results and user feedback. It may consolidate them into a Capability. Exact turn plans, AuthorityBoundary, EffectGateway, and the Broker still prevent generated content from fabricating execution receipts or silently bypassing operational controls.
 
-When a Capability includes a Script or Workflow effect, it references the exact immutable saved definition revision. The Capability owns applicability, activation, feedback, and restoration. The project program continues to own its editable definition, immutable revision history, execution records, workflow phases, and resume behavior. Selecting the Capability adds a frozen adapter for that exact program to the same Tool Catalog and Broker used by `execute`. There is no parallel workflow implementation.
+When a Capability includes a Program effect, it references the exact immutable saved definition revision and its execution mode. The Capability owns applicability, activation, feedback, and restoration. The Program owns its editable definition, immutable revision history, execution records, and mode-specific mechanics. Selecting the Capability adds a frozen adapter for that exact Program revision to the same Tool Catalog and Broker used by `execute`. There is no parallel executable implementation.
 
 ## Current standard
 
@@ -181,6 +168,6 @@ When a Capability includes a Script or Workflow effect, it references the exact 
 2. Preserve truthful conversation roles.
 3. Use a model for decisions that depend on meaning.
 4. Keep atomic file and shell tools one call away; compose broader work through codemode.
-5. Let the model shape its direct tool set without gaining authority.
+5. Keep the provider-facing tool surface fixed; discover everything else progressively.
 6. Keep self-improvement guidance and exact mutation schemas progressively disclosed.
 7. Let foreground collaboration and ambient reflection author through the same protected Capability publisher.

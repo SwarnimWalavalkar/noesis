@@ -305,6 +305,16 @@ function provenanceSection(
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const entries: (readonly [string, string])[] = [
     ["execution", safeInspectorScalar(detail.executionId)],
+    ...(detail.program
+      ? ([
+          [
+            "program",
+            `${safeInspectorScalar(detail.program.name)} · ${detail.program.mode} r${String(detail.program.revision)}`,
+          ],
+          ["definition", safeInspectorScalar(detail.program.definitionRevisionId)],
+          ["project", safeInspectorScalar(detail.program.projectId)],
+        ] as const)
+      : []),
     ...(detail.parentExecutionId
       ? ([["parent", safeInspectorScalar(detail.parentExecutionId)]] as const)
       : []),

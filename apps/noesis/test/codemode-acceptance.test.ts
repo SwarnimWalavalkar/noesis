@@ -1,15 +1,16 @@
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { resolveNoesisConfig } from "@noesis/config";
 import {
   createAmbiguousSubAgentOutcomeError,
   createPiAgentRuntime,
   createPiSubAgentRunner,
   type PiSubAgentRunRequest,
-  projectWorkflowToolName,
 } from "@noesis/runtime-pi";
 import { afterEach, describe, expect, test } from "vitest";
+import { z } from "zod";
 import {
   CONTROLLED_PI_MODEL,
   CONTROLLED_PI_PROVIDER,
@@ -17,7 +18,7 @@ import {
   createControlledPiModels,
 } from "../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 import { createScriptedAgentRoleRunner } from "../../../packages/runtime-pi/test/support/scripted-role-runner.ts";
-import { createApplicationRuntimeComposition } from "../src/runtime-composition.ts";
+import { createApplicationRuntimeComposition, resolveActiveProject } from "../src/runtime-composition.ts";
 
 const roots: string[] = [];
 
@@ -113,8 +114,8 @@ describe("production codemode journey", () => {
           return await createPiSubAgentRunner(process.cwd(), controlled.models).run(request);
         },
       }),
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -210,32 +211,37 @@ describe("production codemode journey", () => {
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
     const controlled = createControlledPiModels({
-      respond: ({ context, systemPrompt }) => {
+      respond: ({ context, lastUserText, systemPrompt }) => {
         if (systemPrompt.includes("bounded subagent"))
           return context.messages.at(-1)?.role === "toolResult"
-            ? "The package metadata was read by the subagent."
+            ? lastUserText.includes("malformed")
+              ? "The malformed read was rejected by the subagent."
+              : "The package metadata was read by the subagent."
             : controlledToolCallResponse(
                 "file_read",
-                { path: "package.json", startLine: 1, endLine: 4 },
-                "call-subagent-read",
+                lastUserText.includes("malformed") ? {} : { path: "package.json", startLine: 1, endLine: 4 },
+                lastUserText.includes("malformed") ? "call-subagent-invalid-read" : "call-subagent-read",
               );
         return context.messages.at(-1)?.role === "toolResult"
-          ? "The foreground received the subagent result."
+          ? lastUserText.includes("malformed")
+            ? "The foreground received the rejected subagent result."
+            : "The foreground received the subagent result."
           : controlledToolCallResponse(
               "execute",
               {
-                source:
-                  'return await agents.run({ systemPrompt: "Inspect one file.", prompt: "Read the package metadata.", tools: ["files.read"], thinkingLevel: "low" });',
+                source: lastUserText.includes("malformed")
+                  ? 'return await agents.run({ systemPrompt: "Test invalid input.", prompt: "Attempt one malformed file read.", tools: ["files.read"], thinkingLevel: "low" });'
+                  : 'return await agents.run({ systemPrompt: "Inspect one file.", prompt: "Read the package metadata.", tools: ["files.read"], thinkingLevel: "low" });',
               },
-              "call-run-subagent",
+              lastUserText.includes("malformed") ? "call-run-invalid-subagent" : "call-run-subagent",
             );
       },
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
       subAgent: createPiSubAgentRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -280,7 +286,42 @@ describe("production codemode journey", () => {
       callCount: 1,
       status: "completed",
     });
+    await expect(
+      runtime.debug.runTurn(trail.trailId, "Delegate one malformed file read."),
+    ).resolves.toMatchObject({ output: "The foreground received the rejected subagent result." });
+    const callsAfterMalformed = await runtime.debug.workspace.operational.toolCalls.listForSession(
+      trail.trailId,
+    );
+    const failedRead = callsAfterMalformed.find(
+      (call) => call.toolName === "files.read" && call.status === "failed",
+    );
+    expect(failedRead).toMatchObject({ parentToolCallId: expect.any(String), request: {} });
+    expect(
+      callsAfterMalformed.find((call) => call.toolCallId === failedRead?.parentToolCallId),
+    ).toMatchObject({ toolName: "agents.run", status: "completed" });
     await runtime.shutdown();
+
+    const otherRoot = await mkdtemp(join(tmpdir(), "noesis-other-subagent-project-"));
+    roots.push(otherRoot);
+    const otherProject = await resolveActiveProject(otherRoot);
+    const otherRuntime = await createApplicationRuntimeComposition({
+      config,
+      project: otherProject,
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(otherProject.root, controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    if (!subAgentAction) throw new Error("Expected a persisted subagent action");
+    await expect(
+      otherRuntime.inspectExecution?.(trail.trailId, subAgentAction.actionId),
+    ).resolves.toBeUndefined();
+    await otherRuntime.shutdown();
   });
 
   test("subagents may run safe saved programs but actual descendant delegation fails closed", async () => {
@@ -296,18 +337,43 @@ describe("production codemode journey", () => {
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
     const nestedRequests: PiSubAgentRunRequest[] = [];
+    const subagentStages = new Map<string, "described" | "ran">();
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText, systemPrompt }) => {
         if (systemPrompt.includes("bounded subagent")) {
-          if (context.messages.at(-1)?.role === "toolResult") return "Saved program attempt settled.";
-          return controlledToolCallResponse(
-            "scripts_run",
-            {
-              name: lastUserText.includes("safe") ? "safe-subagent-program" : "recursive-subagent-program",
-              input: {},
-            },
-            lastUserText.includes("safe") ? "call-subagent-safe-script" : "call-subagent-recursive-script",
-          );
+          const name = lastUserText.includes("safe") ? "safe-subagent-program" : "recursive-subagent-program";
+          const stage = subagentStages.get(lastUserText);
+          if (!stage) {
+            subagentStages.set(lastUserText, "described");
+            return controlledToolCallResponse(
+              "programs_describe",
+              { mode: "script", name },
+              `call-subagent-describe-${name}`,
+            );
+          }
+          if (stage === "described") {
+            const lastMessage = context.messages.at(-1);
+            const text =
+              lastMessage?.role === "toolResult"
+                ? lastMessage.content.find((part) => part.type === "text")?.text
+                : undefined;
+            if (!text) throw new Error("Expected the described Program result");
+            const described = z
+              .object({ definitionRevision: z.object({ revisionId: z.string() }) })
+              .parse(JSON.parse(text));
+            subagentStages.set(lastUserText, "ran");
+            return controlledToolCallResponse(
+              "programs_run",
+              {
+                mode: "script",
+                name,
+                definitionRevisionId: described.definitionRevision.revisionId,
+                input: {},
+              },
+              `call-subagent-run-${name}`,
+            );
+          }
+          return "Saved program attempt settled.";
         }
         if (context.messages.at(-1)?.role === "toolResult") return "Foreground delegation settled.";
         if (lastUserText.includes("Save"))
@@ -315,14 +381,14 @@ describe("production codemode journey", () => {
             "execute",
             {
               source: [
-                "await tools.scripts.save({",
+                'await tools.programs.save({ mode: "script",',
                 '  name: "safe-subagent-program", description: "Return a local value.",',
                 '  source: "return { safe: true };",',
                 '  inputSchema: { type: "object", properties: {}, additionalProperties: false },',
                 '  outputSchema: { type: "object", properties: { safe: { type: "boolean" } }, required: ["safe"], additionalProperties: false },',
                 "  requiredTools: []",
                 "});",
-                "await tools.scripts.save({",
+                'await tools.programs.save({ mode: "script",',
                 '  name: "recursive-subagent-program", description: "Attempt descendant delegation.",',
                 '  source: "return await agents.run({ prompt: \\"Nested recursion.\\" });",',
                 '  inputSchema: { type: "object", properties: {}, additionalProperties: false },',
@@ -341,7 +407,7 @@ describe("production codemode journey", () => {
               lastUserText.includes("safe")
                 ? "Run the safe saved program."
                 : "Run the recursive saved program.",
-            )}, tools: ["scripts.run"] });`,
+            )}, tools: ["programs.describe", "programs.run"] });`,
           },
           lastUserText.includes("safe") ? "call-safe-program-subagent" : "call-recursive-program-subagent",
         );
@@ -355,8 +421,8 @@ describe("production codemode journey", () => {
           return await createPiSubAgentRunner(process.cwd(), controlled.models).run(request);
         },
       }),
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -376,78 +442,33 @@ describe("production codemode journey", () => {
     ).resolves.toMatchObject({ output: "Foreground delegation settled." });
 
     expect(nestedRequests).toHaveLength(2);
-    expect(nestedRequests.map((request) => request.plan.tools)).toEqual([["scripts.run"], ["scripts.run"]]);
+    expect(nestedRequests.map((request) => request.plan.tools)).toEqual([
+      ["programs.describe", "programs.run"],
+      ["programs.describe", "programs.run"],
+    ]);
     expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toMatchObject([
       { status: "completed" },
       { status: "completed" },
     ]);
     const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
-    const scriptCalls = calls.filter((call) => call.toolName === "scripts.run");
-    expect(scriptCalls).toMatchObject([{ status: "completed" }, { status: "failed" }]);
+    const programCalls = calls.filter((call) => call.toolName === "programs.run");
+    expect(programCalls).toMatchObject([{ status: "completed" }, { status: "failed" }]);
+    const programExecutions = await runtime.debug.workspace.operational.codeExecutions.listForSession(
+      trail.trailId,
+    );
+    expect(
+      programExecutions.find((execution) => execution.program?.name === "safe-subagent-program"),
+    ).toMatchObject({ parentExecutionId: nestedRequests[0]?.plan.authority.parentExecutionId });
+    expect(
+      programExecutions.find((execution) => execution.program?.name === "recursive-subagent-program"),
+    ).toMatchObject({ parentExecutionId: nestedRequests[1]?.plan.authority.parentExecutionId });
     const descendantDelegation = calls.find(
       (call) => call.toolName === "agents.run" && call.status === "failed",
     );
     expect(descendantDelegation).toMatchObject({
-      parentToolCallId: scriptCalls[1]?.toolCallId,
+      parentToolCallId: programCalls[1]?.toolCallId,
       response: { error: "Subagents cannot recursively invoke agents.run" },
     });
-    await runtime.shutdown();
-  });
-
-  test("a direct hotbar read records one Broker action without a codemode execution", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-hotbar-acceptance-"));
-    roots.push(home);
-    const resolved = await resolveNoesisConfig({
-      home,
-      env: Object.freeze({}),
-      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
-    });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
-    const controlled = createControlledPiModels({
-      respond: ({ context }) =>
-        context.messages.at(-1)?.role === "toolResult"
-          ? "Read the package directly."
-          : controlledToolCallResponse(
-              "file_read",
-              { path: "package.json", startLine: 1, endLine: 4 },
-              "call-direct-read",
-            ),
-    });
-    const runtime = await createApplicationRuntimeComposition({
-      config,
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
-      createRoleRunner: (configurations) =>
-        createScriptedAgentRoleRunner({
-          variants: configurations,
-          respond: () => ({
-            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
-          }),
-        }),
-    });
-    const trail = await runtime.startTrail({ title: "Direct hotbar acceptance" });
-
-    const result = await runtime.debug.runTurn(trail.trailId, "Read the package metadata.");
-
-    expect(result.output).toBe("Read the package directly.");
-    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({
-      toolName: "files.read",
-      status: "completed",
-      timelineSequence: 1,
-    });
-    expect(
-      (await runtime.getTranscript(trail.trailId)).flatMap((entry) =>
-        entry.kind === "action" ? [entry.name] : [],
-      ),
-    ).toEqual(["files.read"]);
-    expect(await runtime.debug.workspace.operational.codeExecutions.listForSession(trail.trailId)).toEqual(
-      [],
-    );
     await runtime.shutdown();
   });
 
@@ -474,8 +495,8 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -501,11 +522,9 @@ describe("production codemode journey", () => {
     await runtime.shutdown();
   });
 
-  test("direct saved-code hotbar calls do not persist synthetic codemode parents", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-direct-saved-code-"));
+  test("persists a malformed direct-tool attempt rejected before Broker invocation", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-invalid-direct-tool-"));
     roots.push(home);
-    const project = Object.freeze({ projectId: "project_direct_saved_code", root: process.cwd() });
-    const workflowTool = projectWorkflowToolName(project.projectId, "direct-increment");
     const resolved = await resolveNoesisConfig({
       home,
       env: Object.freeze({}),
@@ -514,90 +533,17 @@ describe("production codemode journey", () => {
     const config = Object.freeze({
       ...resolved,
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
-      tools: Object.freeze({
-        hotbar: Object.freeze([...resolved.tools.hotbar, "workflows.run", "scripts.run"]),
-        projectHotbars: Object.freeze({ [project.projectId]: Object.freeze([workflowTool]) }),
-      }),
     });
-    const savedProgramSubAgentPrompts: string[] = [];
-    let releaseFirstSubAgent = (): void => undefined;
-    const firstSubAgentGate = new Promise<void>((resolve) => {
-      releaseFirstSubAgent = resolve;
-    });
-    let markFirstSubAgentStarted = (): void => undefined;
-    const firstSubAgentStarted = new Promise<void>((resolve) => {
-      markFirstSubAgentStarted = resolve;
-    });
-    let firstSubAgent = true;
     const controlled = createControlledPiModels({
-      respond: ({ context, lastUserText, systemPrompt }) => {
-        if (systemPrompt.includes("bounded subagent"))
-          return context.messages.at(-1)?.role === "toolResult"
-            ? "saved-program-subagent-ok"
-            : controlledToolCallResponse(
-                "file_read",
-                { path: "package.json", startLine: 1, endLine: 2 },
-                "call-saved-program-read",
-              );
-        if (context.messages.at(-1)?.role === "toolResult") return `Completed: ${lastUserText}`;
-        if (lastUserText.includes("Save"))
-          return controlledToolCallResponse(
-            "execute",
-            {
-              source: [
-                "await tools.scripts.save({",
-                '  name: "direct-double", description: "Double one value.",',
-                '  source: "const answer = await agents.run({ prompt: \\"script subagent\\", tools: [\\"files.read\\"] }); return { doubled: input.value * 2, answer };",',
-                '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
-                '  outputSchema: { type: "object", properties: { doubled: { type: "number" }, answer: { type: "string" } }, required: ["doubled", "answer"], additionalProperties: false },',
-                '  requiredTools: ["agents.run", "files.read"]',
-                "});",
-                "await tools.workflows.save({",
-                '  name: "direct-increment", description: "Increment one value.",',
-                '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
-                '  outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
-                '  phases: [{ name: "increment", description: "Increment.", source: "await agents.run({ prompt: \\"workflow subagent\\", tools: [\\"files.read\\"] }); return { value: input.value + 1 };", inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: ["agents.run", "files.read"] }]',
-                "});",
-                "return null;",
-              ].join("\n"),
-            },
-            "call-save-direct-code",
-          );
-        if (lastUserText.includes("generic workflow"))
-          return controlledToolCallResponse(
-            "workflows_run",
-            { name: "direct-increment", input: { value: 41 } },
-            "call-direct-generic-workflow",
-          );
-        if (lastUserText.includes("saved workflow"))
-          return controlledToolCallResponse(
-            "workflow_direct-increment",
-            { value: 41 },
-            "call-direct-saved-workflow",
-          );
-        return controlledToolCallResponse(
-          "scripts_run",
-          { name: "direct-double", input: { value: 21 } },
-          "call-direct-script",
-        );
-      },
+      respond: ({ context }) =>
+        context.messages.at(-1)?.role === "toolResult"
+          ? "The malformed read was rejected."
+          : controlledToolCallResponse("file_read", {}, "call-invalid-file-read"),
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      project,
-      subAgent: Object.freeze({
-        run: async (request: PiSubAgentRunRequest) => {
-          savedProgramSubAgentPrompts.push(request.plan.prompt);
-          if (firstSubAgent) {
-            firstSubAgent = false;
-            markFirstSubAgentStarted();
-            await firstSubAgentGate;
-          }
-          return await createPiSubAgentRunner(process.cwd(), controlled.models).run(request);
-        },
-      }),
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -606,109 +552,21 @@ describe("production codemode journey", () => {
           }),
         }),
     });
-    const trail = await runtime.startTrail({ title: "Direct saved-code acceptance" });
+    const trail = await runtime.startTrail({ title: "Invalid direct tool acceptance" });
 
-    await runtime.debug.runTurn(trail.trailId, "Save a script and workflow.");
-    const liveEvents: {
-      readonly type: string;
-      readonly actionId?: string;
-      readonly parentActionId?: string;
-      readonly name?: string;
-    }[] = [];
-    const genericWorkflowRun = runtime.debug.runTurn(trail.trailId, "Run the generic workflow hotbar tool.", {
-      onEvent: (event) => liveEvents.push(event),
-    });
-    await firstSubAgentStarted;
-    const liveWorkflow = liveEvents.find(
-      (event) => event.type === "tool-start" && event.name === "workflows.run",
+    await expect(runtime.debug.runTurn(trail.trailId, "Try an incomplete file read.")).resolves.toMatchObject(
+      { output: "The malformed read was rejected." },
     );
-    const liveSubAgent = liveEvents.find(
-      (event) => event.type === "tool-start" && event.name === "agents.run",
-    );
-    expect(liveSubAgent).toMatchObject({ parentActionId: liveWorkflow?.actionId });
-    releaseFirstSubAgent();
-    await genericWorkflowRun;
-    await runtime.debug.runTurn(trail.trailId, "Run the saved workflow hotbar tool.");
-    await runtime.debug.runTurn(trail.trailId, "Run the saved script hotbar tool.");
-
-    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    const [attempt] = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    expect(attempt).toMatchObject({ toolName: "files.read", status: "failed", request: {} });
+    expect(JSON.stringify(attempt?.response)).toContain("path");
     expect(
-      calls
-        .filter((call) => ["workflows.run", workflowTool, "scripts.run"].includes(call.toolName))
-        .map((call) => ({ toolName: call.toolName, status: call.status })),
-    ).toEqual([
-      { toolName: "workflows.run", status: "completed" },
-      { toolName: workflowTool, status: "completed" },
-      { toolName: "scripts.run", status: "completed" },
-    ]);
-    expect(
-      await runtime.debug.workspace.operational.workflows.listRunsForSession(trail.trailId),
-    ).toMatchObject([
-      { workflowName: "direct-increment", status: "completed", output: { value: 42 } },
-      { workflowName: "direct-increment", status: "completed", output: { value: 42 } },
-    ]);
-    const executions = await runtime.debug.workspace.operational.codeExecutions.listForSession(trail.trailId);
-    expect(executions).toHaveLength(4);
-    expect(executions.every((execution) => execution.parentExecutionId === undefined)).toBe(true);
-    expect(
-      executions.some(
-        (execution) =>
-          JSON.stringify(execution.result) === '{"doubled":42,"answer":"saved-program-subagent-ok"}',
-      ),
-    ).toBe(true);
-    expect(savedProgramSubAgentPrompts).toEqual([
-      "workflow subagent",
-      "workflow subagent",
-      "script subagent",
-    ]);
-    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toMatchObject([
-      { status: "completed" },
-      { status: "completed" },
-      { status: "completed" },
-    ]);
-    const savedProgramCalls = calls.filter((call) =>
-      ["workflows.run", workflowTool, "scripts.run", "agents.run", "files.read"].includes(call.toolName),
-    );
-    const savedProgramSubAgents = savedProgramCalls.filter((call) => call.toolName === "agents.run");
-    expect(savedProgramSubAgents).toHaveLength(3);
-    for (const subAgentCall of savedProgramSubAgents) {
-      expect(subAgentCall.parentToolCallId).toBeDefined();
-      expect(
-        savedProgramCalls.find(
-          (call) => call.toolName === "files.read" && call.parentToolCallId === subAgentCall.toolCallId,
-        ),
-      ).toBeDefined();
-    }
-    const directActions = (await runtime.getTranscript(trail.trailId)).filter(
-      (entry) =>
-        entry.kind === "action" && ["workflows.run", workflowTool, "scripts.run"].includes(entry.name),
-    );
-    expect(directActions).toHaveLength(3);
-    expect(
-      directActions.every((action) => action.kind === "action" && action.parentActionId === undefined),
-    ).toBe(true);
-    const transcriptBeforeRestart = await runtime.getTranscript(trail.trailId);
+      (await runtime.getTranscript(trail.trailId)).filter((entry) => entry.kind === "action"),
+    ).toMatchObject([{ name: "files.read", status: "failed", input: {} }]);
     await runtime.shutdown();
-
-    const reopened = await createApplicationRuntimeComposition({
-      config,
-      project,
-      subAgent: createPiSubAgentRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
-      createRoleRunner: (configurations) =>
-        createScriptedAgentRoleRunner({
-          variants: configurations,
-          respond: () => ({
-            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
-          }),
-        }),
-    });
-    expect(await reopened.getTranscript(trail.trailId)).toEqual(transcriptBeforeRestart);
-    await reopened.shutdown();
   });
 
-  test("Pi sees the default hotbar and nested execute calls use the recorded broker path", async () => {
+  test("Pi sees the fixed direct surface and nested execute calls use the recorded broker path", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-codemode-acceptance-"));
     roots.push(home);
     const resolved = await resolveNoesisConfig({
@@ -746,8 +604,8 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -761,15 +619,7 @@ describe("production codemode journey", () => {
     const result = await runtime.debug.runTurn(trail.trailId, "Inspect the repository package.");
 
     expect(result.output).toBe("Repository inspected through codemode.");
-    expect(observedToolNames).toEqual([
-      "adapt",
-      "execute",
-      "file_read",
-      "inspect_self",
-      "list_dir",
-      "remember",
-      "shell",
-    ]);
+    expect(observedToolNames).toEqual(["execute", "file_read", "file_write", "shell"]);
     const storedCalls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
     const nestedCall = storedCalls.find((call) => call.toolName === "files.read");
     expect(nestedCall).toMatchObject({
@@ -823,8 +673,8 @@ describe("production codemode journey", () => {
 
     const reopened = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -868,8 +718,8 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -936,8 +786,8 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -981,6 +831,7 @@ describe("production codemode journey", () => {
       ...resolved,
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
+    let originalRevisionId: string | undefined;
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText }) => {
         const lastMessage = context.messages.at(-1);
@@ -989,15 +840,19 @@ describe("production codemode journey", () => {
             ? "Script saved, verified with 42, and ready to reuse as double-value."
             : lastUserText.includes("List")
               ? "double-value is saved, typed, inspectable, and ready to reuse."
-              : lastUserText.includes("direct edit")
-                ? "Script returned 63."
-                : "Script returned 44.";
+              : lastUserText.includes("original")
+                ? "Original script revision returned 42."
+                : lastUserText.includes("invalid output")
+                  ? "Invalid script output was rejected."
+                  : lastUserText.includes("direct edit")
+                    ? "Script returned 63."
+                    : "Script returned 44.";
         if (lastUserText.includes("Save"))
           return controlledToolCallResponse(
             "execute",
             {
               source: [
-                "const saved = await tools.scripts.save({",
+                'const saved = await tools.programs.save({ mode: "script",',
                 '  name: "double-value",',
                 '  description: "Double one numeric input.",',
                 '  source: "return { doubled: input.value * 2 };",',
@@ -1005,8 +860,9 @@ describe("production codemode journey", () => {
                 '  outputSchema: { type: "object", properties: { doubled: { type: "number" } }, required: ["doubled"], additionalProperties: false },',
                 "  requiredTools: []",
                 "});",
-                "const verification = await tools.scripts.run({ name: saved.name, input: { value: 21 } });",
-                "return { saved, verification };",
+                'const verification = await tools.programs.run({ mode: "script", name: saved.manifest.name, definitionRevisionId: saved.definitionRevision.revisionId, input: { value: 21 } });',
+                "const runs = await tools.programs.runs({});",
+                "return { saved, verification, runs };",
               ].join("\n"),
             },
             "call-save-and-verify-script",
@@ -1016,17 +872,46 @@ describe("production codemode journey", () => {
             "execute",
             {
               source: [
-                "const scripts = await tools.scripts.list({});",
-                'const inspected = await tools.scripts.describe({ name: "double-value" });',
+                "const scripts = await tools.programs.list({});",
+                'const inspected = await tools.programs.describe({ mode: "script", name: "double-value" });',
                 "return { scripts, inspected };",
               ].join("\n"),
             },
             "call-list-and-inspect-script",
           );
+        if (lastUserText.includes("original"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: [
+                `const definitionRevisionId = ${JSON.stringify(originalRevisionId)};`,
+                'const described = await tools.programs.describe({ mode: "script", name: "double-value", definitionRevisionId });',
+                'if (!described) throw new Error("Missing original Program revision");',
+                'return await tools.programs.run({ mode: "script", name: "double-value", definitionRevisionId, input: { value: 21 } });',
+              ].join("\n"),
+            },
+            "call-run-original-script-revision",
+          );
+        if (lastUserText.includes("invalid output"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: [
+                'const described = await tools.programs.describe({ mode: "script", name: "double-value" });',
+                'if (!described) throw new Error("Missing Program");',
+                'return await tools.programs.run({ mode: "script", name: "double-value", definitionRevisionId: described.definitionRevision.revisionId, input: { value: 22 } });',
+              ].join("\n"),
+            },
+            "call-run-invalid-script-output",
+          );
         return controlledToolCallResponse(
           "execute",
           {
-            source: `return await tools.scripts.run({ name: "double-value", input: { value: ${lastUserText.includes("direct edit") ? "21" : "22"} } });`,
+            source: [
+              'const described = await tools.programs.describe({ mode: "script", name: "double-value" });',
+              'if (!described) throw new Error("Missing Program");',
+              `return await tools.programs.run({ mode: "script", name: "double-value", definitionRevisionId: described.definitionRevision.revisionId, input: { value: ${lastUserText.includes("direct edit") ? "21" : "22"} } });`,
+            ].join("\n"),
           },
           lastUserText.includes("direct edit") ? "call-run-edited-script" : "call-reuse-script",
         );
@@ -1034,8 +919,8 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -1047,7 +932,7 @@ describe("production codemode journey", () => {
     const trail = await runtime.startTrail({ title: "Script acceptance" });
 
     const saved = await runtime.debug.runTurn(trail.trailId, "Save a reusable doubling script.");
-    const scripts = await runtime.listScripts?.();
+    const scripts = await runtime.listPrograms?.();
     const inspected = await runtime.debug.runTurn(trail.trailId, "List and inspect the saved script.");
     const run = await runtime.debug.runTurn(trail.trailId, "Reuse the double-value script for 22.");
     const executionsBeforeEdit = await runtime.debug.workspace.operational.codeExecutions.listForSession(
@@ -1061,13 +946,31 @@ describe("production codemode journey", () => {
     );
     expect(firstScriptExecution).toBeDefined();
     if (!firstScriptExecution) throw new Error("Expected a completed nested script execution");
-    const scriptWorkingPath = scripts?.[0]?.workingPath;
+    const scriptWorkingPath = scripts?.[0]?.sourceWorkingPath;
     if (!scriptWorkingPath) throw new Error("Expected the saved script working path");
     await writeFile(join(home, scriptWorkingPath), "return { doubled: input.value * 3 };", "utf8");
-    const editedScripts = await runtime.listScripts?.();
+    const editedScripts = await runtime.listPrograms?.();
     const rerun = await runtime.debug.runTurn(
       trail.trailId,
       "Run the double-value script after the direct edit.",
+    );
+    const project = await resolveActiveProject(process.cwd());
+    originalRevisionId = (
+      await runtime.debug.workspace.definitionMetadata.listRevisions(
+        `program:${project.projectId}:script`,
+        "double-value",
+      )
+    )[0]?.definitionRevision.revisionId;
+    if (!originalRevisionId) throw new Error("Expected the original Program revision");
+    const original = await runtime.debug.runTurn(
+      trail.trailId,
+      "Run the original immutable double-value revision.",
+    );
+    await writeFile(join(home, scriptWorkingPath), 'return "invalid";', "utf8");
+    await runtime.listPrograms?.();
+    const invalid = await runtime.debug.runTurn(
+      trail.trailId,
+      "Run the double-value script with invalid output.",
     );
     const executionsAfterEdit = await runtime.debug.workspace.operational.codeExecutions.listForSession(
       trail.trailId,
@@ -1085,6 +988,8 @@ describe("production codemode journey", () => {
     expect(run.output).toBe("Script returned 44.");
     expect(editedScripts).toMatchObject([{ name: "double-value", revision: 2 }]);
     expect(rerun.output).toBe("Script returned 63.");
+    expect(original.output).toBe("Original script revision returned 42.");
+    expect(invalid.output).toBe("Invalid script output was rejected.");
     expect(
       executionsAfterEdit.find((execution) => execution.executionId === firstScriptExecution.executionId),
     ).toEqual(firstScriptExecution);
@@ -1096,30 +1001,89 @@ describe("production codemode journey", () => {
           JSON.stringify(execution.result) === '{"doubled":63}',
       ),
     ).toBe(true);
+    expect(
+      executionsAfterEdit.some(
+        (execution) =>
+          execution.program?.name === "double-value" &&
+          execution.program.revision === 3 &&
+          execution.status === "failed" &&
+          execution.result === undefined,
+      ),
+    ).toBe(true);
     const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
     expect(calls.filter((call) => call.toolName !== "execute").map((call) => call.toolName)).toEqual([
-      "scripts.save",
-      "scripts.run",
-      "scripts.list",
-      "scripts.describe",
-      "scripts.run",
-      "scripts.run",
+      "programs.save",
+      "programs.run",
+      "programs.runs",
+      "programs.list",
+      "programs.describe",
+      "programs.describe",
+      "programs.run",
+      "programs.describe",
+      "programs.run",
+      "programs.describe",
+      "programs.run",
+      "programs.describe",
+      "programs.run",
     ]);
-    expect(calls.find((call) => call.toolName === "scripts.save")?.response).toMatchObject({
+    expect(calls.find((call) => call.toolName === "programs.save")?.response).toMatchObject({
       output: {
-        name: "double-value",
-        revision: 1,
-        requiredTools: [],
-        reuse: {
-          naturalLanguage: "Run the double-value script with the desired input.",
-          run: { tool: "scripts.run", name: "double-value" },
-          inspect: { tool: "scripts.describe", name: "double-value" },
-          list: { tool: "scripts.list" },
-          workingPath: scriptWorkingPath,
+        manifest: {
+          mode: "script",
+          name: "double-value",
+          revision: 1,
+          requiredTools: [],
         },
+        definitionRevision: { revisionId: expect.any(String) },
+        workingPath: scriptWorkingPath,
       },
     });
+    expect(calls.find((call) => call.toolName === "programs.runs")?.response).toMatchObject({
+      output: [
+        {
+          mode: "script",
+          name: "double-value",
+          programRevision: 1,
+          definitionRevisionId: expect.any(String),
+          status: "completed",
+        },
+      ],
+    });
+    const database = new DatabaseSync(join(home, "database", "noesis.sqlite"));
+    expect(() =>
+      database
+        .prepare("UPDATE codemode_executions SET program_name = ? WHERE execution_id = ?")
+        .run("rewritten-program", firstScriptExecution.executionId),
+    ).toThrow(/program execution identity is immutable/u);
+    database.close();
+    expect((await runtime.listExecutions?.(trail.trailId))?.map((entry) => entry.executionId)).toContain(
+      firstScriptExecution.executionId,
+    );
     await runtime.shutdown();
+
+    const otherRoot = await mkdtemp(join(tmpdir(), "noesis-other-project-"));
+    roots.push(otherRoot);
+    const otherProject = await resolveActiveProject(otherRoot);
+    const otherRuntime = await createApplicationRuntimeComposition({
+      config,
+      project: otherProject,
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(otherProject.root, controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    expect(
+      (await otherRuntime.listExecutions?.(trail.trailId))?.map((entry) => entry.executionId),
+    ).not.toContain(firstScriptExecution.executionId);
+    await expect(
+      otherRuntime.inspectExecution?.(trail.trailId, firstScriptExecution.executionId),
+    ).resolves.toBeUndefined();
+    await otherRuntime.shutdown();
   });
 
   test("a controlled Pi turn saves and runs a durable multi-phase workflow", async () => {
@@ -1139,27 +1103,32 @@ describe("production codemode journey", () => {
         if (context.messages.at(-1)?.role === "toolResult")
           return lastUserText.includes("Save")
             ? "Workflow saved."
-            : lastUserText.includes("Retry")
-              ? "Workflow remained paused."
-              : lastUserText.includes("Resume")
-                ? "Workflow returned 42."
-                : "Workflow paused for a correction.";
+            : lastUserText.includes("unchanged")
+              ? "Equal correction retried without changing identity."
+              : lastUserText.includes("Retry")
+                ? "Workflow remained paused."
+                : lastUserText.includes("Resume")
+                  ? "Workflow returned 41."
+                  : "Workflow paused for a correction.";
         if (lastUserText.includes("Save"))
           return controlledToolCallResponse(
             "execute",
             {
               source: [
-                "await tools.workflows.save({",
+                'await tools.programs.save({ mode: "workflow",',
                 '  name: "increment-and-double",',
-                '  description: "Increment a number and then double it.",',
+                '  description: "Increment, double, and then decrement a number.",',
                 '  inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
                 '  outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false },',
                 "  phases: [",
                 '    { name: "increment", description: "Increment the value.", source: "return { value: input.value + 1 };", inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: [] },',
-                '    { name: "double", description: "Double the corrected value.", source: "return { value: input.value * 2 };", inputSchema: { type: "object", properties: { value: { type: "number" }, allow: { type: "boolean" } }, required: ["value", "allow"], additionalProperties: false }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: [] }',
+                '    { name: "double", description: "Double the corrected value.", source: "await tools.programs.list({}); if (!input.allow) throw new Error(); return { value: input.value * 2 };", inputSchema: { type: "object", properties: { value: { type: "number" }, allow: { type: "boolean" } }, required: ["value"], additionalProperties: false }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: ["programs.list"] },',
+                '    { name: "decrement", description: "Decrement the doubled value.", source: "return { value: input.value - 1 };", inputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, outputSchema: { type: "object", properties: { value: { type: "number" } }, required: ["value"], additionalProperties: false }, requiredTools: [] }',
                 "  ]",
                 "});",
-                'return await tools.workflows.run({ name: "increment-and-double", input: { value: 20 } });',
+                'const saved = await tools.programs.describe({ mode: "workflow", name: "increment-and-double" });',
+                'if (!saved) throw new Error("Missing Program");',
+                'return await tools.programs.run({ mode: "workflow", name: "increment-and-double", definitionRevisionId: saved.definitionRevision.revisionId, input: { value: 20 } });',
               ].join("\n"),
             },
             "call-save-workflow",
@@ -1169,19 +1138,30 @@ describe("production codemode journey", () => {
             "execute",
             {
               source: [
-                "const [run] = await tools.workflows.runs({});",
-                "return await tools.workflows.resume({ runId: run.runId, correction: { value: 21, allow: true } });",
+                "const [run] = await tools.programs.runs({});",
+                "return await tools.programs.resume({ runId: run.runId, correction: { value: 21, allow: true } });",
               ].join("\n"),
             },
             "call-resume-workflow",
+          );
+        if (lastUserText.includes("unchanged"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: [
+                "const [run] = await tools.programs.runs({});",
+                "return await tools.programs.resume({ runId: run.runId, correction: { value: 21 } });",
+              ].join("\n"),
+            },
+            "call-resume-workflow-unchanged",
           );
         if (lastUserText.includes("Retry"))
           return controlledToolCallResponse(
             "execute",
             {
               source: [
-                "const [run] = await tools.workflows.runs({});",
-                "return await tools.workflows.resume({ runId: run.runId });",
+                "const [run] = await tools.programs.runs({});",
+                "return await tools.programs.resume({ runId: run.runId });",
               ].join("\n"),
             },
             "call-retry-workflow",
@@ -1189,8 +1169,11 @@ describe("production codemode journey", () => {
         return controlledToolCallResponse(
           "execute",
           {
-            source:
-              'return await tools.workflows.run({ name: "increment-and-double", input: { value: 20 } });',
+            source: [
+              'const saved = await tools.programs.describe({ mode: "workflow", name: "increment-and-double" });',
+              'if (!saved) throw new Error("Missing Program");',
+              'return await tools.programs.run({ mode: "workflow", name: "increment-and-double", definitionRevisionId: saved.definitionRevision.revisionId, input: { value: 20 } });',
+            ].join("\n"),
           },
           "call-run-workflow",
         );
@@ -1198,8 +1181,8 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
@@ -1210,19 +1193,27 @@ describe("production codemode journey", () => {
     });
     const trail = await runtime.startTrail({ title: "Workflow acceptance" });
 
-    const saved = await runtime.debug.runTurn(trail.trailId, "Save and run a two-phase arithmetic workflow.");
-    const workflows = await runtime.listWorkflows?.();
+    const saved = await runtime.debug.runTurn(
+      trail.trailId,
+      "Save and run a three-phase arithmetic workflow.",
+    );
+    const workflows = await runtime.listPrograms?.();
     const pausedRuns = await runtime.debug.workspace.operational.workflows.listRunsForSession(trail.trailId);
     const pausedPhases = pausedRuns[0]
       ? await runtime.debug.workspace.operational.workflows.listPhases(pausedRuns[0].runId)
       : [];
     const firstPhaseExecutionId = pausedPhases[0]?.executionId;
     const failedPhaseLogicalExecutionId = pausedPhases[1]?.logicalExecutionId;
+    const failedPhaseExecutionId = pausedPhases[1]?.executionId;
     const retried = await runtime.debug.runTurn(
       trail.trailId,
       "Retry the workflow without changing its input.",
     );
     const phasesAfterRetry = pausedRuns[0]
+      ? await runtime.debug.workspace.operational.workflows.listPhases(pausedRuns[0].runId)
+      : [];
+    const equalCorrection = await runtime.debug.runTurn(trail.trailId, "Retry with an unchanged correction.");
+    const phasesAfterEqualCorrection = pausedRuns[0]
       ? await runtime.debug.workspace.operational.workflows.listPhases(pausedRuns[0].runId)
       : [];
     const resumed = await runtime.debug.runTurn(
@@ -1241,7 +1232,7 @@ describe("production codemode journey", () => {
       {
         name: "increment-and-double",
         revision: 1,
-        phaseNames: ["increment", "double"],
+        phaseNames: ["increment", "double", "decrement"],
       },
     ]);
     expect(pausedRuns).toMatchObject([{ status: "paused", currentPhase: 1 }]);
@@ -1254,7 +1245,7 @@ describe("production codemode journey", () => {
       model: CONTROLLED_PI_MODEL,
       thinkingLevel: config.agent.thinkingLevel,
     });
-    expect(pausedPhases).toMatchObject([
+    expect(pausedPhases.slice(0, 2)).toMatchObject([
       { phaseName: "increment", status: "completed", attempt: 1, output: { value: 21 } },
       {
         phaseName: "double",
@@ -1267,17 +1258,25 @@ describe("production codemode journey", () => {
     expect(phasesAfterRetry[1]).toMatchObject({
       phaseName: "double",
       status: "failed",
-      attempt: 1,
+      attempt: 2,
       logicalExecutionId: failedPhaseLogicalExecutionId,
       input: { value: 21 },
     });
-    expect(resumed.output).toBe("Workflow returned 42.");
+    expect(equalCorrection.output).toBe("Equal correction retried without changing identity.");
+    expect(phasesAfterEqualCorrection[1]).toMatchObject({
+      phaseName: "double",
+      status: "failed",
+      attempt: 3,
+      logicalExecutionId: failedPhaseLogicalExecutionId,
+      input: { value: 21 },
+    });
+    expect(resumed.output).toBe("Workflow returned 41.");
     expect(workflowRuns).toMatchObject([
       {
         workflowName: "increment-and-double",
         status: "completed",
-        output: { value: 42 },
-        currentPhase: 2,
+        output: { value: 41 },
+        currentPhase: 3,
       },
     ]);
     expect(phases).toMatchObject([
@@ -1285,14 +1284,156 @@ describe("production codemode journey", () => {
       {
         phaseName: "double",
         status: "completed",
-        attempt: 2,
+        attempt: 4,
         input: { value: 21, allow: true },
         output: { value: 42 },
       },
+      {
+        phaseName: "decrement",
+        status: "completed",
+        attempt: 1,
+        input: { value: 42 },
+        output: { value: 41 },
+      },
     ]);
     expect(phases[0]?.executionId).toBe(firstPhaseExecutionId);
-    expect(phases[1]?.logicalExecutionId).toBe(failedPhaseLogicalExecutionId);
+    expect(phasesAfterRetry[1]?.executionId).not.toBe(failedPhaseExecutionId);
+    expect(phases[1]?.logicalExecutionId).not.toBe(failedPhaseLogicalExecutionId);
+    if (!firstPhaseExecutionId) throw new Error("Expected a workflow phase CodeExecution");
+    const phaseExecution =
+      await runtime.debug.workspace.operational.codeExecutions.get(firstPhaseExecutionId);
+    if (!phaseExecution?.projectId || !phaseExecution.sourceArtifactId)
+      throw new Error("Expected a project-owned workflow phase CodeExecution with source evidence");
+    const prelinkExecutionId = "execution-workflow-prelink-crash";
+    await runtime.debug.workspace.operational.codeExecutions.put({
+      executionId: prelinkExecutionId,
+      logicalExecutionId: "logical-workflow-prelink-crash",
+      sessionId: trail.trailId,
+      projectId: phaseExecution.projectId,
+      catalogId: phaseExecution.catalogId,
+      catalogDigest: phaseExecution.catalogDigest,
+      sourceDigest: phaseExecution.sourceDigest,
+      sourceArtifactId: phaseExecution.sourceArtifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: new Date().toISOString(),
+    });
+    expect((await runtime.listExecutions?.(trail.trailId))?.map((entry) => entry.executionId)).toContain(
+      firstPhaseExecutionId,
+    );
     await runtime.shutdown();
+
+    const otherRoot = await mkdtemp(join(tmpdir(), "noesis-other-workflow-project-"));
+    roots.push(otherRoot);
+    const otherProject = await resolveActiveProject(otherRoot);
+    const otherRuntime = await createApplicationRuntimeComposition({
+      config,
+      project: otherProject,
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(otherProject.root, controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    expect(
+      (await otherRuntime.listExecutions?.(trail.trailId))?.map((entry) => entry.executionId),
+    ).not.toEqual(expect.arrayContaining([firstPhaseExecutionId, prelinkExecutionId]));
+    await expect(
+      otherRuntime.inspectExecution?.(trail.trailId, firstPhaseExecutionId),
+    ).resolves.toBeUndefined();
+    await expect(otherRuntime.inspectExecution?.(trail.trailId, prelinkExecutionId)).resolves.toBeUndefined();
+    await otherRuntime.shutdown();
+  });
+
+  test("workflow resume preserves JSON null across restart", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-workflow-null-resume-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText }) => {
+        if (context.messages.at(-1)?.role === "toolResult")
+          return lastUserText.includes("Save")
+            ? "Null workflow paused."
+            : "Null workflow retried after restart.";
+        if (lastUserText.includes("Save"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: [
+                'await tools.programs.save({ mode: "workflow",',
+                '  name: "preserve-null",',
+                '  description: "Preserve a JSON null value across workflow retries.",',
+                '  inputSchema: { type: "object", additionalProperties: false },',
+                '  outputSchema: { type: "null" },',
+                "  phases: [",
+                '    { name: "produce-null", description: "Produce null.", source: "return null;", inputSchema: { type: "object", additionalProperties: false }, outputSchema: { type: "null" }, requiredTools: [] },',
+                '    { name: "pause", description: "Pause while preserving null.", source: "if (input !== null) throw new Error(\\"lost null\\"); throw new Error(\\"pause\\");", inputSchema: { type: "null" }, outputSchema: { type: "null" }, requiredTools: [] }',
+                "  ]",
+                "});",
+                'const saved = await tools.programs.describe({ mode: "workflow", name: "preserve-null" });',
+                'if (!saved) throw new Error("Missing Program");',
+                'return await tools.programs.run({ mode: "workflow", name: "preserve-null", definitionRevisionId: saved.definitionRevision.revisionId, input: {} });',
+              ].join("\n"),
+            },
+            "call-save-null-workflow",
+          );
+        return controlledToolCallResponse(
+          "execute",
+          {
+            source: [
+              "const runs = await tools.programs.runs({});",
+              'const run = runs.find((candidate) => candidate.mode === "workflow" && candidate.name === "preserve-null");',
+              'if (!run || run.mode !== "workflow") throw new Error("Missing workflow run");',
+              "return await tools.programs.resume({ runId: run.runId });",
+            ].join("\n"),
+          },
+          "call-resume-null-workflow",
+        );
+      },
+    });
+    const createRuntime = async () =>
+      await createApplicationRuntimeComposition({
+        config,
+        createAgent: (_sessionTools, codeExecution) =>
+          createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+        createRoleRunner: (configurations) =>
+          createScriptedAgentRoleRunner({
+            variants: configurations,
+            respond: () => ({
+              text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+            }),
+          }),
+      });
+    const initial = await createRuntime();
+    const trail = await initial.startTrail({ title: "Null workflow acceptance" });
+    await initial.debug.runTurn(trail.trailId, "Save and run the null workflow.");
+    const [run] = await initial.debug.workspace.operational.workflows.listRunsForSession(trail.trailId);
+    if (!run) throw new Error("Expected a paused null workflow run");
+    expect(await initial.debug.workspace.operational.workflows.listPhases(run.runId)).toMatchObject([
+      { phaseName: "produce-null", status: "completed", output: null },
+      { phaseName: "pause", status: "failed", attempt: 1, input: null },
+    ]);
+    await initial.shutdown();
+
+    const restarted = await createRuntime();
+    await restarted.debug.runTurn(trail.trailId, "Resume the null workflow after restart.");
+    expect(await restarted.debug.workspace.operational.workflows.listPhases(run.runId)).toMatchObject([
+      { phaseName: "produce-null", status: "completed", output: null },
+      { phaseName: "pause", status: "failed", attempt: 2, input: null },
+    ]);
+    await restarted.shutdown();
   });
 
   test("foreground codemode authors one exact Capability while subagents remain advisory", async () => {
@@ -1380,8 +1521,8 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       subAgent: createPiSubAgentRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution, selfTools) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,

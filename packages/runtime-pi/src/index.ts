@@ -23,12 +23,10 @@ import {
 } from "./execute-tool.ts";
 import { frozenPlanMaterialUses } from "./frozen-session-tools.ts";
 import {
-  createHotbarToolAliases,
-  createPiHotbarTools,
-  reconcileHotbarTools,
-  resolveHotbarTools,
-} from "./hotbar-tools.ts";
-import { createPiSelfTools, type PiSelfToolAdapter } from "./self-tools.ts";
+  createBrokerToolAliases,
+  createPiBrokerTools,
+  FOREGROUND_DIRECT_TOOL_NAMES,
+} from "./broker-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
 import { resolvePiSkillInvocation } from "./skill-invocation.ts";
 import type { PiSkillLibrary, PiSkillResource } from "./skill-library.ts";
@@ -54,14 +52,13 @@ export type {
   FrozenSessionToolResolver,
 } from "./frozen-session-tools.ts";
 export { frozenPlanMaterialUses, resolveFrozenSessionToolDefinitions } from "./frozen-session-tools.ts";
-export * from "./hotbar-tools.ts";
+export * from "./broker-tools.ts";
 export * from "./model-selection.ts";
 export * from "./mcp-sampling.ts";
 export * from "./pi-role-backend.ts";
 export * from "./role-context.ts";
 export * from "./role-runner.ts";
 export * from "./role-types.ts";
-export * from "./self-tools.ts";
 export * from "./skill-invocation.ts";
 export * from "./skill-library.ts";
 export * from "./subagent-run.ts";
@@ -316,7 +313,6 @@ export interface PiAgentRuntime extends NoesisAgentRuntime {
 }
 export interface CreatePiAgentRuntimeOptions {
   readonly codeExecution?: PiCodeExecutionAdapter;
-  readonly selfTools?: PiSelfToolAdapter;
   readonly skills?: PiSkillLibrary;
   readonly requirePinnedSkillSnapshot?: boolean;
   readonly now?: () => string;
@@ -446,11 +442,19 @@ export function createPiAgentRuntime(
         );
       if (preparedCode) execution.preparedCode = preparedCode;
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
+      const brokerRecordedDirectActionIds = new Set<string>();
       const emitCodeEvent = (
         event: Parameters<Parameters<typeof createPiExecuteTool>[0]["emit"]>[0],
         parentActionId?: string,
         recordedByBroker = false,
       ): void => {
+        if (
+          recordedByBroker &&
+          parentActionId === undefined &&
+          event.type === "tool-start" &&
+          event.callId.startsWith("direct:")
+        )
+          brokerRecordedDirectActionIds.add(event.callId);
         if (event.type === "tool-start")
           // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           emit(
@@ -501,63 +505,9 @@ export function createPiAgentRuntime(
               .finish(),
           );
       };
-      let harness: AgentHarness | undefined;
-      const initialHotbar =
-        plan && preparedCode && options.selfTools
-          ? reconcileHotbarTools(
-              preparedCode.catalog,
-              await options.selfTools.hotbar({
-                plan,
-                catalog: preparedCode.catalog,
-                signal: execution.controller.signal,
-              }),
-            ).active
-          : Object.freeze([]);
-      const hotbarAliases = preparedCode
-        ? createHotbarToolAliases(preparedCode.catalog)
+      const directAliases = preparedCode
+        ? createBrokerToolAliases(preparedCode.catalog)
         : new Map<string, string>();
-      const activeNames = (canonicalNames: readonly string[]): string[] => [
-        ...(plan && options.selfTools
-          ? ["inspect_self", "remember", ...(preparedCode ? ["adapt"] : [])]
-          : []),
-        ...(preparedCode
-          ? [
-              "execute",
-              ...canonicalNames.map((name) => {
-                const alias = hotbarAliases.get(name);
-                if (!alias) throw new Error(`Frozen tool catalog has no direct alias for ${name}`);
-                return alias;
-              }),
-            ]
-          : []),
-      ];
-      const applyHotbar = async (canonicalNames: readonly string[]): Promise<void> => {
-        if (!preparedCode) throw new Error("This turn has no executable tool catalog");
-        const resolved = resolveHotbarTools(preparedCode.catalog, canonicalNames);
-        if (!harness) throw new Error("The direct-tool hotbar is not ready");
-        await harness.setActiveTools(activeNames(resolved));
-      };
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      const selfTools =
-        plan && options.selfTools
-          ? createPiSelfTools(
-              createConditionalObject({
-                adapter: options.selfTools,
-                plan,
-                request,
-                signal: execution.controller.signal,
-                applyHotbar,
-              } as const)
-                .addOptional(
-                  preparedCode
-                    ? {
-                        catalog: preparedCode.catalog,
-                      }
-                    : undefined,
-                )
-                .finish(),
-            )
-          : Object.freeze([]);
       const { session, sessionId } = await createEphemeralPiSession();
       execution.sessionId = sessionId;
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
@@ -570,16 +520,24 @@ export function createPiAgentRuntime(
               emit: emitCodeEvent,
             })
           : undefined;
-      const hotbarTools =
+      const directTools =
         plan && preparedCode
-          ? createPiHotbarTools({
+          ? createPiBrokerTools({
               prepared: preparedCode,
               turnId: plan.turnId,
               signal: execution.controller.signal,
+              canonicalNames: FOREGROUND_DIRECT_TOOL_NAMES,
               emit: emitCodeEvent,
             })
           : Object.freeze([]);
-      const directToolNames = new Set(hotbarTools.map((tool) => tool.name));
+      const directToolNames = new Set(directTools.map((tool) => tool.name));
+      const canonicalDirectToolNames = new Map(
+        FOREGROUND_DIRECT_TOOL_NAMES.flatMap((canonicalName) => {
+          const alias = directAliases.get(canonicalName);
+          return alias ? [[alias, canonicalName] as const] : [];
+        }),
+      );
+      const pendingDirectToolInputs = new Map<string, ReturnType<typeof toAgentActionPayload>>();
       const piSkills = skillSnapshot.skills.map((skill): Skill => ({
         name: skill.name,
         description: skill.description,
@@ -605,11 +563,20 @@ export function createPiAgentRuntime(
           result: explicitSkill.actionEvidence,
         });
       }
-      const agentTools = executeTool ? [...selfTools, executeTool, ...hotbarTools] : [...selfTools];
-      const initialActiveToolNames = activeNames(initialHotbar);
+      const agentTools = executeTool ? [executeTool, ...directTools] : [];
+      const initialActiveToolNames = executeTool
+        ? [
+            "execute",
+            ...FOREGROUND_DIRECT_TOOL_NAMES.map((name) => {
+              const alias = directAliases.get(name);
+              if (!alias) throw new Error(`Frozen tool catalog has no direct alias for ${name}`);
+              return alias;
+            }),
+          ]
+        : [];
       const skillsSystemPrompt = formatSkillsForNoesisPrompt(piSkills, executeTool !== undefined);
       const completeSystemPrompt = [request.systemPrompt, skillsSystemPrompt].filter(Boolean).join("\n\n");
-      harness = new AgentHarness({
+      const harness = new AgentHarness({
         env: new NodeExecutionEnv({ cwd }),
         session,
         models,
@@ -710,7 +677,10 @@ export function createPiAgentRuntime(
           const delta = assistantDeltas.push(event.assistantMessageEvent.delta);
           if (delta) emit({ type: "delta", text: delta });
         } else if (event.type === "tool_execution_start") {
-          if (directToolNames.has(event.toolName)) return;
+          if (directToolNames.has(event.toolName)) {
+            pendingDirectToolInputs.set(event.toolCallId, toAgentActionPayload(event.args));
+            return;
+          }
           emit({
             type: "tool-start",
             actionId: event.toolCallId,
@@ -727,7 +697,28 @@ export function createPiAgentRuntime(
             update: toAgentActionPayload(piToolUpdatePayload(event.partialResult)),
           });
         } else if (event.type === "tool_execution_end") {
-          if (directToolNames.has(event.toolName)) return;
+          if (directToolNames.has(event.toolName)) {
+            const actionId = `direct:${event.toolCallId}`;
+            const directInput = pendingDirectToolInputs.get(event.toolCallId) ?? {};
+            pendingDirectToolInputs.delete(event.toolCallId);
+            if (brokerRecordedDirectActionIds.delete(actionId)) return;
+            const canonicalName = canonicalDirectToolNames.get(event.toolName) ?? event.toolName;
+            emit({
+              type: "tool-start",
+              actionId,
+              name: canonicalName,
+              input: directInput,
+              timelineSequence: claimTimelineSequence(),
+            });
+            emit({
+              type: "tool-end",
+              actionId,
+              name: canonicalName,
+              isError: event.isError,
+              result: toAgentActionPayload(event.result),
+            });
+            return;
+          }
           emit({
             type: "tool-end",
             actionId: event.toolCallId,

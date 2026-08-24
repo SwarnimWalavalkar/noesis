@@ -16,6 +16,7 @@ import {
   canonicalJson,
   EvidenceRefSchema,
   FileRevisionRefSchema,
+  JsonValueSchema,
   ProjectRefSchema,
   sha256,
 } from "@noesis/domain";
@@ -72,6 +73,54 @@ export interface AgentRoleRunner {
   readonly run: (request: AgentRunRequest) => Promise<AgentRunResult>;
 }
 export type AgentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export const ProgramWorkflowPhaseSchema = z.strictObject({
+  name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+  description: z.string().min(1).max(2048),
+  source: z
+    .string()
+    .min(1)
+    .max(128 * 1024),
+  inputSchema: z.record(z.string(), JsonValueSchema),
+  outputSchema: z.record(z.string(), JsonValueSchema),
+  requiredTools: z.array(z.string().min(1)).max(128),
+});
+export const ScriptProgramManifestSchema = z.strictObject({
+  kind: z.literal("noesis_program"),
+  mode: z.literal("script"),
+  name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+  description: z.string().min(1).max(2048),
+  revision: z.number().int().positive(),
+  sourceRevision: FileRevisionRefSchema,
+  inputSchema: z.record(z.string(), JsonValueSchema),
+  outputSchema: z.record(z.string(), JsonValueSchema),
+  requiredTools: z.array(z.string().min(1)).max(128),
+  createdFrom: z.strictObject({
+    sessionId: z.string().min(1),
+    turnId: z.string().min(1),
+    planId: z.string().min(1),
+  }),
+});
+export type ScriptProgramManifest = Readonly<z.infer<typeof ScriptProgramManifestSchema>>;
+export const WorkflowProgramManifestSchema = z.strictObject({
+  kind: z.literal("noesis_program"),
+  mode: z.literal("workflow"),
+  name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+  description: z.string().min(1).max(2048),
+  revision: z.number().int().positive(),
+  inputSchema: z.record(z.string(), JsonValueSchema),
+  outputSchema: z.record(z.string(), JsonValueSchema),
+  phases: z.array(ProgramWorkflowPhaseSchema).min(1).max(64),
+  createdFrom: z.strictObject({
+    sessionId: z.string().min(1),
+    turnId: z.string().min(1),
+    planId: z.string().min(1),
+  }),
+});
+export type WorkflowProgramManifest = Readonly<z.infer<typeof WorkflowProgramManifestSchema>>;
+export const ProgramManifestSchema = z.discriminatedUnion("mode", [
+  ScriptProgramManifestSchema,
+  WorkflowProgramManifestSchema,
+]);
 export interface AgentContextUsage {
   readonly usedTokens: number;
   readonly contextWindow: number;
@@ -107,7 +156,8 @@ export type FrozenCapabilityEffect =
       readonly material: FrozenRevisionMaterial;
     }
   | {
-      readonly kind: "script" | "workflow";
+      readonly kind: "program";
+      readonly mode: "script" | "workflow";
       readonly name: string;
       readonly project: ProjectRef;
       readonly definition: FrozenRevisionMaterial;
@@ -115,6 +165,8 @@ export type FrozenCapabilityEffect =
 export interface FrozenCapabilitySelection {
   readonly capabilityId: string;
   readonly name: string;
+  readonly description: string;
+  readonly applicability: string;
   readonly scope: string;
   readonly selectionReason: string;
   readonly revision: CapabilityRevisionRef;
@@ -257,13 +309,8 @@ const FrozenCapabilityEffectSchema = z.discriminatedUnion("kind", [
     material: FrozenRevisionMaterialSchema,
   }),
   z.strictObject({
-    kind: z.literal("script"),
-    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-    project: ProjectRefSchema,
-    definition: FrozenRevisionMaterialSchema,
-  }),
-  z.strictObject({
-    kind: z.literal("workflow"),
+    kind: z.literal("program"),
+    mode: z.enum(["script", "workflow"]),
     name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
     project: ProjectRefSchema,
     definition: FrozenRevisionMaterialSchema,
@@ -281,6 +328,8 @@ const FrozenBaselineRefSchema = z.discriminatedUnion("kind", [
 const FrozenCapabilitySelectionSchema = z.strictObject({
   capabilityId: z.string().min(1),
   name: z.string().min(1),
+  description: z.string().min(1),
+  applicability: z.string().min(1),
   scope: z.string().min(1),
   selectionReason: z.string().min(1),
   revision: CapabilityRevisionRefSchema,

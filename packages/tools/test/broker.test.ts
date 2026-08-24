@@ -62,7 +62,6 @@ function echo(description = "Return the provided value"): ToolDefinition {
     name: "test.echo",
     label: "Echo",
     description,
-    visibility: "codemode_only",
     inputSchema: z.strictObject({ value: z.string() }),
     outputSchema: z.strictObject({ value: z.string() }),
     effect: () => Object.freeze({ effect: "read", resource: "test:echo", estimatedCost: 0 }),
@@ -91,7 +90,6 @@ describe("tool broker", () => {
       name: "shell.run",
       label: "Run shell command",
       description: "Run a shell command",
-      visibility: "codemode_only",
       inputSchema: z.strictObject({ command: z.string() }),
       outputSchema: z.null(),
       effect: () => Object.freeze({ effect: "read", resource: "test:shell", estimatedCost: 0 }),
@@ -101,7 +99,6 @@ describe("tool broker", () => {
       name: "foo",
       label: "Foo",
       description: "Exercise nearest-name recovery across dot structure",
-      visibility: "codemode_only",
       inputSchema: z.strictObject({}),
       outputSchema: z.null(),
       effect: () => Object.freeze({ effect: "read", resource: "test:foo", estimatedCost: 0 }),
@@ -166,12 +163,59 @@ describe("tool broker", () => {
     expect(first.catalogDigest).toBe(second.catalogDigest);
     expect(first.describe("test.echo")?.revisionId).toBe(second.describe("test.echo")?.revisionId);
   });
+  it("exposes exact Program and Capability provenance through discovery", () => {
+    const program = defineTool({
+      name: "capability.safe-report",
+      label: "Safe report",
+      description: "Build the project report when its Capability is relevant",
+      implementation: Object.freeze({
+        kind: "program" as const,
+        mode: "workflow" as const,
+        projectId: "project-one",
+        name: "safe-report",
+        definitionRevisionId: "revision-program-one",
+      }),
+      exposure: Object.freeze({
+        kind: "capability" as const,
+        capabilityId: "capability-safe-report",
+        capabilityRevisionId: "revision-capability-one",
+      }),
+      inputSchema: z.strictObject({}),
+      outputSchema: z.null(),
+      effect: () => Object.freeze({ effect: "read", resource: "test:report", estimatedCost: 0 }),
+      execute: async () => null,
+    });
+    const broker = createToolBroker({
+      definitions: [program],
+      authority: foregroundAuthority(),
+      permission,
+    });
+
+    expect(broker.describe("capability.safe-report")).toMatchObject({
+      implementation: {
+        kind: "program",
+        mode: "workflow",
+        projectId: "project-one",
+        name: "safe-report",
+        definitionRevisionId: "revision-program-one",
+      },
+      exposure: {
+        kind: "capability",
+        capabilityId: "capability-safe-report",
+        capabilityRevisionId: "revision-capability-one",
+      },
+    });
+    expect(broker.search("safe report")[0]).toMatchObject({
+      name: "capability.safe-report",
+      implementation: { kind: "program", mode: "workflow" },
+      exposure: { kind: "capability" },
+    });
+  });
   it("changes catalog identity when executable behavior identity changes", () => {
     const changed = defineTool({
       name: "test.echo",
       label: "Echo",
       description: "Return the provided value",
-      visibility: "codemode_only",
       identityMaterial: { adapterRevision: "echo-v2" },
       inputSchema: z.strictObject({ value: z.string() }),
       outputSchema: z.strictObject({ value: z.string() }),
@@ -245,7 +289,6 @@ describe("tool broker", () => {
       name: "test.transformed",
       label: "Transformed",
       description: "Exercise one validation boundary",
-      visibility: "codemode_only",
       inputSchema: z.strictObject({
         value: z.string().transform((value) => {
           inputTransforms += 1;
@@ -283,7 +326,6 @@ describe("tool broker", () => {
       name: "test.cancel",
       label: "Cancel",
       description: "Cancel while executing",
-      visibility: "codemode_only",
       inputSchema: z.strictObject({}),
       outputSchema: z.null(),
       effect: () => ({ effect: "read", resource: "test:cancel", estimatedCost: 0 }),
@@ -297,7 +339,6 @@ describe("tool broker", () => {
       name: "test.invalid",
       label: "Invalid",
       description: "Return invalid output",
-      visibility: "codemode_only",
       inputSchema: z.strictObject({}),
       outputSchema: invalidOutputSchema,
       effect: () => ({ effect: "read", resource: "test:invalid", estimatedCost: 0 }),
@@ -308,7 +349,6 @@ describe("tool broker", () => {
       name: "test.oversized",
       label: "Oversized",
       description: "Return oversized output",
-      visibility: "codemode_only",
       inputSchema: z.strictObject({}),
       outputSchema: z.string(),
       effect: () => ({ effect: "read", resource: "test:oversized", estimatedCost: 0 }),
@@ -348,7 +388,6 @@ describe("tool broker", () => {
       name: "test.broken-effect",
       label: "Broken effect",
       description: "Throw while deriving an effect",
-      visibility: "codemode_only",
       inputSchema: z.strictObject({}),
       outputSchema: z.null(),
       effect: () => {
@@ -414,7 +453,6 @@ describe("tool broker", () => {
       name: "test.captured",
       label: "Captured",
       description: "Capture authoring closures",
-      visibility: "codemode_only" as const,
       inputSchema: z.strictObject({ value: z.string() }),
       outputSchema: z.strictObject({ value: z.string() }),
       effect: () => ({ effect: "read" as const, resource: "test:captured", estimatedCost: 0 }),
@@ -501,7 +539,6 @@ describe("tool broker", () => {
         name,
         label: name,
         description: `Return ${name}`,
-        visibility: "codemode_only",
         inputSchema: z.strictObject({}),
         outputSchema: z.string(),
         effect: () => ({ effect: "read", resource: name, estimatedCost: 0 }),
@@ -535,7 +572,6 @@ describe("tool broker", () => {
       name: "test.reported-failure",
       label: "Reported failure",
       description: "Returns a protocol-valid failure result",
-      visibility: "codemode_only",
       inputSchema: z.strictObject({}),
       outputSchema: z.json(),
       effect: () => ({ effect: "read", resource: "test:reported-failure", estimatedCost: 0 }),
@@ -565,7 +601,6 @@ describe("tool broker", () => {
       name: "test.materialized-failure",
       label: "Materialized failure",
       description: "Returns a large protocol failure",
-      visibility: "codemode_only",
       inputSchema: z.strictObject({}),
       outputSchema: z.json(),
       effect: () => ({ effect: "read", resource: "test:materialized-failure", estimatedCost: 0 }),

@@ -289,9 +289,12 @@ function freezeRevision(construction: CapabilityRevisionConstruction): Capabilit
                     effect.kind === "instruction" || effect.kind === "skill"
                       ? { ...effect, material: cloneFileRevision(effect.material) }
                       : {
-                          ...effect,
-                          project: Object.freeze({ ...effect.project }),
-                          definitionRevision: cloneFileRevision(effect.definitionRevision),
+                          kind: "program" as const,
+                          program: Object.freeze({
+                            ...effect.program,
+                            project: Object.freeze({ ...effect.program.project }),
+                            definitionRevision: cloneFileRevision(effect.program.definitionRevision),
+                          }),
                         },
                   ),
                 ),

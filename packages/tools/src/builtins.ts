@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, createWriteStream, type WriteStream } from "node:fs";
+import { createReadStream, createWriteStream, lstatSync, realpathSync, type WriteStream } from "node:fs";
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, matchesGlob, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, matchesGlob, relative, resolve, sep } from "node:path";
 import { createConditionalObject, type JsonValue, sha256 } from "@noesis/domain";
 import { createEffectExecutionFailure } from "@noesis/policy";
 import { z } from "zod";
@@ -33,6 +33,40 @@ const FALLBACK_SEARCH_IGNORED_DIRECTORIES = new Set([
 ]);
 function resolvedPath(cwd: string, path: string): string {
   return resolve(cwd, path);
+}
+function isWithin(root: string, path: string): boolean {
+  const displacement = relative(root, path);
+  return (
+    displacement === "" ||
+    (displacement !== ".." && !displacement.startsWith(`..${sep}`) && !isAbsolute(displacement))
+  );
+}
+function projectPath(root: string, path: string): string {
+  const requested = resolvedPath(root, path);
+  if (!isWithin(root, requested)) throw new Error(`Path is outside the active project: ${path}`);
+  let existing = requested;
+  while (true) {
+    try {
+      lstatSync(existing);
+      break;
+    } catch (error) {
+      if (!(typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT"))
+        throw error;
+      const parent = dirname(existing);
+      if (parent === existing) throw new Error(`Path has no existing project ancestor: ${path}`);
+      existing = parent;
+    }
+  }
+  let canonicalAncestor: string;
+  try {
+    canonicalAncestor = realpathSync(existing);
+  } catch {
+    throw new Error(`Path contains an unresolved symbolic link: ${path}`);
+  }
+  const canonical = resolve(canonicalAncestor, relative(existing, requested));
+  if (!isWithin(root, canonical))
+    throw new Error(`Path escapes the active project through a symbolic link: ${path}`);
+  return canonical;
 }
 interface ProcessResult {
   readonly exitCode: number | null;
@@ -436,8 +470,8 @@ async function readBoundedResponseBody(response: Response): Promise<{
   });
 }
 async function searchWithoutRipgrep(input: {
-  readonly cwd: string;
   readonly path: string;
+  readonly reportedPath: string;
   readonly query: string;
   readonly glob?: string;
   readonly maxMatches: number;
@@ -450,7 +484,7 @@ async function searchWithoutRipgrep(input: {
   }[];
   readonly truncated: boolean;
 }> {
-  const root = resolvedPath(input.cwd, input.path);
+  const root = input.path;
   const matches: {
     path: string;
     line: number;
@@ -487,7 +521,7 @@ async function searchWithoutRipgrep(input: {
       break;
     }
     visitedFiles += 1;
-    const relativePath = relative(input.cwd, file);
+    const relativePath = relative(root, file);
     if (input.glob && !matchesGlob(relativePath, input.glob)) continue;
     const stream = createReadStream(file);
     const decoder = new TextDecoder();
@@ -519,7 +553,7 @@ async function searchWithoutRipgrep(input: {
         return;
       }
       fileMatches.push({
-        path: file,
+        path: resolve(input.reportedPath, relativePath),
         line: lineNumber,
         text: lineTruncated ? `${truncateUtf8(text, FALLBACK_SEARCH_MAX_LINE_BYTES - 3)}...` : text,
       });
@@ -602,6 +636,7 @@ async function searchWithoutRipgrep(input: {
 }
 export interface CreateLocalWorkToolsOptions {
   readonly cwd: string;
+  readonly fileMutationCoordinator?: FileMutationCoordinator;
   readonly searchCommand?: string;
   readonly writeArtifact: (input: { readonly path: string; readonly content: string }) => Promise<{
     readonly path: string;
@@ -613,8 +648,31 @@ export interface CreateLocalWorkToolsOptions {
   }>;
   readonly maxShellOutputArtifactBytes?: number;
 }
+export interface FileMutationCoordinator {
+  readonly run: <Value>(path: string, operation: () => Promise<Value>) => Promise<Value>;
+}
+export function createFileMutationCoordinator(): FileMutationCoordinator {
+  const tails = new Map<string, Promise<void>>();
+  return Object.freeze({
+    run: async <Value>(path: string, operation: () => Promise<Value>): Promise<Value> => {
+      const prior = tails.get(path) ?? Promise.resolve();
+      const running = prior.catch(() => undefined).then(operation);
+      const tail = running.then(
+        () => undefined,
+        () => undefined,
+      );
+      tails.set(path, tail);
+      try {
+        return await running;
+      } finally {
+        if (tails.get(path) === tail) tails.delete(path);
+      }
+    },
+  });
+}
 export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): readonly ToolDefinition[] {
   const cwd = resolve(options.cwd);
+  const projectRoot = realpathSync(cwd);
   const searchCommand = options.searchCommand ?? "rg";
   const shellPath = process.env["SHELL"] ?? "/bin/sh";
   const writeArtifact = options.writeArtifact;
@@ -625,6 +683,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     .positive()
     .max(DEFAULT_MAX_SHELL_OUTPUT_ARTIFACT_BYTES)
     .parse(options.maxShellOutputArtifactBytes ?? DEFAULT_MAX_SHELL_OUTPUT_ARTIFACT_BYTES);
+  const fileMutationCoordinator = options.fileMutationCoordinator ?? createFileMutationCoordinator();
   const identity = (tool: string, extra: JsonValue = null): JsonValue =>
     Object.freeze({
       adapterRevision: "local-work-tools-v1",
@@ -636,7 +695,6 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     name: "files.read",
     label: "Read file",
     description: "Read a UTF-8 file, optionally selecting a bounded line range.",
-    visibility: "codemode_only",
     identityMaterial: identity("files.read"),
     inputSchema: z.strictObject({
       path: pathSchema,
@@ -675,7 +733,6 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     name: "files.list",
     label: "List directory",
     description: "List one directory with entry kinds and stable lexical ordering.",
-    visibility: "codemode_only",
     identityMaterial: identity("files.list"),
     inputSchema: z.strictObject({ path: pathSchema.optional() }),
     outputSchema: z.strictObject({
@@ -689,15 +746,15 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     }),
     effect: ({ path = "." }) => ({
       effect: "read",
-      resource: `directory:${resolvedPath(cwd, path)}`,
+      resource: `directory:${projectPath(projectRoot, path)}`,
       estimatedCost: 0,
     }),
     execute: async ({ path = "." }) => {
-      const absolute = resolvedPath(cwd, path);
+      const absolute = projectPath(projectRoot, path);
       const entries = await readdir(absolute, { withFileTypes: true });
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return {
-        path: absolute,
+        path: resolvedPath(cwd, path),
         entries: entries
           .map((entry) => ({
             name: entry.name,
@@ -717,7 +774,6 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     name: "files.search",
     label: "Search files",
     description: "Search repository text with ripgrep and return bounded cited line matches.",
-    visibility: "codemode_only",
     identityMaterial: identity("files.search", { searchCommand }),
     inputSchema: z.strictObject({
       query: z.string().min(1).max(1000),
@@ -737,10 +793,12 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     }),
     effect: ({ path = "." }) => ({
       effect: "execute",
-      resource: `search:${resolvedPath(cwd, path)}`,
+      resource: `search:${projectPath(projectRoot, path)}`,
       estimatedCost: 0,
     }),
     execute: async ({ query, path = ".", glob, maxMatches = 200 }, context) => {
+      const absolute = projectPath(projectRoot, path);
+      const reportedPath = resolvedPath(cwd, path);
       const args = [
         "--line-number",
         "--color",
@@ -750,7 +808,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
         ...(glob ? ["--glob", glob] : []),
         "--",
         query,
-        path,
+        absolute,
       ];
       let result: ProcessResult;
       try {
@@ -766,8 +824,8 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
           // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           return await searchWithoutRipgrep(
             createConditionalObject({
-              cwd,
-              path,
+              path: absolute,
+              reportedPath,
               query,
             } as const)
               .addOptional(glob ? { glob } : undefined)
@@ -787,7 +845,14 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
         if (!match) return [];
         const [, matchPath, lineNumber, text] = match;
         if (!matchPath || !lineNumber || text === undefined) return [];
-        return [{ path: resolvedPath(cwd, matchPath), line: Number(lineNumber), text }];
+        const canonicalMatchPath = resolvedPath(cwd, matchPath);
+        return [
+          {
+            path: resolve(reportedPath, relative(absolute, canonicalMatchPath)),
+            line: Number(lineNumber),
+            text,
+          },
+        ];
       });
       return { matches, truncated: result.truncated || lines.length > maxMatches };
     },
@@ -795,8 +860,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
   const write = defineTool({
     name: "files.write",
     label: "Write file",
-    description: "Create or replace a UTF-8 file on the user's machine.",
-    visibility: "codemode_only",
+    description: "Create or completely replace a UTF-8 file, creating parent directories by default.",
     identityMaterial: identity("files.write"),
     inputSchema: z.strictObject({
       path: pathSchema,
@@ -810,21 +874,31 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     }),
     effect: ({ path }) => ({
       effect: "write",
-      resource: `file:${resolvedPath(cwd, path)}`,
+      resource: `file:${projectPath(projectRoot, path)}`,
       estimatedCost: 1,
     }),
-    execute: async ({ path, content, createParents = false }) => {
-      const absolute = resolvedPath(cwd, path);
-      if (createParents) await mkdir(dirname(absolute), { recursive: true });
-      await writeFile(absolute, content, "utf8");
-      return { path: absolute, bytes: Buffer.byteLength(content, "utf8"), contentDigest: sha256(content) };
+    execute: async ({ path, content, createParents = true }, context) => {
+      const absolute = projectPath(projectRoot, path);
+      const reportedPath = resolvedPath(cwd, path);
+      return await fileMutationCoordinator.run(absolute, async () => {
+        if (context.signal.aborted)
+          throw createEffectExecutionFailure("cancelled", "File write was cancelled before execution");
+        if (createParents) await mkdir(dirname(absolute), { recursive: true });
+        if (context.signal.aborted)
+          throw createEffectExecutionFailure("cancelled", "File write was cancelled before mutation");
+        await writeFile(absolute, content, "utf8");
+        return {
+          path: reportedPath,
+          bytes: Buffer.byteLength(content, "utf8"),
+          contentDigest: sha256(content),
+        };
+      });
     },
   });
   const edit = defineTool({
     name: "files.replace",
     label: "Replace text",
     description: "Replace an exact text occurrence in a UTF-8 file, rejecting ambiguous edits.",
-    visibility: "codemode_only",
     identityMaterial: identity("files.replace"),
     inputSchema: z.strictObject({
       path: pathSchema,
@@ -842,18 +916,25 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     }),
     effect: ({ path }) => ({
       effect: "write",
-      resource: `file:${resolvedPath(cwd, path)}`,
+      resource: `file:${projectPath(projectRoot, path)}`,
       estimatedCost: 1,
     }),
-    execute: async ({ path, oldText, newText, expectedOccurrences = 1 }) => {
-      const absolute = resolvedPath(cwd, path);
-      const content = await readFile(absolute, "utf8");
-      const occurrences = content.split(oldText).length - 1;
-      if (occurrences !== expectedOccurrences)
-        throw new Error(`Expected ${expectedOccurrences} occurrences but found ${occurrences}`);
-      const updated = content.replaceAll(oldText, newText);
-      await writeFile(absolute, updated, "utf8");
-      return { path: absolute, replacements: occurrences, contentDigest: sha256(updated) };
+    execute: async ({ path, oldText, newText, expectedOccurrences = 1 }, context) => {
+      const absolute = projectPath(projectRoot, path);
+      const reportedPath = resolvedPath(cwd, path);
+      return await fileMutationCoordinator.run(absolute, async () => {
+        if (context.signal.aborted)
+          throw createEffectExecutionFailure("cancelled", "File replacement was cancelled before execution");
+        const content = await readFile(absolute, "utf8");
+        const occurrences = content.split(oldText).length - 1;
+        if (occurrences !== expectedOccurrences)
+          throw new Error(`Expected ${expectedOccurrences} occurrences but found ${occurrences}`);
+        const updated = content.replaceAll(oldText, newText);
+        if (context.signal.aborted)
+          throw createEffectExecutionFailure("cancelled", "File replacement was cancelled before mutation");
+        await writeFile(absolute, updated, "utf8");
+        return { path: reportedPath, replacements: occurrences, contentDigest: sha256(updated) };
+      });
     },
   });
   const shell = defineTool({
@@ -861,7 +942,6 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     label: "Run shell command",
     description:
       "Run a shell command locally with bounded tail output, timeout, and cancellation. A truncated result saves captured output to fullOutputPath for inspection with ordinary file or Unix tools; fullOutputComplete says whether that artifact is complete.",
-    visibility: "codemode_only",
     identityMaterial: identity("shell.run", {
       shellPath,
       importArtifact: importArtifact.toString(),
@@ -973,7 +1053,6 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     name: "web.fetch",
     label: "Fetch URL",
     description: "Fetch an HTTP(S) resource and return bounded response text and headers.",
-    visibility: "codemode_only",
     identityMaterial: identity("web.fetch"),
     inputSchema: z.strictObject({
       url: z.url(),
@@ -1009,7 +1088,6 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     name: "artifacts.write",
     label: "Write artifact",
     description: "Write a durable artifact beneath the Noesis workspace artifact directory.",
-    visibility: "codemode_only",
     identityMaterial: identity("artifacts.write", {
       writeArtifact: writeArtifact.toString(),
     }),
