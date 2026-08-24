@@ -1,6 +1,6 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { createPiSkillLibrary, resolvePiSkillInvocation } from "@noesis/runtime-pi";
 import { afterEach, describe, expect, test } from "vitest";
 import {
@@ -45,11 +45,9 @@ describe("built-in Noesis skill", () => {
       description: EXECUTE_BUILT_IN_SKILL.description,
       content: expect.stringContaining("noesis.search(query)"),
     });
-    expect(execute?.content).toContain("references/sdk.md");
-    const sdk = await readFile(join(dirname(EXECUTE_BUILT_IN_SKILL.filePath), "references/sdk.md"), "utf8");
-    expect(sdk).toContain("agents.run({ systemPrompt?, prompt, tools?, thinkingLevel? })");
-    expect(sdk).toContain("async JavaScript function body");
-    expect(sdk).toContain("exact returned `definitionRevisionId`");
+    expect(execute?.content).toContain("agents.run({ systemPrompt?, prompt, tools?, thinkingLevel? })");
+    expect(execute?.content).toContain("async JavaScript function body");
+    expect(execute?.content).toContain("exact returned `definitionRevisionId`");
     const invocation = resolvePiSkillInvocation("/refine preserve this method", snapshot.skills);
     expect(invocation).toMatchObject({ name: "noesis" });
     expect(invocation?.prompt).toContain("preserve this method");

@@ -13,7 +13,7 @@ Pi's provider-facing tool set is fixed for every foreground turn:
 
 The set is not user-configurable and does not change when Noesis learns or saves executable behavior. Every direct tool is an adapter over the turn's frozen Tool Catalog and canonical Broker. Every other built-in, MCP, Capability, and Program operation is available inside `execute` and is discovered progressively through `noesis.search` and `noesis.describe`.
 
-The direct `execute` descriptor stays small and points to a progressively loaded built-in `execute` skill. That skill teaches Code Mode composition and links to an on-demand SDK reference, including Program authoring. Exact tool call shapes remain in the frozen Tool Catalog.
+The direct `execute` descriptor stays small and points to a progressively loaded, turn-frozen built-in `execute` skill. That skill teaches Code Mode composition, the injected SDK, and Program authoring. Exact tool call shapes remain in the frozen Tool Catalog.
 
 ## Programs
 
