@@ -16,18 +16,8 @@ const MAX_SOURCE_BYTES = 128 * 1024;
 const MAX_STARTER_OUTPUT_CONTRACT_BYTES = 1024;
 const EXECUTE_DESCRIPTION = [
   "Execute JavaScript on the user's machine and compose work tools through the injected SDK.",
-  "Compose the complete related operation in one program; do not wrap one known tool call or split one task across serial execute calls.",
-  'Known starter tools—invoke these directly without search: tools.files.read({ path }); tools.files.write({ path, content }); tools.files.list({ path: "." }); tools.shell.run({ command }); tools.programs.list({}); tools.skills.load({ name }); tools.history.search_sessions({ query }); tools.history.open_session_evidence({ citation: search.fragments[0].citation }).',
-  "For any other tool, return await noesis.search(query), then return await noesis.describe(exactName) to inspect its complete input and output contract.",
-  "Invoke with return await tools.<family>.<operation>(input), or return await noesis.invoke(exactName, input).",
-  "Batch independent calls with Promise.all. Keep intermediate results in code; when collected evidence needs independent judgment, use one agents.run call instead of repeatedly rewriting retrieval queries across foreground rounds.",
-  "Inspect explicit completeness fields before agents.run. Recover required truncated evidence through returned recovery fields or bounded recollection; if saved evidence is itself incomplete, narrow or safely rerun the collection. Never treat omitted output as proof that requested evidence is absent. Prefer several bounded independent calls over one aggregate command whose early output can crowd out later sections.",
-  "For retrieval, one precise hybrid query normally suffices. Select and open the strongest citation in the same program. An empty or irrelevant result means only that this bounded search found no relevant evidence; report that bounded miss instead of cycling through paraphrases.",
-  "For large-session analysis, context is a lazy immutable view of the complete pre-turn session timeline: inspect context.length, take context.slice(start, end), and await view.text() only when raw text is needed. Use await agents.run({ prompt: contextOrViews }) for an isolated query, or add canonical tool names when the subagent needs tools.",
-  "emit(value) and notify(value) show progress to the user but do not return that value to you; use return for the final result that should enter conversation context.",
-  "For reusable behavior, use programs.save with script mode for bounded computation or workflow mode for durable phases, run the exact returned revision with programs.run, then attach it to a Capability for semantic discovery. Do not defer foreground Program creation to reflection.",
-  "Use mcp.servers, mcp.inspect, and noesis.search to discover MCP resources progressively.",
-  "Use store(key, value)/load(key) for codemode-session scratch state.",
+  "Compose related multi-call work in one program.",
+  'Load the `execute` skill with tools.skills.load({ name: "execute" }) for SDK, composition, subagent, and Program guidance.',
 ].join(" ");
 function jsonSchemaLiteral(value: JsonValue): string {
   return JSON.stringify(value) ?? "unknown";

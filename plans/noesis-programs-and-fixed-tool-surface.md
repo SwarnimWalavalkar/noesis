@@ -13,6 +13,8 @@ Pi's provider-facing tool set is fixed for every foreground turn:
 
 The set is not user-configurable and does not change when Noesis learns or saves executable behavior. Every direct tool is an adapter over the turn's frozen Tool Catalog and canonical Broker. Every other built-in, MCP, Capability, and Program operation is available inside `execute` and is discovered progressively through `noesis.search` and `noesis.describe`.
 
+The direct `execute` descriptor stays small and points to a progressively loaded, turn-frozen built-in `execute` skill. That skill teaches Code Mode composition, the injected SDK, and Program authoring. Exact tool call shapes remain in the frozen Tool Catalog.
+
 ## Programs
 
 Program is the one public reusable-execution primitive. Its `mode` selects one of two deliberately distinct runtimes:
@@ -39,7 +41,7 @@ This lets the model recognize that a discovered tool is editable Program behavio
 
 ## Self-improvement
 
-The built-in `noesis` skill, with `/refine` as an alias, teaches this model progressively. A coherent foreground improvement may inspect existing Capabilities, save and verify a Program, and publish one complete Capability decision. Ambient reflection uses the same protected Capability publisher. Subagents may advise but may not publish.
+The built-in `noesis` skill, with `/refine` as an alias, progressively teaches deliberate self-improvement. A coherent foreground improvement may inspect existing Capabilities, use the separate `execute` skill to save and verify a Program, and publish one complete Capability decision. Ambient reflection uses the same protected Capability publisher. Subagents may advise but may not publish.
 
 ## Acceptance
 
