@@ -25,6 +25,7 @@ export interface SlashCommandContext {
 export const HELP_LINES = [
   "/model provider/model · /context · /capabilities",
   "/skills · /scripts · /workflows · /runs · /learning",
+  "/refine [REQUEST] deliberately improves a lasting Noesis behavior",
   "/mcp manages servers, authentication, and discovered capabilities",
   "/skill NAME inspects · /skill:NAME [instructions] invokes command-name collisions",
   "/script NAME · /workflow NAME · /run ID",
@@ -174,7 +175,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
             `Skills · ${String(skills.length)}`,
             ...skills.map(
               (skill) =>
-                `• ${skill.name}${skill.disableModelInvocation ? " · explicit only" : ""}\n  ${skill.description}\n  ${skill.filePath}`,
+                `• ${skill.name}${skill.aliases?.length ? ` · aliases ${skill.aliases.map((alias) => `/${alias}`).join(", ")}` : ""}${skill.disableModelInvocation ? " · explicit only" : ""}\n  ${skill.description}\n  ${skill.filePath}`,
             ),
             "",
             "Install with: noesis skills install SOURCE [--workspace]",

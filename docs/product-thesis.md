@@ -69,9 +69,11 @@ Noesis should collaborate with the user when a problem is unclear or calls for j
 
 ### Changes the user can understand
 
-Noesis may change its own instructions and abilities. It can publish and use a project script or workflow during a foreground turn. Reflection can create a Capability with exact Instruction, Skill, Script, or Workflow effects. Each Capability must connect an observed problem to evidence and a clear future use.
+Noesis may change its own instructions and abilities. It can publish and use a project script or workflow during a foreground turn. Ambient reflection can create a Capability with exact Instruction, Skill, Script, or Workflow effects. The foreground agent can author the same complete Capability decision deliberately while it works with the user, without asking a second reflector to reinterpret it. Each Capability must connect an observed problem to evidence and a clear future use.
 
 Useful changes should not require approval at every step. The user can still inspect, challenge, keep, or reverse them.
+
+The built-in `noesis` skill explains this system progressively when the task calls for it. The user may invoke the same guidance directly with `/refine`; the stable system prompt does not carry the full self-improvement interface on every turn.
 
 ## Product principles
 
@@ -80,7 +82,7 @@ Useful changes should not require approval at every step. The user can still ins
 3. Match the user's intent. An unclear intellectual task should default to collaboration. A clear request for execution should default to direct action. A correction from the user overrides the guess.
 4. Preserve the links among thinking, making, and learning. Keep the artifacts, reasons, questions, criteria, and feedback that let learning change a build or reflection change a decision.
 5. Keep lasting learning specific. Each Capability names the future situation it should improve. It is globally eligible by default, selected only when relevant, and can be narrowed or made always active by the user.
-6. Accept `no_change`. Reflection should run quietly, but it should not create a memory, rule, or ability from every session.
+6. Accept `no_change`. Ambient reflection should run quietly, and deliberate refinement should remain selective; neither should create a memory, rule, or ability merely because it can.
 7. Make changes understandable and reversible. The user can see what changed, why it changed, where it applies, and how to undo it.
 8. Add only what strengthens the main promise. New models, tools, interfaces, and research methods should help the user and agent develop together.
 9. Let real use change the product. Evidence may revise the primary user, interaction patterns, learning reach, continuity choices, and defaults.

@@ -166,11 +166,21 @@ function mergeSkillResources(
   capability: readonly PiSkillResource[],
 ): readonly PiSkillResource[] {
   const merged = new Map(discovered.map((skill) => [skill.name, skill]));
+  const commandOwners = new Map<string, string>();
+  for (const skill of discovered)
+    for (const command of [skill.name, ...(skill.aliases ?? [])]) commandOwners.set(command, skill.name);
   for (const skill of capability) {
     const existing = merged.get(skill.name);
     if (existing && existing.contentDigest !== skill.contentDigest)
       throw new Error(`Capability skill ${skill.name} conflicts with another frozen skill`);
+    if (existing) continue;
+    const commandOwner = commandOwners.get(skill.name);
+    if (commandOwner)
+      throw new Error(
+        `Capability skill ${skill.name} conflicts with an explicit command owned by ${commandOwner}`,
+      );
     merged.set(skill.name, skill);
+    commandOwners.set(skill.name, skill.name);
   }
   return Object.freeze([...merged.values()].sort((left, right) => left.name.localeCompare(right.name)));
 }

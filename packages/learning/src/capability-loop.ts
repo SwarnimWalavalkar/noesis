@@ -3,15 +3,11 @@ import {
   type AtomicCapabilityRegistry,
   capabilityEffectKinds,
   capabilityEffects,
-  validateCapabilityEffects,
 } from "@noesis/capabilities";
 import {
   createConditionalObject,
-  type Capability,
   type CapabilityActivationMode,
   type CapabilityDefinition,
-  type CapabilityEffect,
-  type CapabilityFeedback,
   type CapabilityLifecycleRevision,
   type CapabilityRevisionRef,
   type CapabilityScope,
@@ -28,35 +24,21 @@ import {
 import type { ExactCitation, HistoryPort } from "@noesis/intelligence";
 import type { CapabilityLifecycleStore, NoesisWorkspaceStore } from "@noesis/workspace";
 import { z } from "zod";
+import {
+  CapabilityConsequenceSchema,
+  type CapabilityDecision,
+  CapabilityEffectDraftSchema,
+  type CapabilityProgramLibrary,
+  type CapabilityProposal,
+  CapabilityProposalSchema,
+  type CapabilityPublicationResult,
+  type CapabilityPublisher,
+  CapabilityScopeDecisionSchema,
+  capabilityScopeDecision,
+  createCapabilityPublisher,
+} from "./capability-publisher.ts";
 import type { LearningRoleConfiguration, LearningTurnInput } from "./schemas.ts";
-const CapabilityScopeDecisionSchema = z.enum(["global", "current_project", "current_session"]);
-const CapabilityConsequenceSchema = z.enum([
-  "ordinary",
-  "recovery_control",
-  "credential_export",
-  "irreversible_external",
-]);
-const CapabilityEffectDraftSchema = z.discriminatedUnion("kind", [
-  z.strictObject({
-    kind: z.literal("instruction"),
-    content: z.string().min(1).max(12000),
-  }),
-  z.strictObject({
-    kind: z.literal("skill"),
-    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-    description: z.string().min(1).max(2048),
-    instructions: z.string().min(1).max(32000),
-  }),
-  z.strictObject({
-    kind: z.literal("script"),
-    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-  }),
-  z.strictObject({
-    kind: z.literal("workflow"),
-    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-  }),
-]);
-const CapabilityProposalSchema = z
+const CapabilityReflectionProposalSchema = z
   .strictObject({
     name: z.string().min(1).max(160),
     /** Accepted only for compatibility with controlled responders written before effects-first authoring. */
@@ -88,11 +70,11 @@ const CapabilityGateChangeSchema = z.strictObject({
 });
 export const CapabilityReflectionOutputSchema = z.discriminatedUnion("decision", [
   z.strictObject({ decision: z.literal("no_change"), reason: z.string().min(1).max(2048) }),
-  z.strictObject({ decision: z.literal("create"), proposal: CapabilityProposalSchema }),
+  z.strictObject({ decision: z.literal("create"), proposal: CapabilityReflectionProposalSchema }),
   z.strictObject({
     decision: z.literal("revise"),
     capabilityId: z.string().min(1),
-    proposal: CapabilityProposalSchema,
+    proposal: CapabilityReflectionProposalSchema,
   }),
   z.strictObject({
     decision: z.literal("pause"),
@@ -114,26 +96,13 @@ export const CapabilityReflectionOutputSchema = z.discriminatedUnion("decision",
   }),
 ]);
 export type CapabilityReflectionOutput = Readonly<z.infer<typeof CapabilityReflectionOutputSchema>>;
+export type { CapabilityProgramLibrary } from "./capability-publisher.ts";
 export interface CapabilityLearningTurn {
   readonly turn: LearningTurnInput;
   readonly project: ProjectRef;
   readonly selectedCapabilities: readonly CapabilityRevisionRef[];
 }
-export type CapabilityReflectionResult =
-  | {
-      readonly status: "no_change";
-      readonly reason: string;
-    }
-  | {
-      readonly status: "activated" | "revised" | "pending" | "paused" | "restored" | "binding_changed";
-      readonly capabilityId: string;
-      readonly message: string;
-    }
-  | {
-      readonly status: "stale";
-      readonly capabilityId: string;
-      readonly message: string;
-    };
+export type CapabilityReflectionResult = CapabilityPublicationResult;
 export type CapabilityManagementIntent =
   | {
       readonly type: "pause";
@@ -200,31 +169,9 @@ export interface CreateCapabilityLearningModuleOptions {
   readonly inference: StructuredInferencePort;
   readonly reflector: LearningRoleConfiguration;
   readonly programs?: CapabilityProgramLibrary;
+  readonly publisher?: CapabilityPublisher;
   readonly now?: () => string;
   readonly nextId?: (prefix: string) => string;
-}
-export interface CapabilityProgramLibrary {
-  readonly list: (project: ProjectRef) => Promise<
-    readonly {
-      readonly kind: "script" | "workflow";
-      readonly name: string;
-      readonly description: string;
-      readonly revision: number;
-    }[]
-  >;
-  readonly resolve: (
-    kind: "script" | "workflow",
-    name: string,
-    project: ProjectRef,
-  ) => Promise<
-    | Extract<
-        CapabilityEffect,
-        {
-          readonly kind: "script" | "workflow";
-        }
-      >
-    | undefined
-  >;
 }
 function roleRequest(
   configuration: LearningRoleConfiguration,
@@ -244,51 +191,31 @@ function roleRequest(
     signal,
   });
 }
-function scopeFrom(
-  decision: z.infer<typeof CapabilityScopeDecisionSchema>,
-  input: CapabilityLearningTurn,
-): CapabilityScope {
-  if (decision === "global") return Object.freeze({ kind: "global" });
-  if (decision === "current_project")
-    return Object.freeze({ kind: "project", project: Object.freeze({ ...input.project }) });
-  return Object.freeze({ kind: "session", sessionId: input.turn.sessionId });
-}
-function scopeDecision(scope: CapabilityScope): z.infer<typeof CapabilityScopeDecisionSchema> {
-  if (scope.kind === "global") return "global";
-  if (scope.kind === "project") return "current_project";
-  return "current_session";
-}
-function proposedScope(
-  proposal: z.infer<typeof CapabilityProposalSchema>,
-  input: CapabilityLearningTurn,
-  current?: CapabilityScope,
-): CapabilityScope {
-  const hasProjectProgram = proposalEffects(proposal).some(
-    (effect) => effect.kind === "script" || effect.kind === "workflow",
+function publicationProposal(
+  proposal: z.infer<typeof CapabilityReflectionProposalSchema>,
+): CapabilityProposal {
+  const effects =
+    proposal.effects ??
+    (proposal.instruction
+      ? Object.freeze([{ kind: "instruction" as const, content: proposal.instruction }])
+      : undefined);
+  if (!effects) throw new Error("Capability proposal has no effects");
+  return CapabilityProposalSchema.parse(
+    createConditionalObject({
+      name: proposal.name,
+      description: proposal.description,
+      applicability: proposal.applicability,
+      summary: proposal.summary,
+      rationale: proposal.rationale,
+      anticipatedEffect: proposal.anticipatedEffect,
+      effects,
+      consequence: proposal.consequence,
+      consequenceDescription: proposal.consequenceDescription,
+    } as const)
+      .addOptional(proposal.scope ? { scope: proposal.scope } : undefined)
+      .addOptional(proposal.activationMode ? { activationMode: proposal.activationMode } : undefined)
+      .finish(),
   );
-  if (hasProjectProgram) {
-    if (proposal.scope !== undefined && proposal.scope !== "current_project")
-      throw new Error("Script and workflow Capability effects require current-project scope");
-    return Object.freeze({ kind: "project", project: Object.freeze({ ...input.project }) });
-  }
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return proposal.scope === undefined
-    ? (current ?? Object.freeze({ kind: "global" as const }))
-    : scopeFrom(proposal.scope, input);
-}
-function proposalEffects(
-  proposal: z.infer<typeof CapabilityProposalSchema>,
-): readonly z.infer<typeof CapabilityEffectDraftSchema>[] {
-  if (proposal.effects) return Object.freeze([...proposal.effects]);
-  if (!proposal.instruction) throw new Error("Capability proposal has no effects");
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return Object.freeze([{ kind: "instruction" as const, content: proposal.instruction }]);
-}
-function proposedActivationMode(
-  proposal: z.infer<typeof CapabilityProposalSchema>,
-  current?: CapabilityActivationMode,
-): CapabilityActivationMode {
-  return proposal.activationMode ?? current ?? "relevant";
 }
 const REFLECTOR_MESSAGE_MAX_CHARACTERS = 10000;
 const CURRENT_CAPABILITIES_MAX_CHARACTERS = REFLECTOR_MESSAGE_MAX_CHARACTERS;
@@ -882,14 +809,6 @@ function availableProgramsMessage(programs: Awaited<ReturnType<CapabilityProgram
     omittedCount: programs.length,
   });
 }
-function registryCapability(capability: CapabilityDefinition): Capability {
-  return Object.freeze({
-    capabilityId: capability.capabilityId,
-    name: capability.name,
-    scope: "general",
-    intent: capability.applicability,
-  });
-}
 export function createCapabilityLearningModule(
   options: CreateCapabilityLearningModuleOptions,
 ): CapabilityLearningModule {
@@ -901,201 +820,16 @@ export function createCapabilityLearningModule(
       list: async () => Object.freeze([]),
       resolve: async () => undefined,
     });
-  const compatibilityRouter = async (evidenceRefs: readonly EvidenceRef[]) => {
-    const namespace = "capability_system";
-    const definitionId = "semantic-router-v1";
-    const current = await options.workspace.definitionMetadata.getCurrent(namespace, definitionId);
-    if (current) return current.definitionRevision;
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const publication = await options.workspace.definitionPublications.publish({
-      namespace,
-      definitionId,
-      revision: 1,
-      workingPath: "capabilities/system/semantic-router.json",
-      bytes: new TextEncoder().encode(
-        `${canonicalJson({ strategyId: "semantic-capability-router-v1", scope: "central" })}\n`,
-      ),
-      provenanceRefs: evidenceRefs,
-      activity: Object.freeze({
-        kind: "capability.semantic_router_initialized",
-        actor: Object.freeze({ actorId: "capability-learning", kind: "noesis" as const }),
-        reason: "Compatibility identity for the central semantic Capability router",
-      }),
+  const publisher =
+    options.publisher ??
+    createCapabilityPublisher({
+      workspace: options.workspace,
+      store: options.store,
+      registry: options.registry,
+      programs,
+      now,
+      nextId,
     });
-    if (publication.ok) return publication.value.definitionRevision;
-    const raced = await options.workspace.definitionMetadata.getCurrent(namespace, definitionId);
-    if (!raced) throw new Error(publication.error.message);
-    return raced.definitionRevision;
-  };
-  const authorRevision = async (input: {
-    readonly proposal: z.infer<typeof CapabilityProposalSchema>;
-    readonly capabilityId: string;
-    readonly predecessor?: CapabilityLifecycleRevision;
-    readonly evidenceRefs: readonly EvidenceRef[];
-    readonly project?: ProjectRef;
-  }): Promise<{
-    readonly definition: CapabilityDefinition;
-    readonly revision: CapabilityLifecycleRevision;
-  }> => {
-    const capabilityRevisionId = nextId("capability_revision");
-    const existingDefinition = input.predecessor
-      ? await options.store.getDefinition(input.capabilityId)
-      : undefined;
-    if (input.predecessor && !existingDefinition)
-      throw new Error(`Capability ${input.capabilityId} has a revision but no definition`);
-    const drafts = proposalEffects(input.proposal);
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const definition: CapabilityDefinition = Object.freeze(
-      createConditionalObject({
-        capabilityId: input.capabilityId,
-        name: existingDefinition?.name ?? input.proposal.name,
-      } as const)
-        .addOptional(existingDefinition?.kind ? { kind: existingDefinition.kind } : undefined)
-        .add({
-          description: existingDefinition?.description ?? input.proposal.description,
-          applicability: existingDefinition?.applicability ?? input.proposal.applicability,
-          createdAt: existingDefinition?.createdAt ?? now(),
-        } as const)
-        .finish(),
-    );
-    options.registry.registerCapability(registryCapability(definition));
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const actor = Object.freeze({ actorId: "capability-learning", kind: "noesis" as const });
-    const predecessorEffects = input.predecessor
-      ? capabilityEffects(input.predecessor.revision)
-      : Object.freeze([]);
-    const effects = validateCapabilityEffects(
-      await Promise.all(
-        drafts.map(async (draft, index): Promise<CapabilityEffect> => {
-          if (draft.kind === "instruction") {
-            const instructionIndex = drafts
-              .slice(0, index)
-              .filter((candidate) => candidate.kind === "instruction").length;
-            const predecessor = predecessorEffects.filter((effect) => effect.kind === "instruction")[
-              instructionIndex
-            ];
-            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-            const material = await options.workspace.definitions.recordWorkingDefinition(
-              createConditionalObject({
-                workingPath: `capabilities/${input.capabilityId}/${capabilityRevisionId}/instruction-${String(index + 1)}.md`,
-                bytes: new TextEncoder().encode(`${draft.content.trim()}\n`),
-                actor,
-                reason: input.proposal.rationale,
-                provenanceRefs: input.evidenceRefs,
-              } as const)
-                .addOptional(
-                  predecessor?.kind === "instruction"
-                    ? {
-                        predecessorRevisionId: predecessor.material.revisionId,
-                      }
-                    : undefined,
-                )
-                .finish(),
-            );
-            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-            return Object.freeze({ kind: "instruction" as const, material });
-          }
-          if (draft.kind === "skill") {
-            const predecessor = predecessorEffects.find(
-              (effect) => effect.kind === "skill" && effect.name === draft.name,
-            );
-            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-            const material = await options.workspace.definitions.recordWorkingDefinition(
-              createConditionalObject({
-                workingPath: `capabilities/${input.capabilityId}/${capabilityRevisionId}/skills/${draft.name}/SKILL.md`,
-                bytes: new TextEncoder().encode(`${draft.instructions.trim()}\n`),
-                actor,
-                reason: input.proposal.rationale,
-                provenanceRefs: input.evidenceRefs,
-              } as const)
-                .addOptional(
-                  predecessor?.kind === "skill"
-                    ? {
-                        predecessorRevisionId: predecessor.material.revisionId,
-                      }
-                    : undefined,
-                )
-                .finish(),
-            );
-            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-            return Object.freeze({
-              kind: "skill" as const,
-              name: draft.name,
-              description: draft.description,
-              material,
-            });
-          }
-          if (!input.project)
-            throw new Error(`Capability ${draft.kind} ${draft.name} has no project authority`);
-          const resolved = await programs.resolve(draft.kind, draft.name, input.project);
-          if (!resolved) throw new Error(`Unknown saved ${draft.kind} ${draft.name}`);
-          return resolved;
-        }),
-      ),
-    );
-    const router = await compatibilityRouter(input.evidenceRefs);
-    const executesPrograms = effects.some((effect) => effect.kind === "script" || effect.kind === "workflow");
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const reference = options.registry.constructRevision(
-      createConditionalObject({
-        definitionState: "candidate",
-        capabilityRevisionId,
-        capabilityId: input.capabilityId,
-      } as const)
-        .addOptional(
-          input.predecessor
-            ? {
-                predecessorRevisionId: input.predecessor.revision.capabilityRevisionId,
-              }
-            : undefined,
-        )
-        .add({
-          effects,
-          promptModules: Object.freeze(
-            effects.flatMap((effect) => (effect.kind === "instruction" ? [effect.material] : [])),
-          ),
-          skills: Object.freeze([]),
-          tools: Object.freeze([]),
-          routerRevision: router,
-          routerStrategyId: "semantic-capability-router-v1",
-          activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
-          permissionManifest: Object.freeze({
-            effects: Object.freeze(executesPrograms ? ["execute"] : []),
-            resourcePatterns: Object.freeze(
-              effects.flatMap((effect) =>
-                effect.kind === "script"
-                  ? [`script:${effect.project.projectId}:${effect.name}:run`, "scripts:*"]
-                  : effect.kind === "workflow"
-                    ? [`workflow:${effect.project.projectId}:${effect.name}:run`, "workflows:*"]
-                    : [],
-              ),
-            ),
-            credentialRefs: Object.freeze([]),
-          }),
-          evidenceRefs: input.evidenceRefs,
-          sourceEvaluationDefinitions: Object.freeze([]),
-          requestedPermissionDelta: Object.freeze({
-            addedEffects: Object.freeze([]),
-            widenedResources: Object.freeze([]),
-            addedCredentialRefs: Object.freeze([]),
-          }),
-        } as const)
-        .finish(),
-    );
-    const revision = options.registry.getRevision(reference);
-    if (!revision) throw new Error(`Capability registry lost authored revision ${capabilityRevisionId}`);
-    return Object.freeze({
-      definition,
-      revision: Object.freeze({
-        revision,
-        reference,
-        summary: input.proposal.summary,
-        rationale: input.proposal.rationale,
-        anticipatedEffect: input.proposal.anticipatedEffect,
-        createdAt: now(),
-      }),
-    });
-  };
   const reflect = async (
     input: CapabilityLearningTurn & {
       readonly feedback?: string;
@@ -1207,185 +941,54 @@ export function createCapabilityLearningModule(
     );
     signal.throwIfAborted();
     const decision = inferred.value;
-    const decisionEvidence = Object.freeze([...input.turn.evidenceRefs]);
-    const decisionFeedback = (
-      binding: import("@noesis/domain").CapabilityBinding,
-      interpretation: string,
-      disposition: CapabilityFeedback["disposition"],
-    ): CapabilityFeedback =>
-      Object.freeze({
-        feedbackId: nextId("capability_feedback"),
-        capabilityId: binding.capabilityId,
-        revision: binding.revision,
-        evidenceRefs: decisionEvidence,
-        interpretation,
-        disposition,
-        createdAt: now(),
-      });
-    if (decision.decision === "no_change")
-      return Object.freeze({ status: "no_change", reason: decision.reason });
-    if (decision.decision === "pause") {
-      const binding = await options.store.getBinding(decision.capabilityId);
-      if (!binding) throw new Error(`Unknown capability ${decision.capabilityId}`);
-      signal.throwIfAborted();
-      const updated = await options.store.updateBindingWithFeedback({
-        capabilityId: binding.capabilityId,
-        expectedRevisionNumber: binding.revisionNumber,
-        state: "paused",
-        feedback: decisionFeedback(binding, decision.reason, "correction"),
-      });
-      return Object.freeze({
-        status: updated.status === "stale" ? "stale" : "paused",
-        capabilityId: binding.capabilityId,
-        message: decision.reason,
-      });
-    }
-    if (decision.decision === "restore") {
-      const [binding, revisions] = await Promise.all([
-        options.store.getBinding(decision.capabilityId),
-        options.store.listRevisions(decision.capabilityId),
-      ]);
-      if (!binding) throw new Error(`Unknown capability ${decision.capabilityId}`);
-      const target = revisions.find(
-        (revision) => revision.reference.capabilityRevisionId === decision.capabilityRevisionId,
-      );
-      if (!target) throw new Error(`Unknown restorable revision ${decision.capabilityRevisionId}`);
-      signal.throwIfAborted();
-      const updated = await options.store.updateBindingWithFeedback({
-        capabilityId: binding.capabilityId,
-        expectedRevisionNumber: binding.revisionNumber,
-        revision: target.reference,
-        state: "active",
-        feedback: decisionFeedback(binding, decision.reason, "restore_request"),
-      });
-      return Object.freeze({
-        status: updated.status === "stale" ? "stale" : "restored",
-        capabilityId: binding.capabilityId,
-        message: decision.reason,
-      });
-    }
-    if (decision.decision === "change_binding") {
-      const binding = await options.store.getBinding(decision.capabilityId);
-      if (!binding) throw new Error(`Unknown capability ${decision.capabilityId}`);
-      signal.throwIfAborted();
-      const updated = await options.store.updateBindingWithFeedback({
-        capabilityId: binding.capabilityId,
-        expectedRevisionNumber: binding.revisionNumber,
-        scope: scopeFrom(decision.scope, input),
-        activationMode: decision.activationMode,
-        feedback: decisionFeedback(
-          binding,
-          decision.reason,
-          decision.activationMode !== binding.activationMode ? "activation_change" : "scope_change",
-        ),
-      });
-      return Object.freeze({
-        status: updated.status === "stale" ? "stale" : "binding_changed",
-        capabilityId: binding.capabilityId,
-        message: decision.reason,
-      });
-    }
-    const proposal = decision.proposal;
-    const evidenceRefs = citedEvidence(proposal.evidenceCitationIndexes, citations);
-    const capabilityId = decision.decision === "create" ? nextId("capability") : decision.capabilityId;
-    const binding = await options.store.getBinding(capabilityId);
-    const predecessor = binding ? await options.store.getRevision(binding.revision) : undefined;
-    if (decision.decision === "revise" && (!binding || !predecessor))
-      throw new Error(`Cannot revise unknown capability ${capabilityId}`);
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const authored = await authorRevision(
-      createConditionalObject({
-        proposal,
-        capabilityId,
-        evidenceRefs,
-        project: input.project,
-      } as const)
-        .addOptional(predecessor ? { predecessor } : undefined)
-        .finish(),
+    const bindingByCapabilityId = new Map(
+      bindings.map((binding) => [binding.capabilityId, binding] as const),
     );
-    const requiresGate = proposal.consequence !== "ordinary";
-    const nextScope = proposedScope(proposal, input, binding?.scope);
-    const nextActivationMode = proposedActivationMode(proposal, binding?.activationMode);
-    if (!binding) {
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      const gate = requiresGate
-        ? Object.freeze({
-            gateRequestId: nextId("capability_gate"),
-            capabilityId,
-            revision: authored.revision.reference,
-            expectedBindingRevision: 1,
-            proposedScope: nextScope,
-            proposedActivationMode: nextActivationMode,
-            consequence: proposal.consequenceDescription,
-            status: "pending" as const,
-            createdAt: now(),
-          })
-        : undefined;
-      signal.throwIfAborted();
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      await options.store.create(
-        createConditionalObject({
-          definition: authored.definition,
-          revision: authored.revision,
-          binding: Object.freeze({
-            capabilityId,
-            revision: authored.revision.reference,
-            scope: nextScope,
-            activationMode: nextActivationMode,
-            state: requiresGate ? "paused" : "active",
-          }),
-        } as const)
-          .addOptional(gate ? { gate } : undefined)
-          .finish(),
-      );
-      return Object.freeze({
-        status: requiresGate ? "pending" : "activated",
-        capabilityId,
-        message: authored.revision.summary,
-      });
-    }
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const feedback = Object.freeze({
-      feedbackId: nextId("capability_feedback"),
-      capabilityId,
-      revision: binding.revision,
-      evidenceRefs,
-      interpretation: input.feedback ?? input.turn.correction ?? proposal.rationale,
-      disposition: "correction" as const,
-      createdAt: now(),
-    }) satisfies CapabilityFeedback;
-    if (requiresGate) {
-      signal.throwIfAborted();
-      await options.store.stageGatedRevision({
-        revision: authored.revision,
-        feedback,
-        gate: Object.freeze({
-          gateRequestId: nextId("capability_gate"),
-          capabilityId,
-          revision: authored.revision.reference,
-          expectedBindingRevision: binding.revisionNumber,
-          proposedScope: nextScope,
-          proposedActivationMode: nextActivationMode,
-          consequence: proposal.consequenceDescription,
-          status: "pending",
-          createdAt: now(),
-        }),
-      });
-      return Object.freeze({ status: "pending", capabilityId, message: authored.revision.summary });
-    }
-    signal.throwIfAborted();
-    const updated = await options.store.applyRevision({
-      revision: authored.revision,
-      feedback,
-      expectedBindingRevision: binding.revisionNumber,
-      scope: nextScope,
-      activationMode: nextActivationMode,
-    });
-    return Object.freeze({
-      status: updated.status === "stale" ? "stale" : "revised",
-      capabilityId,
-      message: authored.revision.summary,
-    });
+    const existingDecision = (capabilityId: string): { readonly expectedBindingRevision: number } => {
+      const binding = bindingByCapabilityId.get(capabilityId);
+      if (!binding) throw new Error(`Unknown capability ${capabilityId}`);
+      return Object.freeze({ expectedBindingRevision: binding.revisionNumber });
+    };
+    const publicationDecision: CapabilityDecision =
+      decision.decision === "no_change"
+        ? decision
+        : decision.decision === "create"
+          ? Object.freeze({
+              decision: "create" as const,
+              proposal: publicationProposal(decision.proposal),
+            })
+          : decision.decision === "revise"
+            ? Object.freeze({
+                decision: "revise" as const,
+                capabilityId: decision.capabilityId,
+                ...existingDecision(decision.capabilityId),
+                proposal: publicationProposal(decision.proposal),
+              })
+            : Object.freeze({
+                ...decision,
+                ...existingDecision(decision.capabilityId),
+              });
+    const proposal =
+      decision.decision === "create" || decision.decision === "revise" ? decision.proposal : undefined;
+    const evidenceRefs = proposal
+      ? citedEvidence(proposal.evidenceCitationIndexes, citations)
+      : input.turn.evidenceRefs;
+    const interpretation =
+      input.feedback ??
+      input.turn.correction ??
+      proposal?.rationale ??
+      ("reason" in decision ? decision.reason : "Capability decision");
+    return await publisher.publish(
+      publicationDecision,
+      {
+        project: input.project,
+        sessionId: input.turn.sessionId,
+        evidenceRefs,
+        actor: Object.freeze({ actorId: "automatic-learning-organ", kind: "noesis" }),
+        interpretation,
+      },
+      signal,
+    );
   };
   const manage: CapabilityLearningModule["manage"] = async (intent, signal) => {
     signal.throwIfAborted();
@@ -1454,7 +1057,7 @@ export function createCapabilityLearningModule(
       );
       signal.throwIfAborted();
       const changed = inferred.value;
-      const proposal: z.infer<typeof CapabilityProposalSchema> = Object.freeze({
+      const proposal = CapabilityProposalSchema.parse({
         name: definition.name,
         description: definition.description,
         applicability: definition.applicability,
@@ -1462,56 +1065,26 @@ export function createCapabilityLearningModule(
         rationale: changed.rationale,
         anticipatedEffect: changed.anticipatedEffect,
         effects: changed.effects,
-        scope: scopeDecision(gate.proposedScope),
+        scope: capabilityScopeDecision(gate.proposedScope),
         activationMode: gate.proposedActivationMode,
         consequence: changed.consequence,
         consequenceDescription: changed.consequenceDescription,
-        evidenceCitationIndexes: [0],
       });
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      const authored = await authorRevision(
-        createConditionalObject({
+      return await publisher.replacePendingGate(
+        {
+          gateRequestId: gate.gateRequestId,
           proposal,
-          capabilityId: gate.capabilityId,
-          predecessor,
-          evidenceRefs: predecessor.revision.evidenceRefs,
+          instruction: intent.instruction,
+        },
+        createConditionalObject({
+          actor: Object.freeze({ actorId: "automatic-learning-organ", kind: "noesis" as const }),
         } as const)
           .addOptional(
             gate.proposedScope.kind === "project" ? { project: gate.proposedScope.project } : undefined,
           )
           .finish(),
+        signal,
       );
-      signal.throwIfAborted();
-      await options.store.stageGatedRevision({
-        revision: authored.revision,
-        feedback: Object.freeze({
-          feedbackId: nextId("capability_feedback"),
-          capabilityId: gate.capabilityId,
-          revision: binding.revision,
-          evidenceRefs: predecessor.revision.evidenceRefs,
-          interpretation: intent.instruction,
-          disposition: "correction",
-          createdAt: now(),
-        }),
-        supersedeGateRequestId: gate.gateRequestId,
-        gate: Object.freeze({
-          gateRequestId: nextId("capability_gate"),
-          capabilityId: gate.capabilityId,
-          revision: authored.revision.reference,
-          expectedBindingRevision: binding.revisionNumber,
-          proposedScope: gate.proposedScope,
-          proposedActivationMode: gate.proposedActivationMode,
-          consequence: changed.consequenceDescription,
-          status: "pending",
-          instruction: intent.instruction,
-          createdAt: now(),
-        }),
-      });
-      return Object.freeze({
-        status: "pending",
-        capabilityId: gate.capabilityId,
-        message: authored.revision.summary,
-      });
     }
     const binding = await options.store.getBinding(intent.capabilityId);
     if (!binding) throw new Error(`Unknown capability ${intent.capabilityId}`);

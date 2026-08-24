@@ -17,7 +17,8 @@ function actionEvidence(evidence: JsonValue, authority: JsonValue): JsonValue {
 }
 
 /**
- * Resolve an explicit `/name instructions` (or Pi-compatible `/skill:name instructions`)
+ * Resolve an explicit `/name instructions`, a declared alias, or Pi-compatible
+ * `/skill:name instructions`
  * against the exact skill snapshot already admitted for this turn.
  */
 export function resolvePiSkillInvocation(
@@ -29,7 +30,9 @@ export function resolvePiSkillInvocation(
   const command = prompt.slice(1, separator < 0 ? undefined : separator);
   const name = command.startsWith("skill:") ? command.slice("skill:".length) : command;
   if (!name) return undefined;
-  const skill = skills.find((candidate) => candidate.name === name);
+  const skill = skills.find(
+    (candidate) => candidate.name === name || candidate.aliases?.includes(name) === true,
+  );
   if (!skill) return undefined;
   const additionalInstructions = separator < 0 ? undefined : prompt.slice(separator).trimStart();
   const piSkill: Skill = {

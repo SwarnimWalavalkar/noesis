@@ -177,6 +177,28 @@ const NESTED_SUMMARIZERS = {
     const name = stringField(input, "name");
     return name ? { subject: name } : {};
   },
+  "capabilities.inspect": (input, output) => {
+    const view = stringField(input, "view");
+    const capabilityId = stringField(input, "capabilityId");
+    const total = numberField(output, "total");
+    return createConditionalObject({} as const)
+      .addOptional(view ? { subject: capabilityId ? `${view} · ${capabilityId}` : view } : undefined)
+      .addOptional(
+        !(total === undefined) ? { outcome: formatCount(total, "Capability", "Capabilities") } : undefined,
+      )
+      .finish();
+  },
+  "capabilities.refine": (input, output) => {
+    const decision = stringField(input, "decision");
+    const capabilityId = stringField(output, "capabilityId");
+    const status = stringField(output, "status");
+    return createConditionalObject({} as const)
+      .addOptional(
+        decision ? { subject: capabilityId ? `${decision} · ${capabilityId}` : decision } : undefined,
+      )
+      .addOptional(status ? { outcome: status } : undefined)
+      .finish();
+  },
   inspect_self: (input, output) => {
     const section = stringField(input, "section") ?? "overview";
     const presentation = presentActionPayload("inspect_self", output);

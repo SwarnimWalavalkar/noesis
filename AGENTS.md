@@ -10,6 +10,7 @@
 - Run reflection ambiently after every settled foreground turn, including failed and aborted work. `no_change` is a valid result.
 - Keep every adaptation inspectable, contestable, and revertible. Normal workflows stay conversational instead of becoming approval dialogs.
 - An explicit foreground task may publish a project-local script or workflow and use it immediately through `execute` under the current authority. Do not force this path through reflection or evaluation. Reflection observes the result; ambient learning may author instruction and skill effects or attach an exact already-saved project script or workflow to a Capability, but it does not create a parallel executable definition.
+- The foreground agent may deliberately author the same complete Capability decision as ambient reflection. Both paths use one protected publisher; the runtime supplies authoritative foreground evidence and binding versions and does not reinterpret the decision with another model call. Keep the operational guidance in the progressively disclosed built-in `noesis` skill, with `/refine` as an alias, instead of expanding the base system prompt. Subagents may advise but may not publish Capability changes.
 - Generated content may author exact Capability materials. Credential export, recovery and audit control, and irreversible external actions without foreground user intent remain behind the small capability gate.
 - Keep durable product doctrine under `docs/`. Keep implementation plans under `plans/`.
 
@@ -34,7 +35,7 @@
 
 ## Protected control plane
 
-- Reflection may create or revise an exact Capability and activate ordinary revisions immediately. Explicit foreground publication of a project-local script or workflow remains an independent direct path.
+- Reflection or the foreground agent may create or revise an exact Capability and activate ordinary revisions immediately through the same protected publisher. Explicit foreground publication of a project-local script or workflow remains an independent direct path.
 - Recovery and audit control, credential export, and irreversible external actions without foreground user intent require an explicit approve, deny, or change decision. Workspace integrity and truthful rollback remain protected code.
 - All side effects and protected promotion, rollback, and scheduling transitions go through `AuthorityBoundary` and `EffectGateway`. Ordinary callers never install grants or mint receipts.
 - Reserve grant use and cost durably in authoritative operational state before execution. Rehydrate reservations and completions from SQLite and fail closed when a reservation has no unambiguous outcome.

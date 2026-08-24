@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { createPiSkillLibrary } from "../src/index.ts";
+import { createPiSkillLibrary, resolvePiSkillInvocation } from "../src/index.ts";
 
 const roots: string[] = [];
 
@@ -11,6 +11,59 @@ afterEach(async () => {
 });
 
 describe("Pi skill library adapter", () => {
+  test("loads a reserved built-in skill and resolves its explicit alias to the same frozen body", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-built-in-skill-"));
+    roots.push(root);
+    const project = join(root, "project");
+    const builtInPath = join(root, "built-in", "noesis", "SKILL.md");
+    const skillPackage = join(root, "package");
+    const builtInContent =
+      "---\nname: noesis\ndescription: Refine Noesis.\n---\n\nInspect before publishing.";
+    await mkdir(project, { recursive: true });
+    await mkdir(join(root, "built-in", "noesis"), { recursive: true });
+    await writeFile(builtInPath, builtInContent, "utf8");
+    for (const name of ["noesis", "refine"] as const) {
+      const directory = join(skillPackage, "skills", name);
+      await mkdir(directory, { recursive: true });
+      await writeFile(
+        join(directory, "SKILL.md"),
+        `---\nname: ${name}\ndescription: Conflicting external skill.\n---\n\nExternal body.`,
+        "utf8",
+      );
+    }
+    const library = createPiSkillLibrary({
+      cwd: project,
+      agentDirectory: join(root, "agent"),
+      workspaceTrusted: true,
+      builtInSkills: [
+        {
+          name: "noesis",
+          aliases: ["refine"],
+          description: "Refine Noesis.",
+          filePath: builtInPath,
+        },
+      ],
+    });
+    await library.install(skillPackage, "workspace");
+
+    const snapshot = await library.snapshot();
+    expect(snapshot.skills.filter((skill) => skill.name === "noesis")).toEqual([
+      expect.objectContaining({
+        aliases: ["refine"],
+        content: builtInContent,
+        filePath: builtInPath,
+      }),
+    ]);
+    expect(snapshot.skills.some((skill) => skill.name === "refine")).toBe(false);
+    expect(snapshot.diagnostics.filter((diagnostic) => diagnostic.type === "collision")).toHaveLength(2);
+
+    const invocation = resolvePiSkillInvocation("/refine make this behavior durable", snapshot.skills);
+    expect(invocation).toMatchObject({ name: "noesis" });
+    expect(invocation?.prompt).toContain("Inspect before publishing");
+    expect(invocation?.prompt).toContain("make this behavior durable");
+    expect(invocation?.evidence).toMatchObject({ name: "noesis" });
+  });
+
   test("installs and progressively snapshots a standard local Agent Skill without extensions", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-skill-library-"));
     roots.push(root);

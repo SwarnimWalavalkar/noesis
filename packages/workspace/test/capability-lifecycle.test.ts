@@ -301,7 +301,28 @@ describe("Capability lifecycle store", () => {
       },
     });
     expect(await workspace.capabilities.listPendingGates()).toEqual([]);
+    expect(await workspace.capabilities.listGates(binding.capabilityId)).toMatchObject([
+      { gateRequestId: "gate-1", status: "approved" },
+    ]);
     expect(await workspace.capabilities.listRevisions(binding.capabilityId)).toEqual([first, second]);
+    const newestRevisionPage = await workspace.capabilities.listRevisionPage({
+      capabilityId: binding.capabilityId,
+      limit: 1,
+    });
+    expect(newestRevisionPage.items).toEqual([second]);
+    if (!newestRevisionPage.nextCursor) throw new Error("Expected a revision continuation cursor");
+    await expect(
+      workspace.capabilities.listRevisionPage({
+        capabilityId: binding.capabilityId,
+        limit: 1,
+        after: newestRevisionPage.nextCursor,
+      }),
+    ).resolves.toEqual({ items: [first] });
+    await expect(workspace.capabilities.countLifecycle(binding.capabilityId)).resolves.toEqual({
+      revisions: 2,
+      feedback: 1,
+      gates: 1,
+    });
     expect(await workspace.capabilities.getDefinitions([binding.capabilityId])).toEqual([
       await workspace.capabilities.getDefinition(binding.capabilityId),
     ]);
@@ -411,7 +432,7 @@ describe("Capability lifecycle store", () => {
           createdAt: "2026-08-18T05:45:00.000Z",
         }),
       }),
-    ).rejects.toThrow("cannot supersede a request for a stale binding");
+    ).resolves.toMatchObject({ status: "stale", binding: { revisionNumber: 4 } });
     expect(await workspace.capabilities.getGate("stale-gate")).toMatchObject({ status: "pending" });
     expect(await workspace.capabilities.getGate("gate-after-stale")).toBeUndefined();
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.

@@ -17,6 +17,7 @@ export const stopVisibleInteraction = (turnId?: string): TuiInteractionCommand =
 
 export interface TuiSkillSummary {
   readonly name: string;
+  readonly aliases?: readonly string[];
   readonly description: string;
   readonly filePath: string;
   readonly contentDigest: string;

@@ -1052,6 +1052,22 @@ export interface NoesisWorkspaceStore extends WorkspaceStore {
   readonly getArtifactMetadata: (artifactId: string) => Promise<ArtifactFileRef | undefined>;
 }
 
+export interface CapabilityLifecyclePageCursor {
+  readonly createdAt: string;
+  readonly id: string;
+}
+
+export interface CapabilityLifecyclePage<Value> {
+  readonly items: readonly Value[];
+  readonly nextCursor?: CapabilityLifecyclePageCursor;
+}
+
+export interface CapabilityLifecycleCounts {
+  readonly revisions: number;
+  readonly feedback: number;
+  readonly gates: number;
+}
+
 export interface CapabilityLifecycleStore {
   readonly create: (request: {
     readonly definition: import("@noesis/domain").CapabilityDefinition;
@@ -1069,10 +1085,19 @@ export interface CapabilityLifecycleStore {
   readonly getRevision: (
     reference: import("@noesis/domain").CapabilityRevisionRef,
   ) => Promise<import("@noesis/domain").CapabilityLifecycleRevision | undefined>;
+  readonly getRevisionById: (
+    capabilityId: string,
+    capabilityRevisionId: string,
+  ) => Promise<import("@noesis/domain").CapabilityLifecycleRevision | undefined>;
   readonly listRevisions: (
     capabilityId: string,
     request?: { readonly limit: number },
   ) => Promise<readonly import("@noesis/domain").CapabilityLifecycleRevision[]>;
+  readonly listRevisionPage: (request: {
+    readonly capabilityId: string;
+    readonly after?: CapabilityLifecyclePageCursor;
+    readonly limit: number;
+  }) => Promise<CapabilityLifecyclePage<import("@noesis/domain").CapabilityLifecycleRevision>>;
   readonly addRevision: (
     revision: import("@noesis/domain").CapabilityLifecycleRevision,
   ) => Promise<import("@noesis/domain").CapabilityLifecycleRevision>;
@@ -1121,12 +1146,26 @@ export interface CapabilityLifecycleStore {
     capabilityId: string,
     request?: { readonly limit: number },
   ) => Promise<readonly import("@noesis/domain").CapabilityFeedback[]>;
+  readonly listFeedbackPage: (request: {
+    readonly capabilityId: string;
+    readonly after?: CapabilityLifecyclePageCursor;
+    readonly limit: number;
+  }) => Promise<CapabilityLifecyclePage<import("@noesis/domain").CapabilityFeedback>>;
   readonly stageGatedRevision: (request: {
     readonly revision: import("@noesis/domain").CapabilityLifecycleRevision;
     readonly feedback?: import("@noesis/domain").CapabilityFeedback;
     readonly gate: import("@noesis/domain").CapabilityGateRequest;
     readonly supersedeGateRequestId?: string;
-  }) => Promise<import("@noesis/domain").CapabilityGateRequest>;
+  }) => Promise<
+    | {
+        readonly status: "staged";
+        readonly gate: import("@noesis/domain").CapabilityGateRequest;
+      }
+    | {
+        readonly status: "stale";
+        readonly binding: import("@noesis/domain").CapabilityBinding;
+      }
+  >;
   readonly applyRevision: (request: {
     readonly revision: import("@noesis/domain").CapabilityLifecycleRevision;
     readonly feedback: import("@noesis/domain").CapabilityFeedback;
@@ -1148,6 +1187,15 @@ export interface CapabilityLifecycleStore {
     readonly sessionId: string;
     readonly limit: number;
   }) => Promise<readonly import("@noesis/domain").CapabilityGateRequest[]>;
+  readonly listGates: (
+    capabilityId: string,
+  ) => Promise<readonly import("@noesis/domain").CapabilityGateRequest[]>;
+  readonly listGatePage: (request: {
+    readonly capabilityId: string;
+    readonly after?: CapabilityLifecyclePageCursor;
+    readonly limit: number;
+  }) => Promise<CapabilityLifecyclePage<import("@noesis/domain").CapabilityGateRequest>>;
+  readonly countLifecycle: (capabilityId: string) => Promise<CapabilityLifecycleCounts>;
   readonly decideGate: (request: {
     readonly gateRequestId: string;
     readonly decision: "approve" | "deny";

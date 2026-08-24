@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
 const pending = new Map();
+const successfulCallIds = new Set();
 let sequence = 0;
 const MAX_SDK_INPUT_BYTES = 256 * 1024;
 const MAX_STORE_VALUE_BYTES = 64 * 1024;
@@ -70,15 +71,33 @@ function jsonSafe(value) {
 }
 function delegate(kind, payload) {
   const requestId = `sdk_${++sequence}`;
-  return new Promise((resolve, reject) => {
+  const result = new Promise((resolve, reject) => {
     pending.set(requestId, { resolve, reject });
     try {
       const safePayload = boundedJsonSafe(payload, MAX_SDK_INPUT_BYTES, "Codemode SDK request");
-      send({ type: "sdk-call", requestId, kind, ...safePayload });
+      send({
+        type: "sdk-call",
+        requestId,
+        kind,
+        causallyPriorCallIds: [...successfulCallIds],
+        ...safePayload,
+      });
     } catch (error) {
       pending.delete(requestId);
       reject(error);
     }
+  });
+  const consume = () =>
+    result.then(({ value, callId }) => {
+      successfulCallIds.add(callId);
+      return value;
+    });
+  return Object.freeze({
+    // oxlint-disable-next-line unicorn/no-thenable -- awaiting is the observation boundary we must track.
+    then: (onFulfilled, onRejected) => consume().then(onFulfilled, onRejected),
+    catch: (onRejected) => consume().catch(onRejected),
+    finally: (onFinally) => consume().finally(onFinally),
+    [Symbol.toStringTag]: "Promise",
   });
 }
 const toolNamespaces = new Map();
@@ -94,8 +113,8 @@ const tools = new Proxy(
         {
           get(_namespaceTarget, operation) {
             if (typeof operation !== "string") return undefined;
-            return async (input = {}) =>
-              await delegate("invoke", {
+            return (input = {}) =>
+              delegate("invoke", {
                 name: `${family}.${operation}`,
                 input,
               });
@@ -108,8 +127,8 @@ const tools = new Proxy(
   },
 );
 const noesis = Object.freeze({
-  search: async (query, limit) =>
-    await delegate(
+  search: (query, limit) =>
+    delegate(
       "search",
       createConditionalObject({
         query: String(query),
@@ -117,9 +136,9 @@ const noesis = Object.freeze({
         .addOptional(!(limit === undefined) ? { limit } : undefined)
         .finish(),
     ),
-  describe: async (name) => await delegate("describe", { name: String(name) }),
-  invoke: async (name, input = {}) =>
-    await delegate("invoke", {
+  describe: (name) => delegate("describe", { name: String(name) }),
+  invoke: (name, input = {}) =>
+    delegate("invoke", {
       name: String(name),
       input,
     }),
@@ -206,8 +225,9 @@ process.on("message", async (message) => {
     const waiter = pending.get(message.requestId);
     if (!waiter) return;
     pending.delete(message.requestId);
-    if (message.ok) waiter.resolve(message.value);
-    else waiter.reject(new Error(typeof message.error === "string" ? message.error : "SDK call failed"));
+    if (message.ok) {
+      waiter.resolve({ value: message.value, callId: message.callId });
+    } else waiter.reject(new Error(typeof message.error === "string" ? message.error : "SDK call failed"));
     return;
   }
   if (message.type !== "run" || typeof message.source !== "string") return;
@@ -242,10 +262,10 @@ process.on("message", async (message) => {
   const load = (key) => sessionStore.get(String(key));
   const context = createContextView(createContextDocument(message.contextDocument));
   const agents = Object.freeze({
-    run: async (intent) => {
+    run: (intent) => {
       if (!intent || typeof intent !== "object" || Array.isArray(intent))
         throw new TypeError("agents.run requires an intent object");
-      return await delegate("invoke", {
+      return delegate("invoke", {
         name: "agents.run",
         input: {
           ...intent,

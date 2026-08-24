@@ -10,6 +10,7 @@ import {
   type ToolInvocationRecord,
   type ToolInvocationRecorder,
   type ToolInvocationResult,
+  type ToolExecutionContext,
 } from "@noesis/tools";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -60,6 +61,7 @@ function runtime(
     readonly doubleProgress?: JsonValue;
     readonly overrideInvocationResult?: ToolInvocationResult;
     readonly runAgent?: (input: ControlledAgentRunInput) => Promise<string>;
+    readonly observeContext?: (context: ToolExecutionContext) => void;
   } = {},
 ) {
   const runAgent = options.runAgent;
@@ -82,6 +84,7 @@ function runtime(
           outputSchema: z.strictObject({ value: z.number() }),
           effect: () => ({ effect: "read", resource: "math:double", estimatedCost: 0 }),
           execute: async ({ value }, context) => {
+            options.observeContext?.(context);
             await options.beforeDouble?.();
             if (options.doubleProgress !== undefined) context.emitUpdate?.(options.doubleProgress);
             return { value: value * 2 };
@@ -311,6 +314,36 @@ describe("codemode runtime", () => {
       name: "math.double",
       callIndex: started.callIndex,
     });
+  });
+  it("passes only successfully awaited SDK calls as causal predecessors", async () => {
+    const contexts: ToolExecutionContext[] = [];
+    const code = runtime({ observeContext: (context) => contexts.push(context) });
+    await code.execute({
+      source: "await tools.math.double({ value: 2 }); await tools.math.double({ value: 3 }); return null;",
+      sessionId: "session-causal-calls",
+    });
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0]?.causallyPriorCallIds).toEqual([]);
+    expect(contexts[1]?.causallyPriorCallIds).toEqual([contexts[0]?.callId]);
+
+    contexts.splice(0);
+    await code.execute({
+      source:
+        "await Promise.all([tools.math.double({ value: 4 }), tools.math.double({ value: 5 })]); return null;",
+      sessionId: "session-causal-calls",
+    });
+    expect(contexts).toHaveLength(2);
+    expect(contexts[0]?.causallyPriorCallIds).toEqual([]);
+    expect(contexts[1]?.causallyPriorCallIds).toEqual([]);
+
+    contexts.splice(0);
+    await code.execute({
+      source:
+        "void tools.math.double({ value: 6 }); await tools.math.double({ value: 7 }); await tools.math.double({ value: 8 }); return null;",
+      sessionId: "session-causal-calls",
+    });
+    expect(contexts).toHaveLength(3);
+    expect(contexts[2]?.causallyPriorCallIds).toEqual([contexts[1]?.callId]);
   });
   it("persists store values across executions in the same session only", async () => {
     const code = runtime();
