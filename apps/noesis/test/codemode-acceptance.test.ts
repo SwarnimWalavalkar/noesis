@@ -6,6 +6,7 @@ import { resolveNoesisConfig } from "@noesis/config";
 import {
   createAmbiguousSubAgentOutcomeError,
   createPiAgentRuntime,
+  createPiSkillLibrary,
   createPiSubAgentRunner,
   type PiSubAgentRunRequest,
 } from "@noesis/runtime-pi";
@@ -18,6 +19,7 @@ import {
   createControlledPiModels,
 } from "../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 import { createScriptedAgentRoleRunner } from "../../../packages/runtime-pi/test/support/scripted-role-runner.ts";
+import { NOESIS_BUILT_IN_SKILLS } from "../src/noesis-skill.ts";
 import { createApplicationRuntimeComposition, resolveActiveProject } from "../src/runtime-composition.ts";
 
 const roots: string[] = [];
@@ -27,6 +29,69 @@ afterEach(async () => {
 });
 
 describe("production codemode journey", () => {
+  test("loads the frozen built-in execute skill through AgentHarness and Code Mode", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-execute-skill-acceptance-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context }) =>
+        context.messages.at(-1)?.role === "toolResult"
+          ? "The frozen execute skill is loaded."
+          : controlledToolCallResponse(
+              "execute",
+              { source: 'return await tools.skills.load({ name: "execute" });' },
+              "call-load-execute-skill",
+            ),
+    });
+    const skills = createPiSkillLibrary({
+      cwd: process.cwd(),
+      agentDirectory: join(home, "agent"),
+      builtInSkills: NOESIS_BUILT_IN_SKILLS,
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      skills,
+      createAgent: (_sessionTools, codeExecution, skillLibrary) => {
+        if (!skillLibrary) throw new Error("Expected the production skill library");
+        return createPiAgentRuntime(process.cwd(), controlled.models, {
+          codeExecution,
+          skills: skillLibrary,
+          requirePinnedSkillSnapshot: true,
+        });
+      },
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Execute skill acceptance" });
+
+    await expect(runtime.debug.runTurn(trail.trailId, "Load the execute guidance.")).resolves.toMatchObject({
+      output: "The frozen execute skill is loaded.",
+    });
+    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    expect(calls.map((call) => call.toolName)).toEqual(["execute", "skills.load"]);
+    expect(calls.at(-1)?.response).toMatchObject({
+      output: {
+        name: "execute",
+        content: expect.stringContaining("# Execute Code Mode"),
+        contentDigest: expect.any(String),
+      },
+    });
+    await runtime.shutdown();
+  });
+
   test("codemode queries the frozen pre-turn context through the canonical Broker path", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-subagent-query-acceptance-"));
     roots.push(home);
