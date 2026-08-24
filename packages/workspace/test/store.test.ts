@@ -2431,6 +2431,18 @@ describe("WorkspaceStore", () => {
       callCount: 0,
       startedAt: "2026-07-26T00:00:00.000Z",
     });
+    await first.operational.codeExecutions.put({
+      executionId: "execution-without-project",
+      logicalExecutionId: "logical-workflow-phase",
+      sessionId: "session-workflow",
+      catalogId: "catalog-test",
+      catalogDigest: digest("c"),
+      sourceDigest: sha256(text("return input;")),
+      sourceArtifactId: workflowSource.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
     await expect(
       first.operational.codeExecutions.put({
         executionId: "execution-cross-project-child",
@@ -2457,6 +2469,19 @@ describe("WorkspaceStore", () => {
         logicalExecutionId: "logical-workflow-phase",
         input: { value: 1 },
         executionId: "execution-other-project",
+        startedAt: "2026-07-26T00:00:00.000Z",
+      }),
+    ).rejects.toThrow("does not belong to its run project and session");
+    await expect(
+      first.operational.workflows.putPhase({
+        runId: "workflow-run-unfinished",
+        phaseIndex: 1,
+        phaseName: "missing-project",
+        status: "running",
+        attempt: 1,
+        logicalExecutionId: "logical-workflow-phase",
+        input: { value: 1 },
+        executionId: "execution-without-project",
         startedAt: "2026-07-26T00:00:00.000Z",
       }),
     ).rejects.toThrow("does not belong to its run project and session");

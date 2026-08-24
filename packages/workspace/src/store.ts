@@ -3588,10 +3588,15 @@ function createOperationalRepositories(
              JOIN codemode_executions AS execution ON execution.execution_id = ?
              WHERE run.run_id = ?`)
           .get(record.executionId, record.runId);
+        const runProjectId = lineage === undefined ? undefined : optionalString(lineage, "run_project_id");
+        const executionProjectId =
+          lineage === undefined ? undefined : optionalString(lineage, "execution_project_id");
         if (
           lineage === undefined ||
           requiredString(lineage, "run_session_id") !== requiredString(lineage, "execution_session_id") ||
-          requiredString(lineage, "run_project_id") !== requiredString(lineage, "execution_project_id")
+          runProjectId === undefined ||
+          executionProjectId === undefined ||
+          runProjectId !== executionProjectId
         )
           throw new Error(
             `Workflow phase ${record.runId}/${String(record.phaseIndex)} execution does not belong to its run project and session`,

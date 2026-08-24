@@ -113,7 +113,8 @@ Every admitted turn gives the model a fixed direct surface:
 
 - `file_read`, backed by `files.read`
 - `file_write`, backed by `files.write`
-- `shell`, backed by `shell.run`.
+- `shell`, backed by `shell.run`
+- `execute`, which composes canonical Broker tools through codemode.
 
 `files.read` may read an explicitly named file anywhere the Noesis process can read. This does not widen file writes, directory traversal, or search. Those remain bound to their declared project resources. `files.write` creates or completely replaces one UTF-8 file and creates parent directories by default; exact partial edits remain available through `files.replace` or a careful shell command. Compact skill metadata names a skill without presenting its storage path as a project file. The model loads the frozen body through `execute` and `tools.skills.load({ name })`. Ordinary instruction files are still readable when explicitly named.
 

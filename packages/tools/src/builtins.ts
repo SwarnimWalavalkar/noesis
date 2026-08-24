@@ -41,8 +41,7 @@ function isWithin(root: string, path: string): boolean {
     (displacement !== ".." && !displacement.startsWith(`..${sep}`) && !isAbsolute(displacement))
   );
 }
-function projectPath(cwd: string, path: string): string {
-  const root = realpathSync(cwd);
+function projectPath(root: string, path: string): string {
   const requested = resolvedPath(root, path);
   if (!isWithin(root, requested)) throw new Error(`Path is outside the active project: ${path}`);
   let existing = requested;
@@ -673,6 +672,7 @@ export function createFileMutationCoordinator(): FileMutationCoordinator {
 }
 export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): readonly ToolDefinition[] {
   const cwd = resolve(options.cwd);
+  const projectRoot = realpathSync(cwd);
   const searchCommand = options.searchCommand ?? "rg";
   const shellPath = process.env["SHELL"] ?? "/bin/sh";
   const writeArtifact = options.writeArtifact;
@@ -746,11 +746,11 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     }),
     effect: ({ path = "." }) => ({
       effect: "read",
-      resource: `directory:${projectPath(cwd, path)}`,
+      resource: `directory:${projectPath(projectRoot, path)}`,
       estimatedCost: 0,
     }),
     execute: async ({ path = "." }) => {
-      const absolute = projectPath(cwd, path);
+      const absolute = projectPath(projectRoot, path);
       const entries = await readdir(absolute, { withFileTypes: true });
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       return {
@@ -793,11 +793,11 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     }),
     effect: ({ path = "." }) => ({
       effect: "execute",
-      resource: `search:${projectPath(cwd, path)}`,
+      resource: `search:${projectPath(projectRoot, path)}`,
       estimatedCost: 0,
     }),
     execute: async ({ query, path = ".", glob, maxMatches = 200 }, context) => {
-      const absolute = projectPath(cwd, path);
+      const absolute = projectPath(projectRoot, path);
       const reportedPath = resolvedPath(cwd, path);
       const args = [
         "--line-number",
@@ -874,11 +874,11 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     }),
     effect: ({ path }) => ({
       effect: "write",
-      resource: `file:${projectPath(cwd, path)}`,
+      resource: `file:${projectPath(projectRoot, path)}`,
       estimatedCost: 1,
     }),
     execute: async ({ path, content, createParents = true }, context) => {
-      const absolute = projectPath(cwd, path);
+      const absolute = projectPath(projectRoot, path);
       const reportedPath = resolvedPath(cwd, path);
       return await fileMutationCoordinator.run(absolute, async () => {
         if (context.signal.aborted)
@@ -916,11 +916,11 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     }),
     effect: ({ path }) => ({
       effect: "write",
-      resource: `file:${projectPath(cwd, path)}`,
+      resource: `file:${projectPath(projectRoot, path)}`,
       estimatedCost: 1,
     }),
     execute: async ({ path, oldText, newText, expectedOccurrences = 1 }, context) => {
-      const absolute = projectPath(cwd, path);
+      const absolute = projectPath(projectRoot, path);
       const reportedPath = resolvedPath(cwd, path);
       return await fileMutationCoordinator.run(absolute, async () => {
         if (context.signal.aborted)

@@ -161,7 +161,7 @@ function decodeConfig(path: string, value: unknown): Result<NoesisConfig, Noesis
     return err(
       new NoesisConfigError(
         path,
-        `unsupported schemaVersion ${String(value.schemaVersion)}; this build accepts only schemaVersion ${String(NOESIS_CONFIG_SCHEMA_VERSION)}`,
+        `unsupported schemaVersion ${String(value.schemaVersion)}; this build accepts only schemaVersion ${String(NOESIS_CONFIG_SCHEMA_VERSION)}. Remove ${path} and rerun onboarding to regenerate it`,
       ),
     );
   }

@@ -137,7 +137,10 @@ describe("Noesis config", () => {
     await writeFile(noesisConfigPath(unsupported), JSON.stringify({ schemaVersion: 1, agent: {} }));
     const versionResult = await readNoesisConfig(unsupported);
     expect(versionResult.ok).toBe(false);
-    if (!versionResult.ok) expect(versionResult.error.message).toContain("accepts only schemaVersion 2");
+    if (!versionResult.ok) {
+      expect(versionResult.error.message).toContain("accepts only schemaVersion 2");
+      expect(versionResult.error.message).toContain("rerun onboarding to regenerate it");
+    }
 
     const unknown = await mkdtemp(join(tmpdir(), "noesis-config-unknown-"));
     await writeFile(
