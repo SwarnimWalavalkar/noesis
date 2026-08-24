@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createConditionalObject, err, ok, type Result } from "@noesis/domain";
 import { z } from "zod";
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-export const NOESIS_CONFIG_SCHEMA_VERSION = 2 as const;
+export const NOESIS_CONFIG_SCHEMA_VERSION = 1 as const;
 export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 export const AgentConfigSchema = z.strictObject({

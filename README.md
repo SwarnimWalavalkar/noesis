@@ -91,7 +91,7 @@ Noesis stores local state under `~/.noesis/` by default. The default context bud
 
 ```json
 {
-  "schemaVersion": 2,
+  "schemaVersion": 1,
   "agent": {},
   "agents": {
     "provider": "openai-codex",

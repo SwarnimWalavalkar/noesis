@@ -185,7 +185,7 @@ export async function runFirstLaunchOnboarding(input: {
   }
 
   const config: NoesisConfig = {
-    schemaVersion: 2,
+    schemaVersion: 1,
     agent: {
       provider,
       model,

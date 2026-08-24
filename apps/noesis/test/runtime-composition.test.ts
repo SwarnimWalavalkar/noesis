@@ -1916,7 +1916,7 @@ describe("apps/noesis production control-plane composition", () => {
     expect(emptyCapabilityResolution.definitions.map((definition) => definition.name)).toEqual(
       sessionCatalogTools.map((name) => name.slice("history.".length)),
     );
-    expect(config.schemaVersion).toBe(2);
+    expect(config.schemaVersion).toBe(1);
     expect(await runtime.debug.workspace.operational.sessions.get(trail.trailId)).toMatchObject({
       sessionId: trail.trailId,
       runtime: runtimeIdentity,

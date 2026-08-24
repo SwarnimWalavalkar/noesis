@@ -32,7 +32,7 @@ describe("Noesis config", () => {
     await writeFile(
       noesisConfigPath(home),
       JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 1,
         agent: { provider: "file-provider", model: "file-model", thinkingLevel: "low" },
       }),
     );
@@ -60,7 +60,7 @@ describe("Noesis config", () => {
     await writeFile(
       noesisConfigPath(configuredHome),
       JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 1,
         agent: { provider: "foreground-provider", model: "foreground-model", thinkingLevel: "high" },
         agents: { model: "subagent-model", thinkingLevel: "low" },
       }),
@@ -92,7 +92,7 @@ describe("Noesis config", () => {
 
   test.each(["off", "low"])("preserves the explicit %s thinking level", async (thinkingLevel) => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-level-"));
-    await writeFile(noesisConfigPath(home), JSON.stringify({ schemaVersion: 2, agent: { thinkingLevel } }));
+    await writeFile(noesisConfigPath(home), JSON.stringify({ schemaVersion: 1, agent: { thinkingLevel } }));
     expect((await resolveNoesisConfig({ home, env: {} })).agent.thinkingLevel).toBe(thinkingLevel);
   });
 
@@ -101,7 +101,7 @@ describe("Noesis config", () => {
     const configuredHome = await mkdtemp(join(tmpdir(), "noesis-config-context-explicit-"));
     await writeFile(
       noesisConfigPath(configuredHome),
-      JSON.stringify({ schemaVersion: 2, agent: {}, context: { tokenBudget: 96_000 } }),
+      JSON.stringify({ schemaVersion: 1, agent: {}, context: { tokenBudget: 96_000 } }),
     );
 
     expect((await resolveNoesisConfig({ home: defaultsHome, env: {} })).context).toEqual({
@@ -117,7 +117,7 @@ describe("Noesis config", () => {
     await writeFile(
       noesisConfigPath(home),
       JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 1,
         agent: {},
         learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
         autonomy: { riskLevel, approval: "all_changes", pins: "respect", vetoes: "respect" },
@@ -134,18 +134,18 @@ describe("Noesis config", () => {
 
   test("rejects unsupported versions and unknown fields with actionable errors", async () => {
     const unsupported = await mkdtemp(join(tmpdir(), "noesis-config-version-"));
-    await writeFile(noesisConfigPath(unsupported), JSON.stringify({ schemaVersion: 1, agent: {} }));
+    await writeFile(noesisConfigPath(unsupported), JSON.stringify({ schemaVersion: 2, agent: {} }));
     const versionResult = await readNoesisConfig(unsupported);
     expect(versionResult.ok).toBe(false);
     if (!versionResult.ok) {
-      expect(versionResult.error.message).toContain("accepts only schemaVersion 2");
+      expect(versionResult.error.message).toContain("accepts only schemaVersion 1");
       expect(versionResult.error.message).toContain("rerun onboarding to regenerate it");
     }
 
     const unknown = await mkdtemp(join(tmpdir(), "noesis-config-unknown-"));
     await writeFile(
       noesisConfigPath(unknown),
-      JSON.stringify({ schemaVersion: 2, agent: {}, credentials: { apiKey: "must-not-be-here" } }),
+      JSON.stringify({ schemaVersion: 1, agent: {}, credentials: { apiKey: "must-not-be-here" } }),
     );
     const unknownResult = await readNoesisConfig(unknown);
     expect(unknownResult.ok).toBe(false);
@@ -154,7 +154,7 @@ describe("Noesis config", () => {
     const nestedUnknown = await mkdtemp(join(tmpdir(), "noesis-config-nested-unknown-"));
     await writeFile(
       noesisConfigPath(nestedUnknown),
-      JSON.stringify({ schemaVersion: 2, agent: { runtime: "fake", credential: "forbidden" } }),
+      JSON.stringify({ schemaVersion: 1, agent: { runtime: "fake", credential: "forbidden" } }),
     );
     const nestedUnknownResult = await readNoesisConfig(nestedUnknown);
     expect(nestedUnknownResult.ok).toBe(false);
@@ -170,7 +170,7 @@ describe("Noesis config", () => {
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const persisted = JSON.parse(await readFile(noesisConfigPath(home), "utf8")) as unknown;
     expect(persisted).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 1,
       agent: {
         provider: "openai-codex",
         model: "gpt-5.5",
@@ -193,7 +193,7 @@ describe("Noesis config", () => {
     await writeFile(
       noesisConfigPath(home),
       JSON.stringify({
-        schemaVersion: 2,
+        schemaVersion: 1,
         agent: {},
         learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
         autonomy: { riskLevel: "off" },
@@ -204,7 +204,7 @@ describe("Noesis config", () => {
     await updateNoesisConfig(home, { model: "updated-model" });
 
     expect(JSON.parse(await readFile(noesisConfigPath(home), "utf8"))).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 1,
       agent: { model: "updated-model" },
       learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
       autonomy: { riskLevel: "off" },
@@ -216,7 +216,7 @@ describe("Noesis config", () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-update-controls-"));
     await writeFile(
       noesisConfigPath(home),
-      JSON.stringify({ schemaVersion: 2, agent: { model: "keep-model" } }),
+      JSON.stringify({ schemaVersion: 1, agent: { model: "keep-model" } }),
     );
 
     await updateUserControlConfig(home, {
@@ -226,7 +226,7 @@ describe("Noesis config", () => {
     });
 
     expect(await resolveNoesisConfig({ home, env: {} })).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 1,
       agent: { model: "keep-model" },
       learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
       autonomy: { riskLevel: "low", approval: "all_changes" },

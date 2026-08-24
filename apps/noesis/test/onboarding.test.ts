@@ -122,7 +122,7 @@ describe("first-launch onboarding", () => {
     });
 
     expect(result.config).toEqual({
-      schemaVersion: 2,
+      schemaVersion: 1,
       agent: {
         provider: "openai-codex",
         model: "gpt-5.6-sol",
