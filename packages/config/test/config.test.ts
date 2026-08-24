@@ -9,7 +9,6 @@ import {
   readNoesisConfig,
   resolveNoesisConfig,
   updateNoesisConfig,
-  updateToolHotbar,
   updateUserControlConfig,
 } from "../src/index.ts";
 
@@ -33,7 +32,7 @@ describe("Noesis config", () => {
     await writeFile(
       noesisConfigPath(home),
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         agent: { provider: "file-provider", model: "file-model", thinkingLevel: "low" },
       }),
     );
@@ -61,7 +60,7 @@ describe("Noesis config", () => {
     await writeFile(
       noesisConfigPath(configuredHome),
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         agent: { provider: "foreground-provider", model: "foreground-model", thinkingLevel: "high" },
         agents: { model: "subagent-model", thinkingLevel: "low" },
       }),
@@ -93,33 +92,8 @@ describe("Noesis config", () => {
 
   test.each(["off", "low"])("preserves the explicit %s thinking level", async (thinkingLevel) => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-level-"));
-    await writeFile(noesisConfigPath(home), JSON.stringify({ schemaVersion: 1, agent: { thinkingLevel } }));
+    await writeFile(noesisConfigPath(home), JSON.stringify({ schemaVersion: 2, agent: { thinkingLevel } }));
     expect((await resolveNoesisConfig({ home, env: {} })).agent.thinkingLevel).toBe(thinkingLevel);
-  });
-
-  test("ignores the removed version-1 runtime selector without rewriting the file", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-legacy-v1-"));
-    const legacy = '{"schemaVersion":1,"agent":{"runtime":"fake"}}\n';
-    await writeFile(noesisConfigPath(home), legacy);
-
-    const resolved = await resolveNoesisConfig({ home, env: {} });
-
-    expect(resolved.agent).toEqual({
-      provider: "openai-codex",
-      model: "gpt-5.6-sol",
-      thinkingLevel: "high",
-    });
-    expect(resolved.learning).toEqual({ enabled: true, notifications: "quiet", backgroundBudget: 1 });
-    expect(resolved.autonomy).toEqual({
-      riskLevel: "low",
-      approval: "authority_expansion",
-      pins: "respect",
-      vetoes: "respect",
-    });
-    expect(resolved.experiments).toEqual({ maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 });
-    expect(resolved.context).toEqual({ tokenBudget: 160_000 });
-    expect(resolved.tools.hotbar).toEqual(["files.read", "files.list", "shell.run"]);
-    expect(await readFile(noesisConfigPath(home), "utf8")).toBe(legacy);
   });
 
   test("uses a 160k context budget by default and accepts an explicit token budget", async () => {
@@ -127,7 +101,7 @@ describe("Noesis config", () => {
     const configuredHome = await mkdtemp(join(tmpdir(), "noesis-config-context-explicit-"));
     await writeFile(
       noesisConfigPath(configuredHome),
-      JSON.stringify({ schemaVersion: 1, agent: {}, context: { tokenBudget: 96_000 } }),
+      JSON.stringify({ schemaVersion: 2, agent: {}, context: { tokenBudget: 96_000 } }),
     );
 
     expect((await resolveNoesisConfig({ home: defaultsHome, env: {} })).context).toEqual({
@@ -138,114 +112,12 @@ describe("Noesis config", () => {
     });
   });
 
-  test("defaults atomic tools and migrates the old exact default without changing custom choices", async () => {
-    const missing = await mkdtemp(join(tmpdir(), "noesis-config-default-hotbar-"));
-    const legacyDefault = await mkdtemp(join(tmpdir(), "noesis-config-legacy-default-hotbar-"));
-    const legacyWithProjectPin = await mkdtemp(join(tmpdir(), "noesis-config-legacy-pinned-hotbar-"));
-    const explicitFormerDefault = await mkdtemp(join(tmpdir(), "noesis-config-explicit-former-default-"));
-    const oldPersisted = await mkdtemp(join(tmpdir(), "noesis-config-old-hotbar-"));
-    const customPersisted = await mkdtemp(join(tmpdir(), "noesis-config-custom-hotbar-"));
-    const explicitlyEmpty = await mkdtemp(join(tmpdir(), "noesis-config-empty-hotbar-"));
-    await writeFile(
-      noesisConfigPath(legacyDefault),
-      JSON.stringify({
-        schemaVersion: 1,
-        agent: {},
-        tools: {
-          hotbar: ["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"],
-        },
-      }),
-    );
-    await writeFile(
-      noesisConfigPath(legacyWithProjectPin),
-      JSON.stringify({
-        schemaVersion: 1,
-        agent: {},
-        tools: {
-          hotbar: [
-            "files.read",
-            "files.list",
-            "shell.run",
-            "workflows.run",
-            "history.search_sessions",
-            "workflow.1111111111111111.pinned",
-          ],
-        },
-      }),
-    );
-    await writeFile(
-      noesisConfigPath(explicitFormerDefault),
-      JSON.stringify({
-        schemaVersion: 1,
-        agent: {},
-        tools: {
-          hotbar: ["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"],
-          hotbarDefaultsRevision: 2,
-        },
-      }),
-    );
-    await writeFile(
-      noesisConfigPath(oldPersisted),
-      JSON.stringify({
-        schemaVersion: 1,
-        agent: {},
-        tools: { hotbar: ["files.read", "files.list", "shell.run"] },
-      }),
-    );
-    await writeFile(
-      noesisConfigPath(customPersisted),
-      JSON.stringify({
-        schemaVersion: 1,
-        agent: {},
-        tools: { hotbar: ["files.read", "custom.tool"] },
-      }),
-    );
-    await writeFile(
-      noesisConfigPath(explicitlyEmpty),
-      JSON.stringify({ schemaVersion: 1, agent: {}, tools: { hotbar: [] } }),
-    );
-
-    expect((await resolveNoesisConfig({ home: missing, env: {} })).tools.hotbar).toEqual([
-      "files.read",
-      "files.list",
-      "shell.run",
-    ]);
-    expect((await resolveNoesisConfig({ home: legacyDefault, env: {} })).tools.hotbar).toEqual([
-      "files.read",
-      "files.list",
-      "shell.run",
-    ]);
-    expect((await resolveNoesisConfig({ home: legacyWithProjectPin, env: {} })).tools.hotbar).toEqual([
-      "files.read",
-      "files.list",
-      "shell.run",
-      "workflow.1111111111111111.pinned",
-    ]);
-    expect((await resolveNoesisConfig({ home: explicitFormerDefault, env: {} })).tools.hotbar).toEqual([
-      "files.read",
-      "files.list",
-      "shell.run",
-      "workflows.run",
-      "history.search_sessions",
-    ]);
-    expect((await resolveNoesisConfig({ home: oldPersisted, env: {} })).tools.hotbar).toEqual([
-      "files.read",
-      "files.list",
-      "shell.run",
-    ]);
-    expect((await resolveNoesisConfig({ home: customPersisted, env: {} })).tools.hotbar).toEqual([
-      "files.read",
-      "custom.tool",
-    ]);
-    expect((await resolveNoesisConfig({ home: explicitlyEmpty, env: {} })).tools.hotbar).toEqual([]);
-  });
-
   test.each(["off", "low"])("preserves explicit %s autonomy with zero-value defaults", async (riskLevel) => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-autonomy-"));
     await writeFile(
       noesisConfigPath(home),
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         agent: {},
         learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
         autonomy: { riskLevel, approval: "all_changes", pins: "respect", vetoes: "respect" },
@@ -262,15 +134,15 @@ describe("Noesis config", () => {
 
   test("rejects unsupported versions and unknown fields with actionable errors", async () => {
     const unsupported = await mkdtemp(join(tmpdir(), "noesis-config-version-"));
-    await writeFile(noesisConfigPath(unsupported), JSON.stringify({ schemaVersion: 2, agent: {} }));
+    await writeFile(noesisConfigPath(unsupported), JSON.stringify({ schemaVersion: 1, agent: {} }));
     const versionResult = await readNoesisConfig(unsupported);
     expect(versionResult.ok).toBe(false);
-    if (!versionResult.ok) expect(versionResult.error.message).toContain("accepts only schemaVersion 1");
+    if (!versionResult.ok) expect(versionResult.error.message).toContain("accepts only schemaVersion 2");
 
     const unknown = await mkdtemp(join(tmpdir(), "noesis-config-unknown-"));
     await writeFile(
       noesisConfigPath(unknown),
-      JSON.stringify({ schemaVersion: 1, agent: {}, credentials: { apiKey: "must-not-be-here" } }),
+      JSON.stringify({ schemaVersion: 2, agent: {}, credentials: { apiKey: "must-not-be-here" } }),
     );
     const unknownResult = await readNoesisConfig(unknown);
     expect(unknownResult.ok).toBe(false);
@@ -279,11 +151,12 @@ describe("Noesis config", () => {
     const nestedUnknown = await mkdtemp(join(tmpdir(), "noesis-config-nested-unknown-"));
     await writeFile(
       noesisConfigPath(nestedUnknown),
-      JSON.stringify({ schemaVersion: 1, agent: { runtime: "fake", credential: "forbidden" } }),
+      JSON.stringify({ schemaVersion: 2, agent: { runtime: "fake", credential: "forbidden" } }),
     );
     const nestedUnknownResult = await readNoesisConfig(nestedUnknown);
     expect(nestedUnknownResult.ok).toBe(false);
-    if (!nestedUnknownResult.ok) expect(nestedUnknownResult.error.message).toContain("/agent/credential");
+    if (!nestedUnknownResult.ok)
+      expect(nestedUnknownResult.error.message).toMatch(/\/agent\/(runtime|credential)/u);
   });
 
   test("initialization refuses to overwrite and updates only through an explicit operation", async () => {
@@ -294,7 +167,7 @@ describe("Noesis config", () => {
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const persisted = JSON.parse(await readFile(noesisConfigPath(home), "utf8")) as unknown;
     expect(persisted).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       agent: {
         provider: "openai-codex",
         model: "gpt-5.5",
@@ -309,10 +182,6 @@ describe("Noesis config", () => {
       },
       context: { tokenBudget: 160_000 },
       experiments: { maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 },
-      tools: {
-        hotbar: ["files.read", "files.list", "shell.run"],
-        hotbarDefaultsRevision: 2,
-      },
     });
   });
 
@@ -321,7 +190,7 @@ describe("Noesis config", () => {
     await writeFile(
       noesisConfigPath(home),
       JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         agent: {},
         learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
         autonomy: { riskLevel: "off" },
@@ -332,7 +201,7 @@ describe("Noesis config", () => {
     await updateNoesisConfig(home, { model: "updated-model" });
 
     expect(JSON.parse(await readFile(noesisConfigPath(home), "utf8"))).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       agent: { model: "updated-model" },
       learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
       autonomy: { riskLevel: "off" },
@@ -344,401 +213,22 @@ describe("Noesis config", () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-update-controls-"));
     await writeFile(
       noesisConfigPath(home),
-      JSON.stringify({ schemaVersion: 1, agent: { model: "keep-model" } }),
+      JSON.stringify({ schemaVersion: 2, agent: { model: "keep-model" } }),
     );
 
     await updateUserControlConfig(home, {
       learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
       autonomy: { riskLevel: "low", approval: "all_changes" },
       experiments: { maxCases: 3, maxAttemptsPerArm: 1, maxCost: 0 },
-      tools: { hotbar: ["files.read", "shell.run", "files.write"] },
     });
 
     expect(await resolveNoesisConfig({ home, env: {} })).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       agent: { model: "keep-model" },
       learning: { enabled: false, notifications: "off", backgroundBudget: 0 },
       autonomy: { riskLevel: "low", approval: "all_changes" },
       experiments: { maxCases: 3, maxAttemptsPerArm: 1, maxCost: 0 },
-      tools: { hotbar: ["files.read", "shell.run", "files.write"] },
     });
-  });
-
-  test("updates one project hotbar without replacing another project's pins", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-project-hotbars-"));
-    await writeFile(
-      noesisConfigPath(home),
-      JSON.stringify({
-        schemaVersion: 1,
-        agent: {},
-        tools: {
-          hotbar: ["files.read", "workflows.run"],
-          projectHotbars: {
-            project_alpha: ["workflow.1111111111111111.alpha"],
-            project_beta: ["workflow.2222222222222222.beta"],
-          },
-        },
-      }),
-    );
-
-    await updateToolHotbar(home, {
-      projectId: "project_alpha",
-      projectToolNamespace: "workflow.1111111111111111.",
-      scope: "global",
-      action: "add",
-      tool: "files.list",
-      legacyGlobalProjectTools: [],
-      legacyActiveProjectTools: [],
-    });
-    await updateToolHotbar(home, {
-      projectId: "project_alpha",
-      projectToolNamespace: "workflow.1111111111111111.",
-      scope: "project",
-      action: "add",
-      tool: "workflow.1111111111111111.second",
-      legacyGlobalProjectTools: [],
-      legacyActiveProjectTools: [],
-    });
-
-    expect((await resolveNoesisConfig({ home, env: {} })).tools).toEqual({
-      hotbar: ["files.read", "workflows.run", "files.list"],
-      projectHotbars: {
-        project_alpha: ["workflow.1111111111111111.alpha", "workflow.1111111111111111.second"],
-        project_beta: ["workflow.2222222222222222.beta"],
-      },
-    });
-
-    await updateToolHotbar(home, {
-      projectId: "project_alpha",
-      projectToolNamespace: "workflow.1111111111111111.",
-      scope: "project",
-      action: "remove",
-      tool: "workflow.1111111111111111.alpha",
-      legacyGlobalProjectTools: [],
-      legacyActiveProjectTools: [],
-    });
-    await updateToolHotbar(home, {
-      projectId: "project_alpha",
-      projectToolNamespace: "workflow.1111111111111111.",
-      scope: "project",
-      action: "remove",
-      tool: "workflow.1111111111111111.second",
-      legacyGlobalProjectTools: [],
-      legacyActiveProjectTools: [],
-    });
-    expect((await resolveNoesisConfig({ home, env: {} })).tools.projectHotbars).toEqual({
-      project_beta: ["workflow.2222222222222222.beta"],
-    });
-  });
-
-  test("does not remigrate legacy defaults after the user explicitly restores removed tools", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-explicit-legacy-tools-"));
-    await writeFile(
-      noesisConfigPath(home),
-      JSON.stringify({
-        schemaVersion: 1,
-        agent: {},
-        tools: {
-          hotbar: ["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"],
-        },
-      }),
-    );
-    const update = {
-      projectId: "project_alpha",
-      projectToolNamespace: "workflow.1111111111111111.",
-      scope: "global" as const,
-      action: "add" as const,
-      legacyGlobalProjectTools: Object.freeze([]),
-      legacyActiveProjectTools: Object.freeze([]),
-    };
-
-    expect((await resolveNoesisConfig({ home, env: {} })).tools.hotbar).toEqual([
-      "files.read",
-      "files.list",
-      "shell.run",
-    ]);
-    await updateToolHotbar(home, { ...update, tool: "workflows.run" });
-    await updateToolHotbar(home, { ...update, tool: "history.search_sessions" });
-
-    expect((await resolveNoesisConfig({ home, env: {} })).tools.hotbar).toEqual([
-      "files.read",
-      "files.list",
-      "shell.run",
-      "workflows.run",
-      "history.search_sessions",
-    ]);
-    expect(JSON.parse(await readFile(noesisConfigPath(home), "utf8"))).toMatchObject({
-      tools: { hotbarDefaultsRevision: 2 },
-    });
-  });
-
-  test("persists MCP pins in the active project instead of the global hotbar", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-mcp-hotbar-"));
-    await initializeNoesisConfig(home);
-    await updateToolHotbar(home, {
-      projectId: "project_alpha",
-      projectToolNamespace: "workflow.1111111111111111.",
-      scope: "project",
-      action: "add",
-      tool: "mcp.github.search_123456789abc",
-      legacyGlobalProjectTools: [],
-      legacyActiveProjectTools: [],
-    });
-    const config = await resolveNoesisConfig({ home, env: {} });
-    expect(config.tools.hotbar).not.toContain("mcp.github.search_123456789abc");
-    expect(config.tools.projectHotbars).toEqual({
-      project_alpha: ["mcp.github.search_123456789abc"],
-    });
-  });
-
-  test("rejects MCP tools in the global hotbar", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-global-mcp-hotbar-"));
-    await initializeNoesisConfig(home);
-
-    await expect(
-      updateToolHotbar(home, {
-        projectId: "project_alpha",
-        projectToolNamespace: "workflow.1111111111111111.",
-        scope: "global",
-        action: "add",
-        tool: "mcp.github.search_123456789abc",
-        legacyGlobalProjectTools: [],
-        legacyActiveProjectTools: [],
-      }),
-    ).rejects.toThrow("MCP tools are project-scoped");
-
-    expect((await resolveNoesisConfig({ home, env: {} })).tools.hotbar).not.toContain(
-      "mcp.github.search_123456789abc",
-    );
-  });
-
-  test("allows removing a legacy MCP tool from the global hotbar", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-remove-global-mcp-hotbar-"));
-    await writeFile(
-      noesisConfigPath(home),
-      JSON.stringify({
-        schemaVersion: 1,
-        agent: {},
-        tools: { hotbar: ["files.read", "mcp.github.search_123456789abc"] },
-      }),
-    );
-
-    await updateToolHotbar(home, {
-      projectId: "project_alpha",
-      projectToolNamespace: "workflow.1111111111111111.",
-      scope: "global",
-      action: "remove",
-      tool: "mcp.github.search_123456789abc",
-      legacyGlobalProjectTools: [],
-      legacyActiveProjectTools: [],
-    });
-
-    expect((await resolveNoesisConfig({ home, env: {} })).tools.hotbar).not.toContain(
-      "mcp.github.search_123456789abc",
-    );
-  });
-
-  test("migrates a legacy global MCP pin into the active project overlay", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-migrate-global-mcp-hotbar-"));
-    const legacyMcp = "mcp.github.search_123456789abc";
-    await writeFile(
-      noesisConfigPath(home),
-      JSON.stringify({
-        schemaVersion: 1,
-        agent: {},
-        tools: { hotbar: ["files.read", legacyMcp] },
-      }),
-    );
-
-    const committed = await updateToolHotbar(home, {
-      projectId: "project_alpha",
-      projectToolNamespace: "workflow.1111111111111111.",
-      scope: "project",
-      action: "add",
-      tool: legacyMcp,
-      legacyGlobalProjectTools: [legacyMcp],
-      legacyActiveProjectTools: [legacyMcp],
-    });
-
-    expect(committed).toEqual({
-      global: ["files.read"],
-      project: [legacyMcp],
-      effective: ["files.read", legacyMcp],
-    });
-    expect((await resolveNoesisConfig({ home, env: {} })).tools).toMatchObject({
-      hotbar: ["files.read"],
-      projectHotbars: {
-        project_alpha: [legacyMcp],
-      },
-    });
-  });
-
-  test("preserves an inactive legacy MCP pin during an unrelated project mutation", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-preserve-global-mcp-hotbar-"));
-    const legacyMcp = "mcp.github.search_123456789abc";
-    await writeFile(
-      noesisConfigPath(home),
-      JSON.stringify({
-        schemaVersion: 1,
-        agent: {},
-        tools: { hotbar: ["files.read", legacyMcp] },
-      }),
-    );
-
-    await updateToolHotbar(home, {
-      projectId: "project_beta",
-      projectToolNamespace: "workflow.2222222222222222.",
-      scope: "project",
-      action: "add",
-      tool: "mcp.linear.list_abcdef123456",
-      legacyGlobalProjectTools: [legacyMcp],
-      legacyActiveProjectTools: [],
-    });
-
-    const tools = (await resolveNoesisConfig({ home, env: {} })).tools;
-    expect(tools).toMatchObject({
-      hotbar: ["files.read", legacyMcp],
-      projectHotbars: { project_beta: ["mcp.linear.list_abcdef123456"] },
-    });
-  });
-
-  test("serializes concurrent global and same-project hotbar deltas without lost updates", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-concurrent-hotbar-"));
-    await initializeNoesisConfig(home);
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const base = {
-      projectId: "project_concurrent",
-      projectToolNamespace: "workflow.3333333333333333.",
-      action: "add" as const,
-      legacyGlobalProjectTools: [],
-      legacyActiveProjectTools: [],
-    };
-
-    await Promise.all([
-      updateToolHotbar(home, { ...base, scope: "global", tool: "files.write" }),
-      updateToolHotbar(home, { ...base, scope: "global", tool: "artifacts.write" }),
-      updateToolHotbar(home, {
-        ...base,
-        scope: "project",
-        tool: "workflow.3333333333333333.alpha",
-      }),
-      updateToolHotbar(home, {
-        ...base,
-        scope: "project",
-        tool: "workflow.3333333333333333.beta",
-      }),
-    ]);
-
-    const resolved = await resolveNoesisConfig({ home, env: {} });
-    expect(resolved.tools.hotbar).toEqual(
-      expect.arrayContaining(["files.read", "files.list", "shell.run", "files.write", "artifacts.write"]),
-    );
-    expect(resolved.tools.projectHotbars["project_concurrent"]).toHaveLength(2);
-    expect(resolved.tools.projectHotbars["project_concurrent"]).toEqual(
-      expect.arrayContaining(["workflow.3333333333333333.alpha", "workflow.3333333333333333.beta"]),
-    );
-  });
-
-  test("rejects an effective 16 plus 1 union under the config writer lock", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-hotbar-limit-"));
-    const legacyTool = "workflow.4444444444444444.legacy";
-    const projectTool = "workflow.4444444444444444.project";
-    const global = Array.from({ length: 15 }, (_, index) => `global.${String(index)}`);
-    await writeFile(
-      noesisConfigPath(home),
-      JSON.stringify({
-        schemaVersion: 1,
-        agent: {},
-        tools: {
-          hotbar: [...global, legacyTool],
-          projectHotbars: { project_limit: [projectTool] },
-        },
-      }),
-    );
-
-    await expect(
-      updateToolHotbar(home, {
-        projectId: "project_limit",
-        projectToolNamespace: "workflow.4444444444444444.",
-        scope: "global",
-        action: "add",
-        tool: global[0] ?? "global.0",
-        legacyGlobalProjectTools: [legacyTool],
-        legacyActiveProjectTools: [legacyTool],
-      }),
-    ).rejects.toThrow("would contain 17 tools");
-  });
-
-  test("rejects a seventeenth global tool and preserves the config", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-global-hotbar-limit-"));
-    const original = {
-      schemaVersion: 1,
-      agent: {},
-      tools: { hotbar: Array.from({ length: 16 }, (_, index) => `global.${String(index)}`) },
-    };
-    await writeFile(noesisConfigPath(home), JSON.stringify(original));
-
-    await expect(
-      updateToolHotbar(home, {
-        projectId: "project_global_limit",
-        projectToolNamespace: "workflow.cccccccccccccccc.",
-        scope: "global",
-        action: "add",
-        tool: "global.16",
-        legacyGlobalProjectTools: [],
-        legacyActiveProjectTools: [],
-      }),
-    ).rejects.toThrow("global hotbar would contain 17 tools");
-    expect(JSON.parse(await readFile(noesisConfigPath(home), "utf8"))).toEqual(original);
-  });
-
-  test("a global delta cannot overflow another project's persisted or legacy hotbar", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-config-cross-project-limit-"));
-    const global = Array.from({ length: 15 }, (_, index) => `global.${String(index)}`);
-    const original = {
-      schemaVersion: 1,
-      agent: {},
-      tools: {
-        hotbar: global,
-        projectHotbars: { project_alpha: ["workflow.aaaaaaaaaaaaaaaa.alpha"] },
-      },
-    };
-    await writeFile(noesisConfigPath(home), JSON.stringify(original));
-
-    await expect(
-      updateToolHotbar(home, {
-        projectId: "project_beta",
-        projectToolNamespace: "workflow.bbbbbbbbbbbbbbbb.",
-        scope: "global",
-        action: "add",
-        tool: "global.new",
-        legacyGlobalProjectTools: [],
-        legacyActiveProjectTools: [],
-      }),
-    ).rejects.toThrow("project project_alpha hotbar would contain 17 tools");
-    expect(JSON.parse(await readFile(noesisConfigPath(home), "utf8"))).toEqual(original);
-
-    const legacy = "workflow.aaaaaaaaaaaaaaaa.legacy";
-    const withLegacy = {
-      ...original,
-      tools: {
-        ...original.tools,
-        hotbar: [...global.slice(0, 14), legacy],
-      },
-    };
-    await writeFile(noesisConfigPath(home), JSON.stringify(withLegacy));
-    await expect(
-      updateToolHotbar(home, {
-        projectId: "project_beta",
-        projectToolNamespace: "workflow.bbbbbbbbbbbbbbbb.",
-        scope: "global",
-        action: "add",
-        tool: "global.new",
-        legacyGlobalProjectTools: [legacy],
-        legacyActiveProjectTools: [],
-      }),
-    ).rejects.toThrow("project workflow namespace workflow.aaaaaaaaaaaaaaaa. hotbar would contain 17 tools");
-    expect(JSON.parse(await readFile(noesisConfigPath(home), "utf8"))).toEqual(withLegacy);
   });
 
   test("serializes independent writers without losing either patch", async () => {

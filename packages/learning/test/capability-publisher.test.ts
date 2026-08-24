@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { capabilityEffects, createAtomicCapabilityRegistry } from "@noesis/capabilities";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
-import { createCapabilityPublisher } from "../src/capability-publisher.ts";
+import { CapabilityProposalSchema, createCapabilityPublisher } from "../src/capability-publisher.ts";
 
 const opened: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
 
@@ -16,6 +16,26 @@ afterEach(async () => {
 });
 
 describe("Capability publisher", () => {
+  test("rejects more than one Program attachment in a Capability proposal", () => {
+    const parsed = CapabilityProposalSchema.safeParse({
+      name: "Ambiguous program bundle",
+      description: "Attempts to attach two Programs.",
+      applicability: "Never valid.",
+      summary: "Two Programs.",
+      rationale: "Exercise the typed boundary.",
+      anticipatedEffect: "Rejected before publication.",
+      effects: [
+        { kind: "program", mode: "script", name: "first" },
+        { kind: "program", mode: "workflow", name: "second" },
+      ],
+      consequence: "ordinary",
+      consequenceDescription: "No protected consequence.",
+    });
+
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) expect(parsed.error.issues[0]?.message).toContain("at most one Program");
+  });
+
   test("publishes exact foreground decisions and rejects a stale successor without authoring it", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-capability-publisher-"));
     const workspace = await createWorkspaceStore(root);
@@ -209,13 +229,13 @@ describe("Capability publisher", () => {
     const actor = Object.freeze({ actorId: "foreground-capability-author", kind: "noesis" as const });
     const [frozenDefinition, liveDefinition] = await Promise.all([
       workspace.definitions.recordWorkingDefinition({
-        workingPath: "scripts/pinned/script-v1.json",
+        workingPath: "programs/projects/project-program-pin/script/pinned/script-v1.json",
         bytes: new TextEncoder().encode('{"revision":1}\n'),
         actor,
         reason: "Frozen turn fixture",
       }),
       workspace.definitions.recordWorkingDefinition({
-        workingPath: "scripts/pinned/script-v2.json",
+        workingPath: "programs/projects/project-program-pin/script/pinned/script-v2.json",
         bytes: new TextEncoder().encode('{"revision":2}\n'),
         actor,
         reason: "Concurrent live fixture",
@@ -224,10 +244,13 @@ describe("Capability publisher", () => {
     const project = Object.freeze({ projectId: "project-program-pin", root });
     const effect = (definitionRevision: typeof frozenDefinition) =>
       Object.freeze({
-        kind: "script" as const,
-        name: "pinned-script",
-        project,
-        definitionRevision,
+        kind: "program" as const,
+        program: Object.freeze({
+          mode: "script" as const,
+          name: "pinned-script",
+          project,
+          definitionRevision,
+        }),
       });
     const publisher = createCapabilityPublisher({
       workspace,
@@ -249,7 +272,7 @@ describe("Capability publisher", () => {
           summary: "Attach a frozen script.",
           rationale: "The foreground turn selected this exact revision.",
           anticipatedEffect: "Concurrent edits cannot alter the published behavior.",
-          effects: [{ kind: "script", name: "pinned-script" }],
+          effects: [{ kind: "program", mode: "script", name: "pinned-script" }],
           consequence: "ordinary",
           consequenceDescription: "This references a reversible saved program.",
         },
@@ -270,7 +293,10 @@ describe("Capability publisher", () => {
     const lifecycle = await workspace.capabilities.getRevision(binding.revision);
     if (!lifecycle) throw new Error("Expected a pinned Capability revision");
     expect(capabilityEffects(lifecycle.revision)).toMatchObject([
-      { kind: "script", definitionRevision: frozenDefinition },
+      {
+        kind: "program",
+        program: { mode: "script", name: "pinned-script", definitionRevision: frozenDefinition },
+      },
     ]);
   });
 });

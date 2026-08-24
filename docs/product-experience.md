@@ -10,13 +10,13 @@ Noesis follows one broad loop, but it does not force every session through every
 4. Settle a durable turn trace with the messages, actions, outcome, and exact revisions involved.
 5. Reflect on that trace without interrupting the conversation.
 6. Record `no_change`, or create, revise, pause, restore, or retarget one exact Capability.
-7. Activate ordinary Capability revisions immediately. A revision may contribute instructions, progressively loaded skills, or exact saved project scripts and workflows.
+7. Activate ordinary Capability revisions immediately. A revision may contribute instructions, progressively loaded skills, or an exact saved Program revision.
 8. Pause only credential export, recovery or audit control, and irreversible external actions without foreground user intent for an explicit decision.
 9. Select globally eligible Capabilities by semantic relevance on later turns, unless the user has made one always active. Keep every reason and exact revision inspectable.
 
 The current interaction must be useful on its own. Development over time is an added benefit, not a cost charged to every conversation.
 
-An explicit project change does not wait for this loop. Noesis may publish and use a project script or workflow at once through `execute`. Reflection may later consolidate its lessons into a Capability.
+An explicit project change does not wait for this loop. Noesis may publish and use a project Program in script or workflow mode at once through `execute`. Reflection may later consolidate its lessons into a Capability.
 
 Deliberate self-improvement does not wait for the ambient loop either. While working with the user, the foreground agent can inspect current Capabilities, gather evidence, and author one complete create, revise, pause, restore, or binding-change decision. Protected code supplies the admitted turn and evidence, records exact immutable materials, checks the expected binding, and applies the same gate used by ambient reflection. It does not make a second model call to reinterpret the foreground decision. The resulting revision is eligible from a later frozen turn.
 
@@ -96,7 +96,7 @@ The main interaction remains conversational. A user can ask, "Why did you work w
 
 The default filter shows active and recently revised Capabilities, protected decisions, feedback, and failures. Routine `no_change` reflections appear as a bounded summary. Failed reflections remain in an expandable section. Historical experiments remain available for audit, but they do not compete with the current Capability lifecycle.
 
-Each Capability is labelled by its Instruction, Skill, Script, and Workflow effects. The detail pane opens the exact material or saved definition behind each effect. It also shows the decision, applicability, binding, revision history, cited evidence, considered inputs, feedback, and related records.
+Each Capability is labelled by its Instruction, Skill, and Program effects. A Program effect also names its script or workflow mode. The detail pane opens the exact material or saved definition behind each effect. It also shows the decision, applicability, binding, revision history, cited evidence, considered inputs, feedback, and related records.
 
 Enter opens the highlighted record. Tab moves among expandable sections inside the record. Escape moves back one level. Evidence sections show readable previews first, then a larger bounded set on demand. The raw view preserves exact IDs for debugging and still redacts sensitive material.
 
@@ -108,7 +108,7 @@ Ambient reflection or the foreground agent may activate an ordinary exact Capabi
 
 Subagents may investigate or critique a possible refinement, but they cannot publish it. The foreground agent retains the richer user collaboration context and makes the final semantic decision.
 
-The model creates project scripts and workflows through `execute`. A Capability that uses one of those programs points to the same immutable definition revision. It never creates a parallel program.
+The model creates project Programs in script or workflow mode through `execute`. A Capability that uses a Program points to the same immutable definition revision. It never creates a parallel executable definition.
 
 Credential export, recovery or audit control, and irreversible external actions without foreground intent pause for an explicit approve, deny, or natural-language change decision. Protected code retains ownership of workspace integrity and exact restoration.
 
@@ -142,7 +142,7 @@ The user can ask why the Capability changed, inspect the evidence and reasoning,
 
 The user asks Noesis to preserve a method they just developed, or uses `/refine` with a concrete request. Noesis loads its built-in self-knowledge, inspects overlapping Capabilities and exact predecessor material, and gathers relevant evidence during the same foreground execution.
 
-If a lasting ability is justified, the foreground agent authors the complete Capability and exact effects itself. The runtime validates and publishes that decision without a separate reflector pass. If a reusable program is part of the ability, Noesis first saves and verifies the ordinary project Script or Workflow, then attaches its immutable revision. The final response reports the authoritative publication result. Ambient reflection later observes that recorded action and should normally avoid duplicating it.
+If a lasting ability is justified, the foreground agent authors the complete Capability and exact effects itself. The runtime validates and publishes that decision without a separate reflector pass. If a reusable Program is part of the ability, Noesis first saves and verifies the ordinary project Program in the appropriate mode, then attaches its immutable revision. The final response reports the authoritative publication result. Ambient reflection later observes that recorded action and should normally avoid duplicating it.
 
 ### Clear execution remains simple
 

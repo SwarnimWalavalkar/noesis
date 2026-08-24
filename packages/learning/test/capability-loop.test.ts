@@ -443,8 +443,8 @@ describe("Capability learning loop", () => {
       );
     }
     for (const [suffix, toolName] of [
-      ["save", "scripts.save"],
-      ["run", "scripts.run"],
+      ["save", "programs.save"],
+      ["run", "programs.run"],
     ] as const) {
       const toolCallId = `turn-dense:${suffix}`;
       await workspace.operational.toolCalls.put({
@@ -465,10 +465,17 @@ describe("Capability learning loop", () => {
     }
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const definitionRevision = await workspace.definitions.recordWorkingDefinition({
-      workingPath: "scripts/comparative-research-scout/index.mjs",
+      workingPath: "programs/projects/project-dense/script/comparative-research-scout/index.mjs",
       bytes: new TextEncoder().encode("export default async function scout() { return []; }\n"),
       actor: Object.freeze({ actorId: "fixture", kind: "system" as const }),
       reason: "Saved research scout fixture",
+    });
+    const concurrentlyPublishedRevision = await workspace.definitions.recordWorkingDefinition({
+      workingPath: "programs/projects/project-dense/script/comparative-research-scout/index.mjs",
+      bytes: new TextEncoder().encode("export default async function scout() { return ['changed']; }\n"),
+      actor: Object.freeze({ actorId: "fixture", kind: "system" as const }),
+      reason: "Concurrent research scout fixture",
+      predecessorRevisionId: definitionRevision.revisionId,
     });
     const inference = createScriptedLearningInferencePort({
       steps: [
@@ -483,7 +490,9 @@ describe("Capability learning loop", () => {
               summary: "Attach the research scout proven in this turn.",
               rationale: "The saved scout completed the same research pattern successfully.",
               anticipatedEffect: "Future comparisons can reuse the working program.",
-              effects: Object.freeze([Object.freeze({ kind: "script", name: "comparative-research-scout" })]),
+              effects: Object.freeze([
+                Object.freeze({ kind: "program", mode: "script", name: "comparative-research-scout" }),
+              ]),
               activationMode: "relevant",
               consequence: "ordinary",
               consequenceDescription: "This activates an existing saved project script.",
@@ -494,22 +503,35 @@ describe("Capability learning loop", () => {
       ],
     });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    let liveResolveCalls = 0;
     const programs: CapabilityProgramLibrary = Object.freeze({
       list: async () =>
         Object.freeze([
           Object.freeze({
-            kind: "script" as const,
+            mode: "script" as const,
             name: "comparative-research-scout",
             description: "Run bounded comparative research.",
             revision: 1,
+            definitionRevision,
           }),
         ]),
-      resolve: async (kind: "script" | "workflow", name: string, requestedProject: ProjectRef) =>
-        kind === "script" &&
-        name === "comparative-research-scout" &&
-        requestedProject.projectId === project.projectId
-          ? Object.freeze({ kind: "script" as const, name, project, definitionRevision })
-          : undefined,
+      resolve: async (mode: "script" | "workflow", name: string, requestedProject: ProjectRef) =>
+        (() => {
+          liveResolveCalls += 1;
+          return mode === "script" &&
+            name === "comparative-research-scout" &&
+            requestedProject.projectId === project.projectId
+            ? Object.freeze({
+                kind: "program" as const,
+                program: Object.freeze({
+                  mode,
+                  name,
+                  project,
+                  definitionRevision: concurrentlyPublishedRevision,
+                }),
+              })
+            : undefined;
+        })(),
     });
     const module = createCapabilityLearningModule({
       workspace,
@@ -561,21 +583,20 @@ describe("Capability learning loop", () => {
     expect(evidence).toContain('"count":40');
     expect(evidence).toContain('"truncatedResultCount":1');
     expect(evidence).toContain("resultTruncated");
-    expect(evidence).toContain("scripts.save");
-    expect(evidence).toContain("scripts.run");
+    expect(evidence).toContain("programs.save");
+    expect(evidence).toContain("programs.run");
     expect(evidence).toContain("mcp.exa.web_search_exa");
     expect((await workspace.capabilities.listRevisions("capability-dense"))[0]).toMatchObject({
       revision: {
         effects: [
           {
-            kind: "script",
-            name: "comparative-research-scout",
-            project,
-            definitionRevision,
+            kind: "program",
+            program: { mode: "script", name: "comparative-research-scout", project, definitionRevision },
           },
         ],
       },
     });
+    expect(liveResolveCalls).toBe(0);
   });
 
   test("attaches a saved workflow by its exact canonical revision instead of authoring a parallel workflow", async () => {
@@ -605,8 +626,10 @@ describe("Capability learning loop", () => {
     });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const definitionRevision = await workspace.definitions.recordWorkingDefinition({
-      workingPath: "workflows/evidence-synthesis/workflow.json",
-      bytes: new TextEncoder().encode('{"kind":"noesis_workflow","name":"evidence-synthesis"}\n'),
+      workingPath: "programs/projects/project-workflow/workflow/evidence-synthesis/program.json",
+      bytes: new TextEncoder().encode(
+        '{"kind":"noesis_program","mode":"workflow","name":"evidence-synthesis"}\n',
+      ),
       actor: Object.freeze({ actorId: "fixture", kind: "system" as const }),
       reason: "Saved workflow fixture",
     });
@@ -623,7 +646,9 @@ describe("Capability learning loop", () => {
               summary: "Attach the saved evidence synthesis workflow.",
               rationale: "The user explicitly asked to reuse this saved program.",
               anticipatedEffect: "The proven procedure is available on relevant turns.",
-              effects: Object.freeze([Object.freeze({ kind: "workflow", name: "evidence-synthesis" })]),
+              effects: Object.freeze([
+                Object.freeze({ kind: "program", mode: "workflow", name: "evidence-synthesis" }),
+              ]),
               activationMode: "relevant",
               consequence: "ordinary",
               consequenceDescription: "This activates an existing saved workflow.",
@@ -638,21 +663,20 @@ describe("Capability learning loop", () => {
       list: async () =>
         Object.freeze([
           Object.freeze({
-            kind: "workflow" as const,
+            mode: "workflow" as const,
             name: "evidence-synthesis",
             description: "Synthesize evidence.",
             revision: 1,
+            definitionRevision,
           }),
         ]),
-      resolve: async (kind: "script" | "workflow", name: string, requestedProject: ProjectRef) =>
-        kind === "workflow" &&
+      resolve: async (mode: "script" | "workflow", name: string, requestedProject: ProjectRef) =>
+        mode === "workflow" &&
         name === "evidence-synthesis" &&
         requestedProject.projectId === project.projectId
           ? Object.freeze({
-              kind: "workflow" as const,
-              name,
-              project,
-              definitionRevision,
+              kind: "program" as const,
+              program: Object.freeze({ mode, name, project, definitionRevision }),
             })
           : undefined,
     });
@@ -715,12 +739,10 @@ describe("Capability learning loop", () => {
     const current = binding ? await workspace.capabilities.getRevision(binding.revision) : undefined;
     expect(current?.revision.effects).toEqual([
       {
-        kind: "workflow",
-        name: "evidence-synthesis",
-        project,
-        definitionRevision,
+        kind: "program",
+        program: { mode: "workflow", name: "evidence-synthesis", project, definitionRevision },
       },
     ]);
-    expect(await workspace.definitionMetadata.listCurrent("workflow:project-workflow")).toEqual([]);
+    expect(await workspace.definitionMetadata.listCurrent("program:project-workflow:workflow")).toEqual([]);
   });
 });

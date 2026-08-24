@@ -55,6 +55,8 @@ function plan(): FrozenTurnPlan {
       {
         capabilityId: "cap-research",
         name: "research",
+        description: "Conduct grounded research.",
+        applicability: "When the task requires research evidence.",
         scope: "research",
         selectionReason: "Related research work",
         revision: servedRevision,

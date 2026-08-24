@@ -79,7 +79,6 @@ function runtime(
           name: "math.double",
           label: "Double",
           description: "Double a number",
-          visibility: "codemode_only",
           inputSchema: z.strictObject({ value: z.number() }),
           outputSchema: z.strictObject({ value: z.number() }),
           effect: () => ({ effect: "read", resource: "math:double", estimatedCost: 0 }),
@@ -96,7 +95,6 @@ function runtime(
                 name: "agents.run",
                 label: "Run subagent",
                 description: "Controlled subagent run",
-                visibility: "codemode_only",
                 inputSchema: z.strictObject({
                   prompt: z.union([
                     z.string(),

@@ -472,6 +472,7 @@ export function createTurnIntelligencePlanner(
     const resolved: {
       readonly reference: CapabilityRevisionRef;
       readonly capability: Capability;
+      readonly definition?: import("@noesis/domain").CapabilityDefinition;
       readonly revision: CapabilityRevision;
       readonly baseline: FrozenBaselineRef;
     }[] = [];
@@ -506,8 +507,9 @@ export function createTurnIntelligencePlanner(
     const references = [...referencesByCapabilityId.values()];
     for (const reference of references) {
       if (reference.kind !== "capability_revision") continue;
-      const [capability, revision, baseline] = await Promise.all([
+      const [capability, definition, revision, baseline] = await Promise.all([
         options.capabilities.resolveCapability(reference.capabilityId),
+        options.workspace.capabilities.getDefinition(reference.capabilityId),
         options.capabilities.resolveRevision(reference),
         options.capabilities.resolveBaseline(reference),
       ]);
@@ -515,7 +517,13 @@ export function createTurnIntelligencePlanner(
         throw new Error(
           `Active capability ${reference.capabilityRevisionId} cannot be rehydrated from immutable state`,
         );
-      resolved.push(Object.freeze({ reference, capability, revision, baseline }));
+      resolved.push(
+        Object.freeze(
+          createConditionalObject({ reference, capability, revision, baseline } as const)
+            .addOptional(definition ? { definition } : undefined)
+            .finish(),
+        ),
+      );
     }
     const general = resolved.filter((item) => item.baseline.kind === "genesis");
     const always = resolved.filter(
@@ -611,7 +619,14 @@ export function createTurnIntelligencePlanner(
       }),
     ];
     const selections: FrozenCapabilitySelection[] = [];
-    for (const { reference, capability, revision, baseline, selectionReason } of selectedResolved) {
+    for (const {
+      reference,
+      capability,
+      definition,
+      revision,
+      baseline,
+      selectionReason,
+    } of selectedResolved) {
       const currentEffects = capabilityEffects(revision);
       if (currentEffects.length > 0) {
         validateCapabilityEffects(currentEffects);
@@ -634,9 +649,11 @@ export function createTurnIntelligencePlanner(
                 material: await materialize(options.workspace, effect.material),
               })
             : Object.freeze({
-                ...effect,
-                project: Object.freeze({ ...effect.project }),
-                definition: await materialize(options.workspace, effect.definitionRevision),
+                kind: "program" as const,
+                mode: effect.program.mode,
+                name: effect.program.name,
+                project: Object.freeze({ ...effect.program.project }),
+                definition: await materialize(options.workspace, effect.program.definitionRevision),
               }),
         ),
       );
@@ -646,6 +663,8 @@ export function createTurnIntelligencePlanner(
           createConditionalObject({
             capabilityId: capability.capabilityId,
             name: capability.name,
+            description: definition?.description ?? capability.intent,
+            applicability: definition?.applicability ?? capability.intent,
             scope: capability.scope,
             selectionReason,
             revision: reference,

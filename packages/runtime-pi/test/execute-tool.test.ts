@@ -1,51 +1,73 @@
-import { createConditionalObject, sha256 } from "@noesis/domain";
+import { sha256 } from "@noesis/domain";
 import { describe, expect, test } from "vitest";
-import {
-  createPiExecuteTool,
-  type PiMcpServerSummary,
-  type PiWorkflowSummary,
-  type PreparedPiCodeExecution,
-} from "../src/index.ts";
-function executeDescription(
-  workflowSummaries?: readonly PiWorkflowSummary[],
-  mcpServerSummaries?: readonly PiMcpServerSummary[],
-): string {
-  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-  const prepared: PreparedPiCodeExecution = createConditionalObject({
-    catalog: Object.freeze({
-      catalogId: "catalog-workflow-index",
-      catalogDigest: sha256("catalog-workflow-index"),
-      tools: Object.freeze([]),
+import { createPiExecuteTool, type PiMcpServerSummary, type PreparedPiCodeExecution } from "../src/index.ts";
+
+const shellDescriptor = Object.freeze({
+  name: "shell.run",
+  label: "Run shell command",
+  description: "Run one shell command.",
+  revisionId: "shell-run-v1",
+  inputSchema: Object.freeze({ type: "object" }),
+  outputSchema: Object.freeze({
+    type: "object",
+    properties: Object.freeze({
+      exitCode: Object.freeze({ anyOf: [{ type: "integer" }, { type: "null" }] }),
+      signal: Object.freeze({ anyOf: [{ type: "string" }, { type: "null" }] }),
+      output: Object.freeze({ type: "string" }),
+      outputCharacterLength: Object.freeze({ type: "integer" }),
+      truncated: Object.freeze({ type: "boolean" }),
+      fullOutputPath: Object.freeze({ type: "string" }),
+      fullOutputComplete: Object.freeze({ type: "boolean" }),
     }),
-  } as const)
-    .addOptional(workflowSummaries ? { workflowSummaries } : undefined)
-    .addOptional(mcpServerSummaries ? { mcpServerSummaries } : undefined)
-    .add({
-      execute: async () =>
-        Object.freeze({
-          executionId: "execution-workflow-index",
-          value: null,
-          calls: 0,
-          durationMs: 0,
-        }),
-      close: async () => undefined,
-    } as const)
-    .finish();
+    required: Object.freeze([
+      "exitCode",
+      "signal",
+      "output",
+      "outputCharacterLength",
+      "truncated",
+      "fullOutputComplete",
+    ]),
+    additionalProperties: false,
+  }),
+});
+
+function executeDescription(
+  mcpServerSummaries?: readonly PiMcpServerSummary[],
+  tools: PreparedPiCodeExecution["catalog"]["tools"] = Object.freeze([
+    Object.freeze({
+      name: "programs.list",
+      label: "List Programs",
+      description: "List Programs",
+      revisionId: "programs-list-v1",
+      inputSchema: Object.freeze({ type: "object" }),
+      outputSchema: Object.freeze({ type: "array" }),
+    }),
+    shellDescriptor,
+  ]),
+): string {
+  const preparedBase: PreparedPiCodeExecution = {
+    catalog: Object.freeze({
+      catalogId: "catalog-progressive-disclosure",
+      catalogDigest: sha256("catalog-progressive-disclosure"),
+      tools,
+    }),
+    execute: async () =>
+      Object.freeze({ executionId: "execution-test", value: null, calls: 0, durationMs: 0 }),
+    close: async () => undefined,
+  };
+  const prepared = Object.freeze(
+    mcpServerSummaries === undefined ? preparedBase : { ...preparedBase, mcpServerSummaries },
+  );
   return createPiExecuteTool({
     prepared,
-    turnId: "turn-workflow-index",
+    turnId: "turn-test",
     signal: new AbortController().signal,
     emit: () => undefined,
   }).description;
 }
-function workflowIndexFrom(description: string): string {
-  const start = description.indexOf("<available_workflows>");
-  const end = description.indexOf(" Use store(key, value)", start);
-  if (start < 0 || end < 0) throw new Error("Execute description has no workflow index");
-  return description.slice(start, end);
-}
-describe("execute workflow discovery index", () => {
-  test("shows a bounded escaped MCP capability summary without server instructions", () => {
+
+describe("execute progressive disclosure", () => {
+  test("keeps its provider-facing descriptor byte-stable as catalogs and MCP servers change", () => {
     const servers = Array.from({ length: 80 }, (_, index) => ({
       name: index === 0 ? "docs<&" : `server-${String(index).padStart(3, "0")}`,
       tools: index,
@@ -53,83 +75,33 @@ describe("execute workflow discovery index", () => {
       resources: 3,
       resourceTemplates: 4,
     }));
-    const description = executeDescription([], servers);
-    const start = description.indexOf("<available_mcp_servers>");
-    const end = description.indexOf(" Use store(key, value)", start);
-    const index = description.slice(start, end);
-    expect(index).toContain("docs&lt;&amp; (0 tools, 2 prompts, 3 resources, 4 templates)");
-    expect(index).toContain("mcp.servers");
-    expect(index).toContain("mcp.inspect");
-    expect(index).toContain("noesis.search");
-    expect(index).toContain("More servers are available");
-    expect(new TextEncoder().encode(index).byteLength).toBeLessThanOrEqual(4 * 1024);
-  });
-  test("shows compact frozen workflow metadata with progressive-disclosure guidance", () => {
-    const description = executeDescription([
+    const changedCatalog = Object.freeze([
       Object.freeze({
-        name: "research-brief",
-        description: "Research a topic and write a brief.",
-        toolName: "workflow.0123456789abcdef.research-brief",
+        name: "mcp.docs.search",
+        label: "Search docs",
+        description: "A changed dynamic catalog tool",
+        revisionId: "mcp-docs-search-v9",
+        inputSchema: Object.freeze({ type: "object" }),
+        outputSchema: Object.freeze({ type: "string" }),
       }),
+      shellDescriptor,
     ]);
-    expect(description).toContain(
-      "<available_workflows>research-brief [tool: workflow.0123456789abcdef.research-brief] — Research a topic and write a brief.</available_workflows>",
-    );
-    expect(description).toContain("exact listed tool name with adapt for project-safe hotbar pinning");
-    expect(description).toContain("`workflows.run` is the generic runner");
-    expect(description).toContain("tools.workflows.describe({ name })");
-    expect(description).not.toContain("workflows.list");
+    const baseline = executeDescription();
+    expect(executeDescription(servers, changedCatalog)).toBe(baseline);
+    expect(baseline).toContain("mcp.servers");
+    expect(baseline).toContain("noesis.search");
+    expect(baseline).toContain("Schema-derived shell.run result");
+    expect(baseline).toContain("fullOutputPath?:string");
+    expect(baseline).toContain("fullOutputComplete:boolean");
+    expect(baseline).not.toContain("docs<&");
   });
-  test("normalizes each entry to one escaped line and sorts deterministically", () => {
-    const description = executeDescription([
-      Object.freeze({
-        name: "zeta",
-        description: "Second\n\tworkflow",
-        toolName: "workflow.0123456789abcdef.zeta",
-      }),
-      Object.freeze({
-        name: "alpha<&\"'",
-        description: " First   <workflow> & its contract ",
-        toolName: "workflow.0123456789abcdef.alpha<&\"'",
-      }),
-    ]);
-    const index = workflowIndexFrom(description);
-    expect(index).toContain(
-      "alpha&lt;&amp;&quot;&apos; [tool: workflow.0123456789abcdef.alpha&lt;&amp;&quot;&apos;] — First &lt;workflow&gt; &amp; its contract; zeta [tool: workflow.0123456789abcdef.zeta] — Second workflow",
-    );
-    expect(index).not.toContain("\n");
-    expect(index).not.toContain("\t");
-  });
-  test("bounds descriptions, entry count, and the complete index", () => {
-    const summaries = Array.from({ length: 80 }, (_, index) =>
-      Object.freeze({
-        name: `workflow-${String(index).padStart(3, "0")}`,
-        description: `${"😀<&".repeat(200)} ${String(index)}`,
-        toolName: `workflow.0123456789abcdef.workflow-${String(index).padStart(3, "0")}`,
-      }),
-    );
-    const index = workflowIndexFrom(executeDescription(summaries));
-    const listedEntries = index.match(/workflow-\d{3} \[tool:/gu) ?? [];
-    const singleIndex = workflowIndexFrom(
-      executeDescription([
-        Object.freeze({
-          name: "bounded-description",
-          description: "😀".repeat(200),
-          toolName: "workflow.0123456789abcdef.bounded-description",
-        }),
-      ]),
-    );
-    const boundedDescription = /\] — (.*)<\/available_workflows>/u.exec(singleIndex)?.[1];
-    if (!boundedDescription) throw new Error("Expected the bounded workflow description");
-    expect(listedEntries.length).toBeLessThanOrEqual(32);
-    expect(listedEntries.length).toBeGreaterThan(0);
-    expect(new TextEncoder().encode(boundedDescription).byteLength).toBeLessThanOrEqual(192);
-    expect(new TextEncoder().encode(index).byteLength).toBeLessThanOrEqual(4 * 1024);
-    expect(index).toContain("More saved workflows are available; use workflows.list");
-    expect(index).toContain("…");
-  });
-  test("omits the index when the frozen turn has no saved workflows", () => {
-    expect(executeDescription()).not.toContain("available_workflows");
-    expect(executeDescription([])).not.toContain("available_workflows");
+
+  test("keeps Program discovery progressive instead of injecting saved names", () => {
+    const description = executeDescription();
+    expect(description).toContain("programs.list");
+    expect(description).toContain("programs.save");
+    expect(description).toContain("programs.run");
+    expect(description).toContain("exact returned revision");
+    expect(description).not.toContain("available_workflows");
   });
 });

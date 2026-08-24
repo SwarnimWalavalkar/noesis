@@ -42,7 +42,7 @@
     <p>MCP remains one capability source inside Noesis:</p>
     <ul>
       <li>Discovered tools become ordinary frozen Tool Catalog entries named <code>mcp.&lt;server&gt;.&lt;tool&gt;</code>.</li>
-      <li>The same Broker invocation path serves <code>execute</code>, direct hotbar tools, and workflow phases.</li>
+      <li>The same Broker invocation path serves <code>execute</code>, the fixed direct tools, and Program phases.</li>
       <li>Prompts, resources, templates, and completions remain native MCP capabilities exposed through the same host manager and SDK.</li>
       <li>Roots expose the active project by default. Sampling uses Noesis's current model routing. Elicitation opens an interactive form or URL flow in the TUI.</li>
       <li>Progress, logs, cancellation, task state, and server requests appear in the normal live action stream and remain inspectable with the work they belong to.</li>
@@ -55,7 +55,7 @@
     <div class="grid">
       <div class="card"><strong>Compact index</strong><p class="muted">The always-visible execute context includes enabled server names, short descriptions, capability counts, and canonical namespaces.</p></div>
       <div class="card"><strong>On demand</strong><p class="muted">The execute SDK can list and search tools, inspect one tool's full schema, list or fetch prompts, list or read resources, and inspect server capabilities before use.</p></div>
-      <div class="card"><strong>Direct use</strong><p class="muted">Any MCP tool may be pinned to the hotbar as a regular direct tool. Its full schema is disclosed only while pinned.</p></div>
+      <div class="card"><strong>Progressive use</strong><p class="muted">MCP tools are discovered and invoked through <code>execute</code>. Their full schemas are disclosed only on demand, while the provider-facing tool set remains fixed.</p></div>
       <div class="card"><strong>Workflows</strong><p class="muted">Workflows reference canonical names such as <code>mcp.github.search_code</code> in <code>requiredTools</code> and invoke them through the same frozen Broker.</p></div>
     </div>
   </section>
@@ -129,7 +129,7 @@
     <ul>
       <li><strong>Hermes:</strong> simple namespaced discovery, long-lived connections, automatic reconnect, and a management UI are good product defaults.</li>
       <li><strong>OpenCode:</strong> native JSON Schema adaptation, local and remote configuration, enable/disable, OAuth with dynamic registration, and native prompts/resources are the right compatibility baseline.</li>
-      <li><strong>Noesis:</strong> add progressive disclosure, full transcript visibility, hotbar pinning, and first-class workflow composition without inventing a second MCP execution system.</li>
+      <li><strong>Noesis:</strong> add progressive disclosure, full transcript visibility, and first-class Program composition without inventing a second MCP execution system or mutating the provider-facing tool set.</li>
     </ul>
   </section>
 </main></body>

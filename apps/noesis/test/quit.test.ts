@@ -34,10 +34,9 @@ async function createTestRuntime(home: string) {
   });
   return await createApplicationRuntimeComposition({
     config,
-    createAgent: (_sessionTools, codeExecution, selfTools) =>
+    createAgent: (_sessionTools, codeExecution) =>
       createPiAgentRuntime(repositoryRoot, controlled.models, {
         codeExecution,
-        selfTools,
       }),
     createRoleRunner: (configurations) =>
       createPiAgentRoleRunner(repositoryRoot, controlled.models, configurations),

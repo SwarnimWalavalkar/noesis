@@ -59,6 +59,8 @@ function turnPlan(
       selections.map((selection) =>
         Object.freeze({
           ...selection,
+          description: `Fixture Capability ${selection.name}`,
+          applicability: `When ${selection.name} applies.`,
           selectionReason: "fixture",
           revision: revisionRef(selection.capabilityId),
           baseline: Object.freeze({ kind: "genesis" as const }),

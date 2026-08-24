@@ -18,10 +18,9 @@ A Capability is an ability Noesis can reuse. Each version has one or more exact 
 
 - **Instruction** adds trusted instructions to a matching turn.
 - **Skill** exposes an instructional package that the model loads only when needed.
-- **Script** uses one saved project script.
-- **Workflow** uses one saved project workflow.
+- **Program** attaches one exact saved project Program revision in script or workflow mode.
 
-Script and Workflow effects use the same saved programs you create during a turn. They stay in the project that owns that definition.
+Program effects use the same saved Programs you create during a turn. They stay in the project that owns that definition.
 
 New Capabilities apply anywhere they are relevant. You can narrow one to a project or session, or make it always active.
 
@@ -30,9 +29,10 @@ New Capabilities apply anywhere they are relevant. You can narrow one to a proje
 - Work in a local terminal with streaming responses and visible tool activity.
 - Open a new session, continue the last one, resume an older one, or fork the current session. If you type while a turn is running, those messages wait in order.
 - Search previous sessions with citations. You can compact older turns without changing the transcript you see.
-- Use files, directories, the shell, workflows, and session search as tools. Combine them in JavaScript with `execute`.
+- Use files, directories, the shell, Programs, and session search as tools. Combine them in JavaScript with `execute`.
+- Keep the default direct surface small: file read, complete file write, shell, and `execute`. Everything else is progressively discoverable through codemode.
 - Inspect the complete pre-turn session lazily in `execute`, and ask isolated models to analyze selected slices.
-- Save project scripts and multi-phase workflows and reuse them.
+- Save project Programs in script or workflow mode and reuse their exact revisions.
 - Connect local and remote MCP servers, including OAuth, from `/mcp`.
 - Inspect what Noesis learned with `/learning`, and restore any earlier version.
 
@@ -72,16 +72,16 @@ Project skills and project MCP servers stay disabled unless you start with `--tr
 
 ## Commands
 
-| Command                                      | Result                                                                                       |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `/learning`                                  | Inspect and manage Capabilities, reflection, feedback, and history.                          |
-| `/mcp`                                       | Add, authenticate, inspect, enable, disable, or remove MCP servers.                          |
-| `/compact [FOCUS]`                           | Compact older settled turns for future model context. The visible transcript stays complete. |
-| `/context`                                   | Inspect the context for the current session.                                                 |
-| `/capabilities`                              | Inspect the Capabilities selected for the current turn.                                      |
-| `/skills`, `/scripts`, `/workflows`, `/runs` | Inspect those resources and their run records.                                               |
-| `/fork`                                      | Create a new session from the current session.                                               |
-| `/queue resume`                              | Resume a queue that you paused.                                                              |
+| Command                                               | Result                                                                                       |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `/learning`                                           | Inspect and manage Capabilities, reflection, feedback, and history.                          |
+| `/mcp`                                                | Add, authenticate, inspect, enable, disable, or remove MCP servers.                          |
+| `/compact [FOCUS]`                                    | Compact older settled turns for future model context. The visible transcript stays complete. |
+| `/context`                                            | Inspect the context for the current session.                                                 |
+| `/capabilities`                                       | Inspect the Capabilities selected for the current turn.                                      |
+| `/skills`, `/programs`, `/program MODE NAME`, `/runs` | Inspect instructional resources, Programs, and run records.                                  |
+| `/fork`                                               | Create a new session from the current session.                                               |
+| `/queue resume`                                       | Resume a queue that you paused.                                                              |
 
 Press `?` in the terminal for the full command and keyboard reference.
 
@@ -91,7 +91,7 @@ Noesis stores local state under `~/.noesis/` by default. The default context bud
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "agent": {},
   "agents": {
     "provider": "openai-codex",
@@ -146,11 +146,11 @@ This example configures a remote OAuth server:
 }
 ```
 
-Connected MCP tools join the same catalog as built-in tools. The model can call them through `execute`, add one as a direct tool with `adapt`, or use one from a saved script or workflow.
+Connected MCP tools join the same catalog as built-in tools. The model can call them through `execute` or use them from a saved Program.
 
 ## Trust
 
-Generated code uses only the permissions granted for the current turn. It can save project scripts and workflows. Reflection can attach a saved program to a Capability.
+Generated code uses only the permissions granted for the current turn. It can save project Programs in script or workflow mode. Reflection or the foreground agent can attach an exact saved Program revision to a Capability.
 
 Noesis asks before credential export, recovery or audit control, and irreversible external actions that you did not request in the current turn.
 

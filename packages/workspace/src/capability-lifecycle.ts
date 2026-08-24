@@ -129,14 +129,15 @@ function normalizeGate(value: unknown): CapabilityGateRequest {
 }
 function assertRevisionSupportsScope(revision: CapabilityLifecycleRevision, scope: CapabilityScope): void {
   for (const effect of revision.revision.effects ?? []) {
-    if (effect.kind !== "script" && effect.kind !== "workflow") continue;
+    if (effect.kind !== "program") continue;
+    const { program } = effect;
     if (
       scope.kind !== "project" ||
-      scope.project.projectId !== effect.project.projectId ||
-      scope.project.root !== effect.project.root
+      scope.project.projectId !== program.project.projectId ||
+      scope.project.root !== program.project.root
     )
       throw new Error(
-        `Capability ${effect.kind} ${effect.name} must remain bound to project ${effect.project.projectId}`,
+        `Capability Program ${program.name} must remain bound to project ${program.project.projectId}`,
       );
   }
 }
@@ -204,7 +205,7 @@ export function createCapabilityLifecycleStore(
       ...(parsed.revision.effects ?? []).map((effect) =>
         effect.kind === "instruction" || effect.kind === "skill"
           ? effect.material
-          : effect.definitionRevision,
+          : effect.program.definitionRevision,
       ),
       ...parsed.revision.promptModules,
       ...parsed.revision.skills,

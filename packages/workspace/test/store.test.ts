@@ -33,6 +33,43 @@ const actor = { actorId: "test-user", kind: "user" as const };
 const text = (value: string): Uint8Array => Buffer.from(value);
 const digest = (character: string): string => character.repeat(64);
 const authority = (store: NoesisWorkspaceStore) => createWorkspaceRuntimeInternals(store).authority;
+const publishWorkflowProgram = async (store: NoesisWorkspaceStore, projectId: string, name: string) => {
+  const publication = await store.definitionPublications.publish({
+    namespace: `program:${projectId}:workflow`,
+    definitionId: name,
+    revision: 1,
+    workingPath: `programs/projects/${projectId}/workflow/${name}/program.json`,
+    bytes: text(
+      canonicalJson({
+        kind: "noesis_program",
+        mode: "workflow",
+        name,
+        description: `Workflow fixture ${name}.`,
+        revision: 1,
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        phases: [
+          {
+            name: "run",
+            description: "Return the input.",
+            source: "return input;",
+            inputSchema: { type: "object" },
+            outputSchema: { type: "object" },
+            requiredTools: [],
+          },
+        ],
+        createdFrom: {
+          sessionId: `session-${name}`,
+          turnId: `turn-${name}`,
+          planId: `plan-${name}`,
+        },
+      }),
+    ),
+    activity: Object.freeze({ kind: "program.saved", actor }),
+  });
+  if (!publication.ok) throw new Error(publication.error.message);
+  return publication.value.definitionRevision;
+};
 const runningTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
   const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
     schemaVersion: 1,
@@ -1281,11 +1318,11 @@ describe("WorkspaceStore", () => {
       updatedAt: "2026-07-26T00:00:00.000Z",
       metadata: Object.freeze({}),
     });
-    const workflowDefinition = await store.definitions.recordWorkingDefinition({
-      workingPath: "workflows/context-model-integrity/workflow.json",
-      bytes: text('{"name":"context-model-integrity","phases":[]}'),
-      actor,
-    });
+    const workflowDefinition = await publishWorkflowProgram(
+      store,
+      "project-context-model-integrity",
+      "context-model-integrity",
+    );
     const contextText = '{"role":"user","content":"frozen context é"}\n';
     const contextBytes = text(contextText);
     const contextArtifact = await store.artifacts.writeArtifact({
@@ -1908,15 +1945,106 @@ describe("WorkspaceStore", () => {
     lineageDatabase.close();
     store.close();
   });
+  test("binds script Program execution identity to the exact referenced source revision", async () => {
+    const store = await createWorkspaceStore(await temporary("codemode-program-identity"));
+    await store.operational.sessions.put(session("session-program-identity"));
+    const sourceBytes = text('return "exact";');
+    const sourceRevision = await store.definitions.recordWorkingDefinition({
+      workingPath: "programs/projects/project-program/script/exact/index.mjs",
+      bytes: sourceBytes,
+      actor,
+    });
+    const publication = await store.definitionPublications.publish({
+      namespace: "program:project-program:script",
+      definitionId: "exact",
+      revision: 1,
+      workingPath: "programs/projects/project-program/script/exact/program.json",
+      bytes: text(
+        canonicalJson({
+          kind: "noesis_program",
+          mode: "script",
+          name: "exact",
+          description: "Return one exact value.",
+          revision: 1,
+          sourceRevision,
+          inputSchema: { type: "object" },
+          outputSchema: { type: "string" },
+          requiredTools: [],
+          createdFrom: {
+            sessionId: "session-program-identity",
+            turnId: "turn-program-identity",
+            planId: "plan-program-identity",
+          },
+        }),
+      ),
+      provenanceRefs: Object.freeze([sourceRevision]),
+      activity: Object.freeze({ kind: "program.saved", actor }),
+    });
+    if (!publication.ok) throw new Error(publication.error.message);
+    const exactSource = await store.artifacts.writeArtifact({
+      path: "codemode/execution-program-exact/source.mjs",
+      mediaType: "text/javascript",
+      bytes: sourceBytes,
+      actor,
+      relationshipRefs: Object.freeze([]),
+    });
+    await store.operational.codeExecutions.put({
+      executionId: "execution-program-exact",
+      logicalExecutionId: "logical-program-exact",
+      sessionId: "session-program-identity",
+      projectId: "project-program",
+      catalogId: "catalog-test",
+      catalogDigest: digest("a"),
+      sourceDigest: sourceRevision.contentDigest,
+      program: Object.freeze({
+        mode: "script",
+        projectId: "project-program",
+        name: "exact",
+        revision: 1,
+        definitionRevisionId: publication.value.definitionRevision.revisionId,
+      }),
+      sourceArtifactId: exactSource.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    const unrelatedBytes = text('return "unrelated";');
+    const unrelatedSource = await store.artifacts.writeArtifact({
+      path: "codemode/execution-program-unrelated/source.mjs",
+      mediaType: "text/javascript",
+      bytes: unrelatedBytes,
+      actor,
+      relationshipRefs: Object.freeze([]),
+    });
+    await expect(
+      store.operational.codeExecutions.put({
+        executionId: "execution-program-false-attribution",
+        logicalExecutionId: "logical-program-false-attribution",
+        sessionId: "session-program-identity",
+        projectId: "project-program",
+        catalogId: "catalog-test",
+        catalogDigest: digest("a"),
+        sourceDigest: sha256(unrelatedBytes),
+        program: Object.freeze({
+          mode: "script",
+          projectId: "project-program",
+          name: "exact",
+          revision: 1,
+          definitionRevisionId: publication.value.definitionRevision.revisionId,
+        }),
+        sourceArtifactId: unrelatedSource.artifactId,
+        status: "running",
+        callCount: 0,
+        startedAt: "2026-07-26T00:00:00.000Z",
+      }),
+    ).rejects.toThrow("does not match its exact Program definition");
+    store.close();
+  });
   test("validates workflow definition dependency digests at SQL and decoder boundaries", async () => {
     const root = await temporary("workflow-definition-dependency-digest");
     const store = await createWorkspaceStore(root);
     await store.operational.sessions.put(session("session-workflow-digest"));
-    const definitionRevision = await store.definitions.recordWorkingDefinition({
-      workingPath: "workflows/digest/workflow.json",
-      bytes: text('{"name":"digest"}'),
-      actor,
-    });
+    const definitionRevision = await publishWorkflowProgram(store, "project-workflow-digest", "digest");
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const invalidDigests = [
       digest("A"),
@@ -2028,6 +2156,11 @@ describe("WorkspaceStore", () => {
     await expect(upgraded.operational.workflows.getRun(legacy.runId)).resolves.toMatchObject({
       definitionDependenciesDigest: digest("a"),
     });
+    const currentDefinition = await publishWorkflowProgram(
+      upgraded,
+      "project-workflow-digest-upgrade",
+      "digest-upgrade",
+    );
     for (const [index, definitionDependenciesDigest] of [
       digest("A"),
       `${"a".repeat(63)}g`,
@@ -2039,7 +2172,7 @@ describe("WorkspaceStore", () => {
           projectId: "project-workflow-digest-upgrade",
           workflowName: "digest-upgrade",
           workflowRevision: 1,
-          definitionRevisionId: "revision-workflow-digest-upgrade",
+          definitionRevisionId: currentDefinition.revisionId,
           definitionDependenciesDigest,
           sessionId: "session-workflow-digest-upgrade",
           status: "running",
@@ -2054,7 +2187,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 45 });
+    ).toEqual({ version: 47 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -2163,93 +2296,6 @@ describe("WorkspaceStore", () => {
     ).toEqual({ storage_class: "blob" });
     database.close();
   });
-  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-  test("claims legacy workflow runs only through an exact visible definition revision", async () => {
-    const store = await createWorkspaceStore(await temporary("legacy-workflow-run-project-claim"));
-    await store.operational.sessions.put({
-      sessionId: "session-legacy-workflows",
-      title: "Legacy workflows",
-      status: "idle",
-      provider: "controlled",
-      model: "controlled",
-      runtime: "pi",
-      createdAt: "2026-07-26T00:00:00.000Z",
-      updatedAt: "2026-07-26T00:00:00.000Z",
-      metadata: Object.freeze({}),
-    });
-    const publish = async (namespace: string, definitionId: string) => {
-      const publication = await store.definitionPublications.publish({
-        namespace,
-        definitionId,
-        revision: 1,
-        workingPath: `definitions/workflows/${definitionId}/workflow.json`,
-        bytes: text(JSON.stringify({ name: definitionId })),
-        activity: Object.freeze({
-          kind: "workflow.saved",
-          actor,
-          reason: "Legacy workflow claim fixture",
-        }),
-      });
-      if (!publication.ok) throw new Error(publication.error.message);
-      return publication.value.definitionRevision;
-    };
-    const [visibleRevision, foreignRevision, globalRevision] = await Promise.all([
-      publish("workflow:project-visible", "visible"),
-      publish("workflow:project-foreign", "foreign"),
-      publish("workflow", "global"),
-    ]);
-    const database = new DatabaseSync(store.unsafeDatabasePathForTesting);
-    const insertLegacyRun = database.prepare(`INSERT INTO workflow_runs(
-        run_id, project_id, workflow_name, workflow_revision, definition_revision_id,
-        session_id, status, current_phase, input_json, created_at, updated_at
-      ) VALUES (?, NULL, ?, 1, ?, 'session-legacy-workflows', 'paused', 0, '{}', ?, ?)`);
-    for (const [runId, workflowName, revisionId] of [
-      ["legacy-visible", "visible", visibleRevision.revisionId],
-      ["legacy-foreign", "foreign", foreignRevision.revisionId],
-      ["legacy-global", "global", globalRevision.revisionId],
-    ] as const)
-      insertLegacyRun.run(
-        runId,
-        workflowName,
-        revisionId,
-        "2026-07-26T00:00:00.000Z",
-        "2026-07-26T00:00:00.000Z",
-      );
-    database.close();
-    await expect(
-      store.operational.workflows.claimPausedRun(
-        "legacy-foreign",
-        "session-legacy-workflows",
-        "project-visible",
-        "2026-07-26T00:01:00.000Z",
-      ),
-    ).resolves.toBeUndefined();
-    await expect(
-      store.operational.workflows.claimPausedRun(
-        "legacy-visible",
-        "session-legacy-workflows",
-        "project-visible",
-        "2026-07-26T00:01:00.000Z",
-      ),
-    ).resolves.toMatchObject({ runId: "legacy-visible", status: "running" });
-    await expect(
-      store.operational.workflows.claimPausedRun(
-        "legacy-foreign",
-        "session-legacy-workflows",
-        "project-foreign",
-        "2026-07-26T00:01:00.000Z",
-      ),
-    ).resolves.toMatchObject({ runId: "legacy-foreign", status: "running" });
-    await expect(
-      store.operational.workflows.claimPausedRun(
-        "legacy-global",
-        "session-legacy-workflows",
-        "project-visible",
-        "2026-07-26T00:01:00.000Z",
-      ),
-    ).resolves.toMatchObject({ runId: "legacy-global", status: "running" });
-    store.close();
-  });
   test("rehydrates unfinished workflows as paused with their phase identity intact", async () => {
     const root = await temporary("workflow-recovery");
     const first = await createWorkspaceStore(root, {
@@ -2266,11 +2312,7 @@ describe("WorkspaceStore", () => {
       updatedAt: "2026-07-26T00:00:00.000Z",
       metadata: Object.freeze({}),
     });
-    const definitionRevision = await first.definitions.recordWorkingDefinition({
-      workingPath: "workflows/recover/workflow.json",
-      bytes: text('{"name":"recover"}'),
-      actor,
-    });
+    const definitionRevision = await publishWorkflowProgram(first, "project-workflow", "recover");
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const workflowSource = await first.artifacts.writeArtifact({
       path: "codemode/execution-workflow-unfinished/source.mjs",
@@ -2281,20 +2323,6 @@ describe("WorkspaceStore", () => {
         { kind: "database_row" as const, table: "sessions" as const, rowId: "session-workflow" },
       ]),
     });
-    await expect(
-      first.operational.workflows.putRun({
-        runId: "workflow-run-without-project",
-        workflowName: "recover",
-        workflowRevision: 1,
-        definitionRevisionId: definitionRevision.revisionId,
-        sessionId: "session-workflow",
-        status: "running",
-        currentPhase: 0,
-        input: { value: 1 },
-        createdAt: "2026-07-26T00:00:00.000Z",
-        updatedAt: "2026-07-26T00:00:00.000Z",
-      }),
-    ).rejects.toThrow("requires a project");
     await first.operational.workflows.putRun({
       runId: "workflow-run-unfinished",
       projectId: "project-workflow",
@@ -2312,6 +2340,7 @@ describe("WorkspaceStore", () => {
       executionId: "execution-workflow-unfinished",
       logicalExecutionId: "logical-workflow-phase",
       sessionId: "session-workflow",
+      projectId: "project-workflow",
       catalogId: "catalog-test",
       catalogDigest: digest("c"),
       sourceDigest: sha256(text("return input;")),
@@ -2349,6 +2378,7 @@ describe("WorkspaceStore", () => {
         phaseName: "completed-must-start",
         status: "completed",
         attempt: 1,
+        logicalExecutionId: "logical-completed-without-start",
         input: { value: 1 },
         output: { value: 1 },
         completedAt: "2026-07-26T00:00:01.000Z",
@@ -2379,6 +2409,7 @@ describe("WorkspaceStore", () => {
       executionId: "execution-other-session",
       logicalExecutionId: "logical-other-session",
       sessionId: "session-other",
+      projectId: "project-other",
       catalogId: "catalog-test",
       catalogDigest: digest("c"),
       sourceDigest: sha256(text("return input;")),
@@ -2387,6 +2418,48 @@ describe("WorkspaceStore", () => {
       callCount: 0,
       startedAt: "2026-07-26T00:00:00.000Z",
     });
+    await first.operational.codeExecutions.put({
+      executionId: "execution-other-project",
+      logicalExecutionId: "logical-workflow-phase",
+      sessionId: "session-workflow",
+      projectId: "project-other",
+      catalogId: "catalog-test",
+      catalogDigest: digest("c"),
+      sourceDigest: sha256(text("return input;")),
+      sourceArtifactId: workflowSource.artifactId,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    });
+    await expect(
+      first.operational.codeExecutions.put({
+        executionId: "execution-cross-project-child",
+        logicalExecutionId: "logical-cross-project-child",
+        parentExecutionId: "execution-workflow-unfinished",
+        sessionId: "session-workflow",
+        projectId: "project-other",
+        catalogId: "catalog-test",
+        catalogDigest: digest("c"),
+        sourceDigest: sha256(text("return input;")),
+        sourceArtifactId: workflowSource.artifactId,
+        status: "running",
+        callCount: 0,
+        startedAt: "2026-07-26T00:00:00.000Z",
+      }),
+    ).rejects.toThrow("parent does not share its project, session, and turn");
+    await expect(
+      first.operational.workflows.putPhase({
+        runId: "workflow-run-unfinished",
+        phaseIndex: 1,
+        phaseName: "cross-project",
+        status: "running",
+        attempt: 1,
+        logicalExecutionId: "logical-workflow-phase",
+        input: { value: 1 },
+        executionId: "execution-other-project",
+        startedAt: "2026-07-26T00:00:00.000Z",
+      }),
+    ).rejects.toThrow("does not belong to its run project and session");
     await expect(
       first.operational.workflows.putPhase({
         runId: "workflow-run-unfinished",
@@ -2399,8 +2472,54 @@ describe("WorkspaceStore", () => {
         executionId: "execution-other-session",
         startedAt: "2026-07-26T00:00:00.000Z",
       }),
-    ).rejects.toThrow("does not belong to its run session");
+    ).rejects.toThrow("does not belong to its run project and session");
     const lineageDatabase = new DatabaseSync(first.unsafeDatabasePathForTesting);
+    expect(() =>
+      lineageDatabase
+        .prepare(`INSERT INTO codemode_executions(
+          execution_id, logical_execution_id, parent_execution_id, session_id, project_id,
+          catalog_id, catalog_digest, source_digest, source_artifact_id, status, call_count, started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(
+          "execution-cross-project-child-sql",
+          "logical-cross-project-child-sql",
+          "execution-workflow-unfinished",
+          "session-workflow",
+          "project-other",
+          "catalog-test",
+          digest("c"),
+          sha256(text("return input;")),
+          workflowSource.artifactId,
+          "running",
+          0,
+          "2026-07-26T00:00:00.000Z",
+        ),
+    ).toThrow("parent does not belong to its project");
+    expect(() =>
+      lineageDatabase
+        .prepare(`INSERT INTO workflow_phase_runs(
+          run_id, phase_index, phase_name, status, input_json, attempt,
+          logical_execution_id, execution_id, started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(
+          "workflow-run-unfinished",
+          1,
+          "cross-project-sql",
+          "running",
+          '{"value":1}',
+          1,
+          "logical-workflow-phase",
+          "execution-other-project",
+          "2026-07-26T00:00:00.000Z",
+        ),
+    ).toThrow("does not belong to its run project");
+    expect(() =>
+      lineageDatabase
+        .prepare(`INSERT INTO workflow_phase_runs(
+          run_id, phase_index, phase_name, status, input_json, attempt, logical_execution_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run("workflow-run-unfinished", 1, "invalid-pending-identity", "pending", "{}", 0, "logical-pending"),
+    ).toThrow("status and logical execution identity do not match");
     expect(() =>
       lineageDatabase
         .prepare("UPDATE workflow_runs SET session_id = ? WHERE run_id = ?")
@@ -2418,8 +2537,33 @@ describe("WorkspaceStore", () => {
     ).toThrow("project is immutable");
     expect(() =>
       lineageDatabase
+        .prepare("UPDATE workflow_runs SET workflow_name = ? WHERE run_id = ?")
+        .run("retargeted", "workflow-run-unfinished"),
+    ).toThrow("Program identity is immutable");
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_runs SET workflow_revision = ? WHERE run_id = ?")
+        .run(2, "workflow-run-unfinished"),
+    ).toThrow("Program identity is immutable");
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_runs SET definition_revision_id = ? WHERE run_id = ?")
+        .run("definition-other", "workflow-run-unfinished"),
+    ).toThrow("Program identity is immutable");
+    expect(() =>
+      lineageDatabase
         .prepare("UPDATE workflow_phase_runs SET run_id = ? WHERE run_id = ? AND phase_index = 0")
         .run("other-run", "workflow-run-unfinished"),
+    ).toThrow("lineage is immutable");
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_phase_runs SET phase_index = ? WHERE run_id = ? AND phase_index = 0")
+        .run(2, "workflow-run-unfinished"),
+    ).toThrow("lineage is immutable");
+    expect(() =>
+      lineageDatabase
+        .prepare("UPDATE workflow_phase_runs SET phase_name = ? WHERE run_id = ? AND phase_index = 0")
+        .run("renamed", "workflow-run-unfinished"),
     ).toThrow("lineage is immutable");
     expect(() =>
       lineageDatabase
@@ -2510,14 +2654,15 @@ describe("WorkspaceStore", () => {
       phaseName: "recover",
       status: "running",
       attempt: 2,
-      logicalExecutionId: "logical-workflow-phase",
+      logicalExecutionId: "logical-workflow-phase-corrected",
       input: { value: 2 },
       startedAt: "2026-07-26T00:02:00.000Z",
     });
     await recovered.operational.codeExecutions.put({
       executionId: "execution-workflow-retry",
-      logicalExecutionId: "logical-workflow-phase",
+      logicalExecutionId: "logical-workflow-phase-corrected",
       sessionId: "session-workflow",
+      projectId: "project-workflow",
       catalogId: "catalog-test",
       catalogDigest: digest("c"),
       sourceDigest: sha256(text("return input;")),
@@ -2532,7 +2677,7 @@ describe("WorkspaceStore", () => {
       phaseName: "recover",
       status: "running",
       attempt: 2,
-      logicalExecutionId: "logical-workflow-phase",
+      logicalExecutionId: "logical-workflow-phase-corrected",
       input: { value: 2 },
       executionId: "execution-workflow-retry",
       startedAt: "2026-07-26T00:02:00.000Z",
@@ -2543,11 +2688,18 @@ describe("WorkspaceStore", () => {
       {
         status: "running",
         attempt: 2,
-        logicalExecutionId: "logical-workflow-phase",
+        logicalExecutionId: "logical-workflow-phase-corrected",
         executionId: "execution-workflow-retry",
       },
     ]);
     const retryDatabase = new DatabaseSync(recovered.unsafeDatabasePathForTesting);
+    expect(() =>
+      retryDatabase
+        .prepare(`UPDATE workflow_phase_runs
+           SET logical_execution_id = NULL
+           WHERE run_id = ? AND phase_index = 0`)
+        .run("workflow-run-unfinished"),
+    ).toThrow("status and logical execution identity do not match");
     expect(() =>
       retryDatabase
         .prepare(`UPDATE workflow_phase_runs
@@ -2734,7 +2886,7 @@ describe("WorkspaceStore", () => {
         .run(
           "action-null-sequence",
           "session-null-sequence",
-          "inspect_self",
+          "capabilities.inspect",
           "{}",
           "requested",
           "normal",
@@ -2742,7 +2894,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(45);
+    expect(versions.at(-1)).toBe(47);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
@@ -4928,7 +5080,7 @@ describe("WorkspaceStore", () => {
     expect(() =>
       decodeWorkflowRun({
         run_id: "workflow-run-partial-context",
-        project_id: null,
+        project_id: "project-partial-context",
         workflow_name: "partial-context",
         workflow_revision: 1,
         definition_revision_id: "definition-partial-context",

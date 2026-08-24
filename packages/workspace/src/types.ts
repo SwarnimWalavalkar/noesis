@@ -145,10 +145,18 @@ export interface CodeExecutionRecord {
   readonly logicalExecutionId: string;
   readonly parentExecutionId?: string;
   readonly sessionId: string;
+  readonly projectId?: string;
   readonly turnId?: string;
   readonly catalogId: string;
   readonly catalogDigest: string;
   readonly sourceDigest: string;
+  readonly program?: {
+    readonly mode: "script";
+    readonly projectId: string;
+    readonly name: string;
+    readonly revision: number;
+    readonly definitionRevisionId: string;
+  };
   readonly sourceArtifactId?: string;
   readonly stdoutArtifactId?: string;
   readonly stderrArtifactId?: string;
@@ -162,8 +170,7 @@ export interface CodeExecutionRecord {
 
 export interface WorkflowRunRecord {
   readonly runId: string;
-  /** Absent only for runs created before project ownership was persisted. */
-  readonly projectId?: string;
+  readonly projectId: string;
   readonly workflowName: string;
   readonly workflowRevision: number;
   readonly definitionRevisionId: string;
@@ -228,13 +235,11 @@ export interface ModelCallRecord {
   readonly completedAt?: string;
 }
 
-export interface WorkflowPhaseRunRecord {
+interface WorkflowPhaseRunBase {
   readonly runId: string;
   readonly phaseIndex: number;
   readonly phaseName: string;
-  readonly status: "pending" | "running" | "completed" | "failed" | "cancelled";
   readonly attempt: number;
-  readonly logicalExecutionId?: string;
   readonly input: JsonValue;
   readonly output?: JsonValue;
   readonly executionId?: string;
@@ -242,6 +247,15 @@ export interface WorkflowPhaseRunRecord {
   readonly startedAt?: string;
   readonly completedAt?: string;
 }
+export type WorkflowPhaseRunRecord =
+  | (WorkflowPhaseRunBase & {
+      readonly status: "pending";
+      readonly logicalExecutionId?: never;
+    })
+  | (WorkflowPhaseRunBase & {
+      readonly status: "running" | "completed" | "failed" | "cancelled";
+      readonly logicalExecutionId: string;
+    });
 
 export interface OutcomeRecord {
   readonly outcomeId: string;

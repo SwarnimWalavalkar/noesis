@@ -37,6 +37,13 @@ export interface TuiExecutionSummary {
   readonly callCount: number;
   readonly startedAt: string;
   readonly completedAt?: string;
+  readonly program?: {
+    readonly mode: "script";
+    readonly projectId: string;
+    readonly name: string;
+    readonly revision: number;
+    readonly definitionRevisionId: string;
+  };
 }
 
 export interface TuiExecutionArtifact {
@@ -47,39 +54,29 @@ export interface TuiExecutionArtifact {
   readonly truncated: boolean;
 }
 
-export interface TuiWorkflowSummary {
+export interface TuiProgramSummary {
+  readonly mode: "script" | "workflow";
   readonly name: string;
   readonly description: string;
   readonly revision: number;
-  readonly phaseNames: readonly string[];
   readonly definitionDigest: string;
   readonly workingPath: string;
+  readonly sourceDigest?: string;
+  readonly sourceWorkingPath?: string;
+  readonly requiredTools: readonly string[];
+  readonly phaseNames: readonly string[];
 }
 
-export interface TuiWorkflowDetail extends TuiWorkflowSummary {
+export interface TuiProgramDetail extends TuiProgramSummary {
   readonly inputSchema: string;
   readonly outputSchema: string;
-  readonly phases: readonly {
+  readonly source?: string;
+  readonly phases?: readonly {
     readonly name: string;
     readonly description: string;
     readonly requiredTools: readonly string[];
     readonly source: string;
   }[];
-}
-
-export interface TuiScriptSummary {
-  readonly name: string;
-  readonly description: string;
-  readonly revision: number;
-  readonly requiredTools: readonly string[];
-  readonly sourceDigest: string;
-  readonly workingPath: string;
-}
-
-export interface TuiScriptDetail extends TuiScriptSummary {
-  readonly source: string;
-  readonly inputSchema: string;
-  readonly outputSchema: string;
 }
 
 export interface TuiExecutionDetail extends TuiExecutionSummary {
@@ -207,7 +204,7 @@ export type TuiCapabilityKind =
   | "composite";
 
 /** Exact mechanisms produced by the current Capability revision. */
-export type TuiCapabilityFacet = "instruction" | "skill" | "script" | "workflow";
+export type TuiCapabilityFacet = "instruction" | "skill" | "program";
 
 export interface TuiLearningRelation {
   readonly label: string;
@@ -472,10 +469,11 @@ export type NoesisTuiRuntime = Pick<
   readonly agentName?: string;
   readonly listSkills?: () => Promise<readonly TuiSkillSummary[]>;
   readonly inspectSkill?: (name: string) => Promise<TuiSkillDetail | undefined>;
-  readonly listScripts?: () => Promise<readonly TuiScriptSummary[]>;
-  readonly inspectScript?: (name: string) => Promise<TuiScriptDetail | undefined>;
-  readonly listWorkflows?: () => Promise<readonly TuiWorkflowSummary[]>;
-  readonly inspectWorkflow?: (name: string) => Promise<TuiWorkflowDetail | undefined>;
+  readonly listPrograms?: () => Promise<readonly TuiProgramSummary[]>;
+  readonly inspectProgram?: (
+    mode: "script" | "workflow",
+    name: string,
+  ) => Promise<TuiProgramDetail | undefined>;
   readonly listExecutions?: (sessionId: string) => Promise<readonly TuiExecutionSummary[]>;
   readonly inspectExecution?: (
     sessionId: string,

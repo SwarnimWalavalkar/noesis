@@ -79,35 +79,55 @@ describe("Capability effects", () => {
         material: revisionRef("SKILL.md", "c"),
       },
       {
-        kind: "workflow",
-        name: "evidence-synthesis",
-        project,
-        definitionRevision: revisionRef("workflow.json", "d"),
+        kind: "program",
+        program: {
+          mode: "workflow",
+          name: "evidence-synthesis",
+          project,
+          definitionRevision: revisionRef("program.json", "d"),
+        },
       },
     ]);
     const changed = revision([
       { kind: "instruction", material: revisionRef("instruction.md", "e") },
       ...(first.effects?.slice(1) ?? []),
     ]);
-    expect(capabilityEffectKinds(first)).toEqual(["instruction", "skill", "workflow"]);
+    expect(capabilityEffectKinds(first)).toEqual(["instruction", "skill", "program"]);
     expect(capabilityEffectReferences(first)).toHaveLength(3);
     expect(capabilityRevisionRef(first).bundleDigest).not.toBe(capabilityRevisionRef(changed).bundleDigest);
   });
   test("rejects duplicate effects and project programs outside their exact project binding", () => {
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const workflow = Object.freeze({
-      kind: "workflow" as const,
-      name: "evidence-synthesis",
-      project,
-      definitionRevision: revisionRef("workflow.json", "d"),
+    const program = Object.freeze({
+      kind: "program" as const,
+      program: Object.freeze({
+        mode: "workflow" as const,
+        name: "evidence-synthesis",
+        project,
+        definitionRevision: revisionRef("program.json", "d"),
+      }),
     });
-    expect(() => validateCapabilityEffects([workflow, workflow])).toThrow("repeats effect");
+    expect(() => validateCapabilityEffects([program, program])).toThrow("repeats effect");
     expect(() =>
-      assertCapabilityEffectsEligible({ effects: [workflow], scope: { kind: "global" }, project }),
+      validateCapabilityEffects([
+        program,
+        {
+          kind: "program",
+          program: {
+            mode: "script",
+            name: "second-program",
+            project,
+            definitionRevision: revisionRef("second-program.json", "e"),
+          },
+        },
+      ]),
+    ).toThrow("at most one Program");
+    expect(() =>
+      assertCapabilityEffectsEligible({ effects: [program], scope: { kind: "global" }, project }),
     ).toThrow("project-scoped");
     expect(() =>
       assertCapabilityEffectsEligible({
-        effects: [workflow],
+        effects: [program],
         scope: { kind: "project", project },
         project,
       }),

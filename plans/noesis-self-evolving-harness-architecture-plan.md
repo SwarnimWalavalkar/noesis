@@ -4,7 +4,7 @@ Status: implemented. This file is the historical design record for the project w
 
 This is the smallest useful next step toward a self-evolving harness. It adds a fast project-local branch to the learning loop Noesis already has.
 
-This plan governs ambient strategy learning only. Explicit foreground work may publish and immediately use project-local scripts and workflows through the existing execution authority. Reflection observes those runs; the experiment path is required only for broader learned or global consolidation.
+This plan governs ambient strategy learning only. Explicit foreground work may publish and immediately use a project-local Program in script or workflow mode through the existing execution authority. Reflection observes those runs; the experiment path is required only for broader learned or global consolidation.
 
 ## Decision
 
@@ -214,7 +214,7 @@ Run `pnpm check`, then dogfood this loop before adding another adaptation surfac
 - General project detection or project-management UI.
 - More than one active adjustment per project.
 - Automatic expiry or a fixed turn-count lifetime for an adjustment.
-- Ambient reflection silently creating executable project tools or changing the hotbar. Explicit foreground publication uses the existing script and workflow path.
+- Ambient reflection silently creating executable project Programs or changing the fixed provider-facing tool set. Explicit foreground publication uses the Program path.
 - Parallel model workers or a sub-agent system.
 - Prompt, memory, skill, workflow, router, or capability CRUD in the ambient working-adjustment branch.
 - Direct promotion from a working adjustment to active durable behavior.

@@ -5,7 +5,7 @@ export const NOESIS_BUILT_IN_SKILL: PiBuiltInSkill = Object.freeze({
   name: "noesis",
   aliases: Object.freeze(["refine"]),
   description:
-    "Understand and deliberately refine Noesis's memory, Capabilities, skills, scripts, workflows, and tool surface.",
+    "Understand and deliberately refine Noesis's memory, Capabilities, skills, Programs, and harness.",
   filePath: fileURLToPath(new URL("../skills/noesis/SKILL.md", import.meta.url)),
   disableModelInvocation: false,
 });

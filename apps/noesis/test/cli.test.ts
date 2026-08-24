@@ -188,7 +188,7 @@ describe("Noesis CLI grammar", () => {
   test("rejects a thinking-level update when it would preserve an invalid provider-model pair", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-cli-invalid-persisted-pair-"));
     const invalid = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       agent: { provider: "opencode", model: "gpt-5.6-sol", thinkingLevel: "low" },
     };
     await writeFile(join(home, "config.json"), JSON.stringify(invalid));
@@ -230,7 +230,7 @@ describe("Noesis CLI grammar", () => {
     expect(initialized.code).toBe(0);
     expect(initialized.output).toContain(`Initialized ${join(userHome, ".noesis", "config.json")}`);
     await expect(readFile(join(userHome, ".noesis", "config.json"), "utf8")).resolves.toContain(
-      '"schemaVersion": 1',
+      '"schemaVersion": 2',
     );
     await expect(readFile(join(workingDirectory, ".noesis", "config.json"), "utf8")).rejects.toMatchObject({
       code: "ENOENT",

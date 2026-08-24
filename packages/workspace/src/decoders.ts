@@ -57,6 +57,13 @@ const UserIntentStatusSchema = z.enum([
 const UserIntentSteerOriginSchema = z.enum(["explicit", "queued"]);
 const ToolCallStatusSchema = z.enum(["requested", "running", "completed", "failed", "denied", "ambiguous"]);
 const CodeExecutionStatusSchema = z.enum(["running", "completed", "failed", "cancelled", "interrupted"]);
+const ScriptProgramExecutionIdentitySchema = z.strictObject({
+  mode: z.literal("script"),
+  projectId: z.string().min(1),
+  name: z.string().min(1),
+  revision: z.number().int().positive(),
+  definitionRevisionId: z.string().min(1),
+});
 const ModelCallStatusSchema = z.enum(["running", "completed", "failed", "cancelled", "interrupted"]);
 const WorkflowRunStatusSchema = z.enum(["running", "paused", "completed", "failed", "cancelled"]);
 const WorkflowPhaseStatusSchema = z.enum(["pending", "running", "completed", "failed", "cancelled"]);
@@ -227,6 +234,7 @@ export function decodeToolCall(row: DatabaseRow | undefined): ToolCallRecord {
 }
 export function decodeCodeExecution(row: DatabaseRow | undefined): CodeExecutionRecord {
   const parentExecutionId = optionalString(row, "parent_execution_id");
+  const projectId = optionalString(row, "project_id");
   const turnId = optionalString(row, "turn_id");
   const result = optionalString(row, "result_json");
   const error = optionalString(row, "error");
@@ -234,6 +242,17 @@ export function decodeCodeExecution(row: DatabaseRow | undefined): CodeExecution
   const sourceArtifactId = optionalString(row, "source_artifact_id");
   const stdoutArtifactId = optionalString(row, "stdout_artifact_id");
   const stderrArtifactId = optionalString(row, "stderr_artifact_id");
+  const programProjectId = optionalString(row, "program_project_id");
+  const programMode = optionalString(row, "program_mode");
+  const programName = optionalString(row, "program_name");
+  const programRevision = row?.["program_revision"];
+  const programDefinitionRevisionId = optionalString(row, "program_definition_revision_id");
+  const hasProgramIdentity =
+    programProjectId !== undefined ||
+    programMode !== undefined ||
+    programName !== undefined ||
+    (programRevision !== null && programRevision !== undefined) ||
+    programDefinitionRevisionId !== undefined;
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return createConditionalObject({
     executionId: requiredString(row, "execution_id"),
@@ -243,12 +262,26 @@ export function decodeCodeExecution(row: DatabaseRow | undefined): CodeExecution
     .add({
       sessionId: requiredString(row, "session_id"),
     } as const)
+    .addOptional(!(projectId === undefined) ? { projectId } : undefined)
     .addOptional(!(turnId === undefined) ? { turnId } : undefined)
     .add({
       catalogId: requiredString(row, "catalog_id"),
       catalogDigest: requiredString(row, "catalog_digest"),
       sourceDigest: requiredString(row, "source_digest"),
     } as const)
+    .addOptional(
+      hasProgramIdentity
+        ? {
+            program: ScriptProgramExecutionIdentitySchema.parse({
+              mode: programMode,
+              projectId: programProjectId,
+              name: programName,
+              revision: programRevision,
+              definitionRevisionId: programDefinitionRevisionId,
+            }),
+          }
+        : undefined,
+    )
     .addOptional(!(sourceArtifactId === undefined) ? { sourceArtifactId } : undefined)
     .addOptional(!(stdoutArtifactId === undefined) ? { stdoutArtifactId } : undefined)
     .addOptional(!(stderrArtifactId === undefined) ? { stderrArtifactId } : undefined)
@@ -342,7 +375,6 @@ export function decodeModelCall(row: DatabaseRow | undefined): ModelCallRecord {
     .finish();
 }
 export function decodeWorkflowRun(row: DatabaseRow | undefined): WorkflowRunRecord {
-  const projectId = optionalString(row, "project_id");
   const turnId = optionalString(row, "turn_id");
   const catalogId = optionalString(row, "catalog_id");
   const catalogDigest = optionalString(row, "catalog_digest");
@@ -376,8 +408,8 @@ export function decodeWorkflowRun(row: DatabaseRow | undefined): WorkflowRunReco
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return createConditionalObject({
     runId: requiredString(row, "run_id"),
+    projectId: requiredString(row, "project_id"),
   } as const)
-    .addOptional(!(projectId === undefined) ? { projectId } : undefined)
     .add({
       workflowName: requiredString(row, "workflow_name"),
       workflowRevision: requiredNumber(row, "workflow_revision"),
@@ -430,15 +462,13 @@ export function decodeWorkflowPhaseRun(row: DatabaseRow | undefined): WorkflowPh
   const error = optionalString(row, "error");
   const startedAt = optionalString(row, "started_at");
   const completedAt = optionalString(row, "completed_at");
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return createConditionalObject({
+  const status = WorkflowPhaseStatusSchema.parse(requiredString(row, "status"));
+  const decoded = createConditionalObject({
     runId: requiredString(row, "run_id"),
     phaseIndex: requiredNumber(row, "phase_index"),
     phaseName: requiredString(row, "phase_name"),
-    status: WorkflowPhaseStatusSchema.parse(requiredString(row, "status")),
     attempt: requiredNumber(row, "attempt"),
   } as const)
-    .addOptional(!(logicalExecutionId === undefined) ? { logicalExecutionId } : undefined)
     .add({
       input: JsonValueSchema.parse(parseJson(requiredString(row, "input_json"))),
     } as const)
@@ -448,6 +478,18 @@ export function decodeWorkflowPhaseRun(row: DatabaseRow | undefined): WorkflowPh
     .addOptional(!(startedAt === undefined) ? { startedAt } : undefined)
     .addOptional(!(completedAt === undefined) ? { completedAt } : undefined)
     .finish();
+  if (status === "pending") {
+    if (logicalExecutionId !== undefined)
+      throw new Error(
+        `Pending workflow phase ${decoded.runId}/${String(decoded.phaseIndex)} has a logical execution`,
+      );
+    return Object.freeze({ ...decoded, status });
+  }
+  if (logicalExecutionId === undefined)
+    throw new Error(
+      `Settled or running workflow phase ${decoded.runId}/${String(decoded.phaseIndex)} has no logical execution`,
+    );
+  return Object.freeze({ ...decoded, status, logicalExecutionId });
 }
 export function decodeOutcome(row: DatabaseRow | undefined): OutcomeRecord {
   const turnId = optionalString(row, "turn_id");

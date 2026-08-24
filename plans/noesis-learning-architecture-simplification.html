@@ -195,13 +195,14 @@
             <strong>Effects, not mechanism kinds</strong>
             <span class="muted">
               A Capability describes an ability. Its revision carries exact instruction, skill,
-              saved-script, and saved-workflow effects. Mixed abilities need no composite subtype.
+              and saved-Program effects. Mixed abilities need no composite subtype.
             </span>
           </div>
           <div class="card">
             <strong>One program primitive</strong>
             <span class="muted">
-              Script and workflow effects pin the ordinary saved project definition. Capability
+              Program effects pin an ordinary saved project definition and record its script or
+              workflow mode. Capability
               storage never duplicates source, phases, execution state, or resume behavior.
             </span>
           </div>
@@ -269,7 +270,7 @@
         <p class="decision">
           Noesis may autonomously create and revise meaningful abilities. A Capability revision says
           exactly how an ability is delivered through instructions, progressively loaded skills, or
-          references to existing saved project scripts and workflows. The ordinary safety mechanism is
+          references to existing saved project Programs. The ordinary safety mechanism is
           visible provenance plus fast iteration and exact restoration—not a mandatory speculative
           evaluation pipeline.
         </p>
@@ -299,7 +300,7 @@
           <li>
             The built-in <code>noesis</code> skill, also invoked by <code>/refine</code>, progressively
             exposes the deliberate authoring method and current tool schemas without expanding the
-            stable system prompt.
+            stable system prompt. The provider-facing file, shell, and execute surface stays fixed.
           </li>
         </ul>
 
@@ -423,8 +424,13 @@ later work
   readonly effects: readonly (
     | { kind: "instruction"; material: FileRevisionRef }
     | { kind: "skill"; name: string; description: string; material: FileRevisionRef }
-    | { kind: "script"; name: string; project: ProjectRef; definitionRevision: FileRevisionRef }
-    | { kind: "workflow"; name: string; project: ProjectRef; definitionRevision: FileRevisionRef }
+    | {
+        kind: "program";
+        mode: "script" | "workflow";
+        name: string;
+        project: ProjectRef;
+        definitionRevision: FileRevisionRef;
+      }
   )[];
   readonly dependencyLock?: FileRevisionRef;
   readonly permissionManifest: PermissionManifest;
@@ -433,8 +439,8 @@ later work
 }</code></pre>
         <p>
           A revision contains or references the exact implementation that can be mounted. Instructions
-          and skills own immutable material revisions. Script and workflow effects point to the same
-          immutable saved definitions used by <code>scripts.run</code> and <code>workflows.run</code>;
+          and skills own immutable material revisions. Program effects point to the same immutable
+          saved definitions used by <code>programs.run</code>;
           they do not copy source, phases, or run state into Capability storage. Because saved programs
           are project authority, these effects require the matching project scope. Authoring always
           receives the complete predecessor materials. The revision is immutable once any binding or
@@ -543,9 +549,9 @@ change_binding</code></pre>
         <p>
           The foreground model may perform the same semantic work deliberately when its live
           collaboration with the user provides stronger context than post-turn inference. The
-          built-in <code>noesis</code> skill explains when to remember, save a program, or author a
-          Capability. <code>capabilities.inspect</code> progressively exposes current state and exact
-          predecessor material; <code>capabilities.refine</code> accepts one complete typed decision.
+          built-in <code>noesis</code> skill explains when to save a Program or author a Capability.
+          <code>capabilities.inspect</code> progressively exposes current state and exact predecessor
+          material; <code>capabilities.refine</code> accepts one complete typed decision.
         </p>
         <p>
           The runtime supplies the admitted foreground turn, normal-sensitivity evidence produced in
@@ -557,7 +563,8 @@ change_binding</code></pre>
         <h3>Effect author</h3>
         <p>
           The reflection result declares concrete effects. Instruction and skill effects contain
-          authored material; script and workflow effects name an already-saved project program. The
+          authored material; Program effects name an already-saved project Program and its execution
+          mode. The
           author receives:
         </p>
         <ul>
@@ -733,7 +740,8 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
         <ol>
           <li>what the Capability does;</li>
           <li>
-            its concrete effects, labelled as Instruction, Skill, Script, or Workflow, with exact
+            its concrete effects, labelled as Instruction, Skill, or Program with a script/workflow
+            mode, with exact
             material or saved-definition content;
           </li>
           <li>what changed from the predecessor;</li>
@@ -1041,8 +1049,8 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
             predecessor and candidate bytes, validate adapters, preserve rollback, and expose read models.
           </p>
           <p>
-            <strong>Acceptance:</strong> instruction, skill, saved-script, and saved-workflow effects
-            exercise one revision interface. Program effects pin the existing project definition and
+            <strong>Acceptance:</strong> instruction, skill, and Program effects exercise one revision
+            interface. Program effects pin the existing project definition and
             use its ordinary runner rather than introducing parallel executable state.
           </p>
         </div>
@@ -1155,7 +1163,8 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
           <p class="muted">
             Extract the exact publisher from ambient reflection, expose progressively disclosed inspect
             and refine catalog tools, and ship one built-in <code>noesis</code> skill with a
-            <code>/refine</code> alias. Keep the base system prompt unchanged.
+            <code>/refine</code> alias. Keep the base system prompt and provider-facing tool set stable;
+            use the same skill for Broker-backed harness controls rather than adding another permanent self tool.
           </p>
           <p>
             <strong>Acceptance:</strong> foreground and ambient creation exercise the same publisher;
@@ -1308,8 +1317,8 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
           <li>Every terminal foreground turn runs one ambient reflection without a usefulness pre-classifier.</li>
           <li>New capabilities default to global and relevant.</li>
           <li>The user can make any eligible Capability always active.</li>
-          <li>Capability revisions express concrete instruction, skill, saved-script, and saved-workflow effects.</li>
-          <li>Saved-program effects use the same immutable definitions and runners as ordinary project programs.</li>
+          <li>Capability revisions express concrete instruction, skill, and Program effects.</li>
+          <li>Program effects use the same immutable definitions and runners as ordinary project Programs.</li>
           <li>Ordinary learning schedules no experiment, preflight, trial, blind judge, or outcome judge.</li>
           <li>Explicit and ambient feedback can revise, pause, restore, re-scope, or change activation mode.</li>
           <li>The TUI offers approve, deny, and natural-language change only for the tiny consequence gate.</li>

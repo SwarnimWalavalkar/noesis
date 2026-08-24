@@ -235,16 +235,13 @@ export const CapabilityEffectSchema = z.discriminatedUnion("kind", [
     material: FileRevisionRefSchema,
   }),
   z.strictObject({
-    kind: z.literal("script"),
-    name: CapabilityProgramNameSchema,
-    project: ProjectRefSchema,
-    definitionRevision: FileRevisionRefSchema,
-  }),
-  z.strictObject({
-    kind: z.literal("workflow"),
-    name: CapabilityProgramNameSchema,
-    project: ProjectRefSchema,
-    definitionRevision: FileRevisionRefSchema,
+    kind: z.literal("program"),
+    program: z.strictObject({
+      mode: z.enum(["script", "workflow"]),
+      name: CapabilityProgramNameSchema,
+      project: ProjectRefSchema,
+      definitionRevision: FileRevisionRefSchema,
+    }),
   }),
 ]);
 

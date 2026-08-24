@@ -5,39 +5,23 @@ import {
   type FrozenTurnPlan,
   frozenTurnPlanDigest,
 } from "@noesis/agent-types";
-import {
-  canonicalJson,
-  type FileRevisionRef,
-  isJsonObject,
-  type JsonValue,
-  sha256,
-  toJsonValue,
-} from "@noesis/domain";
+import { type FileRevisionRef, isJsonObject, type JsonValue, sha256 } from "@noesis/domain";
 import type { SessionToolDefinition, SessionToolName } from "@noesis/intelligence";
 import { describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import {
   createAssistantDeltaAggregator,
-  createHotbarToolAliases,
+  createBrokerToolAliases,
   createPiAgentRuntime,
   createPiExecuteTool,
-  createPiHotbarTools,
   createPiSubAgentRunner,
-  createPiSelfTools,
   type FrozenSubAgentRunPlan,
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
-  isProjectWorkflowToolForProject,
-  isProjectWorkflowToolName,
   type PiCodeExecutionAdapter,
   type PiFrozenToolCatalog,
-  type PiSelfToolAdapter,
   type PiSkillLibrary,
-  PROJECT_WORKFLOW_TOOL_ADAPTER_REVISION,
   type PreparedPiCodeExecution,
-  projectWorkflowExecutionCatalogDigest,
-  projectWorkflowToolName,
-  reconcileHotbarTools,
   resolveFrozenSessionToolDefinitions,
   resolvePiSkillInvocation,
   toAgentActionPayload,
@@ -90,6 +74,8 @@ function frozenPlan(
       Object.freeze({
         capabilityId: "grounded",
         name: "Grounded",
+        description: "Use exact session evidence.",
+        applicability: "When prior session evidence is needed.",
         scope: "general",
         selectionReason: "controlled runtime test",
         revision: Object.freeze({
@@ -148,19 +134,16 @@ function definitions(marker: string): readonly SessionToolDefinition[] {
 }
 
 function emptyCatalog(catalogId: string) {
-  return Object.freeze({
-    catalogId,
-    catalogDigest: sha256(catalogId),
-    tools: Object.freeze([]),
-  });
+  return catalogWithTools(catalogId, []);
 }
 
 function catalogWithTools(catalogId: string, names: readonly string[]): PiFrozenToolCatalog {
+  const allNames = [...new Set(["files.read", "files.write", "shell.run", ...names])];
   return Object.freeze({
     catalogId,
     catalogDigest: sha256(catalogId),
     tools: Object.freeze(
-      names.map((name) =>
+      allNames.map((name) =>
         Object.freeze({
           name,
           label: name,
@@ -253,196 +236,33 @@ describe("agent runtime factories", () => {
     expect(providerRequests).toBe(0);
   });
 
-  test("reconciles durable hotbar preferences with the current frozen catalog", () => {
-    const catalog: PiFrozenToolCatalog = Object.freeze({
-      catalogId: "catalog-reconciled-hotbar",
-      catalogDigest: sha256("catalog-reconciled-hotbar"),
-      tools: Object.freeze([
-        Object.freeze({
-          name: "files.read",
-          label: "Read file",
-          description: "Read a file",
-          revisionId: "files-read-v1",
-          inputSchema: Object.freeze({ type: "object" }),
-          outputSchema: Object.freeze({ type: "object" }),
-        }),
-      ]),
-    });
-
-    expect(reconcileHotbarTools(catalog, ["files.read", "removed.tool", "files.read"])).toEqual({
-      active: ["files.read"],
-      unavailable: ["removed.tool"],
-    });
-  });
-
-  test("recognizes exact project workflow tool identities", () => {
-    const alpha = projectWorkflowToolName("project_alpha", "summarize");
-    const beta = projectWorkflowToolName("project_beta", "summarize");
-
-    expect(isProjectWorkflowToolName(alpha)).toBe(true);
-    expect(isProjectWorkflowToolForProject("project_alpha", alpha)).toBe(true);
-    expect(isProjectWorkflowToolForProject("project_alpha", beta)).toBe(false);
-    expect(isProjectWorkflowToolName("workflows.run")).toBe(false);
-    expect(isProjectWorkflowToolName("workflow.not-a-digest.summarize")).toBe(false);
-  });
-
   test("assigns injective catalog aliases without shadowing core tools", () => {
     const catalog: PiFrozenToolCatalog = Object.freeze({
       catalogId: "catalog-aliases",
       catalogDigest: sha256("catalog-aliases"),
       tools: Object.freeze(
-        ["files.read", "file_read", "history.search_sessions", "search_sessions", "adapt", "execute"].map(
-          (name) =>
-            Object.freeze({
-              name,
-              label: name,
-              description: name,
-              revisionId: `${name}-v1`,
-              inputSchema: Object.freeze({ type: "object" }),
-              outputSchema: Object.freeze({ type: "object" }),
-            }),
+        ["files.read", "file_read", "history.search_sessions", "search_sessions", "execute"].map((name) =>
+          Object.freeze({
+            name,
+            label: name,
+            description: name,
+            revisionId: `${name}-v1`,
+            inputSchema: Object.freeze({ type: "object" }),
+            outputSchema: Object.freeze({ type: "object" }),
+          }),
         ),
       ),
     });
 
-    const aliases = createHotbarToolAliases(catalog);
+    const aliases = createBrokerToolAliases(catalog);
     const values = [...aliases.values()];
 
     expect(aliases.get("files.read")).toBe("file_read");
-    expect(aliases.get("history.search_sessions")).toBe("search_sessions");
-    expect(aliases.get("search_sessions")).not.toBe("search_sessions");
+    expect(aliases.get("history.search_sessions")).toBe("history_search_sessions");
+    expect(aliases.get("search_sessions")).toBe("search_sessions");
     expect(new Set(values).size).toBe(values.length);
-    expect(values).not.toContain("adapt");
     expect(values).not.toContain("execute");
-    expect([...createHotbarToolAliases(catalog)]).toEqual([...aliases]);
-  });
-
-  test("keeps scalar and array workflow hotbar parameters object-shaped", async () => {
-    const scalarName = projectWorkflowToolName("project_hotbar_schema", "scalar");
-    const arrayName = projectWorkflowToolName("project_hotbar_schema", "array");
-    const catalog: PiFrozenToolCatalog = Object.freeze({
-      catalogId: "catalog-workflow-hotbar-schema",
-      catalogDigest: sha256("catalog-workflow-hotbar-schema"),
-      tools: Object.freeze([
-        Object.freeze({
-          name: scalarName,
-          label: "scalar",
-          description: "Run a scalar workflow",
-          revisionId: "tool-workflow-scalar-v1",
-          inputSchema: Object.freeze({
-            type: "object",
-            properties: Object.freeze({ input: Object.freeze({ type: "number" }) }),
-            required: Object.freeze(["input"]),
-            additionalProperties: false,
-          }),
-          outputSchema: Object.freeze({ type: "number" }),
-        }),
-        Object.freeze({
-          name: arrayName,
-          label: "array",
-          description: "Run an array workflow",
-          revisionId: "tool-workflow-array-v1",
-          inputSchema: Object.freeze({
-            type: "object",
-            properties: Object.freeze({
-              input: Object.freeze({ type: "array", items: Object.freeze({ type: "number" }) }),
-            }),
-            required: Object.freeze(["input"]),
-            additionalProperties: false,
-          }),
-          outputSchema: Object.freeze({ type: "array", items: Object.freeze({ type: "number" }) }),
-        }),
-      ]),
-    });
-    const invocations: Array<{ readonly name: string; readonly input: JsonValue }> = [];
-    const prepared: PreparedPiCodeExecution = Object.freeze({
-      catalog,
-      invoke: async (name: string, input: JsonValue) => {
-        invocations.push(Object.freeze({ name, input }));
-        return input;
-      },
-      execute: async () => Object.freeze({ executionId: "unused", value: null, calls: 0, durationMs: 0 }),
-      close: async () => undefined,
-    });
-    const tools = createPiHotbarTools({
-      prepared,
-      turnId: "turn-workflow-hotbar-schema",
-      signal: new AbortController().signal,
-      emit: () => undefined,
-    });
-    const scalar = tools.find((tool) => tool.name === "workflow_scalar");
-    const array = tools.find((tool) => tool.name === "workflow_array");
-    if (!scalar || !array) throw new Error("Expected friendly workflow hotbar aliases");
-
-    await scalar.execute("scalar-call", { input: 7 });
-    await array.execute("array-call", { input: [1, 2, 3] });
-
-    expect(invocations).toEqual([
-      { name: scalarName, input: { input: 7 } },
-      { name: arrayName, input: { input: [1, 2, 3] } },
-    ]);
-    await expect(scalar.execute("invalid-scalar-call", 7)).rejects.toThrow();
-    await expect(array.execute("invalid-array-call", [1, 2, 3])).rejects.toThrow();
-  });
-
-  test("validates hotbar input without applying JSON Schema defaults before Broker invocation", async () => {
-    const catalog: PiFrozenToolCatalog = Object.freeze({
-      catalogId: "catalog-hotbar-raw-input",
-      catalogDigest: sha256("catalog-hotbar-raw-input"),
-      tools: Object.freeze([
-        Object.freeze({
-          name: "test.defaults",
-          label: "Defaults",
-          description: "Exercise schema defaults",
-          revisionId: "test-defaults-v1",
-          inputSchema: Object.freeze({
-            type: "object",
-            properties: Object.freeze({
-              mode: Object.freeze({ type: "string", default: "mutated" }),
-            }),
-            additionalProperties: false,
-          }),
-          outputSchema: Object.freeze({ type: "object" }),
-        }),
-      ]),
-    });
-    const inputs: JsonValue[] = [];
-    const prepared: PreparedPiCodeExecution = Object.freeze({
-      catalog,
-      invoke: async (_name: string, input: JsonValue) => {
-        inputs.push(input);
-        return input;
-      },
-      execute: async () => Object.freeze({ executionId: "unused", value: null, calls: 0, durationMs: 0 }),
-      close: async () => undefined,
-    });
-    const [tool] = createPiHotbarTools({
-      prepared,
-      turnId: "turn-hotbar-raw-input",
-      signal: new AbortController().signal,
-      emit: () => undefined,
-    });
-    if (!tool) throw new Error("Expected hotbar tool");
-    const rawInput = {};
-
-    await tool.execute("call-hotbar-raw-input", rawInput);
-
-    expect(inputs).toEqual([{}]);
-    expect(inputs[0]).toBe(rawInput);
-  });
-
-  test("pins the saved-workflow adapter revision into workflow execution catalogs", () => {
-    const tools = Object.freeze([Object.freeze({ name: "files.read", revisionId: "tool-read-v1" })]);
-
-    expect(projectWorkflowExecutionCatalogDigest(tools)).toBe(
-      sha256(
-        canonicalJson({
-          tools,
-          savedWorkflowAdapterRevision: PROJECT_WORKFLOW_TOOL_ADAPTER_REVISION,
-        }),
-      ),
-    );
-    expect(projectWorkflowExecutionCatalogDigest(tools)).not.toBe(sha256(canonicalJson(tools)));
+    expect([...createBrokerToolAliases(catalog)]).toEqual([...aliases]);
   });
 
   test("aggregates authoritative Pi text deltas across tool-loop assistant messages", () => {
@@ -1004,7 +824,8 @@ describe("agent runtime factories", () => {
           "files.read",
           "files.list",
           "shell.run",
-          "workflows.run",
+          "programs.list",
+          "programs.run",
           "skills.load",
           "history.search_sessions",
           "history.open_session_evidence",
@@ -1036,7 +857,7 @@ describe("agent runtime factories", () => {
     expect(byteBounded.description).toContain("tools.files.read({ path })");
     expect(byteBounded.description).toContain('tools.files.list({ path: "." })');
     expect(byteBounded.description).toContain("tools.shell.run({ command })");
-    expect(byteBounded.description).toContain("tools.workflows.run({ name, input })");
+    expect(byteBounded.description).toContain("tools.programs.list({})");
     expect(byteBounded.description).toContain("tools.skills.load({ name })");
     expect(byteBounded.description).toContain("tools.history.search_sessions({ query })");
     expect(byteBounded.description).toContain(
@@ -1051,54 +872,21 @@ describe("agent runtime factories", () => {
     expect(byteBounded.description).toContain("repeatedly rewriting retrieval queries");
     expect(byteBounded.description).toContain("For any other tool");
     expect(byteBounded.description).toContain("do not return that value to you");
-    expect(byteBounded.description).toContain("typed Script with scripts.save");
-    expect(byteBounded.description).toContain("Workflow with workflows.save");
-    expect(byteBounded.description).toContain("Do not defer foreground program creation to reflection");
-    expect(byteBounded.description).toContain("Verify newly saved programs immediately");
+    expect(byteBounded.description).toContain("programs.save with script mode");
+    expect(byteBounded.description).toContain("workflow mode for durable phases");
+    expect(byteBounded.description).toContain("Do not defer foreground Program creation to reflection");
+    expect(byteBounded.description).toContain("run the exact returned revision with programs.run");
     expect(byteBounded.description).toContain("store(key, value)");
     expect(executions).toBe(0);
   });
 
-  test("derives the bounded shell starter result contract from its frozen output schema", () => {
-    const shellOutputSchema = toJsonValue(
-      z.toJSONSchema(
-        z.union([
-          z.strictObject({
-            exitCode: z.number().int().nullable(),
-            signal: z.string().nullable(),
-            output: z.string(),
-            fullOutputLength: z.number().int().nonnegative(),
-            truncated: z.literal(false),
-            fullOutputComplete: z.literal(true),
-          }),
-          z.strictObject({
-            exitCode: z.number().int().nullable(),
-            signal: z.string().nullable(),
-            output: z.string(),
-            fullOutputLength: z.number().int().nonnegative(),
-            truncated: z.literal(true),
-            fullOutputPath: z.string(),
-            fullOutputComplete: z.literal(true),
-          }),
-          z.strictObject({
-            exitCode: z.number().int().nullable(),
-            signal: z.string().nullable(),
-            output: z.string(),
-            fullOutputLength: z.number().int().nonnegative(),
-            truncated: z.literal(true),
-            fullOutputPath: z.string(),
-            fullOutputComplete: z.literal(false),
-            terminationReason: z.literal("output_limit"),
-          }),
-        ]),
-      ),
-    );
+  test("derives the bounded shell contract and falls back when that schema is oversized", () => {
     const createExecute = (outputSchema: JsonValue) =>
       createPiExecuteTool({
         prepared: {
           catalog: Object.freeze({
             catalogId: "catalog-shell-contract",
-            catalogDigest: sha256(canonicalJson(outputSchema)),
+            catalogDigest: sha256(JSON.stringify(outputSchema)),
             tools: Object.freeze([
               Object.freeze({
                 name: "shell.run",
@@ -1123,15 +911,8 @@ describe("agent runtime factories", () => {
         emit: () => undefined,
       });
 
-    const execute = createExecute(shellOutputSchema);
-    expect(execute.description).toContain("Schema-derived starter result contract: shell.run returns");
-    expect(execute.description).toContain("fullOutputComplete:true");
-    expect(execute.description).toContain("fullOutputComplete:false");
-    expect(execute.description).toContain('terminationReason:"output_limit"');
-    expect(execute.description).not.toContain('Use noesis.describe("shell.run")');
-    expect(execute.description).not.toContain("stdout");
-
-    const oversizedOutputSchema = toJsonValue({
+    const baseline = createExecute({ type: "string" });
+    const changed = createExecute({
       type: "object",
       properties: Object.fromEntries(
         Array.from({ length: 80 }, (_, index) => [
@@ -1142,11 +923,10 @@ describe("agent runtime factories", () => {
       required: Array.from({ length: 80 }, (_, index) => `unboundedPromptGrowthSentinel${String(index)}`),
       additionalProperties: false,
     });
-    const bounded = createExecute(oversizedOutputSchema);
-    expect(bounded.description).toContain(
-      'Use noesis.describe("shell.run") before depending on its result shape.',
-    );
-    expect(bounded.description).not.toContain("unboundedPromptGrowthSentinel");
+    expect(baseline.description).toContain("Schema-derived shell.run result: string");
+    expect(changed.description).not.toBe(baseline.description);
+    expect(changed.description).toContain('use noesis.describe("shell.run")');
+    expect(changed.description).not.toContain("unboundedPromptGrowthSentinel");
   });
 
   test("scopes codemode logical execution identity by turn when Pi reuses a tool call ID", async () => {
@@ -1233,439 +1013,15 @@ describe("agent runtime factories", () => {
     });
   });
 
-  test("propagates cancellation and bounds direct self-tool results", async () => {
-    const plan = frozenPlan();
-    const turn = new AbortController();
-    let observedSignal: AbortSignal | undefined;
-    const tools = createPiSelfTools({
-      plan,
-      request: {
-        trailId: plan.sessionId,
-        provider: plan.provider,
-        model: plan.model,
-        thinkingLevel: plan.thinkingLevel,
-        systemPrompt: plan.renderedSystemPrompt,
-        prompt: "Inspect.",
-        activeCapabilities: [],
-        frozenTurnPlan: plan,
-      },
-      signal: turn.signal,
-      applyHotbar: async () => undefined,
-      adapter: {
-        hotbar: async () => Object.freeze([]),
-        inspect: async ({ signal }) => {
-          observedSignal = signal;
-          return "x".repeat(70_000);
-        },
-        remember: async ({ signal }) => {
-          observedSignal = signal;
-          return null;
-        },
-        adapt: async () => null,
-      },
-    });
-    const inspect = tools.find((tool) => tool.name === "inspect_self");
-    const remember = tools.find((tool) => tool.name === "remember");
-    if (!inspect || !remember) throw new Error("Expected direct self tools");
-    expect(tools.map((tool) => tool.name)).toEqual(["inspect_self", "remember"]);
-
-    await expect(inspect.execute("inspect", {})).resolves.toMatchObject({
-      content: [{ type: "text", text: JSON.stringify("x".repeat(70_000)) }],
-    });
-    expect(observedSignal).toBeDefined();
-
-    const toolCall = new AbortController();
-    toolCall.abort("cancelled");
-    await expect(
-      remember.execute("remember", { memory: "m", scope: "turn", anticipatedUse: "later" }, toolCall.signal),
-    ).rejects.toThrow("cancelled before execution");
-  });
-
-  test("passes the exact frozen tool catalog through inspect_self", async () => {
-    const plan = frozenPlan();
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const catalog = Object.freeze({
-      catalogId: "catalog-inspection",
-      catalogDigest: sha256("catalog-inspection"),
-      tools: Object.freeze([
-        Object.freeze({
-          name: "files.read",
-          label: "Read file",
-          description: "Read a text file",
-          revisionId: "tool-files-read-v1",
-          inputSchema: Object.freeze({ type: "object" as const }),
-          outputSchema: Object.freeze({ type: "object" as const }),
-        }),
-      ]),
-    });
-    let inspectedCatalog: PiFrozenToolCatalog | undefined;
-    const tools = createPiSelfTools({
-      plan,
-      request: {
-        trailId: plan.sessionId,
-        provider: plan.provider,
-        model: plan.model,
-        thinkingLevel: plan.thinkingLevel,
-        systemPrompt: plan.renderedSystemPrompt,
-        prompt: "Inspect tools.",
-        activeCapabilities: [],
-        frozenTurnPlan: plan,
-      },
-      signal: new AbortController().signal,
-      catalog,
-      applyHotbar: async () => undefined,
-      adapter: {
-        hotbar: async () => Object.freeze([]),
-        inspect: async ({ catalog: received }) => {
-          inspectedCatalog = received;
-          return toJsonValue(received ?? null);
-        },
-        remember: async () => null,
-        adapt: async () => null,
-      },
-    });
-    const inspect = tools.find((tool) => tool.name === "inspect_self");
-    if (!inspect) throw new Error("Expected inspect_self tool");
-
-    const result = await inspect.execute("inspect-tools", { section: "tools" });
-
-    expect(inspectedCatalog).toBe(catalog);
-    expect(result.content).toEqual([{ type: "text", text: JSON.stringify(catalog) }]);
-    expect(inspect.description).toContain("exact frozen tool names");
-  });
-
-  test("keeps adapt focused on immediate toolbox changes and rejects proposal red tape", async () => {
-    const plan = frozenPlan();
-    const tools = createPiSelfTools({
-      plan,
-      request: {
-        trailId: plan.sessionId,
-        provider: plan.provider,
-        model: plan.model,
-        thinkingLevel: plan.thinkingLevel,
-        systemPrompt: plan.renderedSystemPrompt,
-        prompt: "Create a reusable tool.",
-        activeCapabilities: [],
-        frozenTurnPlan: plan,
-      },
-      signal: new AbortController().signal,
-      catalog: emptyCatalog("catalog-adapt-contract"),
-      applyHotbar: async () => undefined,
-      adapter: {
-        hotbar: async () => Object.freeze([]),
-        inspect: async () => null,
-        remember: async () => null,
-        adapt: async () => null,
-      },
-    });
-    const adapt = tools.find((tool) => tool.name === "adapt");
-    if (!adapt) throw new Error("Expected adapt tool");
-
-    expect(adapt.description).toContain("scripts.save");
-    expect(adapt.description).toContain("workflows.save");
-    expect(adapt.description).not.toContain("propose");
-    await expect(
-      adapt.execute("proposal", {
-        action: "propose",
-        target: "tool",
-        change: "Add a tool",
-        scope: "project",
-        rationale: "Useful",
-      }),
-    ).rejects.toThrow();
-  });
-
-  test("activates a catalog tool through adapt for the next model step in the same turn", async () => {
-    const plan = frozenPlan();
-    const catalog: PiFrozenToolCatalog = Object.freeze({
-      catalogId: "catalog-hotbar",
-      catalogDigest: sha256("catalog-hotbar"),
-      tools: Object.freeze([
-        Object.freeze({
-          name: "files.write",
-          label: "Write file",
-          description: "Write a UTF-8 file",
-          revisionId: "tool-files-write-v1",
-          inputSchema: Object.freeze({
-            type: "object",
-            properties: Object.freeze({
-              path: Object.freeze({ type: "string" }),
-              content: Object.freeze({ type: "string" }),
-            }),
-            required: Object.freeze(["path", "content"]),
-            additionalProperties: false,
-          }),
-          outputSchema: Object.freeze({ type: "object" }),
-        }),
-      ]),
-    });
-    const invocations: { readonly name: string; readonly input: JsonValue }[] = [];
-    const codeExecution: PiCodeExecutionAdapter = Object.freeze({
-      prepare: async () => {
-        const invoke: NonNullable<PreparedPiCodeExecution["invoke"]> = async (
-          name,
-          input,
-          _signal,
-          _identity,
-          emitUpdate,
-        ) => {
-          invocations.push(Object.freeze({ name, input }));
-          emitUpdate?.({ message: "Writing note" });
-          return Object.freeze({ written: true });
-        };
-        return Object.freeze({
-          catalog,
-          invoke,
-          execute: async () => {
-            return Object.freeze({
-              executionId: "unused-execution-hotbar",
-              value: null,
-              calls: 0,
-              durationMs: 1,
-            });
-          },
-          close: async () => undefined,
-        });
-      },
-      shutdown: async () => undefined,
-    });
-    let step = 0;
-    const controlled = createControlledPiModels({
-      respond: ({ context }) => {
-        step += 1;
-        const visible = context.tools?.map((tool) => tool.name) ?? [];
-        if (step === 1) {
-          expect(visible).toEqual(["inspect_self", "remember", "adapt", "execute"]);
-          return fauxAssistantMessage(
-            fauxToolCall("adapt", { action: "add_tool", tool: "files.write" }, { id: "adapt-hotbar" }),
-            { stopReason: "toolUse" },
-          );
-        }
-        if (step === 2) {
-          expect(visible).toContain("file_write");
-          return fauxAssistantMessage(
-            fauxToolCall("file_write", { path: "notes.txt", content: "hello" }, { id: "write-hotbar" }),
-            { stopReason: "toolUse" },
-          );
-        }
-        return "Hotbar write completed.";
-      },
-    });
-    const selfTools: PiSelfToolAdapter = {
-      hotbar: async () => Object.freeze([]),
-      inspect: async () => null,
-      remember: async () => null,
-      adapt: async (input) => {
-        if (input.action !== "add_tool") throw new Error("Expected add_tool");
-        await input.applyHotbar([input.tool]);
-        return toJsonValue({ status: "hotbar_updated", hotbar: [input.tool] });
-      },
-    };
-    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
-    const events: AgentRuntimeEvent[] = [];
-
-    const result = await runtime.run(
-      {
-        trailId: plan.sessionId,
-        provider: plan.provider,
-        model: plan.model,
-        thinkingLevel: plan.thinkingLevel,
-        systemPrompt: plan.renderedSystemPrompt,
-        prompt: "Write a note.",
-        activeCapabilities: [],
-        frozenTurnPlan: plan,
-      },
-      (event) => events.push(event),
-    );
-
-    expect(result.text).toContain("Hotbar write completed.");
-    expect(result.assistantMessages?.map((message) => message.text)).toEqual(["Hotbar write completed."]);
-    expect(invocations).toEqual([{ name: "files.write", input: { path: "notes.txt", content: "hello" } }]);
-    expect(events.flatMap((event) => (event.type === "tool-start" ? [event.name] : []))).toEqual([
-      "adapt",
-      "files.write",
-    ]);
-    expect(events.flatMap((event) => (event.type === "assistant-message" ? [event.text] : []))).toEqual([
-      "Hotbar write completed.",
-    ]);
-    expect(events).toContainEqual({
-      type: "tool-update",
-      actionId: "direct:write-hotbar",
-      name: "files.write",
-      update: { message: "Writing note" },
-      recordedByBroker: true,
-    });
-  });
-
-  test("rechecks the complete request budget after same-turn hotbar activation", async () => {
-    const base = frozenPlan();
-    const { canonicalDigest: _digest, ...baseUnsigned } = base;
-    const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 12_000 });
-    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
-    const catalog: PiFrozenToolCatalog = Object.freeze({
-      catalogId: "catalog-oversized-hotbar-tool",
-      catalogDigest: sha256("catalog-oversized-hotbar-tool"),
-      tools: Object.freeze([
-        Object.freeze({
-          name: "files.large-schema",
-          label: "Large schema",
-          description: "Schema material ".repeat(4_000),
-          revisionId: "files-large-schema-v1",
-          inputSchema: Object.freeze({ type: "object" }),
-          outputSchema: Object.freeze({ type: "object" }),
-        }),
-      ]),
-    });
-    const codeExecution: PiCodeExecutionAdapter = Object.freeze({
-      prepare: async () =>
-        Object.freeze({
-          catalog,
-          invoke: async () => null,
-          execute: async () =>
-            Object.freeze({
-              executionId: "unused-oversized-hotbar-tool",
-              value: null,
-              calls: 0,
-              durationMs: 1,
-            }),
-          close: async () => undefined,
-        }),
-      shutdown: async () => undefined,
-    });
-    const controlled = createControlledPiModels({
-      respond: () =>
-        fauxAssistantMessage(
-          fauxToolCall(
-            "adapt",
-            { action: "add_tool", tool: "files.large-schema" },
-            { id: "adapt-large-schema" },
-          ),
-          { stopReason: "toolUse" },
-        ),
-    });
-    const selfTools: PiSelfToolAdapter = {
-      hotbar: async () => Object.freeze([]),
-      inspect: async () => null,
-      remember: async () => null,
-      adapt: async (input) => {
-        if (input.action !== "add_tool") throw new Error("Expected add_tool");
-        await input.applyHotbar([input.tool]);
-        return toJsonValue({ status: "hotbar_updated", hotbar: [input.tool] });
-      },
-    };
-    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
-
-    await expect(
-      runtime.run(
-        {
-          trailId: plan.sessionId,
-          provider: plan.provider,
-          model: plan.model,
-          thinkingLevel: plan.thinkingLevel,
-          systemPrompt: plan.renderedSystemPrompt,
-          prompt: "Activate the large schema.",
-          activeCapabilities: [],
-          frozenTurnPlan: plan,
-        },
-        () => undefined,
-      ),
-    ).resolves.toMatchObject({
-      outcome: "failed",
-      error: expect.stringContaining("complete request exceeds its token budget"),
-    });
-    expect(controlled.provider.state.callCount).toBe(1);
-  });
-
-  test("ignores unavailable persisted hotbar entries without blocking the turn", async () => {
-    const plan = frozenPlan();
-    const catalog: PiFrozenToolCatalog = Object.freeze({
-      catalogId: "catalog-stale-hotbar",
-      catalogDigest: sha256("catalog-stale-hotbar"),
-      tools: Object.freeze([
-        Object.freeze({
-          name: "files.read",
-          label: "Read file",
-          description: "Read a file",
-          revisionId: "files-read-v1",
-          inputSchema: Object.freeze({ type: "object" }),
-          outputSchema: Object.freeze({ type: "object" }),
-        }),
-      ]),
-    });
-    const codeExecution: PiCodeExecutionAdapter = Object.freeze({
-      prepare: async () =>
-        Object.freeze({
-          catalog,
-          invoke: async () => null,
-          execute: async () =>
-            Object.freeze({
-              executionId: "unused-stale-hotbar",
-              value: null,
-              calls: 0,
-              durationMs: 1,
-            }),
-          close: async () => undefined,
-        }),
-      shutdown: async () => undefined,
-    });
-    const controlled = createControlledPiModels({
-      respond: ({ context }) => {
-        expect(context.tools?.map((tool) => tool.name)).toEqual([
-          "inspect_self",
-          "remember",
-          "adapt",
-          "execute",
-          "file_read",
-        ]);
-        return "Stale preference reconciled.";
-      },
-    });
-    const selfTools: PiSelfToolAdapter = Object.freeze({
-      hotbar: async () => Object.freeze(["files.read", "removed.tool"]),
-      inspect: async () => null,
-      remember: async () => null,
-      adapt: async () => null,
-    });
-    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
-
-    await expect(
-      runtime.run(
-        {
-          trailId: plan.sessionId,
-          provider: plan.provider,
-          model: plan.model,
-          thinkingLevel: plan.thinkingLevel,
-          systemPrompt: plan.renderedSystemPrompt,
-          prompt: "Continue despite stale hotbar entries.",
-          activeCapabilities: [],
-          frozenTurnPlan: plan,
-        },
-        () => undefined,
-      ),
-    ).resolves.toMatchObject({ text: "Stale preference reconciled.", outcome: "completed" });
-  });
-
   test("does not charge inactive catalog tools against the request budget", async () => {
     const base = frozenPlan();
     const { canonicalDigest: _digest, ...baseUnsigned } = base;
     const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 12_000 });
     const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
-    const catalog: PiFrozenToolCatalog = Object.freeze({
-      catalogId: "catalog-many-inactive-tools",
-      catalogDigest: sha256("catalog-many-inactive-tools"),
-      tools: Object.freeze(
-        Array.from({ length: 1_000 }, (_, index) =>
-          Object.freeze({
-            name: `inactive.tool-${index}`,
-            label: `Inactive tool ${index}`,
-            description: "A frozen catalog tool that is not active in this turn.",
-            revisionId: `inactive-tool-${index}-v1`,
-            inputSchema: Object.freeze({ type: "object" }),
-            outputSchema: Object.freeze({ type: "object" }),
-          }),
-        ),
-      ),
-    });
+    const catalog = catalogWithTools(
+      "catalog-many-inactive-tools",
+      Array.from({ length: 1_000 }, (_, index) => `inactive.tool-${index}`),
+    );
     const codeExecution: PiCodeExecutionAdapter = Object.freeze({
       prepare: async () =>
         Object.freeze({
@@ -1684,22 +1040,16 @@ describe("agent runtime factories", () => {
     });
     const controlled = createControlledPiModels({
       respond: ({ context }) => {
-        expect(context.tools?.map((tool) => tool.name)).toEqual([
-          "inspect_self",
-          "remember",
-          "adapt",
+        expect(context.tools?.map((tool) => tool.name).sort()).toEqual([
           "execute",
+          "file_read",
+          "file_write",
+          "shell",
         ]);
         return "Only active tools were budgeted.";
       },
     });
-    const selfTools: PiSelfToolAdapter = Object.freeze({
-      hotbar: async () => Object.freeze([]),
-      inspect: async () => null,
-      remember: async () => null,
-      adapt: async () => null,
-    });
-    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution });
 
     await expect(
       runtime.run(

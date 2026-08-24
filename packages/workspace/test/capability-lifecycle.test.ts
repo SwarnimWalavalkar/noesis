@@ -80,7 +80,10 @@ describe("Capability lifecycle store", () => {
     const materials: readonly (readonly [string, string])[] = Object.freeze([
       ["capabilities/program/instructions.md", "instructions"],
       ["capabilities/program/router.json", '{"strategy":"central"}'],
-      ["workflows/evidence-synthesis/workflow.json", '{"name":"evidence-synthesis"}'],
+      [
+        "programs/projects/project-a/workflow/evidence-synthesis/program.json",
+        '{"name":"evidence-synthesis"}',
+      ],
     ]);
     const [prompt, router, workflow] = await Promise.all(
       materials.map(
@@ -101,10 +104,13 @@ describe("Capability lifecycle store", () => {
       ...base.revision,
       effects: Object.freeze([
         Object.freeze({
-          kind: "workflow" as const,
-          name: "evidence-synthesis",
-          project,
-          definitionRevision: workflow,
+          kind: "program" as const,
+          program: Object.freeze({
+            mode: "workflow" as const,
+            name: "evidence-synthesis",
+            project,
+            definitionRevision: workflow,
+          }),
         }),
       ]),
     });

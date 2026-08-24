@@ -2,9 +2,10 @@ import { AgentHarness } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { AssistantMessage, MutableModels } from "@earendil-works/pi-ai";
 import type { AgentThinkingLevel, AgentUsage } from "@noesis/agent-types";
+import { type JsonValue, JsonValueSchema, toJsonValue } from "@noesis/domain";
 import { createPiRequestBudgetProjector } from "./context-budget.ts";
 import type { PiCodeExecutionEvent, PiFrozenToolCatalog, PreparedPiCodeExecution } from "./execute-tool.ts";
-import { createPiHotbarTools } from "./hotbar-tools.ts";
+import { createBrokerToolAliases, createPiBrokerTools } from "./broker-tools.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
 
 export const PI_SUBAGENT_SYSTEM_PROMPT = `You are a bounded subagent inside Noesis.
@@ -213,19 +214,29 @@ export function createPiSubAgentRunner(cwd: string, models: MutableModels): PiSu
         const { session } = resources;
         sessionId = resources.sessionId;
         const eventPrefix = `${request.turnId}:${plan.runId}:`;
-        const tools = createPiHotbarTools({
+        const directAliases = createBrokerToolAliases(selectedPrepared.catalog);
+        const canonicalByAlias = new Map(
+          [...directAliases].map(([canonicalName, alias]) => [alias, canonicalName] as const),
+        );
+        const brokerRecordedActionIds = new Set<string>();
+        const pendingToolInputs = new Map<string, JsonValue>();
+        const tools = createPiBrokerTools({
           prepared: selectedPrepared,
           turnId: `${request.turnId}:${plan.runId}`,
           signal: controller.signal,
           maximumCalls: plan.budget.maxToolCalls,
+          parentExecutionId: plan.authority.parentExecutionId,
           descriptionSuffix: "This canonical tool is available only within the current subagent run.",
           origin: "subagent",
-          emit: (event, parentToolCallId, recordedByBroker) =>
+          emit: (event, parentToolCallId, recordedByBroker) => {
+            if (recordedByBroker && parentToolCallId === undefined && event.type === "tool-start")
+              brokerRecordedActionIds.add(event.callId);
             request.emit(
               parentToolCallId ? event : rewriteEventCallId(event, eventPrefix),
               parentToolCallId ?? plan.authority.parentToolCallId,
               recordedByBroker ?? true,
-            ),
+            );
+          },
         });
         harness = new AgentHarness({
           env: new NodeExecutionEnv({ cwd }),
@@ -270,6 +281,45 @@ export function createPiSubAgentRunner(cwd: string, models: MutableModels): PiSu
           if (event.type === "tool_execution_start") {
             toolCalls += 1;
             reportTelemetry();
+            const parsedInput = JsonValueSchema.safeParse(event.args);
+            pendingToolInputs.set(event.toolCallId, parsedInput.success ? parsedInput.data : null);
+          }
+          if (event.type === "tool_execution_end") {
+            const actionId = `direct:${event.toolCallId}`;
+            const toolInput = pendingToolInputs.get(event.toolCallId) ?? null;
+            pendingToolInputs.delete(event.toolCallId);
+            if (!brokerRecordedActionIds.delete(actionId)) {
+              const canonicalName = canonicalByAlias.get(event.toolName) ?? event.toolName;
+              request.emit(
+                rewriteEventCallId(
+                  {
+                    type: "tool-start",
+                    callId: actionId,
+                    name: canonicalName,
+                    callIndex: 0,
+                    input: toolInput,
+                  },
+                  eventPrefix,
+                ),
+                plan.authority.parentToolCallId,
+                false,
+              );
+              request.emit(
+                rewriteEventCallId(
+                  {
+                    type: "tool-end",
+                    callId: actionId,
+                    name: canonicalName,
+                    callIndex: 0,
+                    ok: !event.isError,
+                    result: toJsonValue(event.result),
+                  },
+                  eventPrefix,
+                ),
+                plan.authority.parentToolCallId,
+                false,
+              );
+            }
           }
           if (event.type === "message_end" && event.message.role === "assistant") {
             usage = addUsage(usage, event.message);

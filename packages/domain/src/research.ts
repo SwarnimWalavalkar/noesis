@@ -199,30 +199,25 @@ export interface CapabilitySkillEffect {
   readonly material: FileRevisionRef;
 }
 
-/** One immutable revision of the ordinary project script primitive. */
-export interface CapabilityScriptEffect {
-  readonly kind: "script";
+export type ProgramMode = "script" | "workflow";
+
+/** One immutable revision of an ordinary project Program. */
+export interface ProgramRevisionRef {
+  readonly mode: ProgramMode;
   readonly name: string;
   readonly project: ProjectRef;
   readonly definitionRevision: FileRevisionRef;
 }
 
-/** One immutable revision of the ordinary project workflow primitive. */
-export interface CapabilityWorkflowEffect {
-  readonly kind: "workflow";
-  readonly name: string;
-  readonly project: ProjectRef;
-  readonly definitionRevision: FileRevisionRef;
+export interface CapabilityProgramEffect {
+  readonly kind: "program";
+  readonly program: ProgramRevisionRef;
 }
 
-export type CapabilityEffect =
-  | CapabilityInstructionEffect
-  | CapabilitySkillEffect
-  | CapabilityScriptEffect
-  | CapabilityWorkflowEffect;
+export type CapabilityEffect = CapabilityInstructionEffect | CapabilitySkillEffect | CapabilityProgramEffect;
 
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-export const CAPABILITY_EFFECT_KINDS = ["instruction", "skill", "script", "workflow"] as const;
+export const CAPABILITY_EFFECT_KINDS = ["instruction", "skill", "program"] as const;
 export type CapabilityEffectKind = (typeof CAPABILITY_EFFECT_KINDS)[number];
 
 /** Immutable identity for the complete Capability revision, including current effects or its legacy bundle. */

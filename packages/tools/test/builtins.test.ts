@@ -1,17 +1,19 @@
 import { createConditionalObject } from "@noesis/domain";
 import { createHash } from "node:crypto";
-import { access, chmod, copyFile, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { JsonValue } from "@noesis/domain";
 import { type AuthorityBoundary, type EffectDecision, inspectEffectExecutionFailure } from "@noesis/policy";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  createFileMutationCoordinator,
   createLocalWorkTools,
   createToolBroker,
   MAX_TOOL_TEXT_BYTES,
   type ToolDefinition,
   type ToolExecutionContext,
+  type FileMutationCoordinator,
 } from "../src/index.ts";
 const permission = Object.freeze({
   effects: Object.freeze(["read", "write", "execute", "network"]),
@@ -74,6 +76,7 @@ function toolsAt(
   cwd: string,
   searchCommand?: string,
   maxShellOutputArtifactBytes?: number,
+  fileMutationCoordinator?: FileMutationCoordinator,
 ): readonly ToolDefinition[] {
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return createLocalWorkTools(
@@ -82,6 +85,7 @@ function toolsAt(
     } as const)
       .addOptional(searchCommand ? { searchCommand } : undefined)
       .addOptional(maxShellOutputArtifactBytes !== undefined ? { maxShellOutputArtifactBytes } : undefined)
+      .addOptional(fileMutationCoordinator ? { fileMutationCoordinator } : undefined)
       .add({
         writeArtifact: async ({ path, content }: { readonly path: string; readonly content: string }) => ({
           path,
@@ -131,17 +135,98 @@ describe("local work tools", () => {
       throw new Error("files.read returned an unexpected value");
     expect(Buffer.byteLength(result["content"], "utf8")).toBeLessThanOrEqual(MAX_TOOL_TEXT_BYTES);
   });
-  it("uses a read-only resource namespace distinct from file writes", () => {
-    const read = tool(toolsAt("/workspace"), "files.read");
-    const write = tool(toolsAt("/workspace"), "files.write");
+  it("keeps unrestricted reads distinct from project-confined writes", () => {
+    const cwd = tmpdir();
+    const read = tool(toolsAt(cwd), "files.read");
+    const write = tool(toolsAt(cwd), "files.write");
     expect(read.effect({ path: "/outside/notes.md" }, context())).toMatchObject({
       effect: "read",
       resource: "file-read:/outside/notes.md",
     });
-    expect(write.effect({ path: "/outside/notes.md", content: "changed" }, context())).toMatchObject({
-      effect: "write",
-      resource: "file:/outside/notes.md",
+    expect(() => write.effect({ path: "/outside/notes.md", content: "changed" }, context())).toThrow(
+      "Path is outside the active project",
+    );
+  });
+  it("creates parent directories by default and completely replaces existing files", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-write-"));
+    const write = tool(toolsAt(cwd), "files.write");
+    const path = join(cwd, "notes", "result.txt");
+
+    await expect(
+      write.execute({ path: "notes/result.txt", content: "first" }, context()),
+    ).resolves.toMatchObject({
+      path,
+      bytes: 5,
+      contentDigest: createHash("sha256").update("first").digest("hex"),
     });
+    await write.execute({ path: "notes/result.txt", content: "second" }, context());
+
+    await expect(readFile(path, "utf8")).resolves.toBe("second");
+  });
+  it("serializes mutations from independently prepared tool sets", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shared-mutations-"));
+    const path = join(cwd, "shared.txt");
+    await writeFile(path, "alpha", "utf8");
+    const coordinator = createFileMutationCoordinator();
+    const first = toolsAt(cwd, undefined, undefined, coordinator);
+    const second = toolsAt(cwd, undefined, undefined, coordinator);
+
+    await Promise.all([
+      tool(first, "files.write").execute({ path: "shared.txt", content: "beta" }, context()),
+      tool(second, "files.replace").execute(
+        { path: "shared.txt", oldText: "beta", newText: "gamma" },
+        context(),
+      ),
+    ]);
+
+    await expect(readFile(path, "utf8")).resolves.toBe("gamma");
+  });
+  it("rejects project paths that escape through symbolic links", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-symlink-project-"));
+    const outside = await mkdtemp(join(tmpdir(), "noesis-tools-symlink-outside-"));
+    const outsideFile = join(outside, "protected.txt");
+    await writeFile(outsideFile, "protected", "utf8");
+    await symlink(outside, join(cwd, "escape"), "dir");
+    const definitions = toolsAt(cwd);
+
+    expect(() =>
+      tool(definitions, "files.write").effect(
+        { path: "escape/protected.txt", content: "changed" },
+        context(),
+      ),
+    ).toThrow("escapes the active project");
+    await expect(
+      tool(definitions, "files.write").execute(
+        { path: "escape/protected.txt", content: "changed" },
+        context(),
+      ),
+    ).rejects.toThrow("escapes the active project");
+    await expect(
+      tool(definitions, "files.replace").execute(
+        { path: "escape/protected.txt", oldText: "protected", newText: "changed" },
+        context(),
+      ),
+    ).rejects.toThrow("escapes the active project");
+    await expect(tool(definitions, "files.list").execute({ path: "escape" }, context())).rejects.toThrow(
+      "escapes the active project",
+    );
+    await expect(
+      tool(definitions, "files.search").execute({ path: "escape", query: "protected" }, context()),
+    ).rejects.toThrow("escapes the active project");
+    await expect(readFile(outsideFile, "utf8")).resolves.toBe("protected");
+  });
+  it("does not create a path for a pre-aborted file write", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-write-abort-"));
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      tool(toolsAt(cwd), "files.write").execute(
+        { path: "notes/result.txt", content: "never written" },
+        context(controller.signal),
+      ),
+    ).rejects.toSatisfy((cause: unknown) => inspectEffectExecutionFailure(cause)?.code === "cancelled");
+    await expect(access(join(cwd, "notes"))).rejects.toThrow();
   });
   it("does not invent a trailing line for newline-terminated or empty files", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-lines-"));

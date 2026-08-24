@@ -648,7 +648,7 @@ async function currentCapabilityMaterialsMessage(
         const reference =
           effect.kind === "instruction" || effect.kind === "skill"
             ? effect.material
-            : effect.definitionRevision;
+            : effect.program.definitionRevision;
         const content = new TextDecoder("utf8", { fatal: true })
           .decode(await workspace.reads.readRevision(reference))
           .slice(0, CURRENT_MATERIAL_EXCERPT_CHARACTERS);
@@ -658,9 +658,9 @@ async function currentCapabilityMaterialsMessage(
             kind: effect.kind,
           } as const)
             .addOptional(
-              effect.kind === "skill" || effect.kind === "script" || effect.kind === "workflow"
+              effect.kind === "skill" || effect.kind === "program"
                 ? {
-                    name: effect.name,
+                    name: effect.kind === "program" ? effect.program.name : effect.name,
                   }
                 : undefined,
             )
@@ -752,7 +752,8 @@ function foregroundCapabilitySurfaceMessage(
               });
             return Object.freeze({
               kind: effect.kind,
-              name: effect.name,
+              name: effect.program.name,
+              mode: effect.program.mode,
               initialForegroundExposure: "exact_project_program_adapter",
             });
           })
@@ -790,13 +791,13 @@ function foregroundCapabilitySurfaceMessage(
   return encode(capabilities);
 }
 function availableProgramsMessage(programs: Awaited<ReturnType<CapabilityProgramLibrary["list"]>>): string {
-  const projected = [...programs]
-    .sort((left, right) => left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name))
+  const projected = programs
+    .map(({ mode, name, description, revision }) => ({ mode, name, description, revision }))
+    .sort((left, right) => left.mode.localeCompare(right.mode) || left.name.localeCompare(right.name))
     .slice(0, AVAILABLE_PROGRAMS_MAX_ITEMS);
   while (projected.length > 0) {
     const encoded = canonicalJson({
-      instruction:
-        "Script and workflow effects must reference one exact saved project program from this list.",
+      instruction: "Program effects must reference one exact saved project Program from this list.",
       programs: projected,
       omittedCount: Math.max(0, programs.length - projected.length),
     });
@@ -978,6 +979,29 @@ export function createCapabilityLearningModule(
       input.turn.correction ??
       proposal?.rationale ??
       ("reason" in decision ? decision.reason : "Capability decision");
+    const frozenPrograms = new Map(
+      availablePrograms.map((program) => [`${program.mode}:${program.name}`, program] as const),
+    );
+    const programResolver: Pick<CapabilityProgramLibrary, "resolve"> = Object.freeze({
+      resolve: async (mode, name, requestedProject) => {
+        if (
+          requestedProject.projectId !== input.project.projectId ||
+          requestedProject.root !== input.project.root
+        )
+          throw new Error(`Capability program library cannot cross project ${input.project.projectId}`);
+        const program = frozenPrograms.get(`${mode}:${name}`);
+        if (!program) return undefined;
+        return Object.freeze({
+          kind: "program" as const,
+          program: Object.freeze({
+            mode,
+            name,
+            project: Object.freeze({ ...input.project }),
+            definitionRevision: program.definitionRevision,
+          }),
+        });
+      },
+    });
     return await publisher.publish(
       publicationDecision,
       {
@@ -986,6 +1010,7 @@ export function createCapabilityLearningModule(
         evidenceRefs,
         actor: Object.freeze({ actorId: "automatic-learning-organ", kind: "noesis" }),
         interpretation,
+        programResolver,
       },
       signal,
     );

@@ -267,6 +267,11 @@
       <span class="pill">Runtime: TypeScript + Node + Pi</span>
       <span class="pill">Execution: JavaScript</span>
       <span class="pill">Authority: existing Noesis control plane</span>
+      <p class="lede">
+        The direct-tool hotbar and separate public Script/Workflow API described below are superseded by
+        <code>noesis-programs-and-fixed-tool-surface.md</code>. The shipped contract has a fixed four-tool
+        provider surface and one public Program primitive with script and workflow execution modes.
+      </p>
     </header>
 
     <nav aria-label="Plan sections">
@@ -275,7 +280,7 @@
         <li><a href="#research">Research</a></li>
         <li><a href="#model">Model</a></li>
         <li><a href="#architecture">Architecture</a></li>
-        <li><a href="#self-tools">Self tools</a></li>
+        <li><a href="#self-tools">Harness control</a></li>
         <li><a href="#skills">Skills</a></li>
         <li><a href="#codemode">Codemode</a></li>
         <li><a href="#scripts">Scripts</a></li>
@@ -290,27 +295,27 @@
       <section id="decision">
         <h2>The recommendation</h2>
         <div class="callout good">
-          <strong>Give the model four permanent tools:</strong>
-          <code>inspect_self</code>, <code>remember</code>,
-          <code>adapt</code>, and <code>execute</code>. The first three are small,
-          semantic operations over Noesis itself. <code>execute</code> executes
+          <strong>Give the model one permanent programmable tool:</strong>
+          <code>execute</code>. It executes
           JavaScript with Node.js on the user's machine and provides the work
           toolset as a programmatic SDK. Shell, files, web, session search, and
           future integrations are discoverable and composable through that SDK.
         </div>
         <p>
           This preserves the user's desired context shape: the model always knows
-          how to understand and improve itself, while a potentially enormous work
-          toolset costs roughly one tool declaration. It also preserves Noesis's
+          how to discover and improve itself through the built-in <code>noesis</code>
+          skill, while a potentially enormous work toolset costs roughly one tool
+          declaration. It also preserves Noesis's
           existing architecture: codemode is an execution client, not a second
           permission system, tool registry, persistence layer, or authority
           boundary.
         </p>
         <p>
-          The shipped default also keeps file read, directory list, and shell run
+          The shipped default also keeps file read, complete file write, and shell run
           directly available for atomic work. Session search and generic workflow
           execution remain named inside <code>execute</code>; users may pin either
-          deliberately through <code>adapt</code>.
+          deliberately through the Broker-backed operation taught by the built-in
+          <code>noesis</code> skill.
         </p>
         <div class="grid">
           <article class="card">
@@ -487,14 +492,14 @@
             </thead>
             <tbody>
               <tr>
-                <td><strong>Self tool</strong></td>
+                <td><strong>Noesis control tool</strong></td>
                 <td>
-                  A thin semantic operation for inspecting, remembering, or
-                  changing Noesis's direct-tool hotbar.
+                  A progressively disclosed Broker operation for inspecting or
+                  changing the harness, such as Capabilities or the direct-tool hotbar.
                 </td>
                 <td>
-                  Directly model-visible; implementation uses existing workspace,
-                  learning, Tool Catalog, and hotbar services.
+                  Frozen Tool Catalog plus Broker and ordinary authority checks;
+                  guidance lives in the built-in <code>noesis</code> skill.
                 </td>
               </tr>
               <tr>
@@ -593,11 +598,6 @@
         <pre aria-label="Architecture flow">
 Pi AgentHarness
   │
-  ├── inspect_self / remember ──→ semantic self services
-  │                                  └──→ WorkspaceStore + learning
-  │
-  ├── adapt ──→ frozen Tool Catalog selection ──→ active hotbar + persisted preference
-  │
   └── execute({ source }) ──→ CodemodeSession ──→ local Node child process
                                                  │
                                                  ├── ordinary Node.js
@@ -608,6 +608,8 @@ Pi AgentHarness
                                         Frozen Tool Broker
                                                  │
                                    validate input + derive effect
+                                                 │
+                                      noesis.hotbar ──→ active hotbar + persisted preference
                                                  │
                                    reserve / record operation
                                                  │
@@ -677,7 +679,7 @@ Pi AgentHarness
               <tr>
                 <td><code>packages/runtime-pi</code></td>
                 <td>
-                  Adapt the three self tools and codemode to Pi
+                  Adapt codemode and hotbar entries to Pi
                   <code>AgentTool</code>s; adapt Pi's skill ResourceLoader,
                   package manager, prompt formatter, and explicit skill
                   invocation; optionally adapt Pi's mature file and shell
@@ -760,39 +762,36 @@ Pi AgentHarness
       </section>
 
       <section id="self-tools">
-        <h2>Always-visible self tools</h2>
+        <h2>Progressively disclosed harness control</h2>
         <p>
-          These tools should describe intentions in the product's language, not
-          expose file CRUD. The model should not need to know workspace paths,
-          SQLite tables, revision IDs, or authority receipts.
+          Self-inspection and self-improvement use the same frozen Tool Catalog,
+          Broker, and protected publisher as ordinary codemode work. They do not
+          require permanently visible semantic tools or expose workspace paths,
+          SQLite tables, authority receipts, or a second learning primitive.
         </p>
         <div class="grid">
           <article class="card">
-            <h3><code>inspect_self</code></h3>
+            <h3><code>capabilities.inspect</code></h3>
             <p>
-              Query active prompts, learned profile, capabilities, scripts,
-              tools, workflows, experiments, recent adaptations, and relevant
-              provenance through one bounded semantic inspector.
+              The single progressive inspector for learned behavior, bindings,
+              lifecycle history, feedback, gates, and exact effect materials.
             </p>
           </article>
           <article class="card">
-            <h3><code>remember</code></h3>
+            <h3><code>capabilities.refine</code></h3>
             <p>
-              Propose or reinforce scoped durable memory with content,
-              anticipated future use, and narrow scope. The host binds current
-              turn evidence automatically.
-            </p>
-          </article>
-          <article class="card">
-            <h3><code>adapt</code></h3>
-            <p>
-              Add or remove tools from the small direct-tool hotbar. It changes
-              convenience, not authority: every hotbar entry still comes from the
-              current frozen Tool Catalog and uses the same Broker and permissions.
-              New project-local scripts and workflows use <code>execute</code>.
+              Publish a lasting fact, preference, criterion, or ability through
+              the canonical Capability primitive. The host binds current turn
+              evidence and authoritative versions automatically.
             </p>
           </article>
         </div>
+        <p>
+          Hotbar mutation is not permanently model-visible. The built-in
+          <code>noesis</code> skill teaches the foreground agent to discover and
+          call <code>noesis.hotbar</code> through <code>execute</code>. Its exact
+          schema comes from the frozen Tool Catalog.
+        </p>
         <h3>Behavioral contract</h3>
         <ul>
           <li>
@@ -800,13 +799,13 @@ Pi AgentHarness
             provenance. The model supplies semantic intent.
           </li>
           <li>
-            <code>remember</code> starts at the narrowest plausible scope and
-            names anticipated future use. Repeated evidence may broaden it later.
+            Deliberate and ambient learning share the protected Capability
+            publisher; no model-facing memory store competes with it.
           </li>
           <li>
-            <code>adapt</code> changes the hotbar only. Ambient reflection may
-            separately propose broader learned behavior; existing protected code
-            decides evaluation, activation, and rollback.
+            <code>noesis.hotbar</code> inspects or changes the hotbar only. It is available
+            only to the foreground agent's top-level execution and uses the same
+            Broker and permission snapshot as every other catalog tool.
           </li>
           <li>
             Ambient reflection is a separate process. It may produce
@@ -815,7 +814,7 @@ Pi AgentHarness
           <li>
             Ordinary user feedback such as “that was worse” is translated into
             evidence for ambient reflection and any broader protected
-            consolidation; it is not a hidden <code>adapt</code> operation.
+            consolidation; it is not a hidden hotbar mutation.
           </li>
         </ul>
         <div class="callout warning">
@@ -981,7 +980,7 @@ Pi AgentHarness
             The generic <code>workflows.run</code> runner is named in the
             <code>execute</code> contract. Each frozen saved workflow also appears under an exact,
             project-qualified Tool Catalog identity shown in the workflow index.
-            Pinning it with <code>adapt</code> exposes a friendly
+            Pinning it through <code>noesis.hotbar</code> exposes a friendly
             <code>workflow_&lt;name&gt;</code> tool with its typed contract, without
             creating another execution path or retargeting the pin across
             projects.
@@ -1052,7 +1051,7 @@ noesis skills install --workspace ./team-skills</code></pre>
         <div class="callout good">
           <strong>Yes—codemode is itself a basic agent tool.</strong>
           <code>packages/runtime-pi</code> registers <code>execute</code> as an
-          ordinary Pi <code>AgentTool</code>, alongside the three self tools. The
+          ordinary Pi <code>AgentTool</code>. The
           model invokes it through the normal tool-calling loop. The difference is
           that the input is a JavaScript program and the program can make many
           nested calls through the generated SDK before returning one result.
@@ -1630,29 +1629,27 @@ revisions/scripts/&lt;revision-id&gt;/
 
         <article class="task">
           <h3>
-            <span class="task-id">TCW-05</span> Implement the three semantic self
-            tools
+            <span class="task-id">TCW-05</span> Implement progressive harness control
           </h3>
           <dl>
             <dt>Outcome</dt>
             <dd>
-              The agent can inspect its active behavior, create narrow durable
-              memory, and add or remove exact frozen Tool Catalog entries from
-              its direct-tool hotbar without seeing storage internals.
+              The agent can inspect and refine active Capabilities and deliberately
+              inspect, add, or remove exact frozen Tool Catalog
+              entries from its direct-tool hotbar without seeing storage internals.
             </dd>
             <dt>Work</dt>
             <dd>
-              Create domain functions and Pi adapters for
-              <code>inspect_self</code>, <code>remember</code>, and
-              <code>adapt</code>. Bind provenance and anticipated-use evidence
-              host-side for learning operations. Keep <code>adapt</code> limited
-              to resolving current-catalog identities and changing hotbar
-              selection.
+              Expose <code>capabilities.inspect</code>,
+              <code>capabilities.refine</code>, and <code>noesis.hotbar</code>
+              through the frozen catalog, and teach them only in the progressively
+              disclosed built-in skill. Bind provenance and authoritative context
+              host-side for learning operations.
             </dd>
             <dt>Acceptance</dt>
             <dd>
-              Inspection and scoped memory use their existing semantic services;
-              adding or removing a tool updates the current turn's direct hotbar
+              Capability inspection and publication use one protected primitive;
+              inspecting, adding, or removing a tool uses the same Broker and updates the direct hotbar
               and its persisted preference without widening authority. Ambient
               reflection may separately produce <code>no_change</code> or a
               broader candidate, while explicit foreground script publication
@@ -1669,7 +1666,7 @@ revisions/scripts/&lt;revision-id&gt;/
           <dl>
             <dt>Outcome</dt>
             <dd>
-              Pi sees the three self tools, <code>execute</code>, and the small
+              Pi sees <code>execute</code> and the small
               atomic direct hotbar; the code session sees the frozen catalog.
             </dd>
             <dt>Work</dt>
@@ -1878,7 +1875,7 @@ Wave 5                   TCW-11 compounding loop
           </li>
           <li>
             Self-improvement closes last because it needs real execution and
-            outcome evidence. Its semantic self tools can ship earlier.
+            outcome evidence. Its progressive inspection tools can ship earlier.
           </li>
         </ul>
         <h3>Suggested implementation task ownership</h3>
@@ -1887,7 +1884,7 @@ Wave 5                   TCW-11 compounding loop
           <strong>(A)</strong> Tool Broker and work adapters,
           <strong>(B)</strong> codemode runtime/protocol,
           <strong>(C)</strong> WorkspaceStore migrations/read models, and
-          <strong>(D)</strong> self-tool domain behavior. TCW-06 should be one
+          <strong>(D)</strong> progressive harness-control behavior. TCW-06 should be one
           integration owner. Skills and scripts may proceed in parallel;
           workflows should be a stacked follow-up rather than a parallel edit to
           the same runtime composition.
@@ -1958,9 +1955,9 @@ Wave 5                   TCW-11 compounding loop
               <tr>
                 <td>“Remember that I prefer pure functions in Noesis.”</td>
                 <td>
-                  <code>remember</code> creates narrow, evidence-bound,
-                  anticipated-use memory which appears only in relevant later
-                  turns.
+                  <code>capabilities.inspect</code> checks for overlap and
+                  <code>capabilities.refine</code> publishes one narrow,
+                  evidence-bound Instruction Capability for relevant later turns.
                 </td>
               </tr>
               <tr>
@@ -2030,9 +2027,9 @@ Wave 5                   TCW-11 compounding loop
         <p>
           Noesis can install and progressively load portable Agent Skills;
           complete real local and web work through one model-visible
-          <code>execute</code> tool; inspect its active behavior, record narrow
-          memory, and manage its direct-tool hotbar through three thin semantic
-          tools; save successful programs as inspectable scripts; run typed
+          <code>execute</code> tool; inspect and refine its active behavior through
+          one Capability primitive, and manage its direct-tool hotbar through one progressively
+          disclosed Broker operation; save successful programs as inspectable scripts; run typed
           multi-phase work durably; and learn from the outcomes without creating
           duplicate authority systems.
         </p>

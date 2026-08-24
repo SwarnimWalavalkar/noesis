@@ -7,6 +7,7 @@ import {
   type JsonValue,
   JsonValueSchema,
   type PermissionManifest,
+  type ProgramMode,
   sha256,
   toJsonValue,
 } from "@noesis/domain";
@@ -29,7 +30,23 @@ function displayToolName(name: string): string {
 }
 export * from "./builtins.ts";
 export * from "./limits.ts";
-export type ToolVisibility = "always" | "codemode_only";
+export type ToolImplementation =
+  | Readonly<{ kind: "builtin" }>
+  | Readonly<{ kind: "mcp"; server: string; remoteName: string }>
+  | Readonly<{
+      kind: "program";
+      mode: ProgramMode;
+      projectId: string;
+      name: string;
+      definitionRevisionId: string;
+    }>;
+export type ToolExposure =
+  | Readonly<{ kind: "catalog" }>
+  | Readonly<{
+      kind: "capability";
+      capabilityId: string;
+      capabilityRevisionId: string;
+    }>;
 export interface ToolExecutionContext {
   readonly executionId: string;
   /** Durable codemode execution that owns this call; absent for direct Broker invocations. */
@@ -56,7 +73,8 @@ export interface ToolDefinition {
   readonly name: string;
   readonly label: string;
   readonly description: string;
-  readonly visibility: ToolVisibility;
+  readonly implementation: ToolImplementation;
+  readonly exposure: ToolExposure;
   readonly implementationDigest: string;
   readonly inputSchema: z.ZodType<unknown>;
   readonly outputSchema: z.ZodType<JsonValue>;
@@ -81,7 +99,8 @@ export interface ToolAuthoringDefinition<Input, Output extends JsonValue> {
   readonly name: string;
   readonly label: string;
   readonly description: string;
-  readonly visibility: ToolVisibility;
+  readonly implementation?: ToolImplementation;
+  readonly exposure?: ToolExposure;
   readonly identityMaterial?: JsonValue;
   readonly inputSchema: z.ZodType<Input>;
   readonly outputSchema: z.ZodType<Output>;
@@ -95,7 +114,8 @@ export function defineTool<Input, Output extends JsonValue>(
   const name = definition.name;
   const label = definition.label;
   const description = definition.description;
-  const visibility = definition.visibility;
+  const implementation = definition.implementation ?? Object.freeze({ kind: "builtin" as const });
+  const exposure = definition.exposure ?? Object.freeze({ kind: "catalog" as const });
   const inputSchema = definition.inputSchema;
   const outputSchema = definition.outputSchema;
   const deriveEffect = definition.effect;
@@ -115,7 +135,8 @@ export function defineTool<Input, Output extends JsonValue>(
       name,
       label,
       description,
-      visibility,
+      implementation,
+      exposure,
       implementationDigest,
       inputSchema,
       outputSchema,
@@ -142,7 +163,8 @@ export interface FrozenToolDescriptor {
   readonly name: string;
   readonly label: string;
   readonly description: string;
-  readonly visibility: ToolVisibility;
+  readonly implementation: ToolImplementation;
+  readonly exposure: ToolExposure;
   readonly implementationDigest: string;
   readonly revisionId: string;
   readonly inputSchema: JsonValue;
@@ -151,6 +173,8 @@ export interface FrozenToolDescriptor {
 export interface ToolSearchHit {
   readonly name: string;
   readonly description: string;
+  readonly implementation: ToolImplementation;
+  readonly exposure: ToolExposure;
   readonly revisionId: string;
   readonly score: number;
 }
@@ -239,7 +263,8 @@ function freezeDefinition(definition: ToolDefinition): FrozenDefinition {
       name: definition.name,
       label: definition.label,
       description: definition.description,
-      visibility: definition.visibility,
+      implementation: definition.implementation,
+      exposure: definition.exposure,
       implementationDigest: definition.implementationDigest,
       inputSchema: definition.inputSchema,
       outputSchema: definition.outputSchema,
@@ -271,7 +296,8 @@ function freezeDefinition(definition: ToolDefinition): FrozenDefinition {
     name: capturedDefinition.name,
     label: capturedDefinition.label,
     description: capturedDefinition.description,
-    visibility: capturedDefinition.visibility,
+    implementation: capturedDefinition.implementation,
+    exposure: capturedDefinition.exposure,
     implementationDigest: capturedDefinition.implementationDigest,
     inputSchema: capturedDefinition.catalogInputSchema ?? schemaJson(capturedDefinition.inputSchema),
     outputSchema: capturedDefinition.catalogOutputSchema ?? schemaJson(capturedDefinition.outputSchema),
@@ -437,6 +463,8 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
           Object.freeze({
             name: descriptor.name,
             description: descriptor.description,
+            implementation: descriptor.implementation,
+            exposure: descriptor.exposure,
             revisionId: descriptor.revisionId,
             score,
           }),

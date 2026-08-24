@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createConditionalObject, err, ok, type Result } from "@noesis/domain";
 import { z } from "zod";
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-export const NOESIS_CONFIG_SCHEMA_VERSION = 1 as const;
+export const NOESIS_CONFIG_SCHEMA_VERSION = 2 as const;
 export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
 export const AgentConfigSchema = z.strictObject({
@@ -45,25 +45,6 @@ export const ExperimentDefaultsSchema = z.strictObject({
   maxCost: z.number().nonnegative().optional(),
 });
 export type ExperimentDefaults = Readonly<z.infer<typeof ExperimentDefaultsSchema>>;
-export const MAX_DIRECT_TOOL_HOTBAR_TOOLS = 16;
-const TOOL_HOTBAR_DEFAULTS_REVISION = 2;
-export const ToolConfigSchema = z.strictObject({
-  // Version 1 briefly stored project-qualified workflow pins here. Keep those
-  // legacy entries readable; the active global + project union is bounded below.
-  hotbar: z.array(z.string().trim().min(1).max(128)).max(256).optional(),
-  hotbarDefaultsRevision: z.literal(TOOL_HOTBAR_DEFAULTS_REVISION).optional(),
-  projectHotbars: z
-    .record(
-      z.string().trim().min(1).max(128),
-      z.array(z.string().trim().min(1).max(128)).max(MAX_DIRECT_TOOL_HOTBAR_TOOLS),
-    )
-    .optional(),
-});
-export type ToolConfig = Readonly<z.infer<typeof ToolConfigSchema>>;
-export interface ResolvedToolConfig {
-  readonly hotbar: readonly string[];
-  readonly projectHotbars: Readonly<Record<string, readonly string[]>>;
-}
 export const NoesisConfigSchema = z.strictObject({
   schemaVersion: z.literal(NOESIS_CONFIG_SCHEMA_VERSION),
   agent: AgentConfigSchema,
@@ -73,7 +54,6 @@ export const NoesisConfigSchema = z.strictObject({
   context: ContextConfigSchema.optional(),
   autonomy: AutonomyConfigSchema.optional(),
   experiments: ExperimentDefaultsSchema.optional(),
-  tools: ToolConfigSchema.optional(),
 });
 export type NoesisConfig = Readonly<z.infer<typeof NoesisConfigSchema>>;
 export interface ResolvedAgentConfig {
@@ -84,7 +64,7 @@ export interface ResolvedAgentConfig {
 export type ConfigSource = "cli" | "environment" | "config" | "default";
 export type AgentDefaultSource = "configured" | "foreground";
 export interface ResolvedNoesisConfig {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: typeof NOESIS_CONFIG_SCHEMA_VERSION;
   readonly home: string;
   readonly configPath: string;
   readonly agent: ResolvedAgentConfig;
@@ -95,7 +75,6 @@ export interface ResolvedNoesisConfig {
   readonly context: Required<ContextConfig>;
   readonly autonomy: Required<AutonomyConfig>;
   readonly experiments: Required<ExperimentDefaults>;
-  readonly tools: ResolvedToolConfig;
   readonly sources: Readonly<Record<keyof ResolvedAgentConfig, ConfigSource>>;
 }
 export interface ConfigOverrides {
@@ -108,7 +87,6 @@ export interface UserControlConfigPatch {
   readonly context?: ContextConfig;
   readonly autonomy?: AutonomyConfig;
   readonly experiments?: ExperimentDefaults;
-  readonly tools?: ToolConfig;
 }
 export interface ResolveConfigInput {
   readonly home: string;
@@ -153,32 +131,6 @@ export const BUILT_IN_EXPERIMENT_DEFAULTS: Required<ExperimentDefaults> = {
   maxAttemptsPerArm: 1,
   maxCost: 0,
 };
-export const BUILT_IN_TOOL_DEFAULTS: ResolvedToolConfig = {
-  hotbar: Object.freeze(["files.read", "files.list", "shell.run"]),
-  projectHotbars: Object.freeze({}),
-};
-const LEGACY_BUILT_IN_TOOL_HOTBARS = Object.freeze([
-  Object.freeze(["files.read", "files.list", "shell.run", "workflows.run", "history.search_sessions"]),
-]);
-const projectWorkflowNamespacePattern = /^(workflow\.[a-f0-9]{16}\.)/u;
-function isSameHotbar(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((tool, index) => tool === right[index]);
-}
-function resolveConfiguredHotbar(tools: ToolConfig | undefined): readonly string[] {
-  const hotbar = tools?.hotbar;
-  if (!hotbar) return BUILT_IN_TOOL_DEFAULTS.hotbar;
-  if (tools?.hotbarDefaultsRevision === TOOL_HOTBAR_DEFAULTS_REVISION) return hotbar;
-  for (const legacy of LEGACY_BUILT_IN_TOOL_HOTBARS) {
-    const formerDefault = hotbar.slice(0, legacy.length);
-    const legacyProjectPins = hotbar.slice(legacy.length);
-    if (
-      isSameHotbar(formerDefault, legacy) &&
-      legacyProjectPins.every((tool) => projectWorkflowNamespacePattern.test(tool))
-    )
-      return Object.freeze([...BUILT_IN_TOOL_DEFAULTS.hotbar, ...legacyProjectPins]);
-  }
-  return hotbar;
-}
 export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
   schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
   agent: { ...BUILT_IN_AGENT_DEFAULTS },
@@ -186,10 +138,6 @@ export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
   context: { ...BUILT_IN_CONTEXT_DEFAULTS },
   autonomy: { ...BUILT_IN_AUTONOMY_DEFAULTS },
   experiments: { ...BUILT_IN_EXPERIMENT_DEFAULTS },
-  tools: {
-    hotbar: [...BUILT_IN_TOOL_DEFAULTS.hotbar],
-    hotbarDefaultsRevision: TOOL_HOTBAR_DEFAULTS_REVISION,
-  },
 };
 export const noesisConfigPath = (home: string): string => join(home, "config.json");
 const delay = (milliseconds: number): Promise<void> =>
@@ -213,27 +161,11 @@ function decodeConfig(path: string, value: unknown): Result<NoesisConfig, Noesis
     return err(
       new NoesisConfigError(
         path,
-        `unsupported schemaVersion ${String(value.schemaVersion)}; this build accepts only schemaVersion 1`,
+        `unsupported schemaVersion ${String(value.schemaVersion)}; this build accepts only schemaVersion ${String(NOESIS_CONFIG_SCHEMA_VERSION)}`,
       ),
     );
   }
-  // schemaVersion 1 previously persisted an agent.runtime selector. Pi is now the
-  // only product executor, so the legacy field is ignored in memory and removed
-  // on the next explicit config write. Durable session runtime identity remains
-  // separate provenance and is not reconstructed from this setting.
-  const normalized =
-    value !== null &&
-    typeof value === "object" &&
-    "agent" in value &&
-    value.agent !== null &&
-    typeof value.agent === "object" &&
-    "runtime" in value.agent
-      ? {
-          ...value,
-          agent: Object.fromEntries(Object.entries(value.agent).filter(([key]) => key !== "runtime")),
-        }
-      : value;
-  const parsed = NoesisConfigSchema.safeParse(normalized);
+  const parsed = NoesisConfigSchema.safeParse(value);
   if (!parsed.success) {
     const first = parsed.error.issues[0];
     const pointer = first ? issuePath(first) : "";
@@ -318,7 +250,6 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
   const context = loaded.value.config?.context ?? {};
   const autonomy = loaded.value.config?.autonomy ?? {};
   const experiments = loaded.value.config?.experiments ?? {};
-  const tools = loaded.value.config?.tools ?? {};
   const [provider, providerSource] = pick(path, "provider", cli, env, file, "NOESIS_PROVIDER");
   const [model, modelSource] = pick(path, "model", cli, env, file, "NOESIS_MODEL");
   const [thinkingLevel, thinkingLevelSource] = pick(
@@ -362,17 +293,6 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
       maxCases: experiments.maxCases ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxCases,
       maxAttemptsPerArm: experiments.maxAttemptsPerArm ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxAttemptsPerArm,
       maxCost: experiments.maxCost ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxCost,
-    },
-    tools: {
-      hotbar: Object.freeze([...resolveConfiguredHotbar(tools)]),
-      projectHotbars: Object.freeze(
-        Object.fromEntries(
-          Object.entries(tools.projectHotbars ?? {}).map(([projectId, hotbar]) => [
-            projectId,
-            Object.freeze([...hotbar]),
-          ]),
-        ),
-      ),
     },
     sources: {
       provider: providerSource,
@@ -517,12 +437,11 @@ export async function updateUserControlConfig(
     patch.learning === undefined &&
     patch.context === undefined &&
     patch.autonomy === undefined &&
-    patch.experiments === undefined &&
-    patch.tools === undefined
+    patch.experiments === undefined
   ) {
     throw new NoesisConfigError(
       noesisConfigPath(home),
-      "user control update requires context, learning, autonomy, experiment, or tool preferences",
+      "user control update requires context, learning, autonomy, or experiment preferences",
     );
   }
   return await withConfigWriter(home, async () => {
@@ -540,133 +459,11 @@ export async function updateUserControlConfig(
       .addOptional(
         patch.experiments ? { experiments: { ...current.experiments, ...patch.experiments } } : undefined,
       )
-      .addOptional(
-        patch.tools
-          ? {
-              tools: {
-                ...current.tools,
-                ...patch.tools,
-                hotbar: [...(patch.tools.hotbar ?? resolveConfiguredHotbar(current.tools))],
-                hotbarDefaultsRevision: TOOL_HOTBAR_DEFAULTS_REVISION,
-              },
-            }
-          : undefined,
-      )
       .finish();
     const decoded = decodeConfig(path, candidate);
     if (!decoded.ok) throw decoded.error;
     await persistConfig(home, decoded.value);
     return decoded.value;
-  });
-}
-export interface ToolHotbarDelta {
-  readonly projectId: string;
-  readonly projectToolNamespace: string;
-  readonly scope: "global" | "project";
-  readonly action: "add" | "remove";
-  readonly tool: string;
-  /** All version-1 project workflow pins still present in the global array. */
-  readonly legacyGlobalProjectTools: readonly string[];
-  /** The subset of legacy pins that belongs to this project. */
-  readonly legacyActiveProjectTools: readonly string[];
-}
-export interface CommittedToolHotbarSelection {
-  readonly global: readonly string[];
-  readonly project: readonly string[];
-  readonly effective: readonly string[];
-}
-function applyHotbarDelta(
-  current: readonly string[],
-  action: ToolHotbarDelta["action"],
-  tool: string,
-): readonly string[] {
-  return action === "add"
-    ? Object.freeze([...new Set([...current, tool])])
-    : Object.freeze(current.filter((name) => name !== tool));
-}
-function assertEffectiveHotbarBounds(
-  path: string,
-  global: readonly string[],
-  projectHotbars: Readonly<Record<string, readonly string[]>>,
-  legacyProjectTools: readonly string[],
-): void {
-  const assertBound = (label: string, tools: readonly string[]): void => {
-    const effectiveCount = new Set([...global, ...tools]).size;
-    if (effectiveCount > MAX_DIRECT_TOOL_HOTBAR_TOOLS)
-      throw new NoesisConfigError(
-        path,
-        `${label} hotbar would contain ${String(effectiveCount)} tools; the maximum is ${String(MAX_DIRECT_TOOL_HOTBAR_TOOLS)}`,
-      );
-  };
-  const namespaceBuckets = new Map<string, Set<string>>();
-  const addToNamespace = (tool: string): void => {
-    const namespace = projectWorkflowNamespacePattern.exec(tool)?.[1];
-    if (!namespace) return;
-    const bucket = namespaceBuckets.get(namespace) ?? new Set<string>();
-    bucket.add(tool);
-    namespaceBuckets.set(namespace, bucket);
-  };
-  assertBound("global", Object.freeze([]));
-  for (const [projectId, hotbar] of Object.entries(projectHotbars)) {
-    assertBound(`project ${projectId}`, hotbar);
-    for (const tool of hotbar) addToNamespace(tool);
-  }
-  for (const tool of legacyProjectTools) addToNamespace(tool);
-  for (const [namespace, tools] of namespaceBuckets)
-    assertBound(`project workflow namespace ${namespace}`, [...tools]);
-}
-/** Apply one exact hotbar action against the latest locked config and return the committed view. */
-export async function updateToolHotbar(
-  home: string,
-  update: ToolHotbarDelta,
-): Promise<CommittedToolHotbarSelection> {
-  if (update.scope === "global" && update.action === "add" && update.tool.startsWith("mcp."))
-    throw new NoesisConfigError(
-      noesisConfigPath(home),
-      "MCP tools are project-scoped and cannot be added to the global hotbar",
-    );
-  return await withConfigWriter(home, async () => {
-    const loaded = await readNoesisConfig(home);
-    if (!loaded.ok) throw loaded.error;
-    const path = noesisConfigPath(home);
-    const current = loaded.value.config ?? DEFAULT_NOESIS_CONFIG;
-    const rawGlobal = resolveConfiguredHotbar(current.tools);
-    const projectHotbars = { ...current.tools?.projectHotbars };
-    const legacyGlobal = new Set(update.legacyGlobalProjectTools);
-    const legacyActive = new Set(update.legacyActiveProjectTools);
-    const global = Object.freeze([
-      ...new Set(rawGlobal.filter((tool) => !legacyGlobal.has(tool) && !tool.startsWith("mcp."))),
-    ]);
-    const project = Object.freeze([
-      ...new Set([
-        ...(projectHotbars[update.projectId] ?? []).filter(
-          (tool) => tool.startsWith(update.projectToolNamespace) || tool.startsWith("mcp."),
-        ),
-        ...rawGlobal.filter((tool) => legacyActive.has(tool)),
-      ]),
-    ]);
-    const nextGlobal =
-      update.scope === "global" ? applyHotbarDelta(global, update.action, update.tool) : global;
-    const nextProject =
-      update.scope === "project" ? applyHotbarDelta(project, update.action, update.tool) : project;
-    const effective = Object.freeze([...new Set([...nextGlobal, ...nextProject])]);
-    if (nextProject.length === 0) delete projectHotbars[update.projectId];
-    else projectHotbars[update.projectId] = [...nextProject];
-    const inactiveLegacy = rawGlobal.filter((tool) => legacyGlobal.has(tool) && !legacyActive.has(tool));
-    assertEffectiveHotbarBounds(path, nextGlobal, projectHotbars, inactiveLegacy);
-    const candidate: NoesisConfig = {
-      ...current,
-      tools: createConditionalObject({
-        hotbar: [...new Set([...nextGlobal, ...inactiveLegacy])],
-        hotbarDefaultsRevision: TOOL_HOTBAR_DEFAULTS_REVISION,
-      } satisfies ToolConfig)
-        .addOptional(Object.keys(projectHotbars).length > 0 ? { projectHotbars } : undefined)
-        .finish(),
-    };
-    const decoded = decodeConfig(path, candidate);
-    if (!decoded.ok) throw decoded.error;
-    await persistConfig(home, decoded.value);
-    return Object.freeze({ global: nextGlobal, project: nextProject, effective });
   });
 }
 export * from "./criteria.ts";
