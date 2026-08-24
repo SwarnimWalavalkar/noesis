@@ -18,6 +18,8 @@ The current interaction must be useful on its own. Development over time is an a
 
 An explicit project change does not wait for this loop. Noesis may publish and use a project script or workflow at once through `execute`. Reflection may later consolidate its lessons into a Capability.
 
+Deliberate self-improvement does not wait for the ambient loop either. While working with the user, the foreground agent can inspect current Capabilities, gather evidence, and author one complete create, revise, pause, restore, or binding-change decision. Protected code supplies the admitted turn and evidence, records exact immutable materials, checks the expected binding, and applies the same gate used by ambient reflection. It does not make a second model call to reinterpret the foreground decision. The resulting revision is eligible from a later frozen turn.
+
 ## How Noesis works with the user
 
 Noesis has two default collaboration approaches. It infers them from the conversation. The user does not need to configure a mode.
@@ -62,6 +64,8 @@ The reflector or the user may choose project or session scope. The user may also
 
 Reflection runs automatically after every settled foreground turn. It should stay quiet and accept `no_change` as a normal result. The user should not have to run learning commands or manage an experiment pipeline.
 
+The user may nevertheless ask Noesis to improve itself explicitly, or invoke `/refine`. Both load the built-in `noesis` skill, which progressively explains how to choose among memory, a saved program, and a Capability; how to inspect current state; and how to publish an exact decision. This guidance is not repeated in the default system prompt.
+
 The TUI shows important outcomes as notifications instead of adding them to the transcript. For example:
 
 ```text
@@ -100,7 +104,9 @@ The `/learning` interface renders a read model. It never becomes a second author
 
 Challenging a lesson does not erase history. Noesis records the correction and may narrow or retire the current revision. It keeps the evidence behind the earlier behavior. A revert restores the prior complete version instead of rebuilding it from files that may have changed.
 
-Ambient reflection may activate an ordinary exact Capability revision immediately. The user can inspect its effects, pause it, retarget it, revise it, or restore it from `/learning`.
+Ambient reflection or the foreground agent may activate an ordinary exact Capability revision immediately. Both use the same publisher, evidence rules, immutable revision format, compare-and-swap binding, and protected consequence gate. The user can inspect its effects, pause it, retarget it, revise it, or restore it from `/learning`.
+
+Subagents may investigate or critique a possible refinement, but they cannot publish it. The foreground agent retains the richer user collaboration context and makes the final semantic decision.
 
 The model creates project scripts and workflows through `execute`. A Capability that uses one of those programs points to the same immutable definition revision. It never creates a parallel program.
 
@@ -131,6 +137,12 @@ Across related sessions, the user corrects Noesis about the same behavior more t
 The ordinary revision becomes active immediately and a compact TUI notification makes that visible without adding a transcript message. Later turns use the exact recorded revision when it is relevant. The user can also make it always active.
 
 The user can ask why the Capability changed, inspect the evidence and reasoning, change its scope or selection mode, pause it, give feedback, or restore a prior revision. That feedback can produce another revision immediately.
+
+### The user deliberately teaches Noesis
+
+The user asks Noesis to preserve a method they just developed, or uses `/refine` with a concrete request. Noesis loads its built-in self-knowledge, inspects overlapping Capabilities and exact predecessor material, and gathers relevant evidence during the same foreground execution.
+
+If a lasting ability is justified, the foreground agent authors the complete Capability and exact effects itself. The runtime validates and publishes that decision without a separate reflector pass. If a reusable program is part of the ability, Noesis first saves and verifies the ordinary project Script or Workflow, then attaches its immutable revision. The final response reports the authoritative publication result. Ambient reflection later observes that recorded action and should normally avoid duplicating it.
 
 ### Clear execution remains simple
 

@@ -36,6 +36,7 @@ const completeQueueCommand = (argumentPrefix: string): AutocompleteItem[] => {
 
 export interface SkillSlashCommand {
   readonly name: string;
+  readonly aliases?: readonly string[];
   readonly description: string;
   readonly disableModelInvocation?: boolean;
 }
@@ -151,15 +152,17 @@ export function createNoesisCommandAutocompleteProvider(
   const builtInNames = new Set<string>(NOESIS_SLASH_COMMANDS.map((command) => command.name));
   const seenSkillNames = new Set<string>();
   const skillCommands: SlashCommand[] = skills.flatMap((skill) => {
-    if (seenSkillNames.has(skill.name)) return [];
-    seenSkillNames.add(skill.name);
-    return [
-      {
-        name: builtInNames.has(skill.name) ? `skill:${skill.name}` : skill.name,
-        description: `Skill · ${skill.description}${skill.disableModelInvocation ? " · explicit only" : ""}`,
-        argumentHint: "[instructions]",
-      },
-    ];
+    return [skill.name, ...(skill.aliases ?? [])].flatMap((name) => {
+      if (seenSkillNames.has(name)) return [];
+      seenSkillNames.add(name);
+      return [
+        {
+          name: builtInNames.has(name) ? `skill:${name}` : name,
+          description: `${name === skill.name ? "Skill" : `Alias for ${skill.name}`} · ${skill.description}${skill.disableModelInvocation ? " · explicit only" : ""}`,
+          argumentHint: "[instructions]",
+        },
+      ];
+    });
   });
   const provider = new CombinedAutocompleteProvider(
     [...NOESIS_SLASH_COMMANDS, ...skillCommands],

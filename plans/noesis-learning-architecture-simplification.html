@@ -227,6 +227,13 @@
             </span>
           </div>
           <div class="card">
+            <strong>Foreground authoring</strong>
+            <span class="muted">
+              The agent working with the user may deliberately author the same complete Capability
+              decision. Protected code publishes it without a second semantic model pass.
+            </span>
+          </div>
+          <div class="card">
             <strong>Real use is the loop</strong>
             <span class="muted">
               Ordinary capabilities activate without preflight. User feedback and later ambient
@@ -289,6 +296,11 @@
             <code>no_change</code> remains a normal result but appears only as an aggregate health
             signal unless the user opens the complete audit view.
           </li>
+          <li>
+            The built-in <code>noesis</code> skill, also invoked by <code>/refine</code>, progressively
+            exposes the deliberate authoring method and current tool schemas without expanding the
+            stable system prompt.
+          </li>
         </ul>
 
         <h3>The intentionally changed doctrine</h3>
@@ -315,13 +327,19 @@
 
       <section>
         <h2>3. The complete lifecycle</h2>
-        <pre class="flow"><code>every admitted foreground turn reaches a terminal state
+        <pre class="flow"><code>during foreground collaboration, when deliberate refinement is useful
+  → load the built-in noesis skill, explicitly or by relevance
+  → inspect current Capabilities and gather evidence through ordinary tools
+  → foreground agent authors one complete Capability decision
+  → protected Capability publisher validates and records it without another model call
+
+every admitted foreground turn reaches a terminal state
   → enqueue one durable capability reflection
   → reflector returns no_change | create | revise | restore | pause | change_binding
 
 create or revise
-  → reflector proposes one or more concrete effects
-  → author records exact instruction or skill bytes and resolves saved programs to immutable revisions
+  → semantic author proposes one or more concrete effects
+  → shared publisher records exact instruction or skill bytes and resolves saved programs to immutable revisions
   → validate effects, dependencies, predecessor, project authority, and recovery information
   → consequence gate says automatic | user_decision
 
@@ -519,6 +537,21 @@ change_binding</code></pre>
         <p>
           Every non-<code>no_change</code> result cites exact evidence and explains anticipated effect.
           The host rejects nonexistent, unauthorized, or sensitivity-incompatible citations.
+        </p>
+
+        <h3>Foreground capability author</h3>
+        <p>
+          The foreground model may perform the same semantic work deliberately when its live
+          collaboration with the user provides stronger context than post-turn inference. The
+          built-in <code>noesis</code> skill explains when to remember, save a program, or author a
+          Capability. <code>capabilities.inspect</code> progressively exposes current state and exact
+          predecessor material; <code>capabilities.refine</code> accepts one complete typed decision.
+        </p>
+        <p>
+          The runtime supplies the admitted foreground turn, normal-sensitivity evidence produced in
+          that execution, project, session, actor, and current binding versions. It validates and
+          publishes the submitted decision but never invokes a second model to reinterpret it.
+          Subagents may investigate and draft; only the foreground execution may publish.
         </p>
 
         <h3>Effect author</h3>
@@ -817,9 +850,10 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
             <tr>
               <td><code>packages/learning</code></td>
               <td>
-                Ambient reflector, exact effect authoring, and <code>iterateOnFeedback</code>. Saved
-                programs are resolved through a narrow canonical program-library port. No experiment
-                or preflight orchestration.
+                One protected Capability publisher plus the ambient reflector adapter and
+                <code>iterateOnFeedback</code>. Foreground and ambient authors use the same publisher.
+                Saved programs are resolved through a narrow canonical program-library port. No
+                experiment or preflight orchestration.
               </td>
             </tr>
             <tr>
@@ -878,9 +912,29 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
     signal: AbortSignal,
   ) =&gt; Promise&lt;CapabilityManagementResult&gt;;
 }</code></pre>
+        <pre><code>interface CapabilityPublisher {
+  readonly publish: (
+    decision: CapabilityDecision,
+    context: AuthoritativePublicationContext,
+    signal: AbortSignal,
+  ) =&gt; Promise&lt;CapabilityPublicationResult&gt;;
+  readonly replacePendingGate: (
+    input: {
+      readonly gateRequestId: string;
+      readonly proposal: CapabilityProposal;
+      readonly instruction: string;
+    },
+    context: {
+      readonly project?: ProjectRef;
+      readonly actor: ActorRef;
+    },
+    signal: AbortSignal,
+  ) =&gt; Promise&lt;CapabilityPublicationResult&gt;;
+}</code></pre>
         <p>
           Turn resolution remains in the turn-intelligence module, which consumes Capability bindings
-          and revisions. Do not make the learning module a second turn planner.
+          and revisions. The publication context is host-owned; model-authored input contains only the
+          semantic decision. Do not make the learning module a second turn planner.
         </p>
       </section>
 
@@ -1095,6 +1149,20 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
             and every visible claim can be reconstructed from SQLite, immutable revisions, and frozen plans.
           </p>
         </div>
+
+        <div class="task">
+          <span class="task-id">CAP-13</span><strong>Add deliberate foreground refinement</strong>
+          <p class="muted">
+            Extract the exact publisher from ambient reflection, expose progressively disclosed inspect
+            and refine catalog tools, and ship one built-in <code>noesis</code> skill with a
+            <code>/refine</code> alias. Keep the base system prompt unchanged.
+          </p>
+          <p>
+            <strong>Acceptance:</strong> foreground and ambient creation exercise the same publisher;
+            exact schemas come from the frozen catalog; subagents cannot publish; current-turn
+            evidence, immutable materials, stale writes, gates, and next-turn activation remain truthful.
+          </p>
+        </div>
       </section>
 
       <section>
@@ -1110,6 +1178,20 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
             <tr>
               <td>Every terminal turn reflects</td>
               <td>Completed, failed, and aborted acceptance turns each enqueue exactly one job.</td>
+            </tr>
+            <tr>
+              <td>Foreground refinement</td>
+              <td>
+                One admitted execute program inspects a predecessor and publishes an exact revision
+                without a second model call; ambient reflection uses the same publication boundary.
+              </td>
+            </tr>
+            <tr>
+              <td>Progressive self-knowledge</td>
+              <td>
+                The default system prompt is unchanged; the <code>noesis</code> skill exposes only
+                metadata until loaded, and <code>/refine</code> resolves to its exact frozen body.
+              </td>
             </tr>
             <tr>
               <td>No semantic pre-filter</td>
@@ -1236,6 +1318,11 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
           <li>Previous revisions and a bootable recovery path remain available after every activation.</li>
           <li>Legacy learning records remain inspectable, but no legacy pipeline can create new live behavior.</li>
           <li>Current doctrine, implementation, tests, and <code>/learning</code> describe the same system.</li>
+          <li>
+            The foreground agent can deliberately create or revise a Capability through the same
+            protected publisher as ambient reflection, with guidance loaded from the built-in
+            <code>noesis</code> skill rather than the base prompt.
+          </li>
         </ol>
       </section>
     </main>

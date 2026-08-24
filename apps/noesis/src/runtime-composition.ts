@@ -55,6 +55,7 @@ import {
 import {
   type CapabilityProgramLibrary,
   createCapabilityLearningModule,
+  createCapabilityPublisher,
   createWorkspaceLearningCandidateManifestStore,
 } from "@noesis/learning";
 import { createMcpToolDefinitions, type McpHostManager } from "@noesis/mcp";
@@ -144,6 +145,7 @@ import {
   createWorkspaceRuntimeInternals,
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
+import { createCapabilityTools } from "./capability-tools.ts";
 import { loadLearningAuditSnapshot } from "./learning-audit-read-model.ts";
 import type {
   ApplicationMcpLifecycleAuthorizer,
@@ -287,6 +289,7 @@ const ScriptManifestSchema = z.strictObject({
 });
 type ScriptManifest = Readonly<z.infer<typeof ScriptManifestSchema>>;
 const ScriptSaveResultSchema = ScriptManifestSchema.extend({
+  definitionRevision: FileRevisionRefSchema,
   reuse: z.strictObject({
     naturalLanguage: z.string().min(1),
     run: z.strictObject({
@@ -520,11 +523,27 @@ async function readStoredScript(
   project: ProjectRef,
   name: string,
 ): Promise<ScriptManifest | undefined> {
+  return (await readStoredScriptDefinition(workspace, project, name))?.manifest;
+}
+async function readStoredScriptDefinition(
+  workspace: NoesisWorkspaceStore,
+  project: ProjectRef,
+  name: string,
+): Promise<
+  | {
+      readonly manifest: ScriptManifest;
+      readonly definitionRevision: FileRevisionRef;
+    }
+  | undefined
+> {
   const current = await currentDefinition(workspace, "script", project, name);
   if (!current) return undefined;
-  return ScriptManifestSchema.parse(
-    JSON.parse(decoder.decode(await workspace.reads.readRevision(current.metadata.definitionRevision))),
-  );
+  return Object.freeze({
+    manifest: ScriptManifestSchema.parse(
+      JSON.parse(decoder.decode(await workspace.reads.readRevision(current.metadata.definitionRevision))),
+    ),
+    definitionRevision: current.metadata.definitionRevision,
+  });
 }
 async function reconcileStoredScript(
   workspace: NoesisWorkspaceStore,
@@ -600,6 +619,19 @@ async function listStoredScripts(
   workspace: NoesisWorkspaceStore,
   project: ProjectRef,
 ): Promise<readonly ScriptManifest[]> {
+  return Object.freeze(
+    (await listStoredScriptDefinitions(workspace, project)).map(({ manifest }) => manifest),
+  );
+}
+async function listStoredScriptDefinitions(
+  workspace: NoesisWorkspaceStore,
+  project: ProjectRef,
+): Promise<
+  readonly {
+    readonly manifest: ScriptManifest;
+    readonly definitionRevision: FileRevisionRef;
+  }[]
+> {
   const current = (
     await Promise.all(
       savedDefinitionScopes("script", project).map(
@@ -609,12 +641,12 @@ async function listStoredScripts(
   ).flat();
   const names = [...new Set(current.map((metadata) => metadata.definitionId))];
   const scripts = await Promise.all(
-    names.map(async (name) => await readStoredScript(workspace, project, name)),
+    names.map(async (name) => await readStoredScriptDefinition(workspace, project, name)),
   );
   return Object.freeze(
     scripts
       .flatMap((script) => (script ? [script] : []))
-      .sort((left, right) => left.name.localeCompare(right.name)),
+      .sort((left, right) => left.manifest.name.localeCompare(right.manifest.name)),
   );
 }
 async function reconcileStoredScripts(workspace: NoesisWorkspaceStore, project: ProjectRef): Promise<void> {
@@ -1866,6 +1898,13 @@ export async function createApplicationRuntimeComposition(
       configuration: roles.history_reranker,
     }),
   });
+  const capabilityPrograms = createCapabilityProgramLibrary(workspace, project);
+  const capabilityPublisher = createCapabilityPublisher({
+    workspace,
+    store: workspace.capabilities,
+    registry,
+    programs: capabilityPrograms,
+  });
   const supportedToolMaterial = z.strictObject({
     kind: z.literal("noesis_session_tools"),
     tools: z
@@ -2122,12 +2161,17 @@ export async function createApplicationRuntimeComposition(
           }),
         })
       : Object.freeze([]);
-    const [frozenScripts, frozenWorkflows] = await Promise.all([
-      listStoredScripts(workspace, project),
+    const [frozenScriptDefinitions, frozenWorkflows] = await Promise.all([
+      listStoredScriptDefinitions(workspace, project),
       listStoredWorkflows(workspace, project),
     ]);
+    const frozenScripts = Object.freeze(frozenScriptDefinitions.map(({ manifest }) => manifest));
     const frozenScriptsByName = new Map(frozenScripts.map((script) => [script.name, script]));
+    const frozenScriptDefinitionRevisionsByName = new Map(
+      frozenScriptDefinitions.map(({ manifest, definitionRevision }) => [manifest.name, definitionRevision]),
+    );
     const savedThisTurnByName = new Map<string, ScriptManifest>();
+    const savedThisTurnScriptDefinitionRevisionsByName = new Map<string, FileRevisionRef>();
     const visibleScripts = (): readonly ScriptManifest[] => {
       const scripts = new Map(frozenScriptsByName);
       for (const [name, script] of savedThisTurnByName) scripts.set(name, script);
@@ -2135,6 +2179,9 @@ export async function createApplicationRuntimeComposition(
     };
     const visibleScript = (name: string): ScriptManifest | undefined =>
       savedThisTurnByName.get(name) ?? frozenScriptsByName.get(name);
+    const visibleScriptDefinitionRevision = (name: string): FileRevisionRef | undefined =>
+      savedThisTurnScriptDefinitionRevisionsByName.get(name) ??
+      frozenScriptDefinitionRevisionsByName.get(name);
     const frozenWorkflowsByName = new Map(
       frozenWorkflows.map((workflow) => [workflow.manifest.name, workflow]),
     );
@@ -2154,6 +2201,23 @@ export async function createApplicationRuntimeComposition(
     };
     const visibleWorkflow = (name: string) =>
       savedThisTurnWorkflowsByName.get(name) ?? frozenWorkflowsByName.get(name);
+    const foregroundCapabilityProgramResolver: Pick<CapabilityProgramLibrary, "resolve"> = Object.freeze({
+      resolve: async (kind, name, requestedProject) => {
+        if (requestedProject.projectId !== project.projectId || requestedProject.root !== project.root)
+          throw new Error(`Capability program library cannot cross project ${project.projectId}`);
+        const definitionRevision =
+          kind === "script"
+            ? visibleScriptDefinitionRevision(name)
+            : visibleWorkflow(name)?.definitionRevision;
+        if (!definitionRevision) return undefined;
+        return Object.freeze({
+          kind,
+          name,
+          project: Object.freeze({ ...project }),
+          definitionRevision,
+        });
+      },
+    });
     // Workflow manifests do not yet declare exact saved-definition dependencies. Pin the complete
     // visible project library so resume fails closed rather than silently switching executable
     // code. This is deliberately conservative until the workflow contract gains declared pins.
@@ -2439,8 +2503,11 @@ export async function createApplicationRuntimeComposition(
                 .finish(),
             );
             if (!publication.ok) throw new Error(publication.error.message);
-            return {
+            savedThisTurnByName.set(name, manifest);
+            savedThisTurnScriptDefinitionRevisionsByName.set(name, publication.value.definitionRevision);
+            return ScriptSaveResultSchema.parse({
               ...manifest,
+              definitionRevision: publication.value.definitionRevision,
               reuse: {
                 naturalLanguage: `Run the ${name} script with the desired input.`,
                 run: { tool: "scripts.run", name },
@@ -2448,7 +2515,7 @@ export async function createApplicationRuntimeComposition(
                 list: { tool: "scripts.list" },
                 workingPath: sourceRevision.workingPath,
               },
-            };
+            });
           }),
       }),
       defineTool({
@@ -2923,6 +2990,14 @@ export async function createApplicationRuntimeComposition(
       ),
     );
     const savedWorkflowToolNames = new Set(savedWorkflowTools.map((tool) => tool.name));
+    const capabilityTools = createCapabilityTools({
+      workspace,
+      project,
+      plan,
+      publisher: capabilityPublisher,
+      programResolver: foregroundCapabilityProgramResolver,
+      isSubAgentExecution: (executionId) => subAgentExecutionIds.has(executionId),
+    });
     const skillLoadTool = defineTool({
       name: "skills.load",
       label: "Load skill",
@@ -3259,6 +3334,7 @@ export async function createApplicationRuntimeComposition(
             return Object.freeze({ path: resolve(options.config.home, artifact.path) });
           },
         }),
+        ...capabilityTools,
         skillLoadTool,
         agentsRunTool,
         ...scriptTools,
@@ -3305,6 +3381,7 @@ export async function createApplicationRuntimeComposition(
               createdFrom: saved.createdFrom,
             }),
           );
+          savedThisTurnScriptDefinitionRevisionsByName.set(saved.name, saved.definitionRevision);
         }
         if (arguments_[0] === "workflows.save" && result.ok) {
           const saved = WorkflowSaveResultSchema.parse(result.value);
@@ -4330,7 +4407,8 @@ export async function createApplicationRuntimeComposition(
     history,
     inference,
     registry,
-    programs: createCapabilityProgramLibrary(workspace, project),
+    programs: capabilityPrograms,
+    publisher: capabilityPublisher,
     reflector: Object.freeze({
       variant: roles.reflector.variant,
       promptRevision: configurationPrompt(roles.reflector),
@@ -4379,6 +4457,7 @@ export async function createApplicationRuntimeComposition(
       "url:http://*",
       "url:https://*",
       "artifact:*",
+      "capability:*",
       "scripts:*",
       "script:*",
       "workflows:*",
@@ -5421,28 +5500,38 @@ export async function createApplicationRuntimeComposition(
     const snapshot = await options.skills.snapshot();
     return Object.freeze(
       snapshot.skills.map((skill) =>
-        Object.freeze({
-          name: skill.name,
-          description: skill.description,
-          filePath: skill.filePath,
-          contentDigest: skill.contentDigest,
-          disableModelInvocation: skill.disableModelInvocation,
-        }),
+        Object.freeze(
+          createConditionalObject({ name: skill.name } as const)
+            .addOptional(skill.aliases ? { aliases: skill.aliases } : undefined)
+            .add({
+              description: skill.description,
+              filePath: skill.filePath,
+              contentDigest: skill.contentDigest,
+              disableModelInvocation: skill.disableModelInvocation,
+            } as const)
+            .finish(),
+        ),
       ),
     );
   };
   const inspectSkill: NonNullable<NoesisTuiRuntime["inspectSkill"]> = async (name) => {
     if (!options.skills) return undefined;
-    const skill = (await options.skills.snapshot()).skills.find((candidate) => candidate.name === name);
+    const skill = (await options.skills.snapshot()).skills.find(
+      (candidate) => candidate.name === name || candidate.aliases?.includes(name) === true,
+    );
     return skill
-      ? Object.freeze({
-          name: skill.name,
-          description: skill.description,
-          filePath: skill.filePath,
-          contentDigest: skill.contentDigest,
-          disableModelInvocation: skill.disableModelInvocation,
-          content: skill.content,
-        })
+      ? Object.freeze(
+          createConditionalObject({ name: skill.name } as const)
+            .addOptional(skill.aliases ? { aliases: skill.aliases } : undefined)
+            .add({
+              description: skill.description,
+              filePath: skill.filePath,
+              contentDigest: skill.contentDigest,
+              disableModelInvocation: skill.disableModelInvocation,
+              content: skill.content,
+            } as const)
+            .finish(),
+        )
       : undefined;
   };
   const listScripts: NonNullable<NoesisTuiRuntime["listScripts"]> = async () => {

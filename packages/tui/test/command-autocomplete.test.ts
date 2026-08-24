@@ -109,6 +109,7 @@ describe("Noesis slash command autocomplete", () => {
     const provider = createNoesisCommandAutocompleteProvider([
       {
         name: "five-whys",
+        aliases: ["refine"],
         description: "Find the cause beneath a recurring problem",
       },
       {
@@ -130,6 +131,9 @@ describe("Noesis slash command autocomplete", () => {
     const allSuggestions = await provider.getSuggestions(["/"], 0, 1, {
       signal: new AbortController().signal,
     });
+    const aliasSuggestions = await provider.getSuggestions(["/ref"], 0, 4, {
+      signal: new AbortController().signal,
+    });
 
     expect(suggestions?.items).toContainEqual(
       expect.objectContaining({
@@ -141,6 +145,12 @@ describe("Noesis slash command autocomplete", () => {
       expect.objectContaining({
         value: "private-review",
         description: expect.stringContaining("explicit only"),
+      }),
+    );
+    expect(aliasSuggestions?.items).toContainEqual(
+      expect.objectContaining({
+        value: "refine",
+        description: expect.stringContaining("Alias for five-whys"),
       }),
     );
     expect(allSuggestions?.items.filter((item) => item.value === "help")).toHaveLength(1);

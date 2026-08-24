@@ -33,6 +33,7 @@ const childMessageSchema = z.union([
     type: z.literal("sdk-call"),
     requestId: z.string().min(1),
     kind: z.literal("search"),
+    causallyPriorCallIds: z.array(z.string().min(1)).optional(),
     query: z.string(),
     limit: z.number().int().optional(),
   }),
@@ -40,12 +41,14 @@ const childMessageSchema = z.union([
     type: z.literal("sdk-call"),
     requestId: z.string().min(1),
     kind: z.literal("describe"),
+    causallyPriorCallIds: z.array(z.string().min(1)).optional(),
     name: z.string(),
   }),
   z.strictObject({
     type: z.literal("sdk-call"),
     requestId: z.string().min(1),
     kind: z.literal("invoke"),
+    causallyPriorCallIds: z.array(z.string().min(1)).optional(),
     name: z.string(),
     input: JsonValueSchema,
   }),
@@ -78,6 +81,7 @@ type ParentMessage =
       readonly requestId: string;
       readonly ok: true;
       readonly value: JsonValue;
+      readonly callId: string;
     }
   | {
       readonly type: "sdk-result";
@@ -509,6 +513,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                         } as const)
                           .addOptional(request.turnId ? { turnId: request.turnId } : undefined)
                           .add({
+                            causallyPriorCallIds: message.causallyPriorCallIds ?? Object.freeze([]),
                             signal: controller.signal,
                             emitUpdate: (update: JsonValue) => {
                               recordProgress(update);
@@ -531,6 +536,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               requestId: message.requestId,
               ok: true,
               value,
+              callId,
             });
             notify({ type: "tool-end", executionId, callId, name, callIndex, ok: true, result: value });
           } catch (error) {

@@ -501,6 +501,32 @@ describe("Noesis transcript rendering", () => {
     expect(inspect).toMatchObject({ subject: "tools", outcome: "2 tools" });
   });
 
+  test("pluralizes Capability inspection counts", () => {
+    const singular = summarizeAction(
+      {
+        actionId: "inspect-one-capability",
+        name: "capabilities.inspect",
+        status: "completed",
+        input: { view: "list" },
+        output: { view: "list", total: 1 },
+      },
+      [],
+    );
+    const plural = summarizeAction(
+      {
+        actionId: "inspect-many-capabilities",
+        name: "capabilities.inspect",
+        status: "completed",
+        input: { view: "list" },
+        output: { view: "list", total: 3 },
+      },
+      [],
+    );
+
+    expect(singular).toMatchObject({ outcome: "1 Capability" });
+    expect(plural).toMatchObject({ outcome: "3 Capabilities" });
+  });
+
   test("summarizes generic result collection envelopes by item count", () => {
     const summary = summarizeAction(
       {

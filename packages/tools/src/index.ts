@@ -38,6 +38,8 @@ export interface ToolExecutionContext {
   readonly callId: string;
   readonly sessionId: string;
   readonly turnId?: string;
+  /** Successful SDK calls that the invoking codemode program awaited before issuing this call. */
+  readonly causallyPriorCallIds?: readonly string[];
   readonly signal: AbortSignal;
   readonly emitUpdate?: (update: JsonValue) => void;
 }

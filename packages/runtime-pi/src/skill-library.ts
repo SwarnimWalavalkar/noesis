@@ -12,6 +12,8 @@ import {
 } from "@noesis/domain";
 export interface PiSkillResource {
   readonly name: string;
+  /** Alternate explicit slash commands for this same immutable skill body. */
+  readonly aliases?: readonly string[];
   readonly description: string;
   readonly content: string;
   readonly filePath: string;
@@ -53,6 +55,13 @@ export interface PiSkillLibrary {
     readonly installedPath?: string;
   }[];
 }
+export interface PiBuiltInSkill {
+  readonly name: string;
+  readonly description: string;
+  readonly filePath: string;
+  readonly aliases?: readonly string[];
+  readonly disableModelInvocation?: boolean;
+}
 type SkillLoadOwner = "snapshot" | "admission";
 interface InFlightSkillLoad {
   readonly owner: SkillLoadOwner;
@@ -73,6 +82,7 @@ export function createPiSkillLibrary(input: {
   readonly agentDirectory: string;
   readonly workspaceTrusted?: boolean;
   readonly readSkillFile?: (path: string) => Promise<string>;
+  readonly builtInSkills?: readonly PiBuiltInSkill[];
 }): PiSkillLibrary {
   const workspaceTrusted = input.workspaceTrusted ?? false;
   const settings = SettingsManager.create(input.cwd, input.agentDirectory, {
@@ -97,6 +107,15 @@ export function createPiSkillLibrary(input: {
   const pinned = new Map<string, PiSkillSnapshot>();
   const pinning = new Map<string, InFlightSkillPin>();
   const readSkillFile = input.readSkillFile ?? (async (path: string) => await readFile(path, "utf8"));
+  const builtInSkills = Object.freeze([...(input.builtInSkills ?? [])]);
+  const builtInCommands = new Map<string, string>();
+  for (const skill of builtInSkills) {
+    for (const command of [skill.name, ...(skill.aliases ?? [])]) {
+      const owner = builtInCommands.get(command);
+      if (owner) throw new Error(`Built-in skill command ${command} is already owned by ${owner}`);
+      builtInCommands.set(command, skill.name);
+    }
+  }
   const awaitWithSignal = <Value>(promise: Promise<Value>, signal?: AbortSignal): Promise<Value> => {
     if (!signal) return promise;
     if (signal.aborted) return Promise.reject(new Error("Skill loading was cancelled"));
@@ -124,21 +143,46 @@ export function createPiSkillLibrary(input: {
       const current = (async () => {
         await loader.reload();
         const loaded = loader.getSkills();
+        const externalSkills = loaded.skills.filter((skill) => !builtInCommands.has(skill.name));
         const resources = await Promise.all(
-          loaded.skills.map(async (skill) => {
+          [
+            ...builtInSkills.map((skill) => ({
+              name: skill.name,
+              description: skill.description,
+              filePath: skill.filePath,
+              aliases: skill.aliases,
+              disableModelInvocation: skill.disableModelInvocation,
+            })),
+            ...externalSkills.map((skill) => ({
+              name: skill.name,
+              description: skill.description,
+              filePath: skill.filePath,
+              disableModelInvocation: skill.disableModelInvocation,
+            })),
+          ].map(async (skill) => {
             try {
               const content = await readSkillFile(skill.filePath);
               // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
               return Object.freeze({
                 kind: "skill" as const,
-                value: Object.freeze({
-                  name: skill.name,
-                  description: skill.description,
-                  content,
-                  filePath: skill.filePath,
-                  contentDigest: sha256(content),
-                  disableModelInvocation: skill.disableModelInvocation ?? false,
-                }),
+                value: Object.freeze(
+                  createConditionalObject({
+                    name: skill.name,
+                    description: skill.description,
+                  } as const)
+                    .addOptional(
+                      "aliases" in skill && skill.aliases
+                        ? { aliases: Object.freeze([...skill.aliases]) }
+                        : undefined,
+                    )
+                    .add({
+                      content,
+                      filePath: skill.filePath,
+                      contentDigest: sha256(content),
+                      disableModelInvocation: skill.disableModelInvocation ?? false,
+                    } as const)
+                    .finish(),
+                ),
               });
             } catch (error) {
               // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -171,6 +215,18 @@ export function createPiSkillLibrary(input: {
                   .finish(),
               ),
             ),
+            ...loaded.skills.flatMap((skill) => {
+              const owner = builtInCommands.get(skill.name);
+              return owner
+                ? [
+                    Object.freeze({
+                      type: "collision" as const,
+                      message: `Skill ${skill.name} is reserved by the built-in ${owner} skill and was ignored.`,
+                      path: skill.filePath,
+                    }),
+                  ]
+                : [];
+            }),
             ...resources.flatMap((resource) => (resource.kind === "diagnostic" ? [resource.value] : [])),
           ]),
         });

@@ -19,6 +19,8 @@ Active Capabilities and skills may add relevant instructions. The stable core st
 
 Active Capability revisions contribute exact effects frozen at turn start. An effect may add an instruction, expose a progressively loaded skill, or attach an exact saved project script or workflow.
 
+The built-in `noesis` skill holds the operational guidance for inspecting and deliberately refining these systems. Its compact name and description appear with other skill metadata; its body loads only when relevant or when the user invokes `/noesis` or its `/refine` alias. The stable core prompt does not duplicate the publication contract.
+
 A Script or Workflow effect pins the same immutable definition revision used by the ordinary runner. Capability storage never copies the program into a second format. The model creates and revises project programs through the foreground `execute` path. Ambient reflection may attach an existing saved program to a Capability.
 
 The semantic router selects global `relevant` Capabilities for matching requests. An `always` Capability enters every eligible turn.
@@ -72,6 +74,10 @@ After every admitted foreground turn settles, the reflector receives its trace, 
 
 A turn with many tool calls receives a structural projection before reflection. The projection counts repeated calls and cites the first and last call. It gives priority to user messages, assistant messages, outcomes, and failed calls. The projection does not decide what Noesis should learn. The reflector makes that decision and may attach an exact saved program produced by the turn.
 
+The foreground agent is an equally capable semantic author. When the task or user calls for deliberate refinement, it may inspect all current Capability definitions, bindings, revisions, feedback, and exact effect material through progressively disclosed catalog tools. It gathers evidence through ordinary work and submits one complete structured decision. The host adds only the non-forgeable admitted-turn envelope and evidence references; it does not call a second model to revise the decision.
+
+Ambient reflection and foreground authoring share one protected Capability publisher. That publisher records exact instruction and skill bytes, resolves exact saved-program revisions, validates scope and consequence, compares the expected binding revision, preserves predecessor lineage, and either activates or creates the same small protected gate. A foreground publication changes later frozen turn plans, never the already-admitted current plan. Subagents may inspect and advise but cannot publish.
+
 Reflection also receives an exact foreground Capability surface. It distinguishes material injected into the initial system prompt, effect skills exposed only as name-and-description metadata, completed `skills.load` calls that later exposed a full frozen body, and exact saved-program adapters. Complete predecessor materials remain available separately for revision authoring; their presence in reflector context is not evidence that the foreground model saw them.
 
 An ordinary exact revision becomes active after SQLite validates its evidence and compare-and-swap binding. User feedback may produce a successor immediately.
@@ -83,6 +89,8 @@ A Capability states when an ability should help, why the evidence supports it, w
 New Capabilities are globally eligible and relevant by default. Semantic routing decides when they apply. The user may narrow the scope or make one always active.
 
 The `remember` tool records a direct lasting instruction from the user. Ambient reflection can consolidate experience into versioned Capabilities.
+
+Inside `execute`, `capabilities.inspect` progressively exposes the Capability list, one complete lifecycle, or one exact effect material. `capabilities.refine` accepts the complete decision schema and returns the authoritative publication result. These schemas come from the frozen Tool Catalog and remain discoverable through `noesis.describe`; they are not handwritten into the system prompt or skill body. Completed normal-sensitivity calls earlier in the same foreground execution, plus the current user message, form the bounded publication evidence set.
 
 Existing experiment and preflight records remain readable historical evidence. No new speculative evaluation pipeline blocks ordinary learning. A future evaluation system must run real candidate behavior before it makes comparative claims.
 
@@ -141,6 +149,8 @@ The change is available on the next model step in the same turn. Noesis saves it
 
 New project programs are created through `execute` with `scripts.save` or `workflows.save`. They do not enter a proposal queue. Reflection may later use their results as evidence for a broader change.
 
+The foreground agent may also attach a newly saved and verified program to a Capability in the same coherent execution. The Capability publisher resolves the ordinary immutable project definition; it does not accept model-authored revision IDs or executable bytes for a Script or Workflow effect.
+
 ## MCP servers
 
 Noesis can connect to local MCP servers over standard input and output. It can connect to remote servers over Streamable HTTP or SSE. Remote servers may use MCP OAuth. OAuth tokens stay in the protected credential store.
@@ -172,3 +182,5 @@ When a Capability includes a Script or Workflow effect, it references the exact 
 3. Use a model for decisions that depend on meaning.
 4. Keep atomic file and shell tools one call away; compose broader work through codemode.
 5. Let the model shape its direct tool set without gaining authority.
+6. Keep self-improvement guidance and exact mutation schemas progressively disclosed.
+7. Let foreground collaboration and ambient reflection author through the same protected Capability publisher.

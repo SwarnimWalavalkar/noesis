@@ -1294,4 +1294,202 @@ describe("production codemode journey", () => {
     expect(phases[1]?.logicalExecutionId).toBe(failedPhaseLogicalExecutionId);
     await runtime.shutdown();
   });
+
+  test("foreground codemode authors one exact Capability while subagents remain advisory", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-foreground-refinement-acceptance-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText }) => {
+        const lastMessage = context.messages.at(-1);
+        if (context.systemPrompt?.includes("bounded subagent"))
+          return lastMessage?.role === "toolResult"
+            ? "The protected runtime kept this subagent advisory."
+            : controlledToolCallResponse(
+                "capabilities_refine",
+                { decision: "no_change", reason: "Advisory probe only." },
+                "call-subagent-refine",
+              );
+        if (lastMessage?.role === "toolResult")
+          return lastUserText.includes("twice")
+            ? "Only one refinement decision was accepted for the turn."
+            : lastUserText.includes("Delegate")
+              ? "The subagent could inspect but could not publish."
+              : "The review Capability is active for later relevant turns.";
+        if (lastUserText.includes("twice"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: [
+                'const attempt = () => tools.capabilities.refine({ decision: "no_change", reason: "One complete decision." });',
+                'return await Promise.all([attempt(), attempt()].map(async (result) => await result.then(() => "accepted", (error) => `rejected: ${error.message}`)));',
+              ].join("\n"),
+            },
+            "call-duplicate-refinement",
+          );
+        if (lastUserText.includes("Delegate"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source:
+                'return await agents.run({ prompt: "Try to publish a no-change Capability decision.", tools: ["capabilities.refine"] });',
+            },
+            "call-delegate-refinement",
+          );
+        return controlledToolCallResponse(
+          "execute",
+          {
+            source: [
+              'const advisory = await agents.run({ prompt: "Try to publish a no-change Capability decision.", tools: ["capabilities.refine"] });',
+              'const descriptor = await noesis.describe("capabilities.inspect");',
+              'if (!JSON.stringify(descriptor.outputSchema).includes("\\\"revisionNumber\\\"")) throw new Error("Capability binding schema is not discoverable");',
+              'const before = await tools.capabilities.inspect({ view: "list" });',
+              "const publication = await tools.capabilities.refine({",
+              '  decision: "create",',
+              "  proposal: {",
+              '    name: "Evidence-led review",',
+              '    description: "Trace exact evidence and consumers before reporting review findings.",',
+              '    applicability: "Repository reviews and implementation audits.",',
+              '    summary: "Add a durable evidence-led review method.",',
+              '    rationale: "The user explicitly asked Noesis to preserve this review method.",',
+              '    anticipatedEffect: "Future reviews distinguish verified defects from speculation.",',
+              '    effects: [{ kind: "instruction", content: "Ground review findings in exact evidence and trace affected consumers." }],',
+              '    consequence: "ordinary",',
+              '    consequenceDescription: "This changes only reversible agent guidance."',
+              "  }",
+              "});",
+              'const detail = await tools.capabilities.inspect({ view: "detail", capabilityId: publication.capabilityId });',
+              'const revisions = await tools.capabilities.inspect({ view: "revisions", capabilityId: publication.capabilityId, limit: 1 });',
+              'const material = await tools.capabilities.inspect({ view: "material", capabilityId: publication.capabilityId, capabilityRevisionId: revisions.revisions[0].reference.capabilityRevisionId, effectIndex: 0, maxCharacters: 16 });',
+              "return { advisory, before, publication, detail, revisions, material };",
+            ].join("\n"),
+          },
+          "call-foreground-refinement",
+        );
+      },
+    });
+    const roleRequests: string[] = [];
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgent: createPiSubAgentRunner(process.cwd(), controlled.models),
+      createAgent: (_sessionTools, codeExecution, selfTools) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution, selfTools }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: (request) => {
+            roleRequests.push(request.runId);
+            return request.runId.startsWith("capability-route-")
+              ? {
+                  text: '{"selections":[],"reason":"Controlled routing omission.","learningAttribution":null}',
+                }
+              : {
+                  text: '{"decision":"no_change","reason":"The foreground agent already published the deliberate refinement."}',
+                };
+          },
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Foreground refinement acceptance" });
+
+    const published = await runtime.debug.runTurn(
+      trail.trailId,
+      "Deliberately preserve our evidence-led review method as a Capability.",
+    );
+    expect(published.output).toBe("The review Capability is active for later relevant turns.");
+    const publishedTurnId = published.frozenTurnPlan?.turnId;
+    if (!publishedTurnId) throw new Error("Expected a frozen foreground turn plan");
+    const publicationCalls = await runtime.debug.workspace.operational.toolCalls.listForTurn(
+      trail.trailId,
+      publishedTurnId,
+    );
+    expect(publicationCalls.map((call) => call.toolName)).toEqual([
+      "execute",
+      "agents.run",
+      "capabilities.refine",
+      "capabilities.inspect",
+      "capabilities.refine",
+      "capabilities.inspect",
+      "capabilities.inspect",
+      "capabilities.inspect",
+    ]);
+    const advisoryCall = publicationCalls.find((call) => call.toolName === "agents.run");
+    if (!advisoryCall) throw new Error("Expected the advisory subagent call");
+    const inspectionCall = publicationCalls.find((call) => call.toolName === "capabilities.inspect");
+    if (!inspectionCall) throw new Error("Expected the foreground Capability inspection");
+    expect(
+      publicationCalls.filter((call) => call.toolName === "capabilities.inspect").at(-1)?.response,
+    ).toMatchObject({
+      output: {
+        view: "material",
+        material: { start: 0, end: 16, truncated: true, nextStart: 16 },
+      },
+    });
+    const [definition] = await runtime.debug.workspace.capabilities.listDefinitions();
+    expect(definition).toMatchObject({ name: "Evidence-led review" });
+    if (!definition) throw new Error("Expected the foreground-authored Capability");
+    const binding = await runtime.debug.workspace.capabilities.getBinding(definition.capabilityId);
+    expect(binding).toMatchObject({
+      scope: { kind: "global" },
+      activationMode: "relevant",
+      state: "active",
+      revisionNumber: 1,
+    });
+    if (!binding) throw new Error("Expected the foreground-authored Capability binding");
+    const lifecycle = await runtime.debug.workspace.capabilities.getRevision(binding.revision);
+    expect(lifecycle).toMatchObject({
+      revision: {
+        effects: [{ kind: "instruction" }],
+        evidenceRefs: [
+          { table: "messages", rowId: `${publishedTurnId}:user` },
+          { table: "tool_calls", rowId: advisoryCall.toolCallId },
+          { table: "tool_calls", rowId: inspectionCall.toolCallId },
+        ],
+      },
+    });
+    expect(roleRequests.filter((runId) => runId.startsWith("reflect-capability"))).toHaveLength(1);
+
+    const advisory = await runtime.debug.runTurn(
+      trail.trailId,
+      "Delegate an advisory refinement attempt to a subagent.",
+    );
+    expect(advisory.output).toBe("The subagent could inspect but could not publish.");
+    const advisoryTurnId = advisory.frozenTurnPlan?.turnId;
+    if (!advisoryTurnId) throw new Error("Expected a frozen advisory turn plan");
+    const calls = await runtime.debug.workspace.operational.toolCalls.listForTurn(
+      trail.trailId,
+      advisoryTurnId,
+    );
+    expect(calls.map((call) => call.toolName)).toContain("capabilities.refine");
+    expect(calls.find((call) => call.toolName === "capabilities.refine")).toMatchObject({
+      status: "failed",
+      response: {
+        error: "Subagents may inspect and advise, but cannot publish Capability changes",
+      },
+    });
+    expect(await runtime.debug.workspace.capabilities.listRevisions(definition.capabilityId)).toHaveLength(1);
+
+    const duplicate = await runtime.debug.runTurn(
+      trail.trailId,
+      "Try to publish a Capability decision twice in this turn.",
+    );
+    expect(duplicate.output).toBe("Only one refinement decision was accepted for the turn.");
+    const duplicateTurnId = duplicate.frozenTurnPlan?.turnId;
+    if (!duplicateTurnId) throw new Error("Expected a frozen duplicate-refinement turn plan");
+    const duplicateCalls = (
+      await runtime.debug.workspace.operational.toolCalls.listForTurn(trail.trailId, duplicateTurnId)
+    ).filter((call) => call.toolName === "capabilities.refine");
+    expect(duplicateCalls.map((call) => call.status).sort()).toEqual(["completed", "failed"]);
+    expect(duplicateCalls.find((call) => call.status === "failed")?.response).toMatchObject({
+      error: "Only one foreground Capability decision may be published per turn",
+    });
+    await runtime.shutdown();
+  });
 });

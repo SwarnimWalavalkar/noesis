@@ -158,6 +158,17 @@ export function createCapabilityLifecycleStore(
     );
     return revision && sameCapabilityRevisionRef(revision.reference, reference) ? revision : undefined;
   };
+  const getRevisionById: CapabilityLifecycleStore["getRevisionById"] = async (
+    capabilityId,
+    capabilityRevisionId,
+  ) =>
+    decodeRevision(
+      db
+        .prepare(
+          "SELECT revision_json FROM capability_revisions WHERE capability_revision_id = ? AND capability_id = ?",
+        )
+        .get(capabilityRevisionId, capabilityId),
+    );
   const getBinding: CapabilityLifecycleStore["getBinding"] = async (capabilityId) =>
     decodeBinding(db.prepare("SELECT * FROM capability_bindings WHERE capability_id = ?").get(capabilityId));
   const assertBatchIds = (capabilityIds: readonly string[]): readonly string[] => {
@@ -511,6 +522,55 @@ export function createCapabilityLifecycleStore(
       }),
     );
   };
+  const listRevisionPage: CapabilityLifecycleStore["listRevisionPage"] = async (request) => {
+    assertLimit(request.limit);
+    const rows = request.after
+      ? db
+          .prepare(`SELECT revision_json, created_at, capability_revision_id
+             FROM capability_revisions
+             WHERE capability_id = ?
+               AND (created_at < ? OR (created_at = ? AND capability_revision_id < ?))
+             ORDER BY created_at DESC, capability_revision_id DESC
+             LIMIT ?`)
+          .all(
+            request.capabilityId,
+            request.after.createdAt,
+            request.after.createdAt,
+            request.after.id,
+            request.limit + 1,
+          )
+      : db
+          .prepare(`SELECT revision_json, created_at, capability_revision_id
+             FROM capability_revisions
+             WHERE capability_id = ?
+             ORDER BY created_at DESC, capability_revision_id DESC
+             LIMIT ?`)
+          .all(request.capabilityId, request.limit + 1);
+    const visible = rows.slice(0, request.limit);
+    const last = visible.at(-1);
+    return Object.freeze(
+      createConditionalObject({
+        items: Object.freeze(
+          visible.map((row) => {
+            const value = decodeRevision(row);
+            if (!value) throw new Error("Capability revision row disappeared during decoding");
+            return value;
+          }),
+        ),
+      } as const)
+        .addOptional(
+          rows.length > request.limit && last
+            ? {
+                nextCursor: Object.freeze({
+                  createdAt: requiredString(last, "created_at"),
+                  id: requiredString(last, "capability_revision_id"),
+                }),
+              }
+            : undefined,
+        )
+        .finish(),
+    );
+  };
   const listBindings: CapabilityLifecycleStore["listBindings"] = async (request) => {
     if (request) assertLimit(request.limit);
     const rows = request
@@ -598,6 +658,53 @@ export function createCapabilityLifecycleStore(
       rows.map((row) => CapabilityFeedbackSchema.parse(parseJson(requiredString(row, "feedback_json")))),
     );
   };
+  const listFeedbackPage: CapabilityLifecycleStore["listFeedbackPage"] = async (request) => {
+    assertLimit(request.limit);
+    const rows = request.after
+      ? db
+          .prepare(`SELECT feedback_json, created_at, feedback_id
+             FROM capability_feedback
+             WHERE capability_id = ?
+               AND (created_at < ? OR (created_at = ? AND feedback_id < ?))
+             ORDER BY created_at DESC, feedback_id DESC
+             LIMIT ?`)
+          .all(
+            request.capabilityId,
+            request.after.createdAt,
+            request.after.createdAt,
+            request.after.id,
+            request.limit + 1,
+          )
+      : db
+          .prepare(`SELECT feedback_json, created_at, feedback_id
+             FROM capability_feedback
+             WHERE capability_id = ?
+             ORDER BY created_at DESC, feedback_id DESC
+             LIMIT ?`)
+          .all(request.capabilityId, request.limit + 1);
+    const visible = rows.slice(0, request.limit);
+    const last = visible.at(-1);
+    return Object.freeze(
+      createConditionalObject({
+        items: Object.freeze(
+          visible.map((row) =>
+            CapabilityFeedbackSchema.parse(parseJson(requiredString(row, "feedback_json"))),
+          ),
+        ),
+      } as const)
+        .addOptional(
+          rows.length > request.limit && last
+            ? {
+                nextCursor: Object.freeze({
+                  createdAt: requiredString(last, "created_at"),
+                  id: requiredString(last, "feedback_id"),
+                }),
+              }
+            : undefined,
+        )
+        .finish(),
+    );
+  };
   const stageGatedRevision: CapabilityLifecycleStore["stageGatedRevision"] = async (request) => {
     const revision = assertRevision(request.revision);
     const gate = normalizeGate(request.gate);
@@ -611,7 +718,7 @@ export function createCapabilityLifecycleStore(
       );
       if (!binding) throw new Error(`Unknown capability ${gate.capabilityId}`);
       if (gate.expectedBindingRevision !== binding.revisionNumber)
-        throw new Error("A staged capability gate must pin the current binding revision");
+        return Object.freeze({ status: "stale" as const, binding });
       const supersededGate = request.supersedeGateRequestId
         ? decodeGate(
             db
@@ -624,7 +731,7 @@ export function createCapabilityLifecycleStore(
       if (supersededGate && supersededGate.capabilityId !== gate.capabilityId)
         throw new Error("A replacement gate cannot supersede another capability's request");
       if (supersededGate && supersededGate.expectedBindingRevision !== binding.revisionNumber)
-        throw new Error("A replacement gate cannot supersede a request for a stale binding");
+        return Object.freeze({ status: "stale" as const, binding });
       const expectedPredecessor =
         supersededGate?.revision.capabilityRevisionId ?? binding.revision.capabilityRevisionId;
       if (revision.revision.predecessorRevisionId !== expectedPredecessor)
@@ -647,7 +754,7 @@ export function createCapabilityLifecycleStore(
         settlePendingGate(supersededGate, "superseded", gate.instruction);
       }
       if (feedback) insertFeedback(feedback);
-      return insertGate(gate);
+      return Object.freeze({ status: "staged" as const, gate: insertGate(gate) });
     });
   };
   const applyRevision: CapabilityLifecycleStore["applyRevision"] = async (request) => {
@@ -707,6 +814,74 @@ export function createCapabilityLifecycleStore(
           )
           .all();
     return Object.freeze(rows.map((row) => normalizeGate(parseJson(requiredString(row, "request_json")))));
+  };
+  const listGates: CapabilityLifecycleStore["listGates"] = async (capabilityId) =>
+    Object.freeze(
+      db
+        .prepare(
+          "SELECT request_json FROM capability_gate_requests WHERE capability_id = ? ORDER BY created_at DESC, gate_request_id DESC",
+        )
+        .all(capabilityId)
+        .map((row) => normalizeGate(parseJson(requiredString(row, "request_json")))),
+    );
+  const listGatePage: CapabilityLifecycleStore["listGatePage"] = async (request) => {
+    assertLimit(request.limit);
+    const rows = request.after
+      ? db
+          .prepare(`SELECT request_json, created_at, gate_request_id
+             FROM capability_gate_requests
+             WHERE capability_id = ?
+               AND (created_at < ? OR (created_at = ? AND gate_request_id < ?))
+             ORDER BY created_at DESC, gate_request_id DESC
+             LIMIT ?`)
+          .all(
+            request.capabilityId,
+            request.after.createdAt,
+            request.after.createdAt,
+            request.after.id,
+            request.limit + 1,
+          )
+      : db
+          .prepare(`SELECT request_json, created_at, gate_request_id
+             FROM capability_gate_requests
+             WHERE capability_id = ?
+             ORDER BY created_at DESC, gate_request_id DESC
+             LIMIT ?`)
+          .all(request.capabilityId, request.limit + 1);
+    const visible = rows.slice(0, request.limit);
+    const last = visible.at(-1);
+    return Object.freeze(
+      createConditionalObject({
+        items: Object.freeze(
+          visible.map((row) => normalizeGate(parseJson(requiredString(row, "request_json")))),
+        ),
+      } as const)
+        .addOptional(
+          rows.length > request.limit && last
+            ? {
+                nextCursor: Object.freeze({
+                  createdAt: requiredString(last, "created_at"),
+                  id: requiredString(last, "gate_request_id"),
+                }),
+              }
+            : undefined,
+        )
+        .finish(),
+    );
+  };
+  const countLifecycle: CapabilityLifecycleStore["countLifecycle"] = async (capabilityId) => {
+    const row = db
+      .prepare(`SELECT
+          (SELECT COUNT(*) FROM capability_revisions WHERE capability_id = ?) AS revisions,
+          (SELECT COUNT(*) FROM capability_feedback WHERE capability_id = ?) AS feedback,
+          (SELECT COUNT(*) FROM capability_gate_requests WHERE capability_id = ?) AS gates`)
+      .get(capabilityId, capabilityId, capabilityId);
+    if (!row) throw new Error("Capability lifecycle counts could not be read");
+    return Object.freeze({
+      revisions: requiredNumber(row, "revisions"),
+      feedback: requiredNumber(row, "feedback"),
+      gates: requiredNumber(row, "gates"),
+    });
   };
   const decideGate: CapabilityLifecycleStore["decideGate"] = async (request) =>
     options.database.transaction(() => {
@@ -830,7 +1005,9 @@ export function createCapabilityLifecycleStore(
     listDefinitions,
     getDefinitions,
     getRevision,
+    getRevisionById,
     listRevisions,
+    listRevisionPage,
     addRevision,
     getBinding,
     getBindings,
@@ -840,11 +1017,15 @@ export function createCapabilityLifecycleStore(
     updateBindingWithFeedback,
     addFeedback,
     listFeedback,
+    listFeedbackPage,
     stageGatedRevision,
     applyRevision,
     createGate,
     getGate,
     listPendingGates,
+    listGates,
+    listGatePage,
+    countLifecycle,
     decideGate,
     settleGate,
     completeCutover,

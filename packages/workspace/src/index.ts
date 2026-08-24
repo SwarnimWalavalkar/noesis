@@ -11,6 +11,7 @@ export type {
   BackupReport,
   CanonicalSearchSource,
   CapabilityLifecycleStore,
+  CapabilityLifecyclePageCursor,
   ClassifyExperimentObservationsRequest,
   ClassifyOutcomeRequest,
   CodeExecutionRecord,
