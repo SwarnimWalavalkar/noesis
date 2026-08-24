@@ -918,6 +918,18 @@ r restore · e edit · y approve · n deny · space raw · esc close</code></pre
     context: AuthoritativePublicationContext,
     signal: AbortSignal,
   ) =&gt; Promise&lt;CapabilityPublicationResult&gt;;
+  readonly replacePendingGate: (
+    input: {
+      readonly gateRequestId: string;
+      readonly proposal: CapabilityProposal;
+      readonly instruction: string;
+    },
+    context: {
+      readonly project?: ProjectRef;
+      readonly actor: ActorRef;
+    },
+    signal: AbortSignal,
+  ) =&gt; Promise&lt;CapabilityPublicationResult&gt;;
 }</code></pre>
         <p>
           Turn resolution remains in the turn-intelligence module, which consumes Capability bindings

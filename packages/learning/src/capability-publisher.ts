@@ -523,9 +523,9 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     }
 
     if (decision.decision === "restore") {
-      const [binding, revisions] = await Promise.all([
+      const [binding, target] = await Promise.all([
         options.store.getBinding(decision.capabilityId),
-        options.store.listRevisions(decision.capabilityId),
+        options.store.getRevisionById(decision.capabilityId, decision.capabilityRevisionId),
       ]);
       if (!binding) throw new Error(`Unknown capability ${decision.capabilityId}`);
       if (binding.revisionNumber !== decision.expectedBindingRevision)
@@ -534,9 +534,6 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
           capabilityId: binding.capabilityId,
           message: "Capability changed concurrently",
         });
-      const target = revisions.find(
-        (revision) => revision.reference.capabilityRevisionId === decision.capabilityRevisionId,
-      );
       if (!target) throw new Error(`Unknown restorable revision ${decision.capabilityRevisionId}`);
       signal.throwIfAborted();
       const updated = await options.store.updateBindingWithFeedback({
