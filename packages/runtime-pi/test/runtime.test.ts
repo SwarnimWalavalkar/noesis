@@ -848,35 +848,12 @@ describe("agent runtime factories", () => {
     await expect(byteBounded.execute("oversized", { source: "😀".repeat(40_000) })).rejects.toThrow(
       "UTF-8 bytes",
     );
-    expect(byteBounded.description).toContain("return await noesis.search(query)");
-    expect(byteBounded.description).toContain("return await noesis.describe(exactName)");
-    expect(byteBounded.description).toContain("complete input and output contract");
-    expect(byteBounded.description).toContain("complete related operation in one program");
-    expect(byteBounded.description).toContain("do not wrap one known tool call");
-    expect(byteBounded.description).toContain("split one task across serial execute calls");
-    expect(byteBounded.description).toContain("tools.files.read({ path })");
-    expect(byteBounded.description).toContain('tools.files.list({ path: "." })');
-    expect(byteBounded.description).toContain("tools.shell.run({ command })");
-    expect(byteBounded.description).toContain("tools.programs.list({})");
-    expect(byteBounded.description).toContain("tools.skills.load({ name })");
-    expect(byteBounded.description).toContain("tools.history.search_sessions({ query })");
-    expect(byteBounded.description).toContain(
-      "tools.history.open_session_evidence({ citation: search.fragments[0].citation })",
-    );
-    expect(byteBounded.description).toContain("one precise hybrid query normally suffices");
-    expect(byteBounded.description).toContain("Batch independent calls with Promise.all");
-    expect(byteBounded.description).toContain("use one agents.run call");
-    expect(byteBounded.description).toContain("Recover required truncated evidence");
-    expect(byteBounded.description).toContain("Prefer several bounded independent calls");
-    expect(byteBounded.description).toContain("report that bounded miss");
-    expect(byteBounded.description).toContain("repeatedly rewriting retrieval queries");
-    expect(byteBounded.description).toContain("For any other tool");
-    expect(byteBounded.description).toContain("do not return that value to you");
-    expect(byteBounded.description).toContain("programs.save with script mode");
-    expect(byteBounded.description).toContain("workflow mode for durable phases");
-    expect(byteBounded.description).toContain("Do not defer foreground Program creation to reflection");
-    expect(byteBounded.description).toContain("run the exact returned revision with programs.run");
-    expect(byteBounded.description).toContain("store(key, value)");
+    expect(byteBounded.description).toContain("Compose related multi-call work in one program");
+    expect(byteBounded.description).toContain('tools.skills.load({ name: "execute" })');
+    expect(byteBounded.description).not.toContain("noesis.search");
+    expect(byteBounded.description).not.toContain("agents.run");
+    expect(byteBounded.description).not.toContain("programs.save");
+    expect(byteBounded.description).not.toContain("store(key, value)");
     expect(executions).toBe(0);
   });
 

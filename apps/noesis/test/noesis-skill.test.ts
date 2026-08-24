@@ -1,9 +1,13 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createPiSkillLibrary, resolvePiSkillInvocation } from "@noesis/runtime-pi";
 import { afterEach, describe, expect, test } from "vitest";
-import { NOESIS_BUILT_IN_SKILL, NOESIS_BUILT_IN_SKILLS } from "../src/noesis-skill.ts";
+import {
+  EXECUTE_BUILT_IN_SKILL,
+  NOESIS_BUILT_IN_SKILL,
+  NOESIS_BUILT_IN_SKILLS,
+} from "../src/noesis-skill.ts";
 
 const roots: string[] = [];
 
@@ -23,6 +27,7 @@ describe("built-in Noesis skill", () => {
 
     const snapshot = await library.snapshot();
     const noesis = snapshot.skills.find((skill) => skill.name === "noesis");
+    const execute = snapshot.skills.find((skill) => skill.name === "execute");
     expect(noesis).toMatchObject({
       name: "noesis",
       aliases: ["refine"],
@@ -31,14 +36,26 @@ describe("built-in Noesis skill", () => {
     });
     expect(noesis?.description).toBe(NOESIS_BUILT_IN_SKILL.description);
     expect(noesis?.content).toContain("capabilities.inspect");
-    expect(noesis?.content).toContain("programs.save");
-    expect(noesis?.content).toContain("foreground surface is deliberately fixed");
+    expect(noesis?.content).not.toContain("implementation files or tests");
     expect(noesis?.content).not.toContain("noesis.hotbar");
     expect(noesis?.content).not.toContain("inspect_self");
     expect(noesis?.content).not.toContain("`remember`");
+    expect(execute).toMatchObject({
+      name: "execute",
+      description: EXECUTE_BUILT_IN_SKILL.description,
+      content: expect.stringContaining("noesis.search(query)"),
+    });
+    expect(execute?.content).toContain("references/sdk.md");
+    const sdk = await readFile(join(dirname(EXECUTE_BUILT_IN_SKILL.filePath), "references/sdk.md"), "utf8");
+    expect(sdk).toContain("agents.run({ systemPrompt?, prompt, tools?, thinkingLevel? })");
+    expect(sdk).toContain("async JavaScript function body");
+    expect(sdk).toContain("exact returned `definitionRevisionId`");
     const invocation = resolvePiSkillInvocation("/refine preserve this method", snapshot.skills);
     expect(invocation).toMatchObject({ name: "noesis" });
     expect(invocation?.prompt).toContain("preserve this method");
-    expect(invocation?.prompt).toContain("There is no second reflector");
+    expect(invocation?.prompt).toContain("foreground agent authors the complete semantic decision");
+    expect(resolvePiSkillInvocation("/execute inspect this session", snapshot.skills)).toMatchObject({
+      name: "execute",
+    });
   });
 });

@@ -88,20 +88,20 @@ describe("execute progressive disclosure", () => {
     ]);
     const baseline = executeDescription();
     expect(executeDescription(servers, changedCatalog)).toBe(baseline);
-    expect(baseline).toContain("mcp.servers");
-    expect(baseline).toContain("noesis.search");
+    expect(baseline).toContain('tools.skills.load({ name: "execute" })');
     expect(baseline).toContain("Schema-derived shell.run result");
     expect(baseline).toContain("fullOutputPath?:string");
     expect(baseline).toContain("fullOutputComplete:boolean");
+    expect(Buffer.byteLength(baseline, "utf8")).toBeLessThanOrEqual(1024);
     expect(baseline).not.toContain("docs<&");
   });
 
-  test("keeps Program discovery progressive instead of injecting saved names", () => {
+  test("keeps SDK and Program guidance progressively disclosed", () => {
     const description = executeDescription();
-    expect(description).toContain("programs.list");
-    expect(description).toContain("programs.save");
-    expect(description).toContain("programs.run");
-    expect(description).toContain("exact returned revision");
+    expect(description).toContain("Load the `execute` skill");
+    expect(description).not.toContain("programs.save");
+    expect(description).not.toContain("agents.run");
+    expect(description).not.toContain("noesis.search");
     expect(description).not.toContain("available_workflows");
   });
 });

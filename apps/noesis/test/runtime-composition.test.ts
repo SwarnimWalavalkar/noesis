@@ -1889,14 +1889,8 @@ describe("apps/noesis production control-plane composition", () => {
     expect(requests[0]?.systemPrompt).toContain(
       "search this installation's previous sessions through `execute` when it could help.",
     );
-    expect(requests[0]?.systemPrompt).toContain("For multi-call work, use one coherent `execute` program");
-    expect(requests[0]?.systemPrompt).toContain("use `agents.run` when a bounded independent agent can help");
+    expect(requests[0]?.systemPrompt).toContain("one coherent `execute` program for related multi-call work");
     expect(requests[0]?.systemPrompt).toContain("Treat explicit truncation as incomplete evidence");
-    expect(requests[0]?.systemPrompt).toContain(
-      "use one coherent follow-up instead of a series of direct calls",
-    );
-    expect(requests[0]?.systemPrompt).toContain("Do not split related work across wrapper executions");
-    expect(requests[0]?.systemPrompt).toContain("Save reusable behavior as a Program.");
     const sessionCatalogTools = [
       "history.search_sessions",
       "history.open_session_evidence",
