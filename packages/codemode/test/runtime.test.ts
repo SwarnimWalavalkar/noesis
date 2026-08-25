@@ -256,6 +256,53 @@ describe("codemode runtime", () => {
     expect(firstStart?.callId).toMatch(/^tool_call_[a-f0-9]{64}$/u);
     expect(firstEnd?.callId).toBe(firstStart?.callId);
   });
+  it("returns the final top-level expression only in last-expression mode", async () => {
+    const code = runtime();
+    await expect(
+      code.execute({
+        source: `
+          const seed = 4;
+          await tools.math.double({ value: seed }); // returned by REPL completion
+        `,
+        completionMode: "last-expression",
+        sessionId: "session-last-expression",
+      }),
+    ).resolves.toMatchObject({ value: { value: 8 }, calls: 1 });
+    await expect(
+      code.execute({
+        source: "const value = 3; ({ value });",
+        completionMode: "last-expression",
+        sessionId: "session-last-expression",
+      }),
+    ).resolves.toMatchObject({ value: { value: 3 } });
+    await expect(
+      code.execute({
+        source: "return 42;",
+        completionMode: "last-expression",
+        sessionId: "session-last-expression",
+      }),
+    ).resolves.toMatchObject({ value: 42 });
+    await expect(
+      code.execute({
+        source: "return new.target ?? null;",
+        completionMode: "last-expression",
+        sessionId: "session-last-expression",
+      }),
+    ).resolves.toMatchObject({ value: null });
+    await expect(
+      code.execute({
+        source: "const value = 3; value;",
+        sessionId: "session-explicit-completion",
+      }),
+    ).resolves.toMatchObject({ value: null });
+    await expect(
+      code.execute({
+        source: "if (true) { 42; }",
+        completionMode: "last-expression",
+        sessionId: "session-last-expression",
+      }),
+    ).resolves.toMatchObject({ value: null });
+  });
   it("returns actionable frozen-catalog recovery for an unknown tool name", async () => {
     await expect(
       runtime().execute({

@@ -9,6 +9,7 @@
   "dependencies": {
     "@noesis/domain": "workspace:*",
     "@noesis/tools": "workspace:*",
+    "acorn": "8.18.0",
     "zod": "4.4.3"
   }
 }

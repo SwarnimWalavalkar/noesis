@@ -1,4 +1,5 @@
 import { createConditionalObject } from "@noesis/domain";
+import { parse } from "acorn";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
@@ -68,6 +69,24 @@ function boundedJsonSafe(value, maximum, label) {
 }
 function jsonSafe(value) {
   return JSON.parse(JSON.stringify(value === undefined ? null : value));
+}
+function sourceWithLastExpressionCompletion(source) {
+  const prefix = "async function __noesis_execute__() {\n";
+  const program = parse(`${prefix}${source}\n}`, {
+    ecmaVersion: "latest",
+    sourceType: "script",
+  });
+  const functionBody = program.body[0]?.body;
+  const finalStatement = functionBody?.type === "BlockStatement" ? functionBody.body.at(-1) : undefined;
+  if (finalStatement?.type !== "ExpressionStatement") return source;
+  const statementStart = finalStatement.start - prefix.length;
+  const expressionStart = finalStatement.expression.start - prefix.length;
+  const expressionEnd = finalStatement.expression.end - prefix.length;
+  const statementEnd = finalStatement.end - prefix.length;
+  return `${source.slice(0, statementStart)}return (${source.slice(
+    expressionStart,
+    expressionEnd,
+  )});${source.slice(statementEnd)}`;
 }
 function delegate(kind, payload) {
   const requestId = `sdk_${++sequence}`;
@@ -275,6 +294,10 @@ process.on("message", async (message) => {
     },
   });
   try {
+    const executableSource =
+      message.completionMode === "last-expression"
+        ? sourceWithLastExpressionCompletion(message.source)
+        : message.source;
     const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
     const execute = new AsyncFunction(
       "tools",
@@ -286,7 +309,7 @@ process.on("message", async (message) => {
       "input",
       "context",
       "agents",
-      `"use strict";\n${message.source}`,
+      `"use strict";\n${executableSource}`,
     );
     const value = await execute(
       tools,
