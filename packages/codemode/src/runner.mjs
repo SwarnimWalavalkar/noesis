@@ -71,18 +71,22 @@ function jsonSafe(value) {
   return JSON.parse(JSON.stringify(value === undefined ? null : value));
 }
 function sourceWithLastExpressionCompletion(source) {
-  const program = parse(source, {
+  const prefix = "async function __noesis_execute__() {\n";
+  const program = parse(`${prefix}${source}\n}`, {
     ecmaVersion: "latest",
     sourceType: "script",
-    allowAwaitOutsideFunction: true,
-    allowReturnOutsideFunction: true,
   });
-  const finalStatement = program.body.at(-1);
+  const functionBody = program.body[0]?.body;
+  const finalStatement = functionBody?.type === "BlockStatement" ? functionBody.body.at(-1) : undefined;
   if (finalStatement?.type !== "ExpressionStatement") return source;
-  return `${source.slice(0, finalStatement.start)}return (${source.slice(
-    finalStatement.expression.start,
-    finalStatement.expression.end,
-  )});${source.slice(finalStatement.end)}`;
+  const statementStart = finalStatement.start - prefix.length;
+  const expressionStart = finalStatement.expression.start - prefix.length;
+  const expressionEnd = finalStatement.expression.end - prefix.length;
+  const statementEnd = finalStatement.end - prefix.length;
+  return `${source.slice(0, statementStart)}return (${source.slice(
+    expressionStart,
+    expressionEnd,
+  )});${source.slice(statementEnd)}`;
 }
 function delegate(kind, payload) {
   const requestId = `sdk_${++sequence}`;

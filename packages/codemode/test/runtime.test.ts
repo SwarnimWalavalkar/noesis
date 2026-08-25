@@ -284,6 +284,13 @@ describe("codemode runtime", () => {
     ).resolves.toMatchObject({ value: 42 });
     await expect(
       code.execute({
+        source: "return new.target ?? null;",
+        completionMode: "last-expression",
+        sessionId: "session-last-expression",
+      }),
+    ).resolves.toMatchObject({ value: null });
+    await expect(
+      code.execute({
         source: "const value = 3; value;",
         sessionId: "session-explicit-completion",
       }),
