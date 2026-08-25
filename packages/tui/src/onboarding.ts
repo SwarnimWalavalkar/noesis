@@ -102,12 +102,7 @@ export function onboardingHeaderLines(
   const muted = (text: string): string => styled(colorEnabled, ANSI.dim, text);
   if (width < 30 || height < 8) return [];
   if (!collapsed && width >= 60 && height >= 22)
-    return [
-      ...NOESIS_WORDMARK.map(brand),
-      muted(note),
-      muted(subtitle),
-      muted("─".repeat(width)),
-    ];
+    return [...NOESIS_WORDMARK.map(brand), muted(note), muted(subtitle), muted("─".repeat(width))];
   return [`${brand("NOESIS")}${muted(`  ${subtitle}`)}`, muted("─".repeat(width))];
 }
 function chunkByWidth(value: string, width: number): string[] {
@@ -207,6 +202,8 @@ export interface SetupTuiOptions {
   readonly terminal?: Terminal;
   /** Compact header label under the wordmark. Defaults to first-launch setup. */
   readonly subtitle?: string;
+  /** One application-owned invitation shared across first-launch setup and the main shell. */
+  readonly startupNote?: string;
 }
 export async function runNoesisOnboardingTui<T>(
   run: (surface: OnboardingSurface) => Promise<T>,
@@ -233,7 +230,7 @@ export async function runNoesisOnboardingTui<T>(
   const interrupted = new Promise<never>((_resolve, reject) => {
     interrupt = () => reject(new OnboardingInterruptedError());
   });
-  const startupNote = pickStartupNote();
+  const startupNote = options.startupNote ?? pickStartupNote();
   const chrome: Component = {
     invalidate() {},
     render(width) {

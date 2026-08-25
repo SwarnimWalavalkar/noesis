@@ -100,7 +100,7 @@ export async function startNoesisTui(
     view.dispatch({ type: "system-message", text: learningDiagnosticNotice(cause) });
     tui.requestRender();
   };
-  const startupNote = pickStartupNote();
+  const startupNote = options.startupNote ?? pickStartupNote();
   const headerView = createHeaderView(
     colorEnabled,
     () => terminal.rows,
@@ -205,6 +205,17 @@ export async function startNoesisTui(
   const shutdown = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
     const visibleTurnId = view.state.interaction.active?.turnId;
+    const trailId = view.state.trailId;
+    const exclusiveCommand = exclusiveCommands?.activeWork();
+    const abortAndSettle =
+      trailId && view.state.interaction.phase !== "idle"
+        ? Promise.resolve()
+            .then(async () => await runtime.interact(trailId, stopVisibleInteraction(visibleTurnId)))
+            .then<ShutdownSettlement, ShutdownSettlement>(
+              () => ({ status: "settled" }),
+              (cause: unknown) => ({ status: "rejected", error: cause }),
+            )
+        : undefined;
     shutdownPromise = (async () => {
       phase = "stopped";
       turnGeneration += 1;
@@ -234,20 +245,12 @@ export async function startNoesisTui(
           tui.stop();
         }
       }
-      const trailId = view.state.trailId;
-      const exclusiveCommand = exclusiveCommands?.activeWork();
       let shutdownFailure:
         | {
             readonly error: unknown;
           }
         | undefined;
-      if (trailId && view.state.interaction.phase !== "idle") {
-        const abortAndSettle = runtime
-          .interact(trailId, stopVisibleInteraction(visibleTurnId))
-          .then<ShutdownSettlement, ShutdownSettlement>(
-            () => ({ status: "settled" }),
-            (cause: unknown) => ({ status: "rejected", error: cause }),
-          );
+      if (abortAndSettle) {
         let graceTimer: NodeJS.Timeout | undefined;
         const settlement = await Promise.race<ShutdownSettlement>([
           abortAndSettle,
@@ -540,6 +543,11 @@ export async function startNoesisTui(
       }
       return undefined;
     }
+    // Inspection owns every byte; bypassing the editor preserves its draft and paste parser.
+    if (view.state.actionCursor) {
+      handleTranscriptKey(data);
+      return { consume: true };
+    }
     if (editor.capturePotentialPasteInput(data)) return { consume: true };
     if (!editor.acceptsUnbracketedCommandInput()) return undefined;
     if (matchesKey(data, "ctrl+c")) {
@@ -712,8 +720,7 @@ export async function startNoesisTui(
       });
     else void performSubmission().catch(reportSubmissionFailure);
   };
-  // Inspect mode pauses the editor entirely: its rows disappear while keys navigate the
-  // transcript, and the inspect badge in the input label explains where input went.
+  // Inspect mode pauses and hides the editor while keys navigate the transcript.
   const editorSlot: Component = {
     invalidate: () => editor.invalidate(),
     render: (width) => (view.state.actionCursor ? [] : editor.render(width)),

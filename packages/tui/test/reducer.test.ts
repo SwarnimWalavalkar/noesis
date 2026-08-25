@@ -142,6 +142,25 @@ describe("Noesis TUI reducer", () => {
     const idle = reduceTui(advanced, { type: "execution-changed", execution: "idle" });
     expect(reduceTui(idle, { type: "animation-tick" })).toBe(idle);
     expect(idle.animationFrame).toBe(0);
+
+    const completed = reduceTui(advanced, {
+      type: "turn-completed",
+      context: {
+        schemaVersion: 1,
+        snapshotId: "context-animation",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        maxTokens: 1_000,
+        usedTokens: 10,
+        fragments: [],
+        capabilityVersions: {},
+      },
+      capabilityVersions: {},
+      turnCount: 1,
+    });
+    expect(completed.animationFrame).toBe(0);
+    expect(reduceTui(advanced, { type: "turn-aborted" }).animationFrame).toBe(0);
+    expect(reduceTui(advanced, { type: "compacted" }).animationFrame).toBe(0);
+    expect(reduceTui(advanced, { type: "failed", error: "failed" }).animationFrame).toBe(0);
   });
 
   test("builds deterministic picker rows in most-recently-active order", () => {

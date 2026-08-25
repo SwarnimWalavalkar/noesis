@@ -288,6 +288,11 @@ def main() -> int:
                 ):
                     os.write(sys.stdout.fileno(), b"\n__NOESIS_PREMATURE_SUBMIT__\n")
                 os.write(master, next_input)
+                # Readiness checks below must observe IDLE after this submission. Otherwise an
+                # IDLE repaint from paste settlement can make the driver quit while the turn is
+                # still active, and eager shutdown correctly aborts it before durable settlement.
+                if label == "genuine-enter":
+                    output = b""
                 last_write_label = label
                 next_write_at = (
                     time.monotonic() + followup_writes[0][0]

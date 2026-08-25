@@ -29,6 +29,7 @@ export function createEscapeRouting(options: {
   const { view } = options;
   let arm: { readonly turnId: string; readonly expiresAt: number } | undefined;
   let armTimer: NodeJS.Timeout | undefined;
+  let nonEscapeInputGeneration = 0;
   const disarm = (): void => {
     if (armTimer) clearTimeout(armTimer);
     armTimer = undefined;
@@ -50,7 +51,9 @@ export function createEscapeRouting(options: {
   };
   return {
     observeInput: (data) => {
-      if (arm && data !== "\u001b" && !matchesKey(data, "escape")) disarm();
+      if (data === "\u001b" || matchesKey(data, "escape")) return;
+      nonEscapeInputGeneration += 1;
+      if (arm) disarm();
     },
     createStandaloneEscapeHandler: () => {
       if (!options.isMainPhase()) return undefined;
@@ -72,7 +75,12 @@ export function createEscapeRouting(options: {
       if (view.state.interaction.phase === "idle") return undefined;
       const visibleTurnId = view.state.interaction.active?.turnId;
       if (!visibleTurnId) return () => true;
+      // SafeEditor delays a lone legacy Escape while it may still become a fragmented paste
+      // marker. Capture the raw-input generation now so a key arriving during that delay makes
+      // this Escape ineligible to arm or commit the consecutive-key gesture.
+      const capturedInputGeneration = nonEscapeInputGeneration;
       return () => {
+        if (nonEscapeInputGeneration !== capturedInputGeneration) return true;
         if (view.state.interaction.active?.turnId !== visibleTurnId) return true;
         if (view.state.interaction.phase === "interrupting" || view.state.execution === "aborting")
           return true;

@@ -16,8 +16,9 @@ import {
 import { createApplicationRuntimeComposition } from "../src/runtime-composition.ts";
 import { NOESIS_STARTUP_NOTES } from "@noesis/tui";
 
-const hasStartupNote = (text: string): boolean =>
-  NOESIS_STARTUP_NOTES.some((note) => text.includes(note));
+const startupNotesIn = (text: string): readonly string[] =>
+  NOESIS_STARTUP_NOTES.filter((note) => text.includes(note));
+const hasStartupNote = (text: string): boolean => startupNotesIn(text).length > 0;
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const cliPath = join(repositoryRoot, "apps/noesis/src/cli.ts");
@@ -226,6 +227,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       const { output, result } = await runPtyExit(action);
 
       expect(output).toContain("● IDLE");
+      expect(startupNotesIn(output)).toHaveLength(1);
       expect(result).toEqual({ code: 0, signal: null });
     },
     7_000,

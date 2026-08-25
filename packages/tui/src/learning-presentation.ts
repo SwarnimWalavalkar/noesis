@@ -62,9 +62,11 @@ export function workingAdjustmentNotice(activity: TuiLearningActivitySummary): s
   if (activity.status === "stale") return `unchanged · ${summary}`;
   return undefined;
 }
-/** Learning outcomes carry their own signature tone; a pending decision still demands attention. */
-export function learningNoticeTone(notice: string): "attention" | "learning" {
-  return notice.startsWith("Capability needs") ? "attention" : "learning";
+/** Learning outcomes carry their own signature tone; structured pending state demands attention. */
+export function learningNoticeTone(
+  activity: Pick<TuiLearningActivitySummary, "status">,
+): "attention" | "learning" {
+  return activity.status === "pending" ? "attention" : "learning";
 }
 /** Keep an auxiliary learning failure visible without turning a settled foreground turn into an error. */
 export function learningDiagnosticNotice(cause: unknown): string {
@@ -83,7 +85,7 @@ export function startLateLearningNoticeRefresh(
   request: Readonly<{
     trailId: string;
     jobId: string;
-    onNotice: (notice: string, focusId: string) => void;
+    onNotice: (notice: string, focusId: string, tone: "attention" | "learning") => void;
     onFailure: (cause: unknown) => void;
     onError: (cause: unknown) => void;
   }>,
@@ -94,7 +96,7 @@ export function startLateLearningNoticeRefresh(
     .then((activity) => {
       if (!activity) return;
       const notice = workingAdjustmentNotice(activity);
-      if (notice) request.onNotice(notice, learningAuditFocusId(activity));
+      if (notice) request.onNotice(notice, learningAuditFocusId(activity), learningNoticeTone(activity));
     }, request.onFailure)
     .catch(request.onError);
 }
@@ -146,16 +148,16 @@ export async function settledTurnPresentation(
       { type: "execution-changed", execution: "idle" },
       { type: "system-message", text: "Turn interrupted." },
     );
-  const learningNotice = workingAdjustmentNoticeForTurn(learning.activities, request.turnId);
-  if (learningNotice)
-    actions.push({
-      type: "notification-shown",
-      text: learningNotice,
-      tone: learningNoticeTone(learningNotice),
-    });
   const focusActivity = learning.activities.find(
     (activity) => activity.turnId === request.turnId && workingAdjustmentNotice(activity) !== undefined,
   );
+  const learningNotice = focusActivity ? workingAdjustmentNotice(focusActivity) : undefined;
+  if (focusActivity && learningNotice)
+    actions.push({
+      type: "notification-shown",
+      text: learningNotice,
+      tone: learningNoticeTone(focusActivity),
+    });
   const pendingReflectionJobId = learning.activities.find(
     (activity) =>
       activity.turnId === request.turnId &&
@@ -194,12 +196,12 @@ export function reconcileSettledTurnPresentation(
         startLateLearningNoticeRefresh(runtime, {
           trailId: request.trailId,
           jobId: presentation.pendingReflectionJobId,
-          onNotice: (notice, focusId) => {
+          onNotice: (notice, focusId, tone) => {
             if (!host.isTrailCurrent()) return;
             host.dispatch({
               type: "notification-shown",
               text: notice,
-              tone: learningNoticeTone(notice),
+              tone,
             });
             host.rememberLearningFocus?.(focusId);
             host.requestRender();

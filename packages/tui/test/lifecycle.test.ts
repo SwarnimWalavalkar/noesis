@@ -1634,6 +1634,11 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("esc close"));
     expect(terminal.output).toContain("tools.shell.run");
 
+    // Even fragmented bracketed paste belongs to inspection and must not mutate the hidden draft.
+    terminal.send("\u001b[20");
+    terminal.send("0~hidden inspector paste");
+    terminal.send("\u001b[201~");
+
     terminal.send("\u001b");
     await vi.waitFor(() => expect(terminal.output).toContain("↑/↓ scroll"));
 
@@ -1964,6 +1969,16 @@ describe("Noesis TUI lifecycle", () => {
     terminal.type("another turn\r");
     await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
     expect(runs).toBe(1);
+
+    // SafeEditor settles a legacy Escape after a short ambiguity window. An ordinary key that
+    // arrives during that window must still break the consecutive-Escape gesture.
+    terminal.send("\u001b");
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    terminal.send("a");
+    terminal.send("\u001b");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    expect(abort).not.toHaveBeenCalled();
+    terminal.send("\u007f");
 
     // The first Escape only arms the interrupt; the second, consecutive one commits it.
     terminal.send("\u001b");
@@ -2511,8 +2526,12 @@ describe("Noesis TUI lifecycle", () => {
 
     terminal.type("\u0003");
 
+    await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
+    // Cancellation begins with shutdown; the closing animation must not give the active turn an
+    // extra execution window before its abort is requested.
+    expect(terminal.stops).toBe(0);
+
     await expect(running).resolves.toBeUndefined();
-    expect(abort).toHaveBeenCalledOnce();
     expect(terminal.stops).toBe(1);
     emitLate?.();
     await new Promise<void>((resolve) => setTimeout(resolve, 20));

@@ -442,6 +442,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
           interaction: EMPTY_INTERACTION,
           turnCount: action.trail.turns.length,
           execution: "idle",
+          animationFrame: 0,
         } as const)
         .finish();
     }
@@ -464,6 +465,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       return {
         ...rest,
         execution: "thinking",
+        animationFrame: 0,
         timeline: [...state.timeline, message],
       };
     }
@@ -661,9 +663,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         ...rest,
         execution: action.execution,
         animationFrame:
-          action.execution === "idle" ||
-          action.execution === "error" ||
-          action.execution === "closing"
+          action.execution === "idle" || action.execution === "error" || action.execution === "closing"
             ? 0
             : state.animationFrame,
       };
@@ -705,6 +705,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       return createConditionalObject({
         ...rest,
         execution: "idle",
+        animationFrame: 0,
         context: action.context,
         turnCount: action.turnCount,
       } as const)
@@ -718,16 +719,16 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       const timeline = [...state.timeline];
       const last = timeline.at(-1);
       if (last?.kind === "message" && last.role === "assistant" && !last.text) timeline.pop();
-      return { ...state, execution: "idle", timeline };
+      return { ...state, execution: "idle", animationFrame: 0, timeline };
     }
     case "compacted": {
       const { contextUsage: _contextUsage, ...rest } = state;
-      return { ...rest, execution: "idle" };
+      return { ...rest, execution: "idle", animationFrame: 0 };
     }
     case "pane-selected":
       return { ...state, pane: action.pane };
     case "failed":
-      return { ...state, execution: "error", error: action.error };
+      return { ...state, execution: "error", animationFrame: 0, error: action.error };
     case "notification-shown":
       return { ...state, notification: Object.freeze({ text: action.text, tone: action.tone }) };
     case "notification-cleared": {
