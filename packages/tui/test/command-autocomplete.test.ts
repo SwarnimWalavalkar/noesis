@@ -53,6 +53,14 @@ describe("Noesis slash command autocomplete", () => {
     );
   });
 
+  test("offers saved-session resume without an inline argument", async () => {
+    const suggestions = await suggestionsFor("/res");
+
+    expect(suggestions?.items).toContainEqual(
+      expect.objectContaining({ value: "resume", description: "Resume a saved session" }),
+    );
+  });
+
   test("fuzzy-filters commands and includes argument hints in descriptions", async () => {
     const program = await suggestionsFor("/pr");
     const model = await suggestionsFor("/mod");
@@ -61,24 +69,82 @@ describe("Noesis slash command autocomplete", () => {
     expect(model?.items).toContainEqual(
       expect.objectContaining({
         value: "model",
-        description: expect.stringContaining("<provider>/<model>"),
+        description: expect.stringContaining("[model]"),
       }),
     );
   });
 
-  test("completes the known provider prefix while leaving the model ID editable", async () => {
-    const suggestions = await suggestionsFor("/model openr");
+  test("completes known providers independently from model IDs", async () => {
+    const suggestions = await suggestionsFor("/provider openr");
 
     expect(suggestions).toEqual(
       expect.objectContaining({
         prefix: "openr",
         items: [
           expect.objectContaining({
-            value: "openrouter/",
+            value: "openrouter",
           }),
         ],
       }),
     );
+  });
+
+  test("distinguishes OpenCode Zen and OpenCode Go provider completions", async () => {
+    const suggestions = await suggestionsFor("/provider opencode");
+
+    expect(suggestions?.items).toEqual([
+      expect.objectContaining({ value: "opencode", description: "OpenCode Zen" }),
+      expect.objectContaining({ value: "opencode-go", description: "OpenCode Go" }),
+    ]);
+  });
+
+  test("offers live current-provider models as inline command arguments", async () => {
+    let currentProvider = "alpha";
+    const provider = createNoesisCommandAutocompleteProvider([], {
+      currentRoute: () => ({ provider: currentProvider, model: "alpha-current" }),
+      listModelRoutes: () => [
+        {
+          provider: "alpha",
+          model: "alpha-current",
+          name: "Alpha Current",
+          thinkingLevels: ["off", "high"],
+          default: false,
+          allowsCustomModelIds: false,
+        },
+        {
+          provider: "alpha",
+          model: "alpha-second",
+          name: "Second Alpha",
+          thinkingLevels: ["off", "medium"],
+          default: true,
+          allowsCustomModelIds: false,
+        },
+        {
+          provider: "beta",
+          model: "beta-only",
+          name: "Beta Only",
+          thinkingLevels: ["off"],
+          default: true,
+          allowsCustomModelIds: false,
+        },
+      ],
+    });
+    const alpha = await provider.getSuggestions(["/model second"], 0, 13, {
+      signal: new AbortController().signal,
+    });
+
+    expect(alpha).toEqual(
+      expect.objectContaining({
+        prefix: "second",
+        items: [expect.objectContaining({ value: "alpha-second", label: "alpha-second" })],
+      }),
+    );
+
+    currentProvider = "beta";
+    const beta = await provider.getSuggestions(["/model "], 0, 7, {
+      signal: new AbortController().signal,
+    });
+    expect(beta?.items.map((item) => item.value)).toEqual(["beta-only"]);
   });
 
   test("suggests queue control and explicit steering commands", async () => {

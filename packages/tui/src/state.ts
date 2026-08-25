@@ -7,6 +7,7 @@ import type {
   TrailState,
 } from "@noesis/runtime";
 import { EXECUTE_ACTION_NAME, SUBAGENT_ACTION_NAME } from "./action-summary.ts";
+import { appendReasoningDelta, reconcileReasoning } from "./reasoning-timeline.ts";
 import type { TuiExecutionDetail, TuiInteractionSnapshot } from "./runtime-port.ts";
 export type Pane = "trail" | "context" | "capabilities";
 export interface TuiMessage {
@@ -37,7 +38,14 @@ export interface TuiMessageEntry extends TuiMessage {
 export interface TuiAgentActionEntry extends TuiAgentAction {
   readonly kind: "action";
 }
-export type TuiTimelineEntry = TuiMessageEntry | TuiAgentActionEntry;
+export interface TuiReasoningEntry {
+  readonly kind: "reasoning";
+  readonly text: string;
+  readonly reasoningId?: string;
+  readonly turnId?: string;
+  readonly createdAt?: string;
+}
+export type TuiTimelineEntry = TuiMessageEntry | TuiReasoningEntry | TuiAgentActionEntry;
 function parsedTimestamp(timestamp: string): number | undefined {
   const parsed = Date.parse(timestamp);
   return Number.isFinite(parsed) ? parsed : undefined;
@@ -69,6 +77,15 @@ export function tuiTimelineFromRuntime(
         .add({
           createdAt: entry.createdAt,
         } as const)
+        .finish();
+    if (entry.kind === "reasoning")
+      return createConditionalObject({
+        kind: "reasoning",
+        text: entry.text,
+        reasoningId: entry.reasoningId,
+      } as const)
+        .addOptional(entry.turnId ? { turnId: entry.turnId } : undefined)
+        .add({ createdAt: entry.createdAt } as const)
         .finish();
     const startedAt = parsedTimestamp(entry.startedAt);
     const durationMs = actionDuration(entry);
@@ -191,6 +208,7 @@ export interface NoesisTuiState {
     readonly text: string;
     readonly tone: "info" | "success" | "attention";
   }>;
+  readonly animationFrame: number;
 }
 export type NoesisTuiAction =
   | {
@@ -226,6 +244,14 @@ export type NoesisTuiAction =
     }
   | {
       readonly type: "stream-reconciled";
+      readonly text: string;
+    }
+  | {
+      readonly type: "reasoning-delta";
+      readonly text: string;
+    }
+  | {
+      readonly type: "reasoning-reconciled";
       readonly text: string;
     }
   | {
@@ -282,6 +308,13 @@ export type NoesisTuiAction =
   | {
       readonly type: "execution-changed";
       readonly execution: ExecutionState;
+    }
+  | {
+      readonly type: "animation-tick";
+    }
+  | {
+      readonly type: "reasoning-level-changed";
+      readonly reasoningLevel: RuntimeAgentDefaults["thinkingLevel"];
     }
   | {
       readonly type: "model-metadata";
@@ -354,6 +387,7 @@ export const initialTuiState = (
   turnCount: 0,
   capabilityVersions: {},
   colorEnabled: options.colorEnabled ?? false,
+  animationFrame: 0,
 });
 export function timelineActions(timeline: readonly TuiTimelineEntry[]): readonly TuiAgentActionEntry[] {
   return timeline.filter((entry): entry is TuiAgentActionEntry => entry.kind === "action");
@@ -461,6 +495,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         title: action.trail.title,
         provider: action.trail.provider,
         model: action.trail.model,
+        reasoningLevel: action.trail.thinkingLevel,
         timeline: [],
       } as const)
         .addOptional(action.trail.context ? { context: action.trail.context } : undefined)
@@ -547,6 +582,15 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       }
       return { ...state, timeline };
     }
+    case "reasoning-delta": {
+      return {
+        ...state,
+        execution: "thinking",
+        timeline: appendReasoningDelta(state.timeline, action.text),
+      };
+    }
+    case "reasoning-reconciled":
+      return { ...state, timeline: reconcileReasoning(state.timeline, action.text) };
     case "action-started": {
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const next: TuiAgentActionEntry = createConditionalObject({
@@ -676,8 +720,19 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
     }
     case "execution-changed": {
       const { activeTool: _activeTool, ...rest } = state;
-      return { ...rest, execution: action.execution };
+      return {
+        ...rest,
+        execution: action.execution,
+        animationFrame:
+          action.execution === "idle" || action.execution === "error" ? 0 : state.animationFrame,
+      };
     }
+    case "animation-tick":
+      return state.execution === "idle" || state.execution === "error"
+        ? state
+        : { ...state, animationFrame: state.animationFrame + 1 };
+    case "reasoning-level-changed":
+      return { ...state, reasoningLevel: action.reasoningLevel };
     case "model-metadata":
       return { ...state, provider: action.provider, model: action.model };
     case "usage-updated":

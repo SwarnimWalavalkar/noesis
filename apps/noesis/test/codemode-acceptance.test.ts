@@ -728,7 +728,7 @@ describe("production codemode journey", () => {
       },
     });
     const beforeRestart = await runtime.getTranscript(trail.trailId);
-    expect(beforeRestart.map((entry) => (entry.kind === "message" ? entry.text : entry.name))).toEqual([
+    expect(beforeRestart.map((entry) => (entry.kind === "action" ? entry.name : entry.text))).toEqual([
       "Inspect the repository package.",
       "execute",
       "files.read",

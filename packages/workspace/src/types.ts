@@ -47,6 +47,8 @@ export interface SessionRecord {
   readonly metadata: JsonObject;
 }
 
+export type SessionDeletionResult = "purged" | "retained-for-audit" | "missing";
+
 export interface MessageRecord {
   readonly messageId: string;
   readonly sessionId: string;
@@ -672,6 +674,10 @@ export interface OperationalRepositories {
     readonly sensitivity: (sessionId: string) => Promise<Sensitivity | undefined>;
     readonly put: (record: SessionRecord) => Promise<DatabaseRowRef>;
     readonly list: () => Promise<readonly SessionRecord[]>;
+    /** Removes a session from user-visible history; referenced evidence is retained as a tombstone. */
+    readonly delete: (sessionId: string, deletedAt: string) => Promise<SessionDeletionResult>;
+    /** Deletes or tombstones the session only when it contains no conversation or recoverable intent. */
+    readonly deleteIfEmpty: (sessionId: string, deletedAt: string) => Promise<boolean>;
   };
   readonly messages: {
     readonly get: (messageId: string) => Promise<MessageRecord | undefined>;

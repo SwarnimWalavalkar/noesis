@@ -772,6 +772,17 @@ describe("apps/noesis production control-plane composition", () => {
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
     const trail = await first.startTrail({ title: "SQLite-authoritative session" });
+    if (!first.setTrailThinkingLevel) throw new Error("reasoning control unavailable");
+    await first.setTrailThinkingLevel(trail.trailId, "medium");
+    await first.debug.workspace.operational.messages.put({
+      messageId: "sqlite-authoritative-session-marker",
+      sessionId: trail.trailId,
+      role: "system",
+      content: "Keep this non-empty session for the SQLite authority check.",
+      sensitivity: "normal",
+      createdAt: "2026-08-25T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
     await first.shutdown();
     await mkdir(join(home, "ledger"), { recursive: true });
     await writeFile(join(home, "ledger", "events.jsonl"), "{ definitely not valid JSONL\n");
@@ -785,6 +796,48 @@ describe("apps/noesis production control-plane composition", () => {
     expect(reopened.getTrail(trail.trailId)).toMatchObject({
       trailId: trail.trailId,
       title: "SQLite-authoritative session",
+      thinkingLevel: "medium",
+    });
+    await reopened.shutdown();
+  });
+  test("purges empty sessions and keeps deleted conversations out of resume after restart", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-session-deletion-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const create = () =>
+      createApplicationRuntimeComposition({
+        config,
+        createAgent: (_sessionTools, codeExecution) =>
+          createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+        createRoleRunner: (configurations) =>
+          createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+      });
+    const first = await create();
+    const empty = await first.startTrail({ title: "empty" });
+    const retained = await first.startTrail({ title: "retained" });
+    await first.debug.workspace.operational.messages.put({
+      messageId: "retained-session-message",
+      sessionId: retained.trailId,
+      role: "user",
+      content: "A retained conversation",
+      sensitivity: "normal",
+      createdAt: "2026-08-25T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    await first.deleteTrail(retained.trailId);
+    await first.shutdown();
+
+    const reopened = await create();
+    expect(reopened.listTrails()).toEqual([]);
+    expect(reopened.listTrailSummaries()).toEqual([]);
+    expect(await reopened.debug.workspace.operational.sessions.get(empty.trailId)).toBeUndefined();
+    expect(await reopened.debug.workspace.operational.sessions.get(retained.trailId)).toMatchObject({
+      metadata: { deletedAt: expect.any(String) },
     });
     await reopened.shutdown();
   });
@@ -1088,15 +1141,16 @@ describe("apps/noesis production control-plane composition", () => {
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
     });
-    expect(runtime.getTrail("session-before-admission")).toMatchObject({ status: "aborted", turns: [] });
+    expect(() => runtime.getTrail("session-before-admission")).toThrow(
+      "Trail not found: session-before-admission",
+    );
     expect(runtime.getTrail("session-after-settlement")).toMatchObject({
       status: "aborted",
       turns: [{ input: "A completed request", output: "A completed response" }],
     });
-    await expect(runtime.resumeTrail("session-before-admission")).resolves.toMatchObject({
-      status: "idle",
-      turns: [],
-    });
+    await expect(runtime.resumeTrail("session-before-admission")).rejects.toThrow(
+      "Trail not found: session-before-admission",
+    );
     await expect(runtime.resumeTrail("session-after-settlement")).resolves.toMatchObject({
       status: "idle",
       turns: [{ input: "A completed request", output: "A completed response" }],
@@ -1104,6 +1158,9 @@ describe("apps/noesis production control-plane composition", () => {
     expect(
       await runtime.debug.workspace.operational.outcomes.listForSession("session-before-admission"),
     ).toEqual([]);
+    expect(
+      await runtime.debug.workspace.operational.sessions.get("session-before-admission"),
+    ).toBeUndefined();
     await runtime.shutdown();
   });
   test("persists every top-level model action and exposes the same transcript after restart", async () => {
@@ -1206,7 +1263,7 @@ describe("apps/noesis production control-plane composition", () => {
       expect.stringMatching(/:action-3$/u),
       expect.stringMatching(/:action-unmatched$/u),
     ]);
-    expect(beforeRestart.map((entry) => (entry.kind === "message" ? entry.text : entry.name))).toEqual([
+    expect(beforeRestart.map((entry) => (entry.kind === "action" ? entry.name : entry.text))).toEqual([
       "Use the direct tool surface",
       "Starting.",
       "file_read",

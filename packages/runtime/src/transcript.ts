@@ -6,7 +6,12 @@ import {
   JsonValueSchema,
 } from "@noesis/domain";
 import type { NoesisWorkspaceStore, ToolCallRecord } from "@noesis/workspace";
-import type { RuntimeTranscriptAction, RuntimeTranscriptEntry, RuntimeTranscriptMessage } from "./index.ts";
+import type {
+  RuntimeTranscriptAction,
+  RuntimeTranscriptEntry,
+  RuntimeTranscriptMessage,
+  RuntimeTranscriptReasoning,
+} from "./index.ts";
 type TranscriptPoint = Readonly<{
   occurredAt: string;
   entry: RuntimeTranscriptEntry;
@@ -76,6 +81,7 @@ const actionStatus = (
 };
 const pointTieRank = (point: TranscriptPoint): number => {
   if (point.entry.kind === "action") return 3;
+  if (point.entry.kind === "reasoning") return 3;
   if (point.entry.role === "system") return 0;
   if (point.entry.role === "user") return point.steer === true ? 2 : 1;
   return 4;
@@ -166,7 +172,7 @@ const compareTranscriptPoints = (
   return entryId(left.entry).localeCompare(entryId(right.entry));
 };
 const entryId = (entry: RuntimeTranscriptEntry): string =>
-  entry.kind === "action" ? entry.actionId : entry.messageId;
+  entry.kind === "action" ? entry.actionId : entry.kind === "reasoning" ? entry.reasoningId : entry.messageId;
 const transcriptTurnOrder = (
   points: readonly TranscriptPoint[],
 ): {
@@ -274,6 +280,34 @@ export async function loadRuntimeTranscript(
   for (const message of messages) {
     if (message.role === "tool") continue;
     const turnId = optionalTurnId(message.metadata);
+    if (message.role === "system" && message.metadata["presentation"] === "reasoning") {
+      const entry = Object.freeze(
+        createConditionalObject({
+          kind: "reasoning" as const,
+          reasoningId: message.messageId,
+          text: message.content,
+          createdAt: message.createdAt,
+        } as const)
+          .addOptional(turnId ? { turnId } : undefined)
+          .finish(),
+      ) satisfies RuntimeTranscriptReasoning;
+      points.push(
+        Object.freeze(
+          createConditionalObject({
+            occurredAt: entry.createdAt,
+            entry,
+          } as const)
+            .addOptional(turnId ? { turnId } : undefined)
+            .addOptional(
+              !(message.timelineSequence === undefined)
+                ? { timelineSequence: message.timelineSequence }
+                : undefined,
+            )
+            .finish(),
+        ),
+      );
+      continue;
+    }
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const entry = Object.freeze(
       createConditionalObject({

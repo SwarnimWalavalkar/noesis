@@ -14,6 +14,7 @@ import {
   type NoesisTuiState,
   type TuiAgentAction,
   type TuiMessage,
+  type TuiReasoningEntry,
   type TuiTimelineEntry,
   timelineActions,
 } from "./state.ts";
@@ -39,6 +40,31 @@ export function renderMessageBlock(message: TuiMessage, width: number, colorEnab
     ...body.map((line) =>
       elideText(
         `${styled(colorEnabled, message.role === "user" ? ANSI.cyan : ANSI.dim, rail)}${line}`,
+        width,
+      ),
+    ),
+  ];
+}
+
+export function renderReasoningBlock(
+  reasoning: TuiReasoningEntry,
+  width: number,
+  colorEnabled = false,
+): string[] {
+  if (width <= 0) return [];
+  const rail = width >= 3 ? "┊ " : "";
+  const bodyWidth = Math.max(1, width - visibleWidth(rail));
+  const source = reasoning.text || "…";
+  const body = renderRichText(source, bodyWidth, colorEnabled);
+  return [
+    styled(colorEnabled, `${ANSI.bold}${ANSI.magenta}`, elideText("∴ THINKING", width)),
+    ...(body.length > 0 ? body : [""]).map((line) =>
+      elideText(
+        `${styled(colorEnabled, `${ANSI.dim}${ANSI.magenta}`, rail)}${styled(
+          colorEnabled,
+          `${ANSI.dim}${ANSI.italic}`,
+          line,
+        )}`,
         width,
       ),
     ),
@@ -308,12 +334,14 @@ export function createTranscriptRenderer(random: () => number = Math.random): Tr
       lines:
         entry.kind === "message"
           ? renderMessageBlock(entry, width, state.colorEnabled)
-          : renderAgentActionBlock(entry, actions, width, {
-              expanded,
-              selected,
-              colorEnabled: state.colorEnabled,
-              maxBodyRows,
-            }),
+          : entry.kind === "reasoning"
+            ? renderReasoningBlock(entry, width, state.colorEnabled)
+            : renderAgentActionBlock(entry, actions, width, {
+                expanded,
+                selected,
+                colorEnabled: state.colorEnabled,
+                maxBodyRows,
+              }),
     };
     cache.set(entry, { key, block });
     return block;

@@ -184,7 +184,9 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(inspectorStarted).toBe(true));
     terminal.type("/fork\r");
     await vi.waitFor(() => {
-      const currentTrailId = runtime.listTrailSummaries()[0]?.trailId;
+      const currentTrailId = runtime
+        .listTrails()
+        .find((trail) => trail.parentTrailId === originalTrailId)?.trailId;
       expect(currentTrailId).toBeDefined();
       expect(currentTrailId).not.toBe(originalTrailId);
     });
@@ -193,6 +195,77 @@ describe("Noesis TUI lifecycle", () => {
 
     expect(terminal.output).not.toContain("STALE_INSPECTOR_REJECTION");
     expect(terminal.output).toContain("● IDLE");
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("authenticates a new provider in a masked modal before switching sessions", async () => {
+    const modelPrompts: string[] = [];
+    const base = await createRuntime({
+      name: "provider-auth-route-scripted",
+      async run(request) {
+        modelPrompts.push(request.prompt);
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const secret = "sk-route-secret-never-render";
+    let storedSecret: string | undefined;
+    const runtime = Object.freeze({
+      ...base,
+      listModelRoutes: () =>
+        Object.freeze([
+          Object.freeze({
+            provider: "openrouter",
+            providerName: "OpenRouter",
+            model: "openai/gpt-test",
+            name: "Test model",
+            thinkingLevels: Object.freeze(["off"] as const),
+            default: true,
+            allowsCustomModelIds: false,
+          }),
+        ]),
+      providerAuthStatus: async (provider: string) => ({
+        provider,
+        configured: false,
+        source: "none" as const,
+      }),
+      authenticateProvider: async (
+        provider: string,
+        callbacks: Parameters<NonNullable<NoesisTuiRuntime["authenticateProvider"]>>[1],
+      ) => {
+        storedSecret = await callbacks.prompt({
+          type: "secret",
+          message: "Paste your OpenRouter API key",
+        });
+        return { provider, configured: true, source: "stored-api-key" as const };
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+    if (!runtime.listTrails()[0]) throw new Error("Expected the initial trail");
+
+    terminal.type("/provider openrouter\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("AUTHENTICATE · OpenRouter"));
+    terminal.send(`\u001b[200~${secret}\u001b[201~`);
+    await vi.waitFor(() => expect(terminal.output).toContain("•".repeat(secret.length)));
+    terminal.type("\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("openrouter/openai/gpt-test"));
+
+    expect(storedSecret).toBe(secret);
+    expect(terminal.output).not.toContain(secret);
+    expect(modelPrompts).toEqual([]);
+    expect(runtime.listTrails()).toHaveLength(1);
+    await expect(runtime.getTranscript(runtime.listTrails()[0]?.trailId ?? "missing")).resolves.toEqual([]);
+
     terminal.type("/quit\n");
     await running;
   });
@@ -442,7 +515,7 @@ describe("Noesis TUI lifecycle", () => {
     expect(discoveryAttempts).toBe(1);
     expect(terminal.output).not.toContain("broken skill package");
     terminal.type("/help\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("/model provider/model"));
+    await vi.waitFor(() => expect(terminal.output).toContain("/provider ID · /model ID"));
     terminal.type("/quit\n");
     await running;
   });
@@ -476,7 +549,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
     expect(discoveryAttempts).toBe(1);
     terminal.type("/help\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("/model provider/model"));
+    await vi.waitFor(() => expect(terminal.output).toContain("/provider ID · /model ID"));
     terminal.type("/quit\n");
     await running;
   });
@@ -832,7 +905,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("first\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("● THINKING"));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] THINKING/u));
     terminal.type("promote me\r");
     await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
     terminal.type("/steer\r");
@@ -920,7 +993,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("first\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("● THINKING"));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] THINKING/u));
     terminal.type("/compact\r");
     await vi.waitFor(() => expect(terminal.output).toContain("changes the session"));
     expect(compact).not.toHaveBeenCalled();
@@ -963,7 +1036,7 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
-  test("two plain launches create distinct fresh sessions without prior conversation", async () => {
+  test("plain launches discard empty sessions instead of adding resume clutter", async () => {
     const runtime = await createRuntime({
       name: "fresh-scripted",
       async run(request) {
@@ -997,14 +1070,8 @@ describe("Noesis TUI lifecycle", () => {
     await second;
 
     const summaries = runtime.listTrailSummaries();
-    expect(summaries).toHaveLength(3);
-    expect(new Set(summaries.map((summary) => summary.trailId)).size).toBe(3);
-    expect(summaries.filter((summary) => summary.trailId !== historical.trailId)).toHaveLength(2);
-    expect(
-      summaries
-        .filter((summary) => summary.trailId !== historical.trailId)
-        .every((summary) => summary.turnCount === 0),
-    ).toBe(true);
+    expect(summaries.map((summary) => summary.trailId)).toEqual([historical.trailId]);
+    expect(runtime.listTrails().map((trail) => trail.trailId)).toEqual([historical.trailId]);
   });
 
   test("direct resume restores only the selected session history", async () => {
@@ -1384,7 +1451,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("use the snapshot\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("● TOOL"));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] TOOL/u));
     await vi.waitFor(() => expect(terminal.output).toContain("● inspect"));
     expect(terminal.output).not.toContain("ACTIONS");
     expect(terminal.output).toContain("inspect");
@@ -1569,6 +1636,69 @@ describe("Noesis TUI lifecycle", () => {
 
     terminal.send("\u001b");
     await vi.waitFor(() => expect(terminal.output).toContain("↑/↓ scroll"));
+
+    terminal.send("\u001b");
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("handles Kitty press and release events once during transcript inspection", async () => {
+    const runtime = await createRuntime({
+      name: "kitty-inspector-scripted",
+      async run(request, emit) {
+        emit({ type: "status", status: "started" });
+        for (const [index, label] of ["oldest", "middle", "newest"].entries()) {
+          emit({
+            type: "tool-start",
+            actionId: `execute-${String(index + 1)}`,
+            name: "execute",
+            input: { source: `return ${JSON.stringify(label)};` },
+          });
+          emit({
+            type: "tool-end",
+            actionId: `execute-${String(index + 1)}`,
+            name: "execute",
+            isError: false,
+            result: { calls: 0 },
+          });
+        }
+        emit({ type: "status", status: "completed" });
+        return {
+          text: "done",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    terminal.type("run it\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("✓ execute"));
+
+    // Press and release must act as one Ctrl+O, leaving inspection active on the newest action.
+    terminal.send("\u001b[111;5:1u");
+    terminal.send("\u001b[111;5:3u");
+    // Press and release must move exactly once, from newest to middle rather than oldest.
+    terminal.send("\u001b[1;1:1A");
+    terminal.send("\u001b[1;1:3A");
+    const beforeInspector = terminal.output.length;
+    terminal.send("\r");
+    await vi.waitFor(() => expect(terminal.output.slice(beforeInspector)).toContain('return "middle";'));
+    expect(terminal.output.slice(beforeInspector)).not.toContain('return "oldest";');
+
+    terminal.send("\u001b[27;1:1u");
+    terminal.send("\u001b[27;1:3u");
+    await vi.waitFor(() =>
+      expect(terminal.output.lastIndexOf("↑/↓ scroll")).toBeGreaterThan(
+        terminal.output.lastIndexOf("esc close"),
+      ),
+    );
 
     terminal.send("\u001b");
     terminal.type("/quit\n");
@@ -1830,13 +1960,13 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("block this turn\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("● STREAMING"));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] STREAMING/u));
     terminal.type("another turn\r");
     await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
     expect(runs).toBe(1);
 
     terminal.send("\u001b");
-    await vi.waitFor(() => expect(terminal.output).toContain("● ABORTING"));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] ABORTING/u));
     await vi.waitFor(() => expect(terminal.output).toContain("Turn interrupted."));
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
     expect(abort).toHaveBeenCalledOnce();
@@ -1891,7 +2021,7 @@ describe("Noesis TUI lifecycle", () => {
 
     expect(abort).not.toHaveBeenCalled();
     expect(terminal.stops).toBe(0);
-    expect(terminal.output).toContain("● STREAMING");
+    expect(terminal.output).toMatch(/[◐◓◑◒] STREAMING/u);
 
     terminal.send("\u0003");
     await running;
@@ -1951,7 +2081,7 @@ describe("Noesis TUI lifecycle", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 40));
 
     expect(abort).not.toHaveBeenCalled();
-    expect(terminal.output).toContain("● THINKING");
+    expect(terminal.output).toMatch(/[◐◓◑◒] THINKING/u);
 
     terminal.send("\u001b");
     await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
@@ -1985,10 +2115,12 @@ describe("Noesis TUI lifecycle", () => {
     mainTerminal.type("/quit\n");
     await main;
 
-    for (let index = 0; index < 12; index += 1)
-      await runtime.startTrail({
+    for (let index = 0; index < 12; index += 1) {
+      const trail = await runtime.startTrail({
         title: `picker resize ${String(index).padStart(2, "0")}`,
       });
+      await runtime.runTurn(trail.trailId, `picker history ${String(index)}`);
+    }
     const pickerTerminal = createTestTerminal();
     pickerTerminal.resize(100, 30);
     const picker = startNoesisTui(runtime, { session: { mode: "pick" } }, pickerTerminal);
@@ -2025,7 +2157,7 @@ describe("Noesis TUI lifecycle", () => {
       expect(terminal.output).toContain("learning, experiments, activation, and revert run ambiently"),
     );
     expect(terminal.output).not.toContain("/learn · /evaluate");
-    expect(terminal.output).toContain("/model provider/model");
+    expect(terminal.output).toContain("/provider ID · /model ID");
 
     terminal.type("/quit\n");
     await running;
@@ -2110,6 +2242,93 @@ describe("Noesis TUI lifecycle", () => {
     await expect(cancelled).resolves.toBeUndefined();
     expect(cancelledTerminal.drains).toBe(1);
     expect(cancelledTerminal.stops).toBe(1);
+  });
+
+  test("opens the saved-session picker from /resume and hydrates the selected session", async () => {
+    const runtime = await createRuntime({
+      name: "slash-resume-scripted",
+      async run(request) {
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const older = await runtime.startTrail({ title: "older" });
+    await runtime.runTurn(older.trailId, "older-history");
+    const newer = await runtime.startTrail({ title: "newer" });
+    await runtime.runTurn(newer.trailId, "newer-history");
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(
+      runtime,
+      { session: { mode: "resume", trailId: newer.trailId } },
+      terminal,
+    );
+    await vi.waitFor(() => expect(terminal.output).toContain("newer-history"));
+
+    terminal.type("/resume\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("resume a session"));
+    terminal.send("\u001b[B");
+    terminal.send("\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("older-history"));
+
+    expect(runtime.resumedTrailIds.at(-1)).toBe(older.trailId);
+    terminal.type("/quit\n");
+    await running;
+  });
+
+  test("confirms session deletion in /resume without allowing the current session to be deleted", async () => {
+    const runtime = await createRuntime({
+      name: "slash-delete-session-scripted",
+      async run(request) {
+        return {
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const older = await runtime.startTrail({ title: "older" });
+    await runtime.runTurn(older.trailId, "older-history");
+    const current = await runtime.startTrail({ title: "current" });
+    await runtime.runTurn(current.trailId, "current-history");
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(
+      runtime,
+      { session: { mode: "resume", trailId: current.trailId } },
+      terminal,
+    );
+    await vi.waitFor(() => expect(terminal.output).toContain("current-history"));
+
+    terminal.type("/resume\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("d delete"));
+    terminal.send("d");
+    await vi.waitFor(() => expect(terminal.output).toContain("current session cannot be deleted"));
+    terminal.send("\u001b[B");
+    terminal.send("d");
+    await vi.waitFor(() => expect(terminal.output).toContain("Delete from resume and search?"));
+    terminal.send("\r");
+    expect(runtime.listTrailSummaries().map((summary) => summary.trailId)).toEqual(
+      expect.arrayContaining([current.trailId, older.trailId]),
+    );
+    expect(terminal.output).toContain("d again to delete · Esc keep");
+    terminal.send("d");
+    await vi.waitFor(() => expect(terminal.output).toContain("Session deleted from resume and search."));
+
+    expect(runtime.listTrailSummaries().map((summary) => summary.trailId)).toEqual([current.trailId]);
+    expect(() => runtime.getTrail(older.trailId)).toThrow(`Trail not found: ${older.trailId}`);
+    terminal.send("\u001b");
+    terminal.type("/quit\n");
+    await running;
   });
 
   test("invalid direct session IDs fail actionably without starting the terminal", async () => {

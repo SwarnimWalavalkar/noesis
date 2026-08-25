@@ -11,6 +11,7 @@ import {
   createNoesisCommandAutocompleteProvider,
   loadSkillSlashCommands,
   type SkillSlashCommand,
+  type TuiCommandAutocompleteContext,
 } from "./command-autocomplete.ts";
 import { ANSI, elideText, styled } from "./theme.ts";
 
@@ -101,6 +102,7 @@ export function createSafeEditor(
   selectTheme: SelectListTheme = createSelectTheme(colorEnabled),
   height: () => number = () => Number.POSITIVE_INFINITY,
   skills: readonly SkillSlashCommand[] = [],
+  autocompleteContext: TuiCommandAutocompleteContext = {},
 ): SafeEditor {
   const editor = new Editor(
     tui,
@@ -110,7 +112,7 @@ export function createSafeEditor(
     },
     { paddingX: 1 },
   );
-  editor.setAutocompleteProvider(createNoesisCommandAutocompleteProvider(skills));
+  editor.setAutocompleteProvider(createNoesisCommandAutocompleteProvider(skills, autocompleteContext));
   let inputState: SafeEditorInputState = { kind: "keyboard", pending: "" };
   let ambiguityTimer: NodeJS.Timeout | undefined;
   let submit: ((text: string) => void) | undefined;
@@ -148,7 +150,11 @@ export function createSafeEditor(
       .join("");
     if (!safe) return;
     if (matchesKey(safe, "escape")) {
-      const standaloneEscape = pendingStandaloneEscape;
+      // A lone ESC is delayed while it may still become a fragmented paste marker. Kitty and
+      // modifyOtherKeys encode Escape as one complete sequence, so they can bind to current state
+      // immediately without weakening that ambiguity boundary.
+      const standaloneEscape =
+        pendingStandaloneEscape ?? (safe === "\u001b" ? undefined : createStandaloneEscapeHandler?.());
       pendingStandaloneEscape = undefined;
       if (standaloneEscape?.()) return;
     }
@@ -314,7 +320,9 @@ export function createSafeEditor(
       tui.requestRender();
     },
     setSkillCommands: (nextSkills) => {
-      editor.setAutocompleteProvider(createNoesisCommandAutocompleteProvider(nextSkills));
+      editor.setAutocompleteProvider(
+        createNoesisCommandAutocompleteProvider(nextSkills, autocompleteContext),
+      );
       tui.requestRender();
     },
     capturePotentialPasteInput: (data) => {

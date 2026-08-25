@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxText, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import {
   type AgentRuntimeEvent,
   type FrozenRevisionMaterial,
@@ -274,6 +274,54 @@ describe("agent runtime factories", () => {
     deltas.beginMessage();
     expect(deltas.push("Grounded answer.")).toBe("\n\nGrounded answer.");
     expect(deltas.text()).toBe("I will inspect the snapshot.\n\nGrounded answer.");
+  });
+
+  test("emits visible reasoning separately from assistant conversation text", async () => {
+    const controlled = createControlledPiModels({
+      respond: () =>
+        fauxAssistantMessage([
+          fauxThinking("Inspect the evidence before answering."),
+          fauxText("The evidence supports the answer."),
+        ]),
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+      now: () => "2026-08-25T00:00:00.000Z",
+    });
+    const events: AgentRuntimeEvent[] = [];
+
+    await expect(
+      runtime.run(
+        {
+          trailId: "trail-reasoning-events",
+          provider: CONTROLLED_PI_PROVIDER,
+          model: CONTROLLED_PI_MODEL,
+          thinkingLevel: "high",
+          systemPrompt: "Reason, then answer.",
+          prompt: "What does the evidence show?",
+          activeCapabilities: [],
+        },
+        (event) => events.push(event),
+      ),
+    ).resolves.toMatchObject({ text: "The evidence supports the answer." });
+
+    expect(
+      events
+        .filter((event) => event.type === "reasoning-delta")
+        .map((event) => event.text)
+        .join(""),
+    ).toBe("Inspect the evidence before answering.");
+    expect(events).toContainEqual({
+      type: "reasoning-message",
+      text: "Inspect the evidence before answering.",
+      timelineSequence: 1,
+      createdAt: "2026-08-25T00:00:00.000Z",
+    });
+    expect(events).toContainEqual({
+      type: "assistant-message",
+      text: "The evidence supports the answer.",
+      timelineSequence: 2,
+      createdAt: "2026-08-25T00:00:00.000Z",
+    });
   });
 
   test("preserves prior conversation roles instead of promoting history into the system prompt", async () => {

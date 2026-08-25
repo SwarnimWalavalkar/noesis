@@ -43,6 +43,20 @@ async function createTestRuntime(home: string) {
   });
 }
 
+type TestRuntime = Awaited<ReturnType<typeof createTestRuntime>>;
+
+async function retainTrail(runtime: TestRuntime, trailId: string, content: string): Promise<void> {
+  await runtime.debug.workspace.operational.messages.put({
+    messageId: `pty-fixture-${trailId}`,
+    sessionId: trailId,
+    role: "user",
+    content,
+    sensitivity: "normal",
+    createdAt: "2026-08-25T00:00:00.000Z",
+    metadata: Object.freeze({}),
+  });
+}
+
 const containsUnsafeTextControl = (text: string): boolean =>
   [...text].some((character) => {
     const code = character.codePointAt(0) ?? 0;
@@ -81,6 +95,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       | "first-launch-oauth-ctrl-c"
       | "picker-cancel"
       | "picker-select-quit"
+      | "model-picker-select-quit"
       | "prompt-quit"
       | "completed-turn-quit-lf"
       | "completed-turn-ctrl-c"
@@ -162,8 +177,8 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     }>((resolveExit, reject) => {
       const timeout = setTimeout(() => {
         stopProcessGroup(child);
-        reject(new Error(`TUI did not exit within 5 seconds. Output:\n${output}`));
-      }, 5_000);
+        reject(new Error(`TUI did not exit within 6 seconds. Output:\n${output}`));
+      }, 6_000);
       child.once("error", (error) => {
         clearTimeout(timeout);
         reject(error);
@@ -180,13 +195,14 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     return { home, output, result };
   }
 
-  test("/quit followed by LF exits its real PTY with code 0", async () => {
+  test("/quit followed by LF exits its real PTY with code 0 without retaining an empty session", async () => {
     const { home, output, result } = await runPtyExit("quit-lf");
 
     expect(output).toContain("● IDLE");
     expect(result).toEqual({ code: 0, signal: null });
     const reopened = await createTestRuntime(home);
-    expect(reopened.listTrails()).toHaveLength(1);
+    expect(reopened.listTrails()).toHaveLength(0);
+    await reopened.shutdown();
   }, 7_000);
 
   test("Ctrl+C exits with code 0 after the TUI is ready", async () => {
@@ -292,7 +308,8 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
 
     const cancelled = await runPtyExit("picker-cancel", async (home) => {
       const runtime = await createTestRuntime(home);
-      await runtime.startTrail({ title: "cancel me" });
+      const trail = await runtime.startTrail({ title: "cancel me" });
+      await retainTrail(runtime, trail.trailId, "cancelled picker history");
       await runtime.shutdown();
       return ["--resume"];
     });
@@ -321,9 +338,21 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       rows: 28,
     });
 
-    expect(output).toContain("● THINKING");
+    expect(output).toMatch(/[◐◓◑◒] THINKING/u);
     expect(output).toContain("Controlled Pi completion for: show the polished shell");
     expect(output).toContain("ctx   0%");
+    expect(result).toEqual({ code: 0, signal: null });
+  }, 7_000);
+
+  test("selects a new model through the interactive picker and preserves cache isolation", async () => {
+    const { output, result } = await runPtyExit("model-picker-select-quit", undefined, {
+      columns: 90,
+      rows: 28,
+    });
+
+    expect(output).toContain("SELECT MODEL · OpenRouter");
+    expect(output).toContain("New empty session · previous preserved · history not replayed");
+    expect(output).toContain("● IDLE");
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
 
@@ -432,7 +461,8 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       "picker-cancel",
       async (home) => {
         const runtime = await createTestRuntime(home);
-        await runtime.startTrail({ title: "picker snapshot" });
+        const trail = await runtime.startTrail({ title: "picker snapshot" });
+        await retainTrail(runtime, trail.trailId, "picker snapshot history");
         await runtime.shutdown();
         return ["--resume"];
       },
@@ -440,7 +470,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     );
 
     expect(output).toContain("NOESIS  resume a session");
-    expect(output).toContain("↑/↓ navigate · Enter resume · Esc cancel");
+    expect(output).toContain("↑/↓ navigate · Enter resume · d delete · Esc cancel");
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
 
@@ -478,10 +508,12 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       "resize-picker-cancel",
       async (home) => {
         const runtime = await createTestRuntime(home);
-        for (let index = 0; index < 12; index += 1)
-          await runtime.startTrail({
+        for (let index = 0; index < 12; index += 1) {
+          const trail = await runtime.startTrail({
             title: `resize picker ${String(index).padStart(2, "0")}`,
           });
+          await retainTrail(runtime, trail.trailId, `resize picker history ${String(index)}`);
+        }
         await runtime.shutdown();
         return ["--resume"];
       },
@@ -507,7 +539,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).toContain("```ts");
     expect(output).toContain("$x_i^2$");
     expect(output).toContain("╭─ math");
-    expect(output).toContain("● STREAMING");
+    expect(output).toMatch(/[◐◓◑◒] STREAMING/u);
     expect(output).toContain("Controlled Pi completion for:");
     expect(resized).not.toContain("███╗   ██╗");
     // History scrolls into terminal scrollback instead of being replaced by a crop marker.

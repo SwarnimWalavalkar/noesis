@@ -195,7 +195,11 @@ describe("runtime transcript projection", () => {
     expect(afterRestart).toEqual(beforeRestart);
     expect(
       afterRestart.map((entry) =>
-        entry.kind === "message" ? `${entry.kind}:${entry.role}` : `${entry.kind}:${entry.name}`,
+        entry.kind === "message"
+          ? `${entry.kind}:${entry.role}`
+          : entry.kind === "action"
+            ? `${entry.kind}:${entry.name}`
+            : `${entry.kind}:trace`,
       ),
     ).toEqual([
       "message:user",
@@ -315,12 +319,12 @@ describe("runtime transcript projection", () => {
     }
     expect(
       (await loadRuntimeTranscript(workspace, "session-source-order")).map((entry) =>
-        entry.kind === "message" ? entry.text : entry.name,
+        entry.kind === "action" ? entry.name : entry.text,
       ),
     ).toEqual(["ordinary user", "steer earlier", "steer later", "assistant"]);
     expect(
       (await loadRuntimeTranscript(workspace, "session-inherited-order")).map((entry) =>
-        entry.kind === "message" ? entry.text : entry.name,
+        entry.kind === "action" ? entry.name : entry.text,
       ),
     ).toEqual(["ordinary user", "steer", "assistant"]);
     workspace.close();
@@ -361,22 +365,28 @@ describe("runtime transcript projection", () => {
         timelineSequence: 0,
       },
       {
+        messageId: "turn-timeline:reasoning:1",
+        role: "system" as const,
+        content: "Inspect durable evidence",
+        timelineSequence: 1,
+      },
+      {
         messageId: "turn-timeline:assistant:1",
         role: "assistant" as const,
         content: "First boundary",
-        timelineSequence: 1,
+        timelineSequence: 2,
       },
       {
         messageId: "turn-timeline:steer:intent",
         role: "user" as const,
         content: "steer",
-        timelineSequence: 4,
+        timelineSequence: 5,
       },
       {
         messageId: "turn-timeline:assistant:4",
         role: "assistant" as const,
         content: "Second boundary",
-        timelineSequence: 5,
+        timelineSequence: 6,
       },
     ]) {
       // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
@@ -389,7 +399,8 @@ describe("runtime transcript projection", () => {
           createConditionalObject({
             turnId: "turn-timeline",
           } as const)
-            .addOptional(message.timelineSequence === 4 ? { deliveryMode: "steer" } : undefined)
+            .addOptional(message.timelineSequence === 5 ? { deliveryMode: "steer" } : undefined)
+            .addOptional(message.role === "system" ? { presentation: "reasoning" } : undefined)
             .finish(),
         ),
       });
@@ -401,7 +412,7 @@ describe("runtime transcript projection", () => {
       toolName: "execute",
       request: {},
       response: {},
-      timelineSequence: 2,
+      timelineSequence: 3,
       status: "completed",
       sensitivity: "normal",
       createdAt,
@@ -415,7 +426,7 @@ describe("runtime transcript projection", () => {
       toolName: "shell.run",
       request: { command: "pwd" },
       response: { stdout: "/workspace" },
-      timelineSequence: 3,
+      timelineSequence: 4,
       status: "completed",
       sensitivity: "normal",
       createdAt,
@@ -426,8 +437,14 @@ describe("runtime transcript projection", () => {
     const reopened = await createWorkspaceStore(root);
     const afterRestart = await loadRuntimeTranscript(reopened, "session-turn-timeline");
     expect(afterRestart).toEqual(beforeRestart);
-    expect(afterRestart.map((entry) => (entry.kind === "message" ? entry.text : entry.name))).toEqual([
+    expect(afterRestart[1]).toMatchObject({
+      kind: "reasoning",
+      text: "Inspect durable evidence",
+      turnId: "turn-timeline",
+    });
+    expect(afterRestart.map((entry) => (entry.kind === "action" ? entry.name : entry.text))).toEqual([
       "start",
+      "Inspect durable evidence",
       "First boundary",
       "execute",
       "shell.run",

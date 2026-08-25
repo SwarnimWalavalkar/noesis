@@ -237,6 +237,45 @@ describe("WorkspaceStore", () => {
     roots.push(root);
     return root;
   };
+  test("purges empty sessions and retains referenced conversation evidence behind a deletion tombstone", async () => {
+    const store = await createWorkspaceStore(await temporary("session-deletion"));
+    await store.operational.sessions.put(session("session-empty"));
+    await expect(
+      store.operational.sessions.deleteIfEmpty("session-empty", "2026-08-25T00:00:00.000Z"),
+    ).resolves.toBe(true);
+    await expect(store.operational.sessions.get("session-empty")).resolves.toBeUndefined();
+
+    await store.operational.sessions.put({ ...session("session-running"), status: "running" });
+    await expect(
+      store.operational.sessions.deleteIfEmpty("session-running", "2026-08-25T00:00:00.000Z"),
+    ).resolves.toBe(false);
+    await expect(store.operational.sessions.get("session-running")).resolves.toBeDefined();
+
+    await store.operational.sessions.put(session("session-retained"));
+    await store.operational.messages.put({
+      messageId: "message-retained",
+      sessionId: "session-retained",
+      role: "user",
+      content: "Delete this conversation from ordinary history.",
+      sensitivity: "normal",
+      createdAt: "2026-08-25T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    await store.search.rebuildDocuments();
+    await expect(
+      store.operational.sessions.deleteIfEmpty("session-retained", "2026-08-25T00:00:01.000Z"),
+    ).resolves.toBe(false);
+    await expect(
+      store.operational.sessions.delete("session-retained", "2026-08-25T00:00:01.000Z"),
+    ).resolves.toBe("retained-for-audit");
+    await expect(store.operational.sessions.get("session-retained")).resolves.toMatchObject({
+      metadata: { deletedAt: "2026-08-25T00:00:01.000Z" },
+    });
+    expect((await store.search.listDocuments()).map((document) => document.sessionId)).not.toContain(
+      "session-retained",
+    );
+    store.close();
+  });
   test("indexes tool calls only after they reach an immutable terminal status", async () => {
     const store = await createWorkspaceStore(await temporary("search-terminal-tool-calls"));
     await store.operational.sessions.put(session("session-search"));

@@ -71,6 +71,22 @@ function assistantText(message: { readonly content: readonly unknown[] }): strin
     })
     .join("");
 }
+function assistantReasoning(message: { readonly content: readonly unknown[] }): string {
+  return message.content
+    .flatMap((part) => {
+      if (
+        !part ||
+        typeof part !== "object" ||
+        !("type" in part) ||
+        part.type !== "thinking" ||
+        !("thinking" in part) ||
+        ("redacted" in part && part.redacted === true)
+      )
+        return [];
+      return typeof part.thinking === "string" && part.thinking.length > 0 ? [part.thinking] : [];
+    })
+    .join("\n\n");
+}
 function userMessageText(message: { readonly content: string | readonly unknown[] }): string {
   if (typeof message.content === "string") return message.content;
   return message.content
@@ -667,6 +683,15 @@ export function createPiAgentRuntime(
             );
           }
         } else if (event.type === "message_end" && event.message.role === "assistant") {
+          const reasoning = assistantReasoning(event.message);
+          if (reasoning.length > 0) {
+            emit({
+              type: "reasoning-message",
+              text: reasoning,
+              timelineSequence: claimTimelineSequence(),
+              createdAt: now(),
+            });
+          }
           const text = assistantText(event.message);
           if (text.length === 0) return;
           const boundary = Object.freeze({
@@ -679,6 +704,12 @@ export function createPiAgentRuntime(
         } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
           const delta = assistantDeltas.push(event.assistantMessageEvent.delta);
           if (delta) emit({ type: "delta", text: delta });
+        } else if (
+          event.type === "message_update" &&
+          event.assistantMessageEvent.type === "thinking_delta" &&
+          event.assistantMessageEvent.delta.length > 0
+        ) {
+          emit({ type: "reasoning-delta", text: event.assistantMessageEvent.delta });
         } else if (event.type === "tool_execution_start") {
           if (directToolNames.has(event.toolName)) {
             pendingDirectToolInputs.set(event.toolCallId, toAgentActionPayload(event.args));

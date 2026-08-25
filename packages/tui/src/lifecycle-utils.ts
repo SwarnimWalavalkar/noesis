@@ -5,6 +5,11 @@ export type ShutdownSettlement =
   | { readonly status: "rejected"; readonly error: unknown };
 
 export const INSPECTOR_PREVIEW_CHARACTERS = 24_000;
+export const TUI_TIMINGS = Object.freeze({
+  shutdownGraceMs: 250,
+  interruptFeedbackMs: 20,
+  closingFeedbackMs: 20,
+});
 const INSPECTOR_PAGE_HEADER_RESERVE = 160;
 
 function utf16SafeBoundary(text: string, requestedEnd: number): number {

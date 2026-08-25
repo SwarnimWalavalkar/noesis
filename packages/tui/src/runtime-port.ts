@@ -545,6 +545,8 @@ export type NoesisTuiRuntime = Pick<
   | "interact"
   | "inspectInteraction"
   | "resumeTrail"
+  | "deleteTrail"
+  | "discardTrailIfEmpty"
   | "forkTrail"
   | "compact"
 > & {
@@ -559,6 +561,10 @@ export type NoesisTuiRuntime = Pick<
     providerId: string,
     callbacks: TuiProviderAuthCallbacks,
   ) => Promise<TuiProviderAuthStatus>;
+  readonly setTrailThinkingLevel?: (
+    trailId: string,
+    thinkingLevel: AgentThinkingLevel,
+  ) => Promise<import("@noesis/runtime").TrailState>;
   readonly listPrograms?: () => Promise<readonly TuiProgramSummary[]>;
   readonly inspectProgram?: (
     mode: "script" | "workflow",
