@@ -260,17 +260,9 @@ const PRIMARY_KEY_BY_TABLE = {
   capability_feedback: "feedback_id",
   capability_gate_requests: "gate_request_id",
 } satisfies Readonly<Record<DatabaseTable, string>>;
-const DURABLE_EVIDENCE_REFERENCE_COLUMNS = Object.freeze([
-  ["artifacts", "relationship_refs_json"],
-  ["file_revisions", "provenance_refs_json"],
-  ["activity_log", "references_json"],
-  ["jobs", "payload_refs_json"],
-  ["experiment_observations", "evidence_refs_json"],
-  ["experiment_research_runs", "evidence_refs_json"],
-  ["experiment_outcomes", "evidence_refs_json"],
-  ["successor_lineage_inputs", "evidence_refs_json"],
-  ["model_calls", "context_refs_json"],
-] as const);
+function quoteSqlIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
 function permitsTransition(
   transitions: Readonly<Record<string, readonly string[]>>,
   from: string,
@@ -2194,18 +2186,32 @@ function createOperationalRepositories(
       "present",
     ) === 1;
   const sessionHasDurableEvidenceReference = (sessionId: string): boolean =>
-    DURABLE_EVIDENCE_REFERENCE_COLUMNS.some(([table, column]) =>
-      Boolean(
-        db
-          .prepare(`SELECT 1
-            FROM ${table}, json_each(${column}) AS reference
-            WHERE json_extract(reference.value, '$.kind') = 'database_row'
-              AND json_extract(reference.value, '$.table') = 'sessions'
-              AND json_extract(reference.value, '$.rowId') = ?
-            LIMIT 1`)
-          .get(sessionId),
-      ),
-    );
+    db
+      .prepare(`SELECT schema.name AS table_name, column.name AS column_name
+        FROM sqlite_schema AS schema
+        JOIN pragma_table_info(schema.name) AS column
+        WHERE schema.type = 'table'
+          AND schema.name NOT LIKE 'sqlite_%'
+          AND substr(column.name, -5) = '_json'`)
+      .all()
+      .some((row) => {
+        const table = quoteSqlIdentifier(requiredString(row, "table_name"));
+        const column = quoteSqlIdentifier(requiredString(row, "column_name"));
+        return (
+          db
+            .prepare(`SELECT 1
+              FROM ${table} AS record,
+                json_tree(
+                  CASE WHEN json_valid(record.${column}) THEN record.${column} ELSE NULL END
+                ) AS reference
+              WHERE reference.type = 'object'
+                AND json_extract(reference.value, '$.kind') = 'database_row'
+                AND json_extract(reference.value, '$.table') = 'sessions'
+                AND json_extract(reference.value, '$.rowId') = ?
+              LIMIT 1`)
+            .get(sessionId) !== undefined
+        );
+      });
   const removeSessionSearchDocuments = (sessionId: string): void => {
     db.prepare(`DELETE FROM search_fts
       WHERE document_id IN (SELECT document_id FROM search_documents WHERE session_id = ?)`).run(sessionId);

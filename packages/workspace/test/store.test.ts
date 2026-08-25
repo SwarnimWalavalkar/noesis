@@ -266,6 +266,32 @@ describe("WorkspaceStore", () => {
       metadata: { deletedAt: "2026-08-25T00:00:00.500Z" },
     });
 
+    await store.operational.sessions.put(session("session-nested-evidence-reference"));
+    await store.research.feedbackSignals.recordFeedbackSignal({
+      signalId: "feedback-session-reference",
+      kind: "explicit_correction",
+      scope: "session deletion",
+      evidenceRefs: Object.freeze([
+        {
+          kind: "database_row",
+          table: "sessions",
+          rowId: "session-nested-evidence-reference",
+        },
+      ]),
+      strength: 1,
+      novelty: 1,
+      sensitivity: "normal",
+    });
+    await expect(
+      store.operational.sessions.deleteIfEmpty(
+        "session-nested-evidence-reference",
+        "2026-08-25T00:00:00.750Z",
+      ),
+    ).resolves.toBe(true);
+    await expect(store.operational.sessions.get("session-nested-evidence-reference")).resolves.toMatchObject({
+      metadata: { deletedAt: "2026-08-25T00:00:00.750Z" },
+    });
+
     await store.operational.sessions.put({ ...session("session-running"), status: "running" });
     await expect(
       store.operational.sessions.deleteIfEmpty("session-running", "2026-08-25T00:00:00.000Z"),
