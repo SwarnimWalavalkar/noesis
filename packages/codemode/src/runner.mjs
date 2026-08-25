@@ -1,4 +1,5 @@
 import { createConditionalObject } from "@noesis/domain";
+import { parse } from "acorn";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
@@ -68,6 +69,20 @@ function boundedJsonSafe(value, maximum, label) {
 }
 function jsonSafe(value) {
   return JSON.parse(JSON.stringify(value === undefined ? null : value));
+}
+function sourceWithLastExpressionCompletion(source) {
+  const program = parse(source, {
+    ecmaVersion: "latest",
+    sourceType: "script",
+    allowAwaitOutsideFunction: true,
+    allowReturnOutsideFunction: true,
+  });
+  const finalStatement = program.body.at(-1);
+  if (finalStatement?.type !== "ExpressionStatement") return source;
+  return `${source.slice(0, finalStatement.start)}return (${source.slice(
+    finalStatement.expression.start,
+    finalStatement.expression.end,
+  )});${source.slice(finalStatement.end)}`;
 }
 function delegate(kind, payload) {
   const requestId = `sdk_${++sequence}`;
@@ -275,6 +290,10 @@ process.on("message", async (message) => {
     },
   });
   try {
+    const executableSource =
+      message.completionMode === "last-expression"
+        ? sourceWithLastExpressionCompletion(message.source)
+        : message.source;
     const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
     const execute = new AsyncFunction(
       "tools",
@@ -286,7 +305,7 @@ process.on("message", async (message) => {
       "input",
       "context",
       "agents",
-      `"use strict";\n${message.source}`,
+      `"use strict";\n${executableSource}`,
     );
     const value = await execute(
       tools,

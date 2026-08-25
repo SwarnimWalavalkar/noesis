@@ -47,7 +47,7 @@ describe("production codemode journey", () => {
           ? "The frozen execute skill is loaded."
           : controlledToolCallResponse(
               "execute",
-              { source: 'return await tools.skills.load({ name: "execute" });' },
+              { source: 'tools.skills.load({ name: "execute" })' },
               "call-load-execute-skill",
             ),
     });

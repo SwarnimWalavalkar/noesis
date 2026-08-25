@@ -72,6 +72,7 @@ type ParentMessage =
   | {
       readonly type: "run";
       readonly source: string;
+      readonly completionMode?: CodeExecutionCompletionMode;
       readonly storeEntries: readonly (readonly [string, JsonValue])[];
       readonly input?: JsonValue;
       readonly contextDocument?: CodeExecutionContextDocument;
@@ -145,6 +146,7 @@ export interface CodeExecutionRequest {
   readonly executionId?: string;
   readonly logicalExecutionId?: string;
   readonly source: string;
+  readonly completionMode?: CodeExecutionCompletionMode;
   readonly input?: JsonValue;
   readonly sessionId: string;
   readonly turnId?: string;
@@ -152,6 +154,7 @@ export interface CodeExecutionRequest {
   readonly timeoutMs?: number;
   readonly contextDocument?: CodeExecutionContextDocument;
 }
+export type CodeExecutionCompletionMode = "explicit" | "last-expression";
 export interface CodeExecutionContextDocument {
   readonly documentId: string;
   readonly path: string;
@@ -587,6 +590,9 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                   source: request.source,
                   storeEntries: [...(sessionStores.get(request.sessionId) ?? new Map()).entries()],
                 } as const)
+                  .addOptional(
+                    request.completionMode ? { completionMode: request.completionMode } : undefined,
+                  )
                   .addOptional(!(request.input === undefined) ? { input: request.input } : undefined)
                   .addOptional(
                     !(request.contextDocument === undefined)

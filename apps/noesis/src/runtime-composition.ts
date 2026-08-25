@@ -3789,6 +3789,7 @@ export async function createApplicationRuntimeComposition(
         const result = await runRecordedCode(
           createConditionalObject({
             source,
+            completionMode: "last-expression",
             sessionId: plan.sessionId,
             turnId: plan.turnId,
             signal: executeSignal,
