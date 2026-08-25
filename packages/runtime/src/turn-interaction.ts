@@ -36,7 +36,7 @@ export interface InteractionPendingIntent {
   readonly intentId: string;
   readonly text: string;
   readonly mode: "turn" | "steer";
-  readonly status: "pending" | "held";
+  readonly status: "pending" | "held" | "dispatching";
   readonly createdAt: string;
 }
 export interface InteractionActiveTurn {
@@ -133,6 +133,7 @@ export interface TurnInteractionIntentStore {
   }) => Promise<readonly UserIntentRecord[]>;
   readonly listPending: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
   readonly listHeld: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
+  readonly listDispatching: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
   readonly claimOldestPending: (request: {
     readonly sessionId: string;
     readonly targetTurnId: string;
@@ -292,7 +293,12 @@ const pendingIntent = (record: UserIntentRecord): InteractionPendingIntent =>
     intentId: record.intentId,
     text: intentText(record),
     mode: record.deliveryMode,
-    status: record.status === "held" ? ("held" as const) : ("pending" as const),
+    status:
+      record.status === "held"
+        ? ("held" as const)
+        : record.status === "dispatching"
+          ? ("dispatching" as const)
+          : ("pending" as const),
     createdAt: record.createdAt,
   });
 export function createTurnInteractionController(
@@ -338,11 +344,21 @@ export function createTurnInteractionController(
     sessionId: string,
     state: SessionInteractionState,
   ): Promise<InteractionSnapshot> => {
-    const [pending, held] = await Promise.all([
+    const [pending, held, dispatching] = await Promise.all([
       options.intents.listPending(sessionId),
       options.intents.listHeld(sessionId),
+      options.intents.listDispatching(sessionId),
     ]);
-    const available = [...pending, ...held].sort(
+    const available = [
+      ...pending,
+      ...held,
+      ...dispatching.filter(
+        (intent) =>
+          intent.deliveryMode === "steer" &&
+          state.active !== undefined &&
+          intent.targetTurnId === state.active.turnId,
+      ),
+    ].sort(
       (left, right) =>
         left.queueSequence - right.queueSequence || left.intentId.localeCompare(right.intentId),
     );
@@ -871,6 +887,7 @@ export function createTurnInteractionController(
             result: Object.freeze({ effect: "idle" as const, snapshot: await snapshot(sessionId, state) }),
           });
       }
+      await notifyState(sessionId, state);
       const heldIntent = steeringIntent;
       const settlement = enqueueSteerDelivery(state, async (): Promise<InteractionDispatchResult> => {
         let intent: UserIntentRecord | undefined = heldIntent;

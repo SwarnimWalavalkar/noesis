@@ -13,10 +13,8 @@ const MAX_STORE_ENTRIES = 256;
 const MAX_PROGRESS_VALUE_BYTES = 64 * 1024;
 const MAX_PROGRESS_BYTES = 256 * 1024;
 const MAX_CHILD_FRAME_BYTES = 1024 * 1024;
-const MAX_CHILD_IPC_BYTES = 8 * 1024 * 1024;
 const MAX_FAILURE_MESSAGE_BYTES = 32 * 1024;
 const MAX_FAILURE_STACK_BYTES = 96 * 1024;
-let childIpcBytes = 0;
 function rawSend(message) {
   if (typeof process.send !== "function") throw new Error("Codemode IPC channel is unavailable");
   process.send(message);
@@ -28,10 +26,6 @@ function send(message) {
   if (!terminalResultFrame && frameBytes > MAX_CHILD_FRAME_BYTES) {
     throw new Error(`Codemode IPC frame exceeds ${MAX_CHILD_FRAME_BYTES} bytes`);
   }
-  if (!terminalResultFrame && childIpcBytes + frameBytes > MAX_CHILD_IPC_BYTES) {
-    throw new Error(`Codemode IPC output exceeds ${MAX_CHILD_IPC_BYTES} bytes`);
-  }
-  if (!terminalResultFrame) childIpcBytes += frameBytes;
   rawSend(message);
 }
 function truncateUtf8(value, maximumBytes) {
@@ -254,11 +248,11 @@ process.on("message", async (message) => {
   const storeMutations = new Map();
   let progressBytes = 0;
   const emit = (value) => {
-    const safeValue = boundedJsonSafe(value, MAX_PROGRESS_VALUE_BYTES, "Codemode progress value");
-    progressBytes += Buffer.byteLength(JSON.stringify(safeValue), "utf8");
-    if (progressBytes > MAX_PROGRESS_BYTES) {
-      throw new Error(`Codemode progress exceeds ${MAX_PROGRESS_BYTES} bytes`);
-    }
+    const serialized = JSON.stringify(value === undefined ? null : value);
+    const valueBytes = Buffer.byteLength(serialized, "utf8");
+    if (valueBytes > MAX_PROGRESS_VALUE_BYTES || progressBytes + valueBytes > MAX_PROGRESS_BYTES) return;
+    const safeValue = JSON.parse(serialized);
+    progressBytes += valueBytes;
     send({ type: "progress", value: safeValue });
   };
   const notify = emit;

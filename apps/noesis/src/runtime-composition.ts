@@ -2,6 +2,7 @@ import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import type {
   AgentActionEvent,
+  AgentMessage,
   AgentRuntimeEvent,
   FrozenBaselineRef,
   FrozenTurnPlan,
@@ -103,9 +104,8 @@ import {
   type FrozenSessionToolResolver,
   type FrozenSubAgentRunPlan,
   frozenPlanMaterialUses,
-  MAX_SUBAGENT_MODEL_CALLS,
-  MAX_SUBAGENT_TOOL_CALLS,
   PI_SUBAGENT_SYSTEM_PROMPT,
+  SUBAGENT_AUTHORITY_COST,
   type PiCodeExecutionAdapter,
   type PiCodeExecutionEvent,
   type PiSubAgentRunTelemetry,
@@ -160,10 +160,6 @@ const HISTORY_RERANK_MIN_EXCERPT_CHARACTERS = 32;
 const HISTORY_RERANK_MAX_EXCERPT_CHARACTERS = 480;
 const HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE = 4096;
 const LATE_REFLECTION_REFRESH_MS = 5000;
-const MAX_SUBAGENT_PROMPT_CHARACTERS = 1_000_000;
-const MAX_SUBAGENT_PROMPT_PARTS = 32;
-const MAX_SUBAGENT_SYSTEM_PROMPT_CHARACTERS = 64 * 1024;
-const MAX_SUBAGENT_TOOLS = 16;
 const BASE_SYSTEM_PROMPT = [
   "Follow the user's instructions, use tools when useful, and finish the work.",
   "Use one direct tool for a simple operation and one coherent `execute` program for related multi-call work.",
@@ -220,6 +216,51 @@ const CapabilityRoutingDecisionSchema = z.strictObject({
     })
     .nullable(),
 });
+const CAPABILITY_ROUTER_NON_HISTORY_MESSAGES = 2;
+/**
+ * Keep a recent tail of complete conversational turns while reserving the current-turn and
+ * structured-output-contract slots required by the isolated role policy.
+ */
+export function capabilityRouterMessages(
+  request: TurnCapabilityRoutingRequest,
+  policy: RoleVariantConfiguration["contextPolicy"],
+): readonly AgentMessage[] {
+  const historyLimit = Math.max(0, policy.maxMessages - CAPABILITY_ROUTER_NON_HISTORY_MESSAGES);
+  const checkpoint =
+    historyLimit > 0 && request.priorConversation[0]?.messageId.startsWith("context-checkpoint:") === true
+      ? request.priorConversation[0]
+      : undefined;
+  const conversation = checkpoint ? request.priorConversation.slice(1) : request.priorConversation;
+  const tailLimit = Math.max(0, historyLimit - (checkpoint ? 1 : 0));
+  const tail = tailLimit === 0 ? [] : conversation.slice(-tailLimit);
+  const firstUserIndex = tail.findIndex((message) => message.role === "user");
+  const history = Object.freeze([
+    ...(checkpoint ? [checkpoint] : []),
+    ...(firstUserIndex < 0 ? [] : tail.slice(firstUserIndex)),
+  ]);
+  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+  return Object.freeze([
+    Object.freeze({
+      role: "user" as const,
+      name: "turn",
+      content: canonicalJson(
+        toJsonValue({
+          instruction:
+            "Use the current request and prior conversation to select only active capabilities whose scope and intent are meaningfully relevant. If any are selected, identify the one primary capability that should receive learning attribution. Abstain when none apply.",
+          userInput: request.userInput,
+          candidates: request.candidates,
+        }),
+      ),
+    }),
+    ...history.map((message) =>
+      Object.freeze({
+        role: "user" as const,
+        name: "prior_conversation",
+        content: canonicalJson(toJsonValue(message)),
+      }),
+    ),
+  ]);
+}
 const HistoryRerankItemSchema = z.strictObject({
   documentId: z.string().min(1).max(512),
   reason: z.string().min(1).max(512),
@@ -1260,7 +1301,6 @@ async function roleConfigurations(
           maxTools: 0,
           includeCapabilityRevisions: true,
         }),
-        timeoutMs: 120000,
         maxRetries: 0,
       });
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -2253,7 +2293,7 @@ export async function createApplicationRuntimeComposition(
         name: "programs.save",
         label: "Save program",
         description:
-          "Save one project Program. Script mode is bounded rerunnable JavaScript; workflow mode is a durable phased procedure. This records implementation mechanics only; attach the exact saved revision to a Capability for semantic applicability.",
+          "Save one project Program. Script mode is rerunnable JavaScript; workflow mode is a durable phased procedure. This records implementation mechanics only; attach the exact saved revision to a Capability for semantic applicability.",
         inputSchema: z.discriminatedUnion("mode", [
           z.strictObject({
             mode: z.literal("script"),
@@ -2265,7 +2305,7 @@ export async function createApplicationRuntimeComposition(
               .max(128 * 1024),
             inputSchema: z.record(z.string(), JsonValueSchema),
             outputSchema: z.record(z.string(), JsonValueSchema),
-            requiredTools: z.array(z.string().min(1)).max(128),
+            requiredTools: z.array(z.string().min(1)),
           }),
           z.strictObject({
             mode: z.literal("workflow"),
@@ -2273,7 +2313,7 @@ export async function createApplicationRuntimeComposition(
             description: z.string().min(1).max(2048),
             inputSchema: z.record(z.string(), JsonValueSchema),
             outputSchema: z.record(z.string(), JsonValueSchema),
-            phases: z.array(WorkflowPhaseSchema).min(1).max(64),
+            phases: z.array(WorkflowPhaseSchema).min(1),
           }),
         ]),
         outputSchema: ProgramSaveResultSchema,
@@ -2844,18 +2884,15 @@ export async function createApplicationRuntimeComposition(
         })
         .refine((range) => range.end >= range.start, "ContextView end must not precede start"),
     });
-    const subAgentPromptPartSchema = z.union([
-      z.string().max(MAX_SUBAGENT_PROMPT_CHARACTERS),
-      contextHandleSchema,
-    ]);
+    const subAgentPromptPartSchema = z.union([z.string(), contextHandleSchema]);
     const subAgentPromptSchema = z.union([
       subAgentPromptPartSchema,
-      z.array(subAgentPromptPartSchema).min(1).max(MAX_SUBAGENT_PROMPT_PARTS),
+      z.array(subAgentPromptPartSchema).min(1),
     ]);
     const subAgentInputSchema = z.strictObject({
-      systemPrompt: z.string().trim().min(1).max(MAX_SUBAGENT_SYSTEM_PROMPT_CHARACTERS).optional(),
+      systemPrompt: z.string().trim().min(1).optional(),
       prompt: subAgentPromptSchema,
-      tools: z.array(z.string().trim().min(1).max(256)).max(MAX_SUBAGENT_TOOLS).optional(),
+      tools: z.array(z.string().trim().min(1).max(256)).optional(),
       thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
     });
     type SubAgentPromptPart = z.infer<typeof subAgentPromptPartSchema>;
@@ -2867,7 +2904,7 @@ export async function createApplicationRuntimeComposition(
       name: "agents.run",
       label: "Run subagent",
       description:
-        "Run one bounded subagent. Supply its prompt, optional system prompt, optional canonical tool names, and optional thinking level. With no tools this is an isolated model query. Prompt parts may include ContextViews.",
+        "Run one subagent. Supply its prompt, optional system prompt, optional canonical tool names, and optional thinking level. With no tools this is an isolated model query. Prompt parts may include ContextViews.",
       identityMaterial: toJsonValue({
         adapterRevision: "agents-run-v1",
         defaults: plan.subAgentDefaults ?? null,
@@ -2877,7 +2914,7 @@ export async function createApplicationRuntimeComposition(
       effect: () => ({
         effect: "network",
         resource: `model:${plan.subAgentDefaults?.provider ?? "unavailable"}/${plan.subAgentDefaults?.model ?? "unavailable"}`,
-        estimatedCost: MAX_SUBAGENT_MODEL_CALLS,
+        estimatedCost: SUBAGENT_AUTHORITY_COST,
       }),
       execute: async (input, context) => {
         if (subAgentExecutionIds.has(context.executionId))
@@ -2968,8 +3005,6 @@ export async function createApplicationRuntimeComposition(
             }),
             budget: Object.freeze({
               requestTokenBudget: defaults.requestTokenBudget,
-              maxModelCalls: MAX_SUBAGENT_MODEL_CALLS,
-              maxToolCalls: MAX_SUBAGENT_TOOL_CALLS,
             }),
           } as const).finish(),
         );
@@ -3945,27 +3980,7 @@ export async function createApplicationRuntimeComposition(
             runId: `capability-route-${request.turnId}`,
             role: "capability_router",
             variant: roles.capability_router.variant,
-            messages: Object.freeze([
-              Object.freeze({
-                role: "user" as const,
-                name: "turn",
-                content: canonicalJson(
-                  toJsonValue({
-                    instruction:
-                      "Use the current request and prior conversation to select only active capabilities whose scope and intent are meaningfully relevant. If any are selected, identify the one primary capability that should receive learning attribution. Abstain when none apply.",
-                    userInput: request.userInput,
-                    candidates: request.candidates,
-                  }),
-                ),
-              }),
-              ...request.priorConversation.map((message) =>
-                Object.freeze({
-                  role: "user" as const,
-                  name: "prior_conversation",
-                  content: canonicalJson(toJsonValue(message)),
-                }),
-              ),
-            ]),
+            messages: capabilityRouterMessages(request, roles.capability_router.contextPolicy),
             evidenceRefs: Object.freeze([]),
             availableTools: Object.freeze([]),
           },

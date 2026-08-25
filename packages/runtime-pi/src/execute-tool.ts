@@ -9,7 +9,7 @@ const executeParameters = z.strictObject({
     .string()
     .min(1)
     .max(128 * 1024),
-  timeoutMs: z.number().int().min(100).max(600000).optional(),
+  timeoutMs: z.number().int().min(100).max(2_147_483_647).optional(),
 });
 const executeParametersJsonSchema = z.toJSONSchema(executeParameters);
 const MAX_SOURCE_BYTES = 128 * 1024;

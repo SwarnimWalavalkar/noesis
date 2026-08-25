@@ -3994,6 +3994,14 @@ function createOperationalRepositories(
              ORDER BY queue_sequence`)
           .all(sessionId)
           .map(decodeUserIntent),
+      listDispatching: async (sessionId: string) =>
+        db
+          .prepare(`SELECT *
+             FROM user_intents
+             WHERE session_id = ? AND status = 'dispatching'
+             ORDER BY queue_sequence`)
+          .all(sessionId)
+          .map(decodeUserIntent),
       listUnresolved: async (sessionId: string) =>
         db
           .prepare(`SELECT *

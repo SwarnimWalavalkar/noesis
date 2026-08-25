@@ -22,6 +22,7 @@ import {
 } from "@noesis/domain";
 import { createMcpHostManager, type LoadedMcpConfig, type McpOAuthCredentialStore } from "@noesis/mcp";
 import {
+  applyRoleContextPolicy,
   createPiAgentRoleRunner,
   createPiAgentRuntime,
   createPiSkillLibrary,
@@ -46,12 +47,80 @@ import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src
 import { createApplicationMcpIntegration } from "../src/mcp-integration.ts";
 import {
   type ApplicationRuntimeCompositionOptions,
+  capabilityRouterMessages,
   createApplicationRuntimeComposition,
   createModelHistoryRerankPort,
   waitForReflectionBarrier,
 } from "../src/runtime-composition.ts";
 import { researchLoopControlledResponse } from "./support/research-loop-controlled-response.ts";
 const roots: string[] = [];
+test("capability routing reserves its current-turn and output-contract message slots", () => {
+  const priorConversation = Object.freeze(
+    Array.from({ length: 12 }, (_, index) => [
+      Object.freeze({
+        messageId: `history-user-${String(index).padStart(2, "0")}`,
+        role: "user" as const,
+        content: `User turn ${String(index)}`,
+        createdAt: `2026-08-25T00:${String(index).padStart(2, "0")}:00.000Z`,
+      }),
+      Object.freeze({
+        messageId: `history-assistant-${String(index).padStart(2, "0")}`,
+        role: "assistant" as const,
+        content: `Assistant turn ${String(index)}`,
+        createdAt: `2026-08-25T00:${String(index).padStart(2, "0")}:30.000Z`,
+      }),
+    ]).flat(),
+  );
+  const policy = createRestrictedRoleContextPolicy("capability_router", {
+    policyId: "noesis-capability_router-bounded-v1",
+    maxMessages: 24,
+  });
+  const messages = capabilityRouterMessages(
+    {
+      sessionId: "session-router-bound",
+      turnId: "turn-router-bound",
+      userInput: "Continue",
+      priorConversation,
+      candidates: Object.freeze([
+        Object.freeze({
+          capabilityId: "capability-router-bound",
+          name: "Bounded router fixture",
+          scope: "global",
+          intent: "Exercise a long conversation",
+        }),
+      ]),
+    },
+    policy,
+  );
+  const selectedHistory = messages
+    .filter((message) => message.name === "prior_conversation")
+    .map((message) => z.object({ messageId: z.string() }).parse(JSON.parse(message.content)).messageId);
+
+  expect(messages.length + 1).toBeLessThanOrEqual(policy.maxMessages);
+  expect(() =>
+    applyRoleContextPolicy(
+      {
+        runId: "capability-route-turn-router-bound",
+        role: "capability_router",
+        variant: {
+          variantId: "noesis-capability-router-v1",
+          axis: "role",
+          configurationRefs: Object.freeze([]),
+        },
+        messages: Object.freeze([
+          ...messages,
+          Object.freeze({ role: "user" as const, name: "output_contract", content: "{}" }),
+        ]),
+        evidenceRefs: Object.freeze([]),
+        availableTools: Object.freeze([]),
+      },
+      policy,
+    ),
+  ).not.toThrow();
+  expect(selectedHistory).toHaveLength(22);
+  expect(selectedHistory[0]).toBe("history-user-01");
+  expect(selectedHistory.at(-1)).toBe("history-assistant-11");
+});
 function frozenHistoryForRequest(request: AgentRuntimeRequest): NonNullable<AgentRuntimeRequest["history"]> {
   if (!request.frozenTurnPlan) return Object.freeze([...(request.history ?? [])]);
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.

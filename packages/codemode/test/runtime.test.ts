@@ -256,6 +256,22 @@ describe("codemode runtime", () => {
     expect(firstStart?.callId).toMatch(/^tool_call_[a-f0-9]{64}$/u);
     expect(firstEnd?.callId).toBe(firstStart?.callId);
   });
+
+  it("does not impose a production SDK-call ceiling", async () => {
+    const result = await runtime().execute({
+      source: `
+        let total = 0;
+        for (let index = 0; index < 130; index += 1) {
+          total += (await tools.math.double({ value: 1 })).value;
+        }
+        return total;
+      `,
+      sessionId: "session-many-calls",
+    });
+
+    expect(result.value).toBe(260);
+    expect(result.calls).toBe(130);
+  });
   it("returns the final top-level expression only in last-expression mode", async () => {
     const code = runtime();
     await expect(
@@ -575,7 +591,7 @@ describe("codemode runtime", () => {
     if (!(thrown instanceof Error)) throw new Error("Expected codemode execution to fail");
     expect(Buffer.byteLength(thrown.message, "utf8")).toBeLessThanOrEqual(32 * 1024);
   });
-  it("bounds cumulative child-originated IPC even when generated code bypasses helpers", async () => {
+  it("does not impose an aggregate IPC ceiling on valid child requests", async () => {
     await expect(
       runtime().execute({
         source: `
@@ -591,7 +607,7 @@ describe("codemode runtime", () => {
         `,
         sessionId: "session-1",
       }),
-    ).rejects.toThrow("Codemode IPC output exceeds");
+    ).resolves.toMatchObject({ value: null, calls: 45 });
   });
   it("enforces host-side frame and semantic limits against raw IPC bypasses", async () => {
     await expect(
@@ -644,7 +660,7 @@ describe("codemode runtime", () => {
         `,
         sessionId: "raw-progress",
       }),
-    ).rejects.toThrow("Codemode progress value exceeds");
+    ).resolves.toMatchObject({ value: null });
     await expect(
       runtime().execute({
         source: `
@@ -666,40 +682,60 @@ describe("codemode runtime", () => {
       }),
     ).rejects.toThrow("Codemode store exceeds");
   });
-  it("bounds individual and aggregate progress before sending it over IPC", async () => {
+  it("drops excess progress without failing productive work", async () => {
+    const individualEvents: CodeExecutionEvent[] = [];
     await expect(
-      runtime().execute({
-        source: 'emit("x".repeat(65 * 1024)); return null;',
-        sessionId: "session-1",
-      }),
-    ).rejects.toThrow("Codemode progress value exceeds");
+      runtime().execute(
+        {
+          source: 'emit("x".repeat(65 * 1024)); return null;',
+          sessionId: "session-1",
+        },
+        (event) => individualEvents.push(event),
+      ),
+    ).resolves.toMatchObject({ value: null });
+    expect(individualEvents.some((event) => event.type === "progress")).toBe(false);
+    const aggregateEvents: CodeExecutionEvent[] = [];
     await expect(
-      runtime().execute({
-        source: `
-          for (let index = 0; index < 5; index += 1) emit("x".repeat(60 * 1024));
-          return null;
-        `,
-        sessionId: "session-2",
-      }),
-    ).rejects.toThrow("Codemode progress exceeds");
+      runtime().execute(
+        {
+          source: `
+            for (let index = 0; index < 5; index += 1) emit("x".repeat(60 * 1024));
+            return null;
+          `,
+          sessionId: "session-2",
+        },
+        (event) => aggregateEvents.push(event),
+      ),
+    ).resolves.toMatchObject({ value: null });
+    expect(aggregateEvents.filter((event) => event.type === "progress")).toHaveLength(4);
   });
-  it("applies progress limits to Broker-emitted updates", async () => {
+  it("drops excess Broker progress without failing the tool call", async () => {
+    const individualEvents: CodeExecutionEvent[] = [];
     await expect(
-      runtime({ doubleProgress: "x".repeat(65 * 1024) }).execute({
-        source: "return await tools.math.double({ value: 1 });",
-        sessionId: "broker-progress-value-limit",
-      }),
-    ).rejects.toThrow("Codemode progress value exceeds");
+      runtime({ doubleProgress: "x".repeat(65 * 1024) }).execute(
+        {
+          source: "return await tools.math.double({ value: 1 });",
+          sessionId: "broker-progress-value-limit",
+        },
+        (event) => individualEvents.push(event),
+      ),
+    ).resolves.toMatchObject({ value: { value: 2 } });
+    expect(individualEvents.some((event) => event.type === "progress")).toBe(false);
+    const aggregateEvents: CodeExecutionEvent[] = [];
     await expect(
-      runtime({ doubleProgress: "x".repeat(60 * 1024) }).execute({
-        source: `
-          for (let index = 0; index < 5; index += 1)
-            await tools.math.double({ value: index });
-          return null;
-        `,
-        sessionId: "broker-progress-aggregate-limit",
-      }),
-    ).rejects.toThrow("Codemode progress exceeds");
+      runtime({ doubleProgress: "x".repeat(60 * 1024) }).execute(
+        {
+          source: `
+            for (let index = 0; index < 5; index += 1)
+              await tools.math.double({ value: index });
+            return null;
+          `,
+          sessionId: "broker-progress-aggregate-limit",
+        },
+        (event) => aggregateEvents.push(event),
+      ),
+    ).resolves.toMatchObject({ value: null, calls: 5 });
+    expect(aggregateEvents.filter((event) => event.type === "progress")).toHaveLength(4);
   });
   it("bounds Broker failure details before returning them to the child", async () => {
     const events: CodeExecutionEvent[] = [];

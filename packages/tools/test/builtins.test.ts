@@ -75,7 +75,6 @@ function tool(definitions: readonly ToolDefinition[], name: string): ToolDefinit
 function toolsAt(
   cwd: string,
   searchCommand?: string,
-  maxShellOutputArtifactBytes?: number,
   fileMutationCoordinator?: FileMutationCoordinator,
 ): readonly ToolDefinition[] {
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
@@ -84,7 +83,6 @@ function toolsAt(
       cwd,
     } as const)
       .addOptional(searchCommand ? { searchCommand } : undefined)
-      .addOptional(maxShellOutputArtifactBytes !== undefined ? { maxShellOutputArtifactBytes } : undefined)
       .addOptional(fileMutationCoordinator ? { fileMutationCoordinator } : undefined)
       .add({
         writeArtifact: async ({ path, content }: { readonly path: string; readonly content: string }) => ({
@@ -168,8 +166,8 @@ describe("local work tools", () => {
     const path = join(cwd, "shared.txt");
     await writeFile(path, "alpha", "utf8");
     const coordinator = createFileMutationCoordinator();
-    const first = toolsAt(cwd, undefined, undefined, coordinator);
-    const second = toolsAt(cwd, undefined, undefined, coordinator);
+    const first = toolsAt(cwd, undefined, coordinator);
+    const second = toolsAt(cwd, undefined, coordinator);
 
     await Promise.all([
       tool(first, "files.write").execute({ path: "shared.txt", content: "beta" }, context()),
@@ -410,29 +408,13 @@ describe("local work tools", () => {
     expect(saved).toHaveLength(fullOutputLength);
     expect(saved.endsWith("tail")).toBe(true);
   });
-  it("terminates shell output at the artifact limit and marks the saved evidence incomplete", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shell-output-limit-"));
-    const captureLimit = 1024;
-    const script = 'process.stdout.write("x".repeat(4096)); setInterval(() => {}, 1000)';
-    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
-    const result = await tool(toolsAt(cwd, undefined, captureLimit), "shell.run").execute(
-      { command, timeoutMs: 5000 },
+  it("accepts explicit shell timeouts longer than ten minutes", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shell-long-timeout-"));
+    const result = await tool(toolsAt(cwd), "shell.run").execute(
+      { command: "true", timeoutMs: 3_600_000 },
       context(),
     );
-    expect(result).toMatchObject({
-      truncated: true,
-      fullOutputComplete: false,
-      terminationReason: "output_limit",
-      fullOutputPath: expect.any(String),
-    });
-    if (
-      typeof result !== "object" ||
-      result === null ||
-      !("fullOutputPath" in result) ||
-      typeof result["fullOutputPath"] !== "string"
-    )
-      throw new Error("shell.run did not return the limited output artifact");
-    expect(await readFile(result["fullOutputPath"])).toHaveLength(captureLimit);
+    expect(result).toMatchObject({ exitCode: 0, truncated: false, fullOutputComplete: true });
   });
   it("uses literal search semantics in the primary ripgrep execution path", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-primary-search-"));

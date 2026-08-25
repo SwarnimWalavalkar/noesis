@@ -752,6 +752,7 @@ export interface OperationalRepositories {
     }) => Promise<UserIntentRecord | undefined>;
     readonly listPending: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
     readonly listHeld: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
+    readonly listDispatching: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
     readonly listUnresolved: (sessionId: string) => Promise<readonly UserIntentRecord[]>;
     readonly claimOldestPending: (request: {
       readonly sessionId: string;

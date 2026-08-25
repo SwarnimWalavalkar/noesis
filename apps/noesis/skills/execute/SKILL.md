@@ -10,7 +10,7 @@ Compose one JavaScript program around the result the user needs. Keep intermedia
 1. Call a known catalog tool with `tools.<family>.<operation>(input)`.
 2. For a broader need, call `noesis.search(query)` once, inspect the selected tool with `noesis.describe(name)`, then invoke its exact contract.
 3. Batch independent calls with `Promise.all`. Sequence calls when a later input depends on an earlier result.
-4. Check result completeness before synthesis. For truncated `shell.run` output, inspect a complete `fullOutputPath` with bounded reads; narrow the collection when the artifact is incomplete.
+4. Check result completeness before synthesis. For truncated `shell.run` previews, inspect the complete `fullOutputPath` with bounded reads or ordinary Unix tools.
 5. Return the final result. Use `emit(value)` only for useful progress updates.
 
 ```js
@@ -32,6 +32,8 @@ return { readme, status };
 - `emit(value)` and `notify(value)` publish JSON-compatible progress updates.
 - `store(key, value)` and `load(key)` manage bounded JSON scratch state for the Code Mode session.
 - `input` is the validated input inside saved Program source. A foreground `execute` receives `null`.
+
+Code Mode, subagents, and shell commands have no implicit duration or call-count ceiling. Pass an optional `timeoutMs` only when the task itself needs a deadline; the user can cancel active work at any time.
 
 Pass a context view directly to `agents.run` when the child can analyze it without expanding the text in the parent execution.
 

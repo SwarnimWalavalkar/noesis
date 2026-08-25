@@ -77,6 +77,12 @@ function createIntentStore(): TurnInteractionIntentStore & {
       Object.freeze(
         [...records.values()].filter((record) => record.sessionId === sessionId && record.status === "held"),
       ),
+    listDispatching: async (sessionId) =>
+      Object.freeze(
+        [...records.values()].filter(
+          (record) => record.sessionId === sessionId && record.status === "dispatching",
+        ),
+      ),
     claimOldestPending: async ({ sessionId, targetTurnId, claimedAt }) => {
       const current = pending(sessionId).find((record) => record.deliveryMode === "turn");
       return current
@@ -1026,6 +1032,15 @@ describe("TurnInteractionController", () => {
     await waitUntil(() =>
       intents.records().some((record) => record.deliveryMode === "steer" && record.status === "dispatching"),
     );
+    await expect(controller.inspect("session-1")).resolves.toMatchObject({
+      pending: [
+        expect.objectContaining({
+          text: "uncertain steering",
+          mode: "steer",
+          status: "dispatching",
+        }),
+      ],
+    });
     await expect(
       controller.dispatch("session-1", { type: "interrupt", turnId: visibleTurnId }),
     ).resolves.toMatchObject({
