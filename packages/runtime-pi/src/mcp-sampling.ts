@@ -6,7 +6,7 @@ import type {
   ImageContent,
   Message,
   Model,
-  MutableModels,
+  Models,
   SimpleStreamOptions,
   TextContent,
   Tool,
@@ -297,7 +297,7 @@ export function adaptMcpSamplingRequest(
   );
 }
 export interface CreatePiMcpSamplingPortInput {
-  readonly models: MutableModels;
+  readonly models: Models;
   readonly provider: string;
   readonly model: string;
   readonly reasoning?: SimpleStreamOptions["reasoning"] | "off";

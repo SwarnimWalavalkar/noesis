@@ -135,10 +135,10 @@ describe("Noesis CLI grammar", () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-cli-provider-pair-"));
     expect((await runCli(["config", "init", "--home", home])).code).toBe(0);
 
-    const changed = await runCli(["config", "set", "--home", home, "--provider", "opencode"]);
+    const changed = await runCli(["config", "set", "--home", home, "--provider", "anthropic"]);
 
     expect(changed.code).toBe(1);
-    expect(changed.output).toContain("Model gpt-5.6-sol belongs to openai-codex, not provider opencode");
+    expect(changed.output).toContain("not provider anthropic");
     expect(changed.output).toContain("Choose a matching model with --model");
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const persisted = NoesisConfigSchema.parse(
@@ -153,7 +153,7 @@ describe("Noesis CLI grammar", () => {
     const result = await runCli(["inspect", "--home", home, "--provider", "anthropic"]);
 
     expect(result.code).toBe(1);
-    expect(result.output).toContain("Model gpt-5.6-sol belongs to openai-codex, not provider anthropic");
+    expect(result.output).toContain("not provider anthropic");
     await expect(readFile(join(home, "database", "noesis.sqlite"))).rejects.toMatchObject({
       code: "ENOENT",
     });
@@ -189,14 +189,14 @@ describe("Noesis CLI grammar", () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-cli-invalid-persisted-pair-"));
     const invalid = {
       schemaVersion: 1,
-      agent: { provider: "opencode", model: "gpt-5.6-sol", thinkingLevel: "low" },
+      agent: { provider: "anthropic", model: "gpt-5.6-sol", thinkingLevel: "low" },
     };
     await writeFile(join(home, "config.json"), JSON.stringify(invalid));
 
     const changed = await runCli(["config", "set", "--home", home, "--thinking-level", "high"]);
 
     expect(changed.code).toBe(1);
-    expect(changed.output).toContain("Model gpt-5.6-sol belongs to openai-codex, not provider opencode");
+    expect(changed.output).toContain("not provider anthropic");
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     expect(JSON.parse(await readFile(join(home, "config.json"), "utf8")) as unknown).toEqual(invalid);
   });

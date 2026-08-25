@@ -12,7 +12,7 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
 import { isJsonObject, JsonValueSchema } from "@noesis/domain";
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   credentialFileMode,
   createPiAgentRuntime,
@@ -21,6 +21,7 @@ import {
   createPiModelServices,
   createDefaultRoleContextPolicy,
   createSecurePiCredentialStore,
+  listPiModelRoutes,
   piAuthPath,
   preparePiModelSelection,
 } from "../src/index.ts";
@@ -31,37 +32,140 @@ const emptyAuthContext = {
 };
 
 describe("Pi authentication", () => {
+  beforeEach(() => {
+    for (const name of [
+      "ANTHROPIC_API_KEY",
+      "OPENAI_API_KEY",
+      "OPENROUTER_API_KEY",
+      "OPENCODE_API_KEY",
+      "OPENCODE_GO_API_KEY",
+    ])
+      vi.stubEnv(name, "");
+  });
+
+  afterEach(() => vi.unstubAllEnvs());
+
   test("registers every provider supported by Noesis", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-provider-registration-"));
-    const services = createPiModelServices(home, { authContext: emptyAuthContext });
+    const services = await createPiModelServices(home);
 
     expect(
-      ["openai-codex", "anthropic", "openrouter", "opencode"].map(
+      ["openai-codex", "anthropic", "openrouter", "opencode", "opencode-go"].map(
         (id) => services.models.getProvider(id)?.id,
       ),
-    ).toEqual(["openai-codex", "anthropic", "openrouter", "opencode"]);
+    ).toEqual(["openai-codex", "anthropic", "openrouter", "opencode", "opencode-go"]);
     expect(services.models.getModel("anthropic", "claude-opus-4-8")?.id).toBe("claude-opus-4-8");
     expect(services.models.getModel("opencode", "kimi-k2.6")?.id).toBe("kimi-k2.6");
+    expect(services.models.getModel("opencode-go", "kimi-k2.6")?.id).toBe("kimi-k2.6");
+    expect(
+      listPiModelRoutes(services.models).find((route) => route.provider === "opencode-go")?.providerName,
+    ).toBe("OpenCode Go");
+  });
+
+  test("restores Pi's persisted remote model compatibility overlay", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-refresh-"));
+    const credentials = createSecurePiCredentialStore(piAuthPath(home));
+    await credentials.modify("openrouter", async () => ({ type: "api_key", key: "test-key" }));
+    const baseline = openrouterProvider().getModels()[0];
+    if (!baseline) throw new Error("Expected Pi's bundled OpenRouter catalog");
+    await writeFile(
+      join(home, "models-store.json"),
+      JSON.stringify({
+        openrouter: {
+          models: [
+            {
+              ...baseline,
+              id: "research/live-model",
+              name: "Research Live Model",
+              reasoning: true,
+              thinkingLevelMap: { low: "low", high: "high" },
+            },
+          ],
+          checkedAt: Date.now(),
+          lastModified: Date.parse("2099-01-01T00:00:00Z"),
+          etag: '"noesis-test-catalog"',
+        },
+      }),
+    );
+
+    const services = await createPiModelServices(home, { credentials });
+    expect(
+      listPiModelRoutes(services.models).find((route) => route.model === "research/live-model"),
+    ).toMatchObject({
+      provider: "openrouter",
+      name: "Research Live Model",
+      thinkingLevels: ["off", "minimal", "low", "medium", "high"],
+    });
   });
 
   test("validates provider and model as one selection through Pi's registered catalog", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-provider-selection-"));
-    const services = createPiModelServices(home, { authContext: emptyAuthContext });
+    const services = await createPiModelServices(home);
 
     expect(() =>
       preparePiModelSelection(services.models, { provider: "opencode", model: "kimi-k2.6" }),
     ).not.toThrow();
     expect(() =>
-      preparePiModelSelection(services.models, { provider: "opencode", model: "gpt-5.6-sol" }),
-    ).toThrow("belongs to openai-codex, not provider opencode");
+      preparePiModelSelection(services.models, { provider: "opencode-go", model: "kimi-k2.6" }),
+    ).not.toThrow();
+    const codexOnly = services.models
+      .getModels("openai-codex")
+      .find((model) => !services.models.getModel("opencode", model.id));
+    if (!codexOnly) throw new Error("Expected a model unique to the OpenAI Codex provider");
+    expect(() =>
+      preparePiModelSelection(services.models, { provider: "opencode", model: codexOnly.id }),
+    ).toThrow(`openai-codex, not provider opencode`);
     expect(() =>
       preparePiModelSelection(services.models, { provider: "missing", model: "anything" }),
-    ).toThrow("Supported providers: anthropic, openai-codex, opencode, openrouter");
+    ).toThrow("Supported providers: anthropic, openai-codex, opencode, opencode-go, openrouter");
+  });
+
+  test("resolves OpenCode Zen and Go from separate environment keys", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-opencode-environment-"));
+    vi.stubEnv("OPENCODE_API_KEY", "zen-environment-secret");
+    vi.stubEnv("OPENCODE_GO_API_KEY", "go-environment-secret");
+    const services = await createPiModelServices(home);
+    const zen = services.models.getModel("opencode", "kimi-k2.6");
+    const go = services.models.getModel("opencode-go", "kimi-k2.6");
+    if (!zen || !go) throw new Error("Expected both OpenCode model routes");
+
+    await expect(services.models.getAuth(zen)).resolves.toMatchObject({
+      auth: { apiKey: "zen-environment-secret" },
+      source: "OPENCODE_API_KEY",
+    });
+    await expect(services.models.getAuth(go)).resolves.toMatchObject({
+      auth: { apiKey: "go-environment-secret" },
+      source: "OPENCODE_GO_API_KEY",
+    });
+  });
+
+  test("stores OpenCode Zen and Go credentials under separate provider keys", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-opencode-stored-"));
+    const services = await createPiModelServices(home);
+    await services.auth.login("opencode", {
+      prompt: async () => "zen-stored-secret",
+      notify: () => undefined,
+    });
+    await services.auth.login("opencode-go", {
+      prompt: async () => "go-stored-secret",
+      notify: () => undefined,
+    });
+
+    const stored = JsonValueSchema.parse(JSON.parse(await readFile(piAuthPath(home), "utf8")));
+    if (!isJsonObject(stored)) throw new Error("Expected the credential file to contain an object");
+    expect(stored["opencode"]).toMatchObject({
+      type: "api_key",
+      key: "zen-stored-secret",
+    });
+    expect(stored["opencode-go"]).toMatchObject({
+      type: "api_key",
+      key: "go-stored-secret",
+    });
   });
 
   test("prepares a custom model from its selected provider's Pi metadata", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-provider-custom-model-"));
-    const services = createPiModelServices(home, { authContext: emptyAuthContext });
+    const services = await createPiModelServices(home);
 
     preparePiModelSelection(services.models, {
       provider: "openrouter",
@@ -78,7 +182,7 @@ describe("Pi authentication", () => {
 
   test("rejects unknown OpenCode models instead of guessing across its mixed API transports", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-provider-opencode-unknown-"));
-    const services = createPiModelServices(home, { authContext: emptyAuthContext });
+    const services = await createPiModelServices(home);
 
     expect(() =>
       preparePiModelSelection(services.models, {
@@ -226,6 +330,26 @@ describe("Pi authentication", () => {
     },
   );
 
+  test("fails before OpenCode Go execution with its distinct authentication guidance", async () => {
+    const services = await createPiModelServices(await mkdtemp(join(tmpdir(), "noesis-auth-go-missing-")));
+    const runtime = createPiAgentRuntime(process.cwd(), services.models);
+
+    await expect(
+      runtime.run(
+        {
+          trailId: "trail-missing-opencode-go",
+          provider: "opencode-go",
+          model: "kimi-k2.6",
+          thinkingLevel: "off",
+          systemPrompt: "test",
+          prompt: "must not reach the network",
+          activeCapabilities: [],
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow("OPENCODE_GO_API_KEY");
+  });
+
   test("reuses the Pi provider and auth lifecycle for isolated roles without reaching the network", async () => {
     const models = createModels({ authContext: emptyAuthContext });
     models.setProvider(openrouterProvider());
@@ -274,6 +398,9 @@ describe("Pi authentication", () => {
         return await update(undefined);
       },
       async delete() {},
+      async list() {
+        return [];
+      },
     };
     const models = createModels({ credentials, authContext: emptyAuthContext });
     models.setProvider(openrouterProvider());
@@ -317,6 +444,9 @@ describe("Pi authentication", () => {
         return await update(undefined);
       },
       async delete() {},
+      async list() {
+        return [];
+      },
     };
     const models = createModels({ credentials, authContext: emptyAuthContext });
     const provider = fauxProvider({

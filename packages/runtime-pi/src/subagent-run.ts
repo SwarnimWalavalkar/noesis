@@ -1,6 +1,5 @@
 import { AgentHarness } from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
-import type { AssistantMessage, MutableModels } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Models } from "@earendil-works/pi-ai";
 import type { AgentThinkingLevel, AgentUsage } from "@noesis/agent-types";
 import { type JsonValue, JsonValueSchema, toJsonValue } from "@noesis/domain";
 import { createPiRequestBudgetProjector } from "./context-budget.ts";
@@ -123,6 +122,8 @@ function missingAuthMessage(provider: string): string {
     return "Claude authentication is missing. Set ANTHROPIC_API_KEY or run `noesis auth login anthropic`.";
   if (provider === "opencode")
     return "OpenCode Zen authentication is missing. Set OPENCODE_API_KEY or run `noesis auth login opencode`.";
+  if (provider === "opencode-go")
+    return "OpenCode Go authentication is missing. Set OPENCODE_GO_API_KEY or run `noesis auth login opencode-go`.";
   return `Pi credentials are missing for provider ${provider}.`;
 }
 
@@ -132,7 +133,7 @@ function rewriteEventCallId(event: PiCodeExecutionEvent, prefix: string): PiCode
   return Object.freeze({ ...event, callId: `${prefix}${event.callId}` });
 }
 
-export function createPiSubAgentRunner(cwd: string, models: MutableModels): PiSubAgentRunner {
+export function createPiSubAgentRunner(cwd: string, models: Models): PiSubAgentRunner {
   return Object.freeze({
     run: async (request: PiSubAgentRunRequest) => {
       const { plan } = request;
@@ -239,7 +240,6 @@ export function createPiSubAgentRunner(cwd: string, models: MutableModels): PiSu
           },
         });
         harness = new AgentHarness({
-          env: new NodeExecutionEnv({ cwd }),
           session,
           models,
           model,

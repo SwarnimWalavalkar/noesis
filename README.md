@@ -47,7 +47,9 @@ pnpm install
 pnpm start
 ```
 
-The first launch asks you to choose a model and authenticate. Noesis supports OpenAI Codex, Anthropic, OpenRouter, and OpenCode Zen.
+The first launch asks you to choose a model and authenticate. Noesis supports OpenAI Codex, Anthropic, OpenRouter, OpenCode Zen, and OpenCode Go.
+
+OpenCode Zen uses provider ID `opencode` and `OPENCODE_API_KEY`. OpenCode Go uses provider ID `opencode-go` and `OPENCODE_GO_API_KEY`. Keys stored through `noesis auth login` are likewise kept under those separate provider IDs.
 
 For development, install the repository-owned `noesis-dev` command:
 
