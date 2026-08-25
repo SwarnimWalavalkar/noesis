@@ -135,6 +135,43 @@ describe("first-launch onboarding", () => {
     expect(persisted).not.toContain("unused-secret");
   });
 
+  test("prefers Pi's provider default when the recommended model is absent", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-onboarding-catalog-default-"));
+    const prompts = createDefaultPrompts([true]);
+    const auth = createFakeAuth({ provider: "openai-codex", configured: true, source: "oauth" });
+
+    const result = await runFirstLaunchOnboarding({
+      home,
+      prompts,
+      auth,
+      authCallbacks,
+      modelRoutes: [
+        {
+          provider: "openai-codex",
+          providerName: "OpenAI Codex",
+          model: "aaa-lexical-first",
+          name: "Lexical first",
+          thinkingLevels: ["high"],
+          default: false,
+          allowsCustomModelIds: false,
+        },
+        {
+          provider: "openai-codex",
+          providerName: "OpenAI Codex",
+          model: "provider-default",
+          name: "Provider default",
+          thinkingLevels: ["high"],
+          default: true,
+          allowsCustomModelIds: false,
+        },
+      ],
+      validateModelSelection: acceptModelSelection,
+    });
+
+    expect(result.config.agent.model).toBe("provider-default");
+    expect(auth.log).toEqual(["status:openai-codex"]);
+  });
+
   test("uses existing OpenRouter environment auth without requesting or persisting a key", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-onboarding-openrouter-"));
     const prompts = createScriptedPrompts(["openrouter", "low"], ["research-lab/future-model"], [true]);

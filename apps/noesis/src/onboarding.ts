@@ -135,14 +135,18 @@ async function chooseModel(
         ? { id: route.model, label: route.name, description: "Provider default" }
         : { id: route.model, label: route.name },
     );
+  const catalogDefaultModel = routes.find((route) => route.provider === provider && route.default)?.model;
   const models = catalogModels.length > 0 ? catalogModels : presentation.models;
   if (models.length > 0) {
+    const defaultModel = models.some((choice) => choice.id === presentation.defaultModel)
+      ? presentation.defaultModel
+      : catalogDefaultModel && models.some((choice) => choice.id === catalogDefaultModel)
+        ? catalogDefaultModel
+        : (models[0]?.id ?? presentation.defaultModel);
     const selection = await prompts.choose(
       presentation.modelPrompt,
       [...models, { id: "custom", label: "Enter another model ID" }],
-      models.some((choice) => choice.id === presentation.defaultModel)
-        ? presentation.defaultModel
-        : (models[0]?.id ?? presentation.defaultModel),
+      defaultModel,
     );
     if (selection !== "custom") return selection;
     return await prompts.text(`${presentation.label} model ID`, presentation.defaultModel);
