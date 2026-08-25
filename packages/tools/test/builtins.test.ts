@@ -75,8 +75,8 @@ function tool(definitions: readonly ToolDefinition[], name: string): ToolDefinit
 function toolsAt(
   cwd: string,
   searchCommand?: string,
-  maxShellOutputArtifactBytes?: number,
   fileMutationCoordinator?: FileMutationCoordinator,
+  maxShellOutputArtifactBytes?: number,
 ): readonly ToolDefinition[] {
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return createLocalWorkTools(
@@ -84,8 +84,8 @@ function toolsAt(
       cwd,
     } as const)
       .addOptional(searchCommand ? { searchCommand } : undefined)
-      .addOptional(maxShellOutputArtifactBytes !== undefined ? { maxShellOutputArtifactBytes } : undefined)
       .addOptional(fileMutationCoordinator ? { fileMutationCoordinator } : undefined)
+      .addOptional(maxShellOutputArtifactBytes === undefined ? undefined : { maxShellOutputArtifactBytes })
       .add({
         writeArtifact: async ({ path, content }: { readonly path: string; readonly content: string }) => ({
           path,
@@ -168,8 +168,8 @@ describe("local work tools", () => {
     const path = join(cwd, "shared.txt");
     await writeFile(path, "alpha", "utf8");
     const coordinator = createFileMutationCoordinator();
-    const first = toolsAt(cwd, undefined, undefined, coordinator);
-    const second = toolsAt(cwd, undefined, undefined, coordinator);
+    const first = toolsAt(cwd, undefined, coordinator);
+    const second = toolsAt(cwd, undefined, coordinator);
 
     await Promise.all([
       tool(first, "files.write").execute({ path: "shared.txt", content: "beta" }, context()),
@@ -410,20 +410,23 @@ describe("local work tools", () => {
     expect(saved).toHaveLength(fullOutputLength);
     expect(saved.endsWith("tail")).toBe(true);
   });
-  it("terminates shell output at the artifact limit and marks the saved evidence incomplete", async () => {
-    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shell-output-limit-"));
-    const captureLimit = 1024;
-    const script = 'process.stdout.write("x".repeat(4096)); setInterval(() => {}, 1000)';
+  it("keeps running after the shell artifact storage boundary and reports an incomplete artifact", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shell-capped-output-"));
+    const fullOutputLength = MAX_TOOL_TEXT_BYTES + 100;
+    const artifactBytes = Math.floor(MAX_TOOL_TEXT_BYTES / 2);
+    const script = `process.stdout.write("x".repeat(${String(fullOutputLength - 4)})); setTimeout(() => process.stdout.write("tail"), 50)`;
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
-    const result = await tool(toolsAt(cwd, undefined, captureLimit), "shell.run").execute(
-      { command, timeoutMs: 5000 },
+    const result = await tool(toolsAt(cwd, undefined, undefined, artifactBytes), "shell.run").execute(
+      { command, timeoutMs: 2000 },
       context(),
     );
     expect(result).toMatchObject({
+      exitCode: 0,
+      output: expect.stringMatching(/tail$/u),
+      fullOutputLength,
       truncated: true,
-      fullOutputComplete: false,
-      terminationReason: "output_limit",
       fullOutputPath: expect.any(String),
+      fullOutputComplete: false,
     });
     if (
       typeof result !== "object" ||
@@ -431,8 +434,44 @@ describe("local work tools", () => {
       !("fullOutputPath" in result) ||
       typeof result["fullOutputPath"] !== "string"
     )
-      throw new Error("shell.run did not return the limited output artifact");
-    expect(await readFile(result["fullOutputPath"])).toHaveLength(captureLimit);
+      throw new Error("shell.run did not return a retained output path");
+    const saved = await readFile(result["fullOutputPath"]);
+    expect(saved.byteLength).toBe(artifactBytes);
+  });
+  it("reports an incomplete retained artifact even when the in-memory preview is complete", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shell-capped-small-output-"));
+    const fullOutputLength = 1000;
+    const artifactBytes = 500;
+    const script = `process.stdout.write("x".repeat(${String(fullOutputLength)}))`;
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+    const result = await tool(toolsAt(cwd, undefined, undefined, artifactBytes), "shell.run").execute(
+      { command, timeoutMs: 2000 },
+      context(),
+    );
+    expect(result).toMatchObject({
+      exitCode: 0,
+      output: "x".repeat(fullOutputLength),
+      fullOutputLength,
+      truncated: false,
+      fullOutputPath: expect.any(String),
+      fullOutputComplete: false,
+    });
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("fullOutputPath" in result) ||
+      typeof result["fullOutputPath"] !== "string"
+    )
+      throw new Error("shell.run did not return its incomplete retained output path");
+    expect((await readFile(result["fullOutputPath"])).byteLength).toBe(artifactBytes);
+  });
+  it("accepts explicit shell timeouts longer than ten minutes", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shell-long-timeout-"));
+    const result = await tool(toolsAt(cwd), "shell.run").execute(
+      { command: "true", timeoutMs: 3_600_000 },
+      context(),
+    );
+    expect(result).toMatchObject({ exitCode: 0, truncated: false, fullOutputComplete: true });
   });
   it("uses literal search semantics in the primary ripgrep execution path", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-primary-search-"));

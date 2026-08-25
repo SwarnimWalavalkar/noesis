@@ -77,7 +77,7 @@ export interface TuiQueuedInput {
   readonly queueId: string;
   readonly text: string;
   readonly createdAt: string;
-  readonly status?: "pending" | "held";
+  readonly status?: "pending" | "held" | "dispatching";
 }
 export interface TuiInteractionView {
   readonly phase: "idle" | "running" | "interrupting";

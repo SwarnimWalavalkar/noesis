@@ -4180,6 +4180,9 @@ describe("WorkspaceStore", () => {
         promotedAt: "2026-01-01T00:00:04.000Z",
       }),
     ).resolves.toMatchObject({ status: "dispatching", attemptCount: 1 });
+    await expect(store.operational.userIntents.listDispatching("session-held-steers")).resolves.toMatchObject(
+      [{ intentId: "intent-explicit-held", deliveryMode: "steer", status: "dispatching" }],
+    );
     await expect(
       store.operational.userIntents.releaseHeldSteer({
         sessionId: "session-held-steers",

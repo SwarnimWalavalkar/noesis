@@ -30,6 +30,7 @@ import {
   CONTROLLED_PI_MODEL,
   CONTROLLED_PI_PROVIDER,
   createControlledPiModels,
+  controlledToolCallResponse,
 } from "./support/controlled-pi-models.ts";
 
 // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
@@ -214,7 +215,7 @@ describe("agent runtime factories", () => {
         parentExecutionId: "execution-parent",
         parentToolCallId: "tool-call-parent",
       }),
-      budget: Object.freeze({ requestTokenBudget: 2_000, maxModelCalls: 8, maxToolCalls: 32 }),
+      budget: Object.freeze({ requestTokenBudget: 2_000 }),
     });
     const prepared: PreparedPiCodeExecution = Object.freeze({
       catalog: emptyCatalog("catalog-subagent-pre-aborted"),
@@ -227,6 +228,9 @@ describe("agent runtime factories", () => {
       prepared,
       turnId: "turn-subagent-pre-aborted",
       signal: controller.signal,
+      authorizeModelCall: async () => {
+        throw new Error("A model call must not be authorized while authentication is pending");
+      },
       emit: () => undefined,
     });
     await started;
@@ -234,6 +238,135 @@ describe("agent runtime factories", () => {
 
     await expect(run).rejects.toThrow("Subagent was cancelled");
     expect(providerRequests).toBe(0);
+  });
+
+  test("does not impose provider-round or tool-call ceilings on productive subagents", async () => {
+    let providerRequests = 0;
+    const controlled = createControlledPiModels({
+      respond: () => {
+        providerRequests += 1;
+        return providerRequests <= 33
+          ? controlledToolCallResponse(
+              "probe",
+              { round: providerRequests },
+              `probe-${String(providerRequests)}`,
+            )
+          : "Completed after thirty-three tool rounds.";
+      },
+    });
+    const catalog = catalogWithTools("catalog-subagent-rounds", ["probe"]);
+    const probe = catalog.tools.find((tool) => tool.name === "probe");
+    if (!probe) throw new Error("Controlled catalog is missing probe");
+    const plan: FrozenSubAgentRunPlan = Object.freeze({
+      runId: "subagent-many-rounds",
+      systemPrompt: "Use the supplied probe until the task is complete.",
+      prompt: "Complete the controlled multi-round task.",
+      tools: Object.freeze(["probe"]),
+      thinkingLevel: "off",
+      route: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+      frozenTools: Object.freeze([probe]),
+      authority: Object.freeze({
+        parentExecutionId: "execution-parent",
+        parentToolCallId: "tool-call-parent",
+      }),
+      budget: Object.freeze({ requestTokenBudget: 2_000 }),
+    });
+    const prepared: PreparedPiCodeExecution = Object.freeze({
+      catalog,
+      execute: async () => Object.freeze({ executionId: "unused", value: null, calls: 0, durationMs: 0 }),
+      invoke: async () => Object.freeze({ ok: true }),
+      close: async () => undefined,
+    });
+
+    const authorizedModelCalls: number[] = [];
+    const settledModelCalls: number[] = [];
+    const result = await createPiSubAgentRunner(process.cwd(), controlled.models).run({
+      plan,
+      prepared,
+      turnId: "turn-subagent-many-rounds",
+      signal: new AbortController().signal,
+      authorizeModelCall: async (modelCall) => {
+        authorizedModelCalls.push(modelCall);
+        return Object.freeze({
+          complete: async () => {
+            settledModelCalls.push(modelCall);
+          },
+          fail: async () => {
+            settledModelCalls.push(modelCall);
+          },
+        });
+      },
+      emit: () => undefined,
+    });
+
+    expect(result.text).toBe("Completed after thirty-three tool rounds.");
+    expect(result.modelCalls).toBe(34);
+    expect(result.toolCalls).toBe(33);
+    expect(providerRequests).toBe(34);
+    expect(authorizedModelCalls).toEqual(Array.from({ length: 34 }, (_, index) => index + 1));
+    expect(settledModelCalls).toEqual(authorizedModelCalls);
+  });
+
+  test.each([
+    Object.freeze({
+      label: "error",
+      response: fauxAssistantMessage("Provider request failed.", {
+        stopReason: "error",
+        errorMessage: "controlled provider unavailable",
+      }),
+      expectedReason: "controlled provider unavailable",
+    }),
+    Object.freeze({
+      label: "aborted",
+      response: fauxAssistantMessage("Provider request aborted.", { stopReason: "aborted" }),
+      expectedReason: "Subagent was cancelled",
+    }),
+  ])("fails the durable model-call lease when the provider round ends as $label", async (fixture) => {
+    const controlled = createControlledPiModels({
+      respond: () => fixture.response,
+    });
+    const plan: FrozenSubAgentRunPlan = Object.freeze({
+      runId: `subagent-provider-${fixture.label}`,
+      systemPrompt: "Return the provider outcome.",
+      prompt: `Exercise a controlled provider ${fixture.label}.`,
+      tools: Object.freeze([]),
+      thinkingLevel: "off",
+      route: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+      frozenTools: Object.freeze([]),
+      authority: Object.freeze({
+        parentExecutionId: "execution-parent",
+        parentToolCallId: "tool-call-parent",
+      }),
+      budget: Object.freeze({ requestTokenBudget: 2_000 }),
+    });
+    const prepared: PreparedPiCodeExecution = Object.freeze({
+      catalog: emptyCatalog(`catalog-subagent-provider-${fixture.label}`),
+      execute: async () => Object.freeze({ executionId: "unused", value: null, calls: 0, durationMs: 0 }),
+      close: async () => undefined,
+    });
+    const completed: number[] = [];
+    const failed: { readonly modelCall: number; readonly reason: string }[] = [];
+
+    await expect(
+      createPiSubAgentRunner(process.cwd(), controlled.models).run({
+        plan,
+        prepared,
+        turnId: `turn-subagent-provider-${fixture.label}`,
+        signal: new AbortController().signal,
+        authorizeModelCall: async (modelCall) =>
+          Object.freeze({
+            complete: async () => {
+              completed.push(modelCall);
+            },
+            fail: async (reason: string) => {
+              failed.push(Object.freeze({ modelCall, reason }));
+            },
+          }),
+        emit: () => undefined,
+      }),
+    ).rejects.toThrow(fixture.expectedReason);
+    expect(completed).toEqual([]);
+    expect(failed).toEqual([{ modelCall: 1, reason: fixture.expectedReason }]);
   });
 
   test("assigns injective catalog aliases without shadowing core tools", () => {
@@ -988,6 +1121,32 @@ describe("agent runtime factories", () => {
     expect(logicalExecutionIds).toEqual(["turn-one:stable-parent-call", "turn-two:stable-parent-call"]);
   });
 
+  test("accepts an explicit execute timeout longer than ten minutes", async () => {
+    let receivedTimeout: number | undefined;
+    const execute = createPiExecuteTool({
+      prepared: {
+        catalog: emptyCatalog("catalog-long-timeout"),
+        execute: async (_source, timeoutMs) => {
+          receivedTimeout = timeoutMs;
+          return {
+            executionId: "long-timeout-execution",
+            value: null,
+            calls: 0,
+            durationMs: 0,
+          };
+        },
+        close: async () => undefined,
+      },
+      turnId: "turn-long-timeout",
+      signal: new AbortController().signal,
+      emit: () => undefined,
+    });
+
+    await execute.execute("long-timeout-call", { source: "return null;", timeoutMs: 3_600_000 });
+
+    expect(receivedTimeout).toBe(3_600_000);
+  });
+
   test("keeps a stable logical execution identity for retries within one turn", async () => {
     let logicalExecutionId: string | undefined;
     const execute = createPiExecuteTool({
@@ -1495,6 +1654,94 @@ describe("agent runtime factories", () => {
     expect(responses).toBe(2);
   });
 
+  test("finishes the active tool, skips later proposed tools, and steers before the next model request", async () => {
+    const firstToolStarted = Promise.withResolvers<void>();
+    const releaseFirstTool = Promise.withResolvers<void>();
+    const secondRequestObserved = Promise.withResolvers<void>();
+    const invoked: string[] = [];
+    let secondRequestContext = "";
+    let responses = 0;
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText }) => {
+        responses += 1;
+        if (responses === 1)
+          return fauxAssistantMessage(
+            [
+              fauxToolCall("shell", { command: "first" }, { id: "call-active-tool" }),
+              fauxToolCall("file_read", { path: "second" }, { id: "call-not-started-tool" }),
+            ],
+            { stopReason: "toolUse" },
+          );
+        secondRequestContext = JSON.stringify(context.messages);
+        expect(lastUserText).toBe("change direction now");
+        secondRequestObserved.resolve();
+        return "Adjusted after steering.";
+      },
+    });
+    const plan = frozenPlan();
+    const invoke: NonNullable<PreparedPiCodeExecution["invoke"]> = async (name) => {
+      invoked.push(name);
+      if (name === "shell.run") {
+        firstToolStarted.resolve();
+        await releaseFirstTool.promise;
+      }
+      return Object.freeze({ name });
+    };
+    const codeExecution: PiCodeExecutionAdapter = Object.freeze({
+      prepare: async () =>
+        Object.freeze({
+          catalog: emptyCatalog("catalog-steering-boundary"),
+          invoke,
+          execute: async () =>
+            Object.freeze({
+              executionId: "unused-steering-execute",
+              value: null,
+              calls: 0,
+              durationMs: 0,
+            }),
+          close: async () => undefined,
+        }),
+      shutdown: async () => undefined,
+    });
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution });
+    const events: AgentRuntimeEvent[] = [];
+    const running = runtime.run(
+      {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "Start both operations.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      (event) => events.push(event),
+    );
+    await firstToolStarted.promise;
+
+    const receipt = runtime.steer(plan.sessionId, "change direction now");
+    releaseFirstTool.resolve();
+
+    await secondRequestObserved.promise;
+    await expect(receipt).resolves.toMatchObject({ status: "consumed" });
+    await expect(running).resolves.toMatchObject({
+      outcome: "completed",
+      text: "Adjusted after steering.",
+    });
+    expect(invoked).toEqual(["shell.run"]);
+    expect(secondRequestContext).toContain("Skipped because a newer user steering message is pending.");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool-end",
+        actionId: "direct:call-not-started-tool",
+        name: "files.read",
+        isError: true,
+      }),
+    );
+    expect(responses).toBe(2);
+  });
+
   test("settles queued steering as not consumed when the turn is aborted first", async () => {
     const responseStarted = Promise.withResolvers<void>();
     const releaseResponse = Promise.withResolvers<void>();
@@ -1531,7 +1778,7 @@ describe("agent runtime factories", () => {
     await expect(aborting).resolves.toBeUndefined();
   });
 
-  test("matches duplicate steering receipts in Pi queue order", async () => {
+  test("drains duplicate steering receipts together in Pi queue order", async () => {
     const firstResponseStarted = Promise.withResolvers<void>();
     const releaseFirstResponse = Promise.withResolvers<void>();
     const secondResponseStarted = Promise.withResolvers<void>();
@@ -1577,21 +1824,15 @@ describe("agent runtime factories", () => {
       timelineSequence: 2,
       consumedAt: "2026-01-01T00:00:00.000Z",
     });
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const secondBeforeItsTurn = await Promise.race([
-      second.then(() => "settled" as const),
-      new Promise<"pending">((resolve) => setImmediate(() => resolve("pending"))),
-    ]);
-    expect(secondBeforeItsTurn).toBe("pending");
-
-    releaseSecondResponse.resolve();
     await expect(second).resolves.toEqual({
       status: "consumed",
-      timelineSequence: 4,
+      timelineSequence: 3,
       consumedAt: "2026-01-01T00:00:00.000Z",
     });
+
+    releaseSecondResponse.resolve();
     await expect(running).resolves.toMatchObject({ outcome: "completed" });
-    expect(responses).toBe(3);
+    expect(responses).toBe(2);
   });
 
   test("rejects sabotaged immutable bytes and incomplete tool registration before prompting", async () => {

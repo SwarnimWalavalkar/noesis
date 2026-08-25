@@ -342,6 +342,7 @@ export function createPiAgentRuntime(
     readonly controller: AbortController;
     readonly pendingSteers: PendingPiSteer[];
     acceptsSteering: boolean;
+    hasQueuedSteering: boolean;
     harness?: AgentHarness;
     sessionId?: string;
     preparedCode?: PreparedPiCodeExecution;
@@ -378,6 +379,7 @@ export function createPiAgentRuntime(
       controller: new AbortController(),
       pendingSteers: [],
       acceptsSteering: false,
+      hasQueuedSteering: false,
     };
     const now = options.now ?? (() => new Date().toISOString());
     let nextTimelineSequence = 1;
@@ -603,6 +605,7 @@ export function createPiAgentRuntime(
         tools: agentTools,
         activeToolNames: initialActiveToolNames,
         thinkingLevel: request.thinkingLevel,
+        steeringMode: "all",
         resources: {
           skills: piSkills,
         },
@@ -663,7 +666,9 @@ export function createPiAgentRuntime(
       const assistantDeltas = createAssistantDeltaAggregator();
       let initialUserMessageObserved = false;
       const unsubscribe = harness.subscribe((event) => {
-        if (event.type === "message_start" && event.message.role === "assistant") {
+        if (event.type === "queue_update") {
+          execution.hasQueuedSteering = event.steer.length > 0;
+        } else if (event.type === "message_start" && event.message.role === "assistant") {
           assistantDeltas.beginMessage();
         } else if (event.type === "message_end" && event.message.role === "user") {
           if (!initialUserMessageObserved) {
@@ -762,6 +767,14 @@ export function createPiAgentRuntime(
           });
         }
       });
+      const unsubscribeSteeringToolGuard = harness.on("tool_call", () =>
+        execution.hasQueuedSteering
+          ? {
+              block: true,
+              reason: "Skipped because a newer user steering message is pending.",
+            }
+          : undefined,
+      );
       execution.acceptsSteering = true;
       emit({ type: "status", status: "started" });
       try {
@@ -816,6 +829,7 @@ export function createPiAgentRuntime(
         execution.acceptsSteering = false;
         execution.controller.signal.removeEventListener("abort", abortHarness);
         unsubscribe();
+        unsubscribeSteeringToolGuard();
         unsubscribeBudgetGuard();
         await abortPromise;
         settlePendingSteers(

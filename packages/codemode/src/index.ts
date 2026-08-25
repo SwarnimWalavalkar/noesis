@@ -9,14 +9,11 @@ import {
 } from "@noesis/domain";
 import type { ToolBroker, ToolInvocationResult } from "@noesis/tools";
 import { z } from "zod";
-const DEFAULT_TIMEOUT_MS = 120000;
-const DEFAULT_MAX_CALLS = 128;
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_MAX_PROGRESS_BYTES = 256 * 1024;
 const DEFAULT_MAX_PROGRESS_VALUE_BYTES = 64 * 1024;
 const DEFAULT_MAX_SDK_REQUEST_BYTES = 256 * 1024;
 const DEFAULT_MAX_CHILD_FRAME_BYTES = 1024 * 1024;
-const DEFAULT_MAX_CHILD_IPC_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_STORE_BYTES = 256 * 1024;
 const DEFAULT_MAX_STORE_ENTRIES = 256;
 const DEFAULT_MAX_FAILURE_MESSAGE_BYTES = 32 * 1024;
@@ -328,7 +325,7 @@ async function waitForPendingSdkCalls(
 export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): CodeModeRuntime {
   const active = new Map<string, ActiveExecution>();
   const sessionStores = new Map<string, ReadonlyMap<string, JsonValue>>();
-  const maxCalls = options.maxCalls ?? DEFAULT_MAX_CALLS;
+  const maxCalls = options.maxCalls;
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const execute: CodeModeRuntime["execute"] = async (request, emit = () => undefined) => {
     if (!request.source.trim()) throw new Error("Codemode source must not be empty");
@@ -354,7 +351,6 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     const output = { stdout: "", stderr: "" };
     let outputBytes = 0;
     let progressBytes = 0;
-    let childIpcBytes = 0;
     let calls = 0;
     let ready = false;
     let terminal = false;
@@ -451,15 +447,12 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
             finishFailure(error instanceof Error ? error : new Error(String(error)));
           }
         };
-        const recordProgress = (value: JsonValue): void => {
+        const recordProgress = (value: JsonValue): boolean => {
           const valueBytes = jsonBytes(value);
-          if (valueBytes > DEFAULT_MAX_PROGRESS_VALUE_BYTES)
-            throw new Error(
-              `Codemode progress value exceeds ${String(DEFAULT_MAX_PROGRESS_VALUE_BYTES)} bytes`,
-            );
+          if (valueBytes > DEFAULT_MAX_PROGRESS_VALUE_BYTES) return false;
+          if (progressBytes + valueBytes > DEFAULT_MAX_PROGRESS_BYTES) return false;
           progressBytes += valueBytes;
-          if (progressBytes > DEFAULT_MAX_PROGRESS_BYTES)
-            throw new Error(`Codemode progress exceeds ${String(DEFAULT_MAX_PROGRESS_BYTES)} bytes`);
+          return true;
         };
         const handleSdkCall = async (
           message: Extract<
@@ -470,7 +463,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
           >,
         ): Promise<void> => {
           calls += 1;
-          if (calls > maxCalls) {
+          if (maxCalls !== undefined && calls > maxCalls) {
             respond({
               type: "sdk-result",
               requestId: message.requestId,
@@ -519,15 +512,15 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                             causallyPriorCallIds: message.causallyPriorCallIds ?? Object.freeze([]),
                             signal: controller.signal,
                             emitUpdate: (update: JsonValue) => {
-                              recordProgress(update);
-                              notify({
-                                type: "progress",
-                                executionId,
-                                value: update,
-                                callId,
-                                name,
-                                callIndex,
-                              });
+                              if (recordProgress(update))
+                                notify({
+                                  type: "progress",
+                                  executionId,
+                                  value: update,
+                                  callId,
+                                  name,
+                                  callIndex,
+                                });
                             },
                           } as const)
                           .finish(),
@@ -561,13 +554,6 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
             if (!terminalResultFrame && frameBytes > DEFAULT_MAX_CHILD_FRAME_BYTES) {
               finishFailure(
                 new Error(`Codemode IPC frame exceeds ${String(DEFAULT_MAX_CHILD_FRAME_BYTES)} bytes`),
-              );
-              return;
-            }
-            if (!terminalResultFrame) childIpcBytes += frameBytes;
-            if (!terminalResultFrame && childIpcBytes > DEFAULT_MAX_CHILD_IPC_BYTES) {
-              finishFailure(
-                new Error(`Codemode IPC output exceeds ${String(DEFAULT_MAX_CHILD_IPC_BYTES)} bytes`),
               );
               return;
             }
@@ -612,8 +598,8 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               pendingSdkCalls.add(pending);
               void pending.finally(() => pendingSdkCalls.delete(pending));
             } else if (message.type === "progress") {
-              recordProgress(message.value);
-              notify({ type: "progress", executionId, value: message.value });
+              if (recordProgress(message.value))
+                notify({ type: "progress", executionId, value: message.value });
             } else if (message.type === "result") {
               if (message.storeMutations.length > DEFAULT_MAX_STORE_ENTRIES) {
                 finishFailure(
@@ -672,9 +658,10 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
           () => finishFailure(new Error("Codemode execution was cancelled"), true),
           { once: true },
         );
-        timer = setTimeout(() => {
-          finishFailure(new Error("Codemode execution timed out"));
-        }, request.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+        if (request.timeoutMs !== undefined)
+          timer = setTimeout(() => {
+            finishFailure(new Error("Codemode execution timed out"));
+          }, request.timeoutMs);
       });
     } finally {
       if (timer) clearTimeout(timer);

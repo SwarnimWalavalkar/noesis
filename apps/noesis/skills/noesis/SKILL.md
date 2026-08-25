@@ -8,7 +8,7 @@ description: Inspect and deliberately refine Noesis's lasting Capabilities, skil
 ## Choose the smallest lasting form
 
 - Answer normally when nothing should persist.
-- Save a Program in `script` mode for one bounded computation or `workflow` mode for a durable multi-phase procedure. Verify a newly saved Program by running its exact revision before depending on it.
+- Save a Program in `script` mode for one reusable computation or `workflow` mode for a durable multi-phase procedure. Verify a newly saved Program by running its exact revision before depending on it.
 - Create or revise a Capability when a lasting fact, preference, criterion, or ability should change Noesis's behavior in future situations. A Capability may contain exact Instruction and Skill materials and may attach an exact already-saved Program revision.
 
 Persist only when future behavior should change. `no_change` is a valid deliberate decision.

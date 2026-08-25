@@ -15,11 +15,13 @@ The set is not user-configurable and does not change when Noesis learns or saves
 
 The direct `execute` descriptor stays small and points to a progressively loaded, turn-frozen built-in `execute` skill. That skill teaches Code Mode composition, the injected SDK, and Program authoring. Exact tool call shapes remain in the frozen Tool Catalog.
 
+Foreground Code Mode, shell commands, Programs, workflows, and subagents are governed by cancellation rather than implicit duration or call-count ceilings. A caller may request an explicit timeout when the task itself needs one. Context projections, individual IPC frames, durable scratch state, and model requests remain size-bounded at their typed boundaries; exceeding a presentation-only progress allowance drops further progress instead of failing productive work.
+
 ## Programs
 
 Program is the one public reusable-execution primitive. Its `mode` selects one of two deliberately distinct runtimes:
 
-- `script` is bounded rerunnable JavaScript with typed JSON input and output.
+- `script` is cancellable rerunnable JavaScript with typed JSON input and output.
 - `workflow` is a durable phased procedure with pause, correction, resume, and per-phase state.
 
 The public codemode API is `programs.list`, `programs.describe`, `programs.save`, `programs.run`, `programs.runs`, and `programs.resume`. Saving returns an immutable definition revision. Running requires that exact revision ID. Program definitions live under `programs/projects/<project-id>/<mode>/<name>/`; ordinary editable files remain declarative authority, recorded revisions are execution authority, and SQLite remains operational run authority.

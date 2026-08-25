@@ -107,7 +107,7 @@ describe("production codemode journey", () => {
     const nestedRequests: PiSubAgentRunRequest[] = [];
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText }) => {
-        if (context.systemPrompt?.includes("bounded subagent")) return "cobalt";
+        if (context.systemPrompt?.includes("subagent inside Noesis")) return "cobalt";
         if (lastUserText.includes("Seed")) return "The durable seed is cobalt.";
         if (context.messages.at(-1)?.role === "toolResult") return "The nested analysis is complete.";
         if (lastUserText.includes("Oversized"))
@@ -210,7 +210,7 @@ describe("production codemode journey", () => {
     expect(nested.plan.prompt).toContain("Seed the session with cobalt.");
     expect(nested.plan.prompt).toContain("The durable seed is cobalt.");
     expect(nested.plan.prompt).not.toContain("Use codemode to ask a model");
-    expect(nested.plan.systemPrompt).toContain("You are a bounded subagent inside Noesis.");
+    expect(nested.plan.systemPrompt).toContain("You are a subagent inside Noesis.");
     expect(nested.plan.route).toEqual({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL });
     expect(nested.plan.thinkingLevel).toBe("xhigh");
     expect(result.frozenTurnPlan?.subAgentDefaults).toMatchObject({
@@ -237,17 +237,18 @@ describe("production codemode journey", () => {
       1,
     );
     await runtime.debug.runTurn(trail.trailId, "Repeated full context nested request.");
-    expect(nestedRequests).toHaveLength(1);
+    expect(nestedRequests).toHaveLength(2);
     expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
-      1,
+      2,
     );
     await runtime.debug.runTurn(trail.trailId, "Recursive subagent request.");
-    expect(nestedRequests).toHaveLength(1);
+    expect(nestedRequests).toHaveLength(2);
     expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
-      1,
+      2,
     );
     await runtime.debug.runTurn(trail.trailId, "Ambiguous nested request.");
     expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toMatchObject([
+      { status: "completed" },
       { status: "completed" },
       {
         status: "interrupted",
@@ -277,7 +278,7 @@ describe("production codemode journey", () => {
     });
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText, systemPrompt }) => {
-        if (systemPrompt.includes("bounded subagent"))
+        if (systemPrompt.includes("subagent inside Noesis"))
           return context.messages.at(-1)?.role === "toolResult"
             ? lastUserText.includes("malformed")
               ? "The malformed read was rejected by the subagent."
@@ -405,7 +406,7 @@ describe("production codemode journey", () => {
     const subagentStages = new Map<string, "described" | "ran">();
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText, systemPrompt }) => {
-        if (systemPrompt.includes("bounded subagent")) {
+        if (systemPrompt.includes("subagent inside Noesis")) {
           const name = lastUserText.includes("safe") ? "safe-subagent-program" : "recursive-subagent-program";
           const stage = subagentStages.get(lastUserText);
           if (!stage) {
@@ -1516,7 +1517,7 @@ describe("production codemode journey", () => {
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText }) => {
         const lastMessage = context.messages.at(-1);
-        if (context.systemPrompt?.includes("bounded subagent"))
+        if (context.systemPrompt?.includes("subagent inside Noesis"))
           return lastMessage?.role === "toolResult"
             ? "The protected runtime kept this subagent advisory."
             : controlledToolCallResponse(

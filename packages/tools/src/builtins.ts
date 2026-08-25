@@ -12,7 +12,7 @@ import { MAX_TOOL_TEXT_BYTES } from "./limits.ts";
 const textBound = z.string().max(MAX_TOOL_TEXT_BYTES);
 const pathSchema = z.string().trim().min(1).max(4096);
 const PROCESS_TERMINATION_GRACE_MS = 500;
-const DEFAULT_MAX_SHELL_OUTPUT_ARTIFACT_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_MAX_SHELL_OUTPUT_ARTIFACT_BYTES = 1024 * 1024 * 1024;
 const FALLBACK_SEARCH_MAX_FILES = 10000;
 const FALLBACK_SEARCH_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 const FALLBACK_SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
@@ -84,58 +84,63 @@ interface ProcessOutputCaptureAppendResult {
 }
 interface ProcessOutputCapture {
   readonly append: (value: string) => ProcessOutputCaptureAppendResult;
-  readonly waitForDrain: () => Promise<void>;
-  readonly finish: () => Promise<void>;
+  readonly waitForDrain: () => Promise<boolean>;
+  readonly finish: () => Promise<boolean>;
 }
 function createProcessOutputCapture(path: string, maximumBytes: number): ProcessOutputCapture {
   const stream: WriteStream = createWriteStream(path, { flags: "wx", mode: 0o600 });
   let failure: Error | undefined;
-  let completion: Promise<void> | undefined;
-  let capturedBytes = 0;
+  let writtenBytes = 0;
   let complete = true;
+  let completion: Promise<boolean> | undefined;
   stream.on("error", (error) => {
     failure = error;
+    complete = false;
   });
   return Object.freeze({
     append: (value: string) => {
-      if (!complete) return Object.freeze({ writable: true, complete: false });
-      const remaining = Math.max(0, maximumBytes - capturedBytes);
-      const accepted = truncateUtf8(value, remaining);
+      if (!value || failure || stream.destroyed || writtenBytes >= maximumBytes) {
+        if (value) complete = false;
+        return Object.freeze({ writable: true, complete });
+      }
+      const accepted = truncateUtf8(value, maximumBytes - writtenBytes);
       const chunk = Buffer.from(accepted, "utf8");
-      capturedBytes += chunk.byteLength;
+      writtenBytes += chunk.byteLength;
       if (accepted.length < value.length) complete = false;
-      const writable = chunk.byteLength === 0 || (!failure && !stream.destroyed && stream.write(chunk));
+      const writable = chunk.byteLength === 0 || stream.write(chunk);
       return Object.freeze({ writable, complete });
     },
     waitForDrain: () => {
-      if (failure) return Promise.reject(failure);
-      if (!stream.writableNeedDrain) return Promise.resolve();
-      return new Promise<void>((resolveDrain, rejectDrain) => {
-        const onError = (error: Error): void => {
+      if (failure || stream.destroyed) return Promise.resolve(false);
+      if (!stream.writableNeedDrain) return Promise.resolve(true);
+      return new Promise<boolean>((resolveDrain) => {
+        const onError = (): void => {
           stream.off("drain", onDrain);
-          rejectDrain(error);
+          complete = false;
+          resolveDrain(false);
         };
         const onDrain = (): void => {
           stream.off("error", onError);
-          resolveDrain();
+          resolveDrain(true);
         };
         stream.once("error", onError);
         stream.once("drain", onDrain);
       });
     },
     finish: () => {
-      completion ??= new Promise<void>((resolveFinish, rejectFinish) => {
-        if (failure) {
-          rejectFinish(failure);
+      completion ??= new Promise<boolean>((resolveFinish) => {
+        if (failure || stream.destroyed) {
+          resolveFinish(false);
           return;
         }
-        const onError = (error: Error): void => {
+        const onError = (): void => {
           stream.off("finish", onFinish);
-          rejectFinish(error);
+          complete = false;
+          resolveFinish(false);
         };
         const onFinish = (): void => {
           stream.off("error", onError);
-          resolveFinish();
+          resolveFinish(complete);
         };
         stream.once("error", onError);
         stream.once("finish", onFinish);
@@ -150,7 +155,7 @@ async function runProcess(input: {
   readonly args: readonly string[];
   readonly cwd: string;
   readonly signal: AbortSignal;
-  readonly timeoutMs: number;
+  readonly timeoutMs: number | undefined;
   readonly maxOutputBytes?: number;
   readonly fullOutputPath?: string;
   readonly maxFullOutputBytes?: number;
@@ -179,9 +184,10 @@ async function runProcess(input: {
     let outputBytes = 0;
     let bytes = 0;
     let fullOutputLength = 0;
+    let fullOutputComplete = true;
     let truncated = false;
     let settled = false;
-    let terminationReason: "cancelled" | "timeout" | "output_limit" | undefined;
+    let terminationReason: "cancelled" | "timeout" | undefined;
     let forceKillTimer: NodeJS.Timeout | undefined;
     const stdoutDecoder = new TextDecoder();
     const stderrDecoder = new TextDecoder();
@@ -218,10 +224,7 @@ async function runProcess(input: {
       bytes += Buffer.byteLength(accepted, "utf8");
       if (accepted.length < decoded.length) truncated = true;
       const captureResult = capture?.append(decoded);
-      if (captureResult?.complete === false) {
-        truncated = true;
-        terminate("output_limit");
-      }
+      if (captureResult && !captureResult.complete) fullOutputComplete = false;
       return captureResult?.writable ?? true;
     };
     const flushOutput = (): void => {
@@ -247,7 +250,7 @@ async function runProcess(input: {
         }
       }
     };
-    const terminate = (reason: "cancelled" | "timeout" | "output_limit"): void => {
+    const terminate = (reason: "cancelled" | "timeout"): void => {
       if (terminationReason) return;
       terminationReason = reason;
       killTree("SIGTERM");
@@ -264,7 +267,7 @@ async function runProcess(input: {
       if (settled) return;
       settled = true;
       cleanup();
-      void (capture?.finish() ?? Promise.resolve()).then(() => reject(cause), reject);
+      void (capture?.finish() ?? Promise.resolve(true)).then(() => reject(cause), reject);
     };
     let captureBackpressured = false;
     const append = (kind: "stdout" | "stderr", chunk: Buffer | string): void => {
@@ -278,20 +281,16 @@ async function runProcess(input: {
       captureBackpressured = true;
       child.stdout.pause();
       child.stderr.pause();
-      void capture.waitForDrain().then(
-        () => {
-          captureBackpressured = false;
-          if (settled) return;
-          child.stdout.resume();
-          child.stderr.resume();
-        },
-        (error: Error) => {
-          killTree("SIGKILL");
-          rejectOnce(error);
-        },
-      );
+      void capture.waitForDrain().then((captureHealthy) => {
+        if (!captureHealthy) fullOutputComplete = false;
+        captureBackpressured = false;
+        if (settled) return;
+        child.stdout.resume();
+        child.stderr.resume();
+      });
     };
-    const timer = setTimeout(() => terminate("timeout"), input.timeoutMs);
+    const timer =
+      input.timeoutMs === undefined ? undefined : setTimeout(() => terminate("timeout"), input.timeoutMs);
     const cancel = (): void => terminate("cancelled");
     input.signal.addEventListener("abort", cancel, { once: true });
     child.stdout.on("data", (chunk: Buffer | string) => append("stdout", chunk));
@@ -303,7 +302,8 @@ async function runProcess(input: {
       if (terminationReason) killTree("SIGKILL");
       cleanup();
       flushOutput();
-      void (capture?.finish() ?? Promise.resolve()).then(() => {
+      void (capture?.finish() ?? Promise.resolve(true)).then((captureFinished) => {
+        if (!captureFinished) fullOutputComplete = false;
         if (terminationReason === "cancelled" || input.signal.aborted) {
           reject(createEffectExecutionFailure("cancelled", "Process was cancelled"));
           return;
@@ -321,7 +321,7 @@ async function runProcess(input: {
             stdout,
             stderr,
             truncated,
-            fullOutputComplete: terminationReason !== "output_limit",
+            fullOutputComplete,
           }),
         );
       }, reject);
@@ -638,6 +638,7 @@ export interface CreateLocalWorkToolsOptions {
   readonly cwd: string;
   readonly fileMutationCoordinator?: FileMutationCoordinator;
   readonly searchCommand?: string;
+  readonly maxShellOutputArtifactBytes?: number;
   readonly writeArtifact: (input: { readonly path: string; readonly content: string }) => Promise<{
     readonly path: string;
     readonly bytes: number;
@@ -646,7 +647,6 @@ export interface CreateLocalWorkToolsOptions {
   readonly importArtifact: (input: { readonly path: string; readonly sourcePath: string }) => Promise<{
     readonly path: string;
   }>;
-  readonly maxShellOutputArtifactBytes?: number;
 }
 export interface FileMutationCoordinator {
   readonly run: <Value>(path: string, operation: () => Promise<Value>) => Promise<Value>;
@@ -674,15 +674,13 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
   const cwd = resolve(options.cwd);
   const projectRoot = realpathSync(cwd);
   const searchCommand = options.searchCommand ?? "rg";
+  const maxShellOutputArtifactBytes =
+    options.maxShellOutputArtifactBytes ?? DEFAULT_MAX_SHELL_OUTPUT_ARTIFACT_BYTES;
+  if (!Number.isSafeInteger(maxShellOutputArtifactBytes) || maxShellOutputArtifactBytes <= 0)
+    throw new Error("maxShellOutputArtifactBytes must be a positive safe integer");
   const shellPath = process.env["SHELL"] ?? "/bin/sh";
   const writeArtifact = options.writeArtifact;
   const importArtifact = options.importArtifact;
-  const maxShellOutputArtifactBytes = z
-    .number()
-    .int()
-    .positive()
-    .max(DEFAULT_MAX_SHELL_OUTPUT_ARTIFACT_BYTES)
-    .parse(options.maxShellOutputArtifactBytes ?? DEFAULT_MAX_SHELL_OUTPUT_ARTIFACT_BYTES);
   const fileMutationCoordinator = options.fileMutationCoordinator ?? createFileMutationCoordinator();
   const identity = (tool: string, extra: JsonValue = null): JsonValue =>
     Object.freeze({
@@ -817,7 +815,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
           args,
           cwd,
           signal: context.signal,
-          timeoutMs: 30000,
+          timeoutMs: undefined,
         });
       } catch (error) {
         if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")
@@ -941,16 +939,16 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     name: "shell.run",
     label: "Run shell command",
     description:
-      "Run a shell command locally with bounded tail output, timeout, and cancellation. A truncated result saves captured output to fullOutputPath for inspection with ordinary file or Unix tools; fullOutputComplete says whether that artifact is complete.",
+      "Run a shell command locally with bounded tail output, optional timeout, and cancellation. truncated reports preview completeness. When fullOutputPath is present, fullOutputComplete reports whether that retained artifact is complete.",
     identityMaterial: identity("shell.run", {
       shellPath,
-      importArtifact: importArtifact.toString(),
       maxShellOutputArtifactBytes,
+      importArtifact: importArtifact.toString(),
     }),
     inputSchema: z.strictObject({
       command: z.string().trim().min(1).max(32768),
       cwd: pathSchema.optional(),
-      timeoutMs: z.number().int().min(100).max(600000).optional(),
+      timeoutMs: z.number().int().min(100).max(2_147_483_647).optional(),
     }),
     outputSchema: z.union([
       z.strictObject({
@@ -974,9 +972,9 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
           .int()
           .nonnegative()
           .describe("Decoded character length observed from the process."),
-        truncated: z.literal(true),
-        fullOutputPath: z.string().describe("Absolute path to the complete combined process output."),
-        fullOutputComplete: z.literal(true),
+        truncated: z.literal(false),
+        fullOutputPath: z.string().describe("Absolute path to the retained combined process output."),
+        fullOutputComplete: z.literal(false),
       }),
       z.strictObject({
         exitCode: z.number().int().nullable(),
@@ -986,11 +984,12 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
           .number()
           .int()
           .nonnegative()
-          .describe("Decoded character length observed before output-limit termination settled."),
+          .describe("Decoded character length observed from the process."),
         truncated: z.literal(true),
-        fullOutputPath: z.string().describe("Absolute path to the captured combined process output."),
-        fullOutputComplete: z.literal(false),
-        terminationReason: z.literal("output_limit"),
+        fullOutputPath: z.string().describe("Absolute path to the retained combined process output."),
+        fullOutputComplete: z
+          .boolean()
+          .describe("Whether fullOutputPath contains every decoded character observed from the process."),
       }),
     ]),
     effect: ({ command, cwd: requestedCwd = "." }) => ({
@@ -998,7 +997,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
       resource: `shell:${resolvedPath(cwd, requestedCwd)}:${sha256(command)}`,
       estimatedCost: 1,
     }),
-    execute: async ({ command, cwd: requestedCwd = ".", timeoutMs = 120000 }, context) => {
+    execute: async ({ command, cwd: requestedCwd = ".", timeoutMs }, context) => {
       const temporaryDirectory = await mkdtemp(join(tmpdir(), "noesis-shell-"));
       const temporaryOutputPath = join(temporaryDirectory, "output.log");
       try {
@@ -1011,7 +1010,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
           fullOutputPath: temporaryOutputPath,
           maxFullOutputBytes: maxShellOutputArtifactBytes,
         });
-        if (!result.truncated)
+        if (!result.truncated && result.fullOutputComplete)
           return {
             exitCode: result.exitCode,
             signal: result.signal,
@@ -1024,26 +1023,15 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
           path: `tool-output/${sha256(`${context.executionId}:${context.callId}`)}.log`,
           sourcePath: temporaryOutputPath,
         });
-        return result.fullOutputComplete
-          ? {
-              exitCode: result.exitCode,
-              signal: result.signal,
-              output: result.output,
-              fullOutputLength: result.fullOutputLength,
-              truncated: true,
-              fullOutputPath: artifact.path,
-              fullOutputComplete: true,
-            }
-          : {
-              exitCode: result.exitCode,
-              signal: result.signal,
-              output: result.output,
-              fullOutputLength: result.fullOutputLength,
-              truncated: true,
-              fullOutputPath: artifact.path,
-              fullOutputComplete: false,
-              terminationReason: "output_limit" as const,
-            };
+        return {
+          exitCode: result.exitCode,
+          signal: result.signal,
+          output: result.output,
+          fullOutputLength: result.fullOutputLength,
+          truncated: result.truncated,
+          fullOutputPath: artifact.path,
+          fullOutputComplete: result.fullOutputComplete,
+        };
       } finally {
         await rm(temporaryDirectory, { recursive: true, force: true });
       }

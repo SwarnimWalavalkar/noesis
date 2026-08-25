@@ -218,6 +218,7 @@ export function renderQueuedInputs(state: NoesisTuiState, width: number, maxVisi
     `QUEUED · ${String(queued.length)}`,
     ...(state.interaction.queuePaused ? ["paused"] : []),
     ...(queued.some((item) => item.status === "held") ? ["holding steer"] : []),
+    ...(queued.some((item) => item.status === "dispatching") ? ["steering at next safe boundary"] : []),
   ].join(" · ");
   return [
     elideText(styled(state.colorEnabled, `${ANSI.bold}${ANSI.yellow}`, heading), safeWidth),
@@ -226,7 +227,7 @@ export function renderQueuedInputs(state: NoesisTuiState, width: number, maxVisi
       : []),
     ...shown.map((item, index) =>
       elideText(
-        `${styled(state.colorEnabled, ANSI.dim, `${String(hidden + index + 1)}${item.status === "held" ? "→" : " "} `)}${safeTerminalQueueText(item.text)}`,
+        `${styled(state.colorEnabled, ANSI.dim, `${String(hidden + index + 1)}${item.status === "held" ? "→" : item.status === "dispatching" ? "⇢" : " "} `)}${safeTerminalQueueText(item.text)}`,
         safeWidth,
       ),
     ),

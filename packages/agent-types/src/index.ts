@@ -82,7 +82,7 @@ export const ProgramWorkflowPhaseSchema = z.strictObject({
     .max(128 * 1024),
   inputSchema: z.record(z.string(), JsonValueSchema),
   outputSchema: z.record(z.string(), JsonValueSchema),
-  requiredTools: z.array(z.string().min(1)).max(128),
+  requiredTools: z.array(z.string().min(1)),
 });
 export const ScriptProgramManifestSchema = z.strictObject({
   kind: z.literal("noesis_program"),
@@ -93,7 +93,7 @@ export const ScriptProgramManifestSchema = z.strictObject({
   sourceRevision: FileRevisionRefSchema,
   inputSchema: z.record(z.string(), JsonValueSchema),
   outputSchema: z.record(z.string(), JsonValueSchema),
-  requiredTools: z.array(z.string().min(1)).max(128),
+  requiredTools: z.array(z.string().min(1)),
   createdFrom: z.strictObject({
     sessionId: z.string().min(1),
     turnId: z.string().min(1),
@@ -109,7 +109,7 @@ export const WorkflowProgramManifestSchema = z.strictObject({
   revision: z.number().int().positive(),
   inputSchema: z.record(z.string(), JsonValueSchema),
   outputSchema: z.record(z.string(), JsonValueSchema),
-  phases: z.array(ProgramWorkflowPhaseSchema).min(1).max(64),
+  phases: z.array(ProgramWorkflowPhaseSchema).min(1),
   createdFrom: z.strictObject({
     sessionId: z.string().min(1),
     turnId: z.string().min(1),
