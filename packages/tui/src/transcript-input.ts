@@ -35,7 +35,8 @@ export function createTranscriptInputHandler(options: {
           maxScroll,
         });
       else if (matchesKey(data, "space")) options.view.dispatch({ type: "inspector-view-toggled" });
-      else return false;
+      // Unmatched keys are consumed: the editor is paused while the inspector owns the keyboard.
+      else return true;
       options.tui.requestRender();
       return true;
     }
@@ -60,7 +61,8 @@ export function createTranscriptInputHandler(options: {
       else if (matchesKey(data, "enter")) {
         options.openRunInspector(state.actionCursor);
         return true;
-      } else return false;
+        // Unmatched keys are consumed: typing is disabled while keys navigate the transcript.
+      } else return true;
       options.tui.requestRender();
       return true;
     }

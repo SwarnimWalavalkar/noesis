@@ -12,7 +12,17 @@ import {
   TUI,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { ANSI, elideText, NOESIS_WORDMARK, safeTerminalText, shouldUseColor, styled } from "./theme.ts";
+import {
+  ANSI,
+  brandGradient,
+  detectTrueColor,
+  elideText,
+  NOESIS_WORDMARK,
+  safeTerminalText,
+  shouldUseColor,
+  styled,
+} from "./theme.ts";
+import { NOESIS_STARTUP_NOTES, pickStartupNote } from "./startup-note.ts";
 import { createSelectTheme } from "./safe-editor.ts";
 export interface OnboardingSurfaceChoice {
   readonly id: string;
@@ -80,17 +90,21 @@ export function onboardingHeaderLines(
   options: {
     readonly collapsed?: boolean;
     readonly subtitle?: string;
+    readonly trueColor?: boolean;
+    readonly note?: string;
   } = {},
 ): string[] {
   const collapsed = options.collapsed ?? false;
   const subtitle = options.subtitle ?? "first-launch setup";
-  const brand = (text: string): string => styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, text);
+  const trueColor = options.trueColor ?? false;
+  const note = options.note ?? NOESIS_STARTUP_NOTES[0];
+  const brand = (text: string): string => brandGradient(text, colorEnabled, trueColor);
   const muted = (text: string): string => styled(colorEnabled, ANSI.dim, text);
   if (width < 30 || height < 8) return [];
   if (!collapsed && width >= 60 && height >= 22)
     return [
       ...NOESIS_WORDMARK.map(brand),
-      muted("think · learn · create · grow"),
+      muted(note),
       muted(subtitle),
       muted("─".repeat(width)),
     ];
@@ -219,6 +233,7 @@ export async function runNoesisOnboardingTui<T>(
   const interrupted = new Promise<never>((_resolve, reject) => {
     interrupt = () => reject(new OnboardingInterruptedError());
   });
+  const startupNote = pickStartupNote();
   const chrome: Component = {
     invalidate() {},
     render(width) {
@@ -229,6 +244,8 @@ export async function runNoesisOnboardingTui<T>(
       const header = onboardingHeaderLines(inner, height, colorEnabled, {
         collapsed: stopped,
         subtitle,
+        trueColor: colorEnabled && detectTrueColor(process.env),
+        note: startupNote,
       });
       const hintRows = height >= 8 && active ? 1 : 0;
       // Questions wrap rather than elide: an authentication prompt can carry a long placeholder

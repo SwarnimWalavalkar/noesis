@@ -62,6 +62,10 @@ export function workingAdjustmentNotice(activity: TuiLearningActivitySummary): s
   if (activity.status === "stale") return `unchanged · ${summary}`;
   return undefined;
 }
+/** Learning outcomes carry their own signature tone; a pending decision still demands attention. */
+export function learningNoticeTone(notice: string): "attention" | "learning" {
+  return notice.startsWith("Capability needs") ? "attention" : "learning";
+}
 /** Keep an auxiliary learning failure visible without turning a settled foreground turn into an error. */
 export function learningDiagnosticNotice(cause: unknown): string {
   let message = "";
@@ -147,7 +151,7 @@ export async function settledTurnPresentation(
     actions.push({
       type: "notification-shown",
       text: learningNotice,
-      tone: learningNotice.startsWith("Capability needs") ? "attention" : "success",
+      tone: learningNoticeTone(learningNotice),
     });
   const focusActivity = learning.activities.find(
     (activity) => activity.turnId === request.turnId && workingAdjustmentNotice(activity) !== undefined,
@@ -195,7 +199,7 @@ export function reconcileSettledTurnPresentation(
             host.dispatch({
               type: "notification-shown",
               text: notice,
-              tone: notice.startsWith("Capability needs") ? "attention" : "success",
+              tone: learningNoticeTone(notice),
             });
             host.rememberLearningFocus?.(focusId);
             host.requestRender();

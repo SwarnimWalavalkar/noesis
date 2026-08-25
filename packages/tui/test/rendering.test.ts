@@ -3,12 +3,13 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   createSafeEditor,
   createTranscriptRenderer,
-  EMPTY_TRANSCRIPT_HINTS,
   executionIdOf,
   formatDuration,
   initialTuiState,
+  NOESIS_STARTUP_NOTES,
   NOESIS_WORDMARK,
   type NoesisTuiState,
+  pickStartupNote,
   renderAgentActionBlock,
   renderBottomChrome,
   renderHeader,
@@ -16,7 +17,6 @@ import {
   renderNoesisState,
   renderRichText,
   renderSubagents,
-  selectEmptyTranscriptHint,
   safeTerminalText,
   sanitizeEditorText,
   streamingFrameDelay,
@@ -286,21 +286,13 @@ describe("Noesis transcript rendering", () => {
     return { execute, read, write, all: [execute, read, write] };
   };
 
-  test("selects one empty-state hint per renderer and keeps it stable across repaint", () => {
+  test("leaves an empty transcript blank so the header startup note owns the invitation", () => {
     const state = initialTuiState("fake");
-    const renderer = createTranscriptRenderer(() => 0.41);
-
-    const first = renderer.render(state, 80);
-    const resized = renderer.render(state, 32);
-
-    expect(first).toEqual([EMPTY_TRANSCRIPT_HINTS[2]]);
-    expect(resized).toEqual([selectEmptyTranscriptHint(0.41).slice(0, 31) + "…"]);
-    expect(createTranscriptRenderer(() => 0).render(state, 80)).toEqual([EMPTY_TRANSCRIPT_HINTS[0]]);
-    expect(createTranscriptRenderer(() => 0.999).render(state, 80)).toEqual([EMPTY_TRANSCRIPT_HINTS.at(-1)]);
+    expect(createTranscriptRenderer().render(state, 80)).toEqual([]);
   });
 
-  test("does not show an empty-state hint once the transcript has content", () => {
-    const rendered = createTranscriptRenderer(() => 0).render(
+  test("renders transcript content once messages arrive", () => {
+    const rendered = createTranscriptRenderer().render(
       {
         ...initialTuiState("fake"),
         timeline: [{ kind: "message", role: "user", text: "Begin." }],
@@ -309,7 +301,6 @@ describe("Noesis transcript rendering", () => {
     );
 
     expect(rendered.join("\n")).toContain("Begin.");
-    expect(rendered.join("\n")).not.toContain(EMPTY_TRANSCRIPT_HINTS[0]);
   });
 
   test("collapses each codemode call to one summarized row", () => {
@@ -743,7 +734,7 @@ describe("Noesis transcript rendering", () => {
       ...state,
       actionCursor: "action-12",
     };
-    const renderer = createTranscriptRenderer(() => 0);
+    const renderer = createTranscriptRenderer();
 
     const newest = renderer.renderWindow(state, 72, 5).join("\n");
     const earlier = renderer.renderWindow({ ...state, actionCursor: "action-2" }, 72, 5).join("\n");
@@ -814,7 +805,7 @@ describe("Noesis transcript rendering", () => {
     };
     const rendered = renderTranscriptLines(state, 60);
 
-    expect(rendered.join("\n")).toContain("YOU\n│ First question\n\nNOESIS\n  First answer\n\nNOTE");
+    expect(rendered.join("\n")).toContain("YOU\n│ First question\n\nNOESIS\n│ First answer\n\nNOTE");
     expect(rendered.filter((line) => line === "")).toHaveLength(2);
   });
 
@@ -1097,6 +1088,13 @@ describe("Noesis transcript rendering", () => {
     expect(renderHeader(false, 120, 35).join("\n")).toContain(NOESIS_WORDMARK[0]);
     expect(renderHeader(false, 90, 28).join("\n")).not.toContain(NOESIS_WORDMARK[0]);
     expect(renderHeader(false, 34, 8).join("\n")).not.toContain(NOESIS_WORDMARK[0]);
+  });
+
+  test("picks a stable startup note from the invitation pool", () => {
+    expect(NOESIS_STARTUP_NOTES.length).toBeGreaterThan(10);
+    expect(NOESIS_STARTUP_NOTES.every((note) => [...note].length <= 46)).toBe(true);
+    expect(pickStartupNote(() => 0)).toBe(NOESIS_STARTUP_NOTES[0]);
+    expect(pickStartupNote(() => 0.999)).toBe(NOESIS_STARTUP_NOTES.at(-1));
   });
 
   test("keeps every owned emitted line inside terminal columns from 1 through 120", () => {

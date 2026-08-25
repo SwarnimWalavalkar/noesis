@@ -33,6 +33,62 @@ export function shouldUseColor(env: Readonly<Record<string, string | undefined>>
   return !("NO_COLOR" in env) && env["TERM"] !== "dumb";
 }
 
+export function detectTrueColor(env: Readonly<Record<string, string | undefined>>): boolean {
+  const colorterm = env["COLORTERM"] ?? "";
+  return colorterm.includes("truecolor") || colorterm.includes("24bit");
+}
+
+interface RgbColor {
+  readonly r: number;
+  readonly g: number;
+  readonly b: number;
+}
+
+/** Brand gradient endpoints: interface cyan flowing into the "mind" violet. */
+const BRAND_GRADIENT_FROM: RgbColor = { r: 34, g: 211, b: 238 };
+const BRAND_GRADIENT_TO: RgbColor = { r: 167, g: 139, b: 250 };
+const GRADIENT_STOPS = 8;
+
+const trueColorSequence = (color: RgbColor): string =>
+  `\u001b[38;2;${String(color.r)};${String(color.g)};${String(color.b)}m`;
+
+const mixChannel = (from: number, to: number, ratio: number): number =>
+  Math.round(from + (to - from) * ratio);
+
+/**
+ * Styles text with a horizontal cyan-to-violet sweep on truecolor terminals, quantized to a few
+ * stops so runs of characters share one escape sequence. Falls back to the plain codes elsewhere.
+ */
+export function brandGradient(
+  text: string,
+  colorEnabled: boolean,
+  trueColorEnabled: boolean,
+  fallbackCodes: string = `${ANSI.bold}${ANSI.cyan}`,
+): string {
+  if (!colorEnabled) return text;
+  const characters = [...text];
+  if (!trueColorEnabled || characters.length === 0) return styled(colorEnabled, fallbackCodes, text);
+  const segments: string[] = [ANSI.bold];
+  let previousStop = -1;
+  for (const [index, character] of characters.entries()) {
+    const stop = Math.min(GRADIENT_STOPS - 1, Math.floor((index / characters.length) * GRADIENT_STOPS));
+    if (stop !== previousStop) {
+      const ratio = stop / (GRADIENT_STOPS - 1);
+      segments.push(
+        trueColorSequence({
+          r: mixChannel(BRAND_GRADIENT_FROM.r, BRAND_GRADIENT_TO.r, ratio),
+          g: mixChannel(BRAND_GRADIENT_FROM.g, BRAND_GRADIENT_TO.g, ratio),
+          b: mixChannel(BRAND_GRADIENT_FROM.b, BRAND_GRADIENT_TO.b, ratio),
+        }),
+      );
+      previousStop = stop;
+    }
+    segments.push(character);
+  }
+  segments.push(ANSI.reset);
+  return segments.join("");
+}
+
 export function elideText(text: string, width: number): string {
   const truncated = truncateToWidth(text, Math.max(0, width), "…");
   // pi-tui defensively appends resets while truncating. Do not introduce ANSI into plain text,

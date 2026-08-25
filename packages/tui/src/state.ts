@@ -1,14 +1,11 @@
 import { createConditionalObject, type JsonValue } from "@noesis/domain";
 import type { ContextSnapshot } from "@noesis/context";
-import type {
-  RuntimeAgentDefaults,
-  RuntimeTranscriptAction,
-  RuntimeTranscriptEntry,
-  TrailState,
-} from "@noesis/runtime";
+import type { RuntimeAgentDefaults, RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
 import { EXECUTE_ACTION_NAME, SUBAGENT_ACTION_NAME } from "./action-summary.ts";
 import { appendReasoningDelta, reconcileReasoning } from "./reasoning-timeline.ts";
 import type { TuiExecutionDetail, TuiInteractionSnapshot } from "./runtime-port.ts";
+import { tuiTimelineFromRuntime } from "./timeline-adapter.ts";
+export { tuiTimelineFromRuntime };
 export type Pane = "trail" | "context" | "capabilities";
 export interface TuiMessage {
   readonly role: "user" | "assistant" | "system";
@@ -46,69 +43,6 @@ export interface TuiReasoningEntry {
   readonly createdAt?: string;
 }
 export type TuiTimelineEntry = TuiMessageEntry | TuiReasoningEntry | TuiAgentActionEntry;
-function parsedTimestamp(timestamp: string): number | undefined {
-  const parsed = Date.parse(timestamp);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-function actionDuration(action: RuntimeTranscriptAction): number | undefined {
-  if (!action.completedAt) return undefined;
-  const startedAt = parsedTimestamp(action.startedAt);
-  const completedAt = parsedTimestamp(action.completedAt);
-  if (startedAt === undefined || completedAt === undefined) return undefined;
-  return Math.max(0, completedAt - startedAt);
-}
-/**
- * The runtime owns transcript ordering and durable payloads. This adapter only converts their
- * representation into the same immutable entry shape used by live TUI events.
- */
-export function tuiTimelineFromRuntime(
-  transcript: readonly RuntimeTranscriptEntry[],
-): readonly TuiTimelineEntry[] {
-  return transcript.map((entry): TuiTimelineEntry => {
-    if (entry.kind === "message")
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      return createConditionalObject({
-        kind: "message",
-        role: entry.role,
-        text: entry.text,
-        messageId: entry.messageId,
-      } as const)
-        .addOptional(entry.turnId ? { turnId: entry.turnId } : undefined)
-        .add({
-          createdAt: entry.createdAt,
-        } as const)
-        .finish();
-    if (entry.kind === "reasoning")
-      return createConditionalObject({
-        kind: "reasoning",
-        text: entry.text,
-        reasoningId: entry.reasoningId,
-      } as const)
-        .addOptional(entry.turnId ? { turnId: entry.turnId } : undefined)
-        .add({ createdAt: entry.createdAt } as const)
-        .finish();
-    const startedAt = parsedTimestamp(entry.startedAt);
-    const durationMs = actionDuration(entry);
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    return createConditionalObject({
-      kind: "action",
-      actionId: entry.actionId,
-    } as const)
-      .addOptional(entry.turnId ? { turnId: entry.turnId } : undefined)
-      .addOptional(entry.parentActionId ? { parentActionId: entry.parentActionId } : undefined)
-      .addOptional(entry.executionId ? { executionId: entry.executionId } : undefined)
-      .add({
-        name: entry.name,
-        status: entry.status,
-      } as const)
-      .addOptional(!(entry.input === undefined) ? { input: entry.input } : undefined)
-      .addOptional(!(entry.update === undefined) ? { update: entry.update } : undefined)
-      .addOptional(!(entry.output === undefined) ? { output: entry.output } : undefined)
-      .addOptional(!(startedAt === undefined) ? { startedAt } : undefined)
-      .addOptional(!(durationMs === undefined) ? { durationMs } : undefined)
-      .finish();
-  });
-}
 export function isTuiMessageEntry(entry: TuiTimelineEntry): entry is TuiMessageEntry {
   return entry.kind === "message";
 }
@@ -206,7 +140,7 @@ export interface NoesisTuiState {
   readonly error?: string;
   readonly notification?: Readonly<{
     readonly text: string;
-    readonly tone: "info" | "success" | "attention";
+    readonly tone: "info" | "success" | "attention" | "learning";
   }>;
   readonly animationFrame: number;
 }
@@ -353,7 +287,10 @@ export type NoesisTuiAction =
   | {
       readonly type: "notification-shown";
       readonly text: string;
-      readonly tone: "info" | "success" | "attention";
+      readonly tone: "info" | "success" | "attention" | "learning";
+    }
+  | {
+      readonly type: "notification-cleared";
     }
   | {
       readonly type: "system-message";
@@ -724,7 +661,11 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         ...rest,
         execution: action.execution,
         animationFrame:
-          action.execution === "idle" || action.execution === "error" ? 0 : state.animationFrame,
+          action.execution === "idle" ||
+          action.execution === "error" ||
+          action.execution === "closing"
+            ? 0
+            : state.animationFrame,
       };
     }
     case "animation-tick":
@@ -789,6 +730,10 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       return { ...state, execution: "error", error: action.error };
     case "notification-shown":
       return { ...state, notification: Object.freeze({ text: action.text, tone: action.tone }) };
+    case "notification-cleared": {
+      const { notification: _notification, ...rest } = state;
+      return rest;
+    }
     case "system-message":
       return {
         ...state,

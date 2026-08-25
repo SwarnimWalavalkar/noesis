@@ -14,6 +14,10 @@ import {
   createControlledPiModels,
 } from "../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 import { createApplicationRuntimeComposition } from "../src/runtime-composition.ts";
+import { NOESIS_STARTUP_NOTES } from "@noesis/tui";
+
+const hasStartupNote = (text: string): boolean =>
+  NOESIS_STARTUP_NOTES.some((note) => text.includes(note));
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const cliPath = join(repositoryRoot, "apps/noesis/src/cli.ts");
@@ -327,7 +331,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     });
 
     expect(output).toContain("███╗   ██╗ ██████╗");
-    expect(output).toContain("think · learn · create · grow");
+    expect(hasStartupNote(output)).toBe(true);
     expect(output).toContain("ctx   —");
     expect(result).toEqual({ code: 0, signal: null });
   }, 7_000);
@@ -338,7 +342,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       rows: 28,
     });
 
-    expect(output).toMatch(/[◐◓◑◒] THINKING/u);
+    expect(output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] WORKING/u);
     expect(output).toContain("Controlled Pi completion for: show the polished shell");
     expect(output).toContain("ctx   0%");
     expect(result).toEqual({ code: 0, signal: null });
@@ -448,7 +452,8 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       { columns: 70, rows: 22 },
     );
 
-    expect(output).toContain("NOESIS  think · learn · create · grow");
+    expect(hasStartupNote(output)).toBe(true);
+    expect(output).toMatch(/NOESIS {2}.+/u);
     expect(output).not.toContain("███╗   ██╗ ██████╗");
     // A 70-column status line has no room for the session field; the resumed content is the
     // evidence that the right session opened.
@@ -481,7 +486,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     });
 
     expect(output).not.toContain("███╗   ██╗ ██████╗");
-    expect(output).not.toContain("think · learn · create · grow");
+    expect(hasStartupNote(output)).toBe(false);
     expect(output).toContain("● IDLE");
     expect(output).toContain("› message");
     expect(output).toContain("? help · ctrl+o inspect runs");
@@ -497,7 +502,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
 
     expect(output).toContain("███╗   ██╗ ██████╗");
     expect(resized).not.toContain("███╗   ██╗ ██████╗");
-    expect(resized).not.toContain("think · learn · create · grow");
+    expect(hasStartupNote(resized)).toBe(false);
     expect(resized).toContain("● IDLE");
     expect(resized).toContain("› message");
     expect(result).toEqual({ code: 0, signal: null });
@@ -539,7 +544,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).toContain("```ts");
     expect(output).toContain("$x_i^2$");
     expect(output).toContain("╭─ math");
-    expect(output).toMatch(/[◐◓◑◒] STREAMING/u);
+    expect(output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] STREAMING/u);
     expect(output).toContain("Controlled Pi completion for:");
     expect(resized).not.toContain("███╗   ██╗");
     // History scrolls into terminal scrollback instead of being replaced by a crop marker.

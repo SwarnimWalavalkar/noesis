@@ -905,7 +905,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("first\r");
-    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] THINKING/u));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] WORKING/u));
     terminal.type("promote me\r");
     await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
     terminal.type("/steer\r");
@@ -993,7 +993,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("first\r");
-    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] THINKING/u));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] WORKING/u));
     terminal.type("/compact\r");
     await vi.waitFor(() => expect(terminal.output).toContain("changes the session"));
     expect(compact).not.toHaveBeenCalled();
@@ -1302,7 +1302,7 @@ describe("Noesis TUI lifecycle", () => {
       }),
     );
     await vi.waitFor(() =>
-      expect(terminal.output).toContain("◆ adjusted · Verify observable state before claiming success"),
+      expect(terminal.output).toContain("✦ adjusted · Verify observable state before claiming success"),
     );
     expect(terminal.output).not.toContain("\nstrategy ·");
     expect(waitedJobIds).toEqual(["job-late-adjustment"]);
@@ -1451,7 +1451,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("use the snapshot\r");
-    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] TOOL/u));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] TOOL/u));
     await vi.waitFor(() => expect(terminal.output).toContain("● inspect"));
     expect(terminal.output).not.toContain("ACTIONS");
     expect(terminal.output).toContain("inspect");
@@ -1960,11 +1960,15 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("block this turn\r");
-    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] STREAMING/u));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] STREAMING/u));
     terminal.type("another turn\r");
     await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
     expect(runs).toBe(1);
 
+    // The first Escape only arms the interrupt; the second, consecutive one commits it.
+    terminal.send("\u001b");
+    await vi.waitFor(() => expect(terminal.output).toContain("Press esc again to interrupt"));
+    expect(abort).not.toHaveBeenCalled();
     terminal.send("\u001b");
     await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] ABORTING/u));
     await vi.waitFor(() => expect(terminal.output).toContain("Turn interrupted."));
@@ -2021,7 +2025,7 @@ describe("Noesis TUI lifecycle", () => {
 
     expect(abort).not.toHaveBeenCalled();
     expect(terminal.stops).toBe(0);
-    expect(terminal.output).toMatch(/[◐◓◑◒] STREAMING/u);
+    expect(terminal.output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] STREAMING/u);
 
     terminal.send("\u0003");
     await running;
@@ -2081,8 +2085,10 @@ describe("Noesis TUI lifecycle", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 40));
 
     expect(abort).not.toHaveBeenCalled();
-    expect(terminal.output).toMatch(/[◐◓◑◒] THINKING/u);
+    expect(terminal.output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] WORKING/u);
 
+    // Two fresh Escapes interrupt the successor: the stale arm from the first turn does not count.
+    terminal.send("\u001b");
     terminal.send("\u001b");
     await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(terminal.output).toContain("Turn interrupted."));
@@ -2459,7 +2465,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("/quit\n");
-    await vi.waitFor(() => expect(terminal.output).toContain("● CLOSING"));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[⣿⣷⣶⣦⣤⣄⣀] CLOSING/u));
     expect(terminal.output).toContain("closing session…");
     expect(terminal.stops).toBe(0);
 

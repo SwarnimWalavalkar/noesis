@@ -8,7 +8,10 @@ export const INSPECTOR_PREVIEW_CHARACTERS = 24_000;
 export const TUI_TIMINGS = Object.freeze({
   shutdownGraceMs: 250,
   interruptFeedbackMs: 20,
-  closingFeedbackMs: 20,
+  /** Long enough for one full closing-glyph cycle before cleanup can finish instantly. */
+  closingFeedbackMs: 840,
+  /** How long a first Escape stays armed before interrupting requires starting over. */
+  escInterruptArmMs: 2_000,
 });
 const INSPECTOR_PAGE_HEADER_RESERVE = 160;
 
