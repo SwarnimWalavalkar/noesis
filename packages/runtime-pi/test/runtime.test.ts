@@ -228,6 +228,9 @@ describe("agent runtime factories", () => {
       prepared,
       turnId: "turn-subagent-pre-aborted",
       signal: controller.signal,
+      authorizeModelCall: async () => {
+        throw new Error("A model call must not be authorized while authentication is pending");
+      },
       emit: () => undefined,
     });
     await started;
@@ -275,11 +278,24 @@ describe("agent runtime factories", () => {
       close: async () => undefined,
     });
 
+    const authorizedModelCalls: number[] = [];
+    const settledModelCalls: number[] = [];
     const result = await createPiSubAgentRunner(process.cwd(), controlled.models).run({
       plan,
       prepared,
       turnId: "turn-subagent-many-rounds",
       signal: new AbortController().signal,
+      authorizeModelCall: async (modelCall) => {
+        authorizedModelCalls.push(modelCall);
+        return Object.freeze({
+          complete: async () => {
+            settledModelCalls.push(modelCall);
+          },
+          fail: async () => {
+            settledModelCalls.push(modelCall);
+          },
+        });
+      },
       emit: () => undefined,
     });
 
@@ -287,6 +303,8 @@ describe("agent runtime factories", () => {
     expect(result.modelCalls).toBe(34);
     expect(result.toolCalls).toBe(33);
     expect(providerRequests).toBe(34);
+    expect(authorizedModelCalls).toEqual(Array.from({ length: 34 }, (_, index) => index + 1));
+    expect(settledModelCalls).toEqual(authorizedModelCalls);
   });
 
   test("assigns injective catalog aliases without shadowing core tools", () => {

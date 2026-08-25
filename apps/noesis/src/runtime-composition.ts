@@ -105,7 +105,6 @@ import {
   type FrozenSubAgentRunPlan,
   frozenPlanMaterialUses,
   PI_SUBAGENT_SYSTEM_PROMPT,
-  SUBAGENT_AUTHORITY_COST,
   type PiCodeExecutionAdapter,
   type PiCodeExecutionEvent,
   type PiSubAgentRunTelemetry,
@@ -217,14 +216,67 @@ const CapabilityRoutingDecisionSchema = z.strictObject({
     .nullable(),
 });
 const CAPABILITY_ROUTER_NON_HISTORY_MESSAGES = 2;
+export const CAPABILITY_ROUTER_OUTPUT_CONTRACT = `Return JSON only. The JSON must match this schema:\n${JSON.stringify(
+  z.toJSONSchema(CapabilityRoutingDecisionSchema),
+)}`;
+const ROUTER_TRUNCATION_MARKER = "\n...[bounded for capability routing]...\n";
+
+function boundedRoutingText(content: string, maximumCharacters: number): string {
+  if (content.length <= maximumCharacters) return content;
+  if (maximumCharacters <= ROUTER_TRUNCATION_MARKER.length) return content.slice(0, maximumCharacters);
+  const retained = maximumCharacters - ROUTER_TRUNCATION_MARKER.length;
+  const head = Math.ceil(retained / 2);
+  return `${content.slice(0, head)}${ROUTER_TRUNCATION_MARKER}${content.slice(-(retained - head))}`;
+}
+
+function largestBoundedRendering(
+  content: string,
+  maximumCharacters: number,
+  render: (boundedContent: string) => string,
+): string | undefined {
+  const complete = render(content);
+  if (complete.length <= maximumCharacters) return complete;
+  let selected: string | undefined;
+  let lower = 0;
+  let upper = Math.min(content.length, maximumCharacters);
+  while (lower <= upper) {
+    const midpoint = Math.floor((lower + upper) / 2);
+    const candidate = render(boundedRoutingText(content, midpoint));
+    if (candidate.length <= maximumCharacters) {
+      selected = candidate;
+      lower = midpoint + 1;
+    } else upper = midpoint - 1;
+  }
+  return selected;
+}
 /**
  * Keep a recent tail of complete conversational turns while reserving the current-turn and
- * structured-output-contract slots required by the isolated role policy.
+ * structured-output-contract slots and character budgets required by the isolated role policy.
  */
 export function capabilityRouterMessages(
   request: TurnCapabilityRoutingRequest,
   policy: RoleVariantConfiguration["contextPolicy"],
 ): readonly AgentMessage[] {
+  if (
+    CAPABILITY_ROUTER_OUTPUT_CONTRACT.length > policy.maxCharactersPerMessage ||
+    CAPABILITY_ROUTER_OUTPUT_CONTRACT.length > policy.maxTotalCharacters
+  )
+    throw new Error("Capability router output contract exceeds its configured context policy");
+  const maximumTurnCharacters = Math.min(
+    policy.maxCharactersPerMessage,
+    policy.maxTotalCharacters - CAPABILITY_ROUTER_OUTPUT_CONTRACT.length,
+  );
+  const renderTurn = (userInput: string): string =>
+    canonicalJson(
+      toJsonValue({
+        instruction:
+          "Use the current request and prior conversation to select only active capabilities whose scope and intent are meaningfully relevant. If any are selected, identify the one primary capability that should receive learning attribution. Abstain when none apply.",
+        userInput,
+        candidates: request.candidates,
+      }),
+    );
+  const turnContent = largestBoundedRendering(request.userInput, maximumTurnCharacters, renderTurn);
+  if (!turnContent) throw new Error("Capability router candidates exceed the configured role context policy");
   const historyLimit = Math.max(0, policy.maxMessages - CAPABILITY_ROUTER_NON_HISTORY_MESSAGES);
   const checkpoint =
     historyLimit > 0 && request.priorConversation[0]?.messageId.startsWith("context-checkpoint:") === true
@@ -234,29 +286,46 @@ export function capabilityRouterMessages(
   const tailLimit = Math.max(0, historyLimit - (checkpoint ? 1 : 0));
   const tail = tailLimit === 0 ? [] : conversation.slice(-tailLimit);
   const firstUserIndex = tail.findIndex((message) => message.role === "user");
+  const renderHistory = (message: (typeof request.priorConversation)[number]): string | undefined =>
+    largestBoundedRendering(message.content, policy.maxCharactersPerMessage, (content) =>
+      canonicalJson(toJsonValue({ ...message, content })),
+    );
+  const boundedCheckpoint = checkpoint ? renderHistory(checkpoint) : undefined;
+  let boundedTail = (firstUserIndex < 0 ? [] : tail.slice(firstUserIndex)).flatMap((message) => {
+    const content = renderHistory(message);
+    return content ? [{ message, content }] : [];
+  });
+  const historyCharacterBudget = Math.max(
+    0,
+    policy.maxTotalCharacters - turnContent.length - CAPABILITY_ROUTER_OUTPUT_CONTRACT.length,
+  );
+  const retainedCheckpoint =
+    boundedCheckpoint && boundedCheckpoint.length <= historyCharacterBudget ? boundedCheckpoint : undefined;
+  const checkpointCharacters = retainedCheckpoint?.length ?? 0;
+  while (
+    boundedTail.length > 0 &&
+    checkpointCharacters + boundedTail.reduce((total, item) => total + item.content.length, 0) >
+      historyCharacterBudget
+  ) {
+    boundedTail = boundedTail.slice(1);
+    while (boundedTail[0]?.message.role === "assistant") boundedTail = boundedTail.slice(1);
+  }
   const history = Object.freeze([
-    ...(checkpoint ? [checkpoint] : []),
-    ...(firstUserIndex < 0 ? [] : tail.slice(firstUserIndex)),
+    ...(retainedCheckpoint ? [retainedCheckpoint] : []),
+    ...boundedTail.map((item) => item.content),
   ]);
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze([
     Object.freeze({
       role: "user" as const,
       name: "turn",
-      content: canonicalJson(
-        toJsonValue({
-          instruction:
-            "Use the current request and prior conversation to select only active capabilities whose scope and intent are meaningfully relevant. If any are selected, identify the one primary capability that should receive learning attribution. Abstain when none apply.",
-          userInput: request.userInput,
-          candidates: request.candidates,
-        }),
-      ),
+      content: turnContent,
     }),
-    ...history.map((message) =>
+    ...history.map((content) =>
       Object.freeze({
         role: "user" as const,
         name: "prior_conversation",
-        content: canonicalJson(toJsonValue(message)),
+        content,
       }),
     ),
   ]);
@@ -2914,7 +2983,7 @@ export async function createApplicationRuntimeComposition(
       effect: () => ({
         effect: "network",
         resource: `model:${plan.subAgentDefaults?.provider ?? "unavailable"}/${plan.subAgentDefaults?.model ?? "unavailable"}`,
-        estimatedCost: SUBAGENT_AUTHORITY_COST,
+        estimatedCost: 0,
       }),
       execute: async (input, context) => {
         if (subAgentExecutionIds.has(context.executionId))
@@ -3071,6 +3140,66 @@ export async function createApplicationRuntimeComposition(
             prepared: preparedForSubAgents,
             turnId: plan.turnId,
             signal: context.signal,
+            authorizeModelCall: async (modelCall) => {
+              const resource = `model:${defaults.provider}/${defaults.model}`;
+              const estimatedCost = 1;
+              const idempotencyKey = `subagent:${context.callId}:model-call:${String(modelCall)}`;
+              const requestDigest = sha256(
+                canonicalJson({
+                  principal: "foreground",
+                  effect: "network",
+                  resource,
+                  estimatedCost,
+                }),
+              );
+              const completion = Promise.withResolvers<
+                { readonly ok: true } | { readonly ok: false; readonly reason: string }
+              >();
+              const admitted = Promise.withResolvers<void>();
+              const decision = authority.runForeground(
+                {
+                  operationId: `operation_${sha256(canonicalJson({ idempotencyKey, requestDigest }))}`,
+                  effect: "network",
+                  resource,
+                  estimatedCost,
+                  idempotencyKey,
+                  requestDigest,
+                  execute: async () => {
+                    admitted.resolve();
+                    const outcome = await completion.promise;
+                    if (!outcome.ok) throw new Error(outcome.reason);
+                    return null;
+                  },
+                },
+                plan.permissionSnapshot,
+              );
+              const admission = await Promise.race([
+                admitted.promise.then(() => Object.freeze({ ok: true as const })),
+                decision.then((result) =>
+                  result.ok
+                    ? Object.freeze({
+                        ok: false as const,
+                        reason: "Model-call reservation settled before admission",
+                      })
+                    : Object.freeze({ ok: false as const, reason: result.reason }),
+                ),
+              ]);
+              if (!admission.ok) throw new Error(admission.reason);
+              let settled = false;
+              const settle = async (
+                outcome: { readonly ok: true } | { readonly ok: false; readonly reason: string },
+              ): Promise<void> => {
+                if (settled) return;
+                settled = true;
+                completion.resolve(outcome);
+                const result = await decision;
+                if (outcome.ok && !result.ok) throw new Error(result.reason);
+              };
+              return Object.freeze({
+                complete: async () => await settle(Object.freeze({ ok: true as const })),
+                fail: async (reason: string) => await settle(Object.freeze({ ok: false as const, reason })),
+              });
+            },
             emit: (event, parentToolCallId, recordedByBroker) => {
               if (event.type === "tool-start" && recordedByBroker) {
                 nestedActionBindings.set(

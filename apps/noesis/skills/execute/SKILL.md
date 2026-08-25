@@ -10,7 +10,7 @@ Compose one JavaScript program around the result the user needs. Keep intermedia
 1. Call a known catalog tool with `tools.<family>.<operation>(input)`.
 2. For a broader need, call `noesis.search(query)` once, inspect the selected tool with `noesis.describe(name)`, then invoke its exact contract.
 3. Batch independent calls with `Promise.all`. Sequence calls when a later input depends on an earlier result.
-4. Check result completeness before synthesis. For truncated `shell.run` previews, inspect the complete `fullOutputPath` with bounded reads or ordinary Unix tools.
+4. Check result completeness before synthesis. For truncated `shell.run` previews with `fullOutputComplete: true`, inspect `fullOutputPath` with bounded reads or ordinary Unix tools. If it is false, narrow or recollect the missing evidence.
 5. Return the final result. Use `emit(value)` only for useful progress updates.
 
 ```js
