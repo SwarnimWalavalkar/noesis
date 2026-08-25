@@ -1,7 +1,6 @@
 import { createConditionalObject } from "@noesis/domain";
 import { AgentHarness, type Skill } from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
-import type { AssistantMessage, MutableModels, UserMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Models, UserMessage } from "@earendil-works/pi-ai";
 import {
   type AgentAssistantMessageBoundary,
   type AgentContextUsage,
@@ -56,6 +55,7 @@ export * from "./broker-tools.ts";
 export * from "./model-selection.ts";
 export * from "./mcp-sampling.ts";
 export * from "./pi-role-backend.ts";
+export * from "./provider-ids.ts";
 export * from "./role-context.ts";
 export * from "./role-runner.ts";
 export * from "./role-types.ts";
@@ -267,7 +267,7 @@ function priorUserMessage(content: string, timestamp: number): UserMessage {
 function priorAssistantMessage(
   content: string,
   timestamp: number,
-  model: NonNullable<ReturnType<MutableModels["getModel"]>>,
+  model: NonNullable<ReturnType<Models["getModel"]>>,
 ): AssistantMessage {
   const message: AssistantMessage = {
     role: "assistant",
@@ -309,7 +309,7 @@ function piToolUpdatePayload(value: unknown): unknown {
   );
 }
 export interface PiAgentRuntime extends NoesisAgentRuntime {
-  readonly name: "pi-agent-harness-0.80.6";
+  readonly name: "pi-agent-harness-0.82.1";
 }
 export interface CreatePiAgentRuntimeOptions {
   readonly codeExecution?: PiCodeExecutionAdapter;
@@ -319,7 +319,7 @@ export interface CreatePiAgentRuntimeOptions {
 }
 export function createPiAgentRuntime(
   cwd: string,
-  models: MutableModels,
+  models: Models,
   options: CreatePiAgentRuntimeOptions = {},
 ): PiAgentRuntime {
   interface ActivePiExecution {
@@ -415,6 +415,10 @@ export function createPiAgentRuntime(
         if (request.provider === "opencode")
           throw new Error(
             "OpenCode Zen authentication is missing. Set OPENCODE_API_KEY or run `noesis auth login opencode`.",
+          );
+        if (request.provider === "opencode-go")
+          throw new Error(
+            "OpenCode Go authentication is missing. Set OPENCODE_GO_API_KEY or run `noesis auth login opencode-go`.",
           );
         throw new Error(`Pi credentials are missing for provider ${request.provider}.`);
       }
@@ -577,7 +581,6 @@ export function createPiAgentRuntime(
       const skillsSystemPrompt = formatSkillsForNoesisPrompt(piSkills, executeTool !== undefined);
       const completeSystemPrompt = [request.systemPrompt, skillsSystemPrompt].filter(Boolean).join("\n\n");
       const harness = new AgentHarness({
-        env: new NodeExecutionEnv({ cwd }),
         session,
         models,
         model,
@@ -842,5 +845,5 @@ export function createPiAgentRuntime(
     await execution.requestHarnessAbort?.();
     if (execution.abortError) throw execution.abortError;
   };
-  return Object.freeze({ name: "pi-agent-harness-0.80.6", run, steer, abort });
+  return Object.freeze({ name: "pi-agent-harness-0.82.1", run, steer, abort });
 }

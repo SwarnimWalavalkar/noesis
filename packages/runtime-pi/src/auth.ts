@@ -10,25 +10,15 @@ import { constants, type Stats } from "node:fs";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
-  createModels,
-  type AuthContext,
-  type AuthLoginCallbacks,
+  type AuthInteraction,
   type Credential,
+  type CredentialInfo,
   type CredentialStore,
-  type MutableModels,
+  type Models,
 } from "@earendil-works/pi-ai";
-import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
-import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
-import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
-import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { NOESIS_PROVIDER_IDS } from "./provider-ids.ts";
 type CredentialFile = Readonly<Record<string, Credential>>;
-// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-export const NOESIS_PROVIDER_IDS = Object.freeze([
-  "openai-codex",
-  "anthropic",
-  "openrouter",
-  "opencode",
-] as const);
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 const isRecord = (value: JsonValue | undefined): value is JsonObject => isJsonObject(value);
@@ -88,6 +78,7 @@ export interface SecurePiCredentialStore {
     fn: (current: Credential | undefined) => Promise<Credential | undefined>,
   ) => Promise<Credential | undefined>;
   readonly delete: (providerId: string) => Promise<void>;
+  readonly list: () => Promise<readonly CredentialInfo[]>;
 }
 export function createSecurePiCredentialStore(path: string): SecurePiCredentialStore {
   let queue: Promise<void> = Promise.resolve();
@@ -119,6 +110,17 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
         delete next[providerId];
         await persist(next, directory);
       }),
+    );
+  };
+  const list = async (): Promise<readonly CredentialInfo[]> => {
+    return await enqueue(async () =>
+      withProcessLock(async (directory) =>
+        Object.freeze(
+          Object.entries(await readCredentials(directory))
+            .map(([providerId, credential]) => Object.freeze({ providerId, type: credential.type }))
+            .sort((left, right) => left.providerId.localeCompare(right.providerId)),
+        ),
+      ),
     );
   };
   function enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -346,7 +348,7 @@ export function createSecurePiCredentialStore(path: string): SecurePiCredentialS
       await unlink(temporary).catch(() => undefined);
     }
   }
-  return Object.freeze({ path, read, modify, delete: remove });
+  return Object.freeze({ path, read, modify, delete: remove, list });
 }
 export interface PiAuthStatus {
   readonly provider: string;
@@ -384,6 +386,14 @@ export type NoesisAuthPrompt = {
 );
 export type NoesisAuthEvent =
   | {
+      readonly type: "info";
+      readonly message: string;
+      readonly links?: readonly {
+        readonly url: string;
+        readonly label?: string;
+      }[];
+    }
+  | {
       readonly type: "auth_url";
       readonly url: string;
       readonly instructions?: string;
@@ -415,16 +425,16 @@ export interface PiAuthManager {
   readonly logout: (providerId: string) => Promise<void>;
 }
 export type PiAuthOperations = PiAuthManager;
-export function createPiAuthManager(models: MutableModels, credentials: CredentialStore): PiAuthManager {
+export function createPiAuthManager(models: Models, credentials: CredentialStore): PiAuthManager {
   const login = async (providerId: string, callbacks: NoesisAuthLoginCallbacks): Promise<PiAuthStatus> => {
     const provider = models.getProvider(providerId);
     if (!provider) throw new Error(`Unknown Pi provider ${providerId}`);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const piCallbacks: AuthLoginCallbacks = createConditionalObject({} as const)
+    const piCallbacks: AuthInteraction = createConditionalObject({} as const)
       .addOptional(callbacks.signal ? { signal: callbacks.signal } : undefined)
       .add({
-        prompt: async (prompt: Parameters<AuthLoginCallbacks["prompt"]>[0]) => await callbacks.prompt(prompt),
-        notify: (event: Parameters<AuthLoginCallbacks["notify"]>[0]) => callbacks.notify(event),
+        prompt: async (prompt: Parameters<AuthInteraction["prompt"]>[0]) => await callbacks.prompt(prompt),
+        notify: (event: Parameters<AuthInteraction["notify"]>[0]) => callbacks.notify(event),
       } as const)
       .addOptional(
         callbacks.renderOAuthCallbackPage
@@ -434,8 +444,11 @@ export function createPiAuthManager(models: MutableModels, credentials: Credenti
           : undefined,
       )
       .finish();
-    const credential = provider.auth.oauth
-      ? await provider.auth.oauth.login(piCallbacks)
+    const prefersOAuth = providerId === "openai-codex" || providerId === "anthropic";
+    const credential = prefersOAuth
+      ? provider.auth.oauth
+        ? await provider.auth.oauth.login(piCallbacks)
+        : undefined
       : provider.auth.apiKey?.login
         ? await provider.auth.apiKey.login(piCallbacks)
         : undefined;
@@ -471,31 +484,51 @@ export function createPiAuthManager(models: MutableModels, credentials: Credenti
   return Object.freeze({ login, status, logout });
 }
 export interface PiModelServices {
-  readonly models: MutableModels;
+  readonly models: ModelRuntime;
   readonly credentials: CredentialStore;
   readonly auth: PiAuthOperations;
+  readonly refresh: (signal?: AbortSignal) => Promise<void>;
 }
-export function createPiModelServices(
+export async function createPiModelServices(
   home: string,
   options: {
     readonly credentials?: CredentialStore;
-    readonly authContext?: AuthContext;
+    readonly catalogBaseUrl?: string;
   } = {},
-): PiModelServices {
+): Promise<PiModelServices> {
   const credentials = options.credentials ?? createSecurePiCredentialStore(piAuthPath(home));
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const models = createModels(
+  const models = await ModelRuntime.create(
     createConditionalObject({
       credentials,
+      modelsPath: join(home, "models.json"),
+      modelsStorePath: join(home, "models-store.json"),
+      allowModelNetwork: false,
+      providerIds: NOESIS_PROVIDER_IDS,
     } as const)
-      .addOptional(options.authContext ? { authContext: options.authContext } : undefined)
+      .addOptional(options.catalogBaseUrl ? { catalogBaseUrl: options.catalogBaseUrl } : undefined)
       .finish(),
   );
-  models.setProvider(openaiCodexProvider());
-  models.setProvider(openrouterProvider());
-  models.setProvider(anthropicProvider());
-  models.setProvider(opencodeProvider());
-  return Object.freeze({ models, credentials, auth: createPiAuthManager(models, credentials) });
+  for (const providerId of NOESIS_PROVIDER_IDS) {
+    const provider = models.getProvider(providerId);
+    if (!provider) throw new Error(`Pi does not provide required model provider ${providerId}`);
+  }
+  const refresh = async (signal?: AbortSignal): Promise<void> => {
+    const timeoutSignal = AbortSignal.timeout(15_000);
+    const refreshSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    const result = await models.refresh(
+      createConditionalObject({ allowNetwork: true } as const)
+        .add({ signal: refreshSignal })
+        .finish(),
+    );
+    if (result.aborted) throw new Error("Pi model catalog refresh was cancelled or timed out.");
+    if (result.errors.size > 0)
+      throw new Error(
+        [...result.errors.entries()]
+          .map(([providerId, error]) => `${providerId}: ${error.message}`)
+          .join("\n"),
+      );
+  };
+  return Object.freeze({ models, credentials, auth: createPiAuthManager(models, credentials), refresh });
 }
 export async function credentialFileMode(home: string): Promise<number | undefined> {
   try {

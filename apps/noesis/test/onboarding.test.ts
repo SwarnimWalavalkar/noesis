@@ -139,7 +139,7 @@ describe("first-launch onboarding", () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-onboarding-openrouter-"));
     const prompts = createScriptedPrompts(["openrouter", "low"], ["research-lab/future-model"], [true]);
     const auth = createFakeAuth({ provider: "openrouter", configured: true, source: "environment" });
-    const models = createPiModelServices(home).models;
+    const models = (await createPiModelServices(home)).models;
 
     const result = await runFirstLaunchOnboarding({
       home,
@@ -198,6 +198,28 @@ describe("first-launch onboarding", () => {
       thinkingLevel: "high",
     });
     expect(auth.log).toEqual(["status:opencode", "login:opencode"]);
+  });
+
+  test("configures OpenCode Go independently with its recommended model and stored API key", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-onboarding-opencode-go-"));
+    const prompts = createScriptedPrompts(["opencode-go", "kimi-k2.6", "high"], [], [true]);
+    const auth = createFakeAuth({ provider: "opencode-go", configured: false, source: "none" });
+
+    const result = await runFirstLaunchOnboarding({
+      home,
+      prompts,
+      auth,
+      authCallbacks,
+      validateModelSelection: acceptModelSelection,
+    });
+
+    expect(result.config.agent).toEqual({
+      provider: "opencode-go",
+      model: "kimi-k2.6",
+      thinkingLevel: "high",
+    });
+    expect(auth.log).toEqual(["status:opencode-go", "login:opencode-go"]);
+    expect(prompts.notes.join("\n")).toContain("OpenCode Go");
   });
 
   test("rejects an unavailable model before confirmation, authentication, or config persistence", async () => {

@@ -6,11 +6,94 @@ import type {
   NoesisRuntime,
   TurnInteractionEvent,
 } from "@noesis/runtime";
+import type { AgentThinkingLevel } from "@noesis/agent-types";
 
 export type TuiInteractionCommand = InteractionCommand;
 export type TuiInteractionSnapshot = InteractionSnapshot;
 export type TuiInteractionEvent = TurnInteractionEvent;
 export type TuiInteractionResult = InteractionDispatchResult;
+
+export interface TuiModelRoute {
+  readonly provider: string;
+  readonly providerName?: string;
+  readonly model: string;
+  readonly name: string;
+  readonly thinkingLevels: readonly AgentThinkingLevel[];
+  readonly default: boolean;
+  readonly allowsCustomModelIds: boolean;
+}
+
+export interface TuiProviderAuthStatus {
+  readonly provider: string;
+  readonly configured: boolean;
+  readonly source: "oauth" | "stored-api-key" | "environment" | "none";
+  readonly expired?: boolean;
+}
+
+export type TuiProviderAuthPrompt = {
+  readonly signal?: AbortSignal;
+} & (
+  | {
+      readonly type: "text";
+      readonly message: string;
+      readonly placeholder?: string;
+    }
+  | {
+      readonly type: "secret";
+      readonly message: string;
+      readonly placeholder?: string;
+    }
+  | {
+      readonly type: "select";
+      readonly message: string;
+      readonly options: readonly {
+        readonly id: string;
+        readonly label: string;
+        readonly description?: string;
+      }[];
+    }
+  | {
+      readonly type: "manual_code";
+      readonly message: string;
+      readonly placeholder?: string;
+    }
+);
+
+export type TuiProviderAuthEvent =
+  | {
+      readonly type: "info";
+      readonly message: string;
+      readonly links?: readonly {
+        readonly url: string;
+        readonly label?: string;
+      }[];
+    }
+  | {
+      readonly type: "auth_url";
+      readonly url: string;
+      readonly instructions?: string;
+    }
+  | {
+      readonly type: "device_code";
+      readonly userCode: string;
+      readonly verificationUri: string;
+      readonly intervalSeconds?: number;
+      readonly expiresInSeconds?: number;
+    }
+  | {
+      readonly type: "progress";
+      readonly message: string;
+    };
+
+export interface TuiProviderAuthCallbacks {
+  readonly signal?: AbortSignal;
+  readonly prompt: (prompt: TuiProviderAuthPrompt) => Promise<string>;
+  readonly notify: (event: TuiProviderAuthEvent) => void;
+  readonly renderOAuthCallbackPage?: (page: {
+    readonly provider: "openai-codex";
+    readonly status: "success";
+  }) => string;
+}
 
 export const stopVisibleInteraction = (turnId?: string): TuiInteractionCommand =>
   turnId ? { type: "interrupt", turnId } : { type: "pause-queue" };
@@ -469,6 +552,13 @@ export type NoesisTuiRuntime = Pick<
   readonly agentName?: string;
   readonly listSkills?: () => Promise<readonly TuiSkillSummary[]>;
   readonly inspectSkill?: (name: string) => Promise<TuiSkillDetail | undefined>;
+  readonly listModelRoutes?: () => readonly TuiModelRoute[];
+  readonly refreshModelRoutes?: (signal?: AbortSignal) => Promise<readonly TuiModelRoute[]>;
+  readonly providerAuthStatus?: (providerId: string) => Promise<TuiProviderAuthStatus>;
+  readonly authenticateProvider?: (
+    providerId: string,
+    callbacks: TuiProviderAuthCallbacks,
+  ) => Promise<TuiProviderAuthStatus>;
   readonly listPrograms?: () => Promise<readonly TuiProgramSummary[]>;
   readonly inspectProgram?: (
     mode: "script" | "workflow",

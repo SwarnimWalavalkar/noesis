@@ -4,7 +4,12 @@ import {
   type NoesisConfig,
   type ThinkingLevel,
 } from "@noesis/config";
-import type { NoesisAuthLoginCallbacks, PiAuthOperations, PiAuthStatus } from "@noesis/runtime-pi";
+import type {
+  NoesisAuthLoginCallbacks,
+  PiAuthOperations,
+  PiAuthStatus,
+  PiModelRoute,
+} from "@noesis/runtime-pi";
 
 export interface OnboardingChoice {
   readonly id: string;
@@ -84,13 +89,24 @@ const ONBOARDING_PROVIDERS = Object.freeze({
   opencode: Object.freeze({
     label: "OpenCode Zen",
     description: "Use OPENCODE_API_KEY or securely store an API key",
-    modelPrompt: "Choose an OpenCode model",
+    modelPrompt: "Choose an OpenCode Zen model",
     defaultModel: "kimi-k2.6",
     models: Object.freeze([
       Object.freeze({ id: "kimi-k2.6", label: "Kimi K2.6", description: "Recommended default" }),
       Object.freeze({ id: "kimi-k2.7-code", label: "Kimi K2.7 Code" }),
     ]),
-    missingAuth: "No OpenCode credential was found. Enter an API key to store it securely.",
+    missingAuth: "No OpenCode Zen credential was found. Enter an API key to store it securely.",
+  }),
+  "opencode-go": Object.freeze({
+    label: "OpenCode Go",
+    description: "Use OPENCODE_GO_API_KEY or securely store a separate API key",
+    modelPrompt: "Choose an OpenCode Go model",
+    defaultModel: "kimi-k2.6",
+    models: Object.freeze([
+      Object.freeze({ id: "kimi-k2.6", label: "Kimi K2.6", description: "Recommended default" }),
+      Object.freeze({ id: "kimi-k2.7-code", label: "Kimi K2.7 Code" }),
+    ]),
+    missingAuth: "No OpenCode Go credential was found. Enter an API key to store it securely.",
   }),
 } as const);
 
@@ -106,13 +122,27 @@ export function shouldAutoOnboard(input: AutoOnboardingDecision): boolean {
   );
 }
 
-async function chooseModel(prompts: OnboardingPrompts, provider: OnboardingProvider): Promise<string> {
+async function chooseModel(
+  prompts: OnboardingPrompts,
+  provider: OnboardingProvider,
+  routes: readonly PiModelRoute[],
+): Promise<string> {
   const presentation = ONBOARDING_PROVIDERS[provider];
-  if (presentation.models.length > 0) {
+  const catalogModels = routes
+    .filter((route) => route.provider === provider)
+    .map((route): OnboardingChoice =>
+      route.default
+        ? { id: route.model, label: route.name, description: "Provider default" }
+        : { id: route.model, label: route.name },
+    );
+  const models = catalogModels.length > 0 ? catalogModels : presentation.models;
+  if (models.length > 0) {
     const selection = await prompts.choose(
       presentation.modelPrompt,
-      [...presentation.models, { id: "custom", label: "Enter another model ID" }],
-      presentation.defaultModel,
+      [...models, { id: "custom", label: "Enter another model ID" }],
+      models.some((choice) => choice.id === presentation.defaultModel)
+        ? presentation.defaultModel
+        : (models[0]?.id ?? presentation.defaultModel),
     );
     if (selection !== "custom") return selection;
     return await prompts.text(`${presentation.label} model ID`, presentation.defaultModel);
@@ -120,7 +150,7 @@ async function chooseModel(prompts: OnboardingPrompts, provider: OnboardingProvi
   return await prompts.text(presentation.modelPrompt, presentation.defaultModel);
 }
 
-const THINKING_CHOICES: readonly OnboardingChoice[] = [
+const THINKING_CHOICES = Object.freeze([
   { id: "off", label: "Off" },
   { id: "minimal", label: "Minimal" },
   { id: "low", label: "Low" },
@@ -128,7 +158,7 @@ const THINKING_CHOICES: readonly OnboardingChoice[] = [
   { id: "high", label: "High", description: "Recommended default" },
   { id: "xhigh", label: "Extra high" },
   { id: "max", label: "Maximum" },
-];
+] as const satisfies readonly OnboardingChoice[]);
 
 function isThinkingLevel(value: string): value is ThinkingLevel {
   return THINKING_CHOICES.some((choice) => choice.id === value);
@@ -140,6 +170,7 @@ export async function runFirstLaunchOnboarding(input: {
   readonly auth: PiAuthOperations;
   readonly authCallbacks: NoesisAuthLoginCallbacks;
   readonly validateModelSelection: (selection: OnboardingModelSelection) => void;
+  readonly modelRoutes?: readonly PiModelRoute[];
 }): Promise<OnboardingResult> {
   const { prompts } = input;
   prompts.note("Welcome to Noesis. Let's configure your agent and authentication.");
@@ -154,13 +185,24 @@ export async function runFirstLaunchOnboarding(input: {
   );
   if (!isOnboardingProvider(provider)) throw new Error(`Unsupported onboarding provider ${provider}`);
 
-  const model = (await chooseModel(prompts, provider)).trim();
+  const model = (await chooseModel(prompts, provider, input.modelRoutes ?? [])).trim();
   if (model.length === 0) throw new Error("Model ID cannot be empty");
   input.validateModelSelection({ provider, model });
+  const selectedRoute = input.modelRoutes?.find(
+    (route) => route.provider === provider && route.model === model,
+  );
+  const thinkingChoices = selectedRoute
+    ? THINKING_CHOICES.filter((choice) => selectedRoute.thinkingLevels.includes(choice.id))
+    : THINKING_CHOICES;
+  const defaultThinkingLevel = thinkingChoices.some(
+    (choice) => choice.id === BUILT_IN_AGENT_DEFAULTS.thinkingLevel,
+  )
+    ? BUILT_IN_AGENT_DEFAULTS.thinkingLevel
+    : (thinkingChoices.at(-1)?.id ?? "off");
   const thinkingLevel = await prompts.choose(
     "Choose a reasoning level",
-    THINKING_CHOICES,
-    BUILT_IN_AGENT_DEFAULTS.thinkingLevel,
+    thinkingChoices,
+    defaultThinkingLevel,
   );
   if (!isThinkingLevel(thinkingLevel)) throw new Error(`Unsupported reasoning level ${thinkingLevel}`);
 

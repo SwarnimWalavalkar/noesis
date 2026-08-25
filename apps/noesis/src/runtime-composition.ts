@@ -130,6 +130,7 @@ import type {
   TuiCapabilityManagementIntent,
   TuiLearningActivitySummary,
   TuiLearningInspection,
+  TuiModelRoute,
 } from "@noesis/tui";
 import {
   createWorkspaceStore,
@@ -724,6 +725,10 @@ export interface ApplicationRuntimeCompositionOptions {
     contextWindow: number;
     maxOutputTokens: number;
   }>;
+  readonly listModelRoutes?: () => readonly TuiModelRoute[];
+  readonly refreshModelRoutes?: (signal?: AbortSignal) => Promise<readonly TuiModelRoute[]>;
+  readonly providerAuthStatus?: NonNullable<NoesisTuiRuntime["providerAuthStatus"]>;
+  readonly authenticateProvider?: NonNullable<NoesisTuiRuntime["authenticateProvider"]>;
 }
 export async function resolveActiveProject(root: string): Promise<ProjectRef> {
   const canonicalRoot = await realpath(root);
@@ -5577,6 +5582,7 @@ export async function createApplicationRuntimeComposition(
       compact,
       listSkills,
       inspectSkill,
+      listModelRoutes: () => options.listModelRoutes?.() ?? Object.freeze([]),
       listPrograms,
       inspectProgram,
       listExecutions,
@@ -5587,6 +5593,17 @@ export async function createApplicationRuntimeComposition(
       manageCapability,
       waitForLearningActivity,
     } as const)
+      .addOptional(
+        options.refreshModelRoutes ? { refreshModelRoutes: options.refreshModelRoutes } : undefined,
+      )
+      .addOptional(
+        options.providerAuthStatus && options.authenticateProvider
+          ? {
+              providerAuthStatus: options.providerAuthStatus,
+              authenticateProvider: options.authenticateProvider,
+            }
+          : undefined,
+      )
       .addOptional(
         options.mcp
           ? {

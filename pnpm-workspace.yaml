@@ -3,4 +3,5 @@ packages:
   - packages/*
 
 patchedDependencies:
-  "@earendil-works/pi-ai@0.80.6": patches/@earendil-works__pi-ai@0.80.6.patch
+  "@earendil-works/pi-ai@0.82.1": patches/@earendil-works__pi-ai@0.82.1.patch
+  "@earendil-works/pi-coding-agent@0.82.1": patches/@earendil-works__pi-coding-agent@0.82.1.patch

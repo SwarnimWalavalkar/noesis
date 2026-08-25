@@ -19,6 +19,7 @@ import {
   createPiSubAgentRunner,
   createPiModelServices,
   createPiSkillLibrary,
+  listPiModelRoutes,
   NOESIS_PROVIDER_IDS,
   preparePiModelSelection,
   type PiAuthOperations,
@@ -271,7 +272,7 @@ Session startup:
   noesis --resume SESSION_ID   Resume that exact prior session
 
 Agent options:
-  --provider ID              openai-codex, anthropic, openrouter, or opencode
+  --provider ID              openai-codex, anthropic, openrouter, opencode, or opencode-go
                              Pair with --model when changing providers
   --model ID                 Model (Codex default: gpt-5.6-sol)
   --thinking-level LEVEL     Reasoning level (default: high)
@@ -299,7 +300,7 @@ async function createRuntime(
     mcpInteractionBridge: ReturnType<typeof createTuiMcpInteractionBridge>;
   }>
 > {
-  const services = createPiModelServices(config.home);
+  const services = await createPiModelServices(config.home);
   preparePiModelSelection(services.models, config.agent);
   preparePiModelSelection(services.models, config.agents);
   const project = await resolveActiveProject(process.cwd());
@@ -352,8 +353,14 @@ async function createRuntime(
           createRoleRunner: (configurations) =>
             createPiAgentRoleRunner(project.root, services.models, configurations),
           subAgent: createPiSubAgentRunner(project.root, services.models),
+          listModelRoutes: () => listPiModelRoutes(services.models),
+          refreshModelRoutes: async (signal) => {
+            await services.refresh(signal);
+            return listPiModelRoutes(services.models);
+          },
+          providerAuthStatus: services.auth.status,
+          authenticateProvider: services.auth.login,
           resolveModelContext: (provider, model) => {
-            preparePiModelSelection(services.models, Object.freeze({ provider, model }));
             const selected = services.models.getModel(provider, model);
             if (!selected) throw new Error(`Unknown Pi model ${provider}/${model}`);
             return Object.freeze({
@@ -367,6 +374,10 @@ async function createRuntime(
           | "createAgent"
           | "createRoleRunner"
           | "subAgent"
+          | "listModelRoutes"
+          | "refreshModelRoutes"
+          | "providerAuthStatus"
+          | "authenticateProvider"
           | "resolveModelContext"
         >)
         .finish(),
@@ -417,7 +428,7 @@ function hasExplicitAgentSettings(input: CliInput): boolean {
   );
 }
 async function runOnboarding(input: CliInput): Promise<void> {
-  const services = createPiModelServices(input.home);
+  const services = await createPiModelServices(input.home);
   await runSetupSurface(
     async (surface) =>
       await runFirstLaunchOnboarding({
@@ -425,6 +436,7 @@ async function runOnboarding(input: CliInput): Promise<void> {
         prompts: promptsFromSurface(surface),
         auth: services.auth,
         authCallbacks: surfaceAuthCallbacks(surface),
+        modelRoutes: listPiModelRoutes(services.models),
         validateModelSelection: (selection) => preparePiModelSelection(services.models, selection),
       }),
     {
@@ -485,7 +497,8 @@ async function runConfig(input: CliInput): Promise<void> {
         provider: input.overrides.provider ?? current.agent.provider,
         model: input.overrides.model ?? current.agent.model,
       };
-      preparePiModelSelection(createPiModelServices(input.home).models, selection);
+      const services = await createPiModelServices(input.home);
+      preparePiModelSelection(services.models, selection);
     }
     console.log(JSON.stringify(await updateNoesisConfig(input.home, input.overrides), null, 2));
     return;
@@ -545,7 +558,8 @@ async function main(): Promise<void> {
     return;
   }
   if (input.command === "auth") {
-    await runAuth(input, createPiModelServices(input.home).auth);
+    const services = await createPiModelServices(input.home);
+    await runAuth(input, services.auth);
     return;
   }
   if (input.command === "skills") {
@@ -613,6 +627,7 @@ async function main(): Promise<void> {
         openUrl: async (url) => {
           openAuthUrl(url);
         },
+        renderOAuthCallbackPage: renderNoesisOAuthCallbackPage,
         session: input.session,
       });
     else

@@ -1,7 +1,6 @@
 import { createConditionalObject } from "@noesis/domain";
 import { AgentHarness } from "@earendil-works/pi-agent-core";
-import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
-import type { AssistantMessage, MutableModels } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Models } from "@earendil-works/pi-ai";
 import type { AgentUsage } from "@noesis/agent-types";
 import { createAgentRoleRunner } from "./role-runner.ts";
 import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
@@ -39,6 +38,9 @@ function missingAuthMessage(provider: string): string {
   if (provider === "opencode") {
     return "OpenCode Zen authentication is missing. Set OPENCODE_API_KEY or run `noesis auth login opencode`.";
   }
+  if (provider === "opencode-go") {
+    return "OpenCode Go authentication is missing. Set OPENCODE_GO_API_KEY or run `noesis auth login opencode-go`.";
+  }
   return `Pi credentials are missing for provider ${provider}.`;
 }
 interface ActivePiRoleRun {
@@ -48,7 +50,7 @@ interface ActivePiRoleRun {
   requestHarnessAbort?: () => Promise<void>;
   abortError?: unknown;
 }
-export function createPiRoleModelBackend(cwd: string, models: MutableModels): RoleModelBackend {
+export function createPiRoleModelBackend(cwd: string, models: Models): RoleModelBackend {
   const active = new Map<string, ActivePiRoleRun>();
   const abort = async (runId: string): Promise<void> => {
     const execution = active.get(runId);
@@ -75,7 +77,6 @@ export function createPiRoleModelBackend(cwd: string, models: MutableModels): Ro
       if (execution.controller.signal.aborted) throw new Error("Pi role run aborted");
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const harness = new AgentHarness({
-        env: new NodeExecutionEnv({ cwd }),
         session,
         models,
         model,
@@ -139,7 +140,7 @@ export function createPiRoleModelBackend(cwd: string, models: MutableModels): Ro
 }
 export function createPiAgentRoleRunner(
   cwd: string,
-  models: MutableModels,
+  models: Models,
   variants: readonly RoleVariantConfiguration[],
 ): RuntimePiAgentRoleRunner {
   return createAgentRoleRunner({ backend: createPiRoleModelBackend(cwd, models), variants });
