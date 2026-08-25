@@ -142,6 +142,25 @@ describe("Noesis TUI reducer", () => {
     const idle = reduceTui(advanced, { type: "execution-changed", execution: "idle" });
     expect(reduceTui(idle, { type: "animation-tick" })).toBe(idle);
     expect(idle.animationFrame).toBe(0);
+
+    const completed = reduceTui(advanced, {
+      type: "turn-completed",
+      context: {
+        schemaVersion: 1,
+        snapshotId: "context-animation",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        maxTokens: 1_000,
+        usedTokens: 10,
+        fragments: [],
+        capabilityVersions: {},
+      },
+      capabilityVersions: {},
+      turnCount: 1,
+    });
+    expect(completed.animationFrame).toBe(0);
+    expect(reduceTui(advanced, { type: "turn-aborted" }).animationFrame).toBe(0);
+    expect(reduceTui(advanced, { type: "compacted" }).animationFrame).toBe(0);
+    expect(reduceTui(advanced, { type: "failed", error: "failed" }).animationFrame).toBe(0);
   });
 
   test("builds deterministic picker rows in most-recently-active order", () => {
@@ -240,7 +259,7 @@ describe("Noesis TUI reducer", () => {
       30,
     ).join("\n");
 
-    expect(transcript).toContain("NOESIS\n  world");
+    expect(transcript).toContain("NOESIS\n│ world");
     expect(renderBottomChrome(state, 100, 30).join("\n")).toContain("● IDLE");
     expect(renderBottomChrome(state, 100, 30).join("\n")).toContain("ctx   —");
     expect(context).toContain("NOESIS");
@@ -306,7 +325,10 @@ describe("Noesis TUI reducer", () => {
   });
 
   test("shows the banner only while it fits and never pins it to the viewport", () => {
-    expect(renderHeader(false, 100, 34).join("\n")).toContain("think · learn · create · grow");
+    expect(renderHeader(false, 100, 34).join("\n")).toContain("What should we work on today?");
+    expect(renderHeader(false, 100, 34, false, "What should we build?").join("\n")).toContain(
+      "What should we build?",
+    );
     expect(renderHeader(false, 90, 28).join("\n")).toContain("NOESIS");
     expect(renderHeader(false, 30, 8)).toEqual([]);
     // The banner is not part of the conversation view, so a long transcript scrolls past it.
@@ -456,7 +478,7 @@ describe("Noesis TUI reducer", () => {
       execution: "closing",
     });
 
-    expect(renderBottomChrome(state, 80, 24).join("\n")).toContain("● CLOSING");
+    expect(renderBottomChrome(state, 80, 24).join("\n")).toMatch(/[⣿⣷⣶⣦⣤⣄⣀] CLOSING/u);
     expect(helpHint(state)).toBe("closing session…");
   });
 
@@ -1017,8 +1039,16 @@ describe("Noesis TUI reducer", () => {
         24,
       ).join("\n"),
     ).not.toContain("\u001b[");
-    expect(renderNoesisState(initialTuiState("fake", { colorEnabled: true }), 70, 22).join("\n")).toContain(
-      "\u001b[",
-    );
+    expect(renderNoesisState(initialTuiState("fake", { colorEnabled: true }), 70, 22).join("\n")).toBe("");
+    expect(
+      renderNoesisState(
+        {
+          ...initialTuiState("fake", { colorEnabled: true }),
+          timeline: [{ kind: "message", role: "user", text: "hello" }],
+        },
+        70,
+        22,
+      ).join("\n"),
+    ).toContain("\u001b[");
   });
 });

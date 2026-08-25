@@ -151,9 +151,27 @@ export function headlineStats(records: readonly TuiLearningPrimitive[], colorEna
     .join("   ");
 }
 
-export function filterChips(filter: AuditFilter, colorEnabled: boolean): string {
+export interface ChipCounts {
+  readonly all: number;
+  readonly groups: ReadonlyMap<TuiLearningPrimitiveGroup, number>;
+}
+
+/** Per-chip record counts so the filter row gives scent of where the activity actually is. */
+export function chipCounts(records: readonly TuiLearningPrimitive[]): ChipCounts {
+  const groups = new Map<TuiLearningPrimitiveGroup, number>();
+  for (const record of records) groups.set(record.group, (groups.get(record.group) ?? 0) + 1);
+  return { all: records.length, groups };
+}
+
+export function filterChips(filter: AuditFilter, colorEnabled: boolean, counts?: ChipCounts): string {
   return CHIP_ORDER.map((item) => {
-    const label = item === "all" ? "all" : item;
+    const count =
+      counts === undefined || item === "noteworthy"
+        ? undefined
+        : item === "all"
+          ? counts.all
+          : counts.groups.get(item);
+    const label = `${item === "all" ? "all" : item}${count !== undefined && count > 0 ? ` ${String(count)}` : ""}`;
     return item === filter
       ? styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, `[${label}]`)
       : styled(colorEnabled, ANSI.dim, label);
@@ -313,11 +331,11 @@ function buildListLines(
       selected ? "›" : " ",
     );
     const type = record.kind === "capability" ? capabilityFacetLabel(record) : undefined;
-    const title = styled(
+    const title = `${type ? styled(colorEnabled, ANSI.dim, `[${type}] `) : ""}${styled(
       colorEnabled,
       selected ? ANSI.bold : "",
-      `${type ? `[${type}] ` : ""}${safeScalar(record.title)}`,
-    );
+      safeScalar(record.title),
+    )}`;
     const relative = formatRelativeTime(record.occurredAt, now);
     const summary = safeScalar(record.summary);
     const context = (grouped ? [relative] : [safeScalar(record.kind).replaceAll("_", " "), relative])
@@ -492,15 +510,18 @@ function recordHeading(
     record.kind === "capability" && type
       ? `${type} capability`
       : safeScalar(record.kind).replaceAll("_", " ");
+  // The status is the load-bearing fact in the metadata line, so it keeps its tone color and
+  // weight while the kind and timestamp stay quiet.
+  const status = styled(
+    colorEnabled,
+    `${ANSI.bold}${TONE_PRESENTATION[record.tone].color}`,
+    safeScalar(record.status).replaceAll("_", " "),
+  );
+  const quiet = [styled(colorEnabled, ANSI.dim, kind), status];
+  if (time !== undefined) quiet.push(styled(colorEnabled, ANSI.dim, time));
   return [
     `${recordGlyph(record, colorEnabled)} ${styled(colorEnabled, ANSI.bold, title)}`,
-    styled(
-      colorEnabled,
-      ANSI.dim,
-      [kind, safeScalar(record.status).replaceAll("_", " "), time]
-        .filter((value): value is string => value !== undefined)
-        .join(" · "),
-    ),
+    quiet.join(styled(colorEnabled, ANSI.dim, " · ")),
     ...(summary && summary !== title ? [summary] : []),
   ];
 }

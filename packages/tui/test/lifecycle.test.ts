@@ -905,7 +905,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("first\r");
-    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] THINKING/u));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] WORKING/u));
     terminal.type("promote me\r");
     await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
     terminal.type("/steer\r");
@@ -993,7 +993,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("first\r");
-    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] THINKING/u));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] WORKING/u));
     terminal.type("/compact\r");
     await vi.waitFor(() => expect(terminal.output).toContain("changes the session"));
     expect(compact).not.toHaveBeenCalled();
@@ -1302,7 +1302,7 @@ describe("Noesis TUI lifecycle", () => {
       }),
     );
     await vi.waitFor(() =>
-      expect(terminal.output).toContain("◆ adjusted · Verify observable state before claiming success"),
+      expect(terminal.output).toContain("✦ adjusted · Verify observable state before claiming success"),
     );
     expect(terminal.output).not.toContain("\nstrategy ·");
     expect(waitedJobIds).toEqual(["job-late-adjustment"]);
@@ -1451,7 +1451,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("use the snapshot\r");
-    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] TOOL/u));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] TOOL/u));
     await vi.waitFor(() => expect(terminal.output).toContain("● inspect"));
     expect(terminal.output).not.toContain("ACTIONS");
     expect(terminal.output).toContain("inspect");
@@ -1633,6 +1633,11 @@ describe("Noesis TUI lifecycle", () => {
     terminal.send("\r");
     await vi.waitFor(() => expect(terminal.output).toContain("esc close"));
     expect(terminal.output).toContain("tools.shell.run");
+
+    // Even fragmented bracketed paste belongs to inspection and must not mutate the hidden draft.
+    terminal.send("\u001b[20");
+    terminal.send("0~hidden inspector paste");
+    terminal.send("\u001b[201~");
 
     terminal.send("\u001b");
     await vi.waitFor(() => expect(terminal.output).toContain("↑/↓ scroll"));
@@ -1960,11 +1965,25 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("block this turn\r");
-    await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] STREAMING/u));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] STREAMING/u));
     terminal.type("another turn\r");
     await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1"));
     expect(runs).toBe(1);
 
+    // SafeEditor settles a legacy Escape after a short ambiguity window. An ordinary key that
+    // arrives during that window must still break the consecutive-Escape gesture.
+    terminal.send("\u001b");
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    terminal.send("a");
+    terminal.send("\u001b");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    expect(abort).not.toHaveBeenCalled();
+    terminal.send("\u007f");
+
+    // The first Escape only arms the interrupt; the second, consecutive one commits it.
+    terminal.send("\u001b");
+    await vi.waitFor(() => expect(terminal.output).toContain("Press esc again to interrupt"));
+    expect(abort).not.toHaveBeenCalled();
     terminal.send("\u001b");
     await vi.waitFor(() => expect(terminal.output).toMatch(/[◐◓◑◒] ABORTING/u));
     await vi.waitFor(() => expect(terminal.output).toContain("Turn interrupted."));
@@ -2021,7 +2040,7 @@ describe("Noesis TUI lifecycle", () => {
 
     expect(abort).not.toHaveBeenCalled();
     expect(terminal.stops).toBe(0);
-    expect(terminal.output).toMatch(/[◐◓◑◒] STREAMING/u);
+    expect(terminal.output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] STREAMING/u);
 
     terminal.send("\u0003");
     await running;
@@ -2081,8 +2100,10 @@ describe("Noesis TUI lifecycle", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 40));
 
     expect(abort).not.toHaveBeenCalled();
-    expect(terminal.output).toMatch(/[◐◓◑◒] THINKING/u);
+    expect(terminal.output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] WORKING/u);
 
+    // Two fresh Escapes interrupt the successor: the stale arm from the first turn does not count.
+    terminal.send("\u001b");
     terminal.send("\u001b");
     await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(terminal.output).toContain("Turn interrupted."));
@@ -2459,7 +2480,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("/quit\n");
-    await vi.waitFor(() => expect(terminal.output).toContain("● CLOSING"));
+    await vi.waitFor(() => expect(terminal.output).toMatch(/[⣿⣷⣶⣦⣤⣄⣀] CLOSING/u));
     expect(terminal.output).toContain("closing session…");
     expect(terminal.stops).toBe(0);
 
@@ -2505,8 +2526,12 @@ describe("Noesis TUI lifecycle", () => {
 
     terminal.type("\u0003");
 
+    await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
+    // Cancellation begins with shutdown; the closing animation must not give the active turn an
+    // extra execution window before its abort is requested.
+    expect(terminal.stops).toBe(0);
+
     await expect(running).resolves.toBeUndefined();
-    expect(abort).toHaveBeenCalledOnce();
     expect(terminal.stops).toBe(1);
     emitLate?.();
     await new Promise<void>((resolve) => setTimeout(resolve, 20));

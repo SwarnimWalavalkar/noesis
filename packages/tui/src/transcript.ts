@@ -19,6 +19,7 @@ import {
   timelineActions,
 } from "./state.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
+import { isPulseDimFrame, isWorkingExecution } from "./working-animation.ts";
 
 const ACTION_DETAIL_MAX_CHARACTERS = 24_000;
 const MAX_ACTION_DEPTH = 4;
@@ -30,7 +31,8 @@ export function renderMessageBlock(message: TuiMessage, width: number, colorEnab
   const labelColor =
     message.role === "user" ? ANSI.cyan : message.role === "assistant" ? ANSI.green : ANSI.yellow;
   const shownLabel = width === 1 ? (label[0] ?? "") : elideText(label, width);
-  const rail = width >= 3 ? (message.role === "user" ? "│ " : "  ") : "";
+  // Both speakers carry a rail so the conversation scans as a dialogue; notes stay unadorned.
+  const rail = width >= 3 ? (message.role === "system" ? "  " : "│ ") : "";
   const bodyWidth = Math.max(1, width - visibleWidth(rail));
   const source = message.text || (message.role === "assistant" ? "…" : "");
   const renderedBody = renderRichText(source, bodyWidth, colorEnabled);
@@ -46,18 +48,42 @@ export function renderMessageBlock(message: TuiMessage, width: number, colorEnab
   ];
 }
 
+const REASONING_LABEL = "∴ THINKING";
+const SHIMMER_WINDOW = 3;
+
+/**
+ * Sweeps a bright band across the label while reasoning streams. The characters are stable; only
+ * styling moves, so plain-text output and NO_COLOR terminals are unaffected.
+ */
+function shimmerLabel(label: string, frame: number): string {
+  const characters = [...label];
+  const span = characters.length + SHIMMER_WINDOW;
+  const start = (frame % span) - SHIMMER_WINDOW + 1;
+  return characters
+    .map((character, index) =>
+      index >= start && index < start + SHIMMER_WINDOW
+        ? `${ANSI.bold}${ANSI.magenta}${character}${ANSI.reset}`
+        : `${ANSI.dim}${ANSI.magenta}${character}${ANSI.reset}`,
+    )
+    .join("");
+}
+
 export function renderReasoningBlock(
   reasoning: TuiReasoningEntry,
   width: number,
   colorEnabled = false,
+  options: { readonly shimmerFrame?: number } = {},
 ): string[] {
   if (width <= 0) return [];
   const rail = width >= 3 ? "┊ " : "";
   const bodyWidth = Math.max(1, width - visibleWidth(rail));
   const source = reasoning.text || "…";
   const body = renderRichText(source, bodyWidth, colorEnabled);
+  const label = elideText(REASONING_LABEL, width);
   return [
-    styled(colorEnabled, `${ANSI.bold}${ANSI.magenta}`, elideText("∴ THINKING", width)),
+    colorEnabled && options.shimmerFrame !== undefined
+      ? shimmerLabel(label, options.shimmerFrame)
+      : styled(colorEnabled, `${ANSI.bold}${ANSI.magenta}`, label),
     ...(body.length > 0 ? body : [""]).map((line) =>
       elideText(
         `${styled(colorEnabled, `${ANSI.dim}${ANSI.magenta}`, rail)}${styled(
@@ -172,6 +198,8 @@ export interface ActionBlockOptions {
   readonly expanded?: boolean;
   readonly selected?: boolean;
   readonly colorEnabled?: boolean;
+  /** Dims the running glyph on alternating animation frames so live work visibly breathes. */
+  readonly pulseDim?: boolean;
   /**
    * Inline expansion stays inside the visible screen. A block taller than the viewport would push
    * its own header above the top, and pi-tui repaints the whole screen when content above the
@@ -196,7 +224,12 @@ export function renderAgentActionBlock(
   const marker = options.selected ? "▸" : " ";
   const indent = `${marker}${"  ".repeat(depth)}`;
   const summary = summarizeAction(action, childActions(actions, action.actionId));
-  const glyph = styled(colorEnabled, `${ANSI.bold}${statusColor(action.status)}`, statusGlyph(action.status));
+  const glyphWeight = action.status === "running" && options.pulseDim ? ANSI.dim : ANSI.bold;
+  const glyph = styled(
+    colorEnabled,
+    `${glyphWeight}${statusColor(action.status)}`,
+    statusGlyph(action.status),
+  );
   const name = styled(
     colorEnabled,
     options.selected ? `${ANSI.bold}${ANSI.underline}` : ANSI.bold,
@@ -272,26 +305,7 @@ export interface TranscriptRenderer {
   readonly metrics: () => TranscriptRenderMetrics;
 }
 
-// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-export const EMPTY_TRANSCRIPT_HINTS = Object.freeze([
-  "What are you thinking about?",
-  "What do you want to understand, make, or change?",
-  "Bring a question, a half-formed idea, or a concrete task.",
-  "What are you working on?",
-  "Start anywhere. We can sharpen the question together.",
-] as const);
-
-export function selectEmptyTranscriptHint(randomValue = Math.random()): string {
-  const bounded = Number.isFinite(randomValue) ? Math.min(Math.max(randomValue, 0), 1) : 0;
-  const index = Math.min(
-    EMPTY_TRANSCRIPT_HINTS.length - 1,
-    Math.floor(bounded * EMPTY_TRANSCRIPT_HINTS.length),
-  );
-  return EMPTY_TRANSCRIPT_HINTS[index] ?? EMPTY_TRANSCRIPT_HINTS[0];
-}
-
-export function createTranscriptRenderer(random: () => number = Math.random): TranscriptRenderer {
-  const emptyTranscriptHint = selectEmptyTranscriptHint(random());
+export function createTranscriptRenderer(): TranscriptRenderer {
   const cache = new WeakMap<
     TuiTimelineEntry,
     { readonly key: string; readonly block: RenderedTimelineBlock }
@@ -308,6 +322,21 @@ export function createTranscriptRenderer(random: () => number = Math.random): Tr
     const expanded = entry.kind === "action" && state.expandedActionIds.has(entry.actionId);
     const selected = entry.kind === "action" && state.actionCursor === entry.actionId;
     const depth = entry.kind === "action" ? actionDepth(entry, actions) : 0;
+    const working = isWorkingExecution(state.execution);
+    // Live-motion styling stays confined to the newest content so repainting it never touches
+    // rows above the viewport, which would erase terminal scrollback.
+    const shimmerFrame =
+      entry.kind === "reasoning" &&
+      state.colorEnabled &&
+      state.execution === "thinking" &&
+      state.timeline.at(-1) === entry
+        ? state.animationFrame
+        : undefined;
+    const pulseDim =
+      entry.kind === "action" &&
+      entry.status === "running" &&
+      working &&
+      isPulseDimFrame(state.animationFrame);
     // An execute row summarizes its direct children. Those children arrive and settle as separate
     // immutable timeline entries, so the parent object can remain identical while its rendered
     // summary changes.
@@ -322,6 +351,8 @@ export function createTranscriptRenderer(random: () => number = Math.random): Tr
       selected ? "selected" : "unselected",
       String(depth),
       String(maxBodyRows),
+      shimmerFrame === undefined ? "static" : String(shimmerFrame),
+      pulseDim ? "pulse" : "steady",
       childSummaryKey,
     ].join(":");
     const cached = cache.get(entry);
@@ -335,11 +366,17 @@ export function createTranscriptRenderer(random: () => number = Math.random): Tr
         entry.kind === "message"
           ? renderMessageBlock(entry, width, state.colorEnabled)
           : entry.kind === "reasoning"
-            ? renderReasoningBlock(entry, width, state.colorEnabled)
+            ? renderReasoningBlock(
+                entry,
+                width,
+                state.colorEnabled,
+                shimmerFrame === undefined ? {} : { shimmerFrame },
+              )
             : renderAgentActionBlock(entry, actions, width, {
                 expanded,
                 selected,
                 colorEnabled: state.colorEnabled,
+                pulseDim,
                 maxBodyRows,
               }),
     };
@@ -371,8 +408,6 @@ export function createTranscriptRenderer(random: () => number = Math.random): Tr
     render(state, width, maxBodyRows = DEFAULT_EXPANDED_BODY_ROWS) {
       if (width <= 0) return [];
       const blocks = renderTimeline(state, width, maxBodyRows);
-      if (blocks.length === 0)
-        return [elideText(styled(state.colorEnabled, ANSI.dim, emptyTranscriptHint), width)];
       return blocks.flatMap((block) => block.lines);
     },
     renderWindow(state, width, height, maxBodyRows = DEFAULT_EXPANDED_BODY_ROWS) {

@@ -3,6 +3,7 @@ import { formatCount, summarizeAction } from "./action-summary.ts";
 import { renderRunInspectorFrame } from "./run-inspector.ts";
 import {
   childActions,
+  type ExecutionState,
   type NoesisTuiAction,
   type NoesisTuiState,
   reduceTui,
@@ -11,12 +12,15 @@ import {
   type TuiContextUsage,
   timelineActions,
 } from "./state.ts";
-import { ANSI, elideText, NOESIS_WORDMARK, safeTerminalText, styled } from "./theme.ts";
+import { ANSI, brandGradient, elideText, NOESIS_WORDMARK, safeTerminalText, styled } from "./theme.ts";
+import { NOESIS_STARTUP_NOTES } from "./startup-note.ts";
 import { createTranscriptRenderer, type TranscriptRenderer } from "./transcript.ts";
+import { isPulseDimFrame, isWorkingExecution, WORKING_ANIMATION_INTERVAL_MS } from "./working-animation.ts";
 
 export * from "./action-summary.ts";
 export * from "./rich-text.ts";
 export * from "./run-inspector.ts";
+export * from "./startup-note.ts";
 export * from "./syntax.ts";
 export * from "./theme.ts";
 export * from "./transcript.ts";
@@ -67,19 +71,61 @@ export function formatContextUsage(usage: TuiContextUsage | undefined): {
   };
 }
 
+const CONTEXT_METER_CELLS = 8;
+
+/** A glanceable pressure gauge next to the exact percentage: fills and warms as context tightens. */
+export function contextMeter(usage: TuiContextUsage | undefined, colorEnabled: boolean): string | undefined {
+  if (!usage || usage.contextWindow <= 0 || usage.usedTokens < 0) return undefined;
+  const ratio = Math.min(1, Math.max(0, usage.usedTokens / usage.contextWindow));
+  const filled = Math.round(ratio * CONTEXT_METER_CELLS);
+  const color = ratio >= 0.9 ? ANSI.red : ratio >= 0.7 ? ANSI.yellow : ANSI.green;
+  return `${styled(colorEnabled, color, "▰".repeat(filled))}${styled(colorEnabled, ANSI.dim, "▱".repeat(CONTEXT_METER_CELLS - filled))}`;
+}
+
+// Motion carries meaning: a thought-comet orbits with a trailing tail, tool work ticks,
+// compaction squeezes.
+const THOUGHT_FRAMES = ["⠉", "⠃", "⠆", "⡄", "⣀", "⢠", "⠰", "⠘"] as const;
+const TOOL_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const COMPACT_FRAMES = ["░", "▒", "▓", "▒"] as const;
+// Closing dissolves into emptiness and reconstitutes: a clear wind-down, not another spinner.
+const CLOSING_FRAMES = ["⣿", "⣷", "⣶", "⣦", "⣤", "⣄", "⣀", "⣄", "⣤", "⣦", "⣶", "⣷"] as const;
+const ORBIT_FRAMES = ["◐", "◓", "◑", "◒"] as const;
+
+function workingGlyph(execution: ExecutionState, frame: number): string {
+  const frames =
+    execution === "thinking" || execution === "streaming"
+      ? THOUGHT_FRAMES
+      : execution === "tool"
+        ? TOOL_FRAMES
+        : execution === "compacting"
+          ? COMPACT_FRAMES
+          : execution === "closing"
+            ? CLOSING_FRAMES
+            : ORBIT_FRAMES;
+  return frames[frame % frames.length] ?? frames[0];
+}
+
+/** Fixed-width turn clock derived from the animation frame, so ticking never shifts the layout. */
+export function formatWorkingClock(frame: number): string {
+  const totalSeconds = Math.floor((frame * WORKING_ANIMATION_INTERVAL_MS) / 1000);
+  const minutes = Math.min(99, Math.floor(totalSeconds / 60));
+  const seconds = minutes >= 99 ? 59 : totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
 export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): readonly string[] {
   const context = formatContextUsage(state.contextUsage);
-  const workingFrames = ["◐", "◓", "◑", "◒"] as const;
-  const animated =
-    state.execution === "thinking" ||
-    state.execution === "streaming" ||
-    state.execution === "tool" ||
-    state.execution === "compacting" ||
-    state.execution === "aborting";
-  const glyph = animated
-    ? (workingFrames[state.animationFrame % workingFrames.length] ?? workingFrames[0])
-    : "●";
-  const execution = `${glyph} ${state.execution.toUpperCase().padEnd(10)}`;
+  const meter = contextMeter(state.contextUsage, state.colorEnabled);
+  const animated = isWorkingExecution(state.execution);
+  // Closing animates without the turn clock: the frame counter no longer measures a turn.
+  const glyph =
+    animated || state.execution === "closing" ? workingGlyph(state.execution, state.animationFrame) : "●";
+  // Status uses WORKING for the thinking phase so the bar reads as general progress; reasoning
+  // blocks keep their own ∴ THINKING label in the transcript.
+  const executionLabel = (state.execution === "thinking" ? "working" : state.execution)
+    .toUpperCase()
+    .padEnd(10);
+  const execution = `${glyph} ${executionLabel}${animated ? ` ${formatWorkingClock(state.animationFrame)}` : ""}`;
   const model = `${state.provider}/${state.model}`;
   const turns = `${String(state.turnCount).padStart(3)} ${state.turnCount === 1 ? "turn" : "turns"}`;
   const capabilities = Object.keys(state.capabilityVersions).length;
@@ -93,6 +139,7 @@ export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): re
       model,
       state.reasoningLevel,
       context.percent,
+      ...(meter ? [meter] : []),
       ...(context.tokens ? [context.tokens] : []),
       turns,
       ...(queue ? [queue] : []),
@@ -104,6 +151,7 @@ export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): re
       model,
       state.reasoningLevel,
       context.percent,
+      ...(meter ? [meter] : []),
       `${String(state.turnCount).padStart(3)}t`,
       ...(queue ? [queue] : []),
     ];
@@ -133,7 +181,9 @@ function colorStatusLine(state: NoesisTuiState, fields: readonly string[]): stri
     .map((field, index) =>
       index === 0
         ? styled(state.colorEnabled, `${ANSI.bold}${stateColor}`, field)
-        : styled(state.colorEnabled, ANSI.dim, field),
+        : field.includes("\u001b[")
+          ? field
+          : styled(state.colorEnabled, ANSI.dim, field),
     )
     .join(" · ");
 }
@@ -150,7 +200,7 @@ export function helpHint(state: NoesisTuiState): string {
     return `↑/↓ scroll · space ${state.inspector.view === "raw" ? "semantic" : "exact"} · esc close`;
   if (state.actionCursor) return "↑/↓ scroll · space expand · enter inspect · esc leave · ctrl+c quit";
   if (state.interaction.phase !== "idle")
-    return "enter queue · /steer redirect · alt+↑ edit newest · esc interrupt";
+    return "enter queue · /steer redirect · alt+↑ edit newest · esc esc interrupt";
   if (state.execution === "compacting" && state.interaction.queuedInputs.length > 0)
     return "enter queue · waiting for compaction · alt+↑ edit newest";
   if (state.interaction.queuePaused && state.interaction.queuedInputs.length > 0)
@@ -185,6 +235,30 @@ export function renderQueuedInputs(state: NoesisTuiState, width: number, maxVisi
 
 const safeTerminalQueueText = (text: string): string =>
   safeTerminalText(text).replaceAll(/\s+/gu, " ").trim() || "(empty)";
+
+/**
+ * The prompt label doubles as the mode indicator: cyan `› message` means the editor owns input.
+ * Inspect mode replaces it with a reverse-video badge because the editor is hidden and paused,
+ * so this line is the one place that says where keystrokes are going.
+ */
+export function inputModeLine(state: NoesisTuiState, width: number): string {
+  if (!state.actionCursor)
+    return elideText(styled(state.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), width);
+  const badge = styled(state.colorEnabled, `${ANSI.bold}${ANSI.reverse}${ANSI.yellow}`, " ⊙ INSPECT ");
+  const hint = styled(state.colorEnabled, ANSI.dim, "  typing paused · esc to return");
+  return elideText(`${badge}${hint}`, width);
+}
+
+/** The badge shape carries the tone even without color; learning gets its own signature glyph. */
+export function notificationBadge(tone: "info" | "success" | "attention" | "learning"): {
+  readonly glyph: string;
+  readonly color: string;
+} {
+  if (tone === "success") return { glyph: "✓", color: ANSI.green };
+  if (tone === "attention") return { glyph: "▲", color: ANSI.yellow };
+  if (tone === "learning") return { glyph: "✦", color: ANSI.magenta };
+  return { glyph: "◆", color: ANSI.cyan };
+}
 
 const subagentStatusGlyph = (status: TuiAgentAction["status"]): string =>
   status === "running" ? "●" : status === "completed" ? "✓" : status === "failed" ? "×" : "■";
@@ -263,8 +337,14 @@ export function renderSubagents(state: NoesisTuiState, width: number, height = 3
       const outcome = [action.status === "running" ? "running" : undefined, summary.outcome]
         .filter((part): part is string => Boolean(part))
         .join(" · ");
+      // The glyph character stays stable; only its intensity breathes while work is live.
+      const pulseDim =
+        action.status === "running" &&
+        isWorkingExecution(state.execution) &&
+        isPulseDimFrame(state.animationFrame);
+      const glyphStyle = `${pulseDim ? ANSI.dim : ANSI.bold}${subagentStatusColor(action.status)}`;
       return elideText(
-        `${selected ? "▸" : " "} ${styled(state.colorEnabled, `${ANSI.bold}${subagentStatusColor(action.status)}`, subagentStatusGlyph(action.status))} ${styled(state.colorEnabled, selected ? `${ANSI.bold}${ANSI.underline}` : "", subject)}${outcome ? `  ${styled(state.colorEnabled, ANSI.dim, outcome)}` : ""}`,
+        `${selected ? "▸" : " "} ${styled(state.colorEnabled, glyphStyle, subagentStatusGlyph(action.status))} ${styled(state.colorEnabled, selected ? `${ANSI.bold}${ANSI.underline}` : "", subject)}${outcome ? `  ${styled(state.colorEnabled, ANSI.dim, outcome)}` : ""}`,
         safeWidth,
       );
     }),
@@ -285,50 +365,50 @@ export function renderSubagents(state: NoesisTuiState, width: number, height = 3
 
 export function renderBottomChrome(state: NoesisTuiState, width: number, height = 30): string[] {
   const safeWidth = Math.max(0, Math.floor(width));
-  const notificationColor =
-    state.notification?.tone === "success"
-      ? ANSI.green
-      : state.notification?.tone === "attention"
-        ? ANSI.yellow
-        : ANSI.cyan;
+  const badge = state.notification ? notificationBadge(state.notification.tone) : undefined;
   return [
     ...renderSubagents(state, safeWidth, height),
-    ...(state.notification
+    ...(state.notification && badge
       ? [
           elideText(
             styled(
               state.colorEnabled,
-              `${ANSI.bold}${notificationColor}`,
-              `◆ ${safeTerminalText(state.notification.text)}`,
+              `${ANSI.bold}${badge.color}`,
+              `${badge.glyph} ${safeTerminalText(state.notification.text)}`,
             ),
             safeWidth,
           ),
         ]
       : []),
-    elideText(styled(state.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), safeWidth),
+    inputModeLine(state, safeWidth),
     renderStatusLine(state, safeWidth, height),
     ...(height >= 8 ? [elideText(styled(state.colorEnabled, ANSI.dim, helpHint(state)), safeWidth)] : []),
   ];
 }
 
-export function renderHeader(colorEnabled: boolean, width: number, height: number): string[] {
+export function renderHeader(
+  colorEnabled: boolean,
+  width: number,
+  height: number,
+  trueColorEnabled = false,
+  note: string = NOESIS_STARTUP_NOTES[0],
+): string[] {
   const terminalWidth = Math.max(0, Math.floor(width));
   const inner = terminalWidth > 2 ? terminalWidth - 2 : terminalWidth;
   if (inner <= 0) return [];
   const { headerMode } = createTuiLayout(terminalWidth, height);
   if (headerMode === "none") return [];
-  const tagline = "think · learn · create · grow";
   const lines =
     headerMode === "ascii"
       ? [
-          ...NOESIS_WORDMARK.map((line) => styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, line)),
-          styled(colorEnabled, ANSI.dim, tagline),
+          ...NOESIS_WORDMARK.map((line) => brandGradient(line, colorEnabled, trueColorEnabled)),
+          styled(colorEnabled, ANSI.dim, note),
         ]
       : [
-          `${styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "NOESIS")}${styled(
+          `${brandGradient("NOESIS", colorEnabled, trueColorEnabled)}${styled(
             colorEnabled,
             ANSI.dim,
-            terminalWidth >= 52 && height >= 16 ? `  ${tagline}` : "",
+            terminalWidth >= 52 && height >= 16 ? `  ${note}` : "",
           )}`,
         ];
   return [...lines, styled(colorEnabled, ANSI.dim, "─".repeat(inner))].map((line) => elideText(line, inner));
@@ -441,10 +521,15 @@ export function createNoesisView(initialState: NoesisTuiState, height: () => num
  * and scrolls out of the viewport into terminal scrollback as the conversation grows, so it costs
  * nothing after the first screen.
  */
-export function createHeaderView(colorEnabled: boolean, height: () => number): Component {
+export function createHeaderView(
+  colorEnabled: boolean,
+  height: () => number,
+  trueColorEnabled = false,
+  note: string = NOESIS_STARTUP_NOTES[0],
+): Component {
   return {
     invalidate() {},
-    render: (width) => renderHeader(colorEnabled, width, height()),
+    render: (width) => renderHeader(colorEnabled, width, height(), trueColorEnabled, note),
   };
 }
 
@@ -478,28 +563,23 @@ export function createInputLabelView(view: NoesisView, height: () => number): Co
     render(width) {
       if (height() < 6) return [];
       const notification = view.state.notification;
-      const color =
-        notification?.tone === "success"
-          ? ANSI.green
-          : notification?.tone === "attention"
-            ? ANSI.yellow
-            : ANSI.cyan;
+      const badge = notification ? notificationBadge(notification.tone) : undefined;
       return [
-        ...(notification
+        ...(notification && badge
           ? safeTerminalText(notification.text)
               .split("\n")
               .map((line, index) =>
                 elideText(
                   styled(
                     view.state.colorEnabled,
-                    `${ANSI.bold}${color}`,
-                    `${index === 0 ? "◆ " : "  "}${line}`,
+                    `${ANSI.bold}${badge.color}`,
+                    `${index === 0 ? `${badge.glyph} ` : "  "}${line}`,
                   ),
                   Math.max(0, width),
                 ),
               )
           : []),
-        elideText(styled(view.state.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), width),
+        inputModeLine(view.state, Math.max(0, width)),
       ];
     },
   };

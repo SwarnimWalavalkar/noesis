@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import {
   learningAuditFocusId,
   learningDiagnosticNotice,
+  learningNoticeTone,
   reconcileSettledTurnPresentation,
   settledTurnPresentation,
   startLateLearningNoticeRefresh,
@@ -55,6 +56,11 @@ const waitForAsyncPresentation = async (): Promise<void> => {
 };
 
 describe("working-adjustment notice presentation", () => {
+  test("derives notification tone from structured activity status", () => {
+    expect(learningNoticeTone(activity("pending"))).toBe("attention");
+    expect(learningNoticeTone(activity("activated"))).toBe("learning");
+  });
+
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
     ["adjusted", "adjusted · adjusted summary"],

@@ -1,5 +1,6 @@
 import { createConditionalObject } from "@noesis/domain";
 import {
+  type Component,
   Container,
   isKeyRelease,
   matchesKey,
@@ -18,6 +19,7 @@ import {
   runSlashCommand,
   steerFeedback,
 } from "./commands.ts";
+import { createEscapeRouting } from "./escape-routing.ts";
 import { createExclusiveCommandBarrier, type ExclusiveCommandBarrier } from "./exclusive-command-barrier.ts";
 import { editTextInExternalEditor } from "./external-editor.ts";
 import { learningDiagnosticNotice, reconcileSettledTurnPresentation } from "./learning-presentation.ts";
@@ -54,7 +56,8 @@ import {
   timelineActions,
 } from "./state.ts";
 import type { ActiveTurnToken } from "./stream-delta-buffer.ts";
-import { safeTerminalText, shouldUseColor } from "./theme.ts";
+import { detectTrueColor, safeTerminalText, shouldUseColor } from "./theme.ts";
+import { pickStartupNote } from "./startup-note.ts";
 import { createTranscriptInputHandler } from "./transcript-input.ts";
 import { createTuiStreamBuffers } from "./turn-stream-buffers.ts";
 import { startWorkingAnimation } from "./working-animation.ts";
@@ -97,7 +100,13 @@ export async function startNoesisTui(
     view.dispatch({ type: "system-message", text: learningDiagnosticNotice(cause) });
     tui.requestRender();
   };
-  const headerView = createHeaderView(colorEnabled, () => terminal.rows);
+  const startupNote = options.startupNote ?? pickStartupNote();
+  const headerView = createHeaderView(
+    colorEnabled,
+    () => terminal.rows,
+    colorEnabled && detectTrueColor(process.env),
+    startupNote,
+  );
   let inspectorMaxScroll = 0;
   const inspectorOverlay = createRunInspectorOverlay(
     view,
@@ -177,7 +186,11 @@ export async function startNoesisTui(
   let terminalStopped = false;
   let shutdownPromise: Promise<void> | undefined;
   const stopWorkingAnimation = startWorkingAnimation(
-    () => phase === "main" && view.state.execution !== "idle" && view.state.execution !== "error",
+    // Closing outlives the main phase: the farewell glyph keeps breathing until the terminal stops.
+    () =>
+      (phase === "main" || view.state.execution === "closing") &&
+      view.state.execution !== "idle" &&
+      view.state.execution !== "error",
     () => {
       view.dispatch({ type: "animation-tick" });
       tui.requestRender();
@@ -192,6 +205,17 @@ export async function startNoesisTui(
   const shutdown = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
     const visibleTurnId = view.state.interaction.active?.turnId;
+    const trailId = view.state.trailId;
+    const exclusiveCommand = exclusiveCommands?.activeWork();
+    const abortAndSettle =
+      trailId && view.state.interaction.phase !== "idle"
+        ? Promise.resolve()
+            .then(async () => await runtime.interact(trailId, stopVisibleInteraction(visibleTurnId)))
+            .then<ShutdownSettlement, ShutdownSettlement>(
+              () => ({ status: "settled" }),
+              (cause: unknown) => ({ status: "rejected", error: cause }),
+            )
+        : undefined;
     shutdownPromise = (async () => {
       phase = "stopped";
       turnGeneration += 1;
@@ -211,29 +235,22 @@ export async function startNoesisTui(
       await mcp.dispose();
       streamDeltas.clear();
       reasoningDeltas.clear();
-      stopWorkingAnimation();
       try {
         await terminal.drainInput(1000);
       } finally {
+        // Keep the closing glyph ticking through dispose and drain; only stop when the TUI dies.
+        stopWorkingAnimation();
         if (!terminalStopped) {
           terminalStopped = true;
           tui.stop();
         }
       }
-      const trailId = view.state.trailId;
-      const exclusiveCommand = exclusiveCommands?.activeWork();
       let shutdownFailure:
         | {
             readonly error: unknown;
           }
         | undefined;
-      if (trailId && view.state.interaction.phase !== "idle") {
-        const abortAndSettle = runtime
-          .interact(trailId, stopVisibleInteraction(visibleTurnId))
-          .then<ShutdownSettlement, ShutdownSettlement>(
-            () => ({ status: "settled" }),
-            (cause: unknown) => ({ status: "rejected", error: cause }),
-          );
+      if (abortAndSettle) {
         let graceTimer: NodeJS.Timeout | undefined;
         const settlement = await Promise.race<ShutdownSettlement>([
           abortAndSettle,
@@ -455,33 +472,15 @@ export async function startNoesisTui(
     }
     return interact(stopVisibleInteraction(visibleTurnId));
   };
-  editor.createStandaloneEscapeHandler = () => {
-    if (phase !== "main") return undefined;
-    const inspectedActionId = view.state.inspector?.actionId;
-    if (inspectedActionId)
-      return () => {
-        if (view.state.inspector?.actionId === inspectedActionId) closeRunInspector();
-        return true;
-      };
-    const selectedActionId = view.state.actionCursor;
-    if (selectedActionId)
-      return () => {
-        if (view.state.actionCursor === selectedActionId) {
-          view.dispatch({ type: "action-cursor-cleared" });
-          tui.requestRender();
-        }
-        return true;
-      };
-    if (view.state.interaction.phase === "idle") return undefined;
-    const visibleTurnId = view.state.interaction.active?.turnId;
-    if (!visibleTurnId) return () => true;
-    return () => {
-      if (view.state.interaction.active?.turnId !== visibleTurnId) return true;
-      if (view.state.interaction.phase !== "interrupting" && view.state.execution !== "aborting")
-        void interruptActiveTurn().catch(reportFailure);
-      return true;
-    };
-  };
+  const escapeRouting = createEscapeRouting({
+    view,
+    isMainPhase: () => phase === "main",
+    armWindowMs: TUI_TIMINGS.escInterruptArmMs,
+    closeRunInspector,
+    interruptActiveTurn: () => void interruptActiveTurn().catch(reportFailure),
+    requestRender: () => tui.requestRender(),
+  });
+  editor.createStandaloneEscapeHandler = escapeRouting.createStandaloneEscapeHandler;
   const restoreNewestQueuedInput = (): void => {
     void interact({ type: "restore-newest" }).then((result) => {
       if (result.effect !== "restored" || !result.restoredText) return;
@@ -536,12 +535,18 @@ export async function startNoesisTui(
       }
       return undefined;
     }
+    escapeRouting.observeInput(data);
     if (mcp.ownsKeyboardFocus() || learning.ownsKeyboardFocus() || selection.ownsKeyboardFocus()) {
       if (matchesKey(data, "ctrl+c")) {
         void shutdown();
         return { consume: true };
       }
       return undefined;
+    }
+    // Inspection owns every byte; bypassing the editor preserves its draft and paste parser.
+    if (view.state.actionCursor) {
+      handleTranscriptKey(data);
+      return { consume: true };
     }
     if (editor.capturePotentialPasteInput(data)) return { consume: true };
     if (!editor.acceptsUnbracketedCommandInput()) return undefined;
@@ -715,6 +720,11 @@ export async function startNoesisTui(
       });
     else void performSubmission().catch(reportSubmissionFailure);
   };
+  // Inspect mode pauses and hides the editor while keys navigate the transcript.
+  const editorSlot: Component = {
+    invalidate: () => editor.invalidate(),
+    render: (width) => (view.state.actionCursor ? [] : editor.render(width)),
+  };
   tui.addChild(root);
   const mountMain = (
     trail: TrailState,
@@ -738,7 +748,7 @@ export async function startNoesisTui(
     root.addChild(subagentsView);
     root.addChild(queuedInputsView);
     root.addChild(inputLabelView);
-    root.addChild(editor);
+    root.addChild(editorSlot);
     root.addChild(statusView);
     root.addChild(helpView);
     tui.setFocus(editor);

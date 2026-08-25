@@ -3,6 +3,7 @@ import {
   type AuditFilter,
   canExpandEvidence,
   canExpandInputs,
+  chipCounts,
   cycleDetailFocus,
   detailPaneLabel,
   type DetailFocus,
@@ -508,30 +509,43 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     render();
   };
 
+  // Navigation keys stay dim; keys that change a Capability are marked and warm so a decision
+  // never looks like scrolling.
+  const navHint = (text: string): string => styled(options.colorEnabled, ANSI.dim, text);
+  const mutationHint = (text: string): string =>
+    styled(options.colorEnabled, `${ANSI.bold}${ANSI.yellow}`, `✎ ${text}`);
+
   const listHint = (): string => {
     const failed = failedCount() > 0 ? " · x failed" : "";
-    return wideLayout
-      ? `↑/↓ · Enter open · Tab details · a all · f group · s session${failed} · r refresh · Esc`
-      : `↑/↓ · Enter open · a all · f group · s session${failed} · r refresh · Esc`;
+    return navHint(
+      wideLayout
+        ? `↑/↓ · Enter open · Tab details · a all · f group · s session${failed} · r refresh · Esc`
+        : `↑/↓ · Enter open · a all · f group · s session${failed} · r refresh · Esc`,
+    );
   };
 
   const detailHint = (record: TuiLearningPrimitive | undefined): string => {
     const management =
       record?.kind === "capability"
-        ? " · p pause/resume · m relevant/always · g scope"
+        ? "p pause/resume · m relevant/always · g scope"
         : record?.kind === "capability_revision" && record.status === "superseded"
-          ? " · v restore"
+          ? "v restore"
           : record?.kind === "capability_gate"
-            ? " · y approve · n deny · c change"
+            ? "y approve · n deny · c change"
             : "";
+    const managed = management ? ` ${mutationHint(management)}${navHint(" ·")}` : "";
     const stops = record ? interactableStops(record) : [];
-    if (detailFocus === "evidence")
-      return `↑/↓ · Enter ${evidenceExpanded ? "hides" : "expands"} · Tab next · Space raw${management} · Esc`;
-    if (detailFocus === "inputs")
-      return `↑/↓ · Enter ${inputsExpanded ? "hides" : "expands"} · Tab next · Space raw${management} · Esc`;
-    if (detailFocus === "related") return `↑/↓ · Enter open · Tab next · Space raw${management} · Esc`;
-    if (stops.length > 0) return `↑/↓ · Tab next · Space raw${management} · Esc`;
-    return `↑/↓ · Space raw${management} · Esc`;
+    const navigation =
+      detailFocus === "evidence"
+        ? `↑/↓ · Enter ${evidenceExpanded ? "hides" : "expands"} · Tab next · Space raw ·`
+        : detailFocus === "inputs"
+          ? `↑/↓ · Enter ${inputsExpanded ? "hides" : "expands"} · Tab next · Space raw ·`
+          : detailFocus === "related"
+            ? "↑/↓ · Enter open · Tab next · Space raw ·"
+            : stops.length > 0
+              ? "↑/↓ · Tab next · Space raw ·"
+              : "↑/↓ · Space raw ·";
+    return `${navHint(navigation)}${managed} ${navHint("Esc")}`;
   };
 
   const component: LearningAuditOverlay = {
@@ -589,7 +603,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
         const overview = wrapDocument(
           [
             ...(stats.length > 0 ? [stats] : []),
-            filterChips(filter, options.colorEnabled),
+            filterChips(filter, options.colorEnabled, chipCounts(scoped)),
             styled(
               options.colorEnabled,
               ANSI.dim,
@@ -741,12 +755,12 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
         screen.kind === "list"
           ? listHint()
           : screen.kind === "change"
-            ? "Enter submit · Esc back"
+            ? `${mutationHint("Enter submit")}${navHint(" · Esc back")}`
             : detailHint(detailRecord());
       return [
         overlayRule(outerWidth, options.colorEnabled, "╭", "╮"),
         overlayRow(
-          `${styled(options.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "LEARNING")}${styled(options.colorEnabled, ANSI.dim, ` · ${subtitle}`)}`,
+          `${styled(options.colorEnabled, `${ANSI.bold}${ANSI.magenta}`, "✦ LEARNING")}${styled(options.colorEnabled, ANSI.dim, ` · ${subtitle}`)}`,
           outerWidth,
           options.colorEnabled,
         ),
@@ -754,7 +768,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
           overlayRow(styled(options.colorEnabled, ANSI.yellow, line), outerWidth, options.colorEnabled),
         ),
         ...body.slice(0, bodyRows).map((line) => overlayRow(line, outerWidth, options.colorEnabled)),
-        overlayRow(styled(options.colorEnabled, ANSI.dim, hint), outerWidth, options.colorEnabled),
+        overlayRow(hint, outerWidth, options.colorEnabled),
         overlayRule(outerWidth, options.colorEnabled, "╰", "╯"),
       ];
     },

@@ -20,6 +20,8 @@ export interface TuiStartOptions {
   readonly provider?: string;
   readonly model?: string;
   readonly thinkingLevel?: RuntimeAgentDefaults["thinkingLevel"];
+  /** One application-owned invitation shared across first-launch setup and the main shell. */
+  readonly startupNote?: string;
   /** Overrides $VISUAL/$EDITOR for Ctrl+G composer editing. */
   readonly externalEditorCommand?: string;
   /** Bridge created before runtime composition so MCP server requests can wait for the mounted TUI. */

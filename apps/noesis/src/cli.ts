@@ -28,6 +28,7 @@ import {
   OnboardingInterruptedError,
   createTuiMcpInteractionBridge,
   type OnboardingSurface,
+  pickStartupNote,
   runNoesisOnboardingTui,
   startNoesisTui,
 } from "@noesis/tui";
@@ -406,11 +407,17 @@ async function runSetupSurface<T>(
     readonly subtitle: string;
     readonly cancelMessage: string;
     readonly requiresTerminal: string;
+    readonly startupNote?: string;
   },
 ): Promise<T> {
   requireInteractiveTerminal(options.requiresTerminal);
   try {
-    return await runNoesisOnboardingTui(run, { subtitle: options.subtitle });
+    return await runNoesisOnboardingTui(
+      run,
+      createConditionalObject({ subtitle: options.subtitle })
+        .addOptional(options.startupNote ? { startupNote: options.startupNote } : undefined)
+        .finish(),
+    );
   } catch (error) {
     if (!(error instanceof OnboardingInterruptedError)) throw error;
     console.error(options.cancelMessage);
@@ -427,7 +434,7 @@ function hasExplicitAgentSettings(input: CliInput): boolean {
     )
   );
 }
-async function runOnboarding(input: CliInput): Promise<void> {
+async function runOnboarding(input: CliInput, startupNote?: string): Promise<void> {
   const services = await createPiModelServices(input.home);
   await runSetupSurface(
     async (surface) =>
@@ -439,12 +446,14 @@ async function runOnboarding(input: CliInput): Promise<void> {
         modelRoutes: listPiModelRoutes(services.models),
         validateModelSelection: (selection) => preparePiModelSelection(services.models, selection),
       }),
-    {
+    createConditionalObject({
       subtitle: "first-launch setup",
       cancelMessage: "Setup cancelled; no configuration was written.",
       requiresTerminal:
         "First-launch onboarding requires an interactive terminal. Run `noesis config init` for non-interactive setup.",
-    },
+    })
+      .addOptional(startupNote ? { startupNote } : undefined)
+      .finish(),
   );
 }
 async function runAuth(input: CliInput, auth: PiAuthOperations): Promise<void> {
@@ -549,6 +558,7 @@ async function runSkills(input: CliInput): Promise<void> {
 }
 async function main(): Promise<void> {
   const input = parseArgs(process.argv.slice(2));
+  const startupNote = pickStartupNote();
   if (input.args.includes("--help") || input.command === "help") {
     console.log(CLI_HELP);
     return;
@@ -574,7 +584,7 @@ async function main(): Promise<void> {
       throw new Error(
         `${input.home}/config.json already exists. Use \`noesis config set\` and \`noesis auth login\` to change setup.`,
       );
-    await runOnboarding(input);
+    await runOnboarding(input, startupNote);
     return;
   }
   const autoOnboard = shouldAutoOnboard({
@@ -583,7 +593,7 @@ async function main(): Promise<void> {
     interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
     hasExplicitAgentSettings: hasExplicitAgentSettings(input),
   });
-  if (autoOnboard) await runOnboarding(input);
+  if (autoOnboard) await runOnboarding(input, startupNote);
   else if (
     input.command === "tui" &&
     !configExists &&
@@ -623,6 +633,7 @@ async function main(): Promise<void> {
         provider: config.agent.provider,
         model: config.agent.model,
         thinkingLevel: config.agent.thinkingLevel,
+        startupNote,
         mcpInteractionBridge: created.mcpInteractionBridge,
         openUrl: async (url) => {
           openAuthUrl(url);
