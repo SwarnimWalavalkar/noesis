@@ -72,6 +72,12 @@ function createMaskedInput(input: Input, colorEnabled: boolean): Component {
   };
 }
 
+function redactSecrets(value: string, secrets: ReadonlySet<string>): string {
+  let redacted = value;
+  for (const secret of secrets) if (secret.length > 0) redacted = redacted.replaceAll(secret, "[redacted]");
+  return redacted;
+}
+
 function createAuthOverlay(options: {
   readonly providerName: string;
   readonly theme: SelectListTheme;
@@ -108,7 +114,7 @@ function createAuthOverlay(options: {
     new Promise<string>((resolve, reject) => {
       clearBody();
       const placeholder = "placeholder" in next ? next.placeholder : undefined;
-      question = `${next.message}${placeholder ? ` (${placeholder})` : ""}`;
+      question = `${redactSecrets(next.message, secrets)}${placeholder ? ` (${redactSecrets(placeholder, secrets)})` : ""}`;
       rejectPrompt = reject;
       let settled = false;
       const settle = (value: string): void => {
@@ -133,8 +139,13 @@ function createAuthOverlay(options: {
       if (next.type === "select") {
         const list = new SelectList(
           next.options.map((option) =>
-            createConditionalObject({ value: option.id, label: option.label } as const)
-              .addOptional(option.description ? { description: option.description } : undefined)
+            createConditionalObject({
+              value: option.id,
+              label: redactSecrets(option.label, secrets),
+            } as const)
+              .addOptional(
+                option.description ? { description: redactSecrets(option.description, secrets) } : undefined,
+              )
               .finish(),
           ),
           Math.max(1, Math.min(8, next.options.length)),
@@ -175,16 +186,19 @@ function createAuthOverlay(options: {
       notes.push(
         options.openUrl ? "Opening your browser to finish sign-in." : "Finish sign-in in your browser.",
       );
-      notes.push(`Sign-in URL: ${event.url}`);
-      if (event.instructions) notes.push(event.instructions);
+      notes.push(`Sign-in URL: ${redactSecrets(event.url, secrets)}`);
+      if (event.instructions) notes.push(redactSecrets(event.instructions, secrets));
       if (options.openUrl) void options.openUrl(event.url).catch(() => undefined);
     } else if (event.type === "device_code") {
-      notes.push(`Verification URL: ${event.verificationUri}`);
-      notes.push(`Device code: ${event.userCode}`);
+      notes.push(`Verification URL: ${redactSecrets(event.verificationUri, secrets)}`);
+      notes.push(`Device code: ${redactSecrets(event.userCode, secrets)}`);
     } else {
-      notes.push(event.message);
+      notes.push(redactSecrets(event.message, secrets));
       if (event.type === "info")
-        for (const link of event.links ?? []) notes.push(`${link.label ?? "More information"}: ${link.url}`);
+        for (const link of event.links ?? [])
+          notes.push(
+            `${redactSecrets(link.label ?? "More information", secrets)}: ${redactSecrets(link.url, secrets)}`,
+          );
     }
     options.requestRender();
   };
@@ -256,8 +270,7 @@ function redactedAuthenticationError(
   providerName: string,
   secrets: ReadonlySet<string>,
 ): Error {
-  let message = cause instanceof Error ? cause.message : String(cause);
-  for (const secret of secrets) if (secret.length > 0) message = message.replaceAll(secret, "[redacted]");
+  const message = redactSecrets(cause instanceof Error ? cause.message : String(cause), secrets);
   return new Error(`${providerName} authentication failed: ${safeTerminalText(message)}`);
 }
 

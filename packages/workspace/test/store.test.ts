@@ -245,6 +245,27 @@ describe("WorkspaceStore", () => {
     ).resolves.toBe(true);
     await expect(store.operational.sessions.get("session-empty")).resolves.toBeUndefined();
 
+    await store.operational.sessions.put(session("session-artifact-reference"));
+    await store.artifacts.writeArtifact({
+      path: "session-deletion/referenced.txt",
+      mediaType: "text/plain",
+      bytes: text("Retained evidence"),
+      actor,
+      relationshipRefs: Object.freeze([
+        {
+          kind: "database_row",
+          table: "sessions",
+          rowId: "session-artifact-reference",
+        },
+      ]),
+    });
+    await expect(
+      store.operational.sessions.deleteIfEmpty("session-artifact-reference", "2026-08-25T00:00:00.500Z"),
+    ).resolves.toBe(true);
+    await expect(store.operational.sessions.get("session-artifact-reference")).resolves.toMatchObject({
+      metadata: { deletedAt: "2026-08-25T00:00:00.500Z" },
+    });
+
     await store.operational.sessions.put({ ...session("session-running"), status: "running" });
     await expect(
       store.operational.sessions.deleteIfEmpty("session-running", "2026-08-25T00:00:00.000Z"),

@@ -260,6 +260,17 @@ const PRIMARY_KEY_BY_TABLE = {
   capability_feedback: "feedback_id",
   capability_gate_requests: "gate_request_id",
 } satisfies Readonly<Record<DatabaseTable, string>>;
+const DURABLE_EVIDENCE_REFERENCE_COLUMNS = Object.freeze([
+  ["artifacts", "relationship_refs_json"],
+  ["file_revisions", "provenance_refs_json"],
+  ["activity_log", "references_json"],
+  ["jobs", "payload_refs_json"],
+  ["experiment_observations", "evidence_refs_json"],
+  ["experiment_research_runs", "evidence_refs_json"],
+  ["experiment_outcomes", "evidence_refs_json"],
+  ["successor_lineage_inputs", "evidence_refs_json"],
+  ["model_calls", "context_refs_json"],
+] as const);
 function permitsTransition(
   transitions: Readonly<Record<string, readonly string[]>>,
   from: string,
@@ -2182,6 +2193,19 @@ function createOperationalRepositories(
         .get(sessionId, sessionId, sessionId),
       "present",
     ) === 1;
+  const sessionHasDurableEvidenceReference = (sessionId: string): boolean =>
+    DURABLE_EVIDENCE_REFERENCE_COLUMNS.some(([table, column]) =>
+      Boolean(
+        db
+          .prepare(`SELECT 1
+            FROM ${table}, json_each(${column}) AS reference
+            WHERE json_extract(reference.value, '$.kind') = 'database_row'
+              AND json_extract(reference.value, '$.table') = 'sessions'
+              AND json_extract(reference.value, '$.rowId') = ?
+            LIMIT 1`)
+          .get(sessionId),
+      ),
+    );
   const removeSessionSearchDocuments = (sessionId: string): void => {
     db.prepare(`DELETE FROM search_fts
       WHERE document_id IN (SELECT document_id FROM search_documents WHERE session_id = ?)`).run(sessionId);
@@ -2198,8 +2222,11 @@ function createOperationalRepositories(
     const existingDeletedAt = session.metadata["deletedAt"];
     if (typeof existingDeletedAt === "string") return "retained-for-audit";
     removeSessionSearchDocuments(sessionId);
-    const purge = db
-      .prepare(`DELETE FROM sessions
+    const purged =
+      !sessionHasDurableEvidenceReference(sessionId) &&
+      Number(
+        db
+          .prepare(`DELETE FROM sessions
         WHERE session_id = ?
           AND NOT EXISTS(SELECT 1 FROM sessions WHERE parent_session_id = ?)
           AND NOT EXISTS(SELECT 1 FROM messages WHERE session_id = ?)
@@ -2216,25 +2243,26 @@ function createOperationalRepositories(
           AND NOT EXISTS(SELECT 1 FROM turn_activation_pins WHERE session_id = ?)
           AND NOT EXISTS(SELECT 1 FROM frozen_turn_plans WHERE session_id = ?)
           AND NOT EXISTS(SELECT 1 FROM experiment_observations WHERE session_id = ?)`)
-      .run(
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-        sessionId,
-      );
-    if (Number(purge.changes) === 1) {
+          .run(
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+          ).changes,
+      ) === 1;
+    if (purged) {
       recordActivity(systemActor, "session.purged", "session", sessionId);
       return "purged";
     }

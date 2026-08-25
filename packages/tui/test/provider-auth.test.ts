@@ -239,4 +239,45 @@ describe("provider authentication overlay", () => {
     auth.dispose();
     tui.stop();
   });
+
+  test("redacts a submitted secret from later provider notifications", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const secret = "secret-that-provider-reported";
+    const release = Promise.withResolvers<void>();
+    const runtime = Object.freeze({
+      ...base,
+      providerAuthStatus: async (provider: string) => ({
+        provider,
+        configured: false,
+        source: "none" as const,
+      }),
+      authenticateProvider: async (
+        provider: string,
+        callbacks: Parameters<NonNullable<NoesisTuiRuntime["authenticateProvider"]>>[1],
+      ) => {
+        const submitted = await callbacks.prompt({ type: "secret", message: "Paste API key" });
+        callbacks.notify({ type: "progress", message: `Validating ${submitted}` });
+        await release.promise;
+        return { provider, configured: true, source: "stored-api-key" as const };
+      },
+    });
+    const { terminal, tui } = createHarness();
+    const auth = createTuiProviderAuthOrchestration({
+      runtime,
+      tui,
+      theme: createSelectTheme(false),
+      colorEnabled: false,
+    });
+
+    const result = auth.ensure("openrouter", "OpenRouter");
+    await vi.waitFor(() => expect(terminal.output).toContain("Paste API key"));
+    terminal.type(`${secret}\r`);
+    await vi.waitFor(() => expect(terminal.output).toContain("Validating [redacted]"));
+
+    expect(terminal.output).not.toContain(secret);
+    release.resolve();
+    await expect(result).resolves.toBe(true);
+    auth.dispose();
+    tui.stop();
+  });
 });
