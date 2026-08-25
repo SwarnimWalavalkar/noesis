@@ -152,6 +152,17 @@ describe("Noesis safe editor key path", () => {
     expect(editor.getText()).toBe("");
   });
 
+  test("routes a complete Kitty Escape sequence without paste ambiguity delay", () => {
+    const editor = createSafeEditor(new TUI(inertTerminal));
+    const standaloneEscape = vi.fn(() => true);
+    editor.createStandaloneEscapeHandler = () => standaloneEscape;
+
+    editor.handleInput?.("\u001b[27;1:1u");
+
+    expect(standaloneEscape).toHaveBeenCalledOnce();
+    expect(editor.getText()).toBe("");
+  });
+
   test("sanitizes a bracketed-paste payload when its closing marker is split across chunks", async () => {
     vi.useFakeTimers();
     const editor = createSafeEditor(new TUI(inertTerminal));

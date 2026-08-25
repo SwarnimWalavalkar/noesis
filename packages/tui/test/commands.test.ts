@@ -1,4 +1,4 @@
-import type { NoesisAgentRuntime } from "@noesis/agent-types";
+import type { AgentThinkingLevel, NoesisAgentRuntime } from "@noesis/agent-types";
 import { describe, expect, test } from "vitest";
 import {
   exclusiveSlashCommandScope,
@@ -117,13 +117,446 @@ describe("Noesis slash commands", () => {
     expect(isExclusiveSlashCommand("  /compact \n")).toBe(true);
     expect(isExclusiveSlashCommand("/compact preserve exact errors")).toBe(true);
     expect(isExclusiveSlashCommand("/fork")).toBe(true);
-    expect(isExclusiveSlashCommand("\t/model provider/model ")).toBe(true);
+    expect(isExclusiveSlashCommand("/resume")).toBe(true);
+    expect(isExclusiveSlashCommand("/model")).toBe(true);
+    expect(isExclusiveSlashCommand("\t/model model-2 ")).toBe(true);
+    expect(isExclusiveSlashCommand("/provider")).toBe(true);
+    expect(isExclusiveSlashCommand("/provider anthropic")).toBe(true);
+    expect(isExclusiveSlashCommand("/reasoning")).toBe(true);
+    expect(isExclusiveSlashCommand("/reasoning medium")).toBe(true);
     expect(isExclusiveSlashCommand("/runs")).toBe(false);
     expect(isExclusiveSlashCommand("/program script reusable-research")).toBe(false);
     expect(exclusiveSlashCommandScope(" /compact keep decisions ")).toBe("current-session");
     expect(exclusiveSlashCommandScope("/fork")).toBe("resulting-session");
-    expect(exclusiveSlashCommandScope("/model provider/model")).toBe("resulting-session");
+    expect(exclusiveSlashCommandScope("/resume")).toBe("resulting-session");
+    expect(exclusiveSlashCommandScope("/model")).toBe("resulting-session");
+    expect(exclusiveSlashCommandScope("/model model-2")).toBe("resulting-session");
+    expect(exclusiveSlashCommandScope("/provider")).toBe("resulting-session");
+    expect(exclusiveSlashCommandScope("/provider anthropic")).toBe("resulting-session");
+    expect(exclusiveSlashCommandScope("/reasoning")).toBe("current-session");
+    expect(exclusiveSlashCommandScope("/reasoning medium")).toBe("current-session");
     expect(exclusiveSlashCommandScope("/runs")).toBeUndefined();
+  });
+
+  test("resumes the session selected by the interactive picker", async () => {
+    const runtime = createInMemoryTestRuntime(agent);
+    const current = await runtime.startTrail({ title: "current" });
+    const selected = await runtime.startTrail({ title: "selected" });
+    const dispatched: NoesisTuiAction[] = [];
+    const prepared: string[] = [];
+
+    await expect(
+      runSlashCommand("/resume", {
+        runtime,
+        trailId: current.trailId,
+        publishInspector: () => undefined,
+        dispatch: (action) => dispatched.push(action),
+        prepareTrailSelection: (trailId) => {
+          prepared.push(trailId);
+          return Promise.resolve();
+        },
+        requestRender: () => undefined,
+        selectSession: () => Promise.resolve(selected.trailId),
+      }),
+    ).resolves.toBe(true);
+
+    expect(prepared).toEqual([selected.trailId]);
+    expect(dispatched).toContainEqual({ type: "trail-selected", trail: selected });
+  });
+
+  test("explains that model changes preserve the current session and isolate its prompt cache", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const current = await base.startTrail({ title: "cached conversation", thinkingLevel: "high" });
+    const dispatched: NoesisTuiAction[] = [];
+    const runtime = Object.freeze({
+      ...base,
+      listModelRoutes: () =>
+        Object.freeze([
+          Object.freeze({
+            provider: "test-provider",
+            model: "test-model",
+            name: "Test model",
+            thinkingLevels: Object.freeze(["off", "high"] as const),
+            default: true,
+            allowsCustomModelIds: false,
+          }),
+          Object.freeze({
+            provider: "test-provider",
+            model: "model-2",
+            name: "Test model 2",
+            thinkingLevels: Object.freeze(["off", "medium", "high"] as const),
+            default: false,
+            allowsCustomModelIds: false,
+          }),
+        ]),
+    });
+
+    const handled = await runSlashCommand("/model model-2", {
+      runtime,
+      trailId: current.trailId,
+      publishInspector: () => undefined,
+      dispatch: (action) => dispatched.push(action),
+      requestRender: () => undefined,
+    });
+
+    expect(handled).toBe(true);
+    expect(base.getTrail(current.trailId)).toMatchObject({
+      trailId: current.trailId,
+      model: "test-model",
+    });
+    expect(dispatched).toContainEqual(
+      expect.objectContaining({
+        type: "system-message",
+        text: expect.stringContaining("previous session is preserved"),
+      }),
+    );
+    expect(dispatched).toContainEqual(
+      expect.objectContaining({
+        type: "system-message",
+        text: expect.stringContaining("prompt-cache isolation"),
+      }),
+    );
+    expect(dispatched).toContainEqual({
+      type: "notification-shown",
+      text: "New empty session · previous preserved · history not replayed",
+      tone: "info",
+    });
+    expect(dispatched).toContainEqual(
+      expect.objectContaining({
+        type: "trail-selected",
+        trail: expect.objectContaining({ model: "model-2", turns: [] }),
+      }),
+    );
+  });
+
+  test("accepts a model published by a successful catalog refresh", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const current = await base.startTrail({ title: "live model refresh", thinkingLevel: "high" });
+    let refreshes = 0;
+    const liveRoute = Object.freeze({
+      provider: current.provider,
+      model: "model-published-live",
+      name: "Published live",
+      thinkingLevels: Object.freeze(["off", "medium"] as const),
+      default: false,
+      allowsCustomModelIds: false,
+    });
+    const dispatched: NoesisTuiAction[] = [];
+    const runtime = Object.freeze({
+      ...base,
+      listModelRoutes: () => Object.freeze([]),
+      refreshModelRoutes: async () => {
+        refreshes += 1;
+        return Object.freeze([liveRoute]);
+      },
+    });
+
+    await expect(
+      runSlashCommand("/model model-published-live", {
+        runtime,
+        trailId: current.trailId,
+        publishInspector: () => undefined,
+        dispatch: (action) => dispatched.push(action),
+        requestRender: () => undefined,
+      }),
+    ).resolves.toBe(true);
+
+    expect(refreshes).toBe(1);
+    expect(dispatched).toContainEqual(
+      expect.objectContaining({
+        type: "trail-selected",
+        trail: expect.objectContaining({ model: "model-published-live", thinkingLevel: "medium" }),
+      }),
+    );
+  });
+
+  test("selects a model interactively into a new empty session", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const current = await base.startTrail({ title: "interactive model", thinkingLevel: "high" });
+    const dispatched: NoesisTuiAction[] = [];
+    const selectedRoute = Object.freeze({
+      provider: "test-provider",
+      model: "model-2",
+      name: "Test model 2",
+      thinkingLevels: Object.freeze(["off", "medium"] as const),
+      default: false,
+      allowsCustomModelIds: false,
+    });
+    let pickerIntent: unknown;
+    const runtime = Object.freeze({
+      ...base,
+      listModelRoutes: () => Object.freeze([selectedRoute]),
+    });
+
+    await expect(
+      runSlashCommand("/model", {
+        runtime,
+        trailId: current.trailId,
+        publishInspector: () => undefined,
+        dispatch: (action) => dispatched.push(action),
+        requestRender: () => undefined,
+        selectRoute: async (intent) => {
+          pickerIntent = intent;
+          return { route: selectedRoute, thinkingLevel: "off" };
+        },
+      }),
+    ).resolves.toBe(true);
+
+    expect(pickerIntent).toEqual({
+      kind: "model",
+      currentProvider: "test-provider",
+      currentModel: "test-model",
+      currentThinkingLevel: "high",
+    });
+    expect(dispatched).toContainEqual(
+      expect.objectContaining({
+        type: "trail-selected",
+        trail: expect.objectContaining({
+          provider: "test-provider",
+          model: "model-2",
+          thinkingLevel: "off",
+          turns: [],
+        }),
+      }),
+    );
+  });
+
+  test("authenticates the selected provider before creating its session", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const current = await base.startTrail({ title: "provider authentication" });
+    const events: string[] = [];
+    const route = Object.freeze({
+      provider: "provider-next",
+      providerName: "Provider Next",
+      model: "next-model",
+      name: "Next model",
+      thinkingLevels: Object.freeze(["off"] as const),
+      default: true,
+      allowsCustomModelIds: false,
+    });
+    const runtime = Object.freeze({
+      ...base,
+      listModelRoutes: () => Object.freeze([route]),
+      startTrail: async (input: Parameters<typeof base.startTrail>[0]) => {
+        events.push("start-session");
+        return await base.startTrail(input);
+      },
+    });
+
+    await runSlashCommand("/provider provider-next", {
+      runtime,
+      trailId: current.trailId,
+      publishInspector: () => undefined,
+      dispatch: () => undefined,
+      requestRender: () => undefined,
+      ensureProviderAuthenticated: async (providerId, providerName) => {
+        events.push(`authenticate:${providerName}:${providerId}`);
+        return true;
+      },
+    });
+
+    expect(events).toEqual(["authenticate:Provider Next:provider-next", "start-session"]);
+    expect(base.listTrails()).toHaveLength(2);
+  });
+
+  test("keeps the current session when provider authentication is cancelled", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const current = await base.startTrail({ title: "cancelled provider authentication" });
+    const dispatched: NoesisTuiAction[] = [];
+    const route = Object.freeze({
+      provider: "provider-next",
+      providerName: "Provider Next",
+      model: "next-model",
+      name: "Next model",
+      thinkingLevels: Object.freeze(["off"] as const),
+      default: true,
+      allowsCustomModelIds: false,
+    });
+    const runtime = Object.freeze({ ...base, listModelRoutes: () => Object.freeze([route]) });
+
+    await runSlashCommand("/provider provider-next", {
+      runtime,
+      trailId: current.trailId,
+      publishInspector: () => undefined,
+      dispatch: (action) => dispatched.push(action),
+      requestRender: () => undefined,
+      ensureProviderAuthenticated: async () => false,
+    });
+
+    expect(base.listTrails()).toHaveLength(1);
+    expect(dispatched).toEqual([
+      {
+        type: "notification-shown",
+        text: "Authentication cancelled · session unchanged",
+        tone: "info",
+      },
+    ]);
+  });
+
+  test("cancels route picking and treats the already-selected model as a no-op", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const current = await base.startTrail({ title: "interactive cancel", thinkingLevel: "high" });
+    const route = Object.freeze({
+      provider: current.provider,
+      model: current.model,
+      name: "Current model",
+      thinkingLevels: Object.freeze(["off", "high"] as const),
+      default: true,
+      allowsCustomModelIds: false,
+    });
+    const runtime = Object.freeze({ ...base, listModelRoutes: () => Object.freeze([route]) });
+    const cancelled: NoesisTuiAction[] = [];
+    await runSlashCommand("/provider", {
+      runtime,
+      trailId: current.trailId,
+      publishInspector: () => undefined,
+      dispatch: (action) => cancelled.push(action),
+      requestRender: () => undefined,
+      selectRoute: async () => undefined,
+    });
+    expect(cancelled).toEqual([]);
+
+    const unchanged: NoesisTuiAction[] = [];
+    await runSlashCommand("/model", {
+      runtime,
+      trailId: current.trailId,
+      publishInspector: () => undefined,
+      dispatch: (action) => unchanged.push(action),
+      requestRender: () => undefined,
+      selectRoute: async () => ({ route, thinkingLevel: current.thinkingLevel }),
+    });
+    expect(unchanged).toEqual([
+      {
+        type: "notification-shown",
+        text: `Already using reasoning ${current.thinkingLevel} · session unchanged`,
+        tone: "info",
+      },
+    ]);
+    expect(base.listTrails()).toHaveLength(1);
+  });
+
+  test("changes reasoning from the model picker without creating a new session", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const current = await base.startTrail({ title: "picker reasoning", thinkingLevel: "high" });
+    const route = Object.freeze({
+      provider: current.provider,
+      model: current.model,
+      name: "Current model",
+      thinkingLevels: Object.freeze(["off", "medium", "high"] as const),
+      default: true,
+      allowsCustomModelIds: false,
+    });
+    let persisted: string | undefined;
+    const dispatched: NoesisTuiAction[] = [];
+    const runtime = Object.freeze({
+      ...base,
+      listModelRoutes: () => Object.freeze([route]),
+      setTrailThinkingLevel: async (trailId: string, thinkingLevel: AgentThinkingLevel) => {
+        persisted = `${trailId}:${thinkingLevel}`;
+        return Object.freeze({ ...base.getTrail(trailId), thinkingLevel });
+      },
+    });
+
+    await runSlashCommand("/model", {
+      runtime,
+      trailId: current.trailId,
+      publishInspector: () => undefined,
+      dispatch: (action) => dispatched.push(action),
+      requestRender: () => undefined,
+      selectRoute: async () => ({ route, thinkingLevel: "medium" }),
+    });
+
+    expect(persisted).toBe(`${current.trailId}:medium`);
+    expect(base.listTrails()).toHaveLength(1);
+    expect(dispatched).toContainEqual({
+      type: "reasoning-level-changed",
+      reasoningLevel: "medium",
+    });
+  });
+
+  test("changes reasoning within the current session when the model supports it", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const current = await base.startTrail({ title: "reasoning control", thinkingLevel: "high" });
+    let persisted: string | undefined;
+    const dispatched: NoesisTuiAction[] = [];
+    const runtime = Object.freeze({
+      ...base,
+      listModelRoutes: () =>
+        Object.freeze([
+          Object.freeze({
+            provider: "test-provider",
+            model: "test-model",
+            name: "Test model",
+            thinkingLevels: Object.freeze(["off", "medium", "high"] as const),
+            default: true,
+            allowsCustomModelIds: false,
+          }),
+        ]),
+      setTrailThinkingLevel: async (trailId: string, thinkingLevel: AgentThinkingLevel) => {
+        persisted = `${trailId}:${thinkingLevel}`;
+        return Object.freeze({ ...base.getTrail(trailId), thinkingLevel });
+      },
+    });
+
+    await expect(
+      runSlashCommand("/reasoning medium", {
+        runtime,
+        trailId: current.trailId,
+        publishInspector: () => undefined,
+        dispatch: (action) => dispatched.push(action),
+        requestRender: () => undefined,
+      }),
+    ).resolves.toBe(true);
+
+    expect(persisted).toBe(`${current.trailId}:medium`);
+    expect(dispatched).toContainEqual({
+      type: "reasoning-level-changed",
+      reasoningLevel: "medium",
+    });
+  });
+
+  test("opens the reasoning picker and applies its current-session selection", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const current = await base.startTrail({ title: "reasoning picker", thinkingLevel: "high" });
+    const route = Object.freeze({
+      provider: current.provider,
+      model: current.model,
+      name: "Current model",
+      thinkingLevels: Object.freeze(["off", "medium", "high"] as const),
+      default: true,
+      allowsCustomModelIds: false,
+    });
+    let pickerIntent: unknown;
+    let persisted: string | undefined;
+    const runtime = Object.freeze({
+      ...base,
+      listModelRoutes: () => Object.freeze([route]),
+      setTrailThinkingLevel: async (trailId: string, thinkingLevel: AgentThinkingLevel) => {
+        persisted = `${trailId}:${thinkingLevel}`;
+        return Object.freeze({ ...base.getTrail(trailId), thinkingLevel });
+      },
+    });
+
+    await runSlashCommand("/reasoning", {
+      runtime,
+      trailId: current.trailId,
+      publishInspector: () => undefined,
+      dispatch: () => undefined,
+      requestRender: () => undefined,
+      selectRoute: async (intent) => {
+        pickerIntent = intent;
+        return { route, thinkingLevel: "medium" };
+      },
+    });
+
+    expect(pickerIntent).toEqual({
+      kind: "reasoning",
+      currentProvider: current.provider,
+      currentModel: current.model,
+      currentThinkingLevel: "high",
+    });
+    expect(persisted).toBe(`${current.trailId}:medium`);
+    expect(base.listTrails()).toHaveLength(1);
   });
 
   test("normalizes surrounding whitespace before matching and parsing arguments", async () => {

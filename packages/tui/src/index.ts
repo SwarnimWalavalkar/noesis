@@ -1,6 +1,7 @@
 import { createConditionalObject } from "@noesis/domain";
 import {
   Container,
+  isKeyRelease,
   matchesKey,
   type OverlayHandle,
   ProcessTerminal,
@@ -20,7 +21,7 @@ import {
 import { createExclusiveCommandBarrier, type ExclusiveCommandBarrier } from "./exclusive-command-barrier.ts";
 import { editTextInExternalEditor } from "./external-editor.ts";
 import { learningDiagnosticNotice, reconcileSettledTurnPresentation } from "./learning-presentation.ts";
-import { boundedInspectorText, type ShutdownSettlement } from "./lifecycle-utils.ts";
+import { boundedInspectorText, TUI_TIMINGS, type ShutdownSettlement } from "./lifecycle-utils.ts";
 import { createTuiLearningOrchestration } from "./learning.ts";
 import { createTuiMcpOrchestration } from "./mcp.ts";
 import { createOptimisticPromptEcho } from "./optimistic-prompt.ts";
@@ -43,12 +44,8 @@ import {
   type TuiInteractionSnapshot,
 } from "./runtime-port.ts";
 import { createSafeEditor, createSelectTheme, enrichEditorSkills } from "./safe-editor.ts";
-import {
-  resolveTuiSessionRequest,
-  resumableTrail,
-  selectSessionTrailId,
-  type TuiStartOptions,
-} from "./session-picker.ts";
+import { createTuiSelectionOrchestration } from "./selection-orchestration.ts";
+import { resolveTuiSessionRequest, resumableTrail, type TuiStartOptions } from "./session-picker.ts";
 import {
   executionForInteractionPhase,
   initialTuiState,
@@ -56,23 +53,12 @@ import {
   type NoesisTuiAction,
   timelineActions,
 } from "./state.ts";
-import { type ActiveTurnToken, createStreamDeltaBuffer } from "./stream-delta-buffer.ts";
+import type { ActiveTurnToken } from "./stream-delta-buffer.ts";
 import { safeTerminalText, shouldUseColor } from "./theme.ts";
 import { createTranscriptInputHandler } from "./transcript-input.ts";
-export * from "./action-summary.ts";
-export * from "./agent-event.ts";
-export * from "./commands.ts";
-export * from "./external-editor.ts";
-export * from "./lifecycle-utils.ts";
-export * from "./learning.ts";
-export * from "./mcp.ts";
-export * from "./onboarding.ts";
-export * from "./rendering.ts";
-export * from "./runtime-port.ts";
-export * from "./safe-editor.ts";
-export * from "./session-picker.ts";
-export * from "./state.ts";
-const [SHUTDOWN_GRACE_MS, INTERRUPT_FEEDBACK_MS, CLOSING_FEEDBACK_MS] = [250, 20, 20];
+import { createTuiStreamBuffers } from "./turn-stream-buffers.ts";
+import { startWorkingAnimation } from "./working-animation.ts";
+export * from "./public-surface.ts";
 export async function startNoesisTui(
   runtime: NoesisTuiRuntime,
   options: TuiStartOptions = {},
@@ -83,7 +69,6 @@ export async function startNoesisTui(
   tui.setClearOnShrink(false);
   const root = new Container();
   const requestedProvider = options.provider ?? runtime.agentDefaults.provider;
-  const requestedModel = options.model ?? runtime.agentDefaults.model;
   const requestedReasoning = options.thinkingLevel ?? runtime.agentDefaults.thinkingLevel;
   const colorEnabled =
     terminal instanceof ProcessTerminal && shouldUseColor(process.env) && process.stdout.hasColors();
@@ -91,13 +76,16 @@ export async function startNoesisTui(
   const view = createNoesisView(
     initialTuiState(runtime.agentName ?? "runtime", {
       provider: requestedProvider,
-      model: requestedModel,
+      model: options.model ?? runtime.agentDefaults.model,
       reasoningLevel: requestedReasoning,
       colorEnabled,
     }),
     () => terminal.rows,
   );
-  const editor = createSafeEditor(tui, colorEnabled, selectTheme, () => terminal.rows);
+  const editor = createSafeEditor(tui, colorEnabled, selectTheme, () => terminal.rows, [], {
+    listModelRoutes: () => runtime.listModelRoutes?.() ?? [],
+    currentRoute: () => view.state,
+  });
   const reportFailure = (cause: unknown): void => {
     view.dispatch({
       type: "failed",
@@ -120,7 +108,6 @@ export async function startNoesisTui(
   );
   let inspectorHandle: OverlayHandle | undefined;
   const optimisticPrompts = createOptimisticPromptEcho(view, () => tui.requestRender());
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const mcp = createTuiMcpOrchestration(
     createConditionalObject({
       runtime,
@@ -145,6 +132,16 @@ export async function startNoesisTui(
     height: () => terminal.rows,
     reportUnavailable: (text: string) => view.dispatch({ type: "system-message", text }),
   });
+  const selection = createTuiSelectionOrchestration({
+    runtime,
+    tui,
+    theme: selectTheme,
+    colorEnabled,
+    height: () => terminal.rows,
+    currentTrailId: () => view.state.trailId,
+    openUrl: options.openUrl,
+    renderOAuthCallbackPage: options.renderOAuthCallbackPage,
+  });
   const statusView = createStatusView(view, () => terminal.rows);
   const subagentsView = createSubagentsView(view, () => terminal.rows);
   const queuedInputsView = createQueuedInputsView(view, () => terminal.rows);
@@ -153,32 +150,39 @@ export async function startNoesisTui(
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
   enrichEditorSkills(editor, runtime.listSkills, () => phase !== "stopped");
   let exclusiveCommands: ExclusiveCommandBarrier | undefined;
-  let externalEditorActive = false;
-  let turnGeneration = 0;
-  let inspectorGeneration = 0;
+  let externalEditorActive = false,
+    turnGeneration = 0,
+    inspectorGeneration = 0;
   let activeTurnToken: ActiveTurnToken | undefined;
   const isCurrentTurn = (token: ActiveTurnToken): boolean =>
     phase === "main" &&
     activeTurnToken === token &&
     token.generation === turnGeneration &&
     view.state.trailId === token.trailId;
-  const streamDeltas = createStreamDeltaBuffer<ActiveTurnToken>({
+  const streams = createTuiStreamBuffers<ActiveTurnToken>({
     isCurrent: isCurrentTurn,
-    activeCharacters: () => {
-      const currentEntry = view.state.timeline.at(-1);
-      return currentEntry?.kind === "message" && currentEntry.role === "assistant"
-        ? currentEntry.text.length
-        : 0;
-    },
-    publish: (text) => {
+    timeline: () => view.state.timeline,
+    publishAssistant: (text) => {
       view.dispatch({ type: "stream-delta", text });
       tui.requestRender();
     },
+    publishReasoning: (text) => {
+      view.dispatch({ type: "reasoning-delta", text });
+      tui.requestRender();
+    },
   });
+  const streamDeltas = streams.assistant,
+    reasoningDeltas = streams.reasoning;
   let removeExitInputListener = (): void => undefined;
   let terminalStopped = false;
-  let cancelPicker: (() => void) | undefined;
   let shutdownPromise: Promise<void> | undefined;
+  const stopWorkingAnimation = startWorkingAnimation(
+    () => phase === "main" && view.state.execution !== "idle" && view.state.execution !== "error",
+    () => {
+      view.dispatch({ type: "animation-tick" });
+      tui.requestRender();
+    },
+  );
   let resolveShutdown: (() => void) | undefined;
   let rejectShutdown: ((cause: unknown) => void) | undefined;
   const shutdownCompleted = new Promise<void>((resolve, reject) => {
@@ -201,10 +205,13 @@ export async function startNoesisTui(
       editor.onSubmit = (): void => undefined;
       removeExitInputListener();
       tui.requestRender();
-      await new Promise<void>((resolve) => setTimeout(resolve, CLOSING_FEEDBACK_MS));
+      await new Promise<void>((resolve) => setTimeout(resolve, TUI_TIMINGS.closingFeedbackMs));
+      selection.dispose();
       learning.dispose();
       await mcp.dispose();
       streamDeltas.clear();
+      reasoningDeltas.clear();
+      stopWorkingAnimation();
       try {
         await terminal.drainInput(1000);
       } finally {
@@ -231,15 +238,13 @@ export async function startNoesisTui(
         const settlement = await Promise.race<ShutdownSettlement>([
           abortAndSettle,
           new Promise<ShutdownSettlement>((resolve) => {
-            graceTimer = setTimeout(() => resolve({ status: "timed-out" }), SHUTDOWN_GRACE_MS);
+            graceTimer = setTimeout(() => resolve({ status: "timed-out" }), TUI_TIMINGS.shutdownGraceMs);
             graceTimer.unref();
           }),
         ]);
         if (graceTimer) clearTimeout(graceTimer);
         if (settlement.status === "rejected") shutdownFailure = { error: settlement.error };
-        if (settlement.status === "timed-out") {
-          void abortAndSettle;
-        }
+        if (settlement.status === "timed-out") void abortAndSettle;
       }
       if (exclusiveCommand) {
         try {
@@ -248,6 +253,7 @@ export async function startNoesisTui(
           shutdownFailure ??= { error };
         }
       }
+      if (!shutdownFailure && trailId) await runtime.discardTrailIfEmpty(trailId);
       if (shutdownFailure) throw shutdownFailure.error;
     })();
     shutdownPromise.then(resolveShutdown, rejectShutdown);
@@ -298,6 +304,7 @@ export async function startNoesisTui(
     view,
     inspectorMaxScroll: () => inspectorMaxScroll,
     openRunInspector,
+    closeRunInspector,
   });
   const applyInteractionSnapshot = (snapshot: TuiInteractionSnapshot): void => {
     if (view.state.trailId !== snapshot.sessionId) return;
@@ -362,7 +369,10 @@ export async function startNoesisTui(
       return;
     }
     if (interactionEvent.type === "steer-delivered") {
-      if (activeTurnToken) streamDeltas.flush(activeTurnToken);
+      if (activeTurnToken) {
+        reasoningDeltas.flush(activeTurnToken);
+        streamDeltas.flush(activeTurnToken);
+      }
       view.dispatch({ type: "steer-delivered", text: interactionEvent.text });
       tui.requestRender();
       return;
@@ -370,6 +380,7 @@ export async function startNoesisTui(
     if (interactionEvent.type === "turn-settled") {
       const token = activeTurnToken;
       if (token?.turnId === interactionEvent.turnId) {
+        reasoningDeltas.flush(token);
         streamDeltas.flush(token);
         activeTurnToken = undefined;
       }
@@ -390,10 +401,17 @@ export async function startNoesisTui(
     const token = activeTurnToken;
     if (!token || token.turnId !== interactionEvent.turnId || !isCurrentTurn(token)) return;
     const event = interactionEvent.event;
+    if (event.type === "reasoning-delta") {
+      streamDeltas.flush(token);
+      reasoningDeltas.queue(token, event.text);
+      return;
+    }
     if (event.type === "delta") {
+      reasoningDeltas.flush(token);
       streamDeltas.queue(token, event.text);
       return;
     }
+    reasoningDeltas.flush(token);
     streamDeltas.flush(token);
     const action = tuiActionForAgentEvent(event);
     if (action) view.dispatch(action);
@@ -410,7 +428,7 @@ export async function startNoesisTui(
       createConditionalObject({
         onEvent: onInteractionEvent,
       } as const)
-        .addOptional(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : undefined)
+        .add({ thinkingLevel: view.state.reasoningLevel })
         .finish(),
     );
     applyInteractionSnapshot(result.snapshot);
@@ -426,13 +444,14 @@ export async function startNoesisTui(
     canDeliver: () => phase === "main",
     interact: interactWithSession,
     onPromptFailure: reportFailure,
+    discardSessionIfEmpty: runtime.discardTrailIfEmpty,
   });
   const interruptActiveTurn = async (): Promise<TuiInteractionResult> => {
     const visibleTurnId = view.state.interaction.active?.turnId;
     if (view.state.interaction.phase !== "idle") {
       view.dispatch({ type: "execution-changed", execution: "aborting" });
       tui.requestRender(true);
-      await new Promise<void>((resolve) => setTimeout(resolve, INTERRUPT_FEEDBACK_MS));
+      await new Promise<void>((resolve) => setTimeout(resolve, TUI_TIMINGS.interruptFeedbackMs));
     }
     return interact(stopVisibleInteraction(visibleTurnId));
   };
@@ -506,15 +525,18 @@ export async function startNoesisTui(
       });
   };
   removeExitInputListener = tui.addInputListener((data) => {
+    // Pi filters Kitty key releases before focused components, but global listeners run first.
+    // Consume releases here so transcript commands observe the same press-only key stream.
+    if (isKeyRelease(data)) return { consume: true };
     if (phase !== "main") {
       if (matchesKey(data, "ctrl+c")) {
-        cancelPicker?.();
+        selection.dispose();
         void shutdown();
         return { consume: true };
       }
       return undefined;
     }
-    if (mcp.ownsKeyboardFocus() || learning.ownsKeyboardFocus()) {
+    if (mcp.ownsKeyboardFocus() || learning.ownsKeyboardFocus() || selection.ownsKeyboardFocus()) {
       if (matchesKey(data, "ctrl+c")) {
         void shutdown();
         return { consume: true };
@@ -640,6 +662,9 @@ export async function startNoesisTui(
               if (isCurrentSubmission()) tui.requestRender();
             },
             openMcpManager: mcp.openManager,
+            selectRoute: selection.selectRoute,
+            ensureProviderAuthenticated: selection.ensureProviderAuthenticated,
+            selectSession: selection.selectSession,
           } as const)
             .addOptional(
               runtime.inspectLearningAudit
@@ -691,14 +716,12 @@ export async function startNoesisTui(
     else void performSubmission().catch(reportSubmissionFailure);
   };
   tui.addChild(root);
-  const loadTranscript = (trail: TrailState) => runtime.getTranscript(trail.trailId);
   const mountMain = (
     trail: TrailState,
     transcript: readonly RuntimeTranscriptEntry[],
     interaction: TuiInteractionSnapshot,
   ): void => {
     phase = "main";
-    cancelPicker = undefined;
     inspectorHandle?.hide();
     inspectorHandle = undefined;
     optimisticPrompts.clear();
@@ -723,20 +746,7 @@ export async function startNoesisTui(
   };
   try {
     if (session.mode === "pick") {
-      const trailId = await selectSessionTrailId({
-        runtime,
-        tui,
-        root,
-        terminal,
-        theme: selectTheme,
-        colorEnabled,
-        registerCancel: (cancel) => {
-          cancelPicker = cancel;
-        },
-        onCancel: () => {
-          void shutdown();
-        },
-      });
+      const trailId = await selection.selectSession({ startTui: true });
       if (!trailId) {
         await shutdown();
         await shutdownCompleted;
@@ -745,7 +755,7 @@ export async function startNoesisTui(
       try {
         const trail = await resumableTrail(runtime, trailId);
         const [transcript, interaction] = await Promise.all([
-          loadTranscript(trail),
+          runtime.getTranscript(trail.trailId),
           runtime.inspectInteraction(trail.trailId),
         ]);
         mountMain(trail, transcript, interaction);
@@ -760,10 +770,11 @@ export async function startNoesisTui(
           : await runtime.startTrail({
               title: "Noesis session",
               provider: requestedProvider,
-              model: requestedModel,
+              model: options.model ?? runtime.agentDefaults.model,
+              thinkingLevel: requestedReasoning,
             });
       const [transcript, interaction] = await Promise.all([
-        loadTranscript(trail),
+        runtime.getTranscript(trail.trailId),
         runtime.inspectInteraction(trail.trailId),
       ]);
       mountMain(trail, transcript, interaction);

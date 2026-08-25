@@ -37,6 +37,14 @@ Noesis preserves instruction levels:
 
 Conversation history never enters the system prompt. The turn trace records the exact bounded messages the model received, with source references and content digests.
 
+Provider-visible thinking is a durable presentation trace with its own turn timeline position. It is not an assistant message, is excluded from conversation replay and compaction input, and never becomes an instruction on a later turn.
+
+Each session records its provider, model, and thinking level. Changing thinking level updates only that session. The TUI reads Pi's bundled and persisted model catalog immediately, then refreshes its `pi.dev` overlay in the background. Pi remains authoritative for transport, reasoning-level support, context limits, modalities, and compatibility metadata; a refresh changes future route choices but never mutates an active session. `/model` searches the current provider, while `/provider` chooses a provider and then a model. Both pickers then choose one of that model's supported reasoning levels, while bare `/reasoning` opens the reasoning picker directly. `/model ID` and `/reasoning LEVEL` remain autocomplete-backed fast paths and revalidate against the current catalog. Changing provider or model creates a new session after validating the route; choosing only a different reasoning level for the current model updates the current session. The prior session and transcript remain unchanged and resumable after a route change. Noesis does not replay an existing transcript across a route change because doing so would silently discard the route's prompt-cache continuity.
+
+Route changes also pass through the canonical Pi authentication manager before session creation. Existing stored or environment credentials continue without interruption. Missing OAuth credentials use the provider's own login callbacks; missing API keys use a masked Pi TUI input and the same secure credential store as `noesis auth login`. Authentication answers are not dispatched into chat state, persisted as messages, or exposed to the model. Cancellation leaves the current session selected.
+
+OpenCode Zen and OpenCode Go are distinct routes throughout this surface. Zen uses provider ID `opencode` and environment key `OPENCODE_API_KEY`; Go uses `opencode-go` and `OPENCODE_GO_API_KEY`. Their stored credentials, model catalogs, frozen routes, and user-facing labels remain separate even when the same model ID exists in both catalogs.
+
 A lower-priority instruction loses only when it conflicts with a higher-priority instruction. Noesis does not use hierarchy to ignore a compatible user request. This follows [The Instruction Hierarchy](https://arxiv.org/pdf/2404.13208).
 
 ## Context budget and compaction
@@ -127,6 +135,8 @@ The fixed surface keeps common file and shell tasks to one call and preserves a 
 The `execute` starter surface stays deliberately small. Because correct truncation recovery depends on the exact `shell.run` result, its compact result type is generated from the frozen output schema and included under a hard byte bound. Other tool contracts remain progressively available through `noesis.describe`; the prompt never carries the full Tool Catalog or a handwritten copy of a tool schema.
 
 The progressively loaded, turn-frozen `execute` skill carries Code Mode composition, SDK, and Program authoring guidance. The separate `noesis` skill stays focused on deliberate self-improvement. Both direct the model to frozen tool schemas for exact call shapes while keeping the stable system prompt unchanged.
+
+Foreground `execute` has REPL-style completion: when its final top-level statement is an expression, that expression becomes the model-visible result. Explicit `return` remains valid. Saved Program source retains ordinary async function-body semantics and must return its schema-valid output explicitly.
 
 Codemode checks explicit completeness fields before semantic synthesis. Oversized `shell.run` output normally remains available at `fullOutputPath`; codemode inspects a complete artifact with `files.read` line ranges or ordinary Unix tools rather than repeating the command. A command that exceeds the finite artifact limit is terminated and returns `fullOutputComplete: false`, so the program treats the saved file as partial and narrows or safely reruns the collection. When other required evidence reports `truncated: true`, it narrows or recollects that evidence with bounded calls. Omitted output is unavailable evidence, not evidence that the omitted item does not exist.
 

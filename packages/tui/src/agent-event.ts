@@ -17,12 +17,7 @@ export function actionIdentityForView(event: AgentActionEvent): {
   );
 }
 export function tuiActionForAgentEvent(
-  event: Exclude<
-    AgentRuntimeEvent,
-    {
-      readonly type: "delta";
-    }
-  >,
+  event: Exclude<AgentRuntimeEvent, { readonly type: "delta" } | { readonly type: "reasoning-delta" }>,
   at = Date.now(),
 ): NoesisTuiAction | undefined {
   if (event.type === "tool-start") {
@@ -64,6 +59,7 @@ export function tuiActionForAgentEvent(
       accuracy: event.accuracy,
     };
   if (event.type === "assistant-message") return undefined;
+  if (event.type === "reasoning-message") return { type: "reasoning-reconciled", text: event.text };
   if (event.status === "started") return { type: "execution-changed", execution: "thinking" };
   if (event.status === "aborted") return { type: "execution-changed", execution: "idle" };
   if (event.status === "failed") return { type: "failed", error: safeTerminalText(event.error) };

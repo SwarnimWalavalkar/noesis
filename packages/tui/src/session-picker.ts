@@ -1,9 +1,9 @@
 import {
-  type Container,
   SelectList,
   type Component,
+  type Focusable,
+  type OverlayHandle,
   type SelectListTheme,
-  type Terminal,
   type TUI,
 } from "@earendil-works/pi-tui";
 import {
@@ -12,11 +12,9 @@ import {
   type TrailState,
   type TrailSummary,
 } from "@noesis/runtime";
-import { createStaticLineView } from "./rendering.ts";
-import { ANSI, elideText, styled } from "./theme.ts";
+import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 import type { TuiMcpInteractionBridge } from "./mcp-interaction.ts";
-import type { NoesisTuiRuntime } from "./runtime-port.ts";
-import type { TuiProviderAuthCallbacks } from "./runtime-port.ts";
+import type { NoesisTuiRuntime, TuiProviderAuthCallbacks } from "./runtime-port.ts";
 
 export interface TuiStartOptions {
   readonly provider?: string;
@@ -88,6 +86,158 @@ export function sessionPickerVisibleCount(height: number): number {
 export interface ResponsiveSessionPicker extends Component {
   onSelect?: (item: SessionPickerItem) => void;
   onCancel?: () => void;
+  readonly selectedItem: () => SessionPickerItem | undefined;
+}
+
+export interface TuiSessionPickerOrchestration {
+  readonly select: (options?: { readonly startTui?: boolean }) => Promise<string | undefined>;
+  readonly ownsKeyboardFocus: () => boolean;
+  readonly dispose: () => void;
+}
+
+export function createTuiSessionPickerOrchestration(input: {
+  readonly runtime: NoesisTuiRuntime;
+  readonly tui: TUI;
+  readonly theme: SelectListTheme;
+  readonly colorEnabled: boolean;
+  readonly height: () => number;
+  readonly currentTrailId?: () => string | undefined;
+}): TuiSessionPickerOrchestration {
+  let handle: OverlayHandle | undefined;
+  let finish: ((trailId: string | undefined) => void) | undefined;
+  let active: Promise<string | undefined> | undefined;
+  const settle = (trailId: string | undefined): void => {
+    const resolve = finish;
+    finish = undefined;
+    active = undefined;
+    handle?.hide();
+    handle = undefined;
+    input.tui.requestRender();
+    resolve?.(trailId);
+  };
+  return Object.freeze({
+    select(options: { readonly startTui?: boolean } = {}) {
+      if (active) {
+        handle?.focus();
+        return active;
+      }
+      let items = createSessionPickerItems(input.runtime.listTrailSummaries());
+      if (items.length === 0)
+        return Promise.reject(
+          new Error(
+            `No saved sessions were found in ${input.runtime.home ?? "the configured Noesis home"}. Start a new session with noesis (without --resume).`,
+          ),
+        );
+      active = new Promise<string | undefined>((resolve) => {
+        finish = resolve;
+      });
+      let confirmation: SessionPickerItem | undefined;
+      let notice: string | undefined;
+      let deleting = false;
+      const createPicker = (): ResponsiveSessionPicker => {
+        const next = createResponsiveSessionPicker(
+          items,
+          () => Math.max(1, input.height() - (confirmation || notice ? 5 : 2)),
+          input.theme,
+        );
+        next.onSelect = (item) => settle(item.value);
+        next.onCancel = () => settle(undefined);
+        return next;
+      };
+      let picker = createPicker();
+      const confirmDeletion = (): void => {
+        const selected = picker.selectedItem();
+        if (!selected) return;
+        if (selected.value === input.currentTrailId?.()) {
+          notice = "The current session cannot be deleted. Resume another session first.";
+          input.tui.requestRender();
+          return;
+        }
+        notice = undefined;
+        confirmation = selected;
+        input.tui.requestRender();
+      };
+      const deleteConfirmed = (): void => {
+        const selected = confirmation;
+        if (!selected || deleting) return;
+        deleting = true;
+        input.tui.requestRender();
+        void input.runtime.deleteTrail(selected.value).then(
+          () => {
+            deleting = false;
+            confirmation = undefined;
+            items = createSessionPickerItems(input.runtime.listTrailSummaries());
+            if (items.length === 0) {
+              settle(undefined);
+              return;
+            }
+            picker = createPicker();
+            notice = "Session deleted from resume and search.";
+            input.tui.requestRender();
+          },
+          (cause: unknown) => {
+            deleting = false;
+            confirmation = undefined;
+            notice = safeTerminalText(cause instanceof Error ? cause.message : String(cause));
+            input.tui.requestRender();
+          },
+        );
+      };
+      let focused = false;
+      const overlay: Component & Focusable = {
+        get focused() {
+          return focused;
+        },
+        set focused(value: boolean) {
+          focused = value;
+        },
+        render(width) {
+          const guidance = confirmation
+            ? [
+                confirmation.label,
+                "Delete from resume and search? Linked learning and audit evidence remains.",
+                deleting ? "Deleting…" : "d again to delete · Esc keep",
+              ]
+            : ["↑/↓ navigate · Enter resume · d delete · Esc cancel", ...(notice ? [notice] : [])];
+          return [
+            `${styled(input.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "NOESIS")}  ${styled(input.colorEnabled, ANSI.dim, "resume a session")}`,
+            ...guidance.map((line) => styled(input.colorEnabled, ANSI.dim, elideText(line, width))),
+            ...picker.render(width),
+          ];
+        },
+        handleInput(data) {
+          if (confirmation) {
+            if (data === "\u001b") {
+              confirmation = undefined;
+              input.tui.requestRender();
+            } else if (data === "d" || data === "D") deleteConfirmed();
+            return;
+          }
+          if (data === "d" || data === "D") {
+            confirmDeletion();
+            return;
+          }
+          notice = undefined;
+          picker.handleInput?.(data);
+          input.tui.requestRender();
+        },
+        invalidate() {
+          picker.invalidate();
+        },
+      };
+      handle = input.tui.showOverlay(overlay, {
+        anchor: "center",
+        width: "92%",
+        maxHeight: "90%",
+        margin: 1,
+      });
+      handle.focus();
+      if (options.startTui) input.tui.start();
+      return active;
+    },
+    ownsKeyboardFocus: () => Boolean(handle?.isFocused()),
+    dispose: () => settle(undefined),
+  });
 }
 
 export function createResponsiveSessionPicker(
@@ -117,6 +267,9 @@ export function createResponsiveSessionPicker(
     invalidate() {
       picker?.invalidate();
     },
+    selectedItem() {
+      return items.find((item) => item.value === selectedValue);
+    },
   };
   const ensurePicker = (): void => {
     const nextVisibleCount = sessionPickerVisibleCount(height());
@@ -139,54 +292,6 @@ export function createResponsiveSessionPicker(
     picker = next;
   };
   return responsive;
-}
-
-export async function selectSessionTrailId(input: {
-  readonly runtime: NoesisTuiRuntime;
-  readonly tui: TUI;
-  readonly root: Container;
-  readonly terminal: Terminal;
-  readonly theme: SelectListTheme;
-  readonly colorEnabled: boolean;
-  readonly registerCancel: (cancel: () => void) => void;
-  readonly onCancel: () => void;
-}): Promise<string | undefined> {
-  const items = createSessionPickerItems(input.runtime.listTrailSummaries());
-  if (items.length === 0)
-    throw new Error(
-      `No saved sessions were found in ${input.runtime.home ?? "the configured Noesis home"}. Start a new session with noesis (without --resume).`,
-    );
-  const picker = createResponsiveSessionPicker(items, () => input.terminal.rows, input.theme);
-  const selected = new Promise<string | undefined>((resolve) => {
-    let settled = false;
-    const finish = (trailId: string | undefined): void => {
-      if (settled) return;
-      settled = true;
-      resolve(trailId);
-    };
-    input.registerCancel(() => finish(undefined));
-    picker.onSelect = (item) => finish(item.value);
-    picker.onCancel = () => {
-      finish(undefined);
-      input.onCancel();
-    };
-  });
-  input.root.addChild(
-    createStaticLineView(
-      `${styled(input.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "NOESIS")}  ${styled(input.colorEnabled, ANSI.dim, "resume a session")}`,
-      () => input.terminal.rows >= 2,
-    ),
-  );
-  input.root.addChild(
-    createStaticLineView(
-      styled(input.colorEnabled, ANSI.dim, "↑/↓ navigate · Enter resume · Esc cancel"),
-      () => input.terminal.rows >= 3,
-    ),
-  );
-  input.root.addChild(picker);
-  input.tui.setFocus(picker);
-  input.tui.start();
-  return await selected;
 }
 
 export async function resumableTrail(runtime: NoesisTuiRuntime, trailId: string): Promise<TrailState> {

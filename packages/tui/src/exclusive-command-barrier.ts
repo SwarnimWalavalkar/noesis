@@ -52,6 +52,7 @@ export function createExclusiveCommandBarrier(options: {
     command: BarrierInteractionCommand,
   ) => Promise<BarrierInteractionResult>;
   readonly onPromptFailure: (cause: unknown) => void;
+  readonly discardSessionIfEmpty?: (sessionId: string) => Promise<boolean>;
 }): ExclusiveCommandBarrier {
   let active: ActiveExclusiveCommand | undefined;
 
@@ -130,6 +131,7 @@ export function createExclusiveCommandBarrier(options: {
             releases.push(options.interact(state.destinationSessionId, { type: "resume-queue" }));
           if (active === state) active = undefined;
           await Promise.all(releases);
+          if (state.destinationSessionId) await options.discardSessionIfEmpty?.(state.sourceSessionId);
         } catch (error) {
           if (commandFailure === undefined) commandFailure = error;
         } finally {

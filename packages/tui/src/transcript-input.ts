@@ -9,11 +9,16 @@ export function createTranscriptInputHandler(options: {
   readonly view: NoesisView;
   readonly inspectorMaxScroll: () => number;
   readonly openRunInspector: (actionId: string) => void;
+  readonly closeRunInspector: () => void;
 }): (data: string) => boolean {
   return (data) => {
     const state = options.view.state;
     if (state.inspector) {
       const maxScroll = options.inspectorMaxScroll();
+      if (matchesKey(data, "escape")) {
+        options.closeRunInspector();
+        return true;
+      }
       if (matchesKey(data, "up")) options.view.dispatch({ type: "inspector-scrolled", delta: -1, maxScroll });
       else if (matchesKey(data, "down"))
         options.view.dispatch({ type: "inspector-scrolled", delta: 1, maxScroll });
@@ -36,6 +41,11 @@ export function createTranscriptInputHandler(options: {
     }
 
     if (state.actionCursor) {
+      if (matchesKey(data, "escape")) {
+        options.view.dispatch({ type: "action-cursor-cleared" });
+        options.tui.requestRender();
+        return true;
+      }
       if (matchesKey(data, "ctrl+o")) {
         options.view.dispatch({ type: "action-cursor-cleared" });
         options.tui.requestRender();

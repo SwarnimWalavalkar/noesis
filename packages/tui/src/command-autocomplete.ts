@@ -2,26 +2,79 @@ import {
   type AutocompleteItem,
   type AutocompleteProvider,
   CombinedAutocompleteProvider,
+  fuzzyFilter,
   type SlashCommand,
 } from "@earendil-works/pi-tui";
+import type { TuiModelRoute } from "./runtime-port.ts";
 
-const MODEL_PROVIDER_COMPLETIONS: readonly AutocompleteItem[] = [
+const PROVIDER_COMPLETIONS: readonly AutocompleteItem[] = [
   {
-    value: "openai-codex/",
-    label: "openai-codex/",
-    description: "Codex OAuth · enter a model ID after the slash",
+    value: "openai-codex",
+    label: "openai-codex",
+    description: "OpenAI Codex OAuth",
   },
   {
-    value: "openrouter/",
-    label: "openrouter/",
-    description: "OpenRouter · enter a provider/model ID after the slash",
+    value: "anthropic",
+    label: "anthropic",
+    description: "Anthropic",
   },
+  { value: "openrouter", label: "openrouter", description: "OpenRouter" },
+  { value: "opencode", label: "opencode", description: "OpenCode Zen" },
+  { value: "opencode-go", label: "opencode-go", description: "OpenCode Go" },
 ];
 
-const completeModelProvider = (argumentPrefix: string): AutocompleteItem[] => {
+const completeProvider = (argumentPrefix: string): AutocompleteItem[] => {
   const normalizedPrefix = argumentPrefix.trim().toLowerCase();
-  if (!normalizedPrefix) return [...MODEL_PROVIDER_COMPLETIONS];
-  return MODEL_PROVIDER_COMPLETIONS.filter((item) => item.value.includes(normalizedPrefix));
+  if (!normalizedPrefix) return [...PROVIDER_COMPLETIONS];
+  return PROVIDER_COMPLETIONS.filter((item) => item.value.includes(normalizedPrefix));
+};
+
+const THINKING_COMPLETIONS: readonly AutocompleteItem[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+].map((value) => ({ value, label: value, description: "Reasoning effort" }));
+
+const completeThinking = (argumentPrefix: string): AutocompleteItem[] => {
+  const prefix = argumentPrefix.trim().toLowerCase();
+  return THINKING_COMPLETIONS.filter((item) => !prefix || item.value.startsWith(prefix));
+};
+
+export interface TuiCommandAutocompleteContext {
+  readonly listModelRoutes?: () => readonly TuiModelRoute[];
+  readonly currentRoute?: () =>
+    | {
+        readonly provider: string;
+        readonly model: string;
+      }
+    | undefined;
+}
+
+const completeModel = (
+  argumentPrefix: string,
+  context: TuiCommandAutocompleteContext,
+): AutocompleteItem[] => {
+  const current = context.currentRoute?.();
+  if (!current) return [];
+  const routes = (context.listModelRoutes?.() ?? [])
+    .filter((route) => route.provider === current.provider)
+    .sort((left, right) => {
+      if (left.model === current.model) return -1;
+      if (right.model === current.model) return 1;
+      if (left.default !== right.default) return left.default ? -1 : 1;
+      return left.model.localeCompare(right.model);
+    });
+  return fuzzyFilter(routes, argumentPrefix.trim(), (route) => `${route.model} ${route.name}`).map(
+    (route) => ({
+      value: route.model,
+      label: route.model,
+      description: `${route.name}${route.model === current.model ? " · current" : ""}`,
+    }),
+  );
 };
 
 const completeQueueCommand = (argumentPrefix: string): AutocompleteItem[] => {
@@ -60,10 +113,21 @@ export const NOESIS_SLASH_COMMANDS = [
     description: "Show commands and usage",
   },
   {
+    name: "provider",
+    description: "Start a fresh session with another provider",
+    argumentHint: "[provider]",
+    getArgumentCompletions: completeProvider,
+  },
+  {
     name: "model",
-    description: "Start a session with a different model",
-    argumentHint: "<provider>/<model>",
-    getArgumentCompletions: completeModelProvider,
+    description: "Pick a model or start a fresh session inline",
+    argumentHint: "[model]",
+  },
+  {
+    name: "reasoning",
+    description: "Pick reasoning effort or change it inline",
+    argumentHint: "[level]",
+    getArgumentCompletions: completeThinking,
   },
   {
     name: "context",
@@ -113,6 +177,10 @@ export const NOESIS_SLASH_COMMANDS = [
     description: "Fork the current session",
   },
   {
+    name: "resume",
+    description: "Resume a saved session",
+  },
+  {
     name: "compact",
     description: "Compact the current context",
   },
@@ -139,6 +207,7 @@ export const NOESIS_SLASH_COMMANDS = [
 
 export function createNoesisCommandAutocompleteProvider(
   skills: readonly SkillSlashCommand[] = [],
+  context: TuiCommandAutocompleteContext = {},
 ): AutocompleteProvider {
   const builtInNames = new Set<string>(NOESIS_SLASH_COMMANDS.map((command) => command.name));
   const seenSkillNames = new Set<string>();
@@ -155,10 +224,15 @@ export function createNoesisCommandAutocompleteProvider(
       ];
     });
   });
-  const provider = new CombinedAutocompleteProvider(
-    [...NOESIS_SLASH_COMMANDS, ...skillCommands],
-    process.cwd(),
+  const builtInCommands: SlashCommand[] = NOESIS_SLASH_COMMANDS.map((command) =>
+    command.name === "model"
+      ? {
+          ...command,
+          getArgumentCompletions: (argumentPrefix) => completeModel(argumentPrefix, context),
+        }
+      : command,
   );
+  const provider = new CombinedAutocompleteProvider([...builtInCommands, ...skillCommands], process.cwd());
 
   return {
     getSuggestions: (lines, cursorLine, cursorCol, options) => {

@@ -260,6 +260,9 @@ const PRIMARY_KEY_BY_TABLE = {
   capability_feedback: "feedback_id",
   capability_gate_requests: "gate_request_id",
 } satisfies Readonly<Record<DatabaseTable, string>>;
+function quoteSqlIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
 function permitsTransition(
   transitions: Readonly<Record<string, readonly string[]>>,
   from: string,
@@ -2171,6 +2174,124 @@ function createOperationalRepositories(
     });
     return databaseRef("sessions", record.sessionId);
   };
+  const sessionHasConversationActivity = (sessionId: string): boolean =>
+    requiredNumber(
+      db
+        .prepare(`SELECT (
+          EXISTS(SELECT 1 FROM messages WHERE session_id = ?)
+          OR EXISTS(SELECT 1 FROM foreground_turns WHERE session_id = ?)
+          OR EXISTS(SELECT 1 FROM user_intents WHERE session_id = ? AND status != 'withdrawn')
+        ) AS present`)
+        .get(sessionId, sessionId, sessionId),
+      "present",
+    ) === 1;
+  const sessionHasDurableEvidenceReference = (sessionId: string): boolean =>
+    db
+      .prepare(`SELECT schema.name AS table_name, column.name AS column_name
+        FROM sqlite_schema AS schema
+        JOIN pragma_table_info(schema.name) AS column
+        WHERE schema.type = 'table'
+          AND schema.name NOT LIKE 'sqlite_%'
+          AND substr(column.name, -5) = '_json'`)
+      .all()
+      .some((row) => {
+        const table = quoteSqlIdentifier(requiredString(row, "table_name"));
+        const column = quoteSqlIdentifier(requiredString(row, "column_name"));
+        return (
+          db
+            .prepare(`SELECT 1
+              FROM ${table} AS record,
+                json_tree(
+                  CASE WHEN json_valid(record.${column}) THEN record.${column} ELSE NULL END
+                ) AS reference
+              WHERE reference.type = 'object'
+                AND json_extract(reference.value, '$.kind') = 'database_row'
+                AND json_extract(reference.value, '$.table') = 'sessions'
+                AND json_extract(reference.value, '$.rowId') = ?
+              LIMIT 1`)
+            .get(sessionId) !== undefined
+        );
+      });
+  const removeSessionSearchDocuments = (sessionId: string): void => {
+    db.prepare(`DELETE FROM search_fts
+      WHERE document_id IN (SELECT document_id FROM search_documents WHERE session_id = ?)`).run(sessionId);
+    db.prepare("DELETE FROM search_documents WHERE session_id = ?").run(sessionId);
+  };
+  const deleteSessionRecord = (
+    sessionId: string,
+    deletedAt: string,
+  ): "purged" | "retained-for-audit" | "missing" => {
+    const row = db.prepare("SELECT * FROM sessions WHERE session_id = ?").get(sessionId);
+    if (row === undefined) return "missing";
+    const session = decodeSession(row);
+    if (session.status === "running") throw new Error(`Running session ${sessionId} cannot be deleted`);
+    const existingDeletedAt = session.metadata["deletedAt"];
+    if (typeof existingDeletedAt === "string") return "retained-for-audit";
+    removeSessionSearchDocuments(sessionId);
+    const purged =
+      !sessionHasDurableEvidenceReference(sessionId) &&
+      Number(
+        db
+          .prepare(`DELETE FROM sessions
+        WHERE session_id = ?
+          AND NOT EXISTS(SELECT 1 FROM sessions WHERE parent_session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM messages WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM tool_calls WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM outcomes WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM foreground_turns WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM user_intents WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM codemode_executions WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM workflow_runs WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM model_calls WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM context_checkpoints WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM session_context_state WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM job_observations WHERE source_session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM turn_activation_pins WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM frozen_turn_plans WHERE session_id = ?)
+          AND NOT EXISTS(SELECT 1 FROM experiment_observations WHERE session_id = ?)`)
+          .run(
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+            sessionId,
+          ).changes,
+      ) === 1;
+    if (purged) {
+      recordActivity(systemActor, "session.purged", "session", sessionId);
+      return "purged";
+    }
+    db.prepare("UPDATE sessions SET metadata_json = ?, updated_at = ? WHERE session_id = ?").run(
+      JSON.stringify({ ...session.metadata, deletedAt }),
+      deletedAt,
+      sessionId,
+    );
+    recordActivity(systemActor, "session.deleted", "session", sessionId);
+    return "retained-for-audit";
+  };
+  const deleteSession = async (
+    sessionId: string,
+    deletedAt: string,
+  ): Promise<"purged" | "retained-for-audit" | "missing"> =>
+    database.transaction(() => deleteSessionRecord(sessionId, deletedAt));
+  const deleteEmptySession = async (sessionId: string, deletedAt: string): Promise<boolean> =>
+    database.transaction(() => {
+      const session = db.prepare("SELECT status FROM sessions WHERE session_id = ?").get(sessionId);
+      if (session === undefined || requiredString(session, "status") === "running") return false;
+      if (sessionHasConversationActivity(sessionId)) return false;
+      return deleteSessionRecord(sessionId, deletedAt) !== "missing";
+    });
   const putMessage = async (record: MessageRecord): Promise<DatabaseRowRef> => {
     database.transaction(() => {
       const turnId =
@@ -3823,6 +3944,8 @@ function createOperationalRepositories(
       put: putSession,
       list: async () =>
         db.prepare("SELECT * FROM sessions ORDER BY created_at, session_id").all().map(decodeSession),
+      delete: deleteSession,
+      deleteIfEmpty: deleteEmptySession,
     }),
     messages: Object.freeze({
       get: async (messageId: string) =>
@@ -4637,7 +4760,9 @@ function createSearchIndex(
           .finish(),
       );
     };
-    for (const row of db.prepare("SELECT * FROM sessions").all())
+    for (const row of db
+      .prepare("SELECT * FROM sessions WHERE json_type(metadata_json, '$.deletedAt') IS NULL")
+      .all())
       add(
         { kind: "database_row", table: "sessions", rowId: requiredString(row, "session_id"), field: "title" },
         requiredString(row, "title"),
@@ -4645,7 +4770,10 @@ function createSearchIndex(
         sessionSensitivity(db, requiredString(row, "session_id")) ?? "private",
         requiredString(row, "session_id"),
       );
-    for (const row of db.prepare("SELECT * FROM messages").all())
+    for (const row of db
+      .prepare(`SELECT messages.* FROM messages JOIN sessions USING(session_id)
+          WHERE json_type(sessions.metadata_json, '$.deletedAt') IS NULL`)
+      .all())
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       add(
         {
@@ -4660,9 +4788,10 @@ function createSearchIndex(
         requiredString(row, "session_id"),
       );
     for (const row of db
-      .prepare(`SELECT * FROM tool_calls
-           WHERE status IN ('completed', 'failed', 'denied', 'ambiguous')
-             AND tool_name NOT GLOB 'history.*'`)
+      .prepare(`SELECT tool_calls.* FROM tool_calls JOIN sessions USING(session_id)
+           WHERE json_type(sessions.metadata_json, '$.deletedAt') IS NULL
+             AND tool_calls.status IN ('completed', 'failed', 'denied', 'ambiguous')
+             AND tool_calls.tool_name NOT GLOB 'history.*'`)
       .all()) {
       const body = [
         requiredString(row, "tool_name"),
@@ -4683,7 +4812,10 @@ function createSearchIndex(
         requiredString(row, "session_id"),
       );
     }
-    for (const row of db.prepare("SELECT * FROM outcomes").all())
+    for (const row of db
+      .prepare(`SELECT outcomes.* FROM outcomes JOIN sessions USING(session_id)
+          WHERE json_type(sessions.metadata_json, '$.deletedAt') IS NULL`)
+      .all())
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       add(
         {
@@ -4772,6 +4904,11 @@ function createSearchIndex(
     const rows = db
       .prepare(`SELECT * FROM search_documents
          WHERE (sensitivity = 'normal' OR (? = 1 AND sensitivity = 'private') OR (? = 1 AND sensitivity = 'secret'))
+           AND (session_id IS NULL OR NOT EXISTS(
+             SELECT 1 FROM sessions
+             WHERE sessions.session_id = search_documents.session_id
+               AND json_type(sessions.metadata_json, '$.deletedAt') = 'text'
+           ))
          ORDER BY document_id`)
       .all(options.includePrivate ? 1 : 0, options.includeSecret ? 1 : 0);
     return rows.map(decodeSearchDocument);
@@ -4833,6 +4970,11 @@ function createSearchIndex(
            WHERE search_fts MATCH ?
              AND sensitivity != 'secret'
              AND (sensitivity = 'normal' OR ? = 1)
+             AND (session_id IS NULL OR NOT EXISTS(
+               SELECT 1 FROM sessions
+               WHERE sessions.session_id = search_documents.session_id
+                 AND json_type(sessions.metadata_json, '$.deletedAt') = 'text'
+             ))
              AND (? IS NULL OR session_id = ?)
              AND (? IS NULL OR (session_id IS NOT NULL AND session_id != ?))
              AND ${sourceScopeSql}
@@ -4879,6 +5021,11 @@ function createSearchIndex(
            FROM search_embeddings JOIN search_documents USING(document_id)
            WHERE model_id = ? AND sensitivity != 'secret'
              AND (sensitivity = 'normal' OR ? = 1)
+             AND (session_id IS NULL OR NOT EXISTS(
+               SELECT 1 FROM sessions
+               WHERE sessions.session_id = search_documents.session_id
+                 AND json_type(sessions.metadata_json, '$.deletedAt') = 'text'
+             ))
              AND (? IS NULL OR session_id = ?)
              AND (? IS NULL OR (session_id IS NOT NULL AND session_id != ?))
              AND ${sourceScopeSql}`)

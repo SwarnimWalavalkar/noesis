@@ -29,6 +29,7 @@ import {
   createUserCriterionRepository,
   createWorkspaceUserCriterionPorts,
   type ResolvedNoesisConfig,
+  ThinkingLevelSchema,
 } from "@noesis/config";
 import { type ContextFragment, compileContext } from "@noesis/context";
 import {
@@ -4021,12 +4022,19 @@ export async function createApplicationRuntimeComposition(
   >();
   const trailStates = new Map<string, TrailState>();
   const messageCounts = new Map<string, number>();
+  const activeConversationTrails = new Set<string>();
   const refreshMessageCount = async (sessionId: string): Promise<number> => {
-    const count = (await workspace.operational.messages.listForSession(sessionId)).length;
+    const count = (await workspace.operational.messages.listForSession(sessionId)).filter(
+      (message) => message.metadata["presentation"] !== "reasoning",
+    ).length;
     messageCounts.set(sessionId, count);
+    if (count > 0) activeConversationTrails.add(sessionId);
     return count;
   };
   for (const session of await workspace.operational.sessions.list()) {
+    if (typeof session.metadata["deletedAt"] === "string") continue;
+    if (await workspace.operational.sessions.deleteIfEmpty(session.sessionId, new Date().toISOString()))
+      continue;
     const [turns] = await Promise.all([
       replayEligibleTurns(workspace, session.sessionId),
       refreshMessageCount(session.sessionId),
@@ -4044,6 +4052,9 @@ export async function createApplicationRuntimeComposition(
             status: session.status,
             provider: session.provider,
             model: session.model,
+            thinkingLevel:
+              ThinkingLevelSchema.safeParse(session.metadata["thinkingLevel"]).data ??
+              agentDefaults.thinkingLevel,
             runtime: session.runtime,
             capabilityVersions: Object.freeze({}),
             turns: Object.freeze(turns),
@@ -4055,6 +4066,7 @@ export async function createApplicationRuntimeComposition(
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
     });
+    activeConversationTrails.add(session.sessionId);
   }
   const persistTrail = async (trail: TrailState): Promise<TrailState> => {
     const timestamp = new Date().toISOString();
@@ -4074,7 +4086,10 @@ export async function createApplicationRuntimeComposition(
             runtime: trail.runtime,
             createdAt: times.createdAt,
             updatedAt: timestamp,
-            metadata: Object.freeze({ authority: "workspace-sqlite" }),
+            metadata: Object.freeze({
+              authority: "workspace-sqlite",
+              thinkingLevel: trail.thinkingLevel,
+            }),
           } as const)
           .finish(),
       ),
@@ -4098,6 +4113,12 @@ export async function createApplicationRuntimeComposition(
   const listTrailSummaries: NoesisRuntime["listTrailSummaries"] = () =>
     Object.freeze(
       [...trailStates.values()]
+        .filter(
+          (trail) =>
+            activeConversationTrails.has(trail.trailId) ||
+            trail.turns.length > 0 ||
+            (messageCounts.get(trail.trailId) ?? 0) > 0,
+        )
         .map((trail): TrailSummary => {
           const times = sessionTimes.get(trail.trailId);
           const latest = trail.turns.at(-1);
@@ -4126,19 +4147,32 @@ export async function createApplicationRuntimeComposition(
         .slice(0, SESSION_PICKER_LIMIT),
     );
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const startTrail: NoesisRuntime["startTrail"] = async (input) =>
-    await persistTrail(
+  const startTrail: NoesisRuntime["startTrail"] = async (input) => {
+    const provider = input.provider ?? agentDefaults.provider;
+    const model = input.model ?? agentDefaults.model;
+    options.resolveModelContext?.(provider, model);
+    return await persistTrail(
       Object.freeze({
         trailId: createId("trail"),
         title: input.title,
         status: "idle" as const,
-        provider: input.provider ?? agentDefaults.provider,
-        model: input.model ?? agentDefaults.model,
+        provider,
+        model,
+        thinkingLevel: input.thinkingLevel ?? agentDefaults.thinkingLevel,
         runtime: agent.name,
         capabilityVersions: Object.freeze({}),
         turns: Object.freeze([]),
       }),
     );
+  };
+  const setTrailThinkingLevel: NonNullable<NoesisTuiRuntime["setTrailThinkingLevel"]> = async (
+    trailId,
+    thinkingLevel,
+  ) => {
+    const trail = getTrail(trailId);
+    options.resolveModelContext?.(trail.provider, trail.model);
+    return await persistTrail(Object.freeze({ ...trail, thinkingLevel }));
+  };
   const resumeTrail: NoesisRuntime["resumeTrail"] = async (trailId) => {
     const trail = getTrail(trailId);
     if (trail.runtime !== agent.name)
@@ -4764,6 +4798,29 @@ export async function createApplicationRuntimeComposition(
                     );
                     return;
                   }
+                  if (event.type === "reasoning-message") {
+                    const boundary = event;
+                    const messageId = `${turnId}:reasoning:${String(boundary.timelineSequence)}`;
+                    const currentPersistence = workspace.operational.messages.put({
+                      messageId,
+                      sessionId: trailId,
+                      role: "system",
+                      content: boundary.text,
+                      sensitivity: "normal",
+                      createdAt: boundary.createdAt,
+                      metadata: Object.freeze({
+                        turnId,
+                        frozenTurnPlanId: plan.planId,
+                        presentation: "reasoning",
+                      }),
+                      timelineSequence: boundary.timelineSequence,
+                    });
+                    assistantPersistence = Promise.all([assistantPersistence, currentPersistence]).then(
+                      () => undefined,
+                    );
+                    runOptions?.onEvent?.(event);
+                    return;
+                  }
                   runOptions?.onEvent?.(event);
                 };
                 let agentOutcome:
@@ -4944,11 +5001,34 @@ export async function createApplicationRuntimeComposition(
   });
   const interact: NoesisRuntime["interact"] = async (trailId, command, interactionOptions) => {
     getTrail(trailId);
-    return await interactions.dispatch(trailId, command, interactionOptions);
+    const result = await interactions.dispatch(trailId, command, interactionOptions);
+    if (command.type === "submit" || command.type === "enqueue" || command.type === "reroute-pending")
+      activeConversationTrails.add(trailId);
+    return result;
   };
   const inspectInteraction: NoesisRuntime["inspectInteraction"] = async (trailId) => {
     getTrail(trailId);
     return await interactions.inspect(trailId);
+  };
+  const deleteTrail: NoesisRuntime["deleteTrail"] = async (trailId) => {
+    const trail = getTrail(trailId);
+    if (trail.status === "running") throw new Error("A running session cannot be deleted.");
+    const interaction = await interactions.inspect(trailId);
+    if (interaction.phase !== "idle" || interaction.pending.length > 0)
+      throw new Error("A session with active or queued work cannot be deleted.");
+    await workspace.operational.sessions.delete(trailId, new Date().toISOString());
+    trailStates.delete(trailId);
+    sessionTimes.delete(trailId);
+    messageCounts.delete(trailId);
+    activeConversationTrails.delete(trailId);
+  };
+  const discardTrailIfEmpty: NoesisRuntime["discardTrailIfEmpty"] = async (trailId) => {
+    const trail = trailStates.get(trailId);
+    if (!trail || trail.turns.length > 0 || (messageCounts.get(trailId) ?? 0) > 0) return false;
+    const interaction = await interactions.inspect(trailId);
+    if (interaction.phase !== "idle" || interaction.pending.length > 0) return false;
+    await deleteTrail(trailId);
+    return true;
   };
   const compact: NoesisRuntime["compact"] = async (trailId, focus) => {
     const trail = getTrail(trailId);
@@ -5493,7 +5573,16 @@ export async function createApplicationRuntimeComposition(
         controlPlane.stop(),
         codeExecution.shutdown(),
         options.mcp?.close() ?? Promise.resolve(),
-      ]).then(() => undefined);
+      ]).then(async () => {
+        for (const trailId of trailStates.keys()) {
+          if (await workspace.operational.sessions.deleteIfEmpty(trailId, new Date().toISOString())) {
+            trailStates.delete(trailId);
+            sessionTimes.delete(trailId);
+            messageCounts.delete(trailId);
+            activeConversationTrails.delete(trailId);
+          }
+        }
+      });
       let graceTimer: NodeJS.Timeout | undefined;
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const settlement = await Promise.race<
@@ -5576,6 +5665,8 @@ export async function createApplicationRuntimeComposition(
       getTrail,
       getTranscript,
       resumeTrail,
+      deleteTrail,
+      discardTrailIfEmpty,
       forkTrail,
       interact,
       inspectInteraction,
@@ -5583,6 +5674,7 @@ export async function createApplicationRuntimeComposition(
       listSkills,
       inspectSkill,
       listModelRoutes: () => options.listModelRoutes?.() ?? Object.freeze([]),
+      setTrailThinkingLevel,
       listPrograms,
       inspectProgram,
       listExecutions,

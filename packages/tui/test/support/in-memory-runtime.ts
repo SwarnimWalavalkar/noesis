@@ -70,6 +70,7 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
       status: "idle",
       provider: input.provider ?? "test-provider",
       model: input.model ?? "test-model",
+      thinkingLevel: input.thinkingLevel ?? "off",
       runtime: agent.name,
       capabilityVersions: Object.freeze({}),
       turns: Object.freeze([]),
@@ -113,6 +114,12 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
   const listTrailSummaries = (): readonly TrailSummary[] =>
     Object.freeze(
       [...trails.values()]
+        .filter(({ state }) => {
+          const interaction = interactions.get(state.trailId);
+          return (
+            state.turns.length > 0 || Boolean(interaction?.active) || Boolean(interaction?.pending.length)
+          );
+        })
         .map(({ state, createdAt, updatedAt }) =>
           Object.freeze(
             createConditionalObject({
@@ -149,12 +156,39 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     stored.updatedAt = timestamp();
     return stored.state;
   };
+  const deleteTrail: NoesisRuntime["deleteTrail"] = async (trailId) => {
+    const stored = getStored(trailId);
+    const interaction = interactions.get(trailId);
+    if (stored.state.status === "running" || interaction?.phase === "running")
+      throw new Error("A running session cannot be deleted.");
+    if (interaction?.pending.length) throw new Error("A session with queued work cannot be deleted.");
+    trails.delete(trailId);
+    interactions.delete(trailId);
+    turnIdsByTrail.delete(trailId);
+    actionsByTrail.delete(trailId);
+  };
+  const discardTrailIfEmpty: NoesisRuntime["discardTrailIfEmpty"] = async (trailId) => {
+    const stored = trails.get(trailId);
+    const interaction = interactions.get(trailId);
+    if (
+      !stored ||
+      stored.state.turns.length > 0 ||
+      stored.state.status === "running" ||
+      interaction?.phase === "running" ||
+      Boolean(interaction?.active) ||
+      Boolean(interaction?.pending.length)
+    )
+      return false;
+    await deleteTrail(trailId);
+    return true;
+  };
   const forkTrail: NoesisRuntime["forkTrail"] = async (trailId, title) => {
     const parent = getStored(trailId).state;
     const forked = await startTrail({
       title: title ?? `${parent.title} (fork)`,
       provider: parent.provider,
       model: parent.model,
+      thinkingLevel: parent.thinkingLevel,
     });
     const stored = getStored(forked.trailId);
     return replaceState(
@@ -194,7 +228,7 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
             trailId,
             provider: stored.state.provider,
             model: stored.state.model,
-            thinkingLevel: options.thinkingLevel ?? "off",
+            thinkingLevel: options.thinkingLevel ?? stored.state.thinkingLevel,
             systemPrompt: "",
             prompt: input,
             activeCapabilities: [],
@@ -563,6 +597,8 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     interact,
     inspectInteraction,
     resumeTrail,
+    deleteTrail,
+    discardTrailIfEmpty,
     forkTrail,
     runTurn,
     compact: async () => undefined,

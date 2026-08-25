@@ -649,9 +649,18 @@ export interface AgentAssistantMessageBoundary {
   readonly timelineSequence: number;
   readonly createdAt: string;
 }
+export interface AgentReasoningBoundary {
+  readonly text: string;
+  readonly timelineSequence: number;
+  readonly createdAt: string;
+}
 export type AgentRuntimeEvent =
   | {
       readonly type: "delta";
+      readonly text: string;
+    }
+  | {
+      readonly type: "reasoning-delta";
       readonly text: string;
     }
   | {
@@ -666,6 +675,9 @@ export type AgentRuntimeEvent =
   | ({
       readonly type: "assistant-message";
     } & AgentAssistantMessageBoundary)
+  | ({
+      readonly type: "reasoning-message";
+    } & AgentReasoningBoundary)
   | AgentActionEvent
   | {
       readonly type: "status";

@@ -191,6 +191,9 @@ def main() -> int:
     elif action == "picker-select-quit":
         exit_input = b"\r"
         ready_marker = b"resume a session"
+    elif action == "model-picker-select-quit":
+        exit_input = b"/model\r"
+        ready_marker = b"? help"
     elif action == "prompt-quit":
         exit_input = b"show the polished shell\r"
         ready_marker = b"? help"
@@ -265,7 +268,9 @@ def main() -> int:
     sent_exit = False
     next_write_at = None
     last_write_label = None
-    deadline = time.monotonic() + 5
+    # Full-suite concurrency can delay the controlled completion slightly while the animated
+    # status is repainting. Keep this below Vitest's seven-second per-case budget.
+    deadline = time.monotonic() + 6
     child_finished = False
     screen = VirtualScreen(columns, rows)
     try:
@@ -368,6 +373,26 @@ def main() -> int:
                     ):
                         os.write(master, b"/quit\n")
                         action = "picker-selected"
+                    elif (
+                        action == "model-picker-select-quit"
+                        and sent_exit
+                        and b"SELECT MODEL" in output
+                    ):
+                        os.write(master, b"\x1b[B\r")
+                        action = "model-picker-selected"
+                    elif (
+                        action == "model-picker-selected"
+                        and b"SELECT REASONING" in output
+                    ):
+                        os.write(master, b"\r")
+                        action = "model-reasoning-selected"
+                    elif (
+                        action == "model-reasoning-selected"
+                        and b"New empty session" in output
+                        and "● IDLE".encode() in output
+                    ):
+                        os.write(master, b"/quit\n")
+                        action = "model-picker-finished"
                     elif (
                         action
                         in (

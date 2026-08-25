@@ -1,12 +1,27 @@
 import { paginateInspectorText } from "./lifecycle-utils.ts";
+import type { AgentThinkingLevel } from "@noesis/agent-types";
 import type {
   NoesisTuiRuntime,
   TuiInteractionResult,
   TuiLearningActivitySummary,
   TuiLearningInspection,
+  TuiModelRoute,
   TuiWorkingAdjustmentState,
 } from "./runtime-port.ts";
 import type { NoesisTuiAction } from "./state.ts";
+import { resumableTrail } from "./session-picker.ts";
+
+export interface TuiRoutePickerIntent {
+  readonly kind: "model" | "provider" | "reasoning";
+  readonly currentProvider: string;
+  readonly currentModel: string;
+  readonly currentThinkingLevel: AgentThinkingLevel;
+}
+
+export interface TuiRoutePickerSelection {
+  readonly route: TuiModelRoute;
+  readonly thinkingLevel: AgentThinkingLevel;
+}
 
 export interface SlashCommandContext {
   readonly runtime: NoesisTuiRuntime;
@@ -19,22 +34,153 @@ export interface SlashCommandContext {
   readonly requestRender: () => void;
   readonly openMcpManager?: () => void;
   readonly openLearningAudit?: () => void;
+  readonly selectRoute?: (intent: TuiRoutePickerIntent) => Promise<TuiRoutePickerSelection | undefined>;
+  readonly ensureProviderAuthenticated?: (providerId: string, providerName: string) => Promise<boolean>;
+  readonly selectSession?: () => Promise<string | undefined>;
 }
 
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const HELP_LINES = [
-  "/model provider/model · /context · /capabilities",
+  "/provider · /model open route pickers · /reasoning opens its picker",
+  "/provider ID · /model ID · /reasoning LEVEL are quick inline changes",
+  "provider or model changes start an empty session; the current session is preserved",
+  "the prior transcript is not replayed in the new session",
+  "/context · /capabilities",
   "/skills · /programs · /runs · /learning",
   "/refine [REQUEST] deliberately improves a lasting Noesis behavior",
   "/mcp manages servers, authentication, and discovered capabilities",
   "/skill NAME inspects · /skill:NAME [instructions] invokes command-name collisions",
   "/program MODE NAME · /run ID",
-  "/fork · /compact [FOCUS] · /steer [MESSAGE] · /queue resume",
+  "/resume · /fork · /compact [FOCUS] · /steer [MESSAGE] · /queue resume",
   "enter queues behind active turns and commands · alt+↑ edits newest queued · esc interrupts",
   "shift+enter newline · ctrl+g external editor",
   "ctrl+o inspect runs · space expand · enter open the run inspector",
   "/quit · learning, experiments, activation, and revert run ambiently",
 ] as const;
+
+const THINKING_LEVELS = Object.freeze([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const satisfies readonly AgentThinkingLevel[]);
+
+function isThinkingLevel(value: string): value is AgentThinkingLevel {
+  return THINKING_LEVELS.some((level) => level === value);
+}
+
+async function refreshedModelRoutes(runtime: NoesisTuiRuntime): Promise<readonly TuiModelRoute[]> {
+  if (!runtime.refreshModelRoutes) return runtime.listModelRoutes?.() ?? [];
+  try {
+    return await runtime.refreshModelRoutes();
+  } catch {
+    return runtime.listModelRoutes?.() ?? [];
+  }
+}
+
+const routeChangeNotice = (provider: string, model: string, thinkingLevel: AgentThinkingLevel): string =>
+  [
+    `Route changed to ${provider}/${model} · reasoning ${thinkingLevel} in a fresh session.`,
+    "The previous session is preserved and can be resumed from the session picker.",
+    "No prior transcript was replayed, preserving prompt-cache isolation.",
+  ].join(" ");
+
+const routeThinkingLevel = (
+  route: Pick<TuiModelRoute, "thinkingLevels">,
+  current: AgentThinkingLevel,
+): AgentThinkingLevel =>
+  route.thinkingLevels.includes(current) ? current : (route.thinkingLevels.at(-1) ?? "off");
+
+async function selectFreshRoute(
+  current: ReturnType<NoesisTuiRuntime["getTrail"]>,
+  route: Pick<TuiModelRoute, "provider" | "providerName" | "model" | "thinkingLevels">,
+  context: SlashCommandContext,
+  requestedThinkingLevel?: AgentThinkingLevel,
+): Promise<void> {
+  if (current.provider === route.provider && current.model === route.model) {
+    context.dispatch({
+      type: "notification-shown",
+      text: `Already using ${route.provider}/${route.model} · session unchanged`,
+      tone: "info",
+    });
+    context.requestRender();
+    return;
+  }
+  if (
+    context.ensureProviderAuthenticated &&
+    !(await context.ensureProviderAuthenticated(route.provider, route.providerName ?? route.provider))
+  ) {
+    context.dispatch({
+      type: "notification-shown",
+      text: "Authentication cancelled · session unchanged",
+      tone: "info",
+    });
+    context.requestRender();
+    return;
+  }
+  const thinkingLevel = requestedThinkingLevel ?? routeThinkingLevel(route, current.thinkingLevel);
+  const trail = await context.runtime.startTrail({
+    title: `${route.provider}/${route.model}`,
+    provider: route.provider,
+    model: route.model,
+    thinkingLevel,
+  });
+  await context.prepareTrailSelection?.(trail.trailId);
+  context.dispatch({ type: "trail-selected", trail });
+  context.dispatch({
+    type: "system-message",
+    text: routeChangeNotice(route.provider, route.model, thinkingLevel),
+  });
+  context.dispatch({
+    type: "notification-shown",
+    text: "New empty session · previous preserved · history not replayed",
+    tone: "info",
+  });
+  context.requestRender();
+}
+
+async function setCurrentReasoningLevel(
+  current: ReturnType<NoesisTuiRuntime["getTrail"]>,
+  level: AgentThinkingLevel,
+  context: SlashCommandContext,
+): Promise<void> {
+  if (current.thinkingLevel === level) {
+    context.dispatch({
+      type: "notification-shown",
+      text: `Already using reasoning ${level} · session unchanged`,
+      tone: "info",
+    });
+    context.requestRender();
+    return;
+  }
+  if (!context.runtime.setTrailThinkingLevel) {
+    context.publishInspector("Reasoning changes are unavailable in this runtime.");
+    return;
+  }
+  await context.runtime.setTrailThinkingLevel(current.trailId, level);
+  context.dispatch({ type: "reasoning-level-changed", reasoningLevel: level });
+  context.dispatch({
+    type: "notification-shown",
+    text: `Reasoning · ${level} · current session`,
+    tone: "success",
+  });
+  context.requestRender();
+}
+
+async function applyRoutePickerSelection(
+  current: ReturnType<NoesisTuiRuntime["getTrail"]>,
+  selection: TuiRoutePickerSelection,
+  context: SlashCommandContext,
+): Promise<void> {
+  if (current.provider === selection.route.provider && current.model === selection.route.model) {
+    await setCurrentReasoningLevel(current, selection.thinkingLevel, context);
+    return;
+  }
+  await selectFreshRoute(current, selection.route, context, selection.thinkingLevel);
+}
 
 function workingAdjustmentLines(adjustment: TuiWorkingAdjustmentState, heading: string): readonly string[] {
   return [
@@ -103,8 +249,14 @@ export function isExclusiveSlashCommand(text: string): boolean {
   return (
     command === "/compact" ||
     command.startsWith("/compact ") ||
+    command === "/resume" ||
     command === "/fork" ||
-    command.startsWith("/model ")
+    command === "/model" ||
+    command.startsWith("/model ") ||
+    command === "/provider" ||
+    command.startsWith("/provider ") ||
+    command === "/reasoning" ||
+    command.startsWith("/reasoning ")
   );
 }
 
@@ -112,7 +264,13 @@ export function exclusiveSlashCommandScope(
   text: string,
 ): "current-session" | "resulting-session" | undefined {
   const command = text.trim();
-  if (command === "/compact" || command.startsWith("/compact ")) return "current-session";
+  if (
+    command === "/compact" ||
+    command.startsWith("/compact ") ||
+    command === "/reasoning" ||
+    command.startsWith("/reasoning ")
+  )
+    return "current-session";
   return isExclusiveSlashCommand(command) ? "resulting-session" : undefined;
 }
 
@@ -398,24 +556,159 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (command.startsWith("/model ")) {
-    const selection = command.slice("/model ".length).trim();
-    const separator = selection.indexOf("/");
-    if (separator <= 0 || separator === selection.length - 1) {
-      dispatch({ type: "failed", error: "Use /model provider/model" });
-    } else {
-      const trail = await runtime.startTrail({
-        title: `Model ${selection}`,
-        provider: selection.slice(0, separator),
-        model: selection.slice(separator + 1),
-      });
-      await context.prepareTrailSelection?.(trail.trailId);
-      dispatch({
-        type: "trail-selected",
-        trail,
-      });
+  if (command === "/resume") {
+    if (!context.selectSession) {
+      publishInspector("Session selection is unavailable in this runtime.");
+      return true;
     }
+    const selectedTrailId = await context.selectSession();
+    if (!selectedTrailId) return true;
+    const trail = await resumableTrail(runtime, selectedTrailId);
+    await context.prepareTrailSelection?.(trail.trailId);
+    dispatch({ type: "trail-selected", trail });
     requestRender();
+    return true;
+  }
+
+  if (command === "/provider") {
+    const routes = runtime.listModelRoutes?.() ?? [];
+    const current = runtime.getTrail(trailId);
+    if (context.selectRoute && routes.length > 0) {
+      const selected = await context.selectRoute({
+        kind: "provider",
+        currentProvider: current.provider,
+        currentModel: current.model,
+        currentThinkingLevel: current.thinkingLevel,
+      });
+      if (selected) await applyRoutePickerSelection(current, selected, context);
+      return true;
+    }
+    const providers = [...new Set(routes.map((route) => route.provider))];
+    publishInspector(
+      providers.length === 0
+        ? `Provider · ${current.provider}\nModel catalog is unavailable in this runtime.`
+        : [
+            `Provider · ${current.provider}`,
+            ...providers.map((provider) => {
+              const models = routes.filter((route) => route.provider === provider);
+              const defaultModel = models.find((route) => route.default) ?? models[0];
+              return `• ${provider}${provider === current.provider ? " · current" : ""} · ${String(models.length)} models${defaultModel ? ` · default ${defaultModel.model}` : ""}`;
+            }),
+            "",
+            "Changing provider starts a new empty session. This one is preserved; its transcript is not replayed.",
+          ].join("\n"),
+    );
+    return true;
+  }
+
+  if (command.startsWith("/provider ")) {
+    const provider = command.slice("/provider ".length).trim();
+    const routes = (await refreshedModelRoutes(runtime)).filter((route) => route.provider === provider);
+    const selected = routes.find((route) => route.default) ?? routes[0];
+    if (!selected) {
+      publishInspector(`Unknown provider: ${provider}. Use /provider to list available providers.`);
+      return true;
+    }
+    await selectFreshRoute(runtime.getTrail(trailId), selected, context);
+    return true;
+  }
+
+  if (command === "/model") {
+    const current = runtime.getTrail(trailId);
+    const routes = (runtime.listModelRoutes?.() ?? []).filter((route) => route.provider === current.provider);
+    if (context.selectRoute && routes.length > 0) {
+      const selected = await context.selectRoute({
+        kind: "model",
+        currentProvider: current.provider,
+        currentModel: current.model,
+        currentThinkingLevel: current.thinkingLevel,
+      });
+      if (selected) await applyRoutePickerSelection(current, selected, context);
+      return true;
+    }
+    publishInspector(
+      routes.length === 0
+        ? `Model · ${current.provider}/${current.model}\nModel catalog is unavailable for ${current.provider}.`
+        : [
+            `Models from ${current.provider} · current ${current.model}`,
+            ...routes.map(
+              (route) =>
+                `• ${route.model}${route.model === current.model ? " · current" : ""}${route.default ? " · default" : ""}\n  ${route.name} · reasoning ${route.thinkingLevels.join(", ") || "off"}`,
+            ),
+            "",
+            "Changing model starts a new empty session. This one is preserved; its transcript is not replayed.",
+          ].join("\n"),
+    );
+    return true;
+  }
+
+  if (command.startsWith("/model ")) {
+    const model = command.slice("/model ".length).trim();
+    const current = runtime.getTrail(trailId);
+    const knownRoutes = (await refreshedModelRoutes(runtime)).filter(
+      (route) => route.provider === current.provider,
+    );
+    if (
+      knownRoutes.length > 0 &&
+      !knownRoutes.some((route) => route.model === model) &&
+      !knownRoutes.some((route) => route.allowsCustomModelIds)
+    ) {
+      publishInspector(`Unknown ${current.provider} model: ${model}. Use /model to list available models.`);
+      return true;
+    }
+    const route = knownRoutes.find((candidate) => candidate.model === model) ?? {
+      provider: current.provider,
+      model,
+      thinkingLevels: Object.freeze([current.thinkingLevel]),
+    };
+    await selectFreshRoute(current, route, context);
+    return true;
+  }
+
+  if (command === "/reasoning") {
+    const current = runtime.getTrail(trailId);
+    const route = runtime
+      .listModelRoutes?.()
+      .find((candidate) => candidate.provider === current.provider && candidate.model === current.model);
+    if (context.selectRoute && route) {
+      const selected = await context.selectRoute({
+        kind: "reasoning",
+        currentProvider: current.provider,
+        currentModel: current.model,
+        currentThinkingLevel: current.thinkingLevel,
+      });
+      if (selected) await applyRoutePickerSelection(current, selected, context);
+      return true;
+    }
+    const levels = route?.thinkingLevels ?? THINKING_LEVELS;
+    publishInspector(
+      [
+        `Reasoning · ${current.thinkingLevel}`,
+        ...levels.map((level) => `• ${level}${level === current.thinkingLevel ? " · current" : ""}`),
+        "",
+        "Reasoning changes in this session; provider and model stay fixed.",
+      ].join("\n"),
+    );
+    return true;
+  }
+
+  if (command.startsWith("/reasoning ")) {
+    const level = command.slice("/reasoning ".length).trim();
+    if (!isThinkingLevel(level)) {
+      publishInspector(`Unknown reasoning level: ${level}. Use /reasoning to list available levels.`);
+      return true;
+    }
+    const current = runtime.getTrail(trailId);
+    const route = (await refreshedModelRoutes(runtime)).find(
+      (candidate) => candidate.provider === current.provider && candidate.model === current.model,
+    );
+    if (route && !route.thinkingLevels.includes(level)) {
+      publishInspector(
+        `${current.provider}/${current.model} does not support reasoning level ${level}. Supported: ${route.thinkingLevels.join(", ") || "off"}.`,
+      );
+      return true;
+    }
+    await setCurrentReasoningLevel(current, level, context);
     return true;
   }
 

@@ -10,8 +10,8 @@ Ship the parts of the August improvement list whose product contract and archite
 
 ### Provider completion
 
-- Register OpenCode Zen through Pi's existing provider system.
-- Surface Claude and OpenCode Zen in first-launch onboarding.
+- Register OpenCode Zen and OpenCode Go through Pi's existing provider system.
+- Surface Claude, OpenCode Zen, and OpenCode Go in first-launch onboarding.
 - Use `claude-opus-4-8` and `kimi-k2.6` as their recommended defaults.
 - Include all supported providers in `auth status`.
 - Give actionable missing-authentication errors for foreground and protected role calls.

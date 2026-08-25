@@ -105,6 +105,45 @@ describe("Noesis TUI reducer", () => {
     });
   });
 
+  test("renders streamed reasoning as a visually distinct transcript block", () => {
+    let state = reduceTui(initialTuiState("pi"), {
+      type: "prompt-submitted",
+      text: "Check the evidence",
+    });
+    state = reduceTui(state, { type: "reasoning-delta", text: "Inspecting sources" });
+    state = reduceTui(state, { type: "stream-delta", text: "The evidence is consistent." });
+    state = reduceTui(state, {
+      type: "reasoning-reconciled",
+      text: "Inspecting sources carefully.",
+    });
+
+    expect(state.timeline).toMatchObject([
+      { kind: "message", role: "user", text: "Check the evidence" },
+      { kind: "reasoning", text: "Inspecting sources carefully." },
+      { kind: "message", role: "assistant", text: "The evidence is consistent." },
+    ]);
+    const rendered = renderNoesisState(state, 100, 30).join("\n");
+    expect(rendered).toContain("∴ THINKING");
+    expect(rendered).toContain("┊ Inspecting sources carefully.");
+    expect(rendered).toContain("NOESIS");
+  });
+
+  test("animates working status without changing its width and stops when idle", () => {
+    const thinking = reduceTui(initialTuiState("pi"), {
+      type: "execution-changed",
+      execution: "thinking",
+    });
+    const advanced = reduceTui(thinking, { type: "animation-tick" });
+    const first = createStatusFields(thinking, createTuiLayout(120, 30))[0] ?? "";
+    const second = createStatusFields(advanced, createTuiLayout(120, 30))[0] ?? "";
+    expect(first).not.toBe(second);
+    expect(visibleWidth(first)).toBe(visibleWidth(second));
+
+    const idle = reduceTui(advanced, { type: "execution-changed", execution: "idle" });
+    expect(reduceTui(idle, { type: "animation-tick" })).toBe(idle);
+    expect(idle.animationFrame).toBe(0);
+  });
+
   test("builds deterministic picker rows in most-recently-active order", () => {
     const items = createSessionPickerItems([
       {
@@ -167,6 +206,7 @@ describe("Noesis TUI reducer", () => {
         status: "idle",
         provider: "fake",
         model: "model-1",
+        thinkingLevel: "high",
         runtime: "fake",
         turns: [],
         capabilityVersions: {},
@@ -570,10 +610,11 @@ describe("Noesis TUI reducer", () => {
       isError: false,
     });
 
-    expect(state.timeline.map((entry) => (entry.kind === "action" ? entry.actionId : entry.role))).toEqual([
-      "execute-1",
-      "execute-1:call:0",
-    ]);
+    expect(
+      state.timeline.map((entry) =>
+        entry.kind === "action" ? entry.actionId : entry.kind === "message" ? entry.role : "reasoning",
+      ),
+    ).toEqual(["execute-1", "execute-1:call:0"]);
     expect(state).toMatchObject({ execution: "tool", activeTool: "execute" });
 
     state = reduceTui(state, {
@@ -663,6 +704,7 @@ describe("Noesis TUI reducer", () => {
         status: "idle",
         provider: "openai-codex",
         model: "gpt-5.6-sol",
+        thinkingLevel: "high",
         runtime: "pi",
         turns: [
           { input: "first", output: "one" },
@@ -686,6 +728,7 @@ describe("Noesis TUI reducer", () => {
         status: "idle",
         provider: "openai-codex",
         model: "gpt-5.6-sol",
+        thinkingLevel: "high",
         runtime: "pi",
         turns: [{ input: "legacy", output: "fallback" }],
         capabilityVersions: {},
@@ -794,6 +837,7 @@ describe("Noesis TUI reducer", () => {
             status: "idle",
             provider: "fake",
             model: "model",
+            thinkingLevel: "high",
             runtime: "fake",
             turns: [{ input: "current", output: "answer" }],
             capabilityVersions: {},

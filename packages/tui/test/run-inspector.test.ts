@@ -397,6 +397,7 @@ describe("run inspector panel", () => {
         status: "idle",
         provider: "openai-codex",
         model: "gpt-5.6-sol",
+        thinkingLevel: "high",
         runtime: "pi",
         turns: [],
         capabilityVersions: {},

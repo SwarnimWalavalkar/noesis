@@ -69,7 +69,17 @@ export function formatContextUsage(usage: TuiContextUsage | undefined): {
 
 export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): readonly string[] {
   const context = formatContextUsage(state.contextUsage);
-  const execution = `● ${state.execution.toUpperCase().padEnd(10)}`;
+  const workingFrames = ["◐", "◓", "◑", "◒"] as const;
+  const animated =
+    state.execution === "thinking" ||
+    state.execution === "streaming" ||
+    state.execution === "tool" ||
+    state.execution === "compacting" ||
+    state.execution === "aborting";
+  const glyph = animated
+    ? (workingFrames[state.animationFrame % workingFrames.length] ?? workingFrames[0])
+    : "●";
+  const execution = `${glyph} ${state.execution.toUpperCase().padEnd(10)}`;
   const model = `${state.provider}/${state.model}`;
   const turns = `${String(state.turnCount).padStart(3)} ${state.turnCount === 1 ? "turn" : "turns"}`;
   const capabilities = Object.keys(state.capabilityVersions).length;

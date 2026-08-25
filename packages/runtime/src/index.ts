@@ -40,6 +40,14 @@ export interface RuntimeTranscriptMessage {
   readonly createdAt: string;
 }
 
+export interface RuntimeTranscriptReasoning {
+  readonly kind: "reasoning";
+  readonly reasoningId: string;
+  readonly turnId?: string;
+  readonly text: string;
+  readonly createdAt: string;
+}
+
 export interface RuntimeTranscriptAction {
   readonly kind: "action";
   readonly actionId: string;
@@ -57,7 +65,10 @@ export interface RuntimeTranscriptAction {
   readonly completedAt?: string;
 }
 
-export type RuntimeTranscriptEntry = RuntimeTranscriptMessage | RuntimeTranscriptAction;
+export type RuntimeTranscriptEntry =
+  | RuntimeTranscriptMessage
+  | RuntimeTranscriptReasoning
+  | RuntimeTranscriptAction;
 
 export interface TrailState {
   readonly trailId: string;
@@ -66,6 +77,7 @@ export interface TrailState {
   readonly status: TrailStatus;
   readonly provider: string;
   readonly model: string;
+  readonly thinkingLevel: AgentThinkingLevel;
   readonly runtime: string;
   readonly contextSnapshotId?: string;
   readonly context?: ContextSnapshot;
@@ -105,6 +117,7 @@ export interface StartTrailInput {
   readonly title: string;
   readonly provider?: string;
   readonly model?: string;
+  readonly thinkingLevel?: AgentThinkingLevel;
 }
 
 export interface RunTurnOptions {
@@ -142,6 +155,10 @@ export interface NoesisRuntime {
   /** Loads the SQLite-authoritative conversation and action projection for this session. */
   readonly getTranscript: (trailId: string) => Promise<readonly RuntimeTranscriptEntry[]>;
   readonly resumeTrail: (trailId: string) => Promise<TrailState>;
+  /** Removes an idle session from resumable/searchable history while preserving referenced audit evidence. */
+  readonly deleteTrail: (trailId: string) => Promise<void>;
+  /** Removes the session only when it has no visible conversation or recoverable queued work. */
+  readonly discardTrailIfEmpty: (trailId: string) => Promise<boolean>;
   readonly forkTrail: (trailId: string, title?: string) => Promise<TrailState>;
   readonly interact: (
     trailId: string,
