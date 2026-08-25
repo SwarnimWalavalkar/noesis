@@ -311,7 +311,14 @@ export function createPiSubAgentRunner(cwd: string, models: Models): PiSubAgentR
             reportTelemetry();
             const lease = activeModelCallLease;
             activeModelCallLease = undefined;
-            await lease?.complete();
+            const failureReason =
+              event.message.stopReason === "aborted" || controller.signal.aborted
+                ? "Subagent was cancelled"
+                : event.message.stopReason === "error"
+                  ? event.message.errorMessage?.trim() || "Subagent provider request failed"
+                  : undefined;
+            if (failureReason) await lease?.fail(failureReason);
+            else await lease?.complete();
           }
         });
         const requestHarnessAbort = (): Promise<void> => {

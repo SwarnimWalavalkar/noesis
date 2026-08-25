@@ -939,7 +939,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     name: "shell.run",
     label: "Run shell command",
     description:
-      "Run a shell command locally with bounded tail output, optional timeout, and cancellation. A truncated preview saves retained output to fullOutputPath for inspection with ordinary file or Unix tools; fullOutputComplete reports whether it is complete.",
+      "Run a shell command locally with bounded tail output, optional timeout, and cancellation. truncated reports preview completeness. When fullOutputPath is present, fullOutputComplete reports whether that retained artifact is complete.",
     identityMaterial: identity("shell.run", {
       shellPath,
       maxShellOutputArtifactBytes,
@@ -962,6 +962,19 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
           .describe("Decoded character length observed from the process."),
         truncated: z.literal(false),
         fullOutputComplete: z.literal(true),
+      }),
+      z.strictObject({
+        exitCode: z.number().int().nullable(),
+        signal: z.string().nullable(),
+        output: textBound,
+        fullOutputLength: z
+          .number()
+          .int()
+          .nonnegative()
+          .describe("Decoded character length observed from the process."),
+        truncated: z.literal(false),
+        fullOutputPath: z.string().describe("Absolute path to the retained combined process output."),
+        fullOutputComplete: z.literal(false),
       }),
       z.strictObject({
         exitCode: z.number().int().nullable(),
@@ -997,7 +1010,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
           fullOutputPath: temporaryOutputPath,
           maxFullOutputBytes: maxShellOutputArtifactBytes,
         });
-        if (!result.truncated)
+        if (!result.truncated && result.fullOutputComplete)
           return {
             exitCode: result.exitCode,
             signal: result.signal,
@@ -1015,7 +1028,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
           signal: result.signal,
           output: result.output,
           fullOutputLength: result.fullOutputLength,
-          truncated: true,
+          truncated: result.truncated,
           fullOutputPath: artifact.path,
           fullOutputComplete: result.fullOutputComplete,
         };

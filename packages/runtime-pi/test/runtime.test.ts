@@ -307,6 +307,68 @@ describe("agent runtime factories", () => {
     expect(settledModelCalls).toEqual(authorizedModelCalls);
   });
 
+  test.each([
+    Object.freeze({
+      label: "error",
+      response: fauxAssistantMessage("Provider request failed.", {
+        stopReason: "error",
+        errorMessage: "controlled provider unavailable",
+      }),
+      expectedReason: "controlled provider unavailable",
+    }),
+    Object.freeze({
+      label: "aborted",
+      response: fauxAssistantMessage("Provider request aborted.", { stopReason: "aborted" }),
+      expectedReason: "Subagent was cancelled",
+    }),
+  ])("fails the durable model-call lease when the provider round ends as $label", async (fixture) => {
+    const controlled = createControlledPiModels({
+      respond: () => fixture.response,
+    });
+    const plan: FrozenSubAgentRunPlan = Object.freeze({
+      runId: `subagent-provider-${fixture.label}`,
+      systemPrompt: "Return the provider outcome.",
+      prompt: `Exercise a controlled provider ${fixture.label}.`,
+      tools: Object.freeze([]),
+      thinkingLevel: "off",
+      route: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+      frozenTools: Object.freeze([]),
+      authority: Object.freeze({
+        parentExecutionId: "execution-parent",
+        parentToolCallId: "tool-call-parent",
+      }),
+      budget: Object.freeze({ requestTokenBudget: 2_000 }),
+    });
+    const prepared: PreparedPiCodeExecution = Object.freeze({
+      catalog: emptyCatalog(`catalog-subagent-provider-${fixture.label}`),
+      execute: async () => Object.freeze({ executionId: "unused", value: null, calls: 0, durationMs: 0 }),
+      close: async () => undefined,
+    });
+    const completed: number[] = [];
+    const failed: { readonly modelCall: number; readonly reason: string }[] = [];
+
+    await expect(
+      createPiSubAgentRunner(process.cwd(), controlled.models).run({
+        plan,
+        prepared,
+        turnId: `turn-subagent-provider-${fixture.label}`,
+        signal: new AbortController().signal,
+        authorizeModelCall: async (modelCall) =>
+          Object.freeze({
+            complete: async () => {
+              completed.push(modelCall);
+            },
+            fail: async (reason: string) => {
+              failed.push(Object.freeze({ modelCall, reason }));
+            },
+          }),
+        emit: () => undefined,
+      }),
+    ).rejects.toThrow(fixture.expectedReason);
+    expect(completed).toEqual([]);
+    expect(failed).toEqual([{ modelCall: 1, reason: fixture.expectedReason }]);
+  });
+
   test("assigns injective catalog aliases without shadowing core tools", () => {
     const catalog: PiFrozenToolCatalog = Object.freeze({
       catalogId: "catalog-aliases",

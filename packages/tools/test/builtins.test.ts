@@ -438,6 +438,33 @@ describe("local work tools", () => {
     const saved = await readFile(result["fullOutputPath"]);
     expect(saved.byteLength).toBe(artifactBytes);
   });
+  it("reports an incomplete retained artifact even when the in-memory preview is complete", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shell-capped-small-output-"));
+    const fullOutputLength = 1000;
+    const artifactBytes = 500;
+    const script = `process.stdout.write("x".repeat(${String(fullOutputLength)}))`;
+    const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+    const result = await tool(toolsAt(cwd, undefined, undefined, artifactBytes), "shell.run").execute(
+      { command, timeoutMs: 2000 },
+      context(),
+    );
+    expect(result).toMatchObject({
+      exitCode: 0,
+      output: "x".repeat(fullOutputLength),
+      fullOutputLength,
+      truncated: false,
+      fullOutputPath: expect.any(String),
+      fullOutputComplete: false,
+    });
+    if (
+      typeof result !== "object" ||
+      result === null ||
+      !("fullOutputPath" in result) ||
+      typeof result["fullOutputPath"] !== "string"
+    )
+      throw new Error("shell.run did not return its incomplete retained output path");
+    expect((await readFile(result["fullOutputPath"])).byteLength).toBe(artifactBytes);
+  });
   it("accepts explicit shell timeouts longer than ten minutes", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shell-long-timeout-"));
     const result = await tool(toolsAt(cwd), "shell.run").execute(
