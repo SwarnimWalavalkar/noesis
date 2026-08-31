@@ -399,32 +399,41 @@ export function createDurableAuthorityBoundary(state: DurableAuthorityStatePort)
     });
   };
 
+  const runWithPermission = async <T extends JsonValue>(
+    principal: Extract<Principal, "foreground" | "subagent">,
+    request: Omit<EffectRequest<T>, "principal">,
+    permission: PermissionManifest,
+  ): Promise<EffectDecision<T>> => {
+    if (!permits(permission, request.effect, request.resource))
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      return Object.freeze({
+        ok: false,
+        code: "denied" as const,
+        reason: `Frozen ${principal === "foreground" ? "turn" : "subagent"} permission does not allow ${request.effect} on ${request.resource}`,
+      });
+    const attributedRequest = Object.freeze({ ...request, principal });
+    return await runWithFreshGrant(attributedRequest, {
+      schemaVersion: 1,
+      grantId: createId("grant"),
+      principal,
+      effects: [request.effect],
+      resourcePrefixes: [request.resource],
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      maxUses: 1,
+      maxCost: request.estimatedCost,
+    });
+  };
+
   return Object.freeze({
     receiptVerifier: verifier,
     runForeground: async <T extends JsonValue>(
       request: Omit<EffectRequest<T>, "principal">,
       permission: PermissionManifest,
-    ): Promise<EffectDecision<T>> => {
-      if (!permits(permission, request.effect, request.resource))
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        return Object.freeze({
-          ok: false,
-          code: "denied" as const,
-          reason: `Frozen turn permission does not allow ${request.effect} on ${request.resource}`,
-        });
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      const foregroundRequest = Object.freeze({ ...request, principal: "foreground" as const });
-      return await runWithFreshGrant(foregroundRequest, {
-        schemaVersion: 1,
-        grantId: createId("grant"),
-        principal: "foreground",
-        effects: [request.effect],
-        resourcePrefixes: [request.resource],
-        expiresAt: new Date(Date.now() + 60_000).toISOString(),
-        maxUses: 1,
-        maxCost: request.estimatedCost,
-      });
-    },
+    ): Promise<EffectDecision<T>> => await runWithPermission("foreground", request, permission),
+    runSubAgent: async <T extends JsonValue>(
+      request: Omit<EffectRequest<T>, "principal">,
+      permission: PermissionManifest,
+    ): Promise<EffectDecision<T>> => await runWithPermission("subagent", request, permission),
     promote,
     rollback,
     schedule,

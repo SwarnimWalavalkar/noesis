@@ -4,10 +4,15 @@ This directory contains implementation plans and design records. Each file prese
 
 For current behavior, start with [the product documentation](../docs/README.md), [the engineering invariants](../AGENTS.md), and the code.
 
+## Active implementation plans
+
+No active implementation plans.
+
 ## Shipped implementation records
 
 The systems described by these plans have shipped:
 
+- [Process-scoped subagents](noesis-process-scoped-subagents.html)
 - [Capability loop](noesis-learning-architecture-simplification.html)
 - [MCP integration](noesis-mcp-integration-design.html)
 - [Durable session compaction](noesis-session-compaction-design.html)

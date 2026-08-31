@@ -116,17 +116,19 @@ Codemode exposes a lazy context view and one composable agent API:
 
 ```js
 const recent = context.slice(-20000);
-const answer = await agents.run({
+const child = await agents.spawn({
+  name: "decision-reviewer",
   prompt: ["Find the unresolved decisions.", recent],
 });
-return answer;
+// Continue useful foreground work here. Join only when the result is needed.
+return await agents.wait({ taskId: child.taskId });
 ```
 
 `context` is an immutable, lazy view of the complete session before the current turn. It contains the visible messages and recorded tool, code, model, and workflow activity. Use `context.length`, `context.slice(start, end)`, or `await context.text()`.
 
-`agents.run({ systemPrompt?, prompt, tools?, thinkingLevel? })` runs one cancellable subagent. With no tools it is an isolated model query. `prompt` accepts text, a context slice, or an array of either; `tools` accepts canonical names from the frozen Tool Catalog. The default subagent route comes from `agents` in `config.json`, with omitted fields inheriting the foreground `agent` route. The parent may choose tools, prompt, and thinking level, but not the provider or model. Productive runs have no independent provider-round, tool-call, or wall-clock ceiling.
+`agents.spawn({ name?, systemPrompt?, prompt, tools?, thinkingLevel? })` durably admits a retained process-scoped agent and immediately returns stable `agentId` and `taskId` handles. With no Code Mode tools it can act as an isolated model collaborator. `prompt` accepts text, a context slice, or an array of either; `tools` accepts canonical names from the frozen Tool Catalog. The default subagent route comes from `agents` in `config.json`, with omitted fields inheriting the foreground `agent` route. The parent may choose tools, prompt, and thinking level, but not the provider or model. Productive tasks have no independent provider-round, tool-call, or wall-clock ceiling.
 
-Subagents use the same Broker, authority, cancellation, and durable recording path as other codemode tools. Saved programs may be selected as tools, but an actual descendant `agents.run` is rejected, including indirect re-entry through Script, Workflow, or Capability program runners. A bounded `SUBAGENTS` surface stays fixed above the composer while agents are running, including across transcript navigation. Settled agents do not leave stale footer state behind. In `Ctrl+O`, selecting an `execute` run or one of its subagents restores that run's settled agents as navigable rows; use the arrow keys to select a subagent, press Space for its bounded prompt/result and child-call summaries, or Enter for the complete run inspector. The main transcript keeps one compact `subagent` row per run but suppresses its child tool calls.
+`agents.send`, `list`, `inspect`, `wait`, `cancel`, and `close` manage collaboration without tying a child's lifetime to one foreground turn or session. Subagents use the same Broker, authority, and durable recording paths as other Code Mode tools; recursive spawning is available only when explicitly granted. A bounded process-wide `SUBAGENTS` surface stays fixed above the composer while agents are active, including after switching sessions. Idle and completed agents collapse by default. In `Ctrl+O`, select an agent and press Enter to inspect its frozen prompt, reasoning, assistant messages, model rounds, mailbox messages, and complete nested tool tree. Child internals never interleave into the main transcript.
 
 Saved workflows keep the context document and model route from the run that started them, including after resume.
 

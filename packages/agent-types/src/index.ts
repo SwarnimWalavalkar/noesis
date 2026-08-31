@@ -73,6 +73,272 @@ export interface AgentRoleRunner {
   readonly run: (request: AgentRunRequest) => Promise<AgentRunResult>;
 }
 export type AgentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+export type SubAgentStatus = "starting" | "running" | "idle" | "suspended" | "closed";
+export type SubAgentTaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+export type AgentMessageStatus = "accepted" | "claimed" | "delivered" | "failed";
+
+export type AgentAddress =
+  | {
+      readonly kind: "foreground";
+      /** Foreground session identity. */
+      readonly id: string;
+    }
+  | {
+      readonly kind: "subagent";
+      readonly id: string;
+    };
+
+export interface SubAgentContextViewReference {
+  readonly __noesisContext: {
+    readonly documentId: string;
+    readonly start: number;
+    readonly end: number;
+  };
+}
+
+export type SubAgentPromptPart = string | SubAgentContextViewReference;
+
+export interface SubAgentSpawnIntent {
+  readonly name?: string;
+  readonly systemPrompt?: string;
+  readonly prompt: SubAgentPromptPart | readonly SubAgentPromptPart[];
+  /** Canonical Broker operations available through the child's execute tool. */
+  readonly tools?: readonly string[];
+  readonly thinkingLevel?: AgentThinkingLevel;
+}
+
+export interface SubAgentHandle {
+  readonly agentId: string;
+  readonly taskId: string;
+  readonly name?: string;
+  readonly status: "accepted";
+}
+
+export interface AgentMessageReceipt {
+  readonly messageId: string;
+  readonly status: "accepted";
+  readonly taskId?: string;
+}
+
+export interface FrozenSubAgentToolReference {
+  readonly name: string;
+  readonly label: string;
+  readonly description: string;
+  readonly revisionId: string;
+  readonly inputSchema: JsonValue;
+  readonly outputSchema: JsonValue;
+}
+
+/** Immutable actor-level contract. Later tasks inherit this exact route, tools, and authority ceiling. */
+export interface FrozenSubAgentPlan {
+  readonly schemaVersion: 1;
+  readonly agentId: string;
+  readonly childSessionId: string;
+  readonly origin: {
+    readonly projectId: string;
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly executionId: string;
+    readonly parentAgentId?: string;
+  };
+  readonly route: {
+    readonly provider: string;
+    readonly model: string;
+  };
+  readonly thinkingLevel: AgentThinkingLevel;
+  readonly renderedSystemPrompt: string;
+  readonly frozenTools: readonly FrozenSubAgentToolReference[];
+  /** Exact immutable material needed to reconstruct the actor's Broker catalog in this process. */
+  readonly executionTemplate: FrozenTurnPlan;
+  readonly authority: {
+    readonly permissionSnapshot: PermissionManifest;
+  };
+  readonly context?: FrozenContextDocument;
+  readonly requestTokenBudget: number;
+  readonly createdAt: string;
+  readonly canonicalDigest: string;
+}
+
+export const FrozenSubAgentPlanSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  agentId: z.string().min(1),
+  childSessionId: z.string().min(1),
+  origin: z.strictObject({
+    projectId: z.string().min(1),
+    sessionId: z.string().min(1),
+    turnId: z.string().min(1),
+    executionId: z.string().min(1),
+    parentAgentId: z.string().min(1).optional(),
+  }),
+  route: z.strictObject({
+    provider: z.string().min(1),
+    model: z.string().min(1),
+  }),
+  thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+  renderedSystemPrompt: z.string().min(1),
+  frozenTools: z.array(
+    z.strictObject({
+      name: z.string().min(1),
+      label: z.string().min(1),
+      description: z.string(),
+      revisionId: z.string().min(1),
+      inputSchema: JsonValueSchema,
+      outputSchema: JsonValueSchema,
+    }),
+  ),
+  executionTemplate: z.lazy(() => FrozenTurnPlanSchema),
+  authority: z.strictObject({
+    permissionSnapshot: z.strictObject({
+      effects: z.array(z.string()),
+      resourcePatterns: z.array(z.string()),
+      credentialRefs: z.array(z.string()),
+    }),
+  }),
+  context: z
+    .strictObject({
+      documentId: z.string().min(1),
+      artifact: ArtifactFileRefSchema.extend({ mediaType: z.literal("application/x-ndjson") }),
+      format: z.literal("noesis-session-context-v1"),
+      characterLength: z.number().int().nonnegative(),
+      byteLength: z.number().int().nonnegative(),
+      contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    })
+    .optional(),
+  requestTokenBudget: z.number().int().positive().max(1000000),
+  createdAt: z.string().min(1),
+  canonicalDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+});
+
+export function frozenSubAgentPlanDigest(plan: Omit<FrozenSubAgentPlan, "canonicalDigest">): string {
+  return sha256(canonicalJson(plan));
+}
+
+export function validateFrozenSubAgentPlan(value: unknown): FrozenSubAgentPlan {
+  const plan = FrozenSubAgentPlanSchema.parse(value);
+  const executionTemplate = validateFrozenTurnPlan(plan.executionTemplate);
+  const normalizedOrigin = createConditionalObject({
+    projectId: plan.origin.projectId,
+    sessionId: plan.origin.sessionId,
+    turnId: plan.origin.turnId,
+    executionId: plan.origin.executionId,
+  } as const)
+    .addOptional(plan.origin.parentAgentId ? { parentAgentId: plan.origin.parentAgentId } : undefined)
+    .finish();
+  const normalized = createConditionalObject({
+    schemaVersion: plan.schemaVersion,
+    agentId: plan.agentId,
+    childSessionId: plan.childSessionId,
+    origin: normalizedOrigin,
+    route: plan.route,
+    thinkingLevel: plan.thinkingLevel,
+    renderedSystemPrompt: plan.renderedSystemPrompt,
+    frozenTools: plan.frozenTools,
+    executionTemplate,
+    authority: plan.authority,
+    requestTokenBudget: plan.requestTokenBudget,
+    createdAt: plan.createdAt,
+    canonicalDigest: plan.canonicalDigest,
+  } as const)
+    .addOptional(plan.context ? { context: plan.context } : undefined)
+    .finish();
+  const { canonicalDigest, ...unsigned } = normalized;
+  if (frozenSubAgentPlanDigest(unsigned) !== canonicalDigest)
+    throw new Error(`Frozen subagent plan ${plan.agentId} failed canonical digest verification`);
+  if (plan.context && plan.context.documentId !== `context_document_${plan.context.contentDigest}`)
+    throw new Error(`Frozen subagent plan ${plan.agentId} has a mismatched context document identity`);
+  return Object.freeze(
+    createConditionalObject({
+      ...normalized,
+      origin: Object.freeze({ ...normalizedOrigin }),
+      route: Object.freeze({ ...plan.route }),
+      frozenTools: Object.freeze(plan.frozenTools.map((tool) => Object.freeze({ ...tool }))),
+      executionTemplate: validateFrozenTurnPlan(plan.executionTemplate),
+      authority: Object.freeze({
+        permissionSnapshot: Object.freeze({
+          effects: Object.freeze([...plan.authority.permissionSnapshot.effects]),
+          resourcePatterns: Object.freeze([...plan.authority.permissionSnapshot.resourcePatterns]),
+          credentialRefs: Object.freeze([...plan.authority.permissionSnapshot.credentialRefs]),
+        }),
+      }),
+    } as const)
+      .addOptional(
+        plan.context
+          ? {
+              context: Object.freeze({
+                ...plan.context,
+                artifact: Object.freeze({ ...plan.context.artifact }),
+              }),
+            }
+          : undefined,
+      )
+      .finish(),
+  );
+}
+
+export interface SubAgentSummary {
+  readonly agentId: string;
+  readonly childSessionId: string;
+  readonly projectId: string;
+  readonly originSessionId: string;
+  readonly parentAgentId?: string;
+  readonly name?: string;
+  readonly status: SubAgentStatus;
+  readonly route: { readonly provider: string; readonly model: string };
+  readonly thinkingLevel: AgentThinkingLevel;
+  readonly activeTaskId?: string;
+  readonly latestTaskId?: string;
+  readonly latestTaskStatus?: SubAgentTaskStatus;
+  readonly latestActivity?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface SubAgentTaskResult {
+  readonly taskId: string;
+  readonly agentId: string;
+  readonly status: SubAgentTaskStatus;
+  readonly result?: string;
+  readonly error?: string;
+  readonly usage?: AgentUsage;
+  readonly startedAt?: string;
+  readonly completedAt?: string;
+}
+
+export interface SubAgentInspection extends SubAgentSummary {
+  readonly systemPrompt: string;
+  readonly tools: readonly string[];
+  readonly tasks: readonly SubAgentTaskResult[];
+  readonly recentMessages: readonly {
+    readonly messageId: string;
+    readonly sender: AgentAddress;
+    readonly recipient: AgentAddress;
+    readonly content: string;
+    readonly status: AgentMessageStatus;
+    readonly createdAt: string;
+  }[];
+  readonly transcriptArtifact?: {
+    readonly path: string;
+    readonly characterLength: number;
+    readonly contentDigest: string;
+  };
+}
+
+export type SubAgentRuntimeEvent =
+  | { readonly type: "changed"; readonly agentId: string; readonly taskId?: string }
+  | {
+      readonly type: "live";
+      readonly agentId: string;
+      readonly taskId: string;
+      readonly event: AgentRuntimeEvent;
+    }
+  | {
+      readonly type: "message";
+      readonly agentId: string;
+      readonly messageId: string;
+      readonly recipient: AgentAddress;
+      readonly status: "accepted" | "delivered";
+    };
 export const ProgramWorkflowPhaseSchema = z.strictObject({
   name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
   description: z.string().min(1).max(2048),
@@ -268,12 +534,19 @@ export interface FrozenTurnPlan {
   readonly provider: string;
   readonly model: string;
   readonly thinkingLevel: AgentThinkingLevel;
-  /** User-configured default route frozen for agents.run calls admitted during this turn. */
+  /** User-configured default route frozen for subagents admitted during this turn. */
   readonly subAgentDefaults?: {
     readonly provider: string;
     readonly model: string;
     readonly thinkingLevel: AgentThinkingLevel;
     readonly requestTokenBudget: number;
+  };
+  /** Present only on a retained subagent task execution plan. */
+  readonly subAgentActor?: {
+    readonly agentId: string;
+    readonly taskId: string;
+    readonly parent: AgentAddress;
+    readonly allowedTools: readonly string[];
   };
   readonly permissionSnapshot: PermissionManifest;
   readonly retrievalCitations: readonly EvidenceRef[];
@@ -404,6 +677,17 @@ export const FrozenTurnPlanSchema = z.strictObject({
       requestTokenBudget: z.number().int().positive().max(1000000),
     })
     .optional(),
+  subAgentActor: z
+    .strictObject({
+      agentId: z.string().min(1),
+      taskId: z.string().min(1),
+      parent: z.discriminatedUnion("kind", [
+        z.strictObject({ kind: z.literal("foreground"), id: z.string().min(1) }),
+        z.strictObject({ kind: z.literal("subagent"), id: z.string().min(1) }),
+      ]),
+      allowedTools: z.array(z.string().min(1)),
+    })
+    .optional(),
   permissionSnapshot: PermissionManifestSchema,
   retrievalCitations: z.array(EvidenceRefSchema),
   routing: z.strictObject({
@@ -433,6 +717,7 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     project,
     workingAdjustmentId,
     subAgentDefaults,
+    subAgentActor,
     routing,
     ...base
   } = decoded;
@@ -483,6 +768,17 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
       .addOptional(
         !(subAgentDefaults === undefined)
           ? { subAgentDefaults: Object.freeze({ ...subAgentDefaults }) }
+          : undefined,
+      )
+      .addOptional(
+        !(subAgentActor === undefined)
+          ? {
+              subAgentActor: Object.freeze({
+                ...subAgentActor,
+                parent: Object.freeze({ ...subAgentActor.parent }),
+                allowedTools: Object.freeze([...subAgentActor.allowedTools]),
+              }),
+            }
           : undefined,
       )
       .add({

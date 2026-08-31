@@ -1527,7 +1527,7 @@ describe("WorkspaceStore", () => {
     const source = await store.artifacts.writeArtifact({
       path: "codemode/execution-context-model-integrity/source.mjs",
       mediaType: "text/javascript",
-      bytes: text('return await agents.run({ prompt: "test" });'),
+      bytes: text('return await agents.spawn({ prompt: "test" });'),
       actor,
       relationshipRefs: Object.freeze([
         {
@@ -1543,7 +1543,7 @@ describe("WorkspaceStore", () => {
       sessionId: "session-context-model-integrity",
       catalogId: "catalog-context-model-integrity",
       catalogDigest: digest("a"),
-      sourceDigest: sha256(text('return await agents.run({ prompt: "test" });')),
+      sourceDigest: sha256(text('return await agents.spawn({ prompt: "test" });')),
       sourceArtifactId: source.artifactId,
       status: "running",
       callCount: 1,
@@ -2273,7 +2273,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 47 });
+    ).toEqual({ version: 48 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -3005,7 +3005,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(47);
+    expect(versions.at(-1)).toBe(48);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

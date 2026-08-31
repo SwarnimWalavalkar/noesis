@@ -70,6 +70,10 @@ export interface AuthorityBoundary {
     request: Omit<EffectRequest<T>, "principal">,
     permission: PermissionManifest,
   ): Promise<EffectDecision<T>>;
+  runSubAgent<T extends JsonValue>(
+    request: Omit<EffectRequest<T>, "principal">,
+    permission: PermissionManifest,
+  ): Promise<EffectDecision<T>>;
   promote<T extends JsonValue>(
     resource: string,
     idempotencyKey: string,

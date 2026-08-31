@@ -9,6 +9,7 @@ export function createTranscriptInputHandler(options: {
   readonly view: NoesisView;
   readonly inspectorMaxScroll: () => number;
   readonly openRunInspector: (actionId: string) => void;
+  readonly openSubAgentInspector: (agentId: string) => void;
   readonly closeRunInspector: () => void;
 }): (data: string) => boolean {
   return (data) => {
@@ -41,6 +42,25 @@ export function createTranscriptInputHandler(options: {
       return true;
     }
 
+    if (state.subAgentCursor) {
+      if (matchesKey(data, "escape") || matchesKey(data, "ctrl+o")) {
+        options.view.dispatch({ type: "action-cursor-cleared" });
+        options.tui.requestRender();
+        return true;
+      }
+      if (matchesKey(data, "up"))
+        options.view.dispatch({ type: "subagent-cursor-moved", direction: "previous" });
+      else if (matchesKey(data, "down"))
+        options.view.dispatch({ type: "subagent-cursor-moved", direction: "next" });
+      else if (matchesKey(data, "tab")) options.view.dispatch({ type: "inspection-navigation-toggled" });
+      else if (matchesKey(data, "enter")) {
+        options.openSubAgentInspector(state.subAgentCursor);
+        return true;
+      } else return true;
+      options.tui.requestRender();
+      return true;
+    }
+
     if (state.actionCursor) {
       if (matchesKey(data, "escape")) {
         options.view.dispatch({ type: "action-cursor-cleared" });
@@ -58,6 +78,7 @@ export function createTranscriptInputHandler(options: {
         options.view.dispatch({ type: "action-cursor-moved", direction: "next" });
       else if (matchesKey(data, "space"))
         options.view.dispatch({ type: "action-expansion-toggled", actionId: state.actionCursor });
+      else if (matchesKey(data, "tab")) options.view.dispatch({ type: "inspection-navigation-toggled" });
       else if (matchesKey(data, "enter")) {
         options.openRunInspector(state.actionCursor);
         return true;
@@ -68,7 +89,11 @@ export function createTranscriptInputHandler(options: {
     }
 
     if (!matchesKey(data, "ctrl+o")) return false;
-    options.view.dispatch({ type: "action-cursor-moved", direction: "previous" });
+    options.view.dispatch(
+      state.subAgents.length > 0
+        ? { type: "subagent-cursor-moved", direction: "previous" }
+        : { type: "action-cursor-moved", direction: "previous" },
+    );
     options.tui.requestRender();
     return true;
   };

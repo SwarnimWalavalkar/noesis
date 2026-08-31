@@ -1,4 +1,13 @@
-import type { FrozenTurnPlan } from "@noesis/agent-types";
+import type {
+  AgentAddress,
+  AgentMessageStatus,
+  AgentThinkingLevel,
+  AgentUsage,
+  FrozenSubAgentPlan,
+  FrozenTurnPlan,
+  SubAgentStatus,
+  SubAgentTaskStatus,
+} from "@noesis/agent-types";
 import type {
   ActorRef,
   ArtifactFileRef,
@@ -231,6 +240,79 @@ export interface ModelCallRecord {
     readonly totalTokens: number;
     readonly estimatedCost: number;
   };
+  readonly latencyMs?: number;
+  readonly error?: string;
+  readonly startedAt: string;
+  readonly completedAt?: string;
+}
+
+export interface SubAgentRecord {
+  readonly agentId: string;
+  readonly childSessionId: string;
+  readonly projectId: string;
+  readonly originSessionId: string;
+  readonly originTurnId: string;
+  readonly originExecutionId: string;
+  readonly parentAgentId?: string;
+  readonly name?: string;
+  readonly status: SubAgentStatus;
+  readonly frozenPlan: FrozenSubAgentPlan;
+  readonly frozenPlanArtifactId: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly closedAt?: string;
+}
+
+export interface SubAgentTaskRecord {
+  readonly taskId: string;
+  readonly agentId: string;
+  readonly triggerMessageId: string;
+  readonly status: SubAgentTaskStatus;
+  readonly resultArtifactId?: string;
+  readonly resultPreview?: string;
+  readonly error?: string;
+  readonly usage?: AgentUsage;
+  readonly createdAt: string;
+  readonly startedAt?: string;
+  readonly completedAt?: string;
+}
+
+export interface AgentMailboxMessageRecord {
+  readonly messageId: string;
+  readonly projectId: string;
+  readonly sender: AgentAddress;
+  readonly recipient: AgentAddress;
+  readonly content: string;
+  readonly sensitivity: Sensitivity;
+  readonly status: AgentMessageStatus;
+  readonly sequence: number;
+  readonly taskId?: string;
+  readonly createdAt: string;
+  readonly claimedAt?: string;
+  readonly deliveredAt?: string;
+  readonly failedAt?: string;
+  readonly failure?: string;
+}
+
+export interface SubAgentTimelineRecord {
+  readonly taskId: string;
+  readonly sequence: number;
+  readonly kind: "message" | "reasoning" | "tool_call" | "model_call" | "mailbox";
+  readonly entryId: string;
+  readonly createdAt: string;
+}
+
+export interface SubAgentModelCallRecord {
+  readonly modelCallId: string;
+  readonly taskId: string;
+  readonly round: number;
+  readonly provider: string;
+  readonly model: string;
+  readonly thinkingLevel: AgentThinkingLevel;
+  readonly requestArtifactId: string;
+  readonly outputArtifactId?: string;
+  readonly status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  readonly usage?: AgentUsage;
   readonly latencyMs?: number;
   readonly error?: string;
   readonly startedAt: string;
@@ -835,6 +917,39 @@ export interface OperationalRepositories {
     readonly listForExecution: (executionId: string) => Promise<readonly ModelCallRecord[]>;
     readonly listForSession: (sessionId: string) => Promise<readonly ModelCallRecord[]>;
     readonly interruptRunning: (interruptedAt: string) => Promise<number>;
+  };
+  readonly subAgents: {
+    readonly admit: (request: {
+      readonly agent: SubAgentRecord;
+      readonly task: SubAgentTaskRecord;
+      readonly message: AgentMailboxMessageRecord;
+      readonly childSession: SessionRecord;
+    }) => Promise<void>;
+    readonly get: (agentId: string) => Promise<SubAgentRecord | undefined>;
+    readonly listForProject: (projectId: string) => Promise<readonly SubAgentRecord[]>;
+    readonly put: (record: SubAgentRecord) => Promise<void>;
+    readonly getTask: (taskId: string) => Promise<SubAgentTaskRecord | undefined>;
+    readonly listTasks: (agentId: string) => Promise<readonly SubAgentTaskRecord[]>;
+    readonly putTask: (record: SubAgentTaskRecord) => Promise<void>;
+    readonly claimTask: (taskId: string, startedAt: string) => Promise<SubAgentTaskRecord | undefined>;
+    readonly appendMessage: (
+      record: Omit<AgentMailboxMessageRecord, "sequence">,
+    ) => Promise<AgentMailboxMessageRecord>;
+    readonly admitMessageTask: (request: {
+      readonly message: Omit<AgentMailboxMessageRecord, "sequence">;
+      readonly task: SubAgentTaskRecord;
+    }) => Promise<AgentMailboxMessageRecord>;
+    readonly getMessage: (messageId: string) => Promise<AgentMailboxMessageRecord | undefined>;
+    readonly listMessages: (agentId: string) => Promise<readonly AgentMailboxMessageRecord[]>;
+    readonly listAcceptedMessagesForRecipient: (
+      recipient: AgentAddress,
+    ) => Promise<readonly AgentMailboxMessageRecord[]>;
+    readonly putMessage: (record: AgentMailboxMessageRecord) => Promise<void>;
+    readonly appendTimeline: (record: SubAgentTimelineRecord) => Promise<void>;
+    readonly listTimeline: (taskId: string) => Promise<readonly SubAgentTimelineRecord[]>;
+    readonly putModelCall: (record: SubAgentModelCallRecord) => Promise<void>;
+    readonly listModelCalls: (taskId: string) => Promise<readonly SubAgentModelCallRecord[]>;
+    readonly recoverInterrupted: (interruptedAt: string) => Promise<number>;
   };
   readonly workflows: {
     readonly getRun: (runId: string) => Promise<WorkflowRunRecord | undefined>;

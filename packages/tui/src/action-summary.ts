@@ -10,7 +10,6 @@ import { safeTerminalText } from "./theme.ts";
  * and the full payload is reachable only through expansion or the run inspector.
  */
 export const EXECUTE_ACTION_NAME = "execute";
-export const SUBAGENT_ACTION_NAME = "agents.run";
 function arrayField(value: JsonValue | undefined, key: string): readonly JsonValue[] | undefined {
   if (!isRecord(value)) return undefined;
   const field = value[key];
@@ -22,7 +21,6 @@ function booleanField(value: JsonValue | undefined, key: string): boolean | unde
   return typeof field === "boolean" ? field : undefined;
 }
 export function executionIdOf(action: TuiAgentAction): string | undefined {
-  if (action.name === SUBAGENT_ACTION_NAME) return action.actionId;
   if (action.executionId) return action.executionId;
   const details = isRecord(action.output) ? action.output["details"] : undefined;
   if (stringField(details, "kind") === "result") {
@@ -261,32 +259,13 @@ export function summarizeNestedAction(action: TuiAgentAction): ActionSummary {
 export function summarizeNestedCalls(children: readonly TuiAgentAction[]): readonly string[] {
   const counts = new Map<string, number>();
   for (const child of children) {
-    const name = child.name === SUBAGENT_ACTION_NAME ? "subagent" : child.name;
-    counts.set(name, (counts.get(name) ?? 0) + 1);
+    counts.set(child.name, (counts.get(child.name) ?? 0) + 1);
   }
   return [...counts.entries()]
     .sort(([leftName, leftCount], [rightName, rightCount]) =>
       leftCount === rightCount ? leftName.localeCompare(rightName) : rightCount - leftCount,
     )
     .map(([name, count]) => `${String(count)} ${name}`);
-}
-export function summarizeSubAgentAction(
-  action: TuiAgentAction,
-  children: readonly TuiAgentAction[],
-): ActionSummary {
-  const promptValue = isRecord(action.input) ? action.input["prompt"] : undefined;
-  const prompt =
-    typeof promptValue === "string"
-      ? promptValue
-      : Array.isArray(promptValue)
-        ? promptValue.find((part): part is string => typeof part === "string")
-        : undefined;
-  const parts = [
-    ...(children.length > 0 ? [formatCount(children.length, "tool call")] : []),
-    ...(action.status === "running" ? [] : [action.status]),
-    ...(action.durationMs === undefined ? [] : [formatDuration(action.durationMs)]),
-  ];
-  return createActionSummary("subagent", prompt ? firstLine(prompt) : undefined, parts.join(" · "));
 }
 export function summarizeExecuteAction(
   action: TuiAgentAction,
@@ -309,6 +288,5 @@ export function summarizeExecuteAction(
 }
 export function summarizeAction(action: TuiAgentAction, children: readonly TuiAgentAction[]): ActionSummary {
   if (action.name === EXECUTE_ACTION_NAME) return summarizeExecuteAction(action, children);
-  if (action.name === SUBAGENT_ACTION_NAME) return summarizeSubAgentAction(action, children);
   return summarizeNestedAction(action);
 }

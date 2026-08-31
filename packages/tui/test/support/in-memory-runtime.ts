@@ -602,6 +602,12 @@ export function createInMemoryTestRuntime(agent: NoesisAgentRuntime): TestNoesis
     forkTrail,
     runTurn,
     compact: async () => undefined,
+    listSubAgents: async () => Object.freeze([]),
+    inspectSubAgent: async (agentId: string) => {
+      throw new Error(`Subagent not found: ${agentId}`);
+    },
+    getSubAgentTranscript: async () => Object.freeze([]),
+    subscribeSubAgents: () => () => undefined,
     get resumedTrailIds() {
       return Object.freeze([...resumedTrailIds]);
     },

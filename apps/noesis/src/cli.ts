@@ -16,7 +16,7 @@ import {
   createPiAgentRoleRunner,
   createPiAgentRuntime,
   createPiMcpSamplingPort,
-  createPiSubAgentRunner,
+  createPiSubAgentTaskRunner,
   createPiModelServices,
   createPiSkillLibrary,
   listPiModelRoutes,
@@ -353,7 +353,7 @@ async function createRuntime(
             ),
           createRoleRunner: (configurations) =>
             createPiAgentRoleRunner(project.root, services.models, configurations),
-          subAgent: createPiSubAgentRunner(project.root, services.models),
+          subAgentTaskRunner: createPiSubAgentTaskRunner(project.root, services.models),
           listModelRoutes: () => listPiModelRoutes(services.models),
           refreshModelRoutes: async (signal) => {
             await services.refresh(signal);
@@ -374,7 +374,7 @@ async function createRuntime(
           | "recoverInterruptedOperations"
           | "createAgent"
           | "createRoleRunner"
-          | "subAgent"
+          | "subAgentTaskRunner"
           | "listModelRoutes"
           | "refreshModelRoutes"
           | "providerAuthStatus"

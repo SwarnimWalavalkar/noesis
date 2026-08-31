@@ -4,13 +4,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { resolveNoesisConfig } from "@noesis/config";
 import {
-  createAmbiguousSubAgentOutcomeError,
   createPiAgentRuntime,
   createPiSkillLibrary,
-  createPiSubAgentRunner,
-  type PiSubAgentRunRequest,
+  createPiSubAgentTaskRunner,
+  type PiSubAgentTaskRequest,
 } from "@noesis/runtime-pi";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
 import {
   CONTROLLED_PI_MODEL,
@@ -104,7 +103,7 @@ describe("production codemode journey", () => {
       ...resolved,
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
-    const nestedRequests: PiSubAgentRunRequest[] = [];
+    const nestedRequests: PiSubAgentTaskRequest[] = [];
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText }) => {
         if (context.systemPrompt?.includes("subagent inside Noesis")) return "cobalt";
@@ -114,7 +113,7 @@ describe("production codemode journey", () => {
           return controlledToolCallResponse(
             "execute",
             {
-              source: 'return await agents.run({ prompt: "x".repeat(2_000_000) });',
+              source: 'return await agents.spawn({ prompt: "x".repeat(2_000_000) });',
             },
             "call-query-oversized",
           );
@@ -122,7 +121,8 @@ describe("production codemode journey", () => {
           return controlledToolCallResponse(
             "execute",
             {
-              source: 'return await agents.run({ prompt: "Trigger ambiguous timeout." });',
+              source:
+                'const child = await agents.spawn({ prompt: "Trigger ambiguous timeout." }); return await agents.wait({ taskId: child.taskId });',
             },
             "call-query-ambiguous",
           );
@@ -132,7 +132,7 @@ describe("production codemode journey", () => {
             {
               source: [
                 "const full = context.slice(0);",
-                "return await agents.run({ prompt: Array.from({ length: 33 }, () => full) });",
+                "return await agents.spawn({ prompt: Array.from({ length: 33 }, () => full) });",
               ].join("\n"),
             },
             "call-query-repeated-context",
@@ -141,7 +141,7 @@ describe("production codemode journey", () => {
           return controlledToolCallResponse(
             "execute",
             {
-              source: 'return await agents.run({ prompt: "Re-enter directly.", tools: ["agents.run"] });',
+              source: 'return await agents.spawn({ prompt: "Re-enter directly.", tools: ["agents.spawn"] });',
             },
             "call-query-recursion",
           );
@@ -150,7 +150,8 @@ describe("production codemode journey", () => {
           {
             source: [
               "const selected = context.slice(0);",
-              'const answer = await agents.run({ prompt: ["Return the durable seed word.", selected] });',
+              'const child = await agents.spawn({ prompt: ["Return the durable seed word.", selected] });',
+              "const answer = await agents.wait({ taskId: child.taskId });",
               "return { contextLength: context.length, answer };",
             ].join("\n"),
           },
@@ -158,25 +159,16 @@ describe("production codemode journey", () => {
         );
       },
     });
+    const taskRunner = createPiSubAgentTaskRunner(process.cwd(), controlled.models);
     const runtime = await createApplicationRuntimeComposition({
       config,
-      subAgent: Object.freeze({
-        run: async (request: PiSubAgentRunRequest) => {
+      subAgentTaskRunner: Object.freeze({
+        ...taskRunner,
+        run: async (request: PiSubAgentTaskRequest) => {
           nestedRequests.push(request);
-          if (request.plan.prompt === "Trigger ambiguous timeout.") {
-            request.onTelemetry?.({
-              usage: {
-                inputTokens: 13,
-                outputTokens: 5,
-                totalTokens: 18,
-                estimatedCost: 0.25,
-              },
-              modelCalls: 1,
-              toolCalls: 0,
-            });
-            throw createAmbiguousSubAgentOutcomeError();
-          }
-          return await createPiSubAgentRunner(process.cwd(), controlled.models).run(request);
+          if (request.prompt === "Trigger ambiguous timeout.")
+            throw new Error("Controlled provider ambiguity");
+          return await taskRunner.run(request);
         },
       }),
       createAgent: (_sessionTools, codeExecution) =>
@@ -203,14 +195,22 @@ describe("production codemode journey", () => {
     );
 
     expect(result.output).toBe("The nested analysis is complete.");
-    expect(nestedRequests).toHaveLength(1);
+    if (nestedRequests.length !== 1)
+      throw new Error(
+        JSON.stringify(
+          await Promise.all(
+            (await runtime.listSubAgents()).map(
+              async (agent) => await runtime.inspectSubAgent(agent.agentId),
+            ),
+          ),
+        ),
+      );
     const nested = nestedRequests[0];
     if (!nested) throw new Error("Expected one nested model request");
-    expect(nested.plan.prompt).toContain("Return the durable seed word.");
-    expect(nested.plan.prompt).toContain("Seed the session with cobalt.");
-    expect(nested.plan.prompt).toContain("The durable seed is cobalt.");
-    expect(nested.plan.prompt).not.toContain("Use codemode to ask a model");
-    expect(nested.plan.systemPrompt).toContain("You are a subagent inside Noesis.");
+    expect(nested.prompt).toContain("Return the durable seed word.");
+    expect(nested.prompt).toContain("Seed the session with cobalt.");
+    expect(nested.plan.context).toBeDefined();
+    expect(nested.plan.renderedSystemPrompt).toContain("retained subagent inside Noesis");
     expect(nested.plan.route).toEqual({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL });
     expect(nested.plan.thinkingLevel).toBe("xhigh");
     expect(result.frozenTurnPlan?.subAgentDefaults).toMatchObject({
@@ -218,7 +218,11 @@ describe("production codemode journey", () => {
       model: CONTROLLED_PI_MODEL,
       thinkingLevel: "xhigh",
     });
-    const modelCalls = await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId);
+    const [summary] = await runtime.listSubAgents();
+    if (!summary?.latestTaskId) throw new Error("Expected the retained subagent task");
+    const modelCalls = await runtime.debug.workspace.operational.subAgents.listModelCalls(
+      summary.latestTaskId,
+    );
     expect(modelCalls).toMatchObject([
       {
         status: "completed",
@@ -230,41 +234,11 @@ describe("production codemode journey", () => {
       },
     ]);
     const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
-    expect(calls.map((call) => call.toolName)).toEqual(["execute", "agents.run"]);
-    await runtime.debug.runTurn(trail.trailId, "Oversized nested request.");
-    expect(nestedRequests).toHaveLength(1);
-    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
-      1,
-    );
-    await runtime.debug.runTurn(trail.trailId, "Repeated full context nested request.");
-    expect(nestedRequests).toHaveLength(2);
-    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
-      2,
-    );
-    await runtime.debug.runTurn(trail.trailId, "Recursive subagent request.");
-    expect(nestedRequests).toHaveLength(2);
-    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toHaveLength(
-      2,
-    );
-    await runtime.debug.runTurn(trail.trailId, "Ambiguous nested request.");
-    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toMatchObject([
-      { status: "completed" },
-      { status: "completed" },
-      {
-        status: "interrupted",
-        error: "Subagent timed out before its provider outcome was observed",
-        usage: {
-          inputTokens: 13,
-          outputTokens: 5,
-          totalTokens: 18,
-          estimatedCost: 0.25,
-        },
-      },
-    ]);
+    expect(calls.map((call) => call.toolName)).toEqual(["execute", "agents.spawn", "agents.wait"]);
     await runtime.shutdown();
   });
 
-  test("a tool-using subagent remains visible as one nested durable action tree", async () => {
+  test("a tool-using subagent stays out of the main transcript and remains fully inspectable", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-subagent-tools-acceptance-"));
     roots.push(home);
     const resolved = await resolveNoesisConfig({
@@ -296,8 +270,8 @@ describe("production codemode journey", () => {
               "execute",
               {
                 source: lastUserText.includes("malformed")
-                  ? 'return await agents.run({ systemPrompt: "Test invalid input.", prompt: "Attempt one malformed file read.", tools: ["files.read"], thinkingLevel: "low" });'
-                  : 'return await agents.run({ systemPrompt: "Inspect one file.", prompt: "Read the package metadata.", tools: ["files.read"], thinkingLevel: "low" });',
+                  ? 'const child = await agents.spawn({ systemPrompt: "Test invalid input.", prompt: "Attempt one malformed file read.", tools: ["files.read"], thinkingLevel: "low" }); return await agents.wait({ taskId: child.taskId });'
+                  : 'const child = await agents.spawn({ systemPrompt: "Inspect one file.", prompt: "Read the package metadata.", tools: ["files.read"], thinkingLevel: "low" }); return await agents.wait({ taskId: child.taskId });',
               },
               lastUserText.includes("malformed") ? "call-run-invalid-subagent" : "call-run-subagent",
             );
@@ -305,7 +279,7 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      subAgent: createPiSubAgentRunner(process.cwd(), controlled.models),
+      subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
       createAgent: (_sessionTools, codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
@@ -324,47 +298,48 @@ describe("production codemode journey", () => {
     const transcriptActions = (await runtime.getTranscript(trail.trailId)).filter(
       (entry) => entry.kind === "action",
     );
-    expect(transcriptActions.map((action) => action.name)).toEqual(["execute", "agents.run", "files.read"]);
-    const [executeAction, subAgentAction, childAction] = transcriptActions;
-    expect(subAgentAction).toMatchObject({ parentActionId: executeAction?.actionId, status: "completed" });
-    expect(childAction).toMatchObject({ parentActionId: subAgentAction?.actionId, status: "completed" });
-    const modelCalls = await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId);
-    expect(modelCalls).toMatchObject([
-      {
-        modelCallId: subAgentAction?.actionId,
-        provider: CONTROLLED_PI_PROVIDER,
-        model: CONTROLLED_PI_MODEL,
-        thinkingLevel: "low",
-        status: "completed",
-      },
+    expect(transcriptActions.map((action) => action.name)).toEqual([
+      "execute",
+      "agents.spawn",
+      "agents.wait",
     ]);
-    const inspected = subAgentAction
-      ? await runtime.inspectExecution?.(trail.trailId, subAgentAction.actionId)
-      : undefined;
+    const [summary] = await runtime.listSubAgents();
+    if (!summary?.latestTaskId) throw new Error("Expected a retained subagent task");
+    const childTranscript = await runtime.getSubAgentTranscript(summary.agentId);
+    expect(childTranscript).toContainEqual(
+      expect.objectContaining({ kind: "action", name: "files.read", status: "completed" }),
+    );
+    const modelCalls = await runtime.debug.workspace.operational.subAgents.listModelCalls(
+      summary.latestTaskId,
+    );
+    expect(modelCalls).toHaveLength(2);
+    expect(modelCalls).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          provider: CONTROLLED_PI_PROVIDER,
+          model: CONTROLLED_PI_MODEL,
+          thinkingLevel: "low",
+          status: "completed",
+        }),
+      ]),
+    );
+    const inspected = await runtime.inspectSubAgent(summary.agentId);
     expect(inspected).toMatchObject({
-      kind: "subagent",
-      prompt: "Read the package metadata.",
       systemPrompt: expect.stringContaining("Inspect one file."),
-      provider: CONTROLLED_PI_PROVIDER,
-      model: CONTROLLED_PI_MODEL,
+      route: { provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL },
       thinkingLevel: "low",
-      toolNames: ["files.read"],
-      callCount: 1,
-      status: "completed",
+      tools: expect.arrayContaining(["files.read"]),
+      status: "idle",
     });
     await expect(
       runtime.debug.runTurn(trail.trailId, "Delegate one malformed file read."),
     ).resolves.toMatchObject({ output: "The foreground received the rejected subagent result." });
-    const callsAfterMalformed = await runtime.debug.workspace.operational.toolCalls.listForSession(
-      trail.trailId,
+    const agentsAfterMalformed = await runtime.listSubAgents();
+    const malformedAgent = agentsAfterMalformed.at(-1);
+    if (!malformedAgent) throw new Error("Expected the malformed-read subagent");
+    expect(await runtime.getSubAgentTranscript(malformedAgent.agentId)).toContainEqual(
+      expect.objectContaining({ kind: "action", name: "files.read", status: "failed" }),
     );
-    const failedRead = callsAfterMalformed.find(
-      (call) => call.toolName === "files.read" && call.status === "failed",
-    );
-    expect(failedRead).toMatchObject({ parentToolCallId: expect.any(String), request: {} });
-    expect(
-      callsAfterMalformed.find((call) => call.toolCallId === failedRead?.parentToolCallId),
-    ).toMatchObject({ toolName: "agents.run", status: "completed" });
     await runtime.shutdown();
 
     const otherRoot = await mkdtemp(join(tmpdir(), "noesis-other-subagent-project-"));
@@ -383,11 +358,329 @@ describe("production codemode journey", () => {
           }),
         }),
     });
-    if (!subAgentAction) throw new Error("Expected a persisted subagent action");
-    await expect(
-      otherRuntime.inspectExecution?.(trail.trailId, subAgentAction.actionId),
-    ).resolves.toBeUndefined();
+    await expect(otherRuntime.inspectSubAgent(summary.agentId)).rejects.toThrow("unavailable");
     await otherRuntime.shutdown();
+  });
+
+  test("a retained subagent keeps running across foreground sessions and accepts asynchronous steering", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-retained-subagent-acceptance-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const childStarted = Promise.withResolvers<void>();
+    const releaseInitialChildRound = Promise.withResolvers<void>();
+    let childRounds = 0;
+    let retainedAgentId: string | undefined;
+    let retainedTaskId: string | undefined;
+    const controlled = createControlledPiModels({
+      respond: async ({ context, lastUserText, systemPrompt }) => {
+        if (systemPrompt.includes("subagent inside Noesis")) {
+          childRounds += 1;
+          if (childRounds === 1) {
+            childStarted.resolve();
+            await releaseInitialChildRound.promise;
+            return "Initial result before steering.";
+          }
+          expect(lastUserText).toContain("Change direction and report cobalt.");
+          return "Steering received: cobalt.";
+        }
+        if (context.messages.at(-1)?.role === "toolResult") return "Foreground operation accepted.";
+        if (lastUserText.includes("Start retained"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source:
+                'return await agents.spawn({ name: "retained-worker", prompt: "Begin a long analysis and wait for collaboration." });',
+            },
+            "call-start-retained-subagent",
+          );
+        if (lastUserText.includes("List retained"))
+          return controlledToolCallResponse(
+            "execute",
+            { source: "return await agents.list();" },
+            "call-list-retained-subagent",
+          );
+        if (lastUserText.includes("Steer retained")) {
+          if (!retainedAgentId) throw new Error("Expected the retained agent identity");
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: `return await agents.send({ to: ${JSON.stringify(retainedAgentId)}, message: "Change direction and report cobalt." });`,
+            },
+            "call-steer-retained-subagent",
+          );
+        }
+        if (!retainedTaskId) throw new Error("Expected the retained task identity");
+        return controlledToolCallResponse(
+          "execute",
+          { source: `return await agents.wait({ taskId: ${JSON.stringify(retainedTaskId)} });` },
+          "call-join-retained-subagent",
+        );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const first = await runtime.startTrail({ title: "Retained subagent origin" });
+    await expect(runtime.debug.runTurn(first.trailId, "Start retained work.")).resolves.toMatchObject({
+      output: "Foreground operation accepted.",
+    });
+    await childStarted.promise;
+    const [running] = await runtime.listSubAgents();
+    if (!running?.activeTaskId) throw new Error("Expected one running retained subagent");
+    retainedAgentId = running.agentId;
+    retainedTaskId = running.activeTaskId;
+
+    const second = await runtime.startTrail({ title: "Retained subagent collaborator" });
+    await runtime.debug.runTurn(second.trailId, "List retained work from this session.");
+    await expect(runtime.debug.runTurn(second.trailId, "Steer retained work now.")).resolves.toMatchObject({
+      output: "Foreground operation accepted.",
+    });
+    const acceptedMessage = (await runtime.inspectSubAgent(retainedAgentId)).recentMessages.at(-1);
+    expect(acceptedMessage).toMatchObject({
+      sender: { kind: "foreground", id: second.trailId },
+      content: "Change direction and report cobalt.",
+      status: "claimed",
+    });
+
+    releaseInitialChildRound.resolve();
+    await expect(runtime.debug.runTurn(second.trailId, "Join the retained task.")).resolves.toMatchObject({
+      output: "Foreground operation accepted.",
+    });
+    await vi.waitFor(async () => {
+      expect(
+        (await runtime.inspectSubAgent(retainedAgentId ?? "missing")).recentMessages.at(-1),
+      ).toMatchObject({
+        status: "delivered",
+      });
+    });
+    const transcript = await runtime.getSubAgentTranscript(retainedAgentId);
+    expect(transcript).toContainEqual(
+      expect.objectContaining({ kind: "message", role: "assistant", text: "Steering received: cobalt." }),
+    );
+    expect(
+      (await runtime.getTranscript(first.trailId))
+        .filter((entry) => entry.kind === "action")
+        .map((entry) => entry.name),
+    ).toEqual(["execute", "agents.spawn"]);
+    expect(
+      (await runtime.getTranscript(second.trailId))
+        .filter((entry) => entry.kind === "action")
+        .map((entry) => entry.name),
+    ).toEqual(["execute", "agents.list", "execute", "agents.send", "execute", "agents.wait"]);
+    await runtime.shutdown();
+  });
+
+  test("retained subagents can hand work directly to one another through Code Mode", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-peer-subagent-acceptance-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    let receiverId: string | undefined;
+    let outsiderId: string | undefined;
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText, systemPrompt }) => {
+        if (systemPrompt.includes("subagent inside Noesis")) {
+          if (lastUserText.includes("Peer handoff: cobalt")) return "Receiver processed peer cobalt.";
+          if (lastUserText.includes("Become the receiver")) return "Receiver is ready.";
+          if (lastUserText.includes("Become the outsider")) return "Outsider is ready.";
+          if (!receiverId) throw new Error("Expected the retained receiver identity");
+          if (!outsiderId) throw new Error("Expected the unrelated outsider identity");
+          return context.messages.at(-1)?.role === "toolResult"
+            ? "Sender completed the peer handoff."
+            : controlledToolCallResponse(
+                "execute",
+                {
+                  source: `const visible = await agents.list(); if (!visible.some((agent) => agent.agentId === ${JSON.stringify(receiverId)})) throw new Error("Sibling receiver is hidden"); if (visible.some((agent) => agent.agentId === ${JSON.stringify(outsiderId)})) throw new Error("Unrelated subagent leaked"); return await agents.send({ to: ${JSON.stringify(receiverId)}, message: "Peer handoff: cobalt" });`,
+                },
+                "call-peer-send",
+              );
+        }
+        if (context.messages.at(-1)?.role === "toolResult") return "Foreground operation accepted.";
+        if (lastUserText.includes("Create receiver"))
+          return controlledToolCallResponse(
+            "execute",
+            { source: 'return await agents.spawn({ name: "receiver", prompt: "Become the receiver." });' },
+            "call-create-receiver",
+          );
+        if (lastUserText.includes("Create outsider"))
+          return controlledToolCallResponse(
+            "execute",
+            { source: 'return await agents.spawn({ name: "outsider", prompt: "Become the outsider." });' },
+            "call-create-outsider",
+          );
+        return controlledToolCallResponse(
+          "execute",
+          {
+            source:
+              'const child = await agents.spawn({ name: "sender", prompt: "Send the requested peer handoff.", tools: ["agents.send"] }); return await agents.wait({ taskId: child.taskId });',
+          },
+          "call-create-sender",
+        );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Peer subagent acceptance" });
+    await runtime.debug.runTurn(trail.trailId, "Create receiver.");
+    await vi.waitFor(async () => {
+      expect((await runtime.listSubAgents()).find((agent) => agent.name === "receiver")?.status).toBe("idle");
+    });
+    receiverId = (await runtime.listSubAgents()).find((agent) => agent.name === "receiver")?.agentId;
+    if (!receiverId) throw new Error("Expected the retained receiver");
+
+    const unrelatedTrail = await runtime.startTrail({ title: "Unrelated subagent acceptance" });
+    await runtime.debug.runTurn(unrelatedTrail.trailId, "Create outsider.");
+    await vi.waitFor(async () => {
+      expect((await runtime.listSubAgents()).find((agent) => agent.name === "outsider")?.status).toBe("idle");
+    });
+    outsiderId = (await runtime.listSubAgents()).find((agent) => agent.name === "outsider")?.agentId;
+    if (!outsiderId) throw new Error("Expected the unrelated retained outsider");
+
+    await runtime.debug.runTurn(trail.trailId, "Create sender.");
+    await vi.waitFor(async () => {
+      const receiver = await runtime.inspectSubAgent(receiverId ?? "missing");
+      expect(receiver.tasks).toHaveLength(2);
+      expect(receiver.tasks.at(-1)?.status).toBe("completed");
+    });
+    const agents = await runtime.listSubAgents();
+    const sender = agents.find((agent) => agent.name === "sender");
+    if (!sender) throw new Error("Expected the retained sender");
+    expect((await runtime.inspectSubAgent(receiverId)).recentMessages.at(-1)).toMatchObject({
+      sender: { kind: "subagent", id: sender.agentId },
+      recipient: { kind: "subagent", id: receiverId },
+      content: "Peer handoff: cobalt",
+      status: "delivered",
+    });
+    expect(await runtime.getSubAgentTranscript(receiverId)).toContainEqual(
+      expect.objectContaining({
+        kind: "message",
+        role: "assistant",
+        text: "Receiver processed peer cobalt.",
+      }),
+    );
+    await runtime.shutdown();
+  });
+
+  test("a child report waits durably for its inactive foreground session", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-foreground-mailbox-acceptance-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const releaseReport = Promise.withResolvers<void>();
+    let foregroundSessionId: string | undefined;
+    const controlled = createControlledPiModels({
+      respond: async ({ context, lastUserText, systemPrompt }) => {
+        if (systemPrompt.includes("subagent inside Noesis")) {
+          if (context.messages.at(-1)?.role === "toolResult") return "Deferred report was accepted.";
+          await releaseReport.promise;
+          if (!foregroundSessionId) throw new Error("Expected the parent foreground session");
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: `return await agents.send({ to: { kind: "foreground", id: ${JSON.stringify(foregroundSessionId)} }, message: "Deferred report: amber" });`,
+            },
+            "call-deferred-foreground-report",
+          );
+        }
+        if (lastUserText.includes("Deferred report: amber")) return "Foreground received deferred amber.";
+        if (context.messages.at(-1)?.role === "toolResult") return "Messenger launched.";
+        if (lastUserText.includes("Start messenger"))
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source:
+                'return await agents.spawn({ name: "messenger", prompt: "Report amber after the parent turn settles.", tools: ["agents.send"] });',
+            },
+            "call-start-messenger",
+          );
+        return "Foreground waiting for collaboration.";
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Foreground mailbox acceptance" });
+    foregroundSessionId = trail.trailId;
+    await runtime.debug.runTurn(trail.trailId, "Start messenger.");
+    releaseReport.resolve();
+    await vi.waitFor(async () => {
+      expect(
+        await runtime.debug.workspace.operational.subAgents.listAcceptedMessagesForRecipient({
+          kind: "foreground",
+          id: trail.trailId,
+        }),
+      ).toHaveLength(1);
+    });
+
+    await expect(runtime.debug.runTurn(trail.trailId, "Continue this session.")).resolves.toMatchObject({
+      output: "Foreground received deferred amber.",
+    });
+    const [message] = await runtime.debug.workspace.operational.subAgents.listAcceptedMessagesForRecipient({
+      kind: "foreground",
+      id: trail.trailId,
+    });
+    expect(message).toBeUndefined();
+    const [messenger] = await runtime.listSubAgents();
+    if (!messenger) throw new Error("Expected the retained messenger");
+    expect((await runtime.inspectSubAgent(messenger.agentId)).recentMessages.at(-1)).toMatchObject({
+      recipient: { kind: "foreground", id: trail.trailId },
+      content: "Deferred report: amber",
+      status: "delivered",
+    });
+    await runtime.shutdown();
   });
 
   test("subagents may run safe saved programs but actual descendant delegation fails closed", async () => {
@@ -402,43 +695,22 @@ describe("production codemode journey", () => {
       ...resolved,
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
-    const nestedRequests: PiSubAgentRunRequest[] = [];
-    const subagentStages = new Map<string, "described" | "ran">();
+    const nestedRequests: PiSubAgentTaskRequest[] = [];
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText, systemPrompt }) => {
         if (systemPrompt.includes("subagent inside Noesis")) {
           const name = lastUserText.includes("safe") ? "safe-subagent-program" : "recursive-subagent-program";
-          const stage = subagentStages.get(lastUserText);
-          if (!stage) {
-            subagentStages.set(lastUserText, "described");
+          if (context.messages.at(-1)?.role !== "toolResult")
             return controlledToolCallResponse(
-              "programs_describe",
-              { mode: "script", name },
-              `call-subagent-describe-${name}`,
-            );
-          }
-          if (stage === "described") {
-            const lastMessage = context.messages.at(-1);
-            const text =
-              lastMessage?.role === "toolResult"
-                ? lastMessage.content.find((part) => part.type === "text")?.text
-                : undefined;
-            if (!text) throw new Error("Expected the described Program result");
-            const described = z
-              .object({ definitionRevision: z.object({ revisionId: z.string() }) })
-              .parse(JSON.parse(text));
-            subagentStages.set(lastUserText, "ran");
-            return controlledToolCallResponse(
-              "programs_run",
+              "execute",
               {
-                mode: "script",
-                name,
-                definitionRevisionId: described.definitionRevision.revisionId,
-                input: {},
+                source: [
+                  `const described = await tools.programs.describe({ mode: "script", name: ${JSON.stringify(name)} });`,
+                  `return await tools.programs.run({ mode: "script", name: ${JSON.stringify(name)}, definitionRevisionId: described.definitionRevision.revisionId, input: {} });`,
+                ].join("\n"),
               },
-              `call-subagent-run-${name}`,
+              `call-subagent-execute-${name}`,
             );
-          }
           return "Saved program attempt settled.";
         }
         if (context.messages.at(-1)?.role === "toolResult") return "Foreground delegation settled.";
@@ -456,10 +728,10 @@ describe("production codemode journey", () => {
                 "});",
                 'await tools.programs.save({ mode: "script",',
                 '  name: "recursive-subagent-program", description: "Attempt descendant delegation.",',
-                '  source: "return await agents.run({ prompt: \\"Nested recursion.\\" });",',
+                '  source: "return await agents.spawn({ prompt: \\"Nested recursion.\\" });",',
                 '  inputSchema: { type: "object", properties: {}, additionalProperties: false },',
                 '  outputSchema: { type: "string" },',
-                '  requiredTools: ["agents.run"]',
+                '  requiredTools: ["agents.spawn"]',
                 "});",
                 "return null;",
               ].join("\n"),
@@ -469,11 +741,11 @@ describe("production codemode journey", () => {
         return controlledToolCallResponse(
           "execute",
           {
-            source: `return await agents.run({ prompt: ${JSON.stringify(
+            source: `const child = await agents.spawn({ prompt: ${JSON.stringify(
               lastUserText.includes("safe")
                 ? "Run the safe saved program."
                 : "Run the recursive saved program.",
-            )}, tools: ["programs.describe", "programs.run"] });`,
+            )}, tools: ["programs.describe", "programs.run"] }); return await agents.wait({ taskId: child.taskId });`,
           },
           lastUserText.includes("safe") ? "call-safe-program-subagent" : "call-recursive-program-subagent",
         );
@@ -481,10 +753,11 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      subAgent: Object.freeze({
-        run: async (request: PiSubAgentRunRequest) => {
+      subAgentTaskRunner: Object.freeze({
+        ...createPiSubAgentTaskRunner(process.cwd(), controlled.models),
+        run: async (request: PiSubAgentTaskRequest) => {
           nestedRequests.push(request);
-          return await createPiSubAgentRunner(process.cwd(), controlled.models).run(request);
+          return await createPiSubAgentTaskRunner(process.cwd(), controlled.models).run(request);
         },
       }),
       createAgent: (_sessionTools, codeExecution) =>
@@ -508,33 +781,18 @@ describe("production codemode journey", () => {
     ).resolves.toMatchObject({ output: "Foreground delegation settled." });
 
     expect(nestedRequests).toHaveLength(2);
-    expect(nestedRequests.map((request) => request.plan.tools)).toEqual([
-      ["programs.describe", "programs.run"],
-      ["programs.describe", "programs.run"],
-    ]);
-    expect(await runtime.debug.workspace.operational.modelCalls.listForSession(trail.trailId)).toMatchObject([
-      { status: "completed" },
-      { status: "completed" },
-    ]);
-    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
-    const programCalls = calls.filter((call) => call.toolName === "programs.run");
-    expect(programCalls).toMatchObject([{ status: "completed" }, { status: "failed" }]);
-    const programExecutions = await runtime.debug.workspace.operational.codeExecutions.listForSession(
-      trail.trailId,
+    for (const request of nestedRequests)
+      expect(request.plan.frozenTools.map((tool) => tool.name)).toEqual(
+        expect.arrayContaining(["programs.describe", "programs.run", "agents.send"]),
+      );
+    const agents = await runtime.listSubAgents();
+    expect(agents).toHaveLength(2);
+    expect(await runtime.getSubAgentTranscript(agents[0]?.agentId ?? "missing")).toContainEqual(
+      expect.objectContaining({ kind: "action", name: "programs.run", status: "completed" }),
     );
-    expect(
-      programExecutions.find((execution) => execution.program?.name === "safe-subagent-program"),
-    ).toMatchObject({ parentExecutionId: nestedRequests[0]?.plan.authority.parentExecutionId });
-    expect(
-      programExecutions.find((execution) => execution.program?.name === "recursive-subagent-program"),
-    ).toMatchObject({ parentExecutionId: nestedRequests[1]?.plan.authority.parentExecutionId });
-    const descendantDelegation = calls.find(
-      (call) => call.toolName === "agents.run" && call.status === "failed",
+    expect(await runtime.getSubAgentTranscript(agents[1]?.agentId ?? "missing")).toContainEqual(
+      expect.objectContaining({ kind: "action", name: "programs.run", status: "failed" }),
     );
-    expect(descendantDelegation).toMatchObject({
-      parentToolCallId: programCalls[1]?.toolCallId,
-      response: { error: "Subagents cannot recursively invoke agents.run" },
-    });
     await runtime.shutdown();
   });
 
@@ -1521,8 +1779,11 @@ describe("production codemode journey", () => {
           return lastMessage?.role === "toolResult"
             ? "The protected runtime kept this subagent advisory."
             : controlledToolCallResponse(
-                "capabilities_refine",
-                { decision: "no_change", reason: "Advisory probe only." },
+                "execute",
+                {
+                  source:
+                    'return await tools.capabilities.refine({ decision: "no_change", reason: "Advisory probe only." });',
+                },
                 "call-subagent-refine",
               );
         if (lastMessage?.role === "toolResult")
@@ -1547,7 +1808,7 @@ describe("production codemode journey", () => {
             "execute",
             {
               source:
-                'return await agents.run({ prompt: "Try to publish a no-change Capability decision.", tools: ["capabilities.refine"] });',
+                'const child = await agents.spawn({ prompt: "Try to publish a no-change Capability decision.", tools: ["capabilities.refine"] }); return await agents.wait({ taskId: child.taskId });',
             },
             "call-delegate-refinement",
           );
@@ -1555,7 +1816,8 @@ describe("production codemode journey", () => {
           "execute",
           {
             source: [
-              'const advisory = await agents.run({ prompt: "Try to publish a no-change Capability decision.", tools: ["capabilities.refine"] });',
+              'const child = await agents.spawn({ prompt: "Try to publish a no-change Capability decision.", tools: ["capabilities.refine"] });',
+              "const advisory = await agents.wait({ taskId: child.taskId });",
               'const descriptor = await noesis.describe("capabilities.inspect");',
               'if (!JSON.stringify(descriptor.outputSchema).includes("\\\"revisionNumber\\\"")) throw new Error("Capability binding schema is not discoverable");',
               'const before = await tools.capabilities.inspect({ view: "list" });',
@@ -1586,7 +1848,7 @@ describe("production codemode journey", () => {
     const roleRequests: string[] = [];
     const runtime = await createApplicationRuntimeComposition({
       config,
-      subAgent: createPiSubAgentRunner(process.cwd(), controlled.models),
+      subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
       createAgent: (_sessionTools, codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
@@ -1594,6 +1856,33 @@ describe("production codemode journey", () => {
           variants: configurations,
           respond: (request) => {
             roleRequests.push(request.runId);
+            if (request.runId.startsWith("history-rerank")) {
+              const envelope = z
+                .object({ messages: z.array(z.object({ content: z.string() })) })
+                .parse(JSON.parse(request.prompt));
+              const documentIds = envelope.messages.flatMap((message) =>
+                (() => {
+                  try {
+                    const parsed = z
+                      .object({ candidates: z.array(z.object({ documentId: z.string() })) })
+                      .safeParse(JSON.parse(message.content));
+                    return parsed.success
+                      ? parsed.data.candidates.map((candidate) => candidate.documentId)
+                      : [];
+                  } catch {
+                    return [];
+                  }
+                })(),
+              );
+              return {
+                text: JSON.stringify({
+                  ranking: documentIds.map((documentId) => ({
+                    documentId,
+                    reason: "Controlled acceptance ordering.",
+                  })),
+                }),
+              };
+            }
             return request.runId.startsWith("capability-route-")
               ? {
                   text: '{"selections":[],"reason":"Controlled routing omission.","learningAttribution":null}',
@@ -1619,16 +1908,18 @@ describe("production codemode journey", () => {
     );
     expect(publicationCalls.map((call) => call.toolName)).toEqual([
       "execute",
-      "agents.run",
-      "capabilities.refine",
+      "agents.spawn",
+      "agents.wait",
       "capabilities.inspect",
       "capabilities.refine",
       "capabilities.inspect",
       "capabilities.inspect",
       "capabilities.inspect",
     ]);
-    const advisoryCall = publicationCalls.find((call) => call.toolName === "agents.run");
+    const advisoryCall = publicationCalls.find((call) => call.toolName === "agents.spawn");
     if (!advisoryCall) throw new Error("Expected the advisory subagent call");
+    const waitCall = publicationCalls.find((call) => call.toolName === "agents.wait");
+    if (!waitCall) throw new Error("Expected the advisory subagent wait");
     const inspectionCall = publicationCalls.find((call) => call.toolName === "capabilities.inspect");
     if (!inspectionCall) throw new Error("Expected the foreground Capability inspection");
     expect(
@@ -1657,27 +1948,29 @@ describe("production codemode journey", () => {
         evidenceRefs: [
           { table: "messages", rowId: `${publishedTurnId}:user` },
           { table: "tool_calls", rowId: advisoryCall.toolCallId },
+          { table: "tool_calls", rowId: waitCall.toolCallId },
           { table: "tool_calls", rowId: inspectionCall.toolCallId },
         ],
       },
     });
-    expect(roleRequests.filter((runId) => runId.startsWith("reflect-capability"))).toHaveLength(1);
+    await vi.waitFor(
+      () => expect(roleRequests.filter((runId) => runId.startsWith("reflect-capability"))).toHaveLength(1),
+      { timeout: 5_000 },
+    );
 
     const advisory = await runtime.debug.runTurn(
       trail.trailId,
       "Delegate an advisory refinement attempt to a subagent.",
     );
     expect(advisory.output).toBe("The subagent could inspect but could not publish.");
-    const advisoryTurnId = advisory.frozenTurnPlan?.turnId;
-    if (!advisoryTurnId) throw new Error("Expected a frozen advisory turn plan");
-    const calls = await runtime.debug.workspace.operational.toolCalls.listForTurn(
-      trail.trailId,
-      advisoryTurnId,
+    const latestAgent = (await runtime.listSubAgents()).at(-1);
+    if (!latestAgent) throw new Error("Expected the advisory retained subagent");
+    const advisoryActions = (await runtime.getSubAgentTranscript(latestAgent.agentId)).filter(
+      (entry) => entry.kind === "action",
     );
-    expect(calls.map((call) => call.toolName)).toContain("capabilities.refine");
-    expect(calls.find((call) => call.toolName === "capabilities.refine")).toMatchObject({
+    expect(advisoryActions.find((call) => call.name === "capabilities.refine")).toMatchObject({
       status: "failed",
-      response: {
+      output: {
         error: "Subagents may inspect and advise, but cannot publish Capability changes",
       },
     });

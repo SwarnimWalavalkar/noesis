@@ -45,7 +45,10 @@ describe("built-in Noesis skill", () => {
       description: EXECUTE_BUILT_IN_SKILL.description,
       content: expect.stringContaining("noesis.search(query)"),
     });
-    expect(execute?.content).toContain("agents.run({ systemPrompt?, prompt, tools?, thinkingLevel? })");
+    expect(execute?.content).toContain(
+      "agents.spawn({ name?, systemPrompt?, prompt, tools?, thinkingLevel? })",
+    );
+    expect(execute?.content).toContain("agents.wait({ taskId, timeoutMs? })");
     expect(execute?.content).toContain("async JavaScript function body");
     expect(execute?.content).toContain("exact returned `definitionRevisionId`");
     const invocation = resolvePiSkillInvocation("/refine preserve this method", snapshot.skills);

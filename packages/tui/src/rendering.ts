@@ -1,16 +1,12 @@
 import { type Component, visibleWidth } from "@earendil-works/pi-tui";
-import { formatCount, summarizeAction } from "./action-summary.ts";
+import { formatCount } from "./action-summary.ts";
 import { renderRunInspectorFrame } from "./run-inspector.ts";
 import {
-  childActions,
   type ExecutionState,
   type NoesisTuiAction,
   type NoesisTuiState,
   reduceTui,
-  subAgentsForSurface,
-  type TuiAgentAction,
   type TuiContextUsage,
-  timelineActions,
 } from "./state.ts";
 import { ANSI, brandGradient, elideText, NOESIS_WORDMARK, safeTerminalText, styled } from "./theme.ts";
 import { NOESIS_STARTUP_NOTES } from "./startup-note.ts";
@@ -198,7 +194,9 @@ export function helpHint(state: NoesisTuiState): string {
   if (state.execution === "closing") return "closing session…";
   if (state.inspector)
     return `↑/↓ scroll · space ${state.inspector.view === "raw" ? "semantic" : "exact"} · esc close`;
-  if (state.actionCursor) return "↑/↓ scroll · space expand · enter inspect · esc leave · ctrl+c quit";
+  if (state.subAgentCursor) return "↑/↓ agents · enter inspect · tab transcript · esc leave · ctrl+c quit";
+  if (state.actionCursor)
+    return "↑/↓ transcript · space expand · enter inspect · tab subagents · esc leave · ctrl+c quit";
   if (state.interaction.phase !== "idle")
     return "enter queue · /steer redirect · alt+↑ edit newest · esc esc interrupt";
   if (state.execution === "compacting" && state.interaction.queuedInputs.length > 0)
@@ -261,66 +259,58 @@ export function notificationBadge(tone: "info" | "success" | "attention" | "lear
   return { glyph: "◆", color: ANSI.cyan };
 }
 
-const subagentStatusGlyph = (status: TuiAgentAction["status"]): string =>
-  status === "running" ? "●" : status === "completed" ? "✓" : status === "failed" ? "×" : "■";
+const subagentStatusGlyph = (status: NoesisTuiState["subAgents"][number]["status"]): string =>
+  status === "running" || status === "starting"
+    ? "●"
+    : status === "idle"
+      ? "✓"
+      : status === "closed"
+        ? "○"
+        : "■";
 
-const subagentStatusColor = (status: TuiAgentAction["status"]): string =>
-  status === "running"
+const subagentStatusColor = (status: NoesisTuiState["subAgents"][number]["status"]): string =>
+  status === "running" || status === "starting"
     ? ANSI.cyan
-    : status === "completed"
+    : status === "idle"
       ? ANSI.green
-      : status === "failed"
-        ? ANSI.red
+      : status === "closed"
+        ? ANSI.dim
         : ANSI.yellow;
 
 /** A footer-adjacent projection inspired by agent tabs/panels, never a second state authority. */
 export function renderSubagents(state: NoesisTuiState, width: number, height = 30): readonly string[] {
   const safeWidth = Math.max(0, Math.floor(width));
-  const subagents = subAgentsForSurface(state.timeline, state.actionCursor);
+  const subagents = state.subAgents;
   if (safeWidth <= 0 || subagents.length === 0 || height < 10) return [];
-  const actions = timelineActions(state.timeline);
-  const running = subagents.filter((action) => action.status === "running");
-  const failed = subagents.filter((action) => action.status === "failed");
-  const interrupted = subagents.filter(
-    (action) => action.status !== "running" && action.status !== "completed" && action.status !== "failed",
-  );
-  const completed = subagents.filter((action) => action.status === "completed");
+  const running = subagents.filter((agent) => agent.status === "running" || agent.status === "starting");
+  const idle = subagents.filter((agent) => agent.status === "idle");
+  const stopped = subagents.filter((agent) => agent.status === "suspended" || agent.status === "closed");
   const maximumRows = createTuiLayout(safeWidth, height).subagentRows;
-  const inspecting = state.actionCursor !== undefined;
-  const selected = inspecting
-    ? subagents.find((action) => action.actionId === state.actionCursor)
-    : undefined;
+  const inspecting = state.subAgentCursor !== undefined;
+  const selected = inspecting ? subagents.find((agent) => agent.agentId === state.subAgentCursor) : undefined;
   const priority = [
     ...(selected ? [selected] : []),
-    ...running.filter((action) => action.actionId !== selected?.actionId),
+    ...running.filter((agent) => agent.agentId !== selected?.agentId),
   ].slice(0, maximumRows);
-  const priorityIds = new Set(priority.map((action) => action.actionId));
+  const priorityIds = new Set(priority.map((agent) => agent.agentId));
   const additionalCapacity = Math.max(0, maximumRows - priority.length);
   const additional =
     !inspecting || additionalCapacity === 0
       ? []
-      : subagents.filter((action) => !priorityIds.has(action.actionId)).slice(-additionalCapacity);
-  const shownIds = new Set([...priority, ...additional].map((action) => action.actionId));
+      : subagents.filter((agent) => !priorityIds.has(agent.agentId)).slice(-additionalCapacity);
+  const shownIds = new Set([...priority, ...additional].map((agent) => agent.agentId));
   const candidates = inspecting ? subagents : running;
-  const shown = candidates.filter((action) => shownIds.has(action.actionId));
+  const shown = candidates.filter((agent) => shownIds.has(agent.agentId));
   const hidden = candidates.length - shown.length;
   const collapsed = inspecting ? 0 : subagents.length - running.length;
-  const headerColor =
-    running.length > 0
-      ? ANSI.cyan
-      : failed.length > 0
-        ? ANSI.red
-        : interrupted.length > 0
-          ? ANSI.yellow
-          : ANSI.green;
+  const headerColor = running.length > 0 ? ANSI.cyan : stopped.length > 0 ? ANSI.yellow : ANSI.green;
   const headerStatus = [
     ...(running.length > 0 ? [formatCount(running.length, "running subagent")] : []),
-    ...(failed.length > 0 ? [formatCount(failed.length, "failed subagent")] : []),
-    ...(interrupted.length > 0 ? [formatCount(interrupted.length, "stopped subagent")] : []),
-    ...(completed.length > 0 ? [formatCount(completed.length, "completed subagent")] : []),
+    ...(idle.length > 0 ? [formatCount(idle.length, "idle subagent")] : []),
+    ...(stopped.length > 0 ? [formatCount(stopped.length, "stopped subagent")] : []),
   ].join(" · ");
   const headerHint = inspecting
-    ? "space expand · enter inspect"
+    ? "enter inspect · tab transcript"
     : collapsed > 0
       ? "ctrl+o expand"
       : "ctrl+o inspect";
@@ -329,23 +319,27 @@ export function renderSubagents(state: NoesisTuiState, width: number, height = 3
       `${styled(state.colorEnabled, `${ANSI.bold}${headerColor}`, `SUBAGENTS · ${String(subagents.length)}`)}${headerStatus ? `  ${styled(state.colorEnabled, ANSI.dim, `${headerStatus} · ${headerHint}`)}` : ""}`,
       safeWidth,
     ),
-    ...shown.map((action, index) => {
-      const summary = summarizeAction(action, childActions(actions, action.actionId));
-      const selected = state.actionCursor === action.actionId;
-      const subject = safeTerminalText(summary.subject ?? `Subagent ${String(index + 1)}`)
+    ...shown.map((agent, index) => {
+      const selected = state.subAgentCursor === agent.agentId;
+      const subject = safeTerminalText(agent.name ?? `Subagent ${String(index + 1)}`)
         .replaceAll(/\s+/gu, " ")
         .trim();
-      const outcome = [action.status === "running" ? "running" : undefined, summary.outcome]
+      const outcome = [
+        agent.status,
+        state.subAgentPhases[agent.agentId],
+        agent.latestTaskStatus === agent.status ? undefined : agent.latestTaskStatus,
+        `${agent.route.provider}/${agent.route.model}`,
+      ]
         .filter((part): part is string => Boolean(part))
         .join(" · ");
       // The glyph character stays stable; only its intensity breathes while work is live.
       const pulseDim =
-        action.status === "running" &&
+        (agent.status === "running" || agent.status === "starting") &&
         isWorkingExecution(state.execution) &&
         isPulseDimFrame(state.animationFrame);
-      const glyphStyle = `${pulseDim ? ANSI.dim : ANSI.bold}${subagentStatusColor(action.status)}`;
+      const glyphStyle = `${pulseDim ? ANSI.dim : ANSI.bold}${subagentStatusColor(agent.status)}`;
       return elideText(
-        `${selected ? "▸" : " "} ${styled(state.colorEnabled, glyphStyle, subagentStatusGlyph(action.status))} ${styled(state.colorEnabled, selected ? `${ANSI.bold}${ANSI.underline}` : "", subject)}${outcome ? `  ${styled(state.colorEnabled, ANSI.dim, outcome)}` : ""}`,
+        `${selected ? "▸" : " "} ${styled(state.colorEnabled, glyphStyle, subagentStatusGlyph(agent.status))} ${styled(state.colorEnabled, selected ? `${ANSI.bold}${ANSI.underline}` : "", subject)}${outcome ? `  ${styled(state.colorEnabled, ANSI.dim, outcome)}` : ""}`,
         safeWidth,
       );
     }),

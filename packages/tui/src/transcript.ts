@@ -1,16 +1,9 @@
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { isJsonObject, type JsonValue } from "@noesis/domain";
-import {
-  EXECUTE_ACTION_NAME,
-  formatCount,
-  sourceOf,
-  SUBAGENT_ACTION_NAME,
-  summarizeAction,
-} from "./action-summary.ts";
+import { EXECUTE_ACTION_NAME, formatCount, sourceOf, summarizeAction } from "./action-summary.ts";
 import { renderRichText } from "./rich-text.ts";
 import {
   childActions,
-  isSubAgentChildAction,
   type NoesisTuiState,
   type TuiAgentAction,
   type TuiMessage,
@@ -137,29 +130,6 @@ function actionDetailSource(action: TuiAgentAction): string {
   ].join("\n\n");
 }
 
-function subagentCallLines(
-  action: TuiAgentAction,
-  actions: readonly TuiAgentAction[],
-  colorEnabled: boolean,
-): readonly string[] {
-  if (action.name !== SUBAGENT_ACTION_NAME) return [];
-  const children = childActions(actions, action.actionId);
-  return [
-    styled(
-      colorEnabled,
-      ANSI.bold,
-      `calls · ${formatCount(children.length, "tool call")}${children.length > 0 ? " · enter for full inspector" : ""}`,
-    ),
-    ...(children.length === 0
-      ? [styled(colorEnabled, ANSI.dim, "No tool calls")]
-      : children.map((child) => {
-          const summary = summarizeAction(child, childActions(actions, child.actionId));
-          const trailing = [summary.subject, summary.outcome].filter((part): part is string => Boolean(part));
-          return `${styled(colorEnabled, `${ANSI.bold}${statusColor(child.status)}`, statusGlyph(child.status))} ${styled(colorEnabled, ANSI.bold, summary.name)}${trailing.length > 0 ? `  ${styled(colorEnabled, ANSI.dim, trailing.join(" · "))}` : ""}`;
-        })),
-  ];
-}
-
 export function actionDepth(action: TuiAgentAction, actions: readonly TuiAgentAction[]): number {
   let depth = 0;
   let parentId = action.parentActionId;
@@ -260,8 +230,7 @@ export function renderAgentActionBlock(
     : actionDetailSource(action)
         .split("\n")
         .flatMap((line) => wrapTextWithAnsi(line, bodyWidth));
-  const calls = subagentCallLines(action, actions, colorEnabled);
-  const body = [...calls, ...(calls.length > 0 && payloadBody.length > 0 ? [""] : []), ...payloadBody];
+  const body = payloadBody;
   const budget = options.maxBodyRows ?? DEFAULT_EXPANDED_BODY_ROWS;
   const shown = body.length > budget ? body.slice(0, Math.max(1, budget - 1)) : body;
   const overflow =
@@ -392,10 +361,7 @@ export function createTranscriptRenderer(): TranscriptRenderer {
     readonly lines: readonly string[];
   }[] => {
     const actions = timelineActions(state.timeline);
-    const visibleTimeline = state.timeline.filter(
-      (entry) => entry.kind !== "action" || !isSubAgentChildAction(entry, actions),
-    );
-    return visibleTimeline.map((entry, index) => {
+    return state.timeline.map((entry, index) => {
       // Nested codemode calls read as a list under their parent, so they are not separated.
       const separated = index > 0 && !(entry.kind === "action" && entry.parentActionId);
       return {

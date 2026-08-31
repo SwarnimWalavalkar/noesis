@@ -2,9 +2,12 @@ import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import type {
   AgentActionEvent,
+  AgentAddress,
   AgentMessage,
   AgentRuntimeEvent,
+  AgentUsage,
   FrozenBaselineRef,
+  FrozenSubAgentPlan,
   FrozenTurnPlan,
   NoesisAgentRuntime,
   ScriptProgramManifest as ScriptManifest,
@@ -16,6 +19,8 @@ import {
   renderFrozenConversationHistoryContent,
   ScriptProgramManifestSchema as ScriptManifestSchema,
   WorkflowProgramManifestSchema as WorkflowManifestSchema,
+  frozenSubAgentPlanDigest,
+  frozenTurnPlanDigest,
 } from "@noesis/agent-types";
 import { createAtomicCapabilityRegistry, createWorkspaceCapabilityControlStore } from "@noesis/capabilities";
 import {
@@ -78,6 +83,7 @@ import {
   createTurnIntelligencePlanner,
   createTurnInteractionController,
   createTurnSettlement,
+  createSubAgentSupervisor,
   DEFAULT_CONTEXT_TOKEN_BUDGET,
   DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS,
   estimateContextTokens,
@@ -95,20 +101,20 @@ import {
   type TurnCapabilityRoutingRequest,
   type TurnResult,
   serializeCompactionWindow,
+  type SubAgentSupervisor,
+  type SubAgentTaskExecutionPort,
   type SessionContextMessage,
 } from "@noesis/runtime";
 import {
   createRestrictedRoleContextPolicy,
   createStructuredInferencePort,
-  isAmbiguousSubAgentOutcomeError,
   type FrozenSessionToolResolver,
-  type FrozenSubAgentRunPlan,
   frozenPlanMaterialUses,
+  FOREGROUND_DIRECT_TOOL_NAMES,
   PI_SUBAGENT_SYSTEM_PROMPT,
   type PiCodeExecutionAdapter,
   type PiCodeExecutionEvent,
-  type PiSubAgentRunTelemetry,
-  type PiSubAgentRunner,
+  type PiSubAgentTaskRunner,
   type PiSkillLibrary,
   type PiSkillSnapshot,
   type RoleVariantConfiguration,
@@ -135,9 +141,12 @@ import type {
 import {
   createWorkspaceStore,
   type CodeExecutionRecord,
+  type AgentMailboxMessageRecord,
   type MessageRecord,
   type NoesisWorkspaceStore,
   type OutcomeRecord,
+  type SubAgentRecord,
+  type SubAgentTaskRecord,
   type WorkflowRunRecord,
 } from "@noesis/workspace";
 import { z } from "zod";
@@ -828,7 +837,7 @@ export interface ApplicationRuntimeCompositionOptions {
   readonly createRoleRunner: (
     configurations: readonly RoleVariantConfiguration[],
   ) => RuntimePiAgentRoleRunner;
-  readonly subAgent?: PiSubAgentRunner;
+  readonly subAgentTaskRunner?: PiSubAgentTaskRunner;
   readonly resolveModelContext?: (
     provider: string,
     model: string,
@@ -1875,12 +1884,20 @@ export async function createApplicationRuntimeComposition(
   >();
   const directActionTimelines = new Map<string, number>();
   const adapterOwnedNestedActionIds = new Set<string>();
+  const topLevelAgentActionIds = new Set<string>();
   const recordToolInvocation = async (record: ToolInvocationRecord): Promise<void> => {
     const binding = nestedActionBindings.get(record.callId);
+    const directExecutionPrefix = "direct:";
+    const directTaskId = record.executionId.startsWith(directExecutionPrefix)
+      ? record.executionId.slice(directExecutionPrefix.length)
+      : undefined;
     const directInvocation =
-      record.turnId !== undefined &&
-      (record.executionId === `direct:${record.turnId}` ||
-        record.executionId.startsWith(`direct:${record.turnId}:`));
+      (record.turnId !== undefined &&
+        (record.executionId === `direct:${record.turnId}` ||
+          record.executionId.startsWith(`direct:${record.turnId}:`))) ||
+      (record.turnId === undefined &&
+        directTaskId !== undefined &&
+        record.callId.startsWith(`${directTaskId}:direct:`));
     const directTimelineSequence = directInvocation ? directActionTimelines.get(record.callId) : undefined;
     await binding?.parentReady;
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -1926,7 +1943,7 @@ export async function createApplicationRuntimeComposition(
         } as const)
         .addOptional(record.completedAt ? { completedAt: record.completedAt } : undefined)
         .addOptional(
-          binding?.timelineSequence !== undefined
+          binding?.timelineSequence !== undefined && record.turnId !== undefined
             ? { timelineSequence: binding.timelineSequence }
             : directTimelineSequence === undefined
               ? undefined
@@ -2037,10 +2054,14 @@ export async function createApplicationRuntimeComposition(
   };
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const durableActionEvent = (turnId: string, event: AgentActionEvent): AgentActionEvent => {
+    const actionKey = `${turnId}\0${event.actionId}`;
+    if (event.type === "tool-start" && !event.parentActionId) topLevelAgentActionIds.add(actionKey);
     const brokerParent = event.parentActionId !== undefined && nestedActionBindings.has(event.parentActionId);
+    const providerParent =
+      event.parentActionId !== undefined && topLevelAgentActionIds.has(`${turnId}\0${event.parentActionId}`);
     if (event.type === "tool-start" && event.parentActionId && !event.recordedByBroker && brokerParent)
       adapterOwnedNestedActionIds.add(event.actionId);
-    return Object.freeze(
+    const durable = Object.freeze(
       createConditionalObject({
         ...event,
         actionId: event.parentActionId ? event.actionId : `${turnId}:${event.actionId}`,
@@ -2049,7 +2070,7 @@ export async function createApplicationRuntimeComposition(
           event.parentActionId
             ? {
                 parentActionId:
-                  event.recordedByBroker || brokerParent
+                  !providerParent && (event.recordedByBroker || brokerParent)
                     ? event.parentActionId
                     : `${turnId}:${event.parentActionId}`,
               }
@@ -2057,7 +2078,10 @@ export async function createApplicationRuntimeComposition(
         )
         .finish(),
     );
+    if (event.type === "tool-end" && !event.parentActionId) topLevelAgentActionIds.delete(actionKey);
+    return durable;
   };
+  let subAgentSupervisor: SubAgentSupervisor | undefined;
   const prepareCodeExecution: PiCodeExecutionAdapter["prepare"] = async (plan, signal, resources) => {
     if (!plan.project || plan.project.projectId !== project.projectId || plan.project.root !== project.root)
       throw new Error(`Frozen turn plan ${plan.planId} does not belong to project ${project.projectId}`);
@@ -2598,13 +2622,14 @@ export async function createApplicationRuntimeComposition(
           const source = decoder.decode(await workspace.reads.readRevision(manifest.sourceRevision));
           if (!runRecordedCode) throw new Error("Script runtime is not initialized");
           const result = await runRecordedCode(
-            {
+            createConditionalObject({
               source,
               input,
               sessionId: plan.sessionId,
-              turnId: plan.turnId,
               signal: context.signal,
-            },
+            } as const)
+              .addOptional(!plan.subAgentActor ? { turnId: plan.turnId } : undefined)
+              .finish(),
             context.parentExecutionId,
             undefined,
             undefined,
@@ -2817,13 +2842,14 @@ export async function createApplicationRuntimeComposition(
                       throw new Error(`Script revision requires unavailable tool ${requiredTool}`);
                   const source = decoder.decode(await workspace.reads.readRevision(manifest.sourceRevision));
                   const result = await runRecordedCode(
-                    {
+                    createConditionalObject({
                       source,
                       input: inputAdapter.unwrap(JsonValueSchema.parse(input)),
                       sessionId: plan.sessionId,
-                      turnId: plan.turnId,
                       signal: context.signal,
-                    },
+                    } as const)
+                      .addOptional(!plan.subAgentActor ? { turnId: plan.turnId } : undefined)
+                      .finish(),
                     context.parentExecutionId,
                     undefined,
                     undefined,
@@ -2959,6 +2985,7 @@ export async function createApplicationRuntimeComposition(
       z.array(subAgentPromptPartSchema).min(1),
     ]);
     const subAgentInputSchema = z.strictObject({
+      name: z.string().trim().min(1).max(128).optional(),
       systemPrompt: z.string().trim().min(1).optional(),
       prompt: subAgentPromptSchema,
       tools: z.array(z.string().trim().min(1).max(256)).optional(),
@@ -2969,82 +2996,203 @@ export async function createApplicationRuntimeComposition(
       value: z.infer<typeof subAgentPromptSchema>,
     ): readonly SubAgentPromptPart[] => Object.freeze(Array.isArray(value) ? value : [value]);
     let preparedForSubAgents: Awaited<ReturnType<PiCodeExecutionAdapter["prepare"]>> | undefined;
-    const agentsRunTool = defineTool({
-      name: "agents.run",
-      label: "Run subagent",
+    const agentAddressSchema = z.discriminatedUnion("kind", [
+      z.strictObject({ kind: z.literal("foreground"), id: z.string().min(1) }),
+      z.strictObject({ kind: z.literal("subagent"), id: z.string().min(1) }),
+    ]);
+    const subAgentTaskResultSchema = z.strictObject({
+      taskId: z.string(),
+      agentId: z.string(),
+      status: z.enum(["pending", "running", "completed", "failed", "cancelled", "interrupted"]),
+      result: z.string().nullable(),
+      error: z.string().nullable(),
+      usage: z
+        .strictObject({
+          inputTokens: z.number().int().nonnegative(),
+          outputTokens: z.number().int().nonnegative(),
+          totalTokens: z.number().int().nonnegative(),
+          estimatedCost: z.number().nonnegative(),
+        })
+        .nullable(),
+      startedAt: z.string().nullable(),
+      completedAt: z.string().nullable(),
+    });
+    const subAgentSummarySchema = z.strictObject({
+      agentId: z.string(),
+      childSessionId: z.string(),
+      projectId: z.string(),
+      originSessionId: z.string(),
+      parentAgentId: z.string().nullable(),
+      name: z.string().nullable(),
+      status: z.enum(["starting", "running", "idle", "suspended", "closed"]),
+      route: z.strictObject({ provider: z.string(), model: z.string() }),
+      thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+      activeTaskId: z.string().nullable(),
+      latestTaskId: z.string().nullable(),
+      latestTaskStatus: z
+        .enum(["pending", "running", "completed", "failed", "cancelled", "interrupted"])
+        .nullable(),
+      latestActivity: z.string().nullable(),
+      createdAt: z.string(),
+      updatedAt: z.string(),
+    });
+    const subAgentTaskResultOutput = (task: import("@noesis/agent-types").SubAgentTaskResult) => ({
+      taskId: task.taskId,
+      agentId: task.agentId,
+      status: task.status,
+      result: task.result ?? null,
+      error: task.error ?? null,
+      usage: task.usage
+        ? {
+            inputTokens: task.usage.inputTokens,
+            outputTokens: task.usage.outputTokens,
+            totalTokens: task.usage.totalTokens,
+            estimatedCost: task.usage.estimatedCost,
+          }
+        : null,
+      startedAt: task.startedAt ?? null,
+      completedAt: task.completedAt ?? null,
+    });
+    const subAgentSummaryOutput = (agent: import("@noesis/agent-types").SubAgentSummary) => ({
+      agentId: agent.agentId,
+      childSessionId: agent.childSessionId,
+      projectId: agent.projectId,
+      originSessionId: agent.originSessionId,
+      parentAgentId: agent.parentAgentId ?? null,
+      name: agent.name ?? null,
+      status: agent.status,
+      route: agent.route,
+      thinkingLevel: agent.thinkingLevel,
+      activeTaskId: agent.activeTaskId ?? null,
+      latestTaskId: agent.latestTaskId ?? null,
+      latestTaskStatus: agent.latestTaskStatus ?? null,
+      latestActivity: agent.latestActivity ?? null,
+      createdAt: agent.createdAt,
+      updatedAt: agent.updatedAt,
+    });
+    const currentAgentAddress = (): AgentAddress =>
+      plan.subAgentActor
+        ? Object.freeze({ kind: "subagent" as const, id: plan.subAgentActor.agentId })
+        : Object.freeze({ kind: "foreground" as const, id: plan.sessionId });
+    const parentAgentAddress = (): AgentAddress | undefined =>
+      plan.subAgentActor ? Object.freeze({ ...plan.subAgentActor.parent }) : undefined;
+    const visibleSubAgents = (
+      agents: readonly import("@noesis/agent-types").SubAgentSummary[],
+    ): readonly import("@noesis/agent-types").SubAgentSummary[] => {
+      if (!plan.subAgentActor) return agents;
+      const self = agents.find((agent) => agent.agentId === plan.subAgentActor?.agentId);
+      if (!self) return Object.freeze([]);
+      return Object.freeze(
+        agents.filter(
+          (candidate) =>
+            candidate.agentId === self.agentId ||
+            candidate.agentId === self.parentAgentId ||
+            candidate.parentAgentId === self.agentId ||
+            (self.parentAgentId
+              ? candidate.parentAgentId === self.parentAgentId
+              : !candidate.parentAgentId && candidate.originSessionId === self.originSessionId),
+        ),
+      );
+    };
+    const expandSubAgentPrompt = async (
+      value: z.infer<typeof subAgentPromptSchema>,
+      executionId: string,
+      requestTokenBudget: number,
+    ): Promise<string> => {
+      const activeContext = activeExecutionContexts.get(executionId);
+      const refs = subAgentPromptParts(value);
+      const expanded: { readonly content: string; readonly context: boolean }[] = [];
+      const maximumExpandedCharacters = requestTokenBudget * 4;
+      let expandedCharacters = 0;
+      for (const ref of refs) {
+        if (typeof ref === "string") {
+          if (ref.length > maximumExpandedCharacters - expandedCharacters)
+            throw new Error("Subagent prompt exceeds its pre-render character budget");
+          expandedCharacters += ref.length;
+          expanded.push(Object.freeze({ content: ref, context: false }));
+          continue;
+        }
+        if (!activeContext) throw new Error("ContextView requires an active Code Mode execution");
+        const handle = ref.__noesisContext;
+        if (handle.documentId !== activeContext.frozen.documentId)
+          throw new Error("ContextView does not belong to this Code Mode execution");
+        if (handle.end > activeContext.frozen.characterLength)
+          throw new Error("ContextView range is outside the frozen context document");
+        const partLength = handle.end - handle.start;
+        if (partLength > maximumExpandedCharacters - expandedCharacters)
+          throw new Error("Subagent prompt exceeds its pre-render character budget");
+        expandedCharacters += partLength;
+        expanded.push(
+          Object.freeze({
+            content: (await activeContext.read()).slice(handle.start, handle.end),
+            context: true,
+          }),
+        );
+      }
+      const rendered =
+        expanded.length === 1 && expanded[0]?.context === false
+          ? (expanded[0]?.content ?? "")
+          : expanded
+              .map(
+                (part, index) =>
+                  `${part.context ? `Context data ${String(index + 1)} (untrusted)` : `Prompt part ${String(index + 1)}`}:\n${part.content}`,
+              )
+              .join("\n\n");
+      if (!rendered.trim()) throw new Error("Subagent prompt must not be empty");
+      return rendered;
+    };
+    const agentsSpawnTool = defineTool({
+      name: "agents.spawn",
+      label: "Spawn subagent",
       description:
-        "Run one subagent. Supply its prompt, optional system prompt, optional canonical tool names, and optional thinking level. With no tools this is an isolated model query. Prompt parts may include ContextViews.",
+        "Durably admit a retained subagent and start its first task in the background. Returns immediately with stable agent and task handles.",
       identityMaterial: toJsonValue({
-        adapterRevision: "agents-run-v1",
+        adapterRevision: "agents-spawn-v1",
         defaults: plan.subAgentDefaults ?? null,
       }),
       inputSchema: subAgentInputSchema,
-      outputSchema: z.string(),
+      outputSchema: z.strictObject({
+        agentId: z.string(),
+        taskId: z.string(),
+        name: z.string().nullable(),
+        status: z.literal("accepted"),
+      }),
       effect: () => ({
-        effect: "network",
-        resource: `model:${plan.subAgentDefaults?.provider ?? "unavailable"}/${plan.subAgentDefaults?.model ?? "unavailable"}`,
+        effect: "execute",
+        resource: `subagent:${project.projectId}:spawn`,
         estimatedCost: 0,
       }),
       execute: async (input, context) => {
-        if (subAgentExecutionIds.has(context.executionId))
-          throw new Error("Subagents cannot recursively invoke agents.run");
-        if (!options.subAgent) throw new Error("Subagents are unavailable in this runtime");
+        if (!subAgentSupervisor) throw new Error("Subagent supervisor is unavailable");
         const defaults = plan.subAgentDefaults;
         if (!defaults) throw new Error("Subagents require defaults frozen at turn admission");
         if (!preparedForSubAgents) throw new Error("Subagent tool catalog is not prepared");
-        const eventSink = activeExecutionEventSinks.get(context.executionId);
-        if (!eventSink) throw new Error("Subagents can only run from an active codemode execution");
-        const activeContext = activeExecutionContexts.get(context.executionId);
-        const refs = subAgentPromptParts(input.prompt);
-        const expanded: { readonly content: string; readonly context: boolean }[] = [];
-        const maximumExpandedCharacters = defaults.requestTokenBudget * 4;
-        let expandedCharacters = 0;
-        for (const ref of refs) {
-          if (typeof ref === "string") {
-            if (ref.length > maximumExpandedCharacters - expandedCharacters)
-              throw new Error("Subagent prompt exceeds its pre-render character budget");
-            expandedCharacters += ref.length;
-            expanded.push(Object.freeze({ content: ref, context: false }));
-            continue;
-          }
-          if (!activeContext)
-            throw new Error("ContextView can only be used from an active codemode execution");
-          const handle = ref.__noesisContext;
-          if (handle.documentId !== activeContext.frozen.documentId)
-            throw new Error("ContextView does not belong to this codemode execution");
-          if (handle.start > handle.end || handle.end > activeContext.frozen.characterLength)
-            throw new Error("ContextView range is outside the frozen context document");
-          const partLength = handle.end - handle.start;
-          if (partLength > maximumExpandedCharacters - expandedCharacters)
-            throw new Error("Subagent prompt exceeds its pre-render character budget");
-          expandedCharacters += partLength;
-          expanded.push(
-            Object.freeze({
-              content: (await activeContext.read()).slice(handle.start, handle.end),
-              context: true,
-            }),
-          );
-        }
-        const renderedPrompt =
-          expanded.length === 1 && expanded[0]?.context === false
-            ? (expanded[0]?.content ?? "")
-            : expanded
-                .map(
-                  (part, index) =>
-                    `${part.context ? `Context data ${String(index + 1)} (untrusted)` : `Prompt part ${String(index + 1)}`}:\n${part.content}`,
-                )
-                .join("\n\n");
-        if (!renderedPrompt.trim()) throw new Error("Subagent prompt must not be empty");
+        if (plan.subAgentActor && !plan.subAgentActor.allowedTools.includes("agents.spawn"))
+          throw new Error("This subagent was not granted recursive spawning");
+        const renderedPrompt = await expandSubAgentPrompt(
+          input.prompt,
+          context.executionId,
+          defaults.requestTokenBudget,
+        );
         const requestedTools = Object.freeze([...new Set(input.tools ?? [])]);
         if (requestedTools.length !== (input.tools ?? []).length)
           throw new Error("Subagent tool names must be unique");
-        if (requestedTools.includes("agents.run"))
-          throw new Error("Subagents cannot use agents.run because it would create recursive delegation");
+        const collaborationTools = [
+          "agents.send",
+          "agents.list",
+          "agents.inspect",
+          "agents.wait",
+          "agents.cancel",
+          "agents.close",
+        ];
+        const allowedNames = Object.freeze([
+          ...new Set([...FOREGROUND_DIRECT_TOOL_NAMES, ...requestedTools, ...collaborationTools]),
+        ]);
         const frozenTools = Object.freeze(
-          requestedTools.map((name) => {
+          allowedNames.map((name) => {
             const descriptor = preparedForSubAgents?.catalog.tools.find((tool) => tool.name === name);
             if (!descriptor) throw new Error(`Subagent tool is unavailable in this turn: ${name}`);
-            return descriptor;
+            return Object.freeze({ ...descriptor });
           }),
         );
         const thinkingLevel = input.thinkingLevel ?? defaults.thinkingLevel;
@@ -3059,200 +3207,258 @@ export async function createApplicationRuntimeComposition(
           throw new Error(
             `Subagent exceeds its frozen request token budget of ${String(defaults.requestTokenBudget)} tokens`,
           );
-        const frozenRunPlan: FrozenSubAgentRunPlan = Object.freeze(
+        const agentId = createId("subagent");
+        const taskId = createId("subagent_task");
+        const childSessionId = createId("session");
+        const createdAt = new Date().toISOString();
+        const originParent = parentAgentAddress();
+        const origin = Object.freeze(
           createConditionalObject({
-            runId: context.callId,
-            systemPrompt: renderedSystemPrompt,
-            prompt: renderedPrompt,
-            tools: requestedTools,
-            thinkingLevel,
-            route: Object.freeze({ provider: defaults.provider, model: defaults.model }),
-            frozenTools,
-            authority: Object.freeze({
-              parentExecutionId: context.executionId,
-              parentToolCallId: context.callId,
-            }),
-            budget: Object.freeze({
-              requestTokenBudget: defaults.requestTokenBudget,
-            }),
-          } as const).finish(),
+            projectId: project.projectId,
+            sessionId: plan.sessionId,
+            turnId: plan.turnId,
+            executionId: context.executionId,
+          } as const)
+            .addOptional(plan.subAgentActor ? { parentAgentId: plan.subAgentActor.agentId } : undefined)
+            .finish(),
         );
-        const startedAt = new Date().toISOString();
-        const artifactDirectory = `model-calls/${sha256(context.callId).slice(0, 32)}`;
+        const unsignedPlan = Object.freeze(
+          createConditionalObject({
+            schemaVersion: 1 as const,
+            agentId,
+            childSessionId,
+            origin,
+            route: Object.freeze({ provider: defaults.provider, model: defaults.model }),
+            thinkingLevel,
+            renderedSystemPrompt,
+            frozenTools,
+            executionTemplate: plan,
+            authority: Object.freeze({ permissionSnapshot: plan.permissionSnapshot }),
+            requestTokenBudget: defaults.requestTokenBudget,
+            createdAt,
+          } as const)
+            .addOptional(plan.contextDocument ? { context: plan.contextDocument } : undefined)
+            .finish(),
+        );
+        const frozenPlan: FrozenSubAgentPlan = Object.freeze({
+          ...unsignedPlan,
+          canonicalDigest: frozenSubAgentPlanDigest(unsignedPlan),
+        });
+        const artifactDirectory = `subagents/${sha256(agentId).slice(0, 32)}`;
         const actor = Object.freeze({ actorId: "noesis-subagent", kind: "noesis" as const });
         const relationshipRefs = Object.freeze([foregroundEvidence(plan)]);
-        const requestArtifact = await workspace.artifacts.writeArtifact({
-          path: `${artifactDirectory}/request.json`,
+        const planArtifact = await workspace.artifacts.writeArtifact({
+          path: `${artifactDirectory}/plan.json`,
           mediaType: "application/json",
-          bytes: encoder.encode(
-            canonicalJson({
-              schemaVersion: 1,
-              intent: input,
-              frozenRunPlan,
-              contextDocumentId: activeContext?.frozen.documentId ?? null,
-            }),
-          ),
+          bytes: encoder.encode(canonicalJson(frozenPlan)),
           actor,
           relationshipRefs,
         });
-        const base = Object.freeze(
+        const sender = currentAgentAddress();
+        const messageId = createId("agent_message");
+        const agent: SubAgentRecord = Object.freeze(
           createConditionalObject({
-            modelCallId: context.callId,
-            parentExecutionId: context.executionId,
-            sessionId: plan.sessionId,
-            turnId: plan.turnId,
-          } as const)
-            .addOptional(
-              activeContext ? { contextArtifactId: activeContext.frozen.artifact.artifactId } : undefined,
-            )
-            .add({
-              requestArtifactId: requestArtifact.artifactId,
-              provider: defaults.provider,
-              model: defaults.model,
-              thinkingLevel,
-              contextRefs: Object.freeze(
-                refs.map((ref) =>
-                  typeof ref === "string"
-                    ? ref
-                    : Object.freeze({ __noesisContext: Object.freeze({ ...ref.__noesisContext }) }),
-                ),
-              ),
-              startedAt,
-            } as const)
+            agentId,
+            childSessionId,
+            projectId: project.projectId,
+            originSessionId: plan.sessionId,
+            originTurnId: plan.turnId,
+            originExecutionId: context.executionId,
+            status: "starting" as const,
+            frozenPlan,
+            frozenPlanArtifactId: planArtifact.artifactId,
+            createdAt,
+            updatedAt: createdAt,
+          })
+            .addOptional(plan.subAgentActor ? { parentAgentId: plan.subAgentActor.agentId } : undefined)
+            .addOptional(input.name ? { name: input.name } : undefined)
             .finish(),
         );
-        await workspace.operational.modelCalls.put({ ...base, status: "running" });
-        const started = Date.now();
-        let latestTelemetry: PiSubAgentRunTelemetry | undefined;
-        try {
-          context.emitUpdate?.(
-            toJsonValue({
-              phase: "running",
-              runId: context.callId,
-              provider: defaults.provider,
-              model: defaults.model,
-              thinkingLevel,
-              tools: requestedTools,
-            }),
-          );
-          const result = await options.subAgent.run({
-            plan: frozenRunPlan,
-            prepared: preparedForSubAgents,
-            turnId: plan.turnId,
-            signal: context.signal,
-            authorizeModelCall: async (modelCall) => {
-              const resource = `model:${defaults.provider}/${defaults.model}`;
-              const estimatedCost = 1;
-              const idempotencyKey = `subagent:${context.callId}:model-call:${String(modelCall)}`;
-              const requestDigest = sha256(
-                canonicalJson({
-                  principal: "foreground",
-                  effect: "network",
-                  resource,
-                  estimatedCost,
-                }),
-              );
-              const completion = Promise.withResolvers<
-                { readonly ok: true } | { readonly ok: false; readonly reason: string }
-              >();
-              const admitted = Promise.withResolvers<void>();
-              const decision = authority.runForeground(
-                {
-                  operationId: `operation_${sha256(canonicalJson({ idempotencyKey, requestDigest }))}`,
-                  effect: "network",
-                  resource,
-                  estimatedCost,
-                  idempotencyKey,
-                  requestDigest,
-                  execute: async () => {
-                    admitted.resolve();
-                    const outcome = await completion.promise;
-                    if (!outcome.ok) throw new Error(outcome.reason);
-                    return null;
-                  },
-                },
-                plan.permissionSnapshot,
-              );
-              const admission = await Promise.race([
-                admitted.promise.then(() => Object.freeze({ ok: true as const })),
-                decision.then((result) =>
-                  result.ok
-                    ? Object.freeze({
-                        ok: false as const,
-                        reason: "Model-call reservation settled before admission",
-                      })
-                    : Object.freeze({ ok: false as const, reason: result.reason }),
-                ),
-              ]);
-              if (!admission.ok) throw new Error(admission.reason);
-              let settled = false;
-              const settle = async (
-                outcome: { readonly ok: true } | { readonly ok: false; readonly reason: string },
-              ): Promise<void> => {
-                if (settled) return;
-                settled = true;
-                completion.resolve(outcome);
-                const result = await decision;
-                if (outcome.ok && !result.ok) throw new Error(result.reason);
-              };
-              return Object.freeze({
-                complete: async () => await settle(Object.freeze({ ok: true as const })),
-                fail: async (reason: string) => await settle(Object.freeze({ ok: false as const, reason })),
-              });
-            },
-            emit: (event, parentToolCallId, recordedByBroker) => {
-              if (event.type === "tool-start" && recordedByBroker) {
-                nestedActionBindings.set(
-                  event.callId,
-                  Object.freeze({
-                    parentToolCallId,
-                    parentReady: Promise.resolve(),
-                  }),
-                );
-              }
-              eventSink(event, parentToolCallId, recordedByBroker);
-            },
-            onTelemetry: (telemetry) => {
-              latestTelemetry = telemetry;
-            },
-          });
-          if (result.provider !== defaults.provider || result.model !== defaults.model)
-            throw new Error("Subagent returned on a route other than its frozen route");
-          const outputArtifact = await workspace.artifacts.writeArtifact({
-            path: `${artifactDirectory}/output.txt`,
-            mediaType: "text/plain",
-            bytes: encoder.encode(result.text),
-            actor,
-            relationshipRefs,
-          });
-          await workspace.operational.modelCalls.put({
-            ...base,
-            outputArtifactId: outputArtifact.artifactId,
-            status: "completed",
-            usage: result.usage,
-            latencyMs: Date.now() - started,
-            completedAt: new Date().toISOString(),
-          });
-          return result.text;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          await workspace.operational.modelCalls.put(
-            createConditionalObject({
-              ...base,
-              status: isAmbiguousSubAgentOutcomeError(error)
-                ? "interrupted"
-                : context.signal.aborted
-                  ? "cancelled"
-                  : "failed",
-              latencyMs: Date.now() - started,
-              error: message,
-              completedAt: new Date().toISOString(),
-            } as const)
-              .addOptional(latestTelemetry ? { usage: latestTelemetry.usage } : undefined)
-              .finish(),
-          );
-          throw error;
+        const task: SubAgentTaskRecord = Object.freeze({
+          taskId,
+          agentId,
+          triggerMessageId: messageId,
+          status: "pending",
+          createdAt,
+        });
+        const message: AgentMailboxMessageRecord = Object.freeze({
+          messageId,
+          projectId: project.projectId,
+          sender,
+          recipient: Object.freeze({ kind: "subagent", id: agentId }),
+          content: renderedPrompt,
+          sensitivity: "normal",
+          status: "accepted",
+          sequence: 1,
+          taskId,
+          createdAt,
+        });
+        const childSession = Object.freeze({
+          sessionId: childSessionId,
+          parentSessionId: plan.sessionId,
+          title: input.name ?? `Subagent ${agentId.slice(-8)}`,
+          status: "idle" as const,
+          provider: defaults.provider,
+          model: defaults.model,
+          runtime: "pi-subagent",
+          createdAt,
+          updatedAt: createdAt,
+          metadata: Object.freeze({ kind: "subagent", agentId, hidden: true }),
+        });
+        const handle = await subAgentSupervisor.spawn({ agent, task, message, childSession });
+        context.emitUpdate?.(toJsonValue({ phase: "accepted", ...handle, parent: originParent ?? null }));
+        return { ...handle, name: handle.name ?? null };
+      },
+    });
+    const agentsSendTool = defineTool({
+      name: "agents.send",
+      label: "Message agent",
+      description: "Durably send an attributed collaboration message to a foreground session or subagent.",
+      identityMaterial: toJsonValue({ adapterRevision: "agents-send-v1" }),
+      inputSchema: z.strictObject({
+        to: z.union([z.string().min(1), agentAddressSchema]),
+        message: z.string().trim().min(1),
+      }),
+      outputSchema: z.strictObject({
+        messageId: z.string(),
+        status: z.literal("accepted"),
+        taskId: z.string().nullable(),
+      }),
+      effect: () => ({
+        effect: "write",
+        resource: `subagent:${project.projectId}:message`,
+        estimatedCost: 0,
+      }),
+      execute: async ({ to, message }) => {
+        if (!subAgentSupervisor) throw new Error("Subagent supervisor is unavailable");
+        const recipient = typeof to === "string" ? Object.freeze({ kind: "subagent" as const, id: to }) : to;
+        if (recipient.kind === "foreground") {
+          const parent = parentAgentAddress();
+          if (!parent || parent.kind !== "foreground" || parent.id !== recipient.id)
+            throw new Error("A subagent may message only its exact foreground parent session");
         }
+        const receipt = await subAgentSupervisor.send({
+          projectId: project.projectId,
+          sender: currentAgentAddress(),
+          recipient,
+          content: message,
+        });
+        return { ...receipt, taskId: receipt.taskId ?? null };
+      },
+    });
+    const agentsListTool = defineTool({
+      name: "agents.list",
+      label: "List subagents",
+      description: "List retained subagents in this process and project with compact current status.",
+      identityMaterial: toJsonValue({ adapterRevision: "agents-list-v1" }),
+      inputSchema: z.strictObject({
+        status: z.enum(["starting", "running", "idle", "suspended", "closed"]).optional(),
+      }),
+      outputSchema: z.array(subAgentSummarySchema),
+      effect: () => ({ effect: "read", resource: `subagent:${project.projectId}:list`, estimatedCost: 0 }),
+      execute: async ({ status }) => {
+        if (!subAgentSupervisor) throw new Error("Subagent supervisor is unavailable");
+        const agents = visibleSubAgents(await subAgentSupervisor.list(project.projectId));
+        return (status ? agents.filter((agent) => agent.status === status) : agents).map(
+          subAgentSummaryOutput,
+        );
+      },
+    });
+    const agentsInspectTool = defineTool({
+      name: "agents.inspect",
+      label: "Inspect subagent",
+      description:
+        "Inspect one retained subagent, its tasks, mailbox, frozen route, and transcript artifact.",
+      identityMaterial: toJsonValue({ adapterRevision: "agents-inspect-v1" }),
+      inputSchema: z.strictObject({ agentId: z.string().min(1), taskId: z.string().min(1).optional() }),
+      outputSchema: subAgentSummarySchema.extend({
+        systemPrompt: z.string(),
+        tools: z.array(z.string()),
+        tasks: z.array(subAgentTaskResultSchema),
+        recentMessages: z.array(
+          z.strictObject({
+            messageId: z.string(),
+            sender: agentAddressSchema,
+            recipient: agentAddressSchema,
+            content: z.string(),
+            status: z.enum(["accepted", "claimed", "delivered", "failed"]),
+            createdAt: z.string(),
+          }),
+        ),
+        transcriptArtifact: z
+          .strictObject({
+            path: z.string(),
+            characterLength: z.number().int().nonnegative(),
+            contentDigest: z.string(),
+          })
+          .nullable(),
+      }),
+      effect: () => ({ effect: "read", resource: `subagent:${project.projectId}:inspect`, estimatedCost: 0 }),
+      execute: async ({ agentId, taskId }) => {
+        if (!subAgentSupervisor) throw new Error("Subagent supervisor is unavailable");
+        const inspection = await subAgentSupervisor.inspect(project.projectId, agentId, taskId);
+        return {
+          ...subAgentSummaryOutput(inspection),
+          systemPrompt: inspection.systemPrompt,
+          tools: [...inspection.tools],
+          tasks: inspection.tasks.map(subAgentTaskResultOutput),
+          recentMessages: inspection.recentMessages.map((message) => ({ ...message })),
+          transcriptArtifact: inspection.transcriptArtifact ?? null,
+        };
+      },
+    });
+    const agentsWaitTool = defineTool({
+      name: "agents.wait",
+      label: "Wait for subagent",
+      description: "Join one exact subagent task. Cancelling or timing out this wait never cancels the task.",
+      identityMaterial: toJsonValue({ adapterRevision: "agents-wait-v1" }),
+      inputSchema: z.strictObject({
+        taskId: z.string().min(1),
+        timeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
+      }),
+      outputSchema: subAgentTaskResultSchema,
+      effect: () => ({ effect: "read", resource: `subagent:${project.projectId}:wait`, estimatedCost: 0 }),
+      execute: async ({ taskId, timeoutMs }, context) => {
+        if (!subAgentSupervisor) throw new Error("Subagent supervisor is unavailable");
+        return subAgentTaskResultOutput(await subAgentSupervisor.wait(taskId, context.signal, timeoutMs));
+      },
+    });
+    const agentsCancelTool = defineTool({
+      name: "agents.cancel",
+      label: "Cancel subagent task",
+      description: "Cancel one exact subagent task without closing the retained actor.",
+      identityMaterial: toJsonValue({ adapterRevision: "agents-cancel-v1" }),
+      inputSchema: z.strictObject({ taskId: z.string().min(1), reason: z.string().trim().min(1).optional() }),
+      outputSchema: subAgentTaskResultSchema,
+      effect: () => ({
+        effect: "execute",
+        resource: `subagent:${project.projectId}:cancel`,
+        estimatedCost: 0,
+      }),
+      execute: async ({ taskId, reason }) => {
+        if (!subAgentSupervisor) throw new Error("Subagent supervisor is unavailable");
+        return subAgentTaskResultOutput(await subAgentSupervisor.cancel(taskId, reason));
+      },
+    });
+    const agentsCloseTool = defineTool({
+      name: "agents.close",
+      label: "Close subagent",
+      description: "Retire one retained subagent and cancel its active task if necessary.",
+      identityMaterial: toJsonValue({ adapterRevision: "agents-close-v1" }),
+      inputSchema: z.strictObject({
+        agentId: z.string().min(1),
+        reason: z.string().trim().min(1).optional(),
+      }),
+      outputSchema: z.null(),
+      effect: () => ({
+        effect: "execute",
+        resource: `subagent:${project.projectId}:close`,
+        estimatedCost: 0,
+      }),
+      execute: async ({ agentId, reason }) => {
+        if (!subAgentSupervisor) throw new Error("Subagent supervisor is unavailable");
+        await subAgentSupervisor.close(agentId, reason);
+        return null;
       },
     });
     const localWorkTools = createLocalWorkTools({
@@ -3294,16 +3500,30 @@ export async function createApplicationRuntimeComposition(
       ...localWorkTools,
       ...capabilityTools,
       skillLoadTool,
-      agentsRunTool,
+      agentsSpawnTool,
+      agentsSendTool,
+      agentsListTool,
+      agentsInspectTool,
+      agentsWaitTool,
+      agentsCancelTool,
+      agentsCloseTool,
       ...programCoreTools,
       ...programWorkflowStateTools,
       ...capabilityProgramTools,
       ...mcpTools,
       ...sessionDefinitionsForBroker(sessionDefinitions, { workspace, history }),
     ]);
+    const admittedDefinitions = plan.subAgentActor
+      ? Object.freeze(
+          baseDefinitions.filter((definition) => plan.subAgentActor?.allowedTools.includes(definition.name)),
+        )
+      : baseDefinitions;
+    const brokerAuthority = plan.subAgentActor
+      ? Object.freeze({ ...authority, runForeground: authority.runSubAgent })
+      : authority;
     const broker = createToolBroker({
-      definitions: baseDefinitions,
-      authority,
+      definitions: admittedDefinitions,
+      authority: brokerAuthority,
       recorder: Object.freeze({
         record: recordToolInvocation,
         status: recordedToolInvocationStatus,
@@ -3600,33 +3820,36 @@ export async function createApplicationRuntimeComposition(
         ? await workspace.operational.workflows.listPhases(runId)
         : Object.freeze([]);
       if (!existing) {
-        await workspace.operational.workflows.putRun({
-          runId,
-          projectId: project.projectId,
-          workflowName: manifest.name,
-          workflowRevision: manifest.revision,
-          definitionRevisionId: definitionRevision.revisionId,
-          catalogId: executionCatalogId,
-          catalogDigest: executionCatalogDigest,
-          definitionDependenciesDigest: currentDefinitionDependenciesDigest,
-          permissionDigest,
-          provider: plan.provider,
-          model: plan.model,
-          thinkingLevel: plan.thinkingLevel,
-          contextPin: Object.freeze({
-            artifactId: workflowContext.frozen.artifact.artifactId,
-            digest: workflowContext.frozen.contentDigest,
-            characterLength: workflowContext.frozen.characterLength,
-            byteLength: workflowContext.frozen.byteLength,
-          }),
-          sessionId: plan.sessionId,
-          turnId: plan.turnId,
-          status: "running",
-          currentPhase: 0,
-          input,
-          createdAt,
-          updatedAt: createdAt,
-        });
+        await workspace.operational.workflows.putRun(
+          createConditionalObject({
+            runId,
+            projectId: project.projectId,
+            workflowName: manifest.name,
+            workflowRevision: manifest.revision,
+            definitionRevisionId: definitionRevision.revisionId,
+            catalogId: executionCatalogId,
+            catalogDigest: executionCatalogDigest,
+            definitionDependenciesDigest: currentDefinitionDependenciesDigest,
+            permissionDigest,
+            provider: plan.provider,
+            model: plan.model,
+            thinkingLevel: plan.thinkingLevel,
+            contextPin: Object.freeze({
+              artifactId: workflowContext.frozen.artifact.artifactId,
+              digest: workflowContext.frozen.contentDigest,
+              characterLength: workflowContext.frozen.characterLength,
+              byteLength: workflowContext.frozen.byteLength,
+            }),
+            sessionId: plan.sessionId,
+            status: "running",
+            currentPhase: 0,
+            input,
+            createdAt,
+            updatedAt: createdAt,
+          } as const)
+            .addOptional(!plan.subAgentActor ? { turnId: plan.turnId } : undefined)
+            .finish(),
+        );
         for (const [phaseIndex, phase] of manifest.phases.entries())
           await workspace.operational.workflows.putPhase({
             runId,
@@ -3715,16 +3938,17 @@ export async function createApplicationRuntimeComposition(
           z.fromJSONSchema(phase.inputSchema).parse(phaseInput);
           if (!runRecordedCode) throw new Error("Codemode runtime is not initialized");
           const result = await runRecordedCode(
-            {
+            createConditionalObject({
               source: phase.source,
               input: phaseInput,
               executionId,
               logicalExecutionId,
               sessionId: plan.sessionId,
-              turnId: plan.turnId,
               signal: context.signal,
               contextDocument: workflowContext.request,
-            },
+            } as const)
+              .addOptional(!plan.subAgentActor ? { turnId: plan.turnId } : undefined)
+              .finish(),
             context.parentExecutionId,
             undefined,
             async () => {
@@ -3919,9 +4143,9 @@ export async function createApplicationRuntimeComposition(
               logicalExecutionId: identity.logicalExecutionId,
               callId: identity.callId,
               sessionId: plan.sessionId,
-              turnId: plan.turnId,
               signal: invokeSignal,
             } as const)
+              .addOptional(!plan.subAgentActor ? { turnId: plan.turnId } : undefined)
               .addOptional(
                 identity.parentExecutionId ? { parentExecutionId: identity.parentExecutionId } : undefined,
               )
@@ -3955,14 +4179,28 @@ export async function createApplicationRuntimeComposition(
             source,
             completionMode: "last-expression",
             sessionId: plan.sessionId,
-            turnId: plan.turnId,
             signal: executeSignal,
           } as const)
+            .addOptional(!plan.subAgentActor ? { turnId: plan.turnId } : undefined)
+            .add({
+              agentContext: plan.subAgentActor
+                ? Object.freeze({
+                    self: Object.freeze({ kind: "subagent" as const, id: plan.subAgentActor.agentId }),
+                    parent: Object.freeze({ ...plan.subAgentActor.parent }),
+                  })
+                : Object.freeze({
+                    self: Object.freeze({ kind: "foreground" as const, id: plan.sessionId }),
+                  }),
+            } as const)
             .addOptional(identity ? { logicalExecutionId: identity.logicalExecutionId } : undefined)
             .addOptional(!(timeoutMs === undefined) ? { timeoutMs } : undefined)
             .finish(),
           undefined,
           (event) => {
+            const recordedByBroker =
+              event.type === "progress" || event.type === "tool-start" || event.type === "tool-end"
+                ? event.name !== "noesis.search" && event.name !== "noesis.describe"
+                : false;
             if (event.type === "progress")
               // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
               emit(
@@ -3974,15 +4212,21 @@ export async function createApplicationRuntimeComposition(
                   .addOptional(event.name ? { name: event.name } : undefined)
                   .addOptional(!(event.callIndex === undefined) ? { callIndex: event.callIndex } : undefined)
                   .finish(),
+                undefined,
+                recordedByBroker,
               );
             else if (event.type === "tool-start")
-              emit({
-                type: "tool-start",
-                callId: event.callId,
-                name: event.name,
-                callIndex: event.callIndex,
-                input: event.input,
-              });
+              emit(
+                {
+                  type: "tool-start",
+                  callId: event.callId,
+                  name: event.name,
+                  callIndex: event.callIndex,
+                  input: event.input,
+                },
+                undefined,
+                recordedByBroker,
+              );
             else if (event.type === "tool-end")
               // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
               emit(
@@ -3996,12 +4240,14 @@ export async function createApplicationRuntimeComposition(
                   .addOptional(!(event.result === undefined) ? { result: event.result } : undefined)
                   .addOptional(event.error ? { error: event.error } : undefined)
                   .finish(),
+                undefined,
+                recordedByBroker,
               );
           },
           async (executionId) => {
             emit({ type: "started", executionId });
           },
-          Object.freeze({ sink: emit }),
+          Object.freeze({ sink: emit, subAgentAncestor: plan.subAgentActor !== undefined }),
         );
         return Object.freeze({
           executionId: result.executionId,
@@ -4027,11 +4273,513 @@ export async function createApplicationRuntimeComposition(
   const foregroundEvidence = (plan: FrozenTurnPlan) =>
     Object.freeze({
       kind: "database_row" as const,
-      table: "messages" as const,
-      rowId: `${plan.turnId}:user`,
+      table: plan.subAgentActor ? ("sessions" as const) : ("messages" as const),
+      rowId: plan.subAgentActor ? plan.sessionId : `${plan.turnId}:user`,
     });
   const agent = options.createAgent?.(sessionTools, codeExecution, options.skills) ?? options.agent;
   if (!agent) throw new Error("Application runtime composition requires a Pi execution adapter");
+  const subAgentTaskRunner: PiSubAgentTaskRunner =
+    options.subAgentTaskRunner ??
+    Object.freeze({
+      run: async () => {
+        throw new Error("Retained subagent execution is unavailable in this runtime composition");
+      },
+      steer: async () => Object.freeze({ status: "not-consumed" as const, reason: "not-running" as const }),
+      abort: async () => undefined,
+    });
+  const childTaskPlan = (record: SubAgentRecord, task: SubAgentTaskRecord): FrozenTurnPlan => {
+    const template = record.frozenPlan.executionTemplate;
+    const {
+      canonicalDigest: _canonicalDigest,
+      contextCheckpoint: _contextCheckpoint,
+      contextDocument: _contextDocument,
+      contextTokenBudget: _contextTokenBudget,
+      conversationHistory: _conversationHistory,
+      selectedCapabilities: _selectedCapabilities,
+      subAgentActor: _subAgentActor,
+      ...templateBase
+    } = template;
+    void _canonicalDigest;
+    void _contextCheckpoint;
+    void _contextDocument;
+    void _contextTokenBudget;
+    void _conversationHistory;
+    void _selectedCapabilities;
+    void _subAgentActor;
+    const unsigned: Omit<FrozenTurnPlan, "canonicalDigest"> = Object.freeze(
+      createConditionalObject({
+        ...templateBase,
+        planId: `subagent_plan_${sha256(`${record.agentId}:${task.taskId}`)}`,
+        sessionId: record.childSessionId,
+        turnId: task.taskId,
+        conversationHistory: Object.freeze([]),
+        selectedCapabilities: Object.freeze([]),
+        retrievalCitations: Object.freeze([]),
+        requestTokenBudget: record.frozenPlan.requestTokenBudget,
+        renderedSystemPrompt: record.frozenPlan.renderedSystemPrompt,
+        provider: record.frozenPlan.route.provider,
+        model: record.frozenPlan.route.model,
+        thinkingLevel: record.frozenPlan.thinkingLevel,
+        permissionSnapshot: record.frozenPlan.authority.permissionSnapshot,
+        routing: Object.freeze({ strategyId: "subagent-task-v1", reason: "Retained subagent task" }),
+        subAgentActor: Object.freeze({
+          agentId: record.agentId,
+          taskId: task.taskId,
+          parent: record.parentAgentId
+            ? Object.freeze({ kind: "subagent" as const, id: record.parentAgentId })
+            : Object.freeze({ kind: "foreground" as const, id: record.originSessionId }),
+          allowedTools: Object.freeze(record.frozenPlan.frozenTools.map((tool) => tool.name)),
+        }),
+        createdAt: task.createdAt,
+      } as const)
+        .addOptional(record.frozenPlan.context ? { contextDocument: record.frozenPlan.context } : undefined)
+        .finish(),
+    );
+    return Object.freeze({
+      ...unsigned,
+      canonicalDigest: frozenTurnPlanDigest(unsigned),
+    });
+  };
+  const durableSubAgentActionEvent = (taskId: string, event: AgentActionEvent): AgentActionEvent => {
+    const actionKey = `${taskId}\0${event.actionId}`;
+    if (event.type === "tool-start" && !event.parentActionId) topLevelAgentActionIds.add(actionKey);
+    const providerParent =
+      event.parentActionId !== undefined && topLevelAgentActionIds.has(`${taskId}\0${event.parentActionId}`);
+    const durable = Object.freeze(
+      createConditionalObject({
+        ...event,
+        actionId: event.parentActionId ? event.actionId : `${taskId}:${event.actionId}`,
+      } as const)
+        .addOptional(
+          event.parentActionId
+            ? {
+                parentActionId: event.recordedByBroker
+                  ? providerParent
+                    ? `${taskId}:${event.parentActionId}`
+                    : event.parentActionId
+                  : `${taskId}:${event.parentActionId}`,
+              }
+            : undefined,
+        )
+        .finish(),
+    );
+    if (event.type === "tool-end" && !event.parentActionId) topLevelAgentActionIds.delete(actionKey);
+    return durable;
+  };
+  const persistSubAgentAction = async (
+    sessionId: string,
+    taskId: string,
+    event: AgentActionEvent,
+  ): Promise<void> => {
+    const durable = durableSubAgentActionEvent(taskId, event);
+    const occurredAt = new Date().toISOString();
+    if (durable.type === "tool-start") {
+      if (!durable.recordedByBroker)
+        await workspace.operational.toolCalls.put(
+          createConditionalObject({
+            toolCallId: durable.actionId,
+            sessionId,
+            toolName: durable.name,
+            request: durable.input,
+            status: "running" as const,
+            sensitivity: "normal" as const,
+            createdAt: occurredAt,
+          } as const)
+            .addOptional(durable.parentActionId ? { parentToolCallId: durable.parentActionId } : undefined)
+            .finish(),
+        );
+      if (durable.timelineSequence !== undefined)
+        await workspace.operational.subAgents.appendTimeline({
+          taskId,
+          sequence: durable.timelineSequence,
+          kind: "tool_call",
+          entryId: durable.actionId,
+          createdAt: occurredAt,
+        });
+      return;
+    }
+    if (durable.recordedByBroker) return;
+    const current = await workspace.operational.toolCalls.get(durable.actionId);
+    if (!current) throw new Error(`Subagent action ${durable.actionId} emitted ${durable.type} before start`);
+    if (durable.type === "tool-update") {
+      await workspace.operational.toolCalls.put({ ...current, update: durable.update, status: "running" });
+      return;
+    }
+    await workspace.operational.toolCalls.put({
+      ...current,
+      response: durable.result,
+      status: durable.isError ? "failed" : "completed",
+      completedAt: occurredAt,
+    });
+  };
+  const subAgentTranscript = async (
+    record: SubAgentRecord,
+    selectedTaskId?: string,
+  ): Promise<readonly import("@noesis/runtime").RuntimeTranscriptEntry[]> => {
+    const [base, tasks, mailbox] = await Promise.all([
+      loadRuntimeTranscript(workspace, record.childSessionId),
+      workspace.operational.subAgents.listTasks(record.agentId),
+      workspace.operational.subAgents.listMessages(record.agentId),
+    ]);
+    const selected = selectedTaskId ? tasks.filter((task) => task.taskId === selectedTaskId) : tasks;
+    const byId = new Map(
+      base.map((entry) => [
+        entry.kind === "action"
+          ? entry.actionId
+          : entry.kind === "reasoning"
+            ? entry.reasoningId
+            : entry.messageId,
+        entry,
+      ]),
+    );
+    for (const message of mailbox) {
+      if (!message.taskId || !selected.some((task) => task.taskId === message.taskId)) continue;
+      byId.set(
+        message.messageId,
+        Object.freeze({
+          kind: "message" as const,
+          messageId: message.messageId,
+          role: "system" as const,
+          text: `[${message.sender.kind}:${message.sender.id} → ${message.recipient.kind}:${message.recipient.id}]\n${message.content}`,
+          createdAt: message.createdAt,
+        }),
+      );
+    }
+    const ordered: import("@noesis/runtime").RuntimeTranscriptEntry[] = [];
+    for (const task of selected) {
+      const [timeline, modelCalls] = await Promise.all([
+        workspace.operational.subAgents.listTimeline(task.taskId),
+        workspace.operational.subAgents.listModelCalls(task.taskId),
+      ]);
+      for (const modelCall of modelCalls)
+        byId.set(
+          modelCall.modelCallId,
+          Object.freeze(
+            createConditionalObject({
+              kind: "action" as const,
+              actionId: modelCall.modelCallId,
+              name: "model.round",
+              status: modelCall.status,
+              input: Object.freeze({
+                provider: modelCall.provider,
+                model: modelCall.model,
+                round: modelCall.round,
+                thinkingLevel: modelCall.thinkingLevel,
+              }),
+              startedAt: modelCall.startedAt,
+            } as const)
+              .addOptional(modelCall.usage ? { output: toJsonValue(modelCall.usage) } : undefined)
+              .addOptional(modelCall.completedAt ? { completedAt: modelCall.completedAt } : undefined)
+              .finish(),
+          ),
+        );
+      for (const point of timeline) {
+        const entry = byId.get(point.entryId);
+        if (entry) ordered.push(entry);
+      }
+    }
+    return Object.freeze(ordered);
+  };
+  subAgentSupervisor = createSubAgentSupervisor({
+    workspace,
+    createId: (prefix) => createId(prefix === "task" ? "subagent_task" : "agent_message"),
+    persistResult: async ({ agent: record, task, text }) => {
+      const bytes = encoder.encode(text);
+      const artifact = await workspace.artifacts.writeArtifact({
+        path: `subagents/${sha256(record.agentId).slice(0, 32)}/tasks/${sha256(task.taskId).slice(0, 32)}/result.txt`,
+        mediaType: "text/plain",
+        bytes,
+        actor: Object.freeze({ actorId: record.agentId, kind: "noesis" as const }),
+        relationshipRefs: Object.freeze([
+          { kind: "database_row" as const, table: "sessions" as const, rowId: record.childSessionId },
+        ]),
+      });
+      return Object.freeze({ artifactId: artifact.artifactId, preview: text.slice(0, 16_000) });
+    },
+    transcript: subAgentTranscript,
+    transcriptArtifact: async (record, taskId) => {
+      const transcript = await subAgentTranscript(record, taskId);
+      const content = `${transcript.map((entry) => canonicalJson(entry)).join("\n")}\n`;
+      const digest = sha256(content);
+      const artifact = await workspace.artifacts.writeArtifact({
+        path: `subagents/${sha256(record.agentId).slice(0, 32)}/transcripts/${digest}.ndjson`,
+        mediaType: "application/x-ndjson",
+        bytes: encoder.encode(content),
+        actor: Object.freeze({ actorId: record.agentId, kind: "noesis" as const }),
+        relationshipRefs: Object.freeze([
+          { kind: "database_row" as const, table: "sessions" as const, rowId: record.childSessionId },
+        ]),
+      });
+      return Object.freeze({ path: artifact.path, characterLength: content.length, contentDigest: digest });
+    },
+    persistDeliveredMessage: async ({ task, message, timelineSequence, consumedAt }) => {
+      await workspace.operational.subAgents.appendTimeline({
+        taskId: task.taskId,
+        sequence: timelineSequence,
+        kind: "mailbox",
+        entryId: message.messageId,
+        createdAt: consumedAt,
+      });
+    },
+    deliverForeground: async ({ message }) => {
+      const delivered = await agent.steer(
+        message.recipient.id,
+        `[Subagent ${message.sender.id}]\n${message.content}`,
+      );
+      return delivered.status === "consumed" ? "delivered" : "pending";
+    },
+    taskExecution: Object.freeze({
+      run: async (request: Parameters<SubAgentTaskExecutionPort["run"]>[0]) => {
+        const { agent: record, task, messages, emit } = request;
+        const plan = childTaskPlan(record, task);
+        const controller = new AbortController();
+        const prepared = await codeExecution.prepare(plan, controller.signal);
+        let persistence = Promise.resolve();
+        let persistenceFailure: unknown;
+        const enqueue = (operation: () => Promise<void>): void => {
+          persistence = persistence.then(operation).catch((cause: unknown) => {
+            persistenceFailure ??= cause;
+          });
+        };
+        const [existingMessages, allMailbox, allTasks] = await Promise.all([
+          workspace.operational.messages.listForSession(record.childSessionId),
+          workspace.operational.subAgents.listMessages(record.agentId),
+          workspace.operational.subAgents.listTasks(record.agentId),
+        ]);
+        const ordinaryById = new Map(existingMessages.map((message) => [message.messageId, message]));
+        const mailboxById = new Map(allMailbox.map((message) => [message.messageId, message]));
+        const history: {
+          readonly role: "user" | "assistant";
+          readonly content: string;
+          readonly createdAt: string;
+        }[] = [];
+        for (const priorTask of allTasks) {
+          if (priorTask.taskId === task.taskId) break;
+          const timeline = await workspace.operational.subAgents.listTimeline(priorTask.taskId);
+          for (const entry of timeline) {
+            if (entry.kind === "mailbox") {
+              const mailbox = mailboxById.get(entry.entryId);
+              if (mailbox)
+                history.push({
+                  role: "user",
+                  content: `[${mailbox.sender.kind}:${mailbox.sender.id}]\n${mailbox.content}`,
+                  createdAt: entry.createdAt,
+                });
+              continue;
+            }
+            if (entry.kind !== "message") continue;
+            const ordinary = ordinaryById.get(entry.entryId);
+            if (ordinary?.role === "assistant")
+              history.push({
+                role: "assistant",
+                content: ordinary.content,
+                createdAt: ordinary.createdAt,
+              });
+          }
+        }
+        for (const [index, message] of messages.entries()) {
+          await workspace.operational.subAgents.appendTimeline({
+            taskId: task.taskId,
+            sequence: index,
+            kind: "mailbox",
+            entryId: message.messageId,
+            createdAt: message.createdAt,
+          });
+        }
+        const prompt = messages
+          .map((message) => `[${message.sender.kind}:${message.sender.id}]\n${message.content}`)
+          .join("\n\n");
+        try {
+          const result = await subAgentTaskRunner.run({
+            plan: record.frozenPlan,
+            taskId: task.taskId,
+            prompt,
+            history,
+            prepared,
+            startingTimelineSequence: messages.length,
+            authorizeModelCall: async ({ round, request, startedAt, timelineSequence }) => {
+              const modelCallId = `${task.taskId}:model:${String(round)}`;
+              const requestBytes = encoder.encode(canonicalJson(request));
+              const requestArtifact = await workspace.artifacts.writeArtifact({
+                path: `subagents/${sha256(record.agentId).slice(0, 32)}/tasks/${sha256(task.taskId).slice(0, 32)}/model-${String(round)}-request.json`,
+                mediaType: "application/json",
+                bytes: requestBytes,
+                actor: Object.freeze({ actorId: record.agentId, kind: "noesis" as const }),
+                relationshipRefs: Object.freeze([
+                  { kind: "database_row" as const, table: "sessions" as const, rowId: record.childSessionId },
+                ]),
+              });
+              const base = Object.freeze({
+                modelCallId,
+                taskId: task.taskId,
+                round,
+                provider: record.frozenPlan.route.provider,
+                model: record.frozenPlan.route.model,
+                thinkingLevel: record.frozenPlan.thinkingLevel,
+                requestArtifactId: requestArtifact.artifactId,
+                startedAt,
+              });
+              await workspace.operational.subAgents.putModelCall({ ...base, status: "running" });
+              await workspace.operational.subAgents.appendTimeline({
+                taskId: task.taskId,
+                sequence: timelineSequence,
+                kind: "model_call",
+                entryId: modelCallId,
+                createdAt: startedAt,
+              });
+              const started = Date.now();
+              const resource = `model:${record.frozenPlan.route.provider}/${record.frozenPlan.route.model}`;
+              const completion = Promise.withResolvers<
+                { readonly ok: true } | { readonly ok: false; readonly reason: string }
+              >();
+              const admitted = Promise.withResolvers<void>();
+              const decision = authority.runSubAgent(
+                {
+                  operationId: `operation_${sha256(`${modelCallId}:${sha256(requestBytes)}`)}`,
+                  effect: "network",
+                  resource,
+                  estimatedCost: 1,
+                  idempotencyKey: modelCallId,
+                  requestDigest: sha256(requestBytes),
+                  execute: async () => {
+                    admitted.resolve();
+                    const outcome = await completion.promise;
+                    if (!outcome.ok) throw new Error(outcome.reason);
+                    return null;
+                  },
+                },
+                record.frozenPlan.authority.permissionSnapshot,
+              );
+              const admission = await Promise.race([
+                admitted.promise.then(() => ({ ok: true as const })),
+                decision.then((value) =>
+                  value.ok
+                    ? { ok: false as const, reason: "Model-call reservation settled before admission" }
+                    : { ok: false as const, reason: value.reason },
+                ),
+              ]);
+              if (!admission.ok) throw new Error(admission.reason);
+              let settled = false;
+              const settleAuthority = async (
+                outcome: { readonly ok: true } | { readonly ok: false; readonly reason: string },
+              ) => {
+                if (settled) return;
+                settled = true;
+                completion.resolve(outcome);
+                const result = await decision;
+                if (outcome.ok && !result.ok) throw new Error(result.reason);
+              };
+              return Object.freeze({
+                complete: async ({
+                  output,
+                  usage,
+                }: {
+                  readonly output: string;
+                  readonly usage: AgentUsage;
+                }) => {
+                  const outputArtifact = await workspace.artifacts.writeArtifact({
+                    path: `subagents/${sha256(record.agentId).slice(0, 32)}/tasks/${sha256(task.taskId).slice(0, 32)}/model-${String(round)}-output.txt`,
+                    mediaType: "text/plain",
+                    bytes: encoder.encode(output),
+                    actor: Object.freeze({ actorId: record.agentId, kind: "noesis" as const }),
+                    relationshipRefs: Object.freeze([
+                      {
+                        kind: "database_row" as const,
+                        table: "sessions" as const,
+                        rowId: record.childSessionId,
+                      },
+                    ]),
+                  });
+                  await settleAuthority({ ok: true });
+                  await workspace.operational.subAgents.putModelCall({
+                    ...base,
+                    outputArtifactId: outputArtifact.artifactId,
+                    status: "completed",
+                    usage,
+                    latencyMs: Date.now() - started,
+                    completedAt: new Date().toISOString(),
+                  });
+                },
+                fail: async (reason: string, usage?: AgentUsage) => {
+                  await settleAuthority({ ok: false, reason });
+                  await workspace.operational.subAgents.putModelCall(
+                    createConditionalObject({
+                      ...base,
+                      status: "failed" as const,
+                      latencyMs: Date.now() - started,
+                      error: reason,
+                      completedAt: new Date().toISOString(),
+                    })
+                      .addOptional(usage ? { usage } : undefined)
+                      .finish(),
+                  );
+                },
+              });
+            },
+            emit: (event) => {
+              if (event.type === "tool-start" || event.type === "tool-update" || event.type === "tool-end") {
+                const durable = durableSubAgentActionEvent(task.taskId, event);
+                if (
+                  durable.type === "tool-start" &&
+                  durable.parentActionId &&
+                  durable.recordedByBroker &&
+                  durable.timelineSequence !== undefined
+                )
+                  nestedActionBindings.set(
+                    durable.actionId,
+                    Object.freeze({
+                      parentToolCallId: durable.parentActionId,
+                      timelineSequence: durable.timelineSequence,
+                      parentReady: persistence,
+                    }),
+                  );
+                enqueue(async () => {
+                  await persistSubAgentAction(record.childSessionId, task.taskId, event);
+                  emit(event);
+                });
+              } else if (event.type === "assistant-message" || event.type === "reasoning-message")
+                enqueue(async () => {
+                  const reasoning = event.type === "reasoning-message";
+                  const messageId = `${task.taskId}:${reasoning ? "reasoning" : "assistant"}:${String(event.timelineSequence)}`;
+                  await workspace.operational.messages.put({
+                    messageId,
+                    sessionId: record.childSessionId,
+                    role: reasoning ? "system" : "assistant",
+                    content: event.text,
+                    sensitivity: "normal",
+                    createdAt: event.createdAt,
+                    metadata: Object.freeze(
+                      createConditionalObject({ taskId: task.taskId })
+                        .addOptional(reasoning ? { presentation: "reasoning" } : undefined)
+                        .finish(),
+                    ),
+                  });
+                  await workspace.operational.subAgents.appendTimeline({
+                    taskId: task.taskId,
+                    sequence: event.timelineSequence,
+                    kind: reasoning ? "reasoning" : "message",
+                    entryId: messageId,
+                    createdAt: event.createdAt,
+                  });
+                  emit(event);
+                });
+              else emit(event);
+            },
+          });
+          await persistence;
+          if (persistenceFailure) throw persistenceFailure;
+          return Object.freeze({ text: result.text, usage: result.usage });
+        } finally {
+          await prepared.close();
+        }
+      },
+      steer: async (taskId: string, message: string) => {
+        return await subAgentTaskRunner.steer(taskId, message);
+      },
+      cancel: async (taskId: string) => await subAgentTaskRunner.abort(taskId),
+    }),
+  });
+  await workspace.operational.subAgents.recoverInterrupted(new Date().toISOString());
   const capabilityLearning = createCapabilityLearningModule({
     workspace,
     store: workspace.capabilities,
@@ -4088,6 +4836,7 @@ export async function createApplicationRuntimeComposition(
       "url:http://*",
       "url:https://*",
       "artifact:*",
+      `subagent:${project.projectId}:*`,
       "capability:*",
       "program:*",
       "skill:*",
@@ -4178,6 +4927,7 @@ export async function createApplicationRuntimeComposition(
   };
   for (const session of await workspace.operational.sessions.list()) {
     if (typeof session.metadata["deletedAt"] === "string") continue;
+    if (session.metadata["kind"] === "subagent" || session.metadata["hidden"] === true) continue;
     if (await workspace.operational.sessions.deleteIfEmpty(session.sessionId, new Date().toISOString()))
       continue;
     const [turns] = await Promise.all([
@@ -4868,7 +5618,16 @@ export async function createApplicationRuntimeComposition(
                   if (event.type === "status" && event.status === "started" && !interactionReady) {
                     interactionReady = true;
                     if (interactionControl?.isInterruptRequested()) void agent.abort(trailId);
-                    else interactionControl?.onReady();
+                    else {
+                      interactionControl?.onReady();
+                      const collaborationPersistence = subAgentSupervisor
+                        ?.deliverPendingForeground(trailId)
+                        .catch(recordActionPersistenceFailure);
+                      if (collaborationPersistence)
+                        actionPersistence = Promise.all([actionPersistence, collaborationPersistence]).then(
+                          () => undefined,
+                        );
+                    }
                   }
                   if (
                     event.type === "tool-start" ||
@@ -5573,95 +6332,6 @@ export async function createApplicationRuntimeComposition(
           .finish(),
       );
     }
-    const subAgentCall = await workspace.operational.toolCalls.get(executionId);
-    const subAgentParent = subAgentCall?.executionId
-      ? await workspace.operational.codeExecutions.get(subAgentCall.executionId)
-      : undefined;
-    if (
-      subAgentCall?.sessionId === sessionId &&
-      subAgentCall.toolName === "agents.run" &&
-      subAgentParent !== undefined &&
-      codeExecutionVisibleInProject(project, subAgentParent)
-    ) {
-      const [modelCall, sessionCalls] = await Promise.all([
-        workspace.operational.modelCalls.get(executionId),
-        workspace.operational.toolCalls.listForSession(sessionId),
-      ]);
-      const childCalls = sessionCalls.filter((call) => call.parentToolCallId === executionId);
-      const parsedRequest = JsonValueSchema.safeParse(subAgentCall.request);
-      const requestEnvelope =
-        parsedRequest.success && isJsonObject(parsedRequest.data) ? parsedRequest.data : undefined;
-      const rawInput =
-        requestEnvelope && isJsonObject(requestEnvelope["input"]) ? requestEnvelope["input"] : undefined;
-      let frozenPrompt = typeof rawInput?.["prompt"] === "string" ? rawInput["prompt"] : undefined;
-      let frozenSystemPrompt =
-        typeof rawInput?.["systemPrompt"] === "string" ? rawInput["systemPrompt"] : undefined;
-      if (modelCall) {
-        const requestArtifact = await workspace.getArtifactMetadata(modelCall.requestArtifactId);
-        if (requestArtifact) {
-          const parsed = z
-            .looseObject({
-              frozenRunPlan: z.looseObject({
-                prompt: z.string(),
-                systemPrompt: z.string().optional(),
-              }),
-            })
-            .safeParse(JSON.parse(decoder.decode(await workspace.reads.readArtifact(requestArtifact))));
-          if (parsed.success) {
-            frozenPrompt = parsed.data.frozenRunPlan.prompt;
-            frozenSystemPrompt = parsed.data.frozenRunPlan.systemPrompt;
-          }
-        }
-      }
-      const parsedResponse = JsonValueSchema.safeParse(subAgentCall.response);
-      const responseEnvelope =
-        parsedResponse.success && isJsonObject(parsedResponse.data) ? parsedResponse.data : undefined;
-      const responseOutput = responseEnvelope?.["output"];
-      const responseError = responseEnvelope?.["error"];
-      const status =
-        subAgentCall.status === "ambiguous"
-          ? ("interrupted" as const)
-          : subAgentCall.status === "denied"
-            ? ("failed" as const)
-            : subAgentCall.status === "requested"
-              ? ("running" as const)
-              : subAgentCall.status;
-      return Object.freeze(
-        createConditionalObject({
-          kind: "subagent" as const,
-          executionId,
-          label: "Subagent",
-          status,
-          toolNames: Object.freeze([...new Set(childCalls.map((call) => call.toolName))].sort()),
-          callCount: childCalls.length,
-          startedAt: subAgentCall.createdAt,
-        } as const)
-          .addOptional(subAgentCall.completedAt ? { completedAt: subAgentCall.completedAt } : undefined)
-          .addOptional(subAgentCall.executionId ? { parentExecutionId: subAgentCall.executionId } : undefined)
-          .addOptional(modelCall ? { provider: modelCall.provider, model: modelCall.model } : undefined)
-          .addOptional(modelCall ? { thinkingLevel: modelCall.thinkingLevel } : undefined)
-          .addOptional(frozenSystemPrompt ? { systemPrompt: frozenSystemPrompt } : undefined)
-          .addOptional(frozenPrompt ? { prompt: frozenPrompt } : undefined)
-          .addOptional(
-            !(responseOutput === undefined)
-              ? {
-                  result:
-                    typeof responseOutput === "string"
-                      ? responseOutput
-                      : JSON.stringify(responseOutput, null, 2),
-                }
-              : undefined,
-          )
-          .addOptional(
-            typeof responseError === "string"
-              ? { error: responseError }
-              : modelCall?.error
-                ? { error: modelCall.error }
-                : undefined,
-          )
-          .finish(),
-      );
-    }
     const workflow = await workspace.operational.workflows.getRun(executionId);
     if (workflow?.sessionId !== sessionId || !workflowRunVisibleInProject(project, workflow))
       return undefined;
@@ -5716,9 +6386,10 @@ export async function createApplicationRuntimeComposition(
         stopCompactions(),
         interactions.close(),
         controlPlane.stop(),
-        codeExecution.shutdown(),
+        subAgentSupervisor?.shutdown() ?? Promise.resolve(),
         options.mcp?.close() ?? Promise.resolve(),
       ]).then(async () => {
+        await codeExecution.shutdown();
         for (const trailId of trailStates.keys()) {
           if (await workspace.operational.sessions.deleteIfEmpty(trailId, new Date().toISOString())) {
             trailStates.delete(trailId);
@@ -5816,6 +6487,17 @@ export async function createApplicationRuntimeComposition(
       interact,
       inspectInteraction,
       compact,
+      listSubAgents: async () => (await subAgentSupervisor?.list(project.projectId)) ?? Object.freeze([]),
+      inspectSubAgent: async (agentId: string, taskId?: string) => {
+        if (!subAgentSupervisor) throw new Error("Subagent supervisor is unavailable");
+        return await subAgentSupervisor.inspect(project.projectId, agentId, taskId);
+      },
+      getSubAgentTranscript: async (agentId: string, taskId?: string) => {
+        if (!subAgentSupervisor) throw new Error("Subagent supervisor is unavailable");
+        return await subAgentSupervisor.transcript(project.projectId, agentId, taskId);
+      },
+      subscribeSubAgents: (listener: Parameters<SubAgentSupervisor["subscribe"]>[0]) =>
+        subAgentSupervisor?.subscribe(listener) ?? (() => undefined),
       listSkills,
       inspectSkill,
       listModelRoutes: () => options.listModelRoutes?.() ?? Object.freeze([]),

@@ -28,14 +28,16 @@ return { readme, status };
 - `noesis.describe(name)` returns one tool's exact input and output schemas.
 - `noesis.invoke(name, input?)` invokes a tool by its exact string name.
 - `context` is a lazy immutable view of the complete pre-turn session. Use `context.length`, `context.slice(start, end)`, and `await view.text()`.
-- `agents.run({ systemPrompt?, prompt, tools?, thinkingLevel? })` runs an independent agent. Its prompt accepts text, a context view, or an array of both. Canonical tool names grant the selected frozen tools; omitting `tools` creates a tool-free query.
+- `agents.spawn({ name?, systemPrompt?, prompt, tools?, thinkingLevel? })` admits a retained agent and returns `{ agentId, taskId }` immediately. Its prompt accepts text, a context view, or an array of both. Canonical names grant frozen Code Mode tools; the provider-facing tools remain `file_read`, `file_write`, `shell`, and `execute`.
+- `agents.send({ to, message })` messages a foreground session or retained agent. `agents.list()` gives compact process-wide status; `agents.inspect({ agentId, taskId? })` retrieves bounded details.
+- `agents.wait({ taskId, timeoutMs? })` joins an exact task without owning its lifetime. Use `agents.cancel({ taskId, reason? })` or `agents.close({ agentId, reason? })` only when the task or actor should actually stop. Inside a child, `agents.self` and `agents.parent` identify collaborators.
 - `emit(value)` and `notify(value)` publish JSON-compatible progress updates.
 - `store(key, value)` and `load(key)` manage bounded JSON scratch state for the Code Mode session.
 - `input` is the validated input inside saved Program source. A foreground `execute` receives `null`.
 
 Code Mode, subagents, and shell commands have no implicit duration or call-count ceiling. Pass an optional `timeoutMs` only when the task itself needs a deadline; the user can cancel active work at any time.
 
-Pass a context view directly to `agents.run` when the child can analyze it without expanding the text in the parent execution.
+Spawn first and continue useful local work. Wait only when the child result is required for the next step. Pass a context view directly in `prompt` when the child can analyze it without expanding the text in the parent execution.
 
 ## Programs
 
