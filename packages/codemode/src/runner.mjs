@@ -275,11 +275,8 @@ process.on("message", async (message) => {
   const load = (key) => sessionStore.get(String(key));
   const context = createContextView(createContextDocument(message.contextDocument));
   const agentContext =
-    message.agentContext && typeof message.agentContext === "object"
-      ? message.agentContext
-      : { self: { kind: "foreground", id: "unknown" } };
+    message.agentContext && typeof message.agentContext === "object" ? message.agentContext : undefined;
   const agentMembers = {
-    self: Object.freeze({ ...agentContext.self }),
     spawn: (intent) => {
       if (!intent || typeof intent !== "object" || Array.isArray(intent))
         throw new TypeError("agents.spawn requires an intent object");
@@ -298,7 +295,8 @@ process.on("message", async (message) => {
     cancel: (input) => delegate("invoke", { name: "agents.cancel", input }),
     close: (input) => delegate("invoke", { name: "agents.close", input }),
   };
-  if (agentContext.parent) agentMembers.parent = Object.freeze({ ...agentContext.parent });
+  if (agentContext) agentMembers.self = Object.freeze({ ...agentContext.self });
+  if (agentContext?.parent) agentMembers.parent = Object.freeze({ ...agentContext.parent });
   const agents = Object.freeze(agentMembers);
   try {
     const executableSource =

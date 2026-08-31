@@ -570,6 +570,7 @@ interface PreparedInspectorDocument {
   readonly action: TuiAgentAction | undefined;
   readonly children: readonly TuiAgentAction[];
   readonly detail: TuiExecutionDetail | undefined;
+  readonly liveEvents: TuiInspectorState["liveEvents"];
   readonly inspectorStatus: TuiInspectorState["status"];
   readonly inspectorView: TuiInspectorState["view"];
   readonly width: number;
@@ -591,6 +592,7 @@ function prepareInspectorDocument(
     cached &&
     cached.action === action &&
     cached.detail === inspector.detail &&
+    cached.liveEvents === inspector.liveEvents &&
     cached.inspectorStatus === inspector.status &&
     cached.inspectorView === inspector.view &&
     cached.width === width &&
@@ -614,6 +616,7 @@ function prepareInspectorDocument(
     action,
     children: [...children],
     detail: inspector.detail,
+    liveEvents: inspector.liveEvents,
     inspectorStatus: inspector.status,
     inspectorView: inspector.view,
     width,

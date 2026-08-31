@@ -241,7 +241,7 @@ const safeTerminalQueueText = (text: string): string =>
  * so this line is the one place that says where keystrokes are going.
  */
 export function inputModeLine(state: NoesisTuiState, width: number): string {
-  if (!state.actionCursor)
+  if (!state.actionCursor && !state.subAgentCursor && !state.inspector)
     return elideText(styled(state.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), width);
   const badge = styled(state.colorEnabled, `${ANSI.bold}${ANSI.reverse}${ANSI.yellow}`, " ⊙ INSPECT ");
   const hint = styled(state.colorEnabled, ANSI.dim, "  typing paused · esc to return");

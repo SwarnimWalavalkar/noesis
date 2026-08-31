@@ -253,7 +253,7 @@ export function validateFrozenSubAgentPlan(value: unknown): FrozenSubAgentPlan {
       origin: Object.freeze({ ...normalizedOrigin }),
       route: Object.freeze({ ...plan.route }),
       frozenTools: Object.freeze(plan.frozenTools.map((tool) => Object.freeze({ ...tool }))),
-      executionTemplate: validateFrozenTurnPlan(plan.executionTemplate),
+      executionTemplate,
       authority: Object.freeze({
         permissionSnapshot: Object.freeze({
           effects: Object.freeze([...plan.authority.permissionSnapshot.effects]),

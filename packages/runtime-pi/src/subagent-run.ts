@@ -27,7 +27,7 @@ Use only the fixed direct tools and Code Mode operations supplied to this actor.
 
 export interface PiSubAgentModelCallLease {
   readonly complete: (request: { readonly output: string; readonly usage: AgentUsage }) => Promise<void>;
-  readonly fail: (reason: string, usage?: AgentUsage) => Promise<void>;
+  readonly fail: (reason: string, usage?: AgentUsage, status?: "failed" | "cancelled") => Promise<void>;
 }
 
 export interface PiSubAgentTaskRequest {
@@ -176,6 +176,7 @@ export function createPiSubAgentTaskRunner(
       readonly text: string;
       readonly resolve: (result: AgentSteerResult) => void;
       readonly promise: Promise<AgentSteerResult>;
+      forwarded: boolean;
     }[];
     harness?: AgentHarness;
     acceptsSteering: boolean;
@@ -405,6 +406,7 @@ export function createPiSubAgentTaskRunner(
                 ? "Subagent task was cancelled"
                 : event.message.errorMessage?.trim() || "Subagent provider request failed",
               messageUsage,
+              event.message.stopReason === "aborted" ? "cancelled" : "failed",
             );
           else await lease?.complete({ output: text, usage: messageUsage });
         } else if (event.type === "tool_execution_start") {
@@ -481,7 +483,11 @@ export function createPiSubAgentTaskRunner(
       request.emit({ type: "status", status: "started" });
       try {
         const prompt = harness.prompt(request.prompt);
-        for (const pending of task.pendingSteers) await harness.steer(pending.text).catch(() => undefined);
+        for (const pending of task.pendingSteers.slice()) {
+          if (pending.forwarded) continue;
+          pending.forwarded = true;
+          await harness.steer(pending.text).catch(() => undefined);
+        }
         const final = await prompt;
         if (final.stopReason === "aborted" || task.controller.signal.aborted)
           throw new Error("Subagent task was cancelled");
@@ -505,7 +511,11 @@ export function createPiSubAgentTaskRunner(
         unsubscribeBudget();
         const lease = activeLease;
         activeLease = undefined;
-        await lease?.fail("Subagent model call ended without a terminal assistant response", usage);
+        await lease?.fail(
+          "Subagent model call ended without a terminal assistant response",
+          usage,
+          task.controller.signal.aborted ? "cancelled" : "failed",
+        );
         await abortPromise;
       }
     } catch (cause) {
@@ -533,8 +543,15 @@ export function createPiSubAgentTaskRunner(
     const task = active.get(taskId);
     if (!task) return notConsumed("not-running");
     const deferred = Promise.withResolvers<AgentSteerResult>();
-    task.pendingSteers.push({ text, promise: deferred.promise, resolve: deferred.resolve });
+    const receipt = {
+      text,
+      promise: deferred.promise,
+      resolve: deferred.resolve,
+      forwarded: false,
+    };
+    task.pendingSteers.push(receipt);
     if (task.harness && task.acceptsSteering) {
+      receipt.forwarded = true;
       try {
         await task.harness.steer(text);
       } catch {

@@ -5,8 +5,10 @@ import {
   fauxToolCall,
   type Models,
 } from "@earendil-works/pi-ai";
+import { AgentHarness } from "@earendil-works/pi-agent-core";
 import {
   type AgentRuntimeEvent,
+  type AgentUsage,
   type FrozenRevisionMaterial,
   type FrozenSubAgentPlan,
   type FrozenTurnPlan,
@@ -264,6 +266,8 @@ function createTestSubAgentTaskRunner(cwd: string, models: Models) {
         request.signal.removeEventListener("abort", abort);
       }
     },
+    steer: runner.steer,
+    abort: runner.abort,
   });
 }
 
@@ -323,6 +327,97 @@ describe("agent runtime factories", () => {
 
     await expect(run).rejects.toThrow("Subagent task was cancelled");
     expect(providerRequests).toBe(0);
+  });
+
+  test("forwards each queued steer once across the startup flush boundary", async () => {
+    const authenticationStarted = Promise.withResolvers<void>();
+    const releaseAuthentication = Promise.withResolvers<void>();
+    const responseStarted = Promise.withResolvers<void>();
+    const releaseResponse = Promise.withResolvers<void>();
+    let responses = 0;
+    const controlled = createControlledPiModels({
+      respond: async () => {
+        responses += 1;
+        if (responses === 1) {
+          responseStarted.resolve();
+          await releaseResponse.promise;
+        }
+        return `response ${String(responses)}`;
+      },
+    });
+    const getAuth = controlled.models.getAuth.bind(controlled.models);
+    vi.spyOn(controlled.models, "getAuth").mockImplementation(async (model) => {
+      authenticationStarted.resolve();
+      await releaseAuthentication.promise;
+      return await getAuth(model);
+    });
+    const firstForwarded = Promise.withResolvers<void>();
+    const releaseFirstForward = Promise.withResolvers<void>();
+    const forwarded: string[] = [];
+    const originalSteer = AgentHarness.prototype.steer;
+    const steerSpy = vi.spyOn(AgentHarness.prototype, "steer").mockImplementation(async function (
+      this: AgentHarness,
+      text: string,
+    ) {
+      forwarded.push(text);
+      await originalSteer.call(this, text);
+      if (text === "first queued steer") {
+        firstForwarded.resolve();
+        await releaseFirstForward.promise;
+      }
+    });
+    const runner = createTestSubAgentTaskRunner(process.cwd(), controlled.models);
+    const turnId = "turn-subagent-steer-flush";
+    const plan: TestSubAgentTaskPlan = Object.freeze({
+      runId: "subagent-steer-flush",
+      systemPrompt: "Follow both steering messages.",
+      prompt: "Begin the controlled task.",
+      tools: Object.freeze([]),
+      thinkingLevel: "off",
+      route: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+      frozenTools: Object.freeze([]),
+      authority: Object.freeze({
+        parentExecutionId: "execution-parent",
+        parentToolCallId: "tool-call-parent",
+      }),
+      budget: Object.freeze({ requestTokenBudget: 2_000 }),
+    });
+    const prepared: PreparedPiCodeExecution = Object.freeze({
+      catalog: emptyCatalog("catalog-subagent-steer-flush"),
+      execute: async () => Object.freeze({ executionId: "unused", value: null, calls: 0, durationMs: 0 }),
+      close: async () => undefined,
+    });
+
+    try {
+      const running = runner.run({
+        plan,
+        prepared,
+        turnId,
+        signal: new AbortController().signal,
+        authorizeModelCall: async () =>
+          Object.freeze({
+            complete: async () => undefined,
+            fail: async () => undefined,
+          }),
+        emit: () => undefined,
+      });
+      await authenticationStarted.promise;
+      const firstReceipt = runner.steer(turnId, "first queued steer");
+      releaseAuthentication.resolve();
+      await firstForwarded.promise;
+      const secondReceipt = runner.steer(turnId, "second direct steer");
+      releaseFirstForward.resolve();
+      await responseStarted.promise;
+      releaseResponse.resolve();
+
+      await expect(firstReceipt).resolves.toMatchObject({ status: "consumed" });
+      await expect(secondReceipt).resolves.toMatchObject({ status: "consumed" });
+      await expect(running).resolves.toMatchObject({ text: expect.any(String) });
+      expect(forwarded.filter((text) => text === "first queued steer")).toHaveLength(1);
+      expect(forwarded.filter((text) => text === "second direct steer")).toHaveLength(1);
+    } finally {
+      steerSpy.mockRestore();
+    }
   });
 
   test("does not impose provider-round or tool-call ceilings on productive subagents", async () => {
@@ -400,11 +495,13 @@ describe("agent runtime factories", () => {
         errorMessage: "controlled provider unavailable",
       }),
       expectedReason: "controlled provider unavailable",
+      expectedStatus: "failed" as const,
     }),
     Object.freeze({
       label: "aborted",
       response: fauxAssistantMessage("Provider request aborted.", { stopReason: "aborted" }),
       expectedReason: "Subagent task was cancelled",
+      expectedStatus: "cancelled" as const,
     }),
   ])("fails the durable model-call lease when the provider round ends as $label", async (fixture) => {
     const controlled = createControlledPiModels({
@@ -430,7 +527,11 @@ describe("agent runtime factories", () => {
       close: async () => undefined,
     });
     const completed: number[] = [];
-    const failed: { readonly modelCall: number; readonly reason: string }[] = [];
+    const failed: {
+      readonly modelCall: number;
+      readonly reason: string;
+      readonly status: "failed" | "cancelled";
+    }[] = [];
 
     await expect(
       createTestSubAgentTaskRunner(process.cwd(), controlled.models).run({
@@ -443,15 +544,17 @@ describe("agent runtime factories", () => {
             complete: async () => {
               completed.push(modelCall);
             },
-            fail: async (reason: string) => {
-              failed.push(Object.freeze({ modelCall, reason }));
+            fail: async (reason: string, _usage?: AgentUsage, status: "failed" | "cancelled" = "failed") => {
+              failed.push(Object.freeze({ modelCall, reason, status }));
             },
           }),
         emit: () => undefined,
       }),
     ).rejects.toThrow(fixture.expectedReason);
     expect(completed).toEqual([]);
-    expect(failed).toEqual([{ modelCall: 1, reason: fixture.expectedReason }]);
+    expect(failed).toEqual([
+      { modelCall: 1, reason: fixture.expectedReason, status: fixture.expectedStatus },
+    ]);
   });
 
   test("assigns injective catalog aliases without shadowing core tools", () => {

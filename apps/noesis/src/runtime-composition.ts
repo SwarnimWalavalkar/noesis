@@ -24,6 +24,7 @@ import {
 } from "@noesis/agent-types";
 import { createAtomicCapabilityRegistry, createWorkspaceCapabilityControlStore } from "@noesis/capabilities";
 import {
+  type CodeExecutionAgentContext,
   type CodeExecutionEvent,
   type CodeExecutionContextDocument,
   type CodeExecutionRequest,
@@ -177,6 +178,14 @@ const BASE_SYSTEM_PROMPT = [
   "Never claim an action or system state without runtime evidence.",
 ].join("\n");
 const CONTEXT_COMPACTION_INTERRUPTED = "NoesisContextCompactionInterrupted";
+function codeExecutionAgentContext(plan: FrozenTurnPlan): CodeExecutionAgentContext {
+  return plan.subAgentActor
+    ? Object.freeze({
+        self: Object.freeze({ kind: "subagent" as const, id: plan.subAgentActor.agentId }),
+        parent: Object.freeze({ ...plan.subAgentActor.parent }),
+      })
+    : Object.freeze({ self: Object.freeze({ kind: "foreground" as const, id: plan.sessionId }) });
+}
 function contextCompactionInterrupted(reason: string): Error {
   const error = new Error(reason);
   error.name = CONTEXT_COMPACTION_INTERRUPTED;
@@ -2627,6 +2636,7 @@ export async function createApplicationRuntimeComposition(
               input,
               sessionId: plan.sessionId,
               signal: context.signal,
+              agentContext: codeExecutionAgentContext(plan),
             } as const)
               .addOptional(!plan.subAgentActor ? { turnId: plan.turnId } : undefined)
               .finish(),
@@ -2847,6 +2857,7 @@ export async function createApplicationRuntimeComposition(
                       input: inputAdapter.unwrap(JsonValueSchema.parse(input)),
                       sessionId: plan.sessionId,
                       signal: context.signal,
+                      agentContext: codeExecutionAgentContext(plan),
                     } as const)
                       .addOptional(!plan.subAgentActor ? { turnId: plan.turnId } : undefined)
                       .finish(),
@@ -3946,6 +3957,7 @@ export async function createApplicationRuntimeComposition(
               sessionId: plan.sessionId,
               signal: context.signal,
               contextDocument: workflowContext.request,
+              agentContext: codeExecutionAgentContext(plan),
             } as const)
               .addOptional(!plan.subAgentActor ? { turnId: plan.turnId } : undefined)
               .finish(),
@@ -4180,18 +4192,9 @@ export async function createApplicationRuntimeComposition(
             completionMode: "last-expression",
             sessionId: plan.sessionId,
             signal: executeSignal,
+            agentContext: codeExecutionAgentContext(plan),
           } as const)
             .addOptional(!plan.subAgentActor ? { turnId: plan.turnId } : undefined)
-            .add({
-              agentContext: plan.subAgentActor
-                ? Object.freeze({
-                    self: Object.freeze({ kind: "subagent" as const, id: plan.subAgentActor.agentId }),
-                    parent: Object.freeze({ ...plan.subAgentActor.parent }),
-                  })
-                : Object.freeze({
-                    self: Object.freeze({ kind: "foreground" as const, id: plan.sessionId }),
-                  }),
-            } as const)
             .addOptional(identity ? { logicalExecutionId: identity.logicalExecutionId } : undefined)
             .addOptional(!(timeoutMs === undefined) ? { timeoutMs } : undefined)
             .finish(),
@@ -4619,11 +4622,10 @@ export async function createApplicationRuntimeComposition(
                 requestArtifactId: requestArtifact.artifactId,
                 startedAt,
               });
-              await workspace.operational.subAgents.putModelCall({ ...base, status: "running" });
-              await workspace.operational.subAgents.appendTimeline({
+              const timelineEntry = Object.freeze({
                 taskId: task.taskId,
                 sequence: timelineSequence,
-                kind: "model_call",
+                kind: "model_call" as const,
                 entryId: modelCallId,
                 createdAt: startedAt,
               });
@@ -4650,15 +4652,51 @@ export async function createApplicationRuntimeComposition(
                 },
                 record.frozenPlan.authority.permissionSnapshot,
               );
-              const admission = await Promise.race([
-                admitted.promise.then(() => ({ ok: true as const })),
-                decision.then((value) =>
-                  value.ok
-                    ? { ok: false as const, reason: "Model-call reservation settled before admission" }
-                    : { ok: false as const, reason: value.reason },
-                ),
-              ]);
-              if (!admission.ok) throw new Error(admission.reason);
+              let admission: { readonly ok: true } | { readonly ok: false; readonly reason: string };
+              try {
+                admission = await Promise.race([
+                  admitted.promise.then(() => ({ ok: true as const })),
+                  decision.then((value) =>
+                    value.ok
+                      ? { ok: false as const, reason: "Model-call reservation settled before admission" }
+                      : { ok: false as const, reason: value.reason },
+                  ),
+                ]);
+              } catch (cause) {
+                admission = {
+                  ok: false,
+                  reason: cause instanceof Error ? cause.message : String(cause),
+                };
+              }
+              if (!admission.ok) {
+                await workspace.operational.subAgents.putModelCall({
+                  ...base,
+                  status: "failed",
+                  latencyMs: Date.now() - started,
+                  error: `Model call was not admitted: ${admission.reason}`,
+                  completedAt: new Date().toISOString(),
+                });
+                await workspace.operational.subAgents.appendTimeline(timelineEntry);
+                throw new Error(admission.reason);
+              }
+              try {
+                await workspace.operational.subAgents.putModelCall({ ...base, status: "running" });
+                await workspace.operational.subAgents.appendTimeline(timelineEntry);
+              } catch (cause) {
+                const reason = cause instanceof Error ? cause.message : String(cause);
+                completion.resolve({ ok: false, reason });
+                await decision.catch(() => undefined);
+                await workspace.operational.subAgents
+                  .putModelCall({
+                    ...base,
+                    status: "failed",
+                    latencyMs: Date.now() - started,
+                    error: reason,
+                    completedAt: new Date().toISOString(),
+                  })
+                  .catch(() => undefined);
+                throw cause;
+              }
               let settled = false;
               const settleAuthority = async (
                 outcome: { readonly ok: true } | { readonly ok: false; readonly reason: string },
@@ -4700,12 +4738,16 @@ export async function createApplicationRuntimeComposition(
                     completedAt: new Date().toISOString(),
                   });
                 },
-                fail: async (reason: string, usage?: AgentUsage) => {
+                fail: async (
+                  reason: string,
+                  usage?: AgentUsage,
+                  status: "failed" | "cancelled" = "failed",
+                ) => {
                   await settleAuthority({ ok: false, reason });
                   await workspace.operational.subAgents.putModelCall(
                     createConditionalObject({
                       ...base,
-                      status: "failed" as const,
+                      status,
                       latencyMs: Date.now() - started,
                       error: reason,
                       completedAt: new Date().toISOString(),
@@ -5622,7 +5664,7 @@ export async function createApplicationRuntimeComposition(
                       interactionControl?.onReady();
                       const collaborationPersistence = subAgentSupervisor
                         ?.deliverPendingForeground(trailId)
-                        .catch(recordActionPersistenceFailure);
+                        .catch(() => undefined);
                       if (collaborationPersistence)
                         actionPersistence = Promise.all([actionPersistence, collaborationPersistence]).then(
                           () => undefined,

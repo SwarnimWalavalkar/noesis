@@ -7,6 +7,7 @@ import {
   executionIdOf,
   formatDuration,
   initialTuiState,
+  inputModeLine,
   NOESIS_STARTUP_NOTES,
   NOESIS_WORDMARK,
   type NoesisTuiState,
@@ -1325,5 +1326,12 @@ describe("Noesis transcript rendering", () => {
     expect(bottom[0]).toContain("› message");
     expect(bottom[1]).toContain("● IDLE");
     expect(bottom[2]).toContain("? help");
+  });
+
+  test("labels subagent navigation as inspect mode while the editor is paused", () => {
+    const state = { ...initialTuiState("fake"), subAgentCursor: "agent-live" };
+
+    expect(inputModeLine(state, 90)).toContain("INSPECT");
+    expect(inputModeLine(state, 90)).not.toContain("› message");
   });
 });

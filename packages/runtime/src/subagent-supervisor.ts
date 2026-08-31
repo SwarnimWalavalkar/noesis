@@ -118,11 +118,12 @@ function isTerminal(task: SubAgentTaskRecord): boolean {
 }
 
 function collaborationMessage(message: AgentMailboxMessageRecord): string {
-  return [
-    `<collaboration_message sender_kind="${message.sender.kind}" sender_id="${message.sender.id}" message_id="${message.messageId}">`,
-    message.content,
-    "</collaboration_message>",
-  ].join("\n");
+  return JSON.stringify({
+    kind: "noesis_collaboration_message",
+    sender: message.sender,
+    messageId: message.messageId,
+    content: message.content,
+  });
 }
 
 export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOptions): SubAgentSupervisor {
@@ -191,29 +192,35 @@ export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOption
   const schedule = (agentId: string, taskId: string): void => {
     if (closing || running.has(taskId)) return;
     const execution = (async () => {
-      const startedAt = now();
-      const claimed = await options.workspace.operational.subAgents.claimTask(taskId, startedAt);
-      if (!claimed) return;
-      let agent = await options.workspace.operational.subAgents.get(agentId);
-      if (!agent || agent.status === "closed" || agent.status === "suspended") {
-        await settleTask(claimed, {
-          status: "interrupted",
-          error: "Subagent became unavailable before task start",
-        });
-        return;
-      }
-      agent = await updateAgentStatus(agent, "running", startedAt);
-      const allMessages = await options.workspace.operational.subAgents.listMessages(agentId);
-      const messages = allMessages.filter((message) => message.taskId === taskId);
-      for (const message of messages) {
-        if (message.status !== "accepted") continue;
-        await options.workspace.operational.subAgents.putMessage({
-          ...message,
-          status: "claimed",
-          claimedAt: startedAt,
-        });
-      }
-      publish({ type: "changed", agentId, taskId });
+      const start = await serializeAgent(agentId, async () => {
+        if (closing) return undefined;
+        const startedAt = now();
+        const claimed = await options.workspace.operational.subAgents.claimTask(taskId, startedAt);
+        if (!claimed) return undefined;
+        let agent = await options.workspace.operational.subAgents.get(agentId);
+        if (!agent || agent.status === "closed" || agent.status === "suspended") {
+          await settleTask(claimed, {
+            status: "interrupted",
+            error: "Subagent became unavailable before task start",
+          });
+          return undefined;
+        }
+        agent = await updateAgentStatus(agent, "running", startedAt);
+        const allMessages = await options.workspace.operational.subAgents.listMessages(agentId);
+        const messages = allMessages.filter((message) => message.taskId === taskId);
+        for (const message of messages) {
+          if (message.status !== "accepted") continue;
+          await options.workspace.operational.subAgents.putMessage({
+            ...message,
+            status: "claimed",
+            claimedAt: startedAt,
+          });
+        }
+        publish({ type: "changed", agentId, taskId });
+        return Object.freeze({ agent, claimed, messages });
+      });
+      if (!start) return;
+      const { agent, claimed, messages } = start;
       try {
         const result = await options.taskExecution.run({
           agent,
@@ -263,7 +270,7 @@ export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOption
             error: cause instanceof Error ? cause.message : String(cause),
           });
         const agent = await options.workspace.operational.subAgents.get(agentId);
-        if (agent?.status === "running")
+        if (agent?.status === "running" || agent?.status === "starting")
           await updateAgentStatus(agent, closing ? "suspended" : "idle", now());
       })
       .finally(() => running.delete(taskId));
@@ -294,28 +301,48 @@ export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOption
   const deliverForegroundMessage = async (message: AgentMailboxMessageRecord): Promise<boolean> => {
     const current = await options.workspace.operational.subAgents.getMessage(message.messageId);
     if (!current || current.status !== "accepted") return false;
-    const delivered = await options.deliverForeground?.({ message: current });
-    if (delivered !== "delivered") return false;
     const claimedAt = now();
-    await options.workspace.operational.subAgents.putMessage({
+    const claimed = Object.freeze({
       ...current,
-      status: "claimed",
+      status: "claimed" as const,
       claimedAt,
     });
-    await options.workspace.operational.subAgents.putMessage({
-      ...current,
-      status: "delivered",
-      claimedAt,
-      deliveredAt: now(),
-    });
-    publish({
-      type: "message",
-      agentId: current.sender.id,
-      messageId: current.messageId,
-      recipient: current.recipient,
-      status: "delivered",
-    });
-    return true;
+    await options.workspace.operational.subAgents.putMessage(claimed);
+    try {
+      const delivered = await options.deliverForeground?.({ message: claimed });
+      if (delivered !== "delivered") {
+        const { claimedAt: _claimedAt, ...accepted } = claimed;
+        void _claimedAt;
+        await options.workspace.operational.subAgents.putMessage({
+          ...accepted,
+          status: "accepted",
+        });
+        return false;
+      }
+      await options.workspace.operational.subAgents.putMessage({
+        ...claimed,
+        status: "delivered",
+        deliveredAt: now(),
+      });
+      publish({
+        type: "message",
+        agentId: current.sender.id,
+        messageId: current.messageId,
+        recipient: current.recipient,
+        status: "delivered",
+      });
+      return true;
+    } catch (cause) {
+      const unresolved = await options.workspace.operational.subAgents.getMessage(message.messageId);
+      if (unresolved?.status === "claimed")
+        await options.workspace.operational.subAgents.putMessage({
+          ...unresolved,
+          status: "failed",
+          failedAt: now(),
+          failure: `Foreground delivery outcome is unknown: ${cause instanceof Error ? cause.message : String(cause)}`,
+        });
+      throw cause;
+    }
   };
 
   const deliverPendingForeground: SubAgentSupervisor["deliverPendingForeground"] = async (sessionId) =>
@@ -358,7 +385,7 @@ export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOption
           await deliverForegroundMessage(message);
         }).catch(async (cause: unknown) => {
           const current = await options.workspace.operational.subAgents.getMessage(message.messageId);
-          if (current?.status === "accepted")
+          if (current?.status === "accepted" || current?.status === "claimed")
             await options.workspace.operational.subAgents.putMessage({
               ...current,
               status: "failed",

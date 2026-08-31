@@ -3613,7 +3613,7 @@ function createOperationalRepositories(
         const transitions = {
           starting: ["starting", "running", "idle", "suspended", "closed"],
           running: ["running", "idle", "suspended", "closed"],
-          idle: ["idle", "running", "suspended", "closed"],
+          idle: ["idle", "starting", "running", "suspended", "closed"],
           suspended: ["suspended", "closed"],
           closed: ["closed"],
         } satisfies Readonly<Record<SubAgentRecord["status"], readonly SubAgentRecord["status"][]>>;
@@ -3779,7 +3779,7 @@ function createOperationalRepositories(
       else {
         const transitions = {
           accepted: ["accepted", "claimed", "failed"],
-          claimed: ["claimed", "delivered", "failed"],
+          claimed: ["accepted", "claimed", "delivered", "failed"],
           delivered: ["delivered"],
           failed: ["failed"],
         } satisfies Readonly<
@@ -4666,6 +4666,9 @@ function createOperationalRepositories(
           const activeTasks = db
             .prepare("SELECT task_id FROM sub_agent_tasks WHERE status IN ('pending', 'running')")
             .all();
+          const claimedMessages = db
+            .prepare("SELECT message_id FROM agent_messages WHERE status = 'claimed'")
+            .all();
           db.prepare(`UPDATE sub_agent_tasks SET
               status = 'interrupted', error = 'Process exited before task settled', completed_at = ?
             WHERE status IN ('pending', 'running')`).run(interruptedAt);
@@ -4674,9 +4677,17 @@ function createOperationalRepositories(
           db.prepare(`UPDATE sub_agent_model_calls SET
               status = 'interrupted', error = 'Process exited before model call settled', completed_at = ?
             WHERE status = 'running'`).run(interruptedAt);
+          db.prepare(`UPDATE agent_messages SET
+              status = 'failed', failed_at = ?,
+              failure = 'Process exited while message delivery outcome was unresolved'
+            WHERE status = 'claimed'`).run(interruptedAt);
           for (const row of activeTasks) {
             const taskId = requiredString(row, "task_id");
             recordActivity(systemActor, "subagent_task.interrupted", "subagent_task", taskId);
+          }
+          for (const row of claimedMessages) {
+            const messageId = requiredString(row, "message_id");
+            recordActivity(systemActor, "agent_message.failed", "agent_message", messageId);
           }
           return activeTasks.length;
         }),

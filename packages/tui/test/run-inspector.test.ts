@@ -460,6 +460,47 @@ describe("run inspector panel", () => {
     expect(body).toContain("ToolError: files.write denied");
     expect(body).not.toContain("RESULT");
   });
+
+  test("invalidates prepared subagent rows when a live event arrives", () => {
+    const action = {
+      actionId: "subagent:agent-live",
+      name: "subagent",
+      status: "running" as const,
+      input: {},
+    };
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "inspector-opened",
+      actionId: action.actionId,
+      syntheticAction: action,
+    });
+    state = reduceTui(state, {
+      type: "inspector-loaded",
+      actionId: action.actionId,
+      detail: {
+        kind: "subagent",
+        executionId: "agent-live",
+        label: "subagent",
+        status: "running",
+        toolNames: [],
+        callCount: 0,
+        startedAt: "2026-08-31T00:00:00.000Z",
+      },
+    });
+    expect(renderRunInspectorFrame(state, 88, 20).rows.join("\n")).not.toContain("fresh reasoning");
+
+    state = reduceTui(state, {
+      type: "subagent-live-event",
+      actionId: action.actionId,
+      event: {
+        type: "live",
+        agentId: "agent-live",
+        taskId: "task-live",
+        event: { type: "reasoning-delta", text: "fresh reasoning" },
+      },
+    });
+
+    expect(renderRunInspectorFrame(state, 88, 20).rows.join("\n")).toContain("fresh reasoning");
+  });
   test("keeps a failed action's exact structured output in raw mode", () => {
     const failed = stateWithRun({ failed: true });
     const timeline = failed.timeline.map((entry) =>
