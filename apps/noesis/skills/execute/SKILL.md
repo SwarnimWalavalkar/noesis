@@ -37,7 +37,11 @@ return { readme, status };
 
 Code Mode, subagents, and shell commands have no implicit duration or call-count ceiling. Pass an optional `timeoutMs` only when the task itself needs a deadline; the user can cancel active work at any time.
 
-Spawn first and continue useful local work. Wait only when the child result is required for the next step. Pass a context view directly in `prompt` when the child can analyze it without expanding the text in the parent execution.
+## Background subagents
+
+When foreground work can proceed independently, make admission a short boundary: spawn in one `execute`, return the handles, continue that work, then join in a later `execute` at synthesis. When delegation is the only useful work, waiting immediately is the join point.
+
+Give research agents a checkable evidence boundary and ask them to batch independent searches and reads. Their report is ready when every requested conclusion has direct evidence. Pass a context view directly in `prompt` when the child can analyze it without expanding the text in the parent execution.
 
 ## Programs
 
