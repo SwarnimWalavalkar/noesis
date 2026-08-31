@@ -359,6 +359,52 @@ describe("Noesis slash commands", () => {
     expect(base.listTrails()).toHaveLength(2);
   });
 
+  test("uses the provider picker only, then authenticates before refreshing its default route", async () => {
+    const base = createInMemoryTestRuntime(agent);
+    const current = await base.startTrail({ title: "interactive provider authentication" });
+    const events: string[] = [];
+    const route = Object.freeze({
+      provider: "provider-next",
+      providerName: "Provider Next",
+      model: "next-default",
+      name: "Next default",
+      thinkingLevels: Object.freeze(["off"] as const),
+      default: true,
+      allowsCustomModelIds: false,
+    });
+    const runtime = Object.freeze({
+      ...base,
+      listModelRoutes: () => Object.freeze([route]),
+      refreshModelRoutes: async () => {
+        events.push("refresh-models");
+        return Object.freeze([route]);
+      },
+      startTrail: async (input: Parameters<typeof base.startTrail>[0]) => {
+        events.push("start-session");
+        return await base.startTrail(input);
+      },
+    });
+
+    await runSlashCommand("/provider", {
+      runtime,
+      trailId: current.trailId,
+      publishInspector: () => undefined,
+      dispatch: () => undefined,
+      requestRender: () => undefined,
+      selectProvider: async () => ({ provider: "provider-next", providerName: "Provider Next" }),
+      selectRoute: async () => {
+        throw new Error("The provider command must not open the model picker");
+      },
+      ensureProviderAuthenticated: async () => {
+        events.push("authenticate");
+        return true;
+      },
+    });
+
+    expect(events).toEqual(["authenticate", "refresh-models", "start-session"]);
+    expect(base.listTrails()).toHaveLength(2);
+  });
+
   test("keeps the current session when provider authentication is cancelled", async () => {
     const base = createInMemoryTestRuntime(agent);
     const current = await base.startTrail({ title: "cancelled provider authentication" });
@@ -412,7 +458,7 @@ describe("Noesis slash commands", () => {
       publishInspector: () => undefined,
       dispatch: (action) => cancelled.push(action),
       requestRender: () => undefined,
-      selectRoute: async () => undefined,
+      selectProvider: async () => undefined,
     });
     expect(cancelled).toEqual([]);
 

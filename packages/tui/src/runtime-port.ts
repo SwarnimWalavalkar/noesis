@@ -569,6 +569,7 @@ export type NoesisTuiRuntime = Pick<
     providerId: string,
     callbacks: TuiProviderAuthCallbacks,
   ) => Promise<TuiProviderAuthStatus>;
+  readonly disconnectProvider?: (providerId: string) => Promise<TuiProviderAuthStatus>;
   readonly setTrailThinkingLevel?: (
     trailId: string,
     thinkingLevel: AgentThinkingLevel,

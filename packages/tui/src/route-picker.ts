@@ -16,11 +16,9 @@ import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 interface ModelPickerScreen {
   readonly kind: "models";
   readonly provider: string;
-  readonly backToProviders: boolean;
 }
 
 type PickerScreen =
-  | { readonly kind: "providers" }
   | ModelPickerScreen
   | {
       readonly kind: "reasoning";
@@ -56,13 +54,6 @@ const pickerRule = (width: number, colorEnabled: boolean, top: boolean): string 
   const rule = `${top ? "╭" : "╰"}${"─".repeat(Math.max(0, bounded - 2))}${top ? "╮" : "╯"}`;
   return styled(colorEnabled, ANSI.dim, rule);
 };
-
-const providerIds = (routes: readonly TuiModelRoute[], currentProvider: string): readonly string[] =>
-  [...new Set(routes.map((route) => route.provider))].sort((left, right) => {
-    if (left === currentProvider) return -1;
-    if (right === currentProvider) return 1;
-    return left.localeCompare(right);
-  });
 
 const providerName = (routes: readonly TuiModelRoute[], provider: string): string =>
   routes.find((route) => route.provider === provider)?.providerName ?? provider;
@@ -102,11 +93,9 @@ export function createTuiRoutePickerOverlay(options: {
       route.provider === options.intent.currentProvider && route.model === options.intent.currentModel,
   );
   let screen: PickerScreen =
-    options.intent.kind === "provider"
-      ? { kind: "providers" }
-      : options.intent.kind === "reasoning" && currentRoute
-        ? { kind: "reasoning", route: currentRoute }
-        : { kind: "models", provider: options.intent.currentProvider, backToProviders: false };
+    options.intent.kind === "reasoning" && currentRoute
+      ? { kind: "reasoning", route: currentRoute }
+      : { kind: "models", provider: options.intent.currentProvider };
   if (screen.kind === "reasoning") {
     const levels: readonly AgentThinkingLevel[] =
       screen.route.thinkingLevels.length > 0 ? screen.route.thinkingLevels : ["off"];
@@ -114,7 +103,6 @@ export function createTuiRoutePickerOverlay(options: {
     cursor = preferred >= 0 ? preferred : Math.max(0, levels.length - 1);
   }
 
-  const providers = (): readonly string[] => providerIds(routes, options.intent.currentProvider);
   const unfilteredModels = (): readonly TuiModelRoute[] =>
     screen.kind === "models"
       ? routesForProvider(
@@ -132,12 +120,7 @@ export function createTuiRoutePickerOverlay(options: {
         ? screen.route.thinkingLevels
         : ["off"]
       : [];
-  const itemCount = (): number =>
-    screen.kind === "providers"
-      ? providers().length
-      : screen.kind === "models"
-        ? models().length
-        : reasoningLevels().length;
+  const itemCount = (): number => (screen.kind === "models" ? models().length : reasoningLevels().length);
   const selectedModel = (): TuiModelRoute | undefined =>
     screen.kind === "models" ? models()[cursor] : undefined;
   const render = (): void => options.requestRender();
@@ -148,19 +131,6 @@ export function createTuiRoutePickerOverlay(options: {
     const count = itemCount();
     if (count === 0) return;
     cursor = (cursor + delta + count) % count;
-    render();
-  };
-  const openModels = (provider: string, backToProviders: boolean): void => {
-    screen = { kind: "models", provider, backToProviders };
-    query = "";
-    search.setValue("");
-    const routes = unfilteredModels();
-    const preferred = routes.findIndex(
-      (route) =>
-        route.provider === options.intent.currentProvider && route.model === options.intent.currentModel,
-    );
-    resetCursor(preferred >= 0 ? preferred : 0);
-    search.focused = focused;
     render();
   };
   const openReasoning = (route: TuiModelRoute): void => {
@@ -176,11 +146,6 @@ export function createTuiRoutePickerOverlay(options: {
     render();
   };
   const accept = (): void => {
-    if (screen.kind === "providers") {
-      const provider = providers()[cursor];
-      if (provider) openModels(provider, true);
-      return;
-    }
     if (screen.kind === "models") {
       const route = selectedModel();
       if (route) openReasoning(route);
@@ -204,18 +169,10 @@ export function createTuiRoutePickerOverlay(options: {
       render();
       return;
     }
-    if (screen.kind === "models" && screen.backToProviders) {
-      const provider = screen.provider;
-      screen = { kind: "providers" };
-      resetCursor(Math.max(0, providers().indexOf(provider)));
-      search.focused = false;
-      render();
-      return;
-    }
     options.cancel();
   };
   const visibleRange = (count: number): readonly [number, number] => {
-    const reserved = screen.kind === "models" ? 11 : screen.kind === "reasoning" ? 10 : 8;
+    const reserved = screen.kind === "models" ? 11 : 10;
     const available = Math.max(1, Math.min(10, options.height() - reserved));
     const start = Math.max(0, Math.min(cursor - Math.floor(available / 2), count - available));
     return [start, Math.min(count, start + available)];
@@ -224,11 +181,9 @@ export function createTuiRoutePickerOverlay(options: {
     const bounded = boundedWidth(width);
     const lines = [pickerRule(bounded, options.colorEnabled, true)];
     const title =
-      screen.kind === "providers"
-        ? "SELECT PROVIDER"
-        : screen.kind === "models"
-          ? `SELECT MODEL · ${safeTerminalText(providerName(routes, screen.provider))}`
-          : `SELECT REASONING · ${safeTerminalText(screen.route.model)}`;
+      screen.kind === "models"
+        ? `SELECT MODEL · ${safeTerminalText(providerName(routes, screen.provider))}`
+        : `SELECT REASONING · ${safeTerminalText(screen.route.model)}`;
     lines.push(
       pickerRow(
         styled(options.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, title),
@@ -252,22 +207,7 @@ export function createTuiRoutePickerOverlay(options: {
     const [start, end] = visibleRange(count);
     for (let index = start; index < end; index += 1) {
       const selected = index === cursor;
-      if (screen.kind === "providers") {
-        const provider = providers()[index];
-        if (!provider) continue;
-        const count = routes.filter((route) => route.provider === provider).length;
-        const current = provider === options.intent.currentProvider;
-        const name = providerName(routes, provider);
-        const identity = name === provider ? name : `${name} (${provider})`;
-        const label = `${selected ? "→" : " "} ${safeTerminalText(identity)}  ${styled(options.colorEnabled, ANSI.dim, `${String(count)} models`)}${current ? styled(options.colorEnabled, ANSI.green, "  ✓ current") : ""}`;
-        lines.push(
-          pickerRow(
-            selected ? styled(options.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, label) : label,
-            bounded,
-            options.colorEnabled,
-          ),
-        );
-      } else if (screen.kind === "models") {
+      if (screen.kind === "models") {
         const route = models()[index];
         if (!route) continue;
         const current =
@@ -341,11 +281,9 @@ export function createTuiRoutePickerOverlay(options: {
         styled(
           options.colorEnabled,
           ANSI.dim,
-          screen.kind === "providers"
-            ? "↑/↓ navigate · Enter choose provider · Esc cancel"
-            : screen.kind === "models"
-              ? `Type to search · ↑/↓ navigate · Enter choose model · Esc ${screen.backToProviders ? "back" : "cancel"}`
-              : `↑/↓ navigate · Enter select · Esc ${screen.previous ? "back" : "cancel"}`,
+          screen.kind === "models"
+            ? "Type to search · ↑/↓ navigate · Enter choose model · Esc cancel"
+            : `↑/↓ navigate · Enter select · Esc ${screen.previous ? "back" : "cancel"}`,
         ),
         bounded,
         options.colorEnabled,

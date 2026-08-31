@@ -302,8 +302,8 @@ async function createRuntime(
   }>
 > {
   const services = await createPiModelServices(config.home);
-  preparePiModelSelection(services.models, config.agent);
-  preparePiModelSelection(services.models, config.agents);
+  preparePiModelSelection(services.catalog, config.agent);
+  preparePiModelSelection(services.catalog, config.agents);
   const project = await resolveActiveProject(process.cwd());
   const skills = createPiSkillLibrary({
     cwd: project.root,
@@ -354,15 +354,19 @@ async function createRuntime(
           createRoleRunner: (configurations) =>
             createPiAgentRoleRunner(project.root, services.models, configurations),
           subAgentTaskRunner: createPiSubAgentTaskRunner(project.root, services.models),
-          listModelRoutes: () => listPiModelRoutes(services.models),
+          listModelRoutes: () => listPiModelRoutes(services.catalog),
           refreshModelRoutes: async (signal) => {
             await services.refresh(signal);
-            return listPiModelRoutes(services.models);
+            return listPiModelRoutes(services.catalog);
           },
           providerAuthStatus: services.auth.status,
           authenticateProvider: services.auth.login,
+          disconnectProvider: async (providerId) => {
+            await services.auth.logout(providerId);
+            return await services.auth.status(providerId);
+          },
           resolveModelContext: (provider, model) => {
-            const selected = services.models.getModel(provider, model);
+            const selected = services.catalog.getModel(provider, model);
             if (!selected) throw new Error(`Unknown Pi model ${provider}/${model}`);
             return Object.freeze({
               contextWindow: selected.contextWindow,
@@ -379,6 +383,7 @@ async function createRuntime(
           | "refreshModelRoutes"
           | "providerAuthStatus"
           | "authenticateProvider"
+          | "disconnectProvider"
           | "resolveModelContext"
         >)
         .finish(),
@@ -443,8 +448,8 @@ async function runOnboarding(input: CliInput, startupNote?: string): Promise<voi
         prompts: promptsFromSurface(surface),
         auth: services.auth,
         authCallbacks: surfaceAuthCallbacks(surface),
-        modelRoutes: listPiModelRoutes(services.models),
-        validateModelSelection: (selection) => preparePiModelSelection(services.models, selection),
+        modelRoutes: listPiModelRoutes(services.catalog),
+        validateModelSelection: (selection) => preparePiModelSelection(services.catalog, selection),
       }),
     createConditionalObject({
       subtitle: "first-launch setup",
@@ -507,7 +512,7 @@ async function runConfig(input: CliInput): Promise<void> {
         model: input.overrides.model ?? current.agent.model,
       };
       const services = await createPiModelServices(input.home);
-      preparePiModelSelection(services.models, selection);
+      preparePiModelSelection(services.catalog, selection);
     }
     console.log(JSON.stringify(await updateNoesisConfig(input.home, input.overrides), null, 2));
     return;

@@ -12,10 +12,19 @@ import type { NoesisTuiAction } from "./state.ts";
 import { resumableTrail } from "./session-picker.ts";
 
 export interface TuiRoutePickerIntent {
-  readonly kind: "model" | "provider" | "reasoning";
+  readonly kind: "model" | "reasoning";
   readonly currentProvider: string;
   readonly currentModel: string;
   readonly currentThinkingLevel: AgentThinkingLevel;
+}
+
+export interface TuiProviderPickerIntent {
+  readonly currentProvider: string;
+}
+
+export interface TuiProviderPickerSelection {
+  readonly provider: string;
+  readonly providerName: string;
 }
 
 export interface TuiRoutePickerSelection {
@@ -35,13 +44,16 @@ export interface SlashCommandContext {
   readonly openMcpManager?: () => void;
   readonly openLearningAudit?: () => void;
   readonly selectRoute?: (intent: TuiRoutePickerIntent) => Promise<TuiRoutePickerSelection | undefined>;
+  readonly selectProvider?: (
+    intent: TuiProviderPickerIntent,
+  ) => Promise<TuiProviderPickerSelection | undefined>;
   readonly ensureProviderAuthenticated?: (providerId: string, providerName: string) => Promise<boolean>;
   readonly selectSession?: () => Promise<string | undefined>;
 }
 
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const HELP_LINES = [
-  "/provider · /model open route pickers · /reasoning opens its picker",
+  "/provider manages connections · /model selects a model · /reasoning selects reasoning",
   "/provider ID · /model ID · /reasoning LEVEL are quick inline changes",
   "provider or model changes start an empty session; the current session is preserved",
   "the prior transcript is not replayed in the new session",
@@ -99,6 +111,7 @@ async function selectFreshRoute(
   route: Pick<TuiModelRoute, "provider" | "providerName" | "model" | "thinkingLevels">,
   context: SlashCommandContext,
   requestedThinkingLevel?: AgentThinkingLevel,
+  providerAlreadyAuthenticated = false,
 ): Promise<void> {
   if (current.provider === route.provider && current.model === route.model) {
     context.dispatch({
@@ -110,6 +123,7 @@ async function selectFreshRoute(
     return;
   }
   if (
+    !providerAlreadyAuthenticated &&
     context.ensureProviderAuthenticated &&
     !(await context.ensureProviderAuthenticated(route.provider, route.providerName ?? route.provider))
   ) {
@@ -140,6 +154,44 @@ async function selectFreshRoute(
     tone: "info",
   });
   context.requestRender();
+}
+
+async function selectProvider(
+  current: ReturnType<NoesisTuiRuntime["getTrail"]>,
+  provider: string,
+  providerName: string,
+  context: SlashCommandContext,
+): Promise<void> {
+  if (
+    context.ensureProviderAuthenticated &&
+    !(await context.ensureProviderAuthenticated(provider, providerName))
+  ) {
+    context.dispatch({
+      type: "notification-shown",
+      text: "Authentication cancelled · session unchanged",
+      tone: "info",
+    });
+    context.requestRender();
+    return;
+  }
+  if (current.provider === provider) {
+    context.dispatch({
+      type: "notification-shown",
+      text: `Already using provider ${provider} · session unchanged`,
+      tone: "info",
+    });
+    context.requestRender();
+    return;
+  }
+  const routes = (await refreshedModelRoutes(context.runtime)).filter((route) => route.provider === provider);
+  const route = routes.find((candidate) => candidate.default) ?? routes[0];
+  if (!route) {
+    context.publishInspector(
+      `${providerName} is connected, but its model catalog is unavailable. The current session is unchanged.`,
+    );
+    return;
+  }
+  await selectFreshRoute(current, route, context, undefined, true);
 }
 
 async function setCurrentReasoningLevel(
@@ -573,14 +625,9 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
   if (command === "/provider") {
     const routes = runtime.listModelRoutes?.() ?? [];
     const current = runtime.getTrail(trailId);
-    if (context.selectRoute && routes.length > 0) {
-      const selected = await context.selectRoute({
-        kind: "provider",
-        currentProvider: current.provider,
-        currentModel: current.model,
-        currentThinkingLevel: current.thinkingLevel,
-      });
-      if (selected) await applyRoutePickerSelection(current, selected, context);
+    if (context.selectProvider) {
+      const selected = await context.selectProvider({ currentProvider: current.provider });
+      if (selected) await selectProvider(current, selected.provider, selected.providerName, context);
       return true;
     }
     const providers = [...new Set(routes.map((route) => route.provider))];
@@ -603,13 +650,12 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
 
   if (command.startsWith("/provider ")) {
     const provider = command.slice("/provider ".length).trim();
-    const routes = (await refreshedModelRoutes(runtime)).filter((route) => route.provider === provider);
-    const selected = routes.find((route) => route.default) ?? routes[0];
-    if (!selected) {
+    const known = (runtime.listModelRoutes?.() ?? []).find((route) => route.provider === provider);
+    if (!known) {
       publishInspector(`Unknown provider: ${provider}. Use /provider to list available providers.`);
       return true;
     }
-    await selectFreshRoute(runtime.getTrail(trailId), selected, context);
+    await selectProvider(runtime.getTrail(trailId), provider, known.providerName ?? provider, context);
     return true;
   }
 

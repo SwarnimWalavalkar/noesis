@@ -176,7 +176,7 @@ describe("first-launch onboarding", () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-onboarding-openrouter-"));
     const prompts = createScriptedPrompts(["openrouter", "low"], ["research-lab/future-model"], [true]);
     const auth = createFakeAuth({ provider: "openrouter", configured: true, source: "environment" });
-    const models = (await createPiModelServices(home)).models;
+    const models = (await createPiModelServices(home)).catalog;
 
     const result = await runFirstLaunchOnboarding({
       home,

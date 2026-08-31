@@ -858,6 +858,7 @@ export interface ApplicationRuntimeCompositionOptions {
   readonly refreshModelRoutes?: (signal?: AbortSignal) => Promise<readonly TuiModelRoute[]>;
   readonly providerAuthStatus?: NonNullable<NoesisTuiRuntime["providerAuthStatus"]>;
   readonly authenticateProvider?: NonNullable<NoesisTuiRuntime["authenticateProvider"]>;
+  readonly disconnectProvider?: NonNullable<NoesisTuiRuntime["disconnectProvider"]>;
 }
 export async function resolveActiveProject(root: string): Promise<ProjectRef> {
   const canonicalRoot = await realpath(root);
@@ -6564,6 +6565,9 @@ export async function createApplicationRuntimeComposition(
               authenticateProvider: options.authenticateProvider,
             }
           : undefined,
+      )
+      .addOptional(
+        options.disconnectProvider ? { disconnectProvider: options.disconnectProvider } : undefined,
       )
       .addOptional(
         options.mcp

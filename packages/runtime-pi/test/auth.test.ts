@@ -2,10 +2,17 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, symlink, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createAssistantMessageEventStream,
   createModels,
+  createProvider,
   fauxAssistantMessage,
   fauxProvider,
+  InMemoryCredentialStore,
+  type Api,
+  type AssistantMessage,
   type CredentialStore,
+  type Model,
+  type ModelsSimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
@@ -22,6 +29,7 @@ import {
   createDefaultRoleContextPolicy,
   createSecurePiCredentialStore,
   listPiModelRoutes,
+  createOAuthRecoveringModels,
   piAuthPath,
   preparePiModelSelection,
 } from "../src/index.ts";
@@ -30,6 +38,48 @@ const emptyAuthContext = {
   env: async (_name: string): Promise<string | undefined> => undefined,
   fileExists: async (_path: string): Promise<boolean> => false,
 };
+
+function modelMessage(
+  model: Model<Api>,
+  text: string,
+  options: { readonly error?: string } = {},
+): AssistantMessage {
+  const message = options.error
+    ? fauxAssistantMessage(text, { stopReason: "error", errorMessage: options.error })
+    : fauxAssistantMessage(text, { stopReason: "stop" });
+  return {
+    ...message,
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+  };
+}
+
+function scriptedHttpStream(
+  model: Model<Api>,
+  options: ModelsSimpleStreamOptions | undefined,
+  status: number,
+  visibleBeforeFailure = false,
+) {
+  const stream = createAssistantMessageEventStream();
+  queueMicrotask(async () => {
+    const partial = modelMessage(model, "");
+    stream.push({ type: "start", partial });
+    await options?.onResponse?.({ status, headers: {} }, model);
+    if (status === 401) {
+      if (visibleBeforeFailure)
+        stream.push({ type: "text_delta", contentIndex: 0, delta: "visible", partial });
+      const failed = modelMessage(model, "", {
+        error: "Provided authentication token is expired.",
+      });
+      stream.push({ type: "error", reason: "error", error: failed });
+      return;
+    }
+    const completed = modelMessage(model, "recovered");
+    stream.push({ type: "done", reason: "stop", message: completed });
+  });
+  return stream;
+}
 
 describe("Pi authentication", () => {
   beforeEach(() => {
@@ -58,7 +108,7 @@ describe("Pi authentication", () => {
     expect(services.models.getModel("opencode", "kimi-k2.6")?.id).toBe("kimi-k2.6");
     expect(services.models.getModel("opencode-go", "kimi-k2.6")?.id).toBe("kimi-k2.6");
     expect(
-      listPiModelRoutes(services.models).find((route) => route.provider === "opencode-go")?.providerName,
+      listPiModelRoutes(services.catalog).find((route) => route.provider === "opencode-go")?.providerName,
     ).toBe("OpenCode Go");
   });
 
@@ -90,7 +140,7 @@ describe("Pi authentication", () => {
 
     const services = await createPiModelServices(home, { credentials });
     expect(
-      listPiModelRoutes(services.models).find((route) => route.model === "research/live-model"),
+      listPiModelRoutes(services.catalog).find((route) => route.model === "research/live-model"),
     ).toMatchObject({
       provider: "openrouter",
       name: "Research Live Model",
@@ -103,20 +153,20 @@ describe("Pi authentication", () => {
     const services = await createPiModelServices(home);
 
     expect(() =>
-      preparePiModelSelection(services.models, { provider: "opencode", model: "kimi-k2.6" }),
+      preparePiModelSelection(services.catalog, { provider: "opencode", model: "kimi-k2.6" }),
     ).not.toThrow();
     expect(() =>
-      preparePiModelSelection(services.models, { provider: "opencode-go", model: "kimi-k2.6" }),
+      preparePiModelSelection(services.catalog, { provider: "opencode-go", model: "kimi-k2.6" }),
     ).not.toThrow();
     const codexOnly = services.models
       .getModels("openai-codex")
       .find((model) => !services.models.getModel("opencode", model.id));
     if (!codexOnly) throw new Error("Expected a model unique to the OpenAI Codex provider");
     expect(() =>
-      preparePiModelSelection(services.models, { provider: "opencode", model: codexOnly.id }),
+      preparePiModelSelection(services.catalog, { provider: "opencode", model: codexOnly.id }),
     ).toThrow(`openai-codex, not provider opencode`);
     expect(() =>
-      preparePiModelSelection(services.models, { provider: "missing", model: "anything" }),
+      preparePiModelSelection(services.catalog, { provider: "missing", model: "anything" }),
     ).toThrow("Supported providers: anthropic, openai-codex, opencode, opencode-go, openrouter");
   });
 
@@ -167,7 +217,7 @@ describe("Pi authentication", () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-provider-custom-model-"));
     const services = await createPiModelServices(home);
 
-    preparePiModelSelection(services.models, {
+    preparePiModelSelection(services.catalog, {
       provider: "openrouter",
       model: "research-lab/future-model",
     });
@@ -185,7 +235,7 @@ describe("Pi authentication", () => {
     const services = await createPiModelServices(home);
 
     expect(() =>
-      preparePiModelSelection(services.models, {
+      preparePiModelSelection(services.catalog, {
         provider: "opencode",
         model: "future-unknown-model",
       }),
@@ -254,6 +304,293 @@ describe("Pi authentication", () => {
       configured: false,
       source: "none",
     });
+  });
+
+  test("refreshes an upstream-rejected OAuth credential and retries once before visible output", async () => {
+    const providerId = "rejected-oauth";
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(providerId, async () => ({
+      type: "oauth",
+      access: "initial-access",
+      refresh: "initial-refresh",
+      expires: Date.now() + 60_000,
+    }));
+    const faux = fauxProvider({ provider: providerId, api: "rejected-oauth-api" });
+    const statuses = [401, 200];
+    const requestKeys: (string | undefined)[] = [];
+    let refreshes = 0;
+    const provider = createProvider({
+      id: providerId,
+      auth: {
+        oauth: {
+          name: "Rejected OAuth",
+          login: async () => {
+            throw new Error("Login is not used by this test");
+          },
+          refresh: async () => {
+            refreshes += 1;
+            return {
+              type: "oauth",
+              access: "rotated-access",
+              refresh: "rotated-refresh",
+              expires: Date.now() + 60_000,
+            };
+          },
+          toAuth: async (credential) => ({ apiKey: credential.access }),
+        },
+      },
+      models: faux.models,
+      api: {
+        stream: (model, _context, options) => {
+          requestKeys.push(options?.apiKey);
+          return scriptedHttpStream(model, options, statuses.shift() ?? 500);
+        },
+        streamSimple: (model, _context, options) => {
+          requestKeys.push(options?.apiKey);
+          return scriptedHttpStream(model, options, statuses.shift() ?? 500);
+        },
+      },
+    });
+    const delegate = createModels({ credentials, authContext: emptyAuthContext });
+    delegate.setProvider(provider);
+    const models = createOAuthRecoveringModels(delegate, credentials);
+    const model = models.getModels(providerId)[0];
+    if (!model) throw new Error("Expected the controlled OAuth model");
+    const observedStatuses: number[] = [];
+    const stream = models.streamSimple(
+      model,
+      { messages: [] },
+      {
+        onResponse: (response) => {
+          observedStatuses.push(response.status);
+        },
+      },
+    );
+    const events: string[] = [];
+    for await (const event of stream) events.push(event.type);
+
+    await expect(stream.result()).resolves.toMatchObject({ stopReason: "stop" });
+    expect(events).toEqual(["start", "done"]);
+    expect(observedStatuses).toEqual([401, 200]);
+    expect(requestKeys).toEqual(["initial-access", "rotated-access"]);
+    expect(refreshes).toBe(1);
+    await expect(credentials.read(providerId)).resolves.toMatchObject({
+      type: "oauth",
+      access: "rotated-access",
+    });
+
+    await credentials.modify(providerId, async () => ({
+      type: "oauth",
+      access: "second-rejected-access",
+      refresh: "second-rejected-refresh",
+      expires: Date.now() + 60_000,
+    }));
+    statuses.push(401, 401);
+    const rejectedRetry = await models.completeSimple(model, { messages: [] });
+    expect(rejectedRetry.stopReason).toBe("error");
+    expect(rejectedRetry.errorMessage).toContain(`Reconnect ${providerId} from /provider.`);
+    expect(refreshes).toBe(2);
+  });
+
+  test("coalesces concurrent upstream OAuth rejection refreshes through the credential store", async () => {
+    const providerId = "concurrent-rejected-oauth";
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(providerId, async () => ({
+      type: "oauth",
+      access: "shared-initial-access",
+      refresh: "shared-initial-refresh",
+      expires: Date.now() + 60_000,
+    }));
+    const faux = fauxProvider({ provider: providerId, api: "concurrent-rejected-oauth-api" });
+    const requestKeys: (string | undefined)[] = [];
+    let refreshes = 0;
+    const dispatch = (model: Model<Api>, options: ModelsSimpleStreamOptions | undefined) => {
+      requestKeys.push(options?.apiKey);
+      return scriptedHttpStream(model, options, options?.apiKey === "shared-initial-access" ? 401 : 200);
+    };
+    const provider = createProvider({
+      id: providerId,
+      auth: {
+        oauth: {
+          name: "Concurrent rejected OAuth",
+          login: async () => {
+            throw new Error("Login is not used by this test");
+          },
+          refresh: async () => {
+            refreshes += 1;
+            await Promise.resolve();
+            return {
+              type: "oauth",
+              access: "shared-rotated-access",
+              refresh: "shared-rotated-refresh",
+              expires: Date.now() + 60_000,
+            };
+          },
+          toAuth: async (credential) => ({ apiKey: credential.access }),
+        },
+      },
+      models: faux.models,
+      api: {
+        stream: (model, _context, options) => dispatch(model, options),
+        streamSimple: (model, _context, options) => dispatch(model, options),
+      },
+    });
+    const delegate = createModels({ credentials, authContext: emptyAuthContext });
+    delegate.setProvider(provider);
+    const models = createOAuthRecoveringModels(delegate, credentials);
+    const model = models.getModels(providerId)[0];
+    if (!model) throw new Error("Expected the concurrent OAuth model");
+
+    const results = await Promise.all([
+      models.completeSimple(model, { messages: [] }),
+      models.completeSimple(model, { messages: [] }),
+    ]);
+
+    expect(results.map((result) => result.stopReason)).toEqual(["stop", "stop"]);
+    expect(refreshes).toBe(1);
+    expect(requestKeys.filter((key) => key === "shared-initial-access")).toHaveLength(2);
+    expect(requestKeys.filter((key) => key === "shared-rotated-access")).toHaveLength(2);
+  });
+
+  test("does not retry after visible output and gives reconnect guidance", async () => {
+    const providerId = "visible-oauth-failure";
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(providerId, async () => ({
+      type: "oauth",
+      access: "visible-access",
+      refresh: "visible-refresh",
+      expires: Date.now() + 60_000,
+    }));
+    const faux = fauxProvider({ provider: providerId, api: "visible-oauth-api" });
+    let calls = 0;
+    let refreshes = 0;
+    const provider = createProvider({
+      id: providerId,
+      auth: {
+        oauth: {
+          name: "Visible OAuth",
+          login: async () => {
+            throw new Error("Login is not used by this test");
+          },
+          refresh: async (credential) => {
+            refreshes += 1;
+            return credential;
+          },
+          toAuth: async (credential) => ({ apiKey: credential.access }),
+        },
+      },
+      models: faux.models,
+      api: {
+        stream: (model, _context, options) => {
+          calls += 1;
+          return scriptedHttpStream(model, options, 401, true);
+        },
+        streamSimple: (model, _context, options) => {
+          calls += 1;
+          return scriptedHttpStream(model, options, 401, true);
+        },
+      },
+    });
+    const delegate = createModels({ credentials, authContext: emptyAuthContext });
+    delegate.setProvider(provider);
+    const models = createOAuthRecoveringModels(delegate, credentials);
+    const model = models.getModels(providerId)[0];
+    if (!model) throw new Error("Expected the controlled OAuth model");
+    const stream = models.streamSimple(model, { messages: [] });
+    const events: string[] = [];
+    for await (const event of stream) events.push(event.type);
+    const result = await stream.result();
+
+    expect(events).toEqual(["start", "text_delta", "error"]);
+    expect(result.errorMessage).toContain(`Reconnect ${providerId} from /provider.`);
+    expect(calls).toBe(1);
+    expect(refreshes).toBe(0);
+  });
+
+  test("does not retry rejected API keys and gives reconnect guidance", async () => {
+    const providerId = "rejected-api-key";
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(providerId, async () => ({ type: "api_key", key: "rejected-key" }));
+    const faux = fauxProvider({ provider: providerId, api: "rejected-api-key-api" });
+    let calls = 0;
+    const provider = createProvider({
+      id: providerId,
+      auth: {
+        apiKey: {
+          name: "Rejected key",
+          resolve: async ({ credential }) =>
+            credential?.key ? { auth: { apiKey: credential.key } } : undefined,
+        },
+      },
+      models: faux.models,
+      api: {
+        stream: (model, _context, options) => {
+          calls += 1;
+          return scriptedHttpStream(model, options, 401);
+        },
+        streamSimple: (model, _context, options) => {
+          calls += 1;
+          return scriptedHttpStream(model, options, 401);
+        },
+      },
+    });
+    const delegate = createModels({ credentials, authContext: emptyAuthContext });
+    delegate.setProvider(provider);
+    const models = createOAuthRecoveringModels(delegate, credentials);
+    const model = models.getModels(providerId)[0];
+    if (!model) throw new Error("Expected the controlled API-key model");
+
+    const result = await models.completeSimple(model, { messages: [] });
+
+    expect(result.errorMessage).toContain(`Reconnect ${providerId} from /provider.`);
+    expect(calls).toBe(1);
+  });
+
+  test("gives reconnect guidance when a locally expired OAuth refresh fails before dispatch", async () => {
+    const providerId = "failed-local-oauth-refresh";
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(providerId, async () => ({
+      type: "oauth",
+      access: "expired-access",
+      refresh: "invalid-refresh",
+      expires: 0,
+    }));
+    const faux = fauxProvider({ provider: providerId, api: "failed-local-oauth-refresh-api" });
+    let dispatches = 0;
+    const delegate = createModels({ credentials, authContext: emptyAuthContext });
+    delegate.setProvider({
+      ...faux.provider,
+      auth: {
+        oauth: {
+          name: "Failed local OAuth refresh",
+          login: async () => {
+            throw new Error("Login is not used by this test");
+          },
+          refresh: async () => {
+            throw new Error("refresh grant was rejected");
+          },
+          toAuth: async (credential) => ({ apiKey: credential.access }),
+        },
+      },
+      stream: (model, context, options) => {
+        dispatches += 1;
+        return faux.provider.stream(model, context, options);
+      },
+      streamSimple: (model, context, options) => {
+        dispatches += 1;
+        return faux.provider.streamSimple(model, context, options);
+      },
+    });
+    const models = createOAuthRecoveringModels(delegate, credentials);
+    const model = models.getModels(providerId)[0];
+    if (!model) throw new Error("Expected the locally expired OAuth model");
+
+    const result = await models.completeSimple(model, { messages: [] });
+
+    expect(result.stopReason).toBe("error");
+    expect(result.errorMessage).toContain("refresh grant was rejected");
+    expect(result.errorMessage).toContain(`Reconnect ${providerId} from /provider.`);
+    expect(dispatches).toBe(0);
   });
 
   test("stores an OpenRouter key only in auth.json and never reveals it through status", async () => {

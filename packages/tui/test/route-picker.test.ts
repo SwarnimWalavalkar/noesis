@@ -69,41 +69,6 @@ describe("route picker", () => {
     ]);
   });
 
-  test("chooses a provider before its model and lets Escape step back", () => {
-    let cancelled = 0;
-    const selected: TuiRoutePickerSelection[] = [];
-    const overlay = createTuiRoutePickerOverlay({
-      routes,
-      intent: {
-        kind: "provider",
-        currentProvider: "alpha",
-        currentModel: "alpha-current",
-        currentThinkingLevel: "high",
-      },
-      colorEnabled: false,
-      height: () => 24,
-      requestRender: () => undefined,
-      select: (route) => selected.push(route),
-      cancel: () => {
-        cancelled += 1;
-      },
-    });
-    overlay.focused = true;
-
-    const providers = overlay.render(72).join("\n");
-    expect(providers).toContain("SELECT PROVIDER");
-    expect(providers).toContain("Beta Cloud (beta)");
-    overlay.handleInput("\u001b[B");
-    overlay.handleInput("\r");
-    expect(overlay.render(72).join("\n")).toContain("SELECT MODEL · Beta Cloud");
-    overlay.handleInput("\u001b");
-    expect(overlay.render(72).join("\n")).toContain("SELECT PROVIDER");
-    expect(cancelled).toBe(0);
-    overlay.handleInput("\u001b");
-    expect(cancelled).toBe(1);
-    expect(selected).toEqual([]);
-  });
-
   test("keeps the cache consequence visible at ordinary terminal widths", () => {
     const overlay = createTuiRoutePickerOverlay({
       routes,

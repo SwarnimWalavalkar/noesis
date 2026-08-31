@@ -633,6 +633,7 @@ export async function startNoesisTui(
             },
             openMcpManager: mcp.openManager,
             selectRoute: selection.selectRoute,
+            selectProvider: selection.selectProvider,
             ensureProviderAuthenticated: selection.ensureProviderAuthenticated,
             selectSession: selection.selectSession,
           } as const)

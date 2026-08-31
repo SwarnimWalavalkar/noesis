@@ -17,6 +17,7 @@ import {
   type Models,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createOAuthRecoveringModels } from "./auth-recovery.ts";
 import { NOESIS_PROVIDER_IDS } from "./provider-ids.ts";
 type CredentialFile = Readonly<Record<string, Credential>>;
 const delay = (milliseconds: number): Promise<void> =>
@@ -484,7 +485,8 @@ export function createPiAuthManager(models: Models, credentials: CredentialStore
   return Object.freeze({ login, status, logout });
 }
 export interface PiModelServices {
-  readonly models: ModelRuntime;
+  readonly models: Models;
+  readonly catalog: ModelRuntime;
   readonly credentials: CredentialStore;
   readonly auth: PiAuthOperations;
   readonly refresh: (signal?: AbortSignal) => Promise<void>;
@@ -497,7 +499,7 @@ export async function createPiModelServices(
   } = {},
 ): Promise<PiModelServices> {
   const credentials = options.credentials ?? createSecurePiCredentialStore(piAuthPath(home));
-  const models = await ModelRuntime.create(
+  const catalog = await ModelRuntime.create(
     createConditionalObject({
       credentials,
       modelsPath: join(home, "models.json"),
@@ -509,13 +511,13 @@ export async function createPiModelServices(
       .finish(),
   );
   for (const providerId of NOESIS_PROVIDER_IDS) {
-    const provider = models.getProvider(providerId);
+    const provider = catalog.getProvider(providerId);
     if (!provider) throw new Error(`Pi does not provide required model provider ${providerId}`);
   }
   const refresh = async (signal?: AbortSignal): Promise<void> => {
     const timeoutSignal = AbortSignal.timeout(15_000);
     const refreshSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-    const result = await models.refresh(
+    const result = await catalog.refresh(
       createConditionalObject({ allowNetwork: true } as const)
         .add({ signal: refreshSignal })
         .finish(),
@@ -528,7 +530,13 @@ export async function createPiModelServices(
           .join("\n"),
       );
   };
-  return Object.freeze({ models, credentials, auth: createPiAuthManager(models, credentials), refresh });
+  return Object.freeze({
+    models: createOAuthRecoveringModels(catalog, credentials),
+    catalog,
+    credentials,
+    auth: createPiAuthManager(catalog, credentials),
+    refresh,
+  });
 }
 export async function credentialFileMode(home: string): Promise<number | undefined> {
   try {

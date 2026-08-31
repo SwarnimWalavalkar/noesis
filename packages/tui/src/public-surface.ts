@@ -5,6 +5,7 @@ export * from "./learning.ts";
 export * from "./mcp.ts";
 export * from "./onboarding.ts";
 export * from "./provider-auth.ts";
+export * from "./provider-picker.ts";
 export * from "./rendering.ts";
 export * from "./route-picker.ts";
 export * from "./runtime-event-surface.ts";
