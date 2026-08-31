@@ -14,6 +14,7 @@ export const err = <E>(error: E): Result<never, E> => ({ ok: false, error });
 
 export const PrincipalSchema = z.enum([
   "foreground",
+  "subagent",
   "reflector",
   "evaluator",
   "promoter",

@@ -230,7 +230,7 @@ function encodeAgentPrompt(value) {
   if (typeof value === "string") return value;
   if (Array.isArray(value)) return value.map(encodeAgentPrompt);
   if (value && typeof value === "object" && typeof value.toJSON === "function") return value.toJSON();
-  throw new TypeError("agents.run prompt must be a string, ContextView, or an array of them");
+  throw new TypeError("agents.spawn prompt must be a string, ContextView, or an array of them");
 }
 process.on("message", async (message) => {
   if (!message || typeof message !== "object") return;
@@ -274,19 +274,30 @@ process.on("message", async (message) => {
   };
   const load = (key) => sessionStore.get(String(key));
   const context = createContextView(createContextDocument(message.contextDocument));
-  const agents = Object.freeze({
-    run: (intent) => {
+  const agentContext =
+    message.agentContext && typeof message.agentContext === "object" ? message.agentContext : undefined;
+  const agentMembers = {
+    spawn: (intent) => {
       if (!intent || typeof intent !== "object" || Array.isArray(intent))
-        throw new TypeError("agents.run requires an intent object");
+        throw new TypeError("agents.spawn requires an intent object");
       return delegate("invoke", {
-        name: "agents.run",
+        name: "agents.spawn",
         input: {
           ...intent,
           prompt: encodeAgentPrompt(intent.prompt),
         },
       });
     },
-  });
+    send: (input) => delegate("invoke", { name: "agents.send", input }),
+    list: (filter = {}) => delegate("invoke", { name: "agents.list", input: filter }),
+    inspect: (input) => delegate("invoke", { name: "agents.inspect", input }),
+    wait: (input) => delegate("invoke", { name: "agents.wait", input }),
+    cancel: (input) => delegate("invoke", { name: "agents.cancel", input }),
+    close: (input) => delegate("invoke", { name: "agents.close", input }),
+  };
+  if (agentContext) agentMembers.self = Object.freeze({ ...agentContext.self });
+  if (agentContext?.parent) agentMembers.parent = Object.freeze({ ...agentContext.parent });
+  const agents = Object.freeze(agentMembers);
   try {
     const executableSource =
       message.completionMode === "last-expression"

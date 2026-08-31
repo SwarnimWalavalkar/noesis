@@ -1700,7 +1700,7 @@ describe("Noesis TUI lifecycle", () => {
     terminal.send("\u001b[27;1:1u");
     terminal.send("\u001b[27;1:3u");
     await vi.waitFor(() =>
-      expect(terminal.output.lastIndexOf("↑/↓ scroll")).toBeGreaterThan(
+      expect(terminal.output.lastIndexOf("↑/↓ transcript")).toBeGreaterThan(
         terminal.output.lastIndexOf("esc close"),
       ),
     );

@@ -1,9 +1,10 @@
 import { createConditionalObject, type JsonValue } from "@noesis/domain";
 import type { ContextSnapshot } from "@noesis/context";
+import type { SubAgentRuntimeEvent, SubAgentSummary } from "@noesis/agent-types";
 import type { RuntimeAgentDefaults, RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
-import { EXECUTE_ACTION_NAME, SUBAGENT_ACTION_NAME } from "./action-summary.ts";
 import { appendReasoningDelta, reconcileReasoning } from "./reasoning-timeline.ts";
 import type { TuiExecutionDetail, TuiInteractionSnapshot } from "./runtime-port.ts";
+import { reduceSubAgentPhase, retainActiveSubAgentPhases } from "./subagent-presentation-state.ts";
 import { tuiTimelineFromRuntime } from "./timeline-adapter.ts";
 export { tuiTimelineFromRuntime };
 export type Pane = "trail" | "context" | "capabilities";
@@ -114,6 +115,9 @@ export interface TuiInspectorState {
   readonly detail?: TuiExecutionDetail;
   readonly view: "semantic" | "raw";
   readonly scroll: number;
+  /** Process-scoped subagents do not add a synthetic tool call to the foreground transcript. */
+  readonly syntheticAction?: TuiAgentAction;
+  readonly liveEvents?: readonly SubAgentRuntimeEvent[];
 }
 export interface NoesisTuiState {
   readonly trailId?: string;
@@ -129,6 +133,11 @@ export interface NoesisTuiState {
   readonly expandedActionIds: ReadonlySet<string>;
   /** Set while the transcript is navigable by keyboard; undefined means the editor owns input. */
   readonly actionCursor?: string;
+  /** Independent process-scoped actor navigation while Ctrl+O owns input. */
+  readonly subAgentCursor?: string;
+  readonly subAgents: readonly SubAgentSummary[];
+  /** Ephemeral live phase text; durable actor/task state remains authoritative in the runtime. */
+  readonly subAgentPhases: Readonly<Record<string, string>>;
   readonly inspector?: TuiInspectorState;
   readonly context?: ContextSnapshot;
   readonly contextUsage?: TuiContextUsage;
@@ -220,8 +229,20 @@ export type NoesisTuiAction =
       readonly type: "action-cursor-cleared";
     }
   | {
+      readonly type: "subagents-hydrated";
+      readonly subAgents: readonly SubAgentSummary[];
+    }
+  | {
+      readonly type: "subagent-cursor-moved";
+      readonly direction: "previous" | "next";
+    }
+  | {
+      readonly type: "inspection-navigation-toggled";
+    }
+  | {
       readonly type: "inspector-opened";
       readonly actionId: string;
+      readonly syntheticAction?: TuiAgentAction;
     }
   | {
       readonly type: "inspector-loaded";
@@ -238,6 +259,11 @@ export type NoesisTuiAction =
     }
   | {
       readonly type: "inspector-closed";
+    }
+  | {
+      readonly type: "subagent-live-event";
+      readonly actionId: string;
+      readonly event: Extract<SubAgentRuntimeEvent, { readonly type: "live" }>;
     }
   | {
       readonly type: "execution-changed";
@@ -319,6 +345,8 @@ export const initialTuiState = (
   runtime,
   pane: "trail",
   timeline: [],
+  subAgents: [],
+  subAgentPhases: {},
   expandedActionIds: NO_EXPANDED_ACTIONS,
   interaction: EMPTY_INTERACTION,
   turnCount: 0,
@@ -336,61 +364,10 @@ export function childActions(
 ): readonly TuiAgentAction[] {
   return actions.filter((action) => action.parentActionId === actionId);
 }
-/** Child activity remains inspectable through its subagent but does not become chat transcript noise. */
-export function isSubAgentChildAction(action: TuiAgentAction, actions: readonly TuiAgentAction[]): boolean {
-  let parentId = action.parentActionId;
-  const visited = new Set<string>();
-  while (parentId && !visited.has(parentId)) {
-    visited.add(parentId);
-    const parent = actions.find((candidate) => candidate.actionId === parentId);
-    if (!parent) return false;
-    if (parent.name === SUBAGENT_ACTION_NAME) return true;
-    parentId = parent.parentActionId;
-  }
-  return false;
-}
 export function visibleTranscriptActions(
   timeline: readonly TuiTimelineEntry[],
 ): readonly TuiAgentActionEntry[] {
-  const actions = timelineActions(timeline);
-  return actions.filter((action) => !isSubAgentChildAction(action, actions));
-}
-/** The fixed surface always shows active agents and adds the run selected in transcript inspection. */
-export function subAgentsForSurface(
-  timeline: readonly TuiTimelineEntry[],
-  actionCursor?: string,
-): readonly TuiAgentActionEntry[] {
-  const actions = timelineActions(timeline);
-  const includedIds = new Set(
-    actions
-      .filter((action) => action.name === SUBAGENT_ACTION_NAME && action.status === "running")
-      .map((action) => action.actionId),
-  );
-  let selected = actionCursor ? actions.find((action) => action.actionId === actionCursor) : undefined;
-  const visited = new Set<string>();
-  while (selected && !visited.has(selected.actionId)) {
-    visited.add(selected.actionId);
-    if (selected.name === EXECUTE_ACTION_NAME) {
-      const byId = new Map(actions.map((action) => [action.actionId, action]));
-      for (const action of actions) {
-        if (action.name !== SUBAGENT_ACTION_NAME) continue;
-        let parentId = action.parentActionId;
-        const ancestry = new Set<string>();
-        while (parentId && !ancestry.has(parentId)) {
-          if (parentId === selected.actionId) {
-            includedIds.add(action.actionId);
-            break;
-          }
-          ancestry.add(parentId);
-          parentId = byId.get(parentId)?.parentActionId;
-        }
-      }
-      break;
-    }
-    const parentActionId = selected.parentActionId;
-    selected = parentActionId ? actions.find((action) => action.actionId === parentActionId) : undefined;
-  }
-  return actions.filter((action) => includedIds.has(action.actionId));
+  return timelineActions(timeline);
 }
 function moveCursor(state: NoesisTuiState, direction: "previous" | "next"): NoesisTuiState {
   const actions = visibleTranscriptActions(state.timeline);
@@ -406,6 +383,23 @@ function moveCursor(state: NoesisTuiState, direction: "previous" | "next"): Noes
   const next = actions[nextIndex];
   return next ? { ...state, actionCursor: next.actionId } : state;
 }
+function moveSubAgentCursor(state: NoesisTuiState, direction: "previous" | "next"): NoesisTuiState {
+  if (state.subAgents.length === 0) return state;
+  const currentIndex = state.subAgents.findIndex((agent) => agent.agentId === state.subAgentCursor);
+  if (currentIndex < 0) {
+    const active = [...state.subAgents]
+      .reverse()
+      .find((agent) => agent.status === "starting" || agent.status === "running");
+    const selected = active ?? state.subAgents.at(-1);
+    return selected ? { ...state, subAgentCursor: selected.agentId } : state;
+  }
+  const nextIndex = Math.min(
+    state.subAgents.length - 1,
+    Math.max(0, currentIndex + (direction === "next" ? 1 : -1)),
+  );
+  const next = state.subAgents[nextIndex];
+  return next ? { ...state, subAgentCursor: next.agentId } : state;
+}
 function toggleExpansion(state: NoesisTuiState, actionId: string): NoesisTuiState {
   const expanded = new Set(state.expandedActionIds);
   if (expanded.has(actionId)) expanded.delete(actionId);
@@ -418,6 +412,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       const {
         activeTool: _activeTool,
         actionCursor: _actionCursor,
+        subAgentCursor: _subAgentCursor,
         context: _context,
         contextUsage: _contextUsage,
         error: _error,
@@ -597,40 +592,72 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
     }
     case "action-expansion-toggled":
       return toggleExpansion(state, action.actionId);
-    case "action-cursor-moved":
-      return moveCursor(state, action.direction);
-    case "action-cursor-cleared": {
+    case "action-cursor-moved": {
+      const { subAgentCursor: _subAgentCursor, ...rest } = state;
+      return moveCursor(rest, action.direction);
+    }
+    case "subagents-hydrated": {
+      const cursorStillExists = action.subAgents.some((agent) => agent.agentId === state.subAgentCursor);
+      const subAgentPhases = retainActiveSubAgentPhases(action.subAgents, state.subAgentPhases);
+      if (cursorStillExists || state.subAgentCursor === undefined)
+        return { ...state, subAgents: Object.freeze([...action.subAgents]), subAgentPhases };
+      const { subAgentCursor: _subAgentCursor, ...rest } = state;
+      return { ...rest, subAgents: Object.freeze([...action.subAgents]), subAgentPhases };
+    }
+    case "subagent-cursor-moved": {
       const { actionCursor: _actionCursor, ...rest } = state;
+      return moveSubAgentCursor(rest, action.direction);
+    }
+    case "inspection-navigation-toggled": {
+      if (state.subAgentCursor !== undefined) {
+        const { subAgentCursor: _subAgentCursor, ...rest } = state;
+        return moveCursor(rest, "previous");
+      }
+      if (state.subAgents.length > 0) {
+        const { actionCursor: _actionCursor, ...rest } = state;
+        return moveSubAgentCursor(rest, "previous");
+      }
+      return state;
+    }
+    case "action-cursor-cleared": {
+      const { actionCursor: _actionCursor, subAgentCursor: _subAgentCursor, ...rest } = state;
       return { ...rest, expandedActionIds: NO_EXPANDED_ACTIONS };
     }
-    case "inspector-opened":
-      return {
-        ...state,
-        actionCursor: action.actionId,
-        inspector: {
-          actionId: action.actionId,
-          status: "loading",
-          view: "semantic",
-          scroll: 0,
-        },
-      };
+    case "inspector-opened": {
+      const inspector = createConditionalObject({
+        actionId: action.actionId,
+        status: "loading",
+        view: "semantic",
+        scroll: 0,
+      } as const)
+        .addOptional(action.syntheticAction ? { syntheticAction: action.syntheticAction } : undefined)
+        .finish();
+      return createConditionalObject({ ...state, inspector })
+        .addOptional(action.syntheticAction ? undefined : { actionCursor: action.actionId })
+        .finish();
+    }
     case "inspector-loaded": {
       // A slow inspector fetch must never replace a newer selection.
       if (state.inspector?.actionId !== action.actionId) return state;
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      return {
-        ...state,
-        inspector: createConditionalObject({
-          actionId: action.actionId,
-          status: action.detail ? "ready" : "fallback",
+      const inspector = createConditionalObject({
+        actionId: action.actionId,
+        status: action.detail ? "ready" : "fallback",
+      } as const)
+        .addOptional(action.detail ? { detail: action.detail } : undefined)
+        .add({
+          view: state.inspector.view,
+          scroll: 0,
         } as const)
-          .addOptional(action.detail ? { detail: action.detail } : undefined)
-          .add({
-            view: state.inspector.view,
-            scroll: 0,
-          } as const)
-          .finish(),
-      };
+        .addOptional(
+          state.inspector.syntheticAction ? { syntheticAction: state.inspector.syntheticAction } : undefined,
+        )
+        .addOptional(
+          state.inspector.liveEvents && action.detail?.status === "running"
+            ? { liveEvents: state.inspector.liveEvents }
+            : undefined,
+        )
+        .finish();
+      return { ...state, inspector };
     }
     case "inspector-scrolled": {
       if (!state.inspector) return state;
@@ -656,6 +683,20 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
     case "inspector-closed": {
       const { inspector: _inspector, ...rest } = state;
       return rest;
+    }
+    case "subagent-live-event": {
+      const agentId = action.actionId.slice("subagent:".length);
+      const event = action.event.event;
+      const subAgentPhases = reduceSubAgentPhase(state.subAgentPhases, agentId, event);
+      if (state.inspector?.actionId !== action.actionId) return { ...state, subAgentPhases };
+      return {
+        ...state,
+        subAgentPhases,
+        inspector: {
+          ...state.inspector,
+          liveEvents: Object.freeze([...(state.inspector.liveEvents ?? []), action.event].slice(-100)),
+        },
+      };
     }
     case "execution-changed": {
       const { activeTool: _activeTool, ...rest } = state;

@@ -1,4 +1,5 @@
 import type { DatabaseRow } from "./database.ts";
+import { validateFrozenSubAgentPlan } from "@noesis/agent-types";
 import {
   createConditionalObject,
   CapabilityRevisionRefSchema,
@@ -14,6 +15,7 @@ import { z } from "zod";
 import { optionalString, parseJson, requiredNumber, requiredString } from "./database.ts";
 import type {
   ActivationApprovalRecord,
+  AgentMailboxMessageRecord,
   ActivationEvidenceBinding,
   ActivationMaterializationRecord,
   ActivationOperationRecord,
@@ -27,6 +29,10 @@ import type {
   SearchConfiguration,
   SearchDocument,
   SessionRecord,
+  SubAgentModelCallRecord,
+  SubAgentRecord,
+  SubAgentTaskRecord,
+  SubAgentTimelineRecord,
   ToolCallRecord,
   TurnActivationPinRecord,
   UserIntentRecord,
@@ -65,6 +71,16 @@ const ScriptProgramExecutionIdentitySchema = z.strictObject({
   definitionRevisionId: z.string().min(1),
 });
 const ModelCallStatusSchema = z.enum(["running", "completed", "failed", "cancelled", "interrupted"]);
+const SubAgentStatusSchema = z.enum(["starting", "running", "idle", "suspended", "closed"]);
+const SubAgentTaskStatusSchema = z.enum([
+  "pending",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+  "interrupted",
+]);
+const AgentMessageStatusSchema = z.enum(["accepted", "claimed", "delivered", "failed"]);
 const WorkflowRunStatusSchema = z.enum(["running", "paused", "completed", "failed", "cancelled"]);
 const WorkflowPhaseStatusSchema = z.enum(["pending", "running", "completed", "failed", "cancelled"]);
 const OutcomeStatusSchema = z.enum(["accepted", "corrected", "failed", "unknown"]);
@@ -372,6 +388,150 @@ export function decodeModelCall(row: DatabaseRow | undefined): ModelCallRecord {
     .addOptional(!(error === undefined) ? { error } : undefined)
     .add({ startedAt: requiredString(row, "started_at") } as const)
     .addOptional(!(completedAt === undefined) ? { completedAt } : undefined)
+    .finish();
+}
+
+const AgentUsageSchema = z.strictObject({
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  totalTokens: z.number().int().nonnegative(),
+  estimatedCost: z.number().nonnegative(),
+});
+
+export function decodeSubAgent(row: DatabaseRow | undefined): SubAgentRecord {
+  const parentAgentId = optionalString(row, "parent_agent_id");
+  const name = optionalString(row, "name");
+  const closedAt = optionalString(row, "closed_at");
+  return createConditionalObject({
+    agentId: requiredString(row, "agent_id"),
+    childSessionId: requiredString(row, "child_session_id"),
+    projectId: requiredString(row, "project_id"),
+    originSessionId: requiredString(row, "origin_session_id"),
+    originTurnId: requiredString(row, "origin_turn_id"),
+    originExecutionId: requiredString(row, "origin_execution_id"),
+  } as const)
+    .addOptional(parentAgentId ? { parentAgentId } : undefined)
+    .addOptional(name ? { name } : undefined)
+    .add({
+      status: SubAgentStatusSchema.parse(requiredString(row, "status")),
+      frozenPlan: validateFrozenSubAgentPlan(parseJson(requiredString(row, "frozen_plan_json"))),
+      frozenPlanArtifactId: requiredString(row, "frozen_plan_artifact_id"),
+      createdAt: requiredString(row, "created_at"),
+      updatedAt: requiredString(row, "updated_at"),
+    } as const)
+    .addOptional(closedAt ? { closedAt } : undefined)
+    .finish();
+}
+
+export function decodeSubAgentTask(row: DatabaseRow | undefined): SubAgentTaskRecord {
+  const resultArtifactId = optionalString(row, "result_artifact_id");
+  const resultPreview = optionalString(row, "result_preview");
+  const error = optionalString(row, "error");
+  const usageJson = optionalString(row, "usage_json");
+  const startedAt = optionalString(row, "started_at");
+  const completedAt = optionalString(row, "completed_at");
+  return createConditionalObject({
+    taskId: requiredString(row, "task_id"),
+    agentId: requiredString(row, "agent_id"),
+    triggerMessageId: requiredString(row, "trigger_message_id"),
+    status: SubAgentTaskStatusSchema.parse(requiredString(row, "status")),
+  } as const)
+    .addOptional(resultArtifactId ? { resultArtifactId } : undefined)
+    .addOptional(resultPreview !== undefined ? { resultPreview } : undefined)
+    .addOptional(error ? { error } : undefined)
+    .addOptional(usageJson ? { usage: AgentUsageSchema.parse(parseJson(usageJson)) } : undefined)
+    .add({ createdAt: requiredString(row, "created_at") } as const)
+    .addOptional(startedAt ? { startedAt } : undefined)
+    .addOptional(completedAt ? { completedAt } : undefined)
+    .finish();
+}
+
+export function decodeAgentMailboxMessage(row: DatabaseRow | undefined): AgentMailboxMessageRecord {
+  const taskId = optionalString(row, "task_id");
+  const claimedAt = optionalString(row, "claimed_at");
+  const deliveredAt = optionalString(row, "delivered_at");
+  const failedAt = optionalString(row, "failed_at");
+  const failure = optionalString(row, "failure");
+  return createConditionalObject({
+    messageId: requiredString(row, "message_id"),
+    projectId: requiredString(row, "project_id"),
+    sender: Object.freeze({
+      kind: z.enum(["foreground", "subagent"]).parse(requiredString(row, "sender_kind")),
+      id: requiredString(row, "sender_id"),
+    }),
+    recipient: Object.freeze({
+      kind: z.enum(["foreground", "subagent"]).parse(requiredString(row, "recipient_kind")),
+      id: requiredString(row, "recipient_id"),
+    }),
+    content: requiredString(row, "content"),
+    sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
+    status: AgentMessageStatusSchema.parse(requiredString(row, "status")),
+    sequence: requiredNumber(row, "sequence"),
+  } as const)
+    .addOptional(taskId ? { taskId } : undefined)
+    .add({ createdAt: requiredString(row, "created_at") } as const)
+    .addOptional(claimedAt ? { claimedAt } : undefined)
+    .addOptional(deliveredAt ? { deliveredAt } : undefined)
+    .addOptional(failedAt ? { failedAt } : undefined)
+    .addOptional(failure ? { failure } : undefined)
+    .finish();
+}
+
+export function decodeSubAgentTimeline(row: DatabaseRow | undefined): SubAgentTimelineRecord {
+  return Object.freeze({
+    taskId: requiredString(row, "task_id"),
+    sequence: requiredNumber(row, "sequence"),
+    kind: z
+      .enum(["message", "reasoning", "tool_call", "model_call", "mailbox"])
+      .parse(requiredString(row, "entry_kind")),
+    entryId: requiredString(row, "entry_id"),
+    createdAt: requiredString(row, "created_at"),
+  });
+}
+
+export function decodeSubAgentModelCall(row: DatabaseRow | undefined): SubAgentModelCallRecord {
+  const outputArtifactId = optionalString(row, "output_artifact_id");
+  const inputTokens = row?.["input_tokens"] ?? null;
+  const outputTokens = row?.["output_tokens"] ?? null;
+  const totalTokens = row?.["total_tokens"] ?? null;
+  const estimatedCost = row?.["estimated_cost"] ?? null;
+  const latencyMs = row?.["latency_ms"] ?? null;
+  const error = optionalString(row, "error");
+  const completedAt = optionalString(row, "completed_at");
+  const hasUsage = inputTokens !== null;
+  return createConditionalObject({
+    modelCallId: requiredString(row, "model_call_id"),
+    taskId: requiredString(row, "task_id"),
+    round: requiredNumber(row, "round"),
+    provider: requiredString(row, "provider"),
+    model: requiredString(row, "model"),
+    thinkingLevel: z
+      .enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+      .parse(requiredString(row, "thinking_level")),
+    requestArtifactId: requiredString(row, "request_artifact_id"),
+  } as const)
+    .addOptional(outputArtifactId ? { outputArtifactId } : undefined)
+    .add({ status: ModelCallStatusSchema.parse(requiredString(row, "status")) } as const)
+    .addOptional(
+      hasUsage
+        ? {
+            usage: AgentUsageSchema.parse({
+              inputTokens,
+              outputTokens,
+              totalTokens,
+              estimatedCost,
+            }),
+          }
+        : undefined,
+    )
+    .addOptional(
+      latencyMs === null || latencyMs === undefined
+        ? undefined
+        : { latencyMs: z.number().int().nonnegative().parse(latencyMs) },
+    )
+    .addOptional(error ? { error } : undefined)
+    .add({ startedAt: requiredString(row, "started_at") } as const)
+    .addOptional(completedAt ? { completedAt } : undefined)
     .finish();
 }
 export function decodeWorkflowRun(row: DatabaseRow | undefined): WorkflowRunRecord {

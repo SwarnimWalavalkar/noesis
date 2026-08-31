@@ -92,9 +92,9 @@ function runtime(
         ...(runAgent
           ? [
               defineTool({
-                name: "agents.run",
-                label: "Run subagent",
-                description: "Controlled subagent run",
+                name: "agents.spawn",
+                label: "Spawn subagent",
+                description: "Controlled subagent spawn",
                 inputSchema: z.strictObject({
                   prompt: z.union([
                     z.string(),
@@ -139,7 +139,7 @@ function runtime(
   return code;
 }
 describe("codemode runtime", () => {
-  it("exposes a lazy immutable context view through agents.run", async () => {
+  it("exposes a lazy immutable context view through agents.spawn", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-codemode-context-"));
     roots.add(root);
     const content = '{"type":"message","content":"first"}\n{"type":"message","content":"second"}\n';
@@ -160,7 +160,7 @@ describe("codemode runtime", () => {
         return {
           length: context.length,
           selected: await selected.text(),
-          answer: await agents.run({ prompt: ["Summarize the last entry", selected, "Be concise"] })
+          answer: await agents.spawn({ prompt: ["Summarize the last entry", selected, "Be concise"] })
         };
       `,
       sessionId: "session-context",

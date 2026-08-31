@@ -4,6 +4,9 @@ import type {
   AgentRuntimeEvent,
   AgentThinkingLevel,
   FrozenTurnPlan,
+  SubAgentInspection,
+  SubAgentRuntimeEvent,
+  SubAgentSummary,
 } from "@noesis/agent-types";
 import type { ContextSnapshot } from "@noesis/context";
 import type { JsonValue, TrailStatus } from "@noesis/domain";
@@ -30,6 +33,7 @@ export * from "./transcript.ts";
 export * from "./turn-interaction.ts";
 export * from "./scheduled-execution.ts";
 export * from "./session-compaction.ts";
+export * from "./subagent-supervisor.ts";
 
 export interface RuntimeTranscriptMessage {
   readonly kind: "message";
@@ -167,4 +171,11 @@ export interface NoesisRuntime {
   ) => Promise<InteractionDispatchResult>;
   readonly inspectInteraction: (trailId: string) => Promise<InteractionSnapshot>;
   readonly compact: (trailId: string, focus?: string) => Promise<void>;
+  readonly listSubAgents: () => Promise<readonly SubAgentSummary[]>;
+  readonly inspectSubAgent: (agentId: string, taskId?: string) => Promise<SubAgentInspection>;
+  readonly getSubAgentTranscript: (
+    agentId: string,
+    taskId?: string,
+  ) => Promise<readonly RuntimeTranscriptEntry[]>;
+  readonly subscribeSubAgents: (listener: (event: SubAgentRuntimeEvent) => void) => () => void;
 }

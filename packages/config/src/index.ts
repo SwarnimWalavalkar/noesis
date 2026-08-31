@@ -48,7 +48,7 @@ export type ExperimentDefaults = Readonly<z.infer<typeof ExperimentDefaultsSchem
 export const NoesisConfigSchema = z.strictObject({
   schemaVersion: z.literal(NOESIS_CONFIG_SCHEMA_VERSION),
   agent: AgentConfigSchema,
-  /** Default route for agents.run. Unspecified fields inherit the foreground agent route. */
+  /** Default route for retained subagents. Unspecified fields inherit the foreground agent route. */
   agents: AgentConfigSchema.optional(),
   learning: LearningConfigSchema.optional(),
   context: ContextConfigSchema.optional(),

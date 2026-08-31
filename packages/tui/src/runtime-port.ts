@@ -4,9 +4,11 @@ import type {
   InteractionDispatchResult,
   InteractionSnapshot,
   NoesisRuntime,
+  RuntimeTranscriptEntry,
   TurnInteractionEvent,
 } from "@noesis/runtime";
-import type { AgentThinkingLevel } from "@noesis/agent-types";
+import type { AgentThinkingLevel, SubAgentInspection } from "@noesis/agent-types";
+export type { SubAgentInspection, SubAgentRuntimeEvent, SubAgentSummary } from "@noesis/agent-types";
 
 export type TuiInteractionCommand = InteractionCommand;
 export type TuiInteractionSnapshot = InteractionSnapshot;
@@ -183,6 +185,8 @@ export interface TuiExecutionDetail extends TuiExecutionSummary {
     readonly executionId?: string;
     readonly error?: string;
   }[];
+  readonly subAgent?: SubAgentInspection;
+  readonly transcript?: readonly RuntimeTranscriptEntry[];
 }
 
 export interface TuiLearningActivitySummary {
@@ -549,6 +553,10 @@ export type NoesisTuiRuntime = Pick<
   | "discardTrailIfEmpty"
   | "forkTrail"
   | "compact"
+  | "listSubAgents"
+  | "inspectSubAgent"
+  | "getSubAgentTranscript"
+  | "subscribeSubAgents"
 > & {
   readonly home?: string;
   readonly agentName?: string;

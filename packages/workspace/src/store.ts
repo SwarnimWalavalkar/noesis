@@ -5,7 +5,11 @@ import { copyFile, link, mkdir, open, readdir, readFile, rename, rm, unlink } fr
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
-import { ScriptProgramManifestSchema, WorkflowProgramManifestSchema } from "@noesis/agent-types";
+import {
+  type AgentAddress,
+  ScriptProgramManifestSchema,
+  WorkflowProgramManifestSchema,
+} from "@noesis/agent-types";
 import {
   createConditionalObject,
   type ArtifactImportRequest,
@@ -70,6 +74,7 @@ import {
 } from "./database.ts";
 import {
   decodeCodeExecution,
+  decodeAgentMailboxMessage,
   decodeExperiment,
   decodeFeedbackSignal,
   decodeFileRevisionRef,
@@ -80,6 +85,10 @@ import {
   decodeSearchConfiguration,
   decodeSearchDocument,
   decodeSession,
+  decodeSubAgent,
+  decodeSubAgentModelCall,
+  decodeSubAgentTask,
+  decodeSubAgentTimeline,
   decodeStored,
   decodeToolCall,
   decodeUserIntent,
@@ -104,12 +113,14 @@ import {
 import { createProtectedWorkspaceRuntime, registerWorkspaceRuntimeInternals } from "./protected-runtime.ts";
 import type {
   CanonicalSearchSource,
+  AgentMailboxMessageRecord,
   ClassifyOutcomeRequest,
   CodeExecutionRecord,
   ContextCheckpointRecord,
   MessageRecord,
   ModelCallRecord,
   NoesisWorkspaceStore,
+  OperationalRepositories,
   OperationalCutoverReport,
   OutcomeRecord,
   SearchCandidate,
@@ -117,6 +128,10 @@ import type {
   SearchDocument,
   SearchSourceScope,
   SessionRecord,
+  SubAgentModelCallRecord,
+  SubAgentRecord,
+  SubAgentTaskRecord,
+  SubAgentTimelineRecord,
   StageDefinitionRequest,
   StagedDefinition,
   ToolCallRecord,
@@ -3590,6 +3605,319 @@ function createOperationalRepositories(
       );
     });
   };
+  const putSubAgent = async (record: SubAgentRecord): Promise<void> => {
+    database.transaction(() => {
+      const currentRow = db.prepare("SELECT * FROM sub_agents WHERE agent_id = ?").get(record.agentId);
+      const current = currentRow === undefined ? undefined : decodeSubAgent(currentRow);
+      if (current) {
+        const transitions = {
+          starting: ["starting", "running", "idle", "suspended", "closed"],
+          running: ["running", "idle", "suspended", "closed"],
+          idle: ["idle", "starting", "running", "suspended", "closed"],
+          suspended: ["suspended", "closed"],
+          closed: ["closed"],
+        } satisfies Readonly<Record<SubAgentRecord["status"], readonly SubAgentRecord["status"][]>>;
+        if (!permitsTransition(transitions, current.status, record.status))
+          throw new Error(`Invalid subagent transition ${current.status} -> ${record.status}`);
+        const comparable = {
+          ...current,
+          name: record.name,
+          status: record.status,
+          updatedAt: record.updatedAt,
+          closedAt: record.closedAt,
+        };
+        if (!isDeepStrictEqual(JSON.parse(JSON.stringify(comparable)), JSON.parse(JSON.stringify(record))))
+          throw new Error(`Subagent ${record.agentId} changed its immutable identity`);
+        if (
+          current.status === "closed" &&
+          !isDeepStrictEqual(JSON.parse(JSON.stringify(current)), JSON.parse(JSON.stringify(record)))
+        )
+          throw new Error(`Closed subagent ${record.agentId} is immutable`);
+        const updated = db
+          .prepare(`UPDATE sub_agents
+           SET name = ?, status = ?, updated_at = ?, closed_at = ?
+           WHERE agent_id = ? AND status = ?`)
+          .run(
+            record.name ?? null,
+            record.status,
+            record.updatedAt,
+            record.closedAt ?? null,
+            record.agentId,
+            current.status,
+          );
+        if (Number(updated.changes) !== 1)
+          throw new Error(`Subagent ${record.agentId} changed during persistence`);
+      } else {
+        db.prepare(`INSERT INTO sub_agents(
+            agent_id, child_session_id, project_id, origin_session_id, origin_turn_id,
+            origin_execution_id, parent_agent_id, name, status, frozen_plan_json,
+            frozen_plan_artifact_id, frozen_plan_digest, created_at, updated_at, closed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          record.agentId,
+          record.childSessionId,
+          record.projectId,
+          record.originSessionId,
+          record.originTurnId,
+          record.originExecutionId,
+          record.parentAgentId ?? null,
+          record.name ?? null,
+          record.status,
+          canonicalJson(record.frozenPlan),
+          record.frozenPlanArtifactId,
+          record.frozenPlan.canonicalDigest,
+          record.createdAt,
+          record.updatedAt,
+          record.closedAt ?? null,
+        );
+      }
+      recordActivity(systemActor, `subagent.${record.status}`, "subagent", record.agentId);
+    });
+  };
+  const putSubAgentTask = async (record: SubAgentTaskRecord): Promise<void> => {
+    database.transaction(() => {
+      const currentRow = db.prepare("SELECT * FROM sub_agent_tasks WHERE task_id = ?").get(record.taskId);
+      const current = currentRow === undefined ? undefined : decodeSubAgentTask(currentRow);
+      if (current) {
+        const transitions = {
+          pending: ["pending", "running", "cancelled", "interrupted", "failed"],
+          running: ["running", "completed", "failed", "cancelled", "interrupted"],
+          completed: ["completed"],
+          failed: ["failed"],
+          cancelled: ["cancelled"],
+          interrupted: ["interrupted"],
+        } satisfies Readonly<Record<SubAgentTaskRecord["status"], readonly SubAgentTaskRecord["status"][]>>;
+        if (!permitsTransition(transitions, current.status, record.status))
+          throw new Error(`Invalid subagent task transition ${current.status} -> ${record.status}`);
+        const comparable = {
+          ...current,
+          status: record.status,
+          resultArtifactId: record.resultArtifactId,
+          resultPreview: record.resultPreview,
+          error: record.error,
+          usage: record.usage,
+          startedAt: record.startedAt,
+          completedAt: record.completedAt,
+        };
+        if (!isDeepStrictEqual(JSON.parse(JSON.stringify(comparable)), JSON.parse(JSON.stringify(record))))
+          throw new Error(`Subagent task ${record.taskId} changed its immutable identity`);
+        if (
+          current.status !== "pending" &&
+          current.status !== "running" &&
+          !isDeepStrictEqual(JSON.parse(JSON.stringify(current)), JSON.parse(JSON.stringify(record)))
+        )
+          throw new Error(`Terminal subagent task ${record.taskId} is immutable`);
+        const updated = db
+          .prepare(`UPDATE sub_agent_tasks SET
+            status = ?, result_artifact_id = ?, result_preview = ?, error = ?, usage_json = ?,
+            started_at = ?, completed_at = ?
+          WHERE task_id = ? AND status = ?`)
+          .run(
+            record.status,
+            record.resultArtifactId ?? null,
+            record.resultPreview ?? null,
+            record.error ?? null,
+            record.usage ? canonicalJson(record.usage) : null,
+            record.startedAt ?? null,
+            record.completedAt ?? null,
+            record.taskId,
+            current.status,
+          );
+        if (Number(updated.changes) !== 1)
+          throw new Error(`Subagent task ${record.taskId} changed during persistence`);
+      } else {
+        db.prepare(`INSERT INTO sub_agent_tasks(
+            task_id, agent_id, trigger_message_id, status, result_artifact_id, result_preview,
+            error, usage_json, created_at, started_at, completed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          record.taskId,
+          record.agentId,
+          record.triggerMessageId,
+          record.status,
+          record.resultArtifactId ?? null,
+          record.resultPreview ?? null,
+          record.error ?? null,
+          record.usage ? canonicalJson(record.usage) : null,
+          record.createdAt,
+          record.startedAt ?? null,
+          record.completedAt ?? null,
+        );
+      }
+      recordActivity(systemActor, `subagent_task.${record.status}`, "subagent_task", record.taskId);
+    });
+  };
+  const insertAgentMessage = (record: AgentMailboxMessageRecord): void => {
+    db.prepare(`INSERT INTO agent_messages(
+        message_id, project_id, sender_kind, sender_id, recipient_kind, recipient_id,
+        content, sensitivity, status, sequence, task_id, created_at, claimed_at,
+        delivered_at, failed_at, failure
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      record.messageId,
+      record.projectId,
+      record.sender.kind,
+      record.sender.id,
+      record.recipient.kind,
+      record.recipient.id,
+      record.content,
+      record.sensitivity,
+      record.status,
+      record.sequence,
+      record.taskId ?? null,
+      record.createdAt,
+      record.claimedAt ?? null,
+      record.deliveredAt ?? null,
+      record.failedAt ?? null,
+      record.failure ?? null,
+    );
+  };
+  const putAgentMessage = async (record: AgentMailboxMessageRecord): Promise<void> => {
+    database.transaction(() => {
+      const currentRow = db
+        .prepare("SELECT * FROM agent_messages WHERE message_id = ?")
+        .get(record.messageId);
+      const current = currentRow === undefined ? undefined : decodeAgentMailboxMessage(currentRow);
+      if (!current) insertAgentMessage(record);
+      else {
+        const transitions = {
+          accepted: ["accepted", "claimed", "failed"],
+          claimed: ["accepted", "claimed", "delivered", "failed"],
+          delivered: ["delivered"],
+          failed: ["failed"],
+        } satisfies Readonly<
+          Record<AgentMailboxMessageRecord["status"], readonly AgentMailboxMessageRecord["status"][]>
+        >;
+        if (!permitsTransition(transitions, current.status, record.status))
+          throw new Error(`Invalid agent-message transition ${current.status} -> ${record.status}`);
+        const comparable = {
+          ...current,
+          status: record.status,
+          claimedAt: record.claimedAt,
+          deliveredAt: record.deliveredAt,
+          failedAt: record.failedAt,
+          failure: record.failure,
+        };
+        if (!isDeepStrictEqual(JSON.parse(JSON.stringify(comparable)), JSON.parse(JSON.stringify(record))))
+          throw new Error(`Agent message ${record.messageId} changed its immutable identity`);
+        const updated = db
+          .prepare(`UPDATE agent_messages SET
+            status = ?, claimed_at = ?, delivered_at = ?, failed_at = ?, failure = ?
+          WHERE message_id = ? AND status = ?`)
+          .run(
+            record.status,
+            record.claimedAt ?? null,
+            record.deliveredAt ?? null,
+            record.failedAt ?? null,
+            record.failure ?? null,
+            record.messageId,
+            current.status,
+          );
+        if (Number(updated.changes) !== 1)
+          throw new Error(`Agent message ${record.messageId} changed during persistence`);
+      }
+      recordActivity(systemActor, `agent_message.${record.status}`, "agent_message", record.messageId);
+    });
+  };
+  const appendSubAgentTimeline = async (record: SubAgentTimelineRecord): Promise<void> => {
+    database.transaction(() => {
+      const existing = db
+        .prepare(`SELECT * FROM sub_agent_timeline_entries
+          WHERE task_id = ? AND sequence = ?`)
+        .get(record.taskId, record.sequence);
+      if (existing) {
+        const decoded = decodeSubAgentTimeline(existing);
+        if (!isDeepStrictEqual(decoded, record))
+          throw new Error(
+            `Subagent task ${record.taskId} timeline position ${String(record.sequence)} is occupied`,
+          );
+        return;
+      }
+      db.prepare(`INSERT INTO sub_agent_timeline_entries(
+          task_id, sequence, entry_kind, entry_id, created_at
+        ) VALUES (?, ?, ?, ?, ?)`).run(
+        record.taskId,
+        record.sequence,
+        record.kind,
+        record.entryId,
+        record.createdAt,
+      );
+    });
+  };
+  const putSubAgentModelCall = async (record: SubAgentModelCallRecord): Promise<void> => {
+    database.transaction(() => {
+      const currentRow = db
+        .prepare("SELECT * FROM sub_agent_model_calls WHERE model_call_id = ?")
+        .get(record.modelCallId);
+      const current = currentRow === undefined ? undefined : decodeSubAgentModelCall(currentRow);
+      if (current) {
+        const transitions = {
+          running: ["running", "completed", "failed", "cancelled", "interrupted"],
+          completed: ["completed"],
+          failed: ["failed"],
+          cancelled: ["cancelled"],
+          interrupted: ["interrupted"],
+        } satisfies Readonly<
+          Record<SubAgentModelCallRecord["status"], readonly SubAgentModelCallRecord["status"][]>
+        >;
+        if (!permitsTransition(transitions, current.status, record.status))
+          throw new Error(`Invalid subagent model-call transition ${current.status} -> ${record.status}`);
+        const comparable = {
+          ...current,
+          outputArtifactId: record.outputArtifactId,
+          status: record.status,
+          usage: record.usage,
+          latencyMs: record.latencyMs,
+          error: record.error,
+          completedAt: record.completedAt,
+        };
+        if (!isDeepStrictEqual(JSON.parse(JSON.stringify(comparable)), JSON.parse(JSON.stringify(record))))
+          throw new Error(`Subagent model call ${record.modelCallId} changed its immutable identity`);
+        const updated = db
+          .prepare(`UPDATE sub_agent_model_calls SET
+            output_artifact_id = ?, status = ?, input_tokens = ?, output_tokens = ?,
+            total_tokens = ?, estimated_cost = ?, latency_ms = ?, error = ?, completed_at = ?
+          WHERE model_call_id = ? AND status = ?`)
+          .run(
+            record.outputArtifactId ?? null,
+            record.status,
+            record.usage?.inputTokens ?? null,
+            record.usage?.outputTokens ?? null,
+            record.usage?.totalTokens ?? null,
+            record.usage?.estimatedCost ?? null,
+            record.latencyMs ?? null,
+            record.error ?? null,
+            record.completedAt ?? null,
+            record.modelCallId,
+            current.status,
+          );
+        if (Number(updated.changes) !== 1)
+          throw new Error(`Subagent model call ${record.modelCallId} changed during persistence`);
+      } else {
+        db.prepare(`INSERT INTO sub_agent_model_calls(
+            model_call_id, task_id, round, provider, model, thinking_level, request_artifact_id,
+            output_artifact_id, status, input_tokens, output_tokens, total_tokens, estimated_cost,
+            latency_ms, error, started_at, completed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          record.modelCallId,
+          record.taskId,
+          record.round,
+          record.provider,
+          record.model,
+          record.thinkingLevel,
+          record.requestArtifactId,
+          record.outputArtifactId ?? null,
+          record.status,
+          record.usage?.inputTokens ?? null,
+          record.usage?.outputTokens ?? null,
+          record.usage?.totalTokens ?? null,
+          record.usage?.estimatedCost ?? null,
+          record.latencyMs ?? null,
+          record.error ?? null,
+          record.startedAt,
+          record.completedAt ?? null,
+        );
+      }
+      recordActivity(systemActor, `subagent_model_call.${record.status}`, "subagent_task", record.taskId);
+    });
+  };
   const putWorkflowRun = async (record: WorkflowRunRecord): Promise<void> => {
     if (db.prepare("SELECT 1 FROM workflow_runs WHERE run_id = ?").get(record.runId) === undefined) {
       const manifest = WorkflowProgramManifestSchema.parse(
@@ -4145,6 +4473,223 @@ function createOperationalRepositories(
             ]);
           }
           return running.length;
+        }),
+    }),
+    subAgents: Object.freeze({
+      admit: async (request: Parameters<OperationalRepositories["subAgents"]["admit"]>[0]) =>
+        database.transaction(() => {
+          const { agent, task, message, childSession } = request;
+          if (
+            agent.childSessionId !== childSession.sessionId ||
+            task.agentId !== agent.agentId ||
+            task.triggerMessageId !== message.messageId ||
+            message.recipient.kind !== "subagent" ||
+            message.recipient.id !== agent.agentId ||
+            message.taskId !== task.taskId ||
+            message.sequence !== 1
+          )
+            throw new Error("Subagent admission records do not share one identity");
+          db.prepare(`INSERT INTO sessions(
+              session_id, parent_session_id, title, status, provider, model, runtime,
+              created_at, updated_at, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            childSession.sessionId,
+            childSession.parentSessionId ?? null,
+            childSession.title,
+            childSession.status,
+            childSession.provider,
+            childSession.model,
+            childSession.runtime,
+            childSession.createdAt,
+            childSession.updatedAt,
+            canonicalJson(childSession.metadata),
+          );
+          db.prepare(`INSERT INTO sub_agents(
+              agent_id, child_session_id, project_id, origin_session_id, origin_turn_id,
+              origin_execution_id, parent_agent_id, name, status, frozen_plan_json,
+              frozen_plan_artifact_id, frozen_plan_digest, created_at, updated_at, closed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            agent.agentId,
+            agent.childSessionId,
+            agent.projectId,
+            agent.originSessionId,
+            agent.originTurnId,
+            agent.originExecutionId,
+            agent.parentAgentId ?? null,
+            agent.name ?? null,
+            agent.status,
+            canonicalJson(agent.frozenPlan),
+            agent.frozenPlanArtifactId,
+            agent.frozenPlan.canonicalDigest,
+            agent.createdAt,
+            agent.updatedAt,
+            agent.closedAt ?? null,
+          );
+          db.prepare(`INSERT INTO sub_agent_tasks(
+              task_id, agent_id, trigger_message_id, status, result_artifact_id, result_preview,
+              error, usage_json, created_at, started_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            task.taskId,
+            task.agentId,
+            task.triggerMessageId,
+            task.status,
+            task.resultArtifactId ?? null,
+            task.resultPreview ?? null,
+            task.error ?? null,
+            task.usage ? canonicalJson(task.usage) : null,
+            task.createdAt,
+            task.startedAt ?? null,
+            task.completedAt ?? null,
+          );
+          insertAgentMessage(message);
+          recordActivity(systemActor, "subagent.admitted", "subagent", agent.agentId, [task.taskId]);
+        }),
+      get: async (agentId: string) =>
+        decodeOptional(
+          db.prepare("SELECT * FROM sub_agents WHERE agent_id = ?").get(agentId),
+          decodeSubAgent,
+        ),
+      listForProject: async (projectId: string) =>
+        db
+          .prepare("SELECT * FROM sub_agents WHERE project_id = ? ORDER BY created_at, agent_id")
+          .all(projectId)
+          .map(decodeSubAgent),
+      put: putSubAgent,
+      getTask: async (taskId: string) =>
+        decodeOptional(
+          db.prepare("SELECT * FROM sub_agent_tasks WHERE task_id = ?").get(taskId),
+          decodeSubAgentTask,
+        ),
+      listTasks: async (agentId: string) =>
+        db
+          .prepare("SELECT * FROM sub_agent_tasks WHERE agent_id = ? ORDER BY created_at, task_id")
+          .all(agentId)
+          .map(decodeSubAgentTask),
+      putTask: putSubAgentTask,
+      claimTask: async (taskId: string, startedAt: string) =>
+        database.transaction(() => {
+          const claimed = db
+            .prepare(`UPDATE sub_agent_tasks SET status = 'running', started_at = ?
+              WHERE task_id = ? AND status = 'pending'`)
+            .run(startedAt, taskId);
+          if (Number(claimed.changes) !== 1) return undefined;
+          const task = decodeSubAgentTask(
+            db.prepare("SELECT * FROM sub_agent_tasks WHERE task_id = ?").get(taskId),
+          );
+          recordActivity(systemActor, "subagent_task.running", "subagent_task", taskId);
+          return task;
+        }),
+      appendMessage: async (record: Parameters<OperationalRepositories["subAgents"]["appendMessage"]>[0]) =>
+        database.transaction(() => {
+          const row = db
+            .prepare(`SELECT COALESCE(MAX(sequence), 0) AS maximum
+              FROM agent_messages WHERE recipient_kind = ? AND recipient_id = ?`)
+            .get(record.recipient.kind, record.recipient.id);
+          const message = Object.freeze({
+            ...record,
+            sequence: requiredNumber(row, "maximum") + 1,
+          });
+          insertAgentMessage(message);
+          recordActivity(systemActor, "agent_message.accepted", "agent_message", message.messageId);
+          return message;
+        }),
+      admitMessageTask: async (
+        request: Parameters<OperationalRepositories["subAgents"]["admitMessageTask"]>[0],
+      ) =>
+        database.transaction(() => {
+          const { message: record, task } = request;
+          if (record.messageId !== task.triggerMessageId || record.taskId !== task.taskId)
+            throw new Error("Agent message and task admission identities do not match");
+          const agent = db.prepare("SELECT status FROM sub_agents WHERE agent_id = ?").get(task.agentId);
+          if (agent === undefined || requiredString(agent, "status") !== "idle")
+            throw new Error(`Subagent ${task.agentId} is not idle`);
+          const row = db
+            .prepare(`SELECT COALESCE(MAX(sequence), 0) AS maximum
+              FROM agent_messages WHERE recipient_kind = ? AND recipient_id = ?`)
+            .get(record.recipient.kind, record.recipient.id);
+          const message = Object.freeze({
+            ...record,
+            sequence: requiredNumber(row, "maximum") + 1,
+          });
+          db.prepare(`INSERT INTO sub_agent_tasks(
+              task_id, agent_id, trigger_message_id, status, result_artifact_id, result_preview,
+              error, usage_json, created_at, started_at, completed_at
+            ) VALUES (?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, NULL, NULL)`).run(
+            task.taskId,
+            task.agentId,
+            task.triggerMessageId,
+            task.createdAt,
+          );
+          insertAgentMessage(message);
+          db.prepare("UPDATE sub_agents SET status = 'starting', updated_at = ? WHERE agent_id = ?").run(
+            task.createdAt,
+            task.agentId,
+          );
+          recordActivity(systemActor, "subagent_task.admitted", "subagent_task", task.taskId);
+          return message;
+        }),
+      getMessage: async (messageId: string) =>
+        decodeOptional(
+          db.prepare("SELECT * FROM agent_messages WHERE message_id = ?").get(messageId),
+          decodeAgentMailboxMessage,
+        ),
+      listMessages: async (agentId: string) =>
+        db
+          .prepare(`SELECT * FROM agent_messages
+            WHERE (sender_kind = 'subagent' AND sender_id = ?)
+               OR (recipient_kind = 'subagent' AND recipient_id = ?)
+            ORDER BY created_at, message_id`)
+          .all(agentId, agentId)
+          .map(decodeAgentMailboxMessage),
+      listAcceptedMessagesForRecipient: async (recipient: AgentAddress) =>
+        db
+          .prepare(`SELECT * FROM agent_messages
+            WHERE recipient_kind = ? AND recipient_id = ? AND status = 'accepted'
+            ORDER BY sequence, message_id`)
+          .all(recipient.kind, recipient.id)
+          .map(decodeAgentMailboxMessage),
+      putMessage: putAgentMessage,
+      appendTimeline: appendSubAgentTimeline,
+      listTimeline: async (taskId: string) =>
+        db
+          .prepare("SELECT * FROM sub_agent_timeline_entries WHERE task_id = ? ORDER BY sequence")
+          .all(taskId)
+          .map(decodeSubAgentTimeline),
+      putModelCall: putSubAgentModelCall,
+      listModelCalls: async (taskId: string) =>
+        db
+          .prepare("SELECT * FROM sub_agent_model_calls WHERE task_id = ? ORDER BY round")
+          .all(taskId)
+          .map(decodeSubAgentModelCall),
+      recoverInterrupted: async (interruptedAt: string) =>
+        database.transaction(() => {
+          const activeTasks = db
+            .prepare("SELECT task_id FROM sub_agent_tasks WHERE status IN ('pending', 'running')")
+            .all();
+          const claimedMessages = db
+            .prepare("SELECT message_id FROM agent_messages WHERE status = 'claimed'")
+            .all();
+          db.prepare(`UPDATE sub_agent_tasks SET
+              status = 'interrupted', error = 'Process exited before task settled', completed_at = ?
+            WHERE status IN ('pending', 'running')`).run(interruptedAt);
+          db.prepare(`UPDATE sub_agents SET status = 'suspended', updated_at = ?
+            WHERE status IN ('starting', 'running', 'idle')`).run(interruptedAt);
+          db.prepare(`UPDATE sub_agent_model_calls SET
+              status = 'interrupted', error = 'Process exited before model call settled', completed_at = ?
+            WHERE status = 'running'`).run(interruptedAt);
+          db.prepare(`UPDATE agent_messages SET
+              status = 'failed', failed_at = ?,
+              failure = 'Process exited while message delivery outcome was unresolved'
+            WHERE status = 'claimed'`).run(interruptedAt);
+          for (const row of activeTasks) {
+            const taskId = requiredString(row, "task_id");
+            recordActivity(systemActor, "subagent_task.interrupted", "subagent_task", taskId);
+          }
+          for (const row of claimedMessages) {
+            const messageId = requiredString(row, "message_id");
+            recordActivity(systemActor, "agent_message.failed", "agent_message", messageId);
+          }
+          return activeTasks.length;
         }),
     }),
     workflows: Object.freeze({

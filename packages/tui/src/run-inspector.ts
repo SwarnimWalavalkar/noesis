@@ -340,6 +340,74 @@ function subagentSection(detail: TuiExecutionDetail | undefined, colorEnabled: b
     ...(detail.prompt ? [{ label: "prompt", lines: exactText(detail.prompt).split("\n") }] : []),
   ];
 }
+function subagentTranscriptSection(
+  detail: TuiExecutionDetail | undefined,
+  inspector: TuiInspectorState,
+  colorEnabled: boolean,
+): readonly Section[] {
+  if (detail?.kind !== "subagent") return [];
+  const durable = (detail.transcript ?? []).map((entry) => {
+    if (entry.kind === "reasoning")
+      return styled(colorEnabled, `${ANSI.dim}${ANSI.magenta}`, `∴ ${safeTerminalText(entry.text)}`);
+    if (entry.kind === "message") {
+      const label = entry.role === "assistant" ? "AGENT" : entry.role.toUpperCase();
+      const style = entry.role === "assistant" ? ANSI.cyan : ANSI.dim;
+      return `${styled(colorEnabled, `${ANSI.bold}${style}`, label)}  ${safeTerminalText(entry.text)}`;
+    }
+    const glyph = statusGlyph(entry.status);
+    const result =
+      entry.output === undefined ? "" : ` · ${boundedInspectorScalar(encodeJson(entry.output), 240)}`;
+    return `${styled(colorEnabled, statusColor(entry.status), glyph)} ${safeInspectorScalar(entry.name)}${result}`;
+  });
+  let liveReasoning = "";
+  let liveText = "";
+  const liveActions: string[] = [];
+  for (const runtimeEvent of inspector.liveEvents ?? []) {
+    if (runtimeEvent.type !== "live") continue;
+    const event = runtimeEvent.event;
+    if (event.type === "reasoning-delta") liveReasoning += event.text;
+    else if (event.type === "delta") liveText += event.text;
+    else if (event.type === "tool-start")
+      liveActions.push(
+        `${styled(colorEnabled, ANSI.cyan, "●")} ${safeInspectorScalar(event.name)} · running`,
+      );
+    else if (event.type === "tool-end")
+      liveActions.push(
+        `${styled(colorEnabled, event.isError ? ANSI.red : ANSI.green, event.isError ? "×" : "✓")} ${safeInspectorScalar(event.name)}`,
+      );
+  }
+  const live = [
+    ...(liveReasoning
+      ? [styled(colorEnabled, `${ANSI.dim}${ANSI.magenta}`, `∴ ${safeTerminalText(liveReasoning)}`)]
+      : []),
+    ...(liveText
+      ? [`${styled(colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "AGENT")}  ${safeTerminalText(liveText)}`]
+      : []),
+    ...liveActions,
+  ];
+  const tasks = detail.subAgent?.tasks ?? [];
+  return [
+    ...(tasks.length > 0
+      ? [
+          {
+            label: "tasks",
+            lines: tasks.map(
+              (task, index) =>
+                `${styled(colorEnabled, ANSI.dim, String(index + 1))} ${styled(colorEnabled, statusColor(task.status), statusGlyph(task.status))} ${safeInspectorScalar(task.taskId)} · ${safeInspectorScalar(task.status)}`,
+            ),
+          },
+        ]
+      : []),
+    ...([...durable, ...live].length > 0
+      ? [
+          createConditionalObject({ label: "transcript" } as const)
+            .addOptional(live.length > 0 ? { note: "live" } : undefined)
+            .add({ lines: [...durable, ...live] } as const)
+            .finish(),
+        ]
+      : []),
+  ];
+}
 function errorText(action: TuiAgentAction, detail: TuiExecutionDetail | undefined): string | undefined {
   if (detail?.error) return detail.error;
   if (action.status !== "failed") return undefined;
@@ -363,7 +431,7 @@ function buildSections(
   detail: TuiExecutionDetail | undefined,
   width: number,
   colorEnabled: boolean,
-  view: TuiInspectorState["view"],
+  inspector: TuiInspectorState,
 ): readonly Section[] {
   const error = errorText(action, detail);
   // The transcript action is authoritative. Execution artifacts are intentionally bounded
@@ -391,9 +459,10 @@ function buildSections(
       : []),
     ...phasesSection(detail, colorEnabled),
     ...subagentSection(detail, colorEnabled),
+    ...subagentTranscriptSection(detail, inspector, colorEnabled),
     ...callsSection(children, colorEnabled),
   ];
-  if (view === "raw")
+  if (inspector.view === "raw")
     return [
       ...common,
       ...(!exactSource ? artifactSection("source", detail?.sourceArtifact, colorEnabled) : []),
@@ -501,6 +570,7 @@ interface PreparedInspectorDocument {
   readonly action: TuiAgentAction | undefined;
   readonly children: readonly TuiAgentAction[];
   readonly detail: TuiExecutionDetail | undefined;
+  readonly liveEvents: TuiInspectorState["liveEvents"];
   readonly inspectorStatus: TuiInspectorState["status"];
   readonly inspectorView: TuiInspectorState["view"];
   readonly width: number;
@@ -522,6 +592,7 @@ function prepareInspectorDocument(
     cached &&
     cached.action === action &&
     cached.detail === inspector.detail &&
+    cached.liveEvents === inspector.liveEvents &&
     cached.inspectorStatus === inspector.status &&
     cached.inspectorView === inspector.view &&
     cached.width === width &&
@@ -532,7 +603,7 @@ function prepareInspectorDocument(
   const body = action
     ? [
         ...identityLines(action, children, inspector, colorEnabled),
-        ...buildSections(action, children, inspector.detail, width, colorEnabled, inspector.view).flatMap(
+        ...buildSections(action, children, inspector.detail, width, colorEnabled, inspector).flatMap(
           (section) => ["", sectionRule(section, width, colorEnabled), ...section.lines],
         ),
       ]
@@ -545,6 +616,7 @@ function prepareInspectorDocument(
     action,
     children: [...children],
     detail: inspector.detail,
+    liveEvents: inspector.liveEvents,
     inspectorStatus: inspector.status,
     inspectorView: inspector.view,
     width,
@@ -576,7 +648,8 @@ export function renderRunInspectorFrame(
   if (!inspector || width < 16 || height < 4) return { rows: [], maxScroll: 0 };
   const colorEnabled = state.colorEnabled;
   const actions = timelineActions(state.timeline);
-  const action = actions.find((candidate) => candidate.actionId === inspector.actionId);
+  const action =
+    actions.find((candidate) => candidate.actionId === inspector.actionId) ?? inspector.syntheticAction;
   const inner = width - 4;
   const children = action ? childActions(actions, action.actionId) : [];
   const documentRows = prepareInspectorDocument(action, children, inspector, inner, colorEnabled);

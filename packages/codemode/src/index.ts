@@ -73,6 +73,7 @@ type ParentMessage =
       readonly storeEntries: readonly (readonly [string, JsonValue])[];
       readonly input?: JsonValue;
       readonly contextDocument?: CodeExecutionContextDocument;
+      readonly agentContext?: CodeExecutionAgentContext;
     }
   | {
       readonly type: "sdk-result";
@@ -150,8 +151,13 @@ export interface CodeExecutionRequest {
   readonly signal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly contextDocument?: CodeExecutionContextDocument;
+  readonly agentContext?: CodeExecutionAgentContext;
 }
 export type CodeExecutionCompletionMode = "explicit" | "last-expression";
+export interface CodeExecutionAgentContext {
+  readonly self: { readonly kind: "foreground" | "subagent"; readonly id: string };
+  readonly parent?: { readonly kind: "foreground" | "subagent"; readonly id: string };
+}
 export interface CodeExecutionContextDocument {
   readonly documentId: string;
   readonly path: string;
@@ -583,6 +589,11 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                   .addOptional(
                     !(request.contextDocument === undefined)
                       ? { contextDocument: request.contextDocument }
+                      : undefined,
+                  )
+                  .addOptional(
+                    !(request.agentContext === undefined)
+                      ? { agentContext: request.agentContext }
                       : undefined,
                   )
                   .finish(),

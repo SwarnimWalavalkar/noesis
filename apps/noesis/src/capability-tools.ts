@@ -511,21 +511,8 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
         options.plan.sessionId,
         options.plan.turnId,
       );
-      const turnCallById = new Map(turnCalls.map((call) => [call.toolCallId, call] as const));
-      const hasSubAgentAncestor = (callId: string): boolean => {
-        const visited = new Set<string>();
-        let parentId = turnCallById.get(callId)?.parentToolCallId;
-        while (parentId && !visited.has(parentId)) {
-          visited.add(parentId);
-          const parent = turnCallById.get(parentId);
-          if (!parent) return false;
-          if (parent.toolName === "agents.run") return true;
-          parentId = parent.parentToolCallId;
-        }
-        return false;
-      };
       const refinementCalls = turnCalls
-        .filter((call) => call.toolName === "capabilities.refine" && !hasSubAgentAncestor(call.toolCallId))
+        .filter((call) => call.toolName === "capabilities.refine")
         .sort(
           (left, right) =>
             (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER),

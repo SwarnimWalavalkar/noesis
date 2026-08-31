@@ -65,7 +65,7 @@ describe("Noesis TUI reducer", () => {
     expect(rejected.timeline).toEqual(state.timeline);
   });
 
-  test("transcript navigation skips tool calls owned by a subagent", () => {
+  test("transcript navigation remains scoped to foreground actions", () => {
     const state = {
       ...initialTuiState("fake"),
       timeline: [
@@ -75,25 +75,11 @@ describe("Noesis TUI reducer", () => {
           name: "execute",
           status: "running" as const,
         },
-        {
-          kind: "action" as const,
-          actionId: "subagent-1",
-          parentActionId: "execute-1",
-          name: "agents.run",
-          status: "running" as const,
-        },
-        {
-          kind: "action" as const,
-          actionId: "subagent-tool-1",
-          parentActionId: "subagent-1",
-          name: "files.read",
-          status: "completed" as const,
-        },
       ],
     };
 
     expect(reduceTui(state, { type: "action-cursor-moved", direction: "previous" }).actionCursor).toBe(
-      "subagent-1",
+      "execute-1",
     );
   });
 
@@ -1022,6 +1008,50 @@ describe("Noesis TUI reducer", () => {
 
     state = reduceTui(state, { type: "inspector-closed" });
     expect(state.inspector).toBeUndefined();
+  });
+
+  test("tracks an active subagent's live phase without requiring its inspector", () => {
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "subagents-hydrated",
+      subAgents: [
+        {
+          agentId: "agent-live",
+          childSessionId: "session-agent-live",
+          projectId: "project-test",
+          originSessionId: "session-foreground",
+          status: "running",
+          route: { provider: "controlled", model: "model" },
+          thinkingLevel: "high",
+          activeTaskId: "task-live",
+          latestTaskId: "task-live",
+          latestTaskStatus: "running",
+          createdAt: "2026-08-31T00:00:00.000Z",
+          updatedAt: "2026-08-31T00:00:01.000Z",
+        },
+      ],
+    });
+    state = reduceTui(state, {
+      type: "subagent-live-event",
+      actionId: "subagent:agent-live",
+      event: {
+        type: "live",
+        agentId: "agent-live",
+        taskId: "task-live",
+        event: {
+          type: "tool-start",
+          actionId: "tool-1",
+          name: "shell.run",
+          input: {},
+        },
+      },
+    });
+    expect(state.subAgentPhases).toEqual({ "agent-live": "tool · shell.run" });
+
+    state = reduceTui(state, {
+      type: "subagents-hydrated",
+      subAgents: state.subAgents.map((agent) => ({ ...agent, status: "idle" as const })),
+    });
+    expect(state.subAgentPhases).toEqual({});
   });
 
   test("honors NO_COLOR and emits no styling when color is disabled", () => {

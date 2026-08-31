@@ -1,0 +1,1149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Noesis process-scoped subagents</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #080a0f;
+        --panel: #10141c;
+        --panel-2: #0c1017;
+        --text: #f1f4f7;
+        --muted: #9da8b7;
+        --line: #293241;
+        --accent: #a8ff60;
+        --cyan: #72d8ff;
+        --violet: #b9a6ff;
+        --yellow: #ffd56a;
+        --red: #ff8a8a;
+        --max: 78rem;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        scroll-behavior: smooth;
+      }
+      body {
+        margin: 0;
+        background:
+          radial-gradient(circle at 82% 5%, rgb(114 216 255 / 8%), transparent 28rem),
+          radial-gradient(circle at 10% 18%, rgb(185 166 255 / 7%), transparent 24rem),
+          var(--bg);
+        color: var(--text);
+        font-size: 16px;
+        line-height: 1.65;
+      }
+      header,
+      main,
+      footer {
+        width: min(calc(100% - 2rem), var(--max));
+        margin-inline: auto;
+      }
+      header {
+        padding: clamp(4rem, 10vw, 8rem) 0 2.5rem;
+      }
+      main {
+        padding-bottom: 5rem;
+      }
+      footer {
+        padding: 2rem 0 4rem;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+      }
+      h1,
+      h2,
+      h3 {
+        line-height: 1.15;
+        text-wrap: balance;
+      }
+      h1 {
+        max-width: 13ch;
+        margin: 0.1em 0 0.35em;
+        font-size: clamp(3rem, 8vw, 6.8rem);
+        letter-spacing: -0.065em;
+      }
+      h2 {
+        margin: 0 0 1rem;
+        font-size: clamp(1.55rem, 3vw, 2.25rem);
+        letter-spacing: -0.025em;
+      }
+      h3 {
+        margin: 1.7rem 0 0.65rem;
+        font-size: 1.05rem;
+      }
+      p,
+      li {
+        max-width: 82ch;
+      }
+      a {
+        color: var(--cyan);
+      }
+      code,
+      pre,
+      .eyebrow,
+      .tag,
+      th {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+      code {
+        color: var(--accent);
+      }
+      pre {
+        margin: 1rem 0;
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #07090d;
+        color: #e6edf5;
+        overflow-x: auto;
+        font-size: 0.91rem;
+        line-height: 1.55;
+      }
+      section {
+        margin-top: 1rem;
+        padding: clamp(1.15rem, 3vw, 2.2rem);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: linear-gradient(145deg, rgb(17 21 29 / 96%), rgb(12 16 23 / 96%));
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        padding: 0.8rem;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        color: var(--violet);
+        font-size: 0.78rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      ul,
+      ol {
+        padding-left: 1.35rem;
+      }
+      li {
+        margin: 0.5rem 0;
+      }
+      .eyebrow {
+        color: var(--accent);
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+      .lede {
+        max-width: 66ch;
+        color: #d7dde5;
+        font-size: clamp(1.12rem, 2.3vw, 1.42rem);
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+        gap: 0.9rem;
+      }
+      .card {
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel-2);
+      }
+      .card strong {
+        display: block;
+        margin-bottom: 0.35rem;
+      }
+      .card p {
+        margin: 0;
+        color: var(--muted);
+      }
+      .decision {
+        padding: 1rem 1rem 1rem 1.15rem;
+        border-left: 3px solid var(--accent);
+        background: rgb(168 255 96 / 5%);
+      }
+      .warning {
+        padding-left: 1rem;
+        border-left: 3px solid var(--yellow);
+      }
+      .danger {
+        padding-left: 1rem;
+        border-left: 3px solid var(--red);
+      }
+      .tag {
+        display: inline-block;
+        margin: 0.15rem 0.25rem 0.15rem 0;
+        padding: 0.18rem 0.48rem;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        color: var(--muted);
+        font-size: 0.73rem;
+      }
+      .flow {
+        padding: 1rem;
+        border: 1px dashed #3b4656;
+        border-radius: 12px;
+        background: #090c12;
+        color: #dbe4ee;
+        white-space: pre;
+        overflow-x: auto;
+      }
+      .scroll {
+        overflow-x: auto;
+      }
+      .toc {
+        columns: 2 18rem;
+        gap: 2rem;
+      }
+      .toc a {
+        color: var(--muted);
+        text-decoration: none;
+      }
+      .toc a:hover {
+        color: var(--text);
+      }
+      .yes {
+        color: var(--accent);
+      }
+      .no {
+        color: var(--red);
+      }
+      @media (max-width: 720px) {
+        body {
+          font-size: 15px;
+        }
+        th,
+        td {
+          padding: 0.65rem;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="eyebrow">Noesis · shipped implementation record</div>
+      <h1>Process-scoped subagents</h1>
+      <p class="lede">
+        Turn subagents from synchronous nested model calls into asynchronous, retained collaborators
+        that are orchestrated through Code Mode, communicate through durable mailboxes, survive session
+        switches, and remain completely visible while Noesis is running.
+      </p>
+      <div>
+        <span class="tag">process resident</span>
+        <span class="tag">code orchestrated</span>
+        <span class="tag">durable identity</span>
+        <span class="tag">live inspectable</span>
+        <span class="tag">no daemon yet</span>
+      </div>
+    </header>
+
+    <main>
+      <section id="decision">
+        <h2>Decision</h2>
+        <p class="decision">
+          A subagent is a first-class Noesis actor with its own specialized session, stable
+          <code>agentId</code>, sequential tasks, and durable mailbox. Its originating session is
+          immutable provenance, not its lifecycle owner. A process-scoped supervisor runs agents until
+          they settle, are explicitly cancelled, or the primary Noesis process exits.
+        </p>
+        <div class="grid">
+          <div class="card">
+            <strong>Lifecycle owner</strong>
+            <p>The primary Noesis process, not the parent turn, <code>execute</code> call, or session.</p>
+          </div>
+          <div class="card">
+            <strong>Orchestration surface</strong>
+            <p>Only the progressively disclosed <code>agents</code> SDK inside <code>execute</code>.</p>
+          </div>
+          <div class="card">
+            <strong>Execution engine</strong>
+            <p>Pi executes one agent task at a time; it does not become the product state authority.</p>
+          </div>
+          <div class="card">
+            <strong>Durable authority</strong>
+            <p>SQLite owns agents, tasks, mailboxes, and settled transcript facts; artifacts own large bytes.</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Contents</h2>
+        <ol class="toc">
+          <li><a href="#requirements">Product requirements</a></li>
+          <li><a href="#usage">Usage first</a></li>
+          <li><a href="#model">Domain model</a></li>
+          <li><a href="#api">Code Mode API</a></li>
+          <li><a href="#lifecycle">Lifecycle and delivery</a></li>
+          <li><a href="#sessions">Session and process behavior</a></li>
+          <li><a href="#authority">Tools, authority, and recursion</a></li>
+          <li><a href="#transcript">Transcript and event contract</a></li>
+          <li><a href="#tui">TUI experience</a></li>
+          <li><a href="#ownership">Package ownership</a></li>
+          <li><a href="#persistence">Persistence shape</a></li>
+          <li><a href="#failures">Failure semantics</a></li>
+          <li><a href="#implementation">Implementation sequence</a></li>
+          <li><a href="#acceptance">Acceptance boundary</a></li>
+          <li><a href="#alternatives">Alternatives and tradeoffs</a></li>
+        </ol>
+      </section>
+
+      <section id="requirements">
+        <h2>Product requirements</h2>
+        <div class="grid">
+          <div class="card">
+            <strong>Asynchronous by default</strong>
+            <p><code>agents.spawn</code> durably admits work and returns a handle without waiting for completion.</p>
+          </div>
+          <div class="card">
+            <strong>Retained collaborators</strong>
+            <p>An idle agent can receive another message and continue from its own prior conversation.</p>
+          </div>
+          <div class="card">
+            <strong>Bidirectional communication</strong>
+            <p>Foreground sessions, parent agents, and sibling agents can exchange explicitly attributed messages.</p>
+          </div>
+          <div class="card">
+            <strong>Session independence</strong>
+            <p>Switching, resuming, or creating a session never cancels work admitted by another session.</p>
+          </div>
+          <div class="card">
+            <strong>Complete observability</strong>
+            <p>The user can watch reasoning, assistant output, messages, tool calls, Code Mode, usage, and failures.</p>
+          </div>
+          <div class="card">
+            <strong>Selective context</strong>
+            <p>Child work stays outside the foreground context until code explicitly waits, inspects, or receives a report.</p>
+          </div>
+        </div>
+
+        <h3>Boundary for this design</h3>
+        <ul>
+          <li>Noesis does <strong>not</strong> gain a daemon in this change.</li>
+          <li>Agents continue only while the primary Noesis process is alive.</li>
+          <li>Process shutdown interrupts active tasks truthfully; restart does not silently replay them.</li>
+          <li>No hard provider-round, tool-call, nesting-depth, or wall-clock ceiling is introduced.</li>
+          <li>Resource pressure may delay admission to execution, but it queues work rather than rejecting ambition.</li>
+        </ul>
+
+        <h3>Reference lessons, not copied architectures</h3>
+        <ul>
+          <li><strong>Pi:</strong> keep <code>AgentHarness</code> as the executor of one task and use its safe steering boundary. Do not patch Pi or turn its in-memory session into Noesis's durable authority.</li>
+          <li><strong>Prime Agent:</strong> adopt admission/completion separation, explicit agent messages, “busy means steer, idle means a new turn,” and child sessions. Defer its daemon, passivation, and hydration machinery.</li>
+          <li><strong>pi-interactive-subagents:</strong> adopt immediate background spawn, visible workers, explicit messaging, and compact completion notices. Do not adopt tmux control, pane typing, session-file polling, or a sidecar registry.</li>
+        </ul>
+      </section>
+
+      <section id="usage">
+        <h2>Usage first</h2>
+        <p>
+          The model keeps one recursive programming surface. It uses ordinary JavaScript to create,
+          coordinate, join, and synthesize work. No new provider-facing tool appears.
+        </p>
+
+        <h3>Parallel background work</h3>
+        <pre><code>const atlas = await agents.spawn({
+  name: "atlas",
+  systemPrompt: "Investigate the runtime and cite exact evidence.",
+  prompt: context.slice(0, 80_000),
+  tools: ["history.search", "history.open"],
+  thinkingLevel: "high"
+});
+
+const sieve = await agents.spawn({
+  name: "sieve",
+  prompt: "Adversarially review the current design and report only concrete defects.",
+  tools: ["files.read", "shell.run"]
+});
+
+// Both handles return after durable admission. This execution can return now.
+({ atlas, sieve });</code></pre>
+
+        <h3>Communicate without joining</h3>
+        <pre><code>await agents.send({
+  to: atlas.agentId,
+  message: "Also compare behavior after switching sessions."
+});
+
+const running = await agents.list({ status: ["starting", "running", "idle"] });
+running;</code></pre>
+
+        <h3>Join only when synthesis needs the result</h3>
+        <pre><code>const [runtime, review] = await Promise.all([
+  agents.wait({ taskId: atlas.taskId }),
+  agents.wait({ taskId: sieve.taskId })
+]);
+
+return synthesize(runtime, review);</code></pre>
+
+        <h3>Agent-to-agent reporting</h3>
+        <pre><code>// Inside a subagent's execute call:
+await agents.send({
+  to: agents.parent,
+  message: "I found a recovery invariant worth checking; evidence is in packages/workspace/..."
+});</code></pre>
+
+        <p class="muted">
+          Tool-free model-query behavior is still expressible as “spawn, then wait.” Every Pi actor
+          retains the fixed four provider tool schemas; the frozen authority/catalog can make all
+          operations unavailable when the caller wants an isolated reasoning task.
+        </p>
+      </section>
+
+      <section id="model">
+        <h2>Domain model</h2>
+        <div class="flow">Primary Noesis process
+│
+├─ process-scoped SubAgentSupervisor
+│  ├─ Agent atlas ── owns specialized Session A1
+│  │  ├─ Task A1.1 ── initial prompt + steers + result
+│  │  └─ Task A1.2 ── later message after the agent became idle
+│  └─ Agent sieve ── owns specialized Session S1
+│     └─ Task S1.1
+│
+├─ foreground Session X ── immutable origin of atlas and sieve
+└─ foreground Session Y ── currently selected; X's agents keep running</div>
+
+        <table>
+          <thead>
+            <tr><th>Identity</th><th>Meaning</th><th>Lifetime</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>agentId</code></td>
+              <td>A retained collaborator with stable route, system prompt, tool authority, and its own session.</td>
+              <td>From spawn until explicitly closed or interrupted by process exit.</td>
+            </tr>
+            <tr>
+              <td><code>taskId</code></td>
+              <td>One active unit of model work for that agent. At most one task runs per agent.</td>
+              <td>Pending through one terminal outcome.</td>
+            </tr>
+            <tr>
+              <td><code>messageId</code></td>
+              <td>One attributed mailbox message between foreground or subagent actors.</td>
+              <td>Durable from acceptance through delivery or failure.</td>
+            </tr>
+            <tr>
+              <td><code>childSessionId</code></td>
+              <td>The canonical transcript and context history owned by one subagent.</td>
+              <td>Durable evidence; hidden from the ordinary foreground session picker.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="decision">
+          Agent identity, task identity, and message identity stay separate. A long-open tool call is
+          never used as an actor, a task queue, or a mailbox.
+        </p>
+      </section>
+
+      <section id="api">
+        <h2>Code Mode API</h2>
+        <pre><code>interface SubAgentSpawnIntent {
+  readonly name?: string;
+  readonly systemPrompt?: string;
+  readonly prompt: string | ContextView | readonly (string | ContextView)[];
+  readonly tools?: readonly string[];
+  readonly thinkingLevel?: AgentThinkingLevel;
+}
+
+interface SubAgentHandle {
+  readonly agentId: string;
+  readonly taskId: string;
+  readonly name?: string;
+  readonly status: "accepted";
+}
+
+type SubAgentStatus = "starting" | "running" | "idle" | "suspended" | "closed";
+type SubAgentTaskStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+interface AgentAddress {
+  readonly kind: "foreground" | "subagent";
+  readonly id: string;
+}
+
+interface AgentsApi {
+  readonly self: AgentAddress;
+  readonly parent?: AgentAddress;
+
+  spawn(intent: SubAgentSpawnIntent): Promise&lt;SubAgentHandle&gt;;
+  send(input: { to: string | AgentAddress; message: string }): Promise&lt;MessageReceipt&gt;;
+  list(filter?: AgentListFilter): Promise&lt;readonly SubAgentSummary[]&gt;;
+  inspect(input: { agentId: string; taskId?: string }): Promise&lt;SubAgentInspection&gt;;
+  wait(input: { taskId: string; timeoutMs?: number }): Promise&lt;SubAgentTaskResult&gt;;
+  cancel(input: { taskId: string; reason?: string }): Promise&lt;SubAgentTaskResult&gt;;
+  close(input: { agentId: string; reason?: string }): Promise&lt;void&gt;;
+}</code></pre>
+
+        <p class="muted">
+          <code>agents.self</code> and <code>agents.parent</code> are read-only, host-derived addresses.
+          Callers cannot choose or spoof the sender recorded by <code>send</code>. A model-facing
+          inspection returns a bounded recent preview plus the path, character length, and digest of
+          a complete immutable transcript snapshot; the TUI reads the canonical rows directly.
+        </p>
+
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr><th>Operation</th><th>Contract</th><th>Does it block on agent work?</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>spawn</code></td>
+                <td>Freeze and durably admit the agent, initial message, and first task; return their IDs.</td>
+                <td class="no">No</td>
+              </tr>
+              <tr>
+                <td><code>send</code></td>
+                <td>Durably enqueue one attributed message and return its delivery receipt.</td>
+                <td class="no">No</td>
+              </tr>
+              <tr>
+                <td><code>list</code></td>
+                <td>Return bounded summaries for agents accessible in the current process and project.</td>
+                <td class="no">No</td>
+              </tr>
+              <tr>
+                <td><code>inspect</code></td>
+                <td>Return bounded metadata, latest activity, task IDs, and complete transcript artifact reference.</td>
+                <td class="no">No</td>
+              </tr>
+              <tr>
+                <td><code>wait</code></td>
+                <td>Join one exact task and return its terminal result. Cancelling the waiter only detaches it.</td>
+                <td class="yes">Yes, deliberately</td>
+              </tr>
+              <tr>
+                <td><code>cancel</code></td>
+                <td>Cancel one task. The retained agent becomes idle after truthful settlement.</td>
+                <td class="no">Only for settlement</td>
+              </tr>
+              <tr>
+                <td><code>close</code></td>
+                <td>Stop active work if necessary and retire the actor from future messages.</td>
+                <td class="no">Only for settlement</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>Frozen actor plan</h3>
+        <pre><code>interface FrozenSubAgentPlan {
+  readonly schemaVersion: 1;
+  readonly agentId: string;
+  readonly childSessionId: string;
+  readonly origin: {
+    readonly projectId: string;
+    readonly sessionId: string;
+    readonly turnId: string;
+    readonly executionId: string;
+    readonly parentAgentId?: string;
+  };
+  readonly route: { readonly provider: string; readonly model: string };
+  readonly thinkingLevel: AgentThinkingLevel;
+  readonly renderedSystemPrompt: string;
+  readonly frozenTools: readonly FrozenToolReference[];
+  readonly authority: FrozenAuthority;
+  readonly context: FrozenContextDocumentReference;
+  readonly requestTokenBudget: number;
+  readonly createdAt: string;
+  readonly canonicalDigest: string;
+}</code></pre>
+
+        <p>
+          The runtime derives the route from the user's configured subagent defaults. The spawning
+          model may choose the system-prompt addition, thinking level, and a subset of canonical
+          tools; it may not choose provider or model in this version. The frozen plan is immutable for
+          the actor's lifetime. Changing those fundamentals creates a new agent instead of mutating an
+          existing collaborator behind its transcript.
+        </p>
+      </section>
+
+      <section id="lifecycle">
+        <h2>Lifecycle and message delivery</h2>
+        <h3>Spawn</h3>
+        <ol>
+          <li>Validate the intent and resolve every <code>ContextView</code> against the active frozen document.</li>
+          <li>Derive a child-only catalog and authority ceiling from the spawning actor.</li>
+          <li>Freeze route, system prompt, reasoning, context budget, exact tool revisions, and origin.</li>
+          <li>In one SQLite transaction, create the child session, actor, initial mailbox message, and task.</li>
+          <li>Publish an admission event and return <code>{ agentId, taskId, status: "accepted" }</code>.</li>
+          <li>The process supervisor claims and starts the task independently of the spawning execution.</li>
+        </ol>
+
+        <h3>One active task per agent</h3>
+        <table>
+          <thead>
+            <tr><th>Target state when a message arrives</th><th>Behavior</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>running</code></td>
+              <td>The message is persisted immediately, then steered into the active Pi turn at its next safe boundary.</td>
+            </tr>
+            <tr>
+              <td>Agent <code>starting</code> or task <code>pending</code></td>
+              <td>The message joins the same task in FIFO order before or during its initial request construction.</td>
+            </tr>
+            <tr>
+              <td><code>idle</code></td>
+              <td>The message creates the agent's next task and wakes the supervisor.</td>
+            </tr>
+            <tr>
+              <td><code>suspended</code> or <code>closed</code></td>
+              <td>The send fails explicitly; it is never accepted into a mailbox that cannot deliver it.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <p class="warning">
+          “Next safe boundary” has the same honest meaning as foreground steering. A Pi tool already in
+          progress finishes. An <code>execute</code> call is one Pi tool call, so a message accepted while
+          that call is active waits until Code Mode returns unless the running program explicitly checks
+          its mailbox. The TUI shows the message as pending rather than pretending it was consumed.
+        </p>
+
+        <h3>Completion</h3>
+        <ul>
+          <li>The final assistant message, usage, model rounds, and terminal task state settle durably.</li>
+          <li>The actor becomes <code>idle</code> and can receive another task.</li>
+          <li>An explicit <code>agents.send</code> report is delivered to its recipient mailbox.</li>
+          <li>If the agent ends without reporting, the origin receives only a compact lifecycle notification, not the full result.</li>
+          <li><code>agents.wait</code> returns the exact task result without changing the task's lifecycle.</li>
+        </ul>
+
+        <h3>Messages addressed to a foreground session</h3>
+        <ul>
+          <li>If that session has an active model turn, the message becomes steering at the next safe boundary.</li>
+          <li>If it is the selected session and idle, the message may wake a collaboration turn immediately; the sender remains explicit and the body is not user-authored.</li>
+          <li>If another session is selected, the message stays pending. The TUI shows a process-wide notification, but Noesis does not run a hidden model turn in the inactive session.</li>
+          <li>Returning to the originating session exposes the pending message and lets its interaction scheduler deliver it.</li>
+          <li>A message for Session A is never injected into the currently selected Session B merely because B is visible.</li>
+        </ul>
+      </section>
+
+      <section id="sessions">
+        <h2>Session and process behavior</h2>
+        <table>
+          <thead>
+            <tr><th>Event</th><th>Effect on active subagents</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Originating foreground turn settles or aborts</td>
+              <td>None. Admission already transferred lifecycle ownership to the process supervisor.</td>
+            </tr>
+            <tr>
+              <td>User starts or resumes another session</td>
+              <td>Agents continue running. The process-wide TUI surface remains subscribed.</td>
+            </tr>
+            <tr>
+              <td><code>/model</code> or <code>/provider</code> creates a fresh session</td>
+              <td>Existing agents keep their frozen route and credentials; the new foreground route does not mutate them.</td>
+            </tr>
+            <tr>
+              <td>Origin session is deleted from history</td>
+              <td>The agent continues. Minimal origin metadata remains as an audit tombstone while active evidence references it.</td>
+            </tr>
+            <tr>
+              <td>User explicitly cancels a task</td>
+              <td>Only that task is cancelled; the actor may become idle and reusable.</td>
+            </tr>
+            <tr>
+              <td>User explicitly closes an agent</td>
+              <td>Its active task is cancelled and the actor rejects future messages.</td>
+            </tr>
+            <tr>
+              <td>Primary process exits cleanly</td>
+              <td>Supervisor aborts active tasks, records them <code>interrupted</code>, marks non-closed actors <code>suspended</code>, flushes events, then allows SQLite to close.</td>
+            </tr>
+            <tr>
+              <td>Primary process crashes</td>
+              <td>Next startup reconciles ambiguous <code>starting</code>/<code>running</code> tasks to <code>interrupted</code> and their actors to <code>suspended</code>; it never assumes a provider or effect failed.</td>
+            </tr>
+            <tr>
+              <td>Noesis restarts</td>
+              <td>History remains inspectable, but suspended actors are not automatically rehydrated or replayed in this design.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="decision">
+          The supervisor is intentionally expressed through opaque IDs and durable repositories. A
+          future daemon can host the same interface without changing Code Mode or the TUI read model.
+          The daemon is a deployment relocation, not a prerequisite hidden inside this plan.
+        </p>
+      </section>
+
+      <section id="authority">
+        <h2>Tools, authority, and recursive orchestration</h2>
+        <ul>
+          <li>Every child Pi request exposes exactly <code>file_read</code>, <code>file_write</code>, <code>shell</code>, and <code>execute</code>.</li>
+          <li>The four schemas stay stable for prompt caching. The child catalog and authority determine which underlying operations can succeed.</li>
+          <li><code>tools</code> in <code>agents.spawn</code> selects exact canonical Broker operations and revisions behind Code Mode; it never mutates the provider-facing tool set.</li>
+          <li>Messaging primitives are available through Code Mode and limited to the actor's accessible project/process family.</li>
+          <li>A foreground session can address any live agent in the same process and project. A subagent can address its parent, direct children, and siblings; broader reach requires an explicit handle passed by an authorized actor.</li>
+          <li>Recursive spawning is allowed only when the parent's frozen selection grants <code>agents.spawn</code>. There is no arbitrary depth limit.</li>
+          <li>Every descendant records its parent actor and immutable origin. Names are ergonomic aliases; IDs are authority-bearing identities.</li>
+          <li>Subagents remain advisory for self-improvement. Actor identity, not an ephemeral execution-ID set, prevents Capability publication.</li>
+        </ul>
+
+        <h3>Background authority</h3>
+        <p>
+          The current implementation reserves effects through foreground authority while the parent
+          call is active. That cannot continue after the parent settles. Spawn must instead reserve a
+          scheduler/background grant derived from the current frozen permission snapshot. The grant is
+          an immutable ceiling: messages, later tasks, and recursive children cannot widen it.
+        </p>
+        <ul>
+          <li>Each provider round reserves and settles one durable network-cost operation.</li>
+          <li>Every child tool still crosses the canonical Broker, <code>AuthorityBoundary</code>, and <code>EffectGateway</code>.</li>
+          <li>Credential revocation and protected recovery controls remain live and can deny a later effect.</li>
+          <li>Effectful retries still require stable operation IDs and idempotency keys.</li>
+          <li>Scheduler backpressure may keep a task pending; it does not truncate model rounds or terminate productive work.</li>
+        </ul>
+
+        <h3>Message authority</h3>
+        <p>
+          A mailbox message never becomes a user-authored message merely because its recipient is a
+          model. The provider context labels sender identity and treats the body as collaboration data.
+          The recipient retains its own frozen authority, so receiving “delete this” from a sibling does
+          not create fresh user intent or permission.
+        </p>
+      </section>
+
+      <section id="transcript">
+        <h2>Transcript and event contract</h2>
+        <p>
+          A subagent's specialized session owns the same canonical kinds of transcript facts as a
+          foreground session. The new runner must emit the complete event stream rather than forwarding
+          only child tool calls.
+        </p>
+        <div class="grid">
+          <div class="card">
+            <strong>Live, ephemeral deltas</strong>
+            <p>Reasoning deltas, assistant text deltas, progress updates, and status motion.</p>
+          </div>
+          <div class="card">
+            <strong>Settled, durable boundaries</strong>
+            <p>Reasoning messages, assistant messages, tool calls, model rounds, usage, mailbox deliveries, and terminal outcomes.</p>
+          </div>
+          <div class="card">
+            <strong>Large material</strong>
+            <p>Prompts, full task results, complete derived transcripts, and oversized tool outputs remain artifact files with SQLite metadata.</p>
+          </div>
+        </div>
+
+        <h3>Ordering rule</h3>
+        <ol>
+          <li>Every settled child-session event receives one monotonic timeline sequence.</li>
+          <li>The runtime persists the settled fact before broadcasting its durable event.</li>
+          <li>The TUI hydrates through a sequence, subscribes from that cursor, and deduplicates by canonical ID.</li>
+          <li>Live deltas reconcile into the later durable reasoning or assistant boundary.</li>
+          <li>A dropped subscriber reloads from SQLite; it never asks Pi to reconstruct history.</li>
+        </ol>
+
+        <h3>One content authority</h3>
+        <p>
+          Mailbox content lives once in the mailbox record. Recipient transcripts contain an ordered
+          delivery reference rather than a copied “user” message. Assistant and reasoning output lives
+          in the child session's ordinary message records. Tool and Code Mode activity keeps canonical
+          Broker IDs and gains <code>agentId</code>/<code>taskId</code> lineage. No parallel
+          <code>sub_agent_events</code> transcript is introduced.
+        </p>
+
+        <h3>Reasoning visibility</h3>
+        <ul>
+          <li>Stream provider-visible reasoning when Pi emits <code>thinking_delta</code>.</li>
+          <li>Persist the settled reasoning boundary exactly as the foreground runtime already does.</li>
+          <li>Render “reasoning not exposed by this provider” when unavailable; never synthesize a substitute trace.</li>
+          <li>Reasoning remains presentation data, not a future instruction or conversation role.</li>
+        </ul>
+      </section>
+
+      <section id="tui">
+        <h2>TUI experience</h2>
+        <h3>Process-wide fixed surface</h3>
+        <pre><code>SUBAGENTS · 2 active · 3 idle
+● atlas      Session A · thinking
+● sieve      Session A · shell.run
+                 ctrl+o inspect</code></pre>
+        <ul>
+          <li>The surface subscribes once to the process supervisor; it is not derived from the currently selected session timeline.</li>
+          <li>Active agents always remain visible, including while the user works in another session.</li>
+          <li>Idle agents and their completed tasks are collapsed by default and become navigable in <code>Ctrl+O</code>.</li>
+          <li>Each row shows name, originating session, current task state, and current reasoning/tool phase.</li>
+          <li>The main chat receives only compact spawn, message, completion, failure, and interruption summaries.</li>
+          <li>Child reasoning, assistant text, tool calls, and inter-agent messages never interleave into the main transcript.</li>
+        </ul>
+
+        <h3>Inspect navigation</h3>
+        <p>
+          Inspect mode gains an explicit focus for the subagent list rather than overloading the current
+          session's transcript <code>actionCursor</code>. Arrow keys move by one visible row, Space expands
+          a collapsed agent/task summary, Enter opens its transcript, and Esc returns to the prior focus.
+        </p>
+
+        <h3>Live subagent transcript</h3>
+        <pre><code>ATLAS · RUNNING · task 2
+openai-codex/gpt-5.6-sol · high · origin Session A
+
+PROMPT
+Investigate the persistence architecture...
+
+∴ THINKING
+I need to establish which component owns operational state...
+
+▼ execute
+  ✓ files.read   packages/workspace/src/store.ts
+  ● shell.run    rg "model_calls" ...
+
+⇢ MESSAGE FROM PARENT · pending at safe boundary
+Also compare behavior after switching sessions.</code></pre>
+
+        <ul>
+          <li>The inspector shows the exact frozen system prompt, initial prompt, route, reasoning level, tools, authority summary, and origin.</li>
+          <li>Reasoning and assistant text stream with the same visually distinct treatment as the foreground transcript.</li>
+          <li>Tool calls render as their complete nested action tree, including Code Mode and saved Program activity.</li>
+          <li>Mailbox messages appear chronologically with sender, recipient, acceptance, and delivery state.</li>
+          <li>Task boundaries, final results, token usage, cost, latency, errors, interruption, and cancellation reasons remain inspectable.</li>
+          <li>After session switching or TUI remount, the view hydrates durable history and resumes live streaming without gaps or duplicates.</li>
+        </ul>
+      </section>
+
+      <section id="ownership">
+        <h2>Package ownership</h2>
+        <table>
+          <thead>
+            <tr><th>Package</th><th>Owns</th><th>Must not own</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>@noesis/agent-types</code></td>
+              <td>Actor, task, message, frozen-plan, lifecycle-event, and read-model contracts.</td>
+              <td>SQLite rows, Pi types, or TUI components.</td>
+            </tr>
+            <tr>
+              <td><code>@noesis/workspace</code></td>
+              <td>Agent/task/mailbox repositories, transactions, lineage constraints, recovery queries, and artifact metadata.</td>
+              <td>Scheduling, provider execution, or presentation.</td>
+            </tr>
+            <tr>
+              <td><code>@noesis/runtime</code></td>
+              <td>A closure-based <code>createSubAgentSupervisor</code>, mailbox semantics, one-task-per-agent scheduling, process event stream, and read projections.</td>
+              <td>Pi imports or application credentials.</td>
+            </tr>
+            <tr>
+              <td><code>@noesis/runtime-pi</code></td>
+              <td><code>createPiSubAgentTaskRunner</code>: execute one frozen task, accept steering, and emit canonical model/tool events.</td>
+              <td>Actor lifecycle, durable mailboxes, SQLite, or process-wide scheduling.</td>
+            </tr>
+            <tr>
+              <td><code>@noesis/codemode</code></td>
+              <td>Typed <code>agents.spawn/send/list/inspect/wait/cancel/close</code> SDK bridge and <code>ContextView</code> encoding.</td>
+              <td>Live agent objects, policy, persistence, or a second registry.</td>
+            </tr>
+            <tr>
+              <td><code>apps/noesis</code></td>
+              <td>Composition: models, credentials, frozen catalog, authority derivation, supervisor startup, and shutdown ordering.</td>
+              <td>Alternative execution or transcript paths.</td>
+            </tr>
+            <tr>
+              <td><code>@noesis/tui</code></td>
+              <td>Process-wide subagent list, task transcript inspector, navigation state, and live read-model subscription.</td>
+              <td>Durable state or agent scheduling.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Deep supervisor port</h3>
+        <pre><code>interface SubAgentSupervisor {
+  spawn(request: SpawnAdmission): Promise&lt;SubAgentHandle&gt;;
+  send(request: SendMessage): Promise&lt;MessageReceipt&gt;;
+  wait(taskId: string, signal?: AbortSignal): Promise&lt;SubAgentTaskResult&gt;;
+  cancel(taskId: string, reason?: string): Promise&lt;SubAgentTaskResult&gt;;
+  close(agentId: string, reason?: string): Promise&lt;void&gt;;
+
+  list(scope: SubAgentScope): Promise&lt;readonly SubAgentSummary[]&gt;;
+  inspect(agentId: string, taskId?: string): Promise&lt;SubAgentInspection&gt;;
+  transcript(agentId: string, taskId?: string): Promise&lt;readonly RuntimeTranscriptEntry[]&gt;;
+  subscribe(listener: (event: SubAgentRuntimeEvent) =&gt; void): () =&gt; void;
+  shutdown(signal?: AbortSignal): Promise&lt;void&gt;;
+}</code></pre>
+        <p class="muted">
+          Callers do not coordinate stores, Pi sessions, controllers, message claims, or transcript
+          reconciliation themselves. That complexity stays behind one process-level module.
+        </p>
+      </section>
+
+      <section id="persistence">
+        <h2>Persistence shape</h2>
+        <table>
+          <thead>
+            <tr><th>Authority</th><th>Required data and constraints</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>sub_agents</code></td>
+              <td>Agent ID; one unique child session; project and origin session/turn/execution; optional parent agent; immutable frozen-plan artifact/digest; lifecycle status; timestamps.</td>
+            </tr>
+            <tr>
+              <td><code>sub_agent_tasks</code></td>
+              <td>Task ID; agent ID; triggering message; pending/running/terminal status; final message or result artifact; usage summary; timestamps; one running task per agent.</td>
+            </tr>
+            <tr>
+              <td><code>agent_messages</code></td>
+              <td>Message ID; typed sender and recipient; content; sensitivity; FIFO sequence; accepted/claimed/delivered/failed state; optional task; timestamps.</td>
+            </tr>
+            <tr>
+              <td>Child <code>sessions</code> and ordinary transcript rows</td>
+              <td>Assistant/reasoning messages, tool calls, Code Mode executions, and context checkpoints. Child sessions are excluded from normal resume/search surfaces unless deliberately queried.</td>
+            </tr>
+            <tr>
+              <td><code>model_calls</code></td>
+              <td>One row per provider round with agent/task/round lineage, route, request/output artifacts, usage, cost, latency, and terminal status.</td>
+            </tr>
+            <tr>
+              <td>Artifacts</td>
+              <td>Frozen plans, full prompts, full results, derived complete transcript files, and other large bytes with digests and relationship references.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Database invariants</h3>
+        <ul>
+          <li>A subagent's child session, project, origin, route, and frozen plan are immutable.</li>
+          <li>A task belongs to exactly one agent and the same project as its child session.</li>
+          <li>At most one task per agent may be <code>pending</code> or <code>running</code>.</li>
+          <li>A mailbox sender and recipient must exist and be visible within the admitted process/project scope.</li>
+          <li>Claim and terminal settlement use compare-and-swap transitions.</li>
+          <li>Tool, model, Code Mode, and message rows cannot cross agent/task/session/project lineage.</li>
+          <li>Terminal task state requires a settled timestamp and either a result or explicit failure/interruption reason.</li>
+          <li>Startup recovery changes ambiguous live states to <code>interrupted</code> without fabricating an effect outcome.</li>
+        </ul>
+
+        <p class="warning">
+          This is a deliberate breaking replacement for <code>agents.run</code>. Do not keep a compatibility
+          adapter or a second nested-call execution path. Existing development-only rows may remain
+          readable as historical legacy activity if that is cheap, but no new work uses them.
+        </p>
+      </section>
+
+      <section id="failures">
+        <h2>Failure semantics</h2>
+        <table>
+          <thead>
+            <tr><th>Failure</th><th>Required outcome</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Invalid prompt, context handle, tool name, or authority</td>
+              <td>Spawn admission fails atomically; no orphan actor or task is created.</td>
+            </tr>
+            <tr>
+              <td>Provider authentication or setup fails after admission</td>
+              <td>Task becomes failed with exact error; actor becomes idle and remains inspectable.</td>
+            </tr>
+            <tr>
+              <td>Provider outcome is ambiguous</td>
+              <td>Task settles interrupted/ambiguous with unresolved effect receipt; never retry by assumption.</td>
+            </tr>
+            <tr>
+              <td>Tool call fails</td>
+              <td>Canonical tool failure stays in the child transcript; Pi decides whether to continue.</td>
+            </tr>
+            <tr>
+              <td>Recipient is inaccessible, interrupted, or closed</td>
+              <td><code>send</code> fails explicitly before claiming successful delivery.</td>
+            </tr>
+            <tr>
+              <td>Waiting Code Mode execution is cancelled</td>
+              <td>The waiter rejects and detaches. The target task keeps running unless separately cancelled.</td>
+            </tr>
+            <tr>
+              <td>TUI subscription drops or session changes</td>
+              <td>Reload durable transcript/read models from the last sequence, then resume live events.</td>
+            </tr>
+            <tr>
+              <td>Individual message or result exceeds its typed context boundary</td>
+              <td>Use an artifact/context reference and bounded preview; do not clip silently or limit the underlying task.</td>
+            </tr>
+            <tr>
+              <td>Process exits while tasks run</td>
+              <td>Abort, settle interrupted, flush durable state, and stop. No background-survival claim.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section id="implementation">
+        <h2>Implementation sequence</h2>
+        <ol>
+          <li>
+            <strong>Types and authority.</strong> Introduce actor/task/message/frozen-plan contracts,
+            scheduler grants, task-scoped model-call leases, and the provider-neutral task-runner port.
+          </li>
+          <li>
+            <strong>SQLite authority.</strong> Add repositories, constraints, recovery, child-session
+            filtering, task/model/tool lineage, and merged child transcript queries.
+          </li>
+          <li>
+            <strong>Process supervisor.</strong> Build the closure-based scheduler, durable admission,
+            mailbox claims, one-task-per-agent rule, waiters, cancellation, and shutdown reconciliation.
+          </li>
+          <li>
+            <strong>Pi task runner.</strong> Replace the synchronous run adapter with one-turn execution
+            that accepts steering and emits reasoning, assistant, tool, usage, and terminal events.
+          </li>
+          <li>
+            <strong>Code Mode SDK.</strong> Replace <code>agents.run</code> with
+            <code>spawn/send/list/inspect/wait/cancel/close</code>, preserve lazy context handles, and
+            update the progressively loaded <code>execute</code> skill.
+          </li>
+          <li>
+            <strong>TUI projection.</strong> Add the process-wide subscription, fixed active-agent
+            surface, explicit inspect focus, completed-agent expansion, and live/hydrated transcript inspector.
+          </li>
+          <li>
+            <strong>Removal and doctrine.</strong> Delete synchronous nested-call code, recursion sets,
+            and old inspector branches; update product doctrine and mark superseded plan clauses clearly.
+          </li>
+        </ol>
+
+        <h3>Doctrine that must change with implementation</h3>
+        <ul>
+          <li><code>docs/agent-intelligence-and-experience.md</code>: replace synchronous <code>agents.run</code>, parent cancellation, nested-call persistence, and recursion rejection.</li>
+          <li><code>docs/product-experience.md</code>: document process-wide lifecycles, mailboxes, session switching, and live full-transcript inspection.</li>
+          <li><code>plans/noesis-programs-and-fixed-tool-surface.md</code>: supersede the acceptance clause that treats <code>agents.run</code> descendants as the recursion boundary.</li>
+          <li><code>plans/noesis-context-models-api.html</code>: retain lazy context doctrine while marking the <code>agents.run</code> replacement as superseded by this plan.</li>
+          <li><code>apps/noesis/skills/execute/SKILL.md</code>: progressively teach async orchestration, explicit joins, messaging, and selective result retrieval.</li>
+        </ul>
+      </section>
+
+      <section id="acceptance">
+        <h2>Acceptance boundary</h2>
+        <h3>Lifecycle</h3>
+        <ul>
+          <li>Two <code>spawn</code> calls return after durable admission and both tasks make progress concurrently.</li>
+          <li>The parent turn and its <code>execute</code> call may settle without cancelling either task.</li>
+          <li>Starting Session B while a Session A agent runs leaves it active and visible; returning to A restores its complete transcript.</li>
+          <li>Changing foreground model/provider does not change a running child's frozen route.</li>
+          <li>Clean process exit and crash recovery leave no authoritative task falsely marked running.</li>
+        </ul>
+
+        <h3>Communication</h3>
+        <ul>
+          <li>A message to a busy agent is visible immediately as accepted and becomes Pi steering at the next safe boundary.</li>
+          <li>A message to an idle agent starts a new task with the agent's prior session context.</li>
+          <li>Parent-to-child, child-to-parent, and sibling messages preserve sender identity and FIFO order.</li>
+          <li>No inter-agent message is persisted or replayed as user-authored content.</li>
+          <li>A completion without an explicit report creates only a compact lifecycle notification.</li>
+        </ul>
+
+        <h3>Orchestration and authority</h3>
+        <ul>
+          <li><code>spawn + wait</code> covers the former isolated query and synchronous delegation cases.</li>
+          <li>Cancelling a waiter does not cancel the task it joined.</li>
+          <li>Every child exposes the same four provider tool schemas as the foreground agent.</li>
+          <li>Selected canonical tools and exact revisions, not provider tool mutation, control child access.</li>
+          <li>A child may recursively spawn only when granted that operation; productive work has no arbitrary call/depth/time ceiling.</li>
+          <li>Subagents cannot publish Capability changes, mint authority, or widen permissions through messages.</li>
+          <li>Every provider round and effect has a durable reservation, completion, and agent/task lineage.</li>
+        </ul>
+
+        <h3>Visibility</h3>
+        <ul>
+          <li>The fixed surface is process-wide, always shows active agents, and collapses idle agents and completed tasks by default.</li>
+          <li><code>Ctrl+O</code> can navigate and open agents from inactive foreground sessions without skipping rows.</li>
+          <li>The live inspector streams reasoning, text, messages, tool progress, and nested Code Mode activity.</li>
+          <li>The resumed inspector reconstructs the same settled ordering from SQLite after switching sessions or restarting the TUI.</li>
+          <li>A provider that exposes no reasoning is labelled truthfully.</li>
+          <li>Child internals never appear in the main chat transcript.</li>
+        </ul>
+      </section>
+
+      <section id="alternatives">
+        <h2>Synthesis decision</h2>
+        <p>
+          The chosen shape combines a process-scoped actor supervisor with a specialized child session
+          per agent. The supervisor hides scheduling, messaging, cancellation, and process lifecycle;
+          the child session reuses Noesis's existing durable transcript, reasoning, tool, compaction,
+          and inspection concepts. This is deeper than either a growing Code Mode API or a separate
+          agent event system because callers see a small actor interface while the implementation owns
+          all coordination behind it.
+        </p>
+
+        <h3>Alternatives considered</h3>
+        <table>
+          <thead>
+            <tr><th>Alternative</th><th>Why it lost</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Make the existing nested <code>agents.run</code> call asynchronous</td>
+              <td>Its prepared catalog, event sink, authority, cancellation, model-call row, and TUI identity all belong to a foreground execution that closes. Stretching it would preserve the wrong owner.</td>
+            </tr>
+            <tr>
+              <td>Keep background promises and agent objects inside Code Mode</td>
+              <td>Generated JavaScript would own lifecycle and disappear when its child process exits. It would also create a second scheduler and uninspectable state.</td>
+            </tr>
+            <tr>
+              <td>Create separate <code>sub_agent_events</code> transcript storage</td>
+              <td>It duplicates message, reasoning, tool, Code Mode, and ordering semantics that specialized sessions already own.</td>
+            </tr>
+            <tr>
+              <td>Launch separate Pi CLI processes in tmux, like the interactive extension reference</td>
+              <td>The UX proves immediate spawn and visible workers are valuable, but pane typing, file polling, and sidecar registries bypass Noesis's Broker, SQLite, authority, and TUI read models.</td>
+            </tr>
+            <tr>
+              <td>Build the daemon now</td>
+              <td>It adds transport, ownership, authentication, discovery, upgrade, and crash-supervision work before process-local behavior is proven. Opaque durable IDs keep that relocation available later.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h3>Tradeoffs accepted</h3>
+        <ul>
+          <li>We accept that agents stop when Noesis exits in exchange for avoiding a premature daemon.</li>
+          <li>We accept one active task per agent in exchange for coherent retained conversation and deterministic mailbox ordering.</li>
+          <li>We accept that steering waits behind an atomic <code>execute</code> call in exchange for staying within Pi's safe turn/tool semantics.</li>
+          <li>We accept immutable route/system/tool fundamentals per actor in exchange for stable identity and reproducible history.</li>
+          <li>We accept a specialized child session per actor in exchange for reusing one transcript, context, compaction, and inspection architecture.</li>
+        </ul>
+
+        <h3>Deferred, deliberately</h3>
+        <ul>
+          <li>A daemon or launch agent that keeps work alive after the primary process exits.</li>
+          <li>Automatic replay or rehydration of interrupted tasks after restart.</li>
+          <li>Per-run provider/model override by the spawning model.</li>
+          <li>Mutable route, system prompt, or tool authority on an existing retained agent.</li>
+          <li>Remote or cross-device agent supervision.</li>
+          <li>A second provider-facing tool surface for agent management.</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer>
+      This is a shipped implementation record. Current product behavior is documented under
+      <code>docs/</code>.
+    </footer>
+  </body>
+</html>

@@ -4,13 +4,11 @@ import {
   Container,
   isKeyRelease,
   matchesKey,
-  type OverlayHandle,
   ProcessTerminal,
   type Terminal,
   TUI,
 } from "@earendil-works/pi-tui";
 import type { RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
-import { executionIdOf } from "./action-summary.ts";
 import { tuiActionForAgentEvent } from "./agent-event.ts";
 import {
   exclusiveSlashCommandScope,
@@ -24,6 +22,7 @@ import { createExclusiveCommandBarrier, type ExclusiveCommandBarrier } from "./e
 import { editTextInExternalEditor } from "./external-editor.ts";
 import { learningDiagnosticNotice, reconcileSettledTurnPresentation } from "./learning-presentation.ts";
 import { boundedInspectorText, TUI_TIMINGS, type ShutdownSettlement } from "./lifecycle-utils.ts";
+import { createTuiInspectorOrchestration } from "./inspector-orchestration.ts";
 import { createTuiLearningOrchestration } from "./learning.ts";
 import { createTuiMcpOrchestration } from "./mcp.ts";
 import { createOptimisticPromptEcho } from "./optimistic-prompt.ts";
@@ -33,7 +32,6 @@ import {
   createInputLabelView,
   createNoesisView,
   createQueuedInputsView,
-  createRunInspectorOverlay,
   createStatusView,
   createSubagentsView,
 } from "./rendering.ts";
@@ -53,11 +51,11 @@ import {
   initialTuiState,
   interactionViewFromSnapshot,
   type NoesisTuiAction,
-  timelineActions,
 } from "./state.ts";
 import type { ActiveTurnToken } from "./stream-delta-buffer.ts";
 import { detectTrueColor, safeTerminalText, shouldUseColor } from "./theme.ts";
 import { pickStartupNote } from "./startup-note.ts";
+import { createTuiSubAgentOrchestration } from "./subagent-orchestration.ts";
 import { createTranscriptInputHandler } from "./transcript-input.ts";
 import { createTuiStreamBuffers } from "./turn-stream-buffers.ts";
 import { startWorkingAnimation } from "./working-animation.ts";
@@ -107,15 +105,12 @@ export async function startNoesisTui(
     colorEnabled && detectTrueColor(process.env),
     startupNote,
   );
-  let inspectorMaxScroll = 0;
-  const inspectorOverlay = createRunInspectorOverlay(
+  const inspector = createTuiInspectorOrchestration({
+    runtime,
     view,
-    () => terminal.rows,
-    (maxScroll) => {
-      inspectorMaxScroll = maxScroll;
-    },
-  );
-  let inspectorHandle: OverlayHandle | undefined;
+    tui,
+    height: () => terminal.rows,
+  });
   const optimisticPrompts = createOptimisticPromptEcho(view, () => tui.requestRender());
   const mcp = createTuiMcpOrchestration(
     createConditionalObject({
@@ -183,6 +178,7 @@ export async function startNoesisTui(
   const streamDeltas = streams.assistant,
     reasoningDeltas = streams.reasoning;
   let removeExitInputListener = (): void => undefined;
+  let removeSubAgentListener = (): void => undefined;
   let terminalStopped = false;
   let shutdownPromise: Promise<void> | undefined;
   const stopWorkingAnimation = startWorkingAnimation(
@@ -221,13 +217,13 @@ export async function startNoesisTui(
       turnGeneration += 1;
       inspectorGeneration += 1;
       activeTurnToken = undefined;
-      inspectorHandle?.hide();
-      inspectorHandle = undefined;
+      inspector.hideOverlay();
       optimisticPrompts.clear();
       view.dispatch({ type: "execution-changed", execution: "closing" });
       editor.disableSubmit = true;
       editor.onSubmit = (): void => undefined;
       removeExitInputListener();
+      removeSubAgentListener();
       tui.requestRender();
       await new Promise<void>((resolve) => setTimeout(resolve, TUI_TIMINGS.closingFeedbackMs));
       selection.dispose();
@@ -276,52 +272,21 @@ export async function startNoesisTui(
     shutdownPromise.then(resolveShutdown, rejectShutdown);
     return shutdownPromise;
   };
-  const closeRunInspector = (): void => {
-    inspectorMaxScroll = 0;
-    view.dispatch({ type: "inspector-closed" });
-    inspectorHandle?.hide();
-    inspectorHandle = undefined;
-    tui.requestRender();
-  };
-  const openRunInspector = (actionId: string): void => {
-    inspectorMaxScroll = 0;
-    view.dispatch({ type: "inspector-opened", actionId });
-    inspectorHandle ??= tui.showOverlay(inspectorOverlay, {
-      anchor: "center",
-      width: "90%",
-    });
-    tui.requestRender();
-    const trailId = view.state.trailId;
-    const action = timelineActions(view.state.timeline).find((candidate) => candidate.actionId === actionId);
-    const executionId = action ? executionIdOf(action) : undefined;
-    const settle = (detail?: Awaited<ReturnType<NonNullable<typeof runtime.inspectExecution>>>): void => {
-      inspectorMaxScroll = 0;
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      view.dispatch(
-        createConditionalObject({
-          type: "inspector-loaded",
-          actionId,
-        } as const)
-          .addOptional(detail ? { detail } : undefined)
-          .finish(),
-      );
-      tui.requestRender();
-    };
-    if (!trailId || !executionId || !runtime.inspectExecution) {
-      settle();
-      return;
-    }
-    void runtime.inspectExecution(trailId, executionId).then(
-      (detail) => settle(detail),
-      () => settle(),
-    );
-  };
+  const subAgents = createTuiSubAgentOrchestration({
+    runtime,
+    view,
+    showInspector: inspector.openSynthetic,
+    requestRender: () => tui.requestRender(),
+    reportFailure,
+  });
+  removeSubAgentListener = subAgents.dispose;
   const handleTranscriptKey = createTranscriptInputHandler({
     tui,
     view,
-    inspectorMaxScroll: () => inspectorMaxScroll,
-    openRunInspector,
-    closeRunInspector,
+    inspectorMaxScroll: inspector.maxScroll,
+    openRunInspector: inspector.openRun,
+    openSubAgentInspector: subAgents.openInspector,
+    closeRunInspector: inspector.close,
   });
   const applyInteractionSnapshot = (snapshot: TuiInteractionSnapshot): void => {
     if (view.state.trailId !== snapshot.sessionId) return;
@@ -476,7 +441,7 @@ export async function startNoesisTui(
     view,
     isMainPhase: () => phase === "main",
     armWindowMs: TUI_TIMINGS.escInterruptArmMs,
-    closeRunInspector,
+    closeRunInspector: inspector.close,
     interruptActiveTurn: () => void interruptActiveTurn().catch(reportFailure),
     requestRender: () => tui.requestRender(),
   });
@@ -544,7 +509,7 @@ export async function startNoesisTui(
       return undefined;
     }
     // Inspection owns every byte; bypassing the editor preserves its draft and paste parser.
-    if (view.state.actionCursor) {
+    if (view.state.actionCursor || view.state.subAgentCursor || view.state.inspector) {
       handleTranscriptKey(data);
       return { consume: true };
     }
@@ -723,7 +688,10 @@ export async function startNoesisTui(
   // Inspect mode pauses and hides the editor while keys navigate the transcript.
   const editorSlot: Component = {
     invalidate: () => editor.invalidate(),
-    render: (width) => (view.state.actionCursor ? [] : editor.render(width)),
+    render: (width) =>
+      view.state.actionCursor || view.state.subAgentCursor || view.state.inspector
+        ? []
+        : editor.render(width),
   };
   tui.addChild(root);
   const mountMain = (
@@ -732,8 +700,7 @@ export async function startNoesisTui(
     interaction: TuiInteractionSnapshot,
   ): void => {
     phase = "main";
-    inspectorHandle?.hide();
-    inspectorHandle = undefined;
+    inspector.hideOverlay();
     optimisticPrompts.clear();
     view.dispatch({ type: "trail-selected", trail });
     view.dispatch({
