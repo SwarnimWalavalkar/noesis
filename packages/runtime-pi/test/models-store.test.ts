@@ -10,16 +10,27 @@ const writerPath = fileURLToPath(new URL("./fixtures/models-store-writer.ts", im
 
 function waitForReady(child: ChildProcessWithoutNullStreams): Promise<void> {
   return new Promise((resolve, reject) => {
+    const cleanup = (): void => {
+      child.stdout.off("data", onData);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
     const onData = (chunk: Buffer): void => {
       if (!chunk.toString("utf8").includes("ready")) return;
-      child.stdout.off("data", onData);
+      cleanup();
       resolve();
     };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      cleanup();
+      reject(new Error(`Model-store writer exited before ready with ${code ?? signal}`));
+    };
     child.stdout.on("data", onData);
-    child.once("error", reject);
-    child.once("exit", (code) => {
-      if (code !== null) reject(new Error(`Model-store writer exited before ready with code ${code}`));
-    });
+    child.once("error", onError);
+    child.once("exit", onExit);
   });
 }
 
@@ -52,10 +63,19 @@ describe("Pi model catalog storage", () => {
         stdio: ["pipe", "pipe", "pipe"],
       }),
     );
-    await Promise.all(children.map(waitForReady));
     const exits = children.map(waitForExit);
-    for (const child of children) child.stdin.end("write\n");
-    await Promise.all(exits);
+    for (const exit of exits) void exit.catch(() => undefined);
+    try {
+      await Promise.all(children.map(waitForReady));
+      for (const child of children) child.stdin.end("write\n");
+      await Promise.all(exits);
+    } finally {
+      for (const child of children) {
+        child.stdin.destroy();
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+      }
+      await Promise.allSettled(exits);
+    }
 
     const stored = JsonValueSchema.parse(JSON.parse(await readFile(path, "utf8")));
     if (!isJsonObject(stored)) throw new Error("Expected a provider-indexed model store");

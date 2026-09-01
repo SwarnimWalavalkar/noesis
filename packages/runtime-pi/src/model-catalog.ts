@@ -101,11 +101,11 @@ export function createConfiguredModelsProjection(projected: Models, source: Mode
     context: Context,
     options?: ModelsApiStreamOptions<TApi>,
   ): AssistantMessageEventStream {
-    const headers = configuredHeaders(model, options?.apiKey, options?.env);
     const configured = createConditionalObject({ ...options })
       .add({
         transformHeaders: async (current: ProviderHeaders) => {
-          let merged = mergeHeaders(current, await headers) ?? {};
+          const headers = await configuredHeaders(model, options?.apiKey, options?.env);
+          let merged = mergeHeaders(current, headers) ?? {};
           merged = mergeHeaders(merged, options?.headers) ?? {};
           return options?.transformHeaders ? await options.transformHeaders(merged) : merged;
         },
@@ -130,11 +130,11 @@ export function createConfiguredModelsProjection(projected: Models, source: Mode
     context: Context,
     options?: ModelsSimpleStreamOptions,
   ): AssistantMessageEventStream {
-    const headers = configuredHeaders(model, options?.apiKey, options?.env);
     return projected.streamSimple(model, context, {
       ...options,
       transformHeaders: async (current) => {
-        let merged = mergeHeaders(current, await headers) ?? {};
+        const headers = await configuredHeaders(model, options?.apiKey, options?.env);
+        let merged = mergeHeaders(current, headers) ?? {};
         merged = mergeHeaders(merged, options?.headers) ?? {};
         return options?.transformHeaders ? await options.transformHeaders(merged) : merged;
       },
