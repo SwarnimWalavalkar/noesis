@@ -18,6 +18,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createOAuthRecoveringModels } from "./auth-recovery.ts";
+import { composeNoesisOpenCodeGoProvider } from "./opencode-go-provider.ts";
 import { NOESIS_PROVIDER_IDS } from "./provider-ids.ts";
 type CredentialFile = Readonly<Record<string, Credential>>;
 const delay = (milliseconds: number): Promise<void> =>
@@ -510,6 +511,9 @@ export async function createPiModelServices(
       .addOptional(options.catalogBaseUrl ? { catalogBaseUrl: options.catalogBaseUrl } : undefined)
       .finish(),
   );
+  const openCodeGo = catalog.getProvider("opencode-go");
+  if (!openCodeGo) throw new Error("Pi does not provide required model provider opencode-go");
+  catalog.registerNativeProvider(composeNoesisOpenCodeGoProvider(openCodeGo), { refresh: false });
   for (const providerId of NOESIS_PROVIDER_IDS) {
     const provider = catalog.getProvider(providerId);
     if (!provider) throw new Error(`Pi does not provide required model provider ${providerId}`);
