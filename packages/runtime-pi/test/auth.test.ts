@@ -13,11 +13,14 @@ import {
   type CredentialStore,
   type Model,
   type ModelsSimpleStreamOptions,
+  type Provider,
 } from "@earendil-works/pi-ai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go";
 import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { isJsonObject, JsonValueSchema } from "@noesis/domain";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -33,6 +36,7 @@ import {
   piAuthPath,
   preparePiModelSelection,
 } from "../src/index.ts";
+import { composeNoesisOpenCodeGoProvider } from "../src/opencode-go-provider.ts";
 
 const emptyAuthContext = {
   env: async (_name: string): Promise<string | undefined> => undefined,
@@ -93,7 +97,10 @@ describe("Pi authentication", () => {
       vi.stubEnv(name, "");
   });
 
-  afterEach(() => vi.unstubAllEnvs());
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
 
   test("registers every provider supported by Noesis", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-provider-registration-"));
@@ -148,6 +155,43 @@ describe("Pi authentication", () => {
     });
   });
 
+  test("retains Pi's persisted OpenCode Go catalog through Noesis composition", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-go-refresh-"));
+    vi.stubEnv("OPENCODE_GO_API_KEY", "go-environment-secret");
+    const baseline = opencodeGoProvider().getModels()[0];
+    if (!baseline) throw new Error("Expected Pi's bundled OpenCode Go catalog");
+    await writeFile(
+      join(home, "models-store.json"),
+      JSON.stringify({
+        "opencode-go": {
+          models: [
+            {
+              ...baseline,
+              id: "noesis/live-go-model",
+              name: "Noesis Live Go Model",
+            },
+          ],
+          checkedAt: Date.now(),
+          lastModified: Date.parse("2099-01-01T00:00:00Z"),
+          etag: '"noesis-test-go-catalog"',
+        },
+      }),
+    );
+
+    const refresh = vi.spyOn(ModelRuntime.prototype, "refresh");
+    const services = await createPiModelServices(home);
+
+    expect(services.models.getModel("opencode-go", "noesis/live-go-model")).toMatchObject({
+      provider: "opencode-go",
+      id: "noesis/live-go-model",
+      name: "Noesis Live Go Model",
+    });
+    expect(services.models.getProvider("opencode-go")?.refreshModels).toBeTypeOf("function");
+    expect(
+      refresh.mock.calls.filter(([options]) => options?.allowNetwork === false).length,
+    ).toBeGreaterThanOrEqual(2);
+  });
+
   test("validates provider and model as one selection through Pi's registered catalog", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-provider-selection-"));
     const services = await createPiModelServices(home);
@@ -184,6 +228,72 @@ describe("Pi authentication", () => {
       source: "OPENCODE_API_KEY",
     });
     await expect(services.models.getAuth(go)).resolves.toMatchObject({
+      auth: { apiKey: "go-environment-secret" },
+      source: "OPENCODE_GO_API_KEY",
+    });
+  });
+
+  test("does not treat the OpenCode Zen environment key as OpenCode Go authentication", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-opencode-go-isolation-"));
+    vi.stubEnv("OPENCODE_API_KEY", "zen-environment-secret");
+    const services = await createPiModelServices(home);
+    const go = services.models.getModel("opencode-go", "kimi-k2.6");
+    if (!go) throw new Error("Expected the OpenCode Go model route");
+
+    await expect(services.models.getAuth(go)).resolves.toBeUndefined();
+  });
+
+  test("prefers a stored OpenCode Go credential over either OpenCode environment key", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-opencode-go-stored-priority-"));
+    const credentials = createSecurePiCredentialStore(piAuthPath(home));
+    await credentials.modify("opencode-go", async () => ({
+      type: "api_key",
+      key: "go-stored-secret",
+    }));
+    vi.stubEnv("OPENCODE_API_KEY", "zen-environment-secret");
+    vi.stubEnv("OPENCODE_GO_API_KEY", "go-environment-secret");
+    const services = await createPiModelServices(home, { credentials });
+    const go = services.models.getModel("opencode-go", "kimi-k2.6");
+    if (!go) throw new Error("Expected the OpenCode Go model route");
+
+    await expect(services.models.getAuth(go)).resolves.toMatchObject({
+      auth: { apiKey: "go-stored-secret" },
+      source: "stored credential",
+    });
+  });
+
+  test("composes OpenCode Go identity and auth without replacing Pi provider behavior", async () => {
+    const base = fauxProvider({ provider: "opencode-go", api: "opencode-go-test" }).provider;
+    const refreshModels: NonNullable<Provider["refreshModels"]> = vi.fn(async () => undefined);
+    const filterModels: NonNullable<Provider["filterModels"]> = vi.fn((models) => models);
+    const provider: Provider = Object.freeze({
+      ...base,
+      name: "Upstream Go label",
+      refreshModels,
+      filterModels,
+    });
+
+    const composed = composeNoesisOpenCodeGoProvider(provider);
+
+    expect(composed).toMatchObject({ id: "opencode-go", name: "OpenCode Go" });
+    expect(composed.getModels).toBe(provider.getModels);
+    expect(composed.refreshModels).toBe(refreshModels);
+    expect(composed.filterModels).toBe(filterModels);
+    expect(composed.stream).toBe(provider.stream);
+    expect(composed.streamSimple).toBe(provider.streamSimple);
+    await expect(
+      composed.auth.apiKey?.resolve({
+        ctx: {
+          env: async (name) =>
+            name === "OPENCODE_API_KEY"
+              ? "zen-environment-secret"
+              : name === "OPENCODE_GO_API_KEY"
+                ? "go-environment-secret"
+                : undefined,
+          fileExists: async () => false,
+        },
+      }),
+    ).resolves.toMatchObject({
       auth: { apiKey: "go-environment-secret" },
       source: "OPENCODE_GO_API_KEY",
     });
