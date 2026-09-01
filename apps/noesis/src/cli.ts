@@ -33,7 +33,6 @@ import {
   startNoesisTui,
 } from "@noesis/tui";
 import { createBrowserUrlOpener } from "./browser-auth.ts";
-import { renderNoesisOAuthCallbackPage } from "./oauth-callback-page.ts";
 import { runFirstLaunchOnboarding, shouldAutoOnboard } from "./onboarding.ts";
 import { createSurfaceAuthCallbacks, promptsFromSurface } from "./prompt-surface.ts";
 import {
@@ -400,7 +399,6 @@ const openAuthUrl = createBrowserUrlOpener({
 function surfaceAuthCallbacks(surface: OnboardingSurface) {
   return createSurfaceAuthCallbacks(surface, {
     openUrl: openAuthUrl,
-    renderOAuthCallbackPage: renderNoesisOAuthCallbackPage,
   });
 }
 function requireInteractiveTerminal(message: string): void {
@@ -643,7 +641,6 @@ async function main(): Promise<void> {
         openUrl: async (url) => {
           openAuthUrl(url);
         },
-        renderOAuthCallbackPage: renderNoesisOAuthCallbackPage,
         session: input.session,
       });
     else

@@ -14,7 +14,7 @@ import {
 } from "@noesis/runtime";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 import type { TuiMcpInteractionBridge } from "./mcp-interaction.ts";
-import type { NoesisTuiRuntime, TuiProviderAuthCallbacks } from "./runtime-port.ts";
+import type { NoesisTuiRuntime } from "./runtime-port.ts";
 
 export interface TuiStartOptions {
   readonly provider?: string;
@@ -28,8 +28,6 @@ export interface TuiStartOptions {
   readonly mcpInteractionBridge?: TuiMcpInteractionBridge;
   /** Opens URL elicitation in the system browser; the overlay always keeps the URL copyable. */
   readonly openUrl?: (url: string) => Promise<void>;
-  /** Supplies the provider OAuth callback receipt without coupling the TUI to a provider SDK. */
-  readonly renderOAuthCallbackPage?: NonNullable<TuiProviderAuthCallbacks["renderOAuthCallbackPage"]>;
   readonly session?:
     | { readonly mode: "new" }
     | { readonly mode: "pick" }

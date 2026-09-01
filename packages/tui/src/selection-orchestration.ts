@@ -2,7 +2,7 @@ import type { SelectListTheme, TUI } from "@earendil-works/pi-tui";
 import { createTuiProviderAuthOrchestration } from "./provider-auth.ts";
 import { createTuiProviderPickerOrchestration } from "./provider-picker.ts";
 import { createTuiRoutePickerOrchestration } from "./route-picker.ts";
-import type { NoesisTuiRuntime, TuiProviderAuthCallbacks } from "./runtime-port.ts";
+import type { NoesisTuiRuntime } from "./runtime-port.ts";
 import { createTuiSessionPickerOrchestration } from "./session-picker.ts";
 
 export function createTuiSelectionOrchestration(options: {
@@ -13,9 +13,6 @@ export function createTuiSelectionOrchestration(options: {
   readonly height: () => number;
   readonly currentTrailId: () => string | undefined;
   readonly openUrl?: ((url: string) => Promise<void>) | undefined;
-  readonly renderOAuthCallbackPage?:
-    | NonNullable<TuiProviderAuthCallbacks["renderOAuthCallbackPage"]>
-    | undefined;
 }) {
   const routeOptions = {
     routes: () => options.runtime.listModelRoutes?.() ?? [],
@@ -33,7 +30,6 @@ export function createTuiSelectionOrchestration(options: {
     theme: options.theme,
     colorEnabled: options.colorEnabled,
     openUrl: options.openUrl,
-    renderOAuthCallbackPage: options.renderOAuthCallbackPage,
   });
   const provider = createTuiProviderPickerOrchestration({
     runtime: options.runtime,

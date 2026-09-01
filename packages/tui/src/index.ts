@@ -144,7 +144,6 @@ export async function startNoesisTui(
     height: () => terminal.rows,
     currentTrailId: () => view.state.trailId,
     openUrl: options.openUrl,
-    renderOAuthCallbackPage: options.renderOAuthCallbackPage,
   });
   const statusView = createStatusView(view, () => terminal.rows);
   const subagentsView = createSubagentsView(view, () => terminal.rows);

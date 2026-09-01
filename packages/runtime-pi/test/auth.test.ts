@@ -532,18 +532,13 @@ describe("Pi authentication", () => {
     const models = createModels({ credentials, authContext: emptyAuthContext });
     const base = openaiCodexProvider();
     let refreshes = 0;
-    let callbackPage = "";
     models.setProvider({
       ...base,
       auth: {
         oauth: {
           name: "mock Codex OAuth",
           login: async (callbacks) => {
-            callbackPage =
-              callbacks.renderOAuthCallbackPage?.({
-                provider: "openai-codex",
-                status: "success",
-              }) ?? "";
+            callbacks.notify({ type: "progress", message: "Completing OAuth" });
             return {
               type: "oauth",
               access: "access-secret",
@@ -565,13 +560,15 @@ describe("Pi authentication", () => {
       },
     });
     const auth = createPiAuthManager(models, credentials);
+    const notifications: string[] = [];
     const status = await auth.login("openai-codex", {
       prompt: async () => "unused",
-      notify: () => undefined,
-      renderOAuthCallbackPage: (page) => `${page.provider}:${page.status}:Noesis`,
+      notify: (event) => {
+        if (event.type === "progress") notifications.push(event.message);
+      },
     });
     expect(status).toMatchObject({ provider: "openai-codex", configured: true, source: "oauth" });
-    expect(callbackPage).toBe("openai-codex:success:Noesis");
+    expect(notifications).toEqual(["Completing OAuth"]);
 
     const model = models.getModels("openai-codex")[0];
     expect(model).toBeDefined();

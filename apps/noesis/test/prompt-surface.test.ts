@@ -41,7 +41,6 @@ describe("prompt surface adapters", () => {
     const openUrl = vi.fn(() => true);
     const callbacks = createSurfaceAuthCallbacks(surface, {
       openUrl,
-      renderOAuthCallbackPage: () => "<html></html>",
     });
 
     expect(callbacks.signal).toBe(surface.signal);
