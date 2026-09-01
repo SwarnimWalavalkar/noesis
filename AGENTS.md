@@ -27,7 +27,7 @@
 - Legacy JSONL support is import-only inside the workspace cutover. Do not recreate a runtime ledger, ledger package, or second operational authority around it.
 - Large outputs remain ordinary artifact files with SQLite metadata. Evaluation evidence is revisioned and append-only once used by a decision; credentials remain only in the protected credential store or process environment.
 - Context fragments have provenance and hard per-fragment and total bounds. Capability versions are frozen at turn start.
-- Pi always sees exactly `execute`, file read, complete file write, and shell. Every other executable operation, including Capability inspection, Program management, MCP tools, and harness control, is a Broker tool taught through progressive disclosure. All four direct tools use the same frozen Tool Catalog, Broker, and authority as codemode.
+- Pi always sees exactly `execute`, file read, file write with exact replacement, and shell. Every other executable operation, including Capability inspection, Program management, MCP tools, and harness control, is a Broker tool taught through progressive disclosure. All four direct tools use the same frozen Tool Catalog, Broker, and authority as codemode.
 - Codemode is trusted local Node.js execution. It owns process lifecycle and the SDK bridge, not real tools, policy, durable state, or a second registry.
 - Standard skills remain instructional resources with progressive disclosure. A skill package never registers executable extensions implicitly.
 - Editable Program files are declarative authority; immutable revisions pin executions. Script and workflow remain distinct execution modes. SQLite owns code execution, workflow run, phase, and nested-call state.

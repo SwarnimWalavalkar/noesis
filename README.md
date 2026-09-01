@@ -30,7 +30,7 @@ New Capabilities apply anywhere they are relevant. You can narrow one to a proje
 - Open a new session, continue the last one, resume an older one, or fork the current session. If you type while a turn is running, those messages wait in order.
 - Search previous sessions with citations. You can compact older turns without changing the transcript you see.
 - Use files, directories, the shell, Programs, and session search as tools. Combine them in JavaScript with `execute`.
-- Keep the default direct surface small: file read, complete file write, shell, and `execute`. Everything else is progressively discoverable through codemode.
+- Keep the default direct surface small: file read, file write with exact replacement, shell, and `execute`. Everything else is progressively discoverable through codemode.
 - Inspect the complete pre-turn session lazily in `execute`, and ask isolated models to analyze selected slices.
 - Save project Programs in script or workflow mode and reuse their exact revisions.
 - Connect local and remote MCP servers, including OAuth, from `/mcp`.

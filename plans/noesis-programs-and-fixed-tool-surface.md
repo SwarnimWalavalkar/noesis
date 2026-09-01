@@ -7,7 +7,7 @@ This plan supersedes the tool-hotbar and separate public Script/Workflow portion
 Pi's provider-facing tool set is fixed for every foreground turn:
 
 - `file_read`, backed by `files.read`
-- `file_write`, backed by `files.write`
+- `file_write`, backed by the full-write and exact-replacement modes of `files.write`
 - `shell`, backed by `shell.run`
 - `execute`, backed by codemode
 

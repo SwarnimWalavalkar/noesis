@@ -11,6 +11,14 @@ import { defineTool, type ToolDefinition } from "./index.ts";
 import { MAX_TOOL_TEXT_BYTES } from "./limits.ts";
 const textBound = z.string().max(MAX_TOOL_TEXT_BYTES);
 const pathSchema = z.string().trim().min(1).max(4096);
+const exactReplacementSchema = z.strictObject({
+  oldText: z
+    .string()
+    .min(1)
+    .max(256 * 1024),
+  newText: textBound,
+  expectedOccurrences: z.number().int().positive().optional(),
+});
 const PROCESS_TERMINATION_GRACE_MS = 500;
 export const DEFAULT_MAX_SHELL_OUTPUT_ARTIFACT_BYTES = 1024 * 1024 * 1024;
 const FALLBACK_SEARCH_MAX_FILES = 10000;
@@ -434,6 +442,63 @@ function truncateUtf8Tail(value: string, maximumBytes: number): string {
   }
   return characters.slice(start).join("");
 }
+interface ExactReplacementRange {
+  readonly editIndex: number;
+  readonly start: number;
+  readonly end: number;
+  readonly newText: string;
+}
+function exactReplacementRanges(content: string, oldText: string): readonly { start: number; end: number }[] {
+  const ranges: { start: number; end: number }[] = [];
+  let offset = 0;
+  while (offset <= content.length - oldText.length) {
+    const start = content.indexOf(oldText, offset);
+    if (start < 0) break;
+    ranges.push({ start, end: start + oldText.length });
+    offset = start + oldText.length;
+  }
+  return ranges;
+}
+function applyExactReplacements(
+  content: string,
+  edits: readonly z.infer<typeof exactReplacementSchema>[],
+): { readonly content: string; readonly replacements: number } {
+  const replacements: readonly ExactReplacementRange[] = edits.flatMap((edit, editIndex) => {
+    if (edit.oldText === edit.newText)
+      throw new Error(`Replacement ${String(editIndex + 1)} does not change the file`);
+    const ranges = exactReplacementRanges(content, edit.oldText);
+    const expected = edit.expectedOccurrences ?? 1;
+    if (ranges.length !== expected)
+      throw new Error(
+        `Replacement ${String(editIndex + 1)} expected ${String(expected)} occurrences but found ${String(ranges.length)}`,
+      );
+    return ranges.map((range) =>
+      Object.freeze({
+        editIndex,
+        start: range.start,
+        end: range.end,
+        newText: edit.newText,
+      }),
+    );
+  });
+  const ordered = [...replacements].sort((left, right) => left.start - right.start || left.end - right.end);
+  for (let index = 1; index < ordered.length; index += 1) {
+    const previous = ordered[index - 1];
+    const current = ordered[index];
+    if (previous && current && current.start < previous.end)
+      throw new Error(
+        `Replacement ${String(current.editIndex + 1)} overlaps replacement ${String(previous.editIndex + 1)}`,
+      );
+  }
+  const updated = ordered
+    .toReversed()
+    .reduce(
+      (value, replacement) =>
+        `${value.slice(0, replacement.start)}${replacement.newText}${value.slice(replacement.end)}`,
+      content,
+    );
+  return Object.freeze({ content: updated, replacements: ordered.length });
+}
 async function readBoundedResponseBody(response: Response): Promise<{
   readonly body: string;
   readonly truncated: boolean;
@@ -689,6 +754,32 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
       tool,
       extra,
     });
+  const replaceExactText = async (input: {
+    readonly absolute: string;
+    readonly reportedPath: string;
+    readonly edits: readonly z.infer<typeof exactReplacementSchema>[];
+    readonly signal: AbortSignal;
+  }): Promise<{
+    readonly path: string;
+    readonly bytes: number;
+    readonly replacements: number;
+    readonly contentDigest: string;
+  }> =>
+    await fileMutationCoordinator.run(input.absolute, async () => {
+      if (input.signal.aborted)
+        throw createEffectExecutionFailure("cancelled", "File replacement was cancelled before execution");
+      const content = await readFile(input.absolute, "utf8");
+      const updated = applyExactReplacements(content, input.edits);
+      if (input.signal.aborted)
+        throw createEffectExecutionFailure("cancelled", "File replacement was cancelled before mutation");
+      await writeFile(input.absolute, updated.content, "utf8");
+      return Object.freeze({
+        path: input.reportedPath,
+        bytes: Buffer.byteLength(updated.content, "utf8"),
+        replacements: updated.replacements,
+        contentDigest: sha256(updated.content),
+      });
+    });
   const read = defineTool({
     name: "files.read",
     label: "Read file",
@@ -858,80 +949,71 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
   const write = defineTool({
     name: "files.write",
     label: "Write file",
-    description: "Create or completely replace a UTF-8 file, creating parent directories by default.",
-    identityMaterial: identity("files.write"),
-    inputSchema: z.strictObject({
-      path: pathSchema,
-      content: textBound,
-      createParents: z.boolean().optional(),
-    }),
-    outputSchema: z.strictObject({
-      path: z.string(),
-      bytes: z.number().int().nonnegative(),
-      contentDigest: z.string(),
-    }),
+    description:
+      "Write a complete UTF-8 file or make exact targeted replacements. Write mode creates or completely replaces the file and creates parent directories by default. Replace mode applies one or more non-overlapping edits only when every expected occurrence count matches.",
+    identityMaterial: identity("files.write", { contractRevision: "write-or-replace-v2" }),
+    inputSchema: z.union([
+      z.strictObject({
+        mode: z
+          .literal("write")
+          .optional()
+          .describe("Complete file write. Omit mode for compatibility; omitted mode defaults to write."),
+        path: pathSchema,
+        content: textBound,
+        createParents: z.boolean().optional(),
+      }),
+      z.strictObject({
+        mode: z.literal("replace"),
+        path: pathSchema,
+        edits: z.array(exactReplacementSchema).min(1),
+      }),
+    ]),
+    outputSchema: z.union([
+      z.strictObject({
+        mode: z.literal("write"),
+        path: z.string(),
+        bytes: z.number().int().nonnegative(),
+        contentDigest: z.string(),
+      }),
+      z.strictObject({
+        mode: z.literal("replace"),
+        path: z.string(),
+        bytes: z.number().int().nonnegative(),
+        replacements: z.number().int().positive(),
+        contentDigest: z.string(),
+      }),
+    ]),
     effect: ({ path }) => ({
       effect: "write",
       resource: `file:${projectPath(projectRoot, path)}`,
       estimatedCost: 1,
     }),
-    execute: async ({ path, content, createParents = true }, context) => {
-      const absolute = projectPath(projectRoot, path);
-      const reportedPath = resolvedPath(cwd, path);
+    execute: async (input, context) => {
+      const absolute = projectPath(projectRoot, input.path);
+      const reportedPath = resolvedPath(cwd, input.path);
+      if (input.mode === "replace") {
+        const result = await replaceExactText({
+          absolute,
+          reportedPath,
+          edits: input.edits,
+          signal: context.signal,
+        });
+        return Object.freeze({ mode: "replace" as const, ...result });
+      }
+      const createParents = input.createParents ?? true;
       return await fileMutationCoordinator.run(absolute, async () => {
         if (context.signal.aborted)
           throw createEffectExecutionFailure("cancelled", "File write was cancelled before execution");
         if (createParents) await mkdir(dirname(absolute), { recursive: true });
         if (context.signal.aborted)
           throw createEffectExecutionFailure("cancelled", "File write was cancelled before mutation");
-        await writeFile(absolute, content, "utf8");
+        await writeFile(absolute, input.content, "utf8");
         return {
+          mode: "write" as const,
           path: reportedPath,
-          bytes: Buffer.byteLength(content, "utf8"),
-          contentDigest: sha256(content),
+          bytes: Buffer.byteLength(input.content, "utf8"),
+          contentDigest: sha256(input.content),
         };
-      });
-    },
-  });
-  const edit = defineTool({
-    name: "files.replace",
-    label: "Replace text",
-    description: "Replace an exact text occurrence in a UTF-8 file, rejecting ambiguous edits.",
-    identityMaterial: identity("files.replace"),
-    inputSchema: z.strictObject({
-      path: pathSchema,
-      oldText: z
-        .string()
-        .min(1)
-        .max(256 * 1024),
-      newText: textBound,
-      expectedOccurrences: z.number().int().positive().optional(),
-    }),
-    outputSchema: z.strictObject({
-      path: z.string(),
-      replacements: z.number().int().positive(),
-      contentDigest: z.string(),
-    }),
-    effect: ({ path }) => ({
-      effect: "write",
-      resource: `file:${projectPath(projectRoot, path)}`,
-      estimatedCost: 1,
-    }),
-    execute: async ({ path, oldText, newText, expectedOccurrences = 1 }, context) => {
-      const absolute = projectPath(projectRoot, path);
-      const reportedPath = resolvedPath(cwd, path);
-      return await fileMutationCoordinator.run(absolute, async () => {
-        if (context.signal.aborted)
-          throw createEffectExecutionFailure("cancelled", "File replacement was cancelled before execution");
-        const content = await readFile(absolute, "utf8");
-        const occurrences = content.split(oldText).length - 1;
-        if (occurrences !== expectedOccurrences)
-          throw new Error(`Expected ${expectedOccurrences} occurrences but found ${occurrences}`);
-        const updated = content.replaceAll(oldText, newText);
-        if (context.signal.aborted)
-          throw createEffectExecutionFailure("cancelled", "File replacement was cancelled before mutation");
-        await writeFile(absolute, updated, "utf8");
-        return { path: reportedPath, replacements: occurrences, contentDigest: sha256(updated) };
       });
     },
   });
@@ -1092,7 +1174,7 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     }),
     execute: async ({ path, content }) => await writeArtifact({ path, content }),
   });
-  return Object.freeze([read, list, search, write, edit, shell, fetchTool, artifact]);
+  return Object.freeze([read, list, search, write, shell, fetchTool, artifact]);
 }
 export function jsonOutputSchema(): z.ZodType<JsonValue> {
   return z.json();

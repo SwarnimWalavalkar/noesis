@@ -343,6 +343,21 @@ describe("Noesis transcript rendering", () => {
     expect(writeRow[0]).toContain("1.2 kB");
   });
 
+  test("summarizes selective file writes by replacement count", () => {
+    const action = {
+      actionId: "write-replacements",
+      name: "files.write",
+      status: "completed" as const,
+      input: { mode: "replace", path: "notes.md", edits: [] },
+      output: { mode: "replace", path: "/repo/notes.md", bytes: 120, replacements: 2 },
+    };
+
+    const row = renderAgentActionBlock(action, [action], 100);
+    expect(row[0]).toContain("notes.md");
+    expect(row[0]).toContain("2 replacements");
+    expect(row[0]).not.toContain("120 B");
+  });
+
   test("carries rounded duration boundaries into the next unit", () => {
     expect(formatDuration(999.4)).toBe("999ms");
     expect(formatDuration(999.5)).toBe("1.0s");

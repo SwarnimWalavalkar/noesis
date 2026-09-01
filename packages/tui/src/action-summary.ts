@@ -84,10 +84,17 @@ const NESTED_SUMMARIZERS = {
   "files.write": (input, output) => {
     const path = stringField(output, "path") ?? stringField(input, "path");
     const bytes = numberField(output, "bytes");
+    const replacements = numberField(output, "replacements");
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     return createConditionalObject({} as const)
       .addOptional(path ? { subject: baseName(path) } : undefined)
-      .addOptional(!(bytes === undefined) ? { outcome: formatBytes(bytes) } : undefined)
+      .addOptional(
+        !(replacements === undefined)
+          ? { outcome: formatCount(replacements, "replacement") }
+          : !(bytes === undefined)
+            ? { outcome: formatBytes(bytes) }
+            : undefined,
+      )
       .finish();
   },
   "files.search": (input, output) => {

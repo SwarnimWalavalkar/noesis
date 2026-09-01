@@ -155,6 +155,7 @@ describe("local work tools", () => {
     await expect(
       write.execute({ path: "notes/result.txt", content: "first" }, context()),
     ).resolves.toMatchObject({
+      mode: "write",
       path,
       bytes: 5,
       contentDigest: createHash("sha256").update("first").digest("hex"),
@@ -162,6 +163,75 @@ describe("local work tools", () => {
     await write.execute({ path: "notes/result.txt", content: "second" }, context());
 
     await expect(readFile(path, "utf8")).resolves.toBe("second");
+  });
+  it("applies several exact file replacements against one original and commits them together", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-replace-"));
+    const path = join(cwd, "state.ts");
+    await writeFile(path, "const alpha = 1;\nconst beta = 2;\n", "utf8");
+    const write = tool(toolsAt(cwd), "files.write");
+
+    await expect(
+      write.execute(
+        {
+          mode: "replace",
+          path: "state.ts",
+          edits: [
+            { oldText: "alpha = 1", newText: "alpha = 10" },
+            { oldText: "beta = 2", newText: "beta = 20" },
+          ],
+        },
+        context(),
+      ),
+    ).resolves.toMatchObject({
+      mode: "replace",
+      path,
+      replacements: 2,
+    });
+    await expect(readFile(path, "utf8")).resolves.toBe("const alpha = 10;\nconst beta = 20;\n");
+  });
+  it("rejects ambiguous or overlapping file replacements without mutating the file", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-replace-reject-"));
+    const path = join(cwd, "state.txt");
+    const original = "alpha alpha beta";
+    await writeFile(path, original, "utf8");
+    const write = tool(toolsAt(cwd), "files.write");
+
+    await expect(
+      write.execute(
+        { mode: "replace", path: "state.txt", edits: [{ oldText: "alpha", newText: "gamma" }] },
+        context(),
+      ),
+    ).rejects.toThrow("expected 1 occurrences but found 2");
+    await expect(readFile(path, "utf8")).resolves.toBe(original);
+
+    await expect(
+      write.execute(
+        {
+          mode: "replace",
+          path: "state.txt",
+          edits: [
+            { oldText: "alpha alpha", newText: "gamma" },
+            { oldText: "alpha beta", newText: "delta" },
+          ],
+        },
+        context(),
+      ),
+    ).rejects.toThrow("overlaps replacement");
+    await expect(readFile(path, "utf8")).resolves.toBe(original);
+  });
+  it("exposes replacement as a mode of files.write rather than a second catalog tool", () => {
+    const definitions = toolsAt(tmpdir());
+    const write = tool(definitions, "files.write");
+
+    expect(definitions.some((definition) => definition.name === "files.replace")).toBe(false);
+    expect(
+      write.inputSchema.safeParse({
+        mode: "replace",
+        path: "state.txt",
+        content: "mixed shape",
+        edits: [{ oldText: "old", newText: "new" }],
+      }).success,
+    ).toBe(false);
   });
   it("serializes mutations from independently prepared tool sets", async () => {
     const cwd = await mkdtemp(join(tmpdir(), "noesis-tools-shared-mutations-"));
@@ -173,8 +243,8 @@ describe("local work tools", () => {
 
     await Promise.all([
       tool(first, "files.write").execute({ path: "shared.txt", content: "beta" }, context()),
-      tool(second, "files.replace").execute(
-        { path: "shared.txt", oldText: "beta", newText: "gamma" },
+      tool(second, "files.write").execute(
+        { mode: "replace", path: "shared.txt", edits: [{ oldText: "beta", newText: "gamma" }] },
         context(),
       ),
     ]);
@@ -202,8 +272,12 @@ describe("local work tools", () => {
       ),
     ).rejects.toThrow("escapes the active project");
     await expect(
-      tool(definitions, "files.replace").execute(
-        { path: "escape/protected.txt", oldText: "protected", newText: "changed" },
+      tool(definitions, "files.write").execute(
+        {
+          mode: "replace",
+          path: "escape/protected.txt",
+          edits: [{ oldText: "protected", newText: "changed" }],
+        },
         context(),
       ),
     ).rejects.toThrow("escapes the active project");
