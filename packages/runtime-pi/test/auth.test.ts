@@ -20,7 +20,6 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go";
 import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { isJsonObject, JsonValueSchema } from "@noesis/domain";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -119,18 +118,16 @@ describe("Pi authentication", () => {
     expect(
       listPiModelRoutes(services.catalog).find((route) => route.provider === "opencode-go")?.providerName,
     ).toBe("OpenCode Go");
-    const unsupported = services.catalog.getProviders().find((provider) => !isNoesisProviderId(provider.id));
-    expect(unsupported).toBeDefined();
+    expect(services.catalog.getProviders().every((provider) => isNoesisProviderId(provider.id))).toBe(true);
     expect(listPiModelRoutes(services.catalog).every((route) => isNoesisProviderId(route.provider))).toBe(
       true,
     );
-    if (unsupported)
-      expect(() =>
-        preparePiModelSelection(services.catalog, {
-          provider: unsupported.id,
-          model: unsupported.getModels()[0]?.id ?? "unavailable",
-        }),
-      ).toThrow(`Unknown Pi provider ${unsupported.id}`);
+    expect(() =>
+      preparePiModelSelection(services.catalog, {
+        provider: "google",
+        model: "gemini-2.5-pro",
+      }),
+    ).toThrow("Unknown Pi provider google");
   });
 
   test("does not consult the protected credential store for unsupported Pi providers", async () => {
@@ -155,7 +152,7 @@ describe("Pi authentication", () => {
 
     expect(reads.length).toBeGreaterThan(0);
     expect(reads.every((providerId) => isNoesisProviderId(providerId))).toBe(true);
-    await expect(services.catalog.listCredentials()).resolves.toEqual([]);
+    await expect(services.credentials.list()).resolves.toEqual([]);
     await expect(services.credentials.read("unsupported-provider")).resolves.toBeUndefined();
     await expect(services.auth.status("unsupported-provider")).rejects.toThrow(
       "Unknown Pi provider unsupported-provider",
@@ -271,7 +268,6 @@ describe("Pi authentication", () => {
       }),
     );
 
-    const refresh = vi.spyOn(ModelRuntime.prototype, "refresh");
     const services = await createPiModelServices(home);
 
     expect(services.models.getModel("opencode-go", "noesis/live-go-model")).toMatchObject({
@@ -280,9 +276,6 @@ describe("Pi authentication", () => {
       name: "Noesis Live Go Model",
     });
     expect(services.models.getProvider("opencode-go")?.refreshModels).toBeTypeOf("function");
-    expect(
-      refresh.mock.calls.filter(([options]) => options?.allowNetwork === false).length,
-    ).toBeGreaterThanOrEqual(2);
   });
 
   test("validates provider and model as one selection through Pi's registered catalog", async () => {
@@ -431,6 +424,9 @@ describe("Pi authentication", () => {
       id: "research-lab/future-model",
       name: "research-lab/future-model",
     });
+
+    await services.refresh();
+    expect(services.models.getModel("openrouter", "research-lab/future-model")).toBe(custom);
   });
 
   test("rejects unknown OpenCode models instead of guessing across its mixed API transports", async () => {
