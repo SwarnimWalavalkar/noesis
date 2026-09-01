@@ -97,7 +97,10 @@ describe("Pi authentication", () => {
       vi.stubEnv(name, "");
   });
 
-  afterEach(() => vi.unstubAllEnvs());
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
 
   test("registers every provider supported by Noesis", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-provider-registration-"));
@@ -187,7 +190,6 @@ describe("Pi authentication", () => {
     expect(
       refresh.mock.calls.filter(([options]) => options?.allowNetwork === false).length,
     ).toBeGreaterThanOrEqual(2);
-    refresh.mockRestore();
   });
 
   test("validates provider and model as one selection through Pi's registered catalog", async () => {
