@@ -560,11 +560,15 @@ describe("Pi authentication", () => {
       },
     });
     const auth = createPiAuthManager(models, credentials);
+    const notifications: string[] = [];
     const status = await auth.login("openai-codex", {
       prompt: async () => "unused",
-      notify: () => undefined,
+      notify: (event) => {
+        if (event.type === "progress") notifications.push(event.message);
+      },
     });
     expect(status).toMatchObject({ provider: "openai-codex", configured: true, source: "oauth" });
+    expect(notifications).toEqual(["Completing OAuth"]);
 
     const model = models.getModels("openai-codex")[0];
     expect(model).toBeDefined();
