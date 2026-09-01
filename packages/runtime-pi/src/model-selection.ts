@@ -1,6 +1,6 @@
 import { getSupportedThinkingLevels, type Api, type Model, type Provider } from "@earendil-works/pi-ai";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { AgentThinkingLevel } from "@noesis/agent-types";
+import type { PiModelCatalog } from "./model-catalog.ts";
 import { isNoesisProviderId, NOESIS_PROVIDER_IDS } from "./provider-ids.ts";
 
 export interface PiModelSelection {
@@ -19,7 +19,7 @@ export interface PiModelRoute {
 }
 
 /** Converts Pi's mutable catalog into the plain, read-only model surface consumed by the TUI. */
-export function listPiModelRoutes(models: ModelRuntime): readonly PiModelRoute[] {
+export function listPiModelRoutes(models: PiModelCatalog): readonly PiModelRoute[] {
   const defaults = new Map(
     models
       .getProviders()
@@ -68,7 +68,7 @@ function supportsCustomModelIds(provider: Provider): boolean {
   return provider.id === "openrouter";
 }
 
-export function preparePiModelSelection(models: ModelRuntime, selection: PiModelSelection): void {
+export function preparePiModelSelection(models: PiModelCatalog, selection: PiModelSelection): void {
   if (selection.provider.trim() !== selection.provider || selection.provider.length === 0)
     throw new Error("Pi provider ID must be a non-empty string without leading or trailing whitespace.");
   if (selection.model.trim() !== selection.model || selection.model.length === 0)
@@ -96,7 +96,7 @@ export function preparePiModelSelection(models: ModelRuntime, selection: PiModel
     .filter((candidate, index, all) => all.indexOf(candidate) === index)
     .sort((left, right) => left.localeCompare(right));
   if (otherProviders.length === 0 && supportsCustomModelIds(provider)) {
-    models.registerNativeProvider(providerWithCustomModel(provider, selection.model), { refresh: false });
+    models.registerNativeProvider(providerWithCustomModel(provider, selection.model));
     return;
   }
 

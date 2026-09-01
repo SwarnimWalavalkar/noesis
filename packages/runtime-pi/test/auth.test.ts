@@ -10,17 +10,18 @@ import {
   InMemoryCredentialStore,
   type Api,
   type AssistantMessage,
+  type Context,
   type CredentialStore,
   type Model,
   type ModelsSimpleStreamOptions,
   type Provider,
+  type ProviderHeaders,
 } from "@earendil-works/pi-ai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go";
 import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { isJsonObject, JsonValueSchema } from "@noesis/domain";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -33,6 +34,7 @@ import {
   createSecurePiCredentialStore,
   listPiModelRoutes,
   createOAuthRecoveringModels,
+  isNoesisProviderId,
   piAuthPath,
   preparePiModelSelection,
 } from "../src/index.ts";
@@ -99,6 +101,7 @@ describe("Pi authentication", () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -117,6 +120,95 @@ describe("Pi authentication", () => {
     expect(
       listPiModelRoutes(services.catalog).find((route) => route.provider === "opencode-go")?.providerName,
     ).toBe("OpenCode Go");
+    expect(services.catalog.getProviders().every((provider) => isNoesisProviderId(provider.id))).toBe(true);
+    expect(listPiModelRoutes(services.catalog).every((route) => isNoesisProviderId(route.provider))).toBe(
+      true,
+    );
+    expect(() =>
+      preparePiModelSelection(services.catalog, {
+        provider: "google",
+        model: "gemini-2.5-pro",
+      }),
+    ).toThrow("Unknown Pi provider google");
+  });
+
+  test("does not consult the protected credential store for unsupported Pi providers", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-credential-scope-"));
+    const delegate = new InMemoryCredentialStore();
+    await delegate.modify("unsupported-provider", async () => ({
+      type: "api_key",
+      key: "must-remain-outside-noesis",
+    }));
+    const reads: string[] = [];
+    const credentials = Object.freeze({
+      read: async (providerId) => {
+        reads.push(providerId);
+        return await delegate.read(providerId);
+      },
+      list: async () => await delegate.list(),
+      modify: async (providerId, fn) => await delegate.modify(providerId, fn),
+      delete: async (providerId) => await delegate.delete(providerId),
+    } satisfies CredentialStore);
+
+    const services = await createPiModelServices(home, { credentials });
+
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((providerId) => isNoesisProviderId(providerId))).toBe(true);
+    await expect(services.credentials.list()).resolves.toEqual([]);
+    await expect(services.credentials.read("unsupported-provider")).resolves.toBeUndefined();
+    await expect(services.auth.status("unsupported-provider")).rejects.toThrow(
+      "Unknown Pi provider unsupported-provider",
+    );
+    await expect(
+      services.auth.login("unsupported-provider", {
+        prompt: async () => "must-not-be-used",
+        notify: () => undefined,
+      }),
+    ).rejects.toThrow("Unknown Pi provider unsupported-provider");
+    await expect(services.auth.logout("unsupported-provider")).rejects.toThrow(
+      "Unknown Pi provider unsupported-provider",
+    );
+    await expect(credentials.read("unsupported-provider")).resolves.toMatchObject({
+      type: "api_key",
+      key: "must-remain-outside-noesis",
+    });
+  });
+
+  test("network-refreshes only providers supported by Noesis", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-supported-refresh-"));
+    vi.stubEnv("OPENROUTER_API_KEY", "supported-secret");
+    vi.stubEnv("GEMINI_API_KEY", "unsupported-secret");
+    const requested: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        requested.push(String(input));
+        return new Response('{"models":[]}', {
+          status: 200,
+          headers: { "last-modified": new Date().toUTCString() },
+        });
+      }),
+    );
+    const services = await createPiModelServices(home, { catalogBaseUrl: "https://catalog.test" });
+
+    await services.refresh();
+
+    expect(requested).toEqual(["https://catalog.test/api/models/providers/openrouter"]);
+    expect(requested.every((url) => !url.includes("/google"))).toBe(true);
+  });
+
+  test("surfaces supported-provider catalog refresh failures", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-supported-refresh-failure-"));
+    vi.stubEnv("OPENROUTER_API_KEY", "supported-secret");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("unavailable", { status: 503 })),
+    );
+    const services = await createPiModelServices(home, { catalogBaseUrl: "https://catalog.test" });
+
+    await expect(services.refresh()).rejects.toThrow(
+      "openrouter: Model catalog request failed for openrouter: 503",
+    );
   });
 
   test("restores Pi's persisted remote model compatibility overlay", async () => {
@@ -178,7 +270,6 @@ describe("Pi authentication", () => {
       }),
     );
 
-    const refresh = vi.spyOn(ModelRuntime.prototype, "refresh");
     const services = await createPiModelServices(home);
 
     expect(services.models.getModel("opencode-go", "noesis/live-go-model")).toMatchObject({
@@ -187,9 +278,6 @@ describe("Pi authentication", () => {
       name: "Noesis Live Go Model",
     });
     expect(services.models.getProvider("opencode-go")?.refreshModels).toBeTypeOf("function");
-    expect(
-      refresh.mock.calls.filter(([options]) => options?.allowNetwork === false).length,
-    ).toBeGreaterThanOrEqual(2);
   });
 
   test("validates provider and model as one selection through Pi's registered catalog", async () => {
@@ -241,6 +329,88 @@ describe("Pi authentication", () => {
     if (!go) throw new Error("Expected the OpenCode Go model route");
 
     await expect(services.models.getAuth(go)).resolves.toBeUndefined();
+  });
+
+  test("applies Pi model override headers at the projected request boundary", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-model-headers-"));
+    const openRouterModel = openrouterProvider().getModels()[0];
+    const goModel = opencodeGoProvider().getModels()[0];
+    if (!openRouterModel || !goModel) throw new Error("Expected bundled Pi model metadata");
+    await writeFile(
+      join(home, "models.json"),
+      JSON.stringify({
+        providers: {
+          openrouter: {
+            modelOverrides: {
+              [openRouterModel.id]: {
+                headers: {
+                  "X-Noesis-Configured": "models-json",
+                  "X-Noesis-Precedence": "configured",
+                },
+              },
+            },
+          },
+          "opencode-go": {
+            modelOverrides: {
+              [goModel.id]: {
+                headers: { "X-Noesis-Go": "models-json" },
+              },
+            },
+          },
+        },
+      }),
+    );
+    vi.stubEnv("OPENROUTER_API_KEY", "openrouter-secret");
+    vi.stubEnv("OPENCODE_GO_API_KEY", "go-secret");
+    const services = await createPiModelServices(home);
+    const provider = services.catalog.getProvider("openrouter");
+    const model = services.models.getModel("openrouter", openRouterModel.id);
+    const go = services.models.getModel("opencode-go", goModel.id);
+    if (!provider || !model || !go) throw new Error("Expected projected Pi providers and models");
+    let requestHeaders: ProviderHeaders | undefined;
+    services.catalog.registerNativeProvider(
+      Object.freeze({
+        ...provider,
+        streamSimple: (requestModel: Model<Api>, _context: Context, options?: ModelsSimpleStreamOptions) => {
+          requestHeaders = options?.headers;
+          return scriptedHttpStream(requestModel, options, 200);
+        },
+      }),
+    );
+
+    await expect(services.models.getAuth(model)).resolves.toMatchObject({
+      auth: {
+        apiKey: "openrouter-secret",
+        headers: {
+          "X-Noesis-Configured": "models-json",
+          "X-Noesis-Precedence": "configured",
+        },
+      },
+    });
+    await expect(services.models.getAuth(go)).resolves.toMatchObject({
+      auth: {
+        apiKey: "go-secret",
+        headers: { "X-Noesis-Go": "models-json" },
+      },
+    });
+
+    await services.models.completeSimple(
+      model,
+      { messages: [] },
+      {
+        headers: { "x-noesis-precedence": "explicit" },
+        transformHeaders: (headers) => {
+          const next = { ...headers };
+          delete next["x-noesis-precedence"];
+          return { ...next, "X-Noesis-Precedence": "transformed", "X-Noesis-Transform": "last" };
+        },
+      },
+    );
+    expect(requestHeaders).toMatchObject({
+      "X-Noesis-Configured": "models-json",
+      "X-Noesis-Precedence": "transformed",
+      "X-Noesis-Transform": "last",
+    });
   });
 
   test("prefers a stored OpenCode Go credential over either OpenCode environment key", async () => {
@@ -323,7 +493,7 @@ describe("Pi authentication", () => {
     });
   });
 
-  test("prepares a custom model from its selected provider's Pi metadata", async () => {
+  test("immediately prepares a custom model from its selected provider's Pi metadata", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-provider-custom-model-"));
     const services = await createPiModelServices(home);
 
@@ -338,6 +508,9 @@ describe("Pi authentication", () => {
       id: "research-lab/future-model",
       name: "research-lab/future-model",
     });
+
+    await services.refresh();
+    expect(services.models.getModel("openrouter", "research-lab/future-model")).toBe(custom);
   });
 
   test("rejects unknown OpenCode models instead of guessing across its mixed API transports", async () => {

@@ -18,8 +18,13 @@ import {
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createOAuthRecoveringModels } from "./auth-recovery.ts";
-import { composeNoesisOpenCodeGoProvider } from "./opencode-go-provider.ts";
-import { NOESIS_PROVIDER_IDS } from "./provider-ids.ts";
+import {
+  createConfiguredModelsProjection,
+  createNoesisPiModelCatalog,
+  type PiModelCatalog,
+} from "./model-catalog.ts";
+import { createNoesisPiModelsStore } from "./models-store.ts";
+import { isNoesisProviderId } from "./provider-ids.ts";
 type CredentialFile = Readonly<Record<string, Credential>>;
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -429,6 +434,7 @@ export interface PiAuthManager {
 export type PiAuthOperations = PiAuthManager;
 export function createPiAuthManager(models: Models, credentials: CredentialStore): PiAuthManager {
   const login = async (providerId: string, callbacks: NoesisAuthLoginCallbacks): Promise<PiAuthStatus> => {
+    if (!isNoesisProviderId(providerId)) throw new Error(`Unknown Pi provider ${providerId}`);
     const provider = models.getProvider(providerId);
     if (!provider) throw new Error(`Unknown Pi provider ${providerId}`);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -459,6 +465,7 @@ export function createPiAuthManager(models: Models, credentials: CredentialStore
     return await status(providerId);
   };
   const status = async (providerId: string): Promise<PiAuthStatus> => {
+    if (!isNoesisProviderId(providerId)) throw new Error(`Unknown Pi provider ${providerId}`);
     const provider = models.getProvider(providerId);
     if (!provider) throw new Error(`Unknown Pi provider ${providerId}`);
     const stored = await credentials.read(providerId);
@@ -480,6 +487,7 @@ export function createPiAuthManager(models: Models, credentials: CredentialStore
     };
   };
   const logout = async (providerId: string): Promise<void> => {
+    if (!isNoesisProviderId(providerId)) throw new Error(`Unknown Pi provider ${providerId}`);
     if (!models.getProvider(providerId)) throw new Error(`Unknown Pi provider ${providerId}`);
     await credentials.delete(providerId);
   };
@@ -487,11 +495,33 @@ export function createPiAuthManager(models: Models, credentials: CredentialStore
 }
 export interface PiModelServices {
   readonly models: Models;
-  readonly catalog: ModelRuntime;
+  readonly catalog: PiModelCatalog;
   readonly credentials: CredentialStore;
   readonly auth: PiAuthOperations;
   readonly refresh: (signal?: AbortSignal) => Promise<void>;
 }
+
+function scopePiCredentialsToNoesis(delegate: CredentialStore): CredentialStore {
+  const assertSupported = (providerId: string): void => {
+    if (!isNoesisProviderId(providerId))
+      throw new Error(`Noesis does not manage credentials for unsupported Pi provider ${providerId}`);
+  };
+  return Object.freeze({
+    read: async (providerId) =>
+      isNoesisProviderId(providerId) ? await delegate.read(providerId) : undefined,
+    list: async () =>
+      Object.freeze((await delegate.list()).filter(({ providerId }) => isNoesisProviderId(providerId))),
+    modify: async (providerId, fn) => {
+      assertSupported(providerId);
+      return await delegate.modify(providerId, fn);
+    },
+    delete: async (providerId) => {
+      assertSupported(providerId);
+      await delegate.delete(providerId);
+    },
+  } satisfies CredentialStore);
+}
+
 export async function createPiModelServices(
   home: string,
   options: {
@@ -500,32 +530,36 @@ export async function createPiModelServices(
   } = {},
 ): Promise<PiModelServices> {
   const credentials = options.credentials ?? createSecurePiCredentialStore(piAuthPath(home));
-  const catalog = await ModelRuntime.create(
+  const piCredentials = scopePiCredentialsToNoesis(credentials);
+  const modelsStore = createNoesisPiModelsStore(join(home, "models-store.json"), isNoesisProviderId);
+  const sourceCatalog = await ModelRuntime.create(
     createConditionalObject({
-      credentials,
+      credentials: piCredentials,
       modelsPath: join(home, "models.json"),
-      modelsStorePath: join(home, "models-store.json"),
+      modelsStore,
       allowModelNetwork: false,
-      providerIds: NOESIS_PROVIDER_IDS,
     } as const)
       .addOptional(options.catalogBaseUrl ? { catalogBaseUrl: options.catalogBaseUrl } : undefined)
       .finish(),
   );
-  const openCodeGo = catalog.getProvider("opencode-go");
-  if (!openCodeGo) throw new Error("Pi does not provide required model provider opencode-go");
-  catalog.registerNativeProvider(composeNoesisOpenCodeGoProvider(openCodeGo), { refresh: false });
-  // ModelRuntime restores persisted overlays during creation, before the
-  // Noesis-specific Go credential source is installed. Restore once more so an
-  // environment-only Go installation can use its cached catalog immediately.
-  await catalog.refresh({ allowNetwork: false });
-  for (const providerId of NOESIS_PROVIDER_IDS) {
-    const provider = catalog.getProvider(providerId);
-    if (!provider) throw new Error(`Pi does not provide required model provider ${providerId}`);
-  }
+  const projected = createNoesisPiModelCatalog({
+    source: sourceCatalog,
+    credentials: piCredentials,
+    modelsStore,
+  });
+  projected.synchronize();
+  await projected.models.refresh({ allowNetwork: false });
+  const requestModels = createConfiguredModelsProjection(projected.models, sourceCatalog);
   const refresh = async (signal?: AbortSignal): Promise<void> => {
     const timeoutSignal = AbortSignal.timeout(15_000);
     const refreshSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-    const result = await catalog.refresh(
+    await sourceCatalog.refresh(
+      createConditionalObject({ allowNetwork: false } as const)
+        .add({ signal: refreshSignal })
+        .finish(),
+    );
+    projected.synchronize();
+    const result = await projected.models.refresh(
       createConditionalObject({ allowNetwork: true } as const)
         .add({ signal: refreshSignal })
         .finish(),
@@ -539,10 +573,10 @@ export async function createPiModelServices(
       );
   };
   return Object.freeze({
-    models: createOAuthRecoveringModels(catalog, credentials),
-    catalog,
-    credentials,
-    auth: createPiAuthManager(catalog, credentials),
+    models: createOAuthRecoveringModels(requestModels, piCredentials),
+    catalog: projected.catalog,
+    credentials: piCredentials,
+    auth: createPiAuthManager(requestModels, piCredentials),
     refresh,
   });
 }

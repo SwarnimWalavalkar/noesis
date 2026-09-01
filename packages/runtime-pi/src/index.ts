@@ -53,6 +53,7 @@ export type {
 } from "./frozen-session-tools.ts";
 export { frozenPlanMaterialUses, resolveFrozenSessionToolDefinitions } from "./frozen-session-tools.ts";
 export * from "./broker-tools.ts";
+export * from "./model-catalog.ts";
 export * from "./model-selection.ts";
 export * from "./mcp-sampling.ts";
 export * from "./pi-role-backend.ts";
