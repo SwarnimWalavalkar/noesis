@@ -100,6 +100,7 @@ describe("Pi authentication", () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -155,31 +156,60 @@ describe("Pi authentication", () => {
     expect(reads.length).toBeGreaterThan(0);
     expect(reads.every((providerId) => isNoesisProviderId(providerId))).toBe(true);
     await expect(services.catalog.listCredentials()).resolves.toEqual([]);
+    await expect(services.credentials.read("unsupported-provider")).resolves.toBeUndefined();
+    await expect(services.auth.status("unsupported-provider")).rejects.toThrow(
+      "Unknown Pi provider unsupported-provider",
+    );
+    await expect(
+      services.auth.login("unsupported-provider", {
+        prompt: async () => "must-not-be-used",
+        notify: () => undefined,
+      }),
+    ).rejects.toThrow("Unknown Pi provider unsupported-provider");
+    await expect(services.auth.logout("unsupported-provider")).rejects.toThrow(
+      "Unknown Pi provider unsupported-provider",
+    );
     await expect(credentials.read("unsupported-provider")).resolves.toMatchObject({
       type: "api_key",
       key: "must-remain-outside-noesis",
     });
   });
 
-  test("ignores refresh failures from providers outside Noesis's supported catalog", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-provider-unsupported-refresh-"));
-    const services = await createPiModelServices(home);
-    const refresh = vi.spyOn(services.catalog, "refresh");
-    refresh.mockResolvedValueOnce({
-      aborted: false,
-      errors: new Map([["unsupported-provider", new Error("unavailable")]]),
-    });
+  test("network-refreshes only providers supported by Noesis", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-supported-refresh-"));
+    vi.stubEnv("OPENROUTER_API_KEY", "supported-secret");
+    vi.stubEnv("GEMINI_API_KEY", "unsupported-secret");
+    const requested: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | Request) => {
+        requested.push(String(input));
+        return new Response('{"models":[]}', {
+          status: 200,
+          headers: { "last-modified": new Date().toUTCString() },
+        });
+      }),
+    );
+    const services = await createPiModelServices(home, { catalogBaseUrl: "https://catalog.test" });
 
-    await expect(services.refresh()).resolves.toBeUndefined();
+    await services.refresh();
 
-    refresh.mockResolvedValueOnce({
-      aborted: false,
-      errors: new Map([
-        ["unsupported-provider", new Error("unavailable")],
-        ["openrouter", new Error("catalog rejected")],
-      ]),
-    });
-    await expect(services.refresh()).rejects.toThrow("openrouter: catalog rejected");
+    expect(requested).toEqual(["https://catalog.test/api/models/providers/openrouter"]);
+    expect(requested.every((url) => !url.includes("/google"))).toBe(true);
+  });
+
+  test("surfaces supported-provider catalog refresh failures", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-supported-refresh-failure-"));
+    vi.stubEnv("OPENROUTER_API_KEY", "supported-secret");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("unavailable", { status: 503 })),
+    );
+    const services = await createPiModelServices(home, { catalogBaseUrl: "https://catalog.test" });
+
+    await expect(services.refresh()).rejects.toThrow(
+      "openrouter: Model catalog request failed for openrouter: 503",
+    );
   });
 
   test("restores Pi's persisted remote model compatibility overlay", async () => {

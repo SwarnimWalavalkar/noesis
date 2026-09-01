@@ -10,6 +10,7 @@ import { constants, type Stats } from "node:fs";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
+  createModels,
   type AuthInteraction,
   type Credential,
   type CredentialInfo,
@@ -18,6 +19,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createOAuthRecoveringModels } from "./auth-recovery.ts";
+import { createNoesisPiModelsStore } from "./models-store.ts";
 import { composeNoesisOpenCodeGoProvider } from "./opencode-go-provider.ts";
 import { isNoesisProviderId, NOESIS_PROVIDER_IDS } from "./provider-ids.ts";
 type CredentialFile = Readonly<Record<string, Credential>>;
@@ -429,6 +431,7 @@ export interface PiAuthManager {
 export type PiAuthOperations = PiAuthManager;
 export function createPiAuthManager(models: Models, credentials: CredentialStore): PiAuthManager {
   const login = async (providerId: string, callbacks: NoesisAuthLoginCallbacks): Promise<PiAuthStatus> => {
+    if (!isNoesisProviderId(providerId)) throw new Error(`Unknown Pi provider ${providerId}`);
     const provider = models.getProvider(providerId);
     if (!provider) throw new Error(`Unknown Pi provider ${providerId}`);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -459,6 +462,7 @@ export function createPiAuthManager(models: Models, credentials: CredentialStore
     return await status(providerId);
   };
   const status = async (providerId: string): Promise<PiAuthStatus> => {
+    if (!isNoesisProviderId(providerId)) throw new Error(`Unknown Pi provider ${providerId}`);
     const provider = models.getProvider(providerId);
     if (!provider) throw new Error(`Unknown Pi provider ${providerId}`);
     const stored = await credentials.read(providerId);
@@ -480,6 +484,7 @@ export function createPiAuthManager(models: Models, credentials: CredentialStore
     };
   };
   const logout = async (providerId: string): Promise<void> => {
+    if (!isNoesisProviderId(providerId)) throw new Error(`Unknown Pi provider ${providerId}`);
     if (!models.getProvider(providerId)) throw new Error(`Unknown Pi provider ${providerId}`);
     await credentials.delete(providerId);
   };
@@ -523,11 +528,12 @@ export async function createPiModelServices(
 ): Promise<PiModelServices> {
   const credentials = options.credentials ?? createSecurePiCredentialStore(piAuthPath(home));
   const piCredentials = scopePiCredentialsToNoesis(credentials);
+  const modelsStore = createNoesisPiModelsStore(join(home, "models-store.json"), isNoesisProviderId);
   const catalog = await ModelRuntime.create(
     createConditionalObject({
       credentials: piCredentials,
       modelsPath: join(home, "models.json"),
-      modelsStorePath: join(home, "models-store.json"),
+      modelsStore,
       allowModelNetwork: false,
     } as const)
       .addOptional(options.catalogBaseUrl ? { catalogBaseUrl: options.catalogBaseUrl } : undefined)
@@ -547,25 +553,40 @@ export async function createPiModelServices(
   const refresh = async (signal?: AbortSignal): Promise<void> => {
     const timeoutSignal = AbortSignal.timeout(15_000);
     const refreshSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-    const result = await catalog.refresh(
+    await catalog.refresh(
+      createConditionalObject({ allowNetwork: false } as const)
+        .add({ signal: refreshSignal })
+        .finish(),
+    );
+    const supportedModels = createModels({ credentials: piCredentials, modelsStore });
+    for (const providerId of NOESIS_PROVIDER_IDS) {
+      const provider = catalog.getProvider(providerId);
+      if (!provider) throw new Error(`Pi no longer provides required model provider ${providerId}`);
+      supportedModels.setProvider(provider);
+    }
+    const result = await supportedModels.refresh(
       createConditionalObject({ allowNetwork: true } as const)
         .add({ signal: refreshSignal })
         .finish(),
     );
     if (result.aborted) throw new Error("Pi model catalog refresh was cancelled or timed out.");
-    const supportedErrors = [...result.errors.entries()].filter(([providerId]) =>
-      isNoesisProviderId(providerId),
-    );
-    if (supportedErrors.length > 0)
+    if (result.errors.size > 0)
       throw new Error(
-        supportedErrors.map(([providerId, error]) => `${providerId}: ${error.message}`).join("\n"),
+        [...result.errors.entries()]
+          .map(([providerId, error]) => `${providerId}: ${error.message}`)
+          .join("\n"),
       );
+    await catalog.refresh(
+      createConditionalObject({ allowNetwork: false } as const)
+        .add({ signal: refreshSignal })
+        .finish(),
+    );
   };
   return Object.freeze({
-    models: createOAuthRecoveringModels(catalog, credentials),
+    models: createOAuthRecoveringModels(catalog, piCredentials),
     catalog,
-    credentials,
-    auth: createPiAuthManager(catalog, credentials),
+    credentials: piCredentials,
+    auth: createPiAuthManager(catalog, piCredentials),
     refresh,
   });
 }
