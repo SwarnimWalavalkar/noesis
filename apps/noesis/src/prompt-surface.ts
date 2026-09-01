@@ -1,4 +1,4 @@
-import type { NoesisAuthLoginCallbacks, NoesisAuthPrompt, NoesisOAuthCallbackPage } from "@noesis/runtime-pi";
+import type { NoesisAuthLoginCallbacks, NoesisAuthPrompt } from "@noesis/runtime-pi";
 import type { OnboardingSurface } from "@noesis/tui";
 import type { BrowserUrlOpener } from "./browser-auth.ts";
 import { presentAuthEvent } from "./browser-auth.ts";
@@ -14,10 +14,7 @@ export function defaultAuthOptionId(prompt: NoesisAuthPrompt & { readonly type: 
 /** Adapt the shared prompt surface to the auth login callback port. */
 export function createSurfaceAuthCallbacks(
   surface: OnboardingSurface,
-  options: {
-    readonly openUrl: BrowserUrlOpener;
-    readonly renderOAuthCallbackPage: (page: NoesisOAuthCallbackPage) => string;
-  },
+  options: { readonly openUrl: BrowserUrlOpener },
 ): NoesisAuthLoginCallbacks {
   return {
     signal: surface.signal,
@@ -41,7 +38,6 @@ export function createSurfaceAuthCallbacks(
         note: (message) => surface.note(message),
         reference: (label, value) => surface.reference(label, value),
       }),
-    renderOAuthCallbackPage: options.renderOAuthCallbackPage,
   };
 }
 

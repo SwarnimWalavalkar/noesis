@@ -243,15 +243,8 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       const { output, result } = await runPtyExit(action);
 
       expect(output).toContain("__NOESIS_OAUTH_CALLBACK_PAGE__");
-      expect(output).toContain("<title>Noesis — authorization received</title>");
-      expect(output).toContain("AUTHORIZATION RECEIVED");
-      expect(output).toContain("Return to Noesis.");
-      expect(output).toContain("Cache-Control: no-store");
-      expect(output).toContain(
-        "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-      );
-      expect(output).toContain("Referrer-Policy: no-referrer");
-      expect(output).toContain("X-Content-Type-Options: nosniff");
+      expect(output).toContain("<title>Authentication successful</title>");
+      expect(output).toContain("OpenAI authentication completed. You can close this window.");
       expect(output).toContain("● IDLE");
       expect(result).toEqual({ code: 0, signal: null });
     },

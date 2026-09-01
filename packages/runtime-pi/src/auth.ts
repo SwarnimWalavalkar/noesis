@@ -416,15 +416,10 @@ export type NoesisAuthEvent =
       readonly type: "progress";
       readonly message: string;
     };
-export interface NoesisOAuthCallbackPage {
-  readonly provider: "openai-codex";
-  readonly status: "success";
-}
 export interface NoesisAuthLoginCallbacks {
   readonly signal?: AbortSignal;
   prompt(prompt: NoesisAuthPrompt): Promise<string>;
   notify(event: NoesisAuthEvent): void;
-  renderOAuthCallbackPage?(page: NoesisOAuthCallbackPage): string;
 }
 export interface PiAuthManager {
   readonly login: (providerId: string, callbacks: NoesisAuthLoginCallbacks) => Promise<PiAuthStatus>;
@@ -444,13 +439,6 @@ export function createPiAuthManager(models: Models, credentials: CredentialStore
         prompt: async (prompt: Parameters<AuthInteraction["prompt"]>[0]) => await callbacks.prompt(prompt),
         notify: (event: Parameters<AuthInteraction["notify"]>[0]) => callbacks.notify(event),
       } as const)
-      .addOptional(
-        callbacks.renderOAuthCallbackPage
-          ? {
-              renderOAuthCallbackPage: callbacks.renderOAuthCallbackPage,
-            }
-          : undefined,
-      )
       .finish();
     const prefersOAuth = providerId === "openai-codex" || providerId === "anthropic";
     const credential = prefersOAuth

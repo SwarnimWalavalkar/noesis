@@ -153,11 +153,10 @@ describe("provider authentication overlay", () => {
     tui.stop();
   });
 
-  test("starts an OAuth flow in the modal and keeps its callback receipt provider-neutral", async () => {
+  test("starts an OAuth flow in the modal and opens the provider URL", async () => {
     const base = createInMemoryTestRuntime(agent);
     const release = Promise.withResolvers<void>();
     const opened: string[] = [];
-    let callbackPage: string | undefined;
     const runtime = Object.freeze({
       ...base,
       providerAuthStatus: async (provider: string) => ({
@@ -174,10 +173,6 @@ describe("provider authentication overlay", () => {
           url: "https://auth.example/authorize",
           instructions: "Complete sign-in in the browser.",
         });
-        callbackPage = callbacks.renderOAuthCallbackPage?.({
-          provider: "openai-codex",
-          status: "success",
-        });
         await release.promise;
         return { provider, configured: true, source: "oauth" as const };
       },
@@ -191,13 +186,11 @@ describe("provider authentication overlay", () => {
       openUrl: async (url) => {
         opened.push(url);
       },
-      renderOAuthCallbackPage: () => "oauth callback received",
     });
 
     const result = auth.ensure("openai-codex", "OpenAI Codex OAuth");
     await vi.waitFor(() => expect(terminal.output).toContain("Sign-in URL"));
     expect(opened).toEqual(["https://auth.example/authorize"]);
-    expect(callbackPage).toBe("oauth callback received");
     release.resolve();
     await expect(result).resolves.toBe(true);
     auth.dispose();

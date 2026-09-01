@@ -280,9 +280,6 @@ export function createTuiProviderAuthOrchestration(options: {
   readonly theme: SelectListTheme;
   readonly colorEnabled: boolean;
   readonly openUrl?: ((url: string) => Promise<void>) | undefined;
-  readonly renderOAuthCallbackPage?:
-    | NonNullable<TuiProviderAuthCallbacks["renderOAuthCallbackPage"]>
-    | undefined;
 }): TuiProviderAuthOrchestration {
   let handle: OverlayHandle | undefined;
   let overlay: AuthOverlay | undefined;
@@ -346,17 +343,11 @@ export function createTuiProviderAuthOrchestration(options: {
     });
     handle.focus();
     active = { providerId, promise, settle };
-    const callbacks: TuiProviderAuthCallbacks = createConditionalObject({
+    const callbacks: TuiProviderAuthCallbacks = {
       signal: controller.signal,
       prompt: overlay.prompt,
       notify: overlay.notify,
-    } as const)
-      .addOptional(
-        options.renderOAuthCallbackPage
-          ? { renderOAuthCallbackPage: options.renderOAuthCallbackPage }
-          : undefined,
-      )
-      .finish();
+    };
     void options.runtime.authenticateProvider(providerId, callbacks).then(
       (authenticated) => {
         if (!authenticated.configured)

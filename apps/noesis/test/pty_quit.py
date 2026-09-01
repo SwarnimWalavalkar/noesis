@@ -327,21 +327,10 @@ def main() -> int:
                                 callback.decode(), timeout=1
                             ) as response:
                                 callback_page = response.read()
-                                callback_headers = "\n".join(
-                                    f"{name}: {response.headers.get(name, '')}"
-                                    for name in (
-                                        "Cache-Control",
-                                        "Content-Security-Policy",
-                                        "Referrer-Policy",
-                                        "X-Content-Type-Options",
-                                    )
-                                ).encode()
                             os.write(
                                 sys.stdout.fileno(),
                                 b"\n__NOESIS_OAUTH_CALLBACK_PAGE__\n"
                                 + callback_page
-                                + b"\n__NOESIS_OAUTH_CALLBACK_HEADERS__\n"
-                                + callback_headers
                                 + b"\n__NOESIS_OAUTH_CALLBACK_END__\n",
                             )
                             oauth_callback_pending = False

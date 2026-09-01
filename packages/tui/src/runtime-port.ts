@@ -91,10 +91,6 @@ export interface TuiProviderAuthCallbacks {
   readonly signal?: AbortSignal;
   readonly prompt: (prompt: TuiProviderAuthPrompt) => Promise<string>;
   readonly notify: (event: TuiProviderAuthEvent) => void;
-  readonly renderOAuthCallbackPage?: (page: {
-    readonly provider: "openai-codex";
-    readonly status: "success";
-  }) => string;
 }
 
 export const stopVisibleInteraction = (turnId?: string): TuiInteractionCommand =>
