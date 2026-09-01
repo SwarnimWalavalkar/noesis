@@ -20,6 +20,7 @@ import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { opencodeGoProvider } from "@earendil-works/pi-ai/providers/opencode-go";
 import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { isJsonObject, JsonValueSchema } from "@noesis/domain";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -153,8 +154,7 @@ describe("Pi authentication", () => {
 
   test("retains Pi's persisted OpenCode Go catalog through Noesis composition", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-provider-go-refresh-"));
-    const credentials = createSecurePiCredentialStore(piAuthPath(home));
-    await credentials.modify("opencode-go", async () => ({ type: "api_key", key: "test-key" }));
+    vi.stubEnv("OPENCODE_GO_API_KEY", "go-environment-secret");
     const baseline = opencodeGoProvider().getModels()[0];
     if (!baseline) throw new Error("Expected Pi's bundled OpenCode Go catalog");
     await writeFile(
@@ -175,7 +175,8 @@ describe("Pi authentication", () => {
       }),
     );
 
-    const services = await createPiModelServices(home, { credentials });
+    const refresh = vi.spyOn(ModelRuntime.prototype, "refresh");
+    const services = await createPiModelServices(home);
 
     expect(services.models.getModel("opencode-go", "noesis/live-go-model")).toMatchObject({
       provider: "opencode-go",
@@ -183,6 +184,10 @@ describe("Pi authentication", () => {
       name: "Noesis Live Go Model",
     });
     expect(services.models.getProvider("opencode-go")?.refreshModels).toBeTypeOf("function");
+    expect(
+      refresh.mock.calls.filter(([options]) => options?.allowNetwork === false).length,
+    ).toBeGreaterThanOrEqual(2);
+    refresh.mockRestore();
   });
 
   test("validates provider and model as one selection through Pi's registered catalog", async () => {

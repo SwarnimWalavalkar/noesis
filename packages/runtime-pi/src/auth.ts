@@ -514,6 +514,10 @@ export async function createPiModelServices(
   const openCodeGo = catalog.getProvider("opencode-go");
   if (!openCodeGo) throw new Error("Pi does not provide required model provider opencode-go");
   catalog.registerNativeProvider(composeNoesisOpenCodeGoProvider(openCodeGo), { refresh: false });
+  // ModelRuntime restores persisted overlays during creation, before the
+  // Noesis-specific Go credential source is installed. Restore once more so an
+  // environment-only Go installation can use its cached catalog immediately.
+  await catalog.refresh({ allowNetwork: false });
   for (const providerId of NOESIS_PROVIDER_IDS) {
     const provider = catalog.getProvider(providerId);
     if (!provider) throw new Error(`Pi does not provide required model provider ${providerId}`);
