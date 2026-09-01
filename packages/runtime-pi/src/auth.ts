@@ -18,7 +18,11 @@ import {
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createOAuthRecoveringModels } from "./auth-recovery.ts";
-import { createNoesisPiModelCatalog, type PiModelCatalog } from "./model-catalog.ts";
+import {
+  createConfiguredModelsProjection,
+  createNoesisPiModelCatalog,
+  type PiModelCatalog,
+} from "./model-catalog.ts";
 import { createNoesisPiModelsStore } from "./models-store.ts";
 import { isNoesisProviderId } from "./provider-ids.ts";
 type CredentialFile = Readonly<Record<string, Credential>>;
@@ -545,6 +549,7 @@ export async function createPiModelServices(
   });
   projected.synchronize();
   await projected.models.refresh({ allowNetwork: false });
+  const requestModels = createConfiguredModelsProjection(projected.models, sourceCatalog);
   const refresh = async (signal?: AbortSignal): Promise<void> => {
     const timeoutSignal = AbortSignal.timeout(15_000);
     const refreshSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -568,10 +573,10 @@ export async function createPiModelServices(
       );
   };
   return Object.freeze({
-    models: createOAuthRecoveringModels(projected.models, piCredentials),
+    models: createOAuthRecoveringModels(requestModels, piCredentials),
     catalog: projected.catalog,
     credentials: piCredentials,
-    auth: createPiAuthManager(projected.models, piCredentials),
+    auth: createPiAuthManager(requestModels, piCredentials),
     refresh,
   });
 }

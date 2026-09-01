@@ -10,10 +10,12 @@ import {
   InMemoryCredentialStore,
   type Api,
   type AssistantMessage,
+  type Context,
   type CredentialStore,
   type Model,
   type ModelsSimpleStreamOptions,
   type Provider,
+  type ProviderHeaders,
 } from "@earendil-works/pi-ai";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
@@ -327,6 +329,88 @@ describe("Pi authentication", () => {
     if (!go) throw new Error("Expected the OpenCode Go model route");
 
     await expect(services.models.getAuth(go)).resolves.toBeUndefined();
+  });
+
+  test("applies Pi model override headers at the projected request boundary", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-model-headers-"));
+    const openRouterModel = openrouterProvider().getModels()[0];
+    const goModel = opencodeGoProvider().getModels()[0];
+    if (!openRouterModel || !goModel) throw new Error("Expected bundled Pi model metadata");
+    await writeFile(
+      join(home, "models.json"),
+      JSON.stringify({
+        providers: {
+          openrouter: {
+            modelOverrides: {
+              [openRouterModel.id]: {
+                headers: {
+                  "X-Noesis-Configured": "models-json",
+                  "X-Noesis-Precedence": "configured",
+                },
+              },
+            },
+          },
+          "opencode-go": {
+            modelOverrides: {
+              [goModel.id]: {
+                headers: { "X-Noesis-Go": "models-json" },
+              },
+            },
+          },
+        },
+      }),
+    );
+    vi.stubEnv("OPENROUTER_API_KEY", "openrouter-secret");
+    vi.stubEnv("OPENCODE_GO_API_KEY", "go-secret");
+    const services = await createPiModelServices(home);
+    const provider = services.catalog.getProvider("openrouter");
+    const model = services.models.getModel("openrouter", openRouterModel.id);
+    const go = services.models.getModel("opencode-go", goModel.id);
+    if (!provider || !model || !go) throw new Error("Expected projected Pi providers and models");
+    let requestHeaders: ProviderHeaders | undefined;
+    services.catalog.registerNativeProvider(
+      Object.freeze({
+        ...provider,
+        streamSimple: (requestModel: Model<Api>, _context: Context, options?: ModelsSimpleStreamOptions) => {
+          requestHeaders = options?.headers;
+          return scriptedHttpStream(requestModel, options, 200);
+        },
+      }),
+    );
+
+    await expect(services.models.getAuth(model)).resolves.toMatchObject({
+      auth: {
+        apiKey: "openrouter-secret",
+        headers: {
+          "X-Noesis-Configured": "models-json",
+          "X-Noesis-Precedence": "configured",
+        },
+      },
+    });
+    await expect(services.models.getAuth(go)).resolves.toMatchObject({
+      auth: {
+        apiKey: "go-secret",
+        headers: { "X-Noesis-Go": "models-json" },
+      },
+    });
+
+    await services.models.completeSimple(
+      model,
+      { messages: [] },
+      {
+        headers: { "x-noesis-precedence": "explicit" },
+        transformHeaders: (headers) => {
+          const next = { ...headers };
+          delete next["x-noesis-precedence"];
+          return { ...next, "X-Noesis-Precedence": "transformed", "X-Noesis-Transform": "last" };
+        },
+      },
+    );
+    expect(requestHeaders).toMatchObject({
+      "X-Noesis-Configured": "models-json",
+      "X-Noesis-Precedence": "transformed",
+      "X-Noesis-Transform": "last",
+    });
   });
 
   test("prefers a stored OpenCode Go credential over either OpenCode environment key", async () => {

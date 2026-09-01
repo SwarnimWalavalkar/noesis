@@ -2,6 +2,7 @@ import { JsonValueSchema, isJsonObject, type JsonObject } from "@noesis/domain";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { lock } from "proper-lockfile";
 import { z } from "zod";
 import type { ModelsStore, ModelsStoreEntry } from "@earendil-works/pi-ai";
 
@@ -64,6 +65,33 @@ export function createNoesisPiModelsStore(
 ): ModelsStore {
   let queue: Promise<void> = Promise.resolve();
 
+  const withProcessLock = async <T>(operation: () => Promise<T>): Promise<T> => {
+    await mkdir(dirname(path), { recursive: true });
+    let compromised: Error | undefined;
+    const release = await lock(path, {
+      realpath: false,
+      stale: 30_000,
+      retries: {
+        retries: 10,
+        factor: 1.5,
+        minTimeout: 10,
+        maxTimeout: 250,
+        randomize: true,
+      },
+      onCompromised: (error) => {
+        compromised = error;
+      },
+    });
+    try {
+      if (compromised) throw compromised;
+      const result = await operation();
+      if (compromised) throw compromised;
+      return result;
+    } finally {
+      await release();
+    }
+  };
+
   const transact = async <T>(operation: () => Promise<T>): Promise<T> => {
     const prior = queue;
     let release: (() => void) | undefined;
@@ -72,7 +100,7 @@ export function createNoesisPiModelsStore(
     });
     await prior.catch(() => undefined);
     try {
-      return await operation();
+      return await withProcessLock(operation);
     } finally {
       release?.();
     }
