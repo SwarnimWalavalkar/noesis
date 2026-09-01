@@ -96,7 +96,7 @@ export function preparePiModelSelection(models: ModelRuntime, selection: PiModel
     .filter((candidate, index, all) => all.indexOf(candidate) === index)
     .sort((left, right) => left.localeCompare(right));
   if (otherProviders.length === 0 && supportsCustomModelIds(provider)) {
-    models.registerNativeProvider(providerWithCustomModel(provider, selection.model), { refresh: false });
+    models.registerNativeProvider(providerWithCustomModel(provider, selection.model));
     return;
   }
 

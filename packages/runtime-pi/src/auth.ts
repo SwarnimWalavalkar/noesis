@@ -19,7 +19,7 @@ import {
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createOAuthRecoveringModels } from "./auth-recovery.ts";
 import { composeNoesisOpenCodeGoProvider } from "./opencode-go-provider.ts";
-import { NOESIS_PROVIDER_IDS } from "./provider-ids.ts";
+import { isNoesisProviderId, NOESIS_PROVIDER_IDS } from "./provider-ids.ts";
 type CredentialFile = Readonly<Record<string, Credential>>;
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -492,6 +492,28 @@ export interface PiModelServices {
   readonly auth: PiAuthOperations;
   readonly refresh: (signal?: AbortSignal) => Promise<void>;
 }
+
+function scopePiCredentialsToNoesis(delegate: CredentialStore): CredentialStore {
+  const assertSupported = (providerId: string): void => {
+    if (!isNoesisProviderId(providerId))
+      throw new Error(`Noesis does not manage credentials for unsupported Pi provider ${providerId}`);
+  };
+  return Object.freeze({
+    read: async (providerId) =>
+      isNoesisProviderId(providerId) ? await delegate.read(providerId) : undefined,
+    list: async () =>
+      Object.freeze((await delegate.list()).filter(({ providerId }) => isNoesisProviderId(providerId))),
+    modify: async (providerId, fn) => {
+      assertSupported(providerId);
+      return await delegate.modify(providerId, fn);
+    },
+    delete: async (providerId) => {
+      assertSupported(providerId);
+      await delegate.delete(providerId);
+    },
+  } satisfies CredentialStore);
+}
+
 export async function createPiModelServices(
   home: string,
   options: {
@@ -500,20 +522,20 @@ export async function createPiModelServices(
   } = {},
 ): Promise<PiModelServices> {
   const credentials = options.credentials ?? createSecurePiCredentialStore(piAuthPath(home));
+  const piCredentials = scopePiCredentialsToNoesis(credentials);
   const catalog = await ModelRuntime.create(
     createConditionalObject({
-      credentials,
+      credentials: piCredentials,
       modelsPath: join(home, "models.json"),
       modelsStorePath: join(home, "models-store.json"),
       allowModelNetwork: false,
-      providerIds: NOESIS_PROVIDER_IDS,
     } as const)
       .addOptional(options.catalogBaseUrl ? { catalogBaseUrl: options.catalogBaseUrl } : undefined)
       .finish(),
   );
   const openCodeGo = catalog.getProvider("opencode-go");
   if (!openCodeGo) throw new Error("Pi does not provide required model provider opencode-go");
-  catalog.registerNativeProvider(composeNoesisOpenCodeGoProvider(openCodeGo), { refresh: false });
+  catalog.registerNativeProvider(composeNoesisOpenCodeGoProvider(openCodeGo));
   // ModelRuntime restores persisted overlays during creation, before the
   // Noesis-specific Go credential source is installed. Restore once more so an
   // environment-only Go installation can use its cached catalog immediately.
@@ -531,11 +553,12 @@ export async function createPiModelServices(
         .finish(),
     );
     if (result.aborted) throw new Error("Pi model catalog refresh was cancelled or timed out.");
-    if (result.errors.size > 0)
+    const supportedErrors = [...result.errors.entries()].filter(([providerId]) =>
+      isNoesisProviderId(providerId),
+    );
+    if (supportedErrors.length > 0)
       throw new Error(
-        [...result.errors.entries()]
-          .map(([providerId, error]) => `${providerId}: ${error.message}`)
-          .join("\n"),
+        supportedErrors.map(([providerId, error]) => `${providerId}: ${error.message}`).join("\n"),
       );
   };
   return Object.freeze({

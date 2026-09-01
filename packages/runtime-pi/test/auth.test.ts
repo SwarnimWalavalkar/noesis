@@ -33,6 +33,7 @@ import {
   createSecurePiCredentialStore,
   listPiModelRoutes,
   createOAuthRecoveringModels,
+  isNoesisProviderId,
   piAuthPath,
   preparePiModelSelection,
 } from "../src/index.ts";
@@ -117,6 +118,68 @@ describe("Pi authentication", () => {
     expect(
       listPiModelRoutes(services.catalog).find((route) => route.provider === "opencode-go")?.providerName,
     ).toBe("OpenCode Go");
+    const unsupported = services.catalog.getProviders().find((provider) => !isNoesisProviderId(provider.id));
+    expect(unsupported).toBeDefined();
+    expect(listPiModelRoutes(services.catalog).every((route) => isNoesisProviderId(route.provider))).toBe(
+      true,
+    );
+    if (unsupported)
+      expect(() =>
+        preparePiModelSelection(services.catalog, {
+          provider: unsupported.id,
+          model: unsupported.getModels()[0]?.id ?? "unavailable",
+        }),
+      ).toThrow(`Unknown Pi provider ${unsupported.id}`);
+  });
+
+  test("does not consult the protected credential store for unsupported Pi providers", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-credential-scope-"));
+    const delegate = new InMemoryCredentialStore();
+    await delegate.modify("unsupported-provider", async () => ({
+      type: "api_key",
+      key: "must-remain-outside-noesis",
+    }));
+    const reads: string[] = [];
+    const credentials = Object.freeze({
+      read: async (providerId) => {
+        reads.push(providerId);
+        return await delegate.read(providerId);
+      },
+      list: async () => await delegate.list(),
+      modify: async (providerId, fn) => await delegate.modify(providerId, fn),
+      delete: async (providerId) => await delegate.delete(providerId),
+    } satisfies CredentialStore);
+
+    const services = await createPiModelServices(home, { credentials });
+
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((providerId) => isNoesisProviderId(providerId))).toBe(true);
+    await expect(services.catalog.listCredentials()).resolves.toEqual([]);
+    await expect(credentials.read("unsupported-provider")).resolves.toMatchObject({
+      type: "api_key",
+      key: "must-remain-outside-noesis",
+    });
+  });
+
+  test("ignores refresh failures from providers outside Noesis's supported catalog", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-unsupported-refresh-"));
+    const services = await createPiModelServices(home);
+    const refresh = vi.spyOn(services.catalog, "refresh");
+    refresh.mockResolvedValueOnce({
+      aborted: false,
+      errors: new Map([["unsupported-provider", new Error("unavailable")]]),
+    });
+
+    await expect(services.refresh()).resolves.toBeUndefined();
+
+    refresh.mockResolvedValueOnce({
+      aborted: false,
+      errors: new Map([
+        ["unsupported-provider", new Error("unavailable")],
+        ["openrouter", new Error("catalog rejected")],
+      ]),
+    });
+    await expect(services.refresh()).rejects.toThrow("openrouter: catalog rejected");
   });
 
   test("restores Pi's persisted remote model compatibility overlay", async () => {
@@ -323,7 +386,7 @@ describe("Pi authentication", () => {
     });
   });
 
-  test("prepares a custom model from its selected provider's Pi metadata", async () => {
+  test("immediately prepares a custom model from its selected provider's Pi metadata", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-provider-custom-model-"));
     const services = await createPiModelServices(home);
 
