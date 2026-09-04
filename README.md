@@ -42,6 +42,8 @@ Noesis is an early public beta. Its interfaces and internal design will change w
 
 Noesis requires Node.js 22.19 or newer.
 
+The npm command below is the public beta installation path. Until `noesisai@0.0.1` appears on npm, use the source setup under [Develop Noesis](#develop-noesis).
+
 ```sh
 npm install --global noesisai
 noesis
@@ -76,7 +78,7 @@ The `0.0.x` releases are a public beta. Noesis is intended for macOS and Linux t
 
 Noesis runs with the file-system and terminal access of its process. Start it in a directory you are comfortable letting an agent inspect and modify. Workspace-selected skills and MCP servers require `--trust-workspace`, but direct file and shell work can still affect anything the process can access.
 
-Noesis does not send product analytics or usage telemetry. It does contact the model providers and MCP servers you configure, and it refreshes compatible model metadata from `pi.dev`. Those services have their own data policies and may charge for usage.
+Noesis does not send product analytics or usage telemetry. It does contact the model providers and MCP servers you configure, refresh compatible model metadata from `pi.dev`, and let the agent fetch HTTP or HTTPS URLs through its web tool. Those services and sites have their own data policies, and model providers may charge for usage.
 
 Please report bugs and beta feedback through [GitHub Issues](https://github.com/SwarnimWalavalkar/noesis/issues). Report security problems privately as described in [SECURITY.md](SECURITY.md).
 
