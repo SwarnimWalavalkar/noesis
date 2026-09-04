@@ -48,6 +48,7 @@ try {
   );
   const packedPaths = new Set(report.files.map((file) => file.path));
   for (const required of [
+    "LICENSE",
     "README.md",
     "dist/cli.js",
     "dist/apps/noesis/skills/execute/SKILL.md",
@@ -79,6 +80,11 @@ try {
     "--no-fund",
     archive,
   ]);
+  await run(
+    "npm",
+    ["audit", "--omit=dev", "--audit-level=moderate", "--prefix", installRoot, "--cache", npmCache],
+    { cwd: installRoot },
+  );
   const binary = join(
     installRoot,
     "node_modules",
