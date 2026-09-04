@@ -480,6 +480,23 @@ export interface FrozenContextCheckpoint {
   readonly sourceDigest: string;
   readonly sensitivity: "normal" | "private" | "secret";
   readonly createdAt: string;
+  /** Exact independent checkpoint notes rendered into this bounded notebook view. */
+  readonly notes?: readonly FrozenContextCheckpointNote[];
+  /** Number of earlier checkpoint notes omitted from the bounded working set. */
+  readonly omittedNoteCount?: number;
+}
+export interface FrozenContextCheckpointNote {
+  readonly checkpointId: string;
+  readonly checkpointRef: {
+    readonly kind: "database_row";
+    readonly table: "context_checkpoints";
+    readonly rowId: string;
+  };
+  readonly summary: string;
+  readonly summaryDigest: string;
+  readonly sourceDigest: string;
+  readonly sensitivity: "normal" | "private" | "secret";
+  readonly createdAt: string;
 }
 export interface FrozenContextDocument {
   readonly documentId: string;
@@ -522,7 +539,7 @@ export interface FrozenTurnPlan {
   readonly selectedCapabilities: readonly FrozenCapabilitySelection[];
   /** Exact bounded SQLite-authoritative history served to this turn. Absent only on legacy plans. */
   readonly conversationHistory?: readonly FrozenConversationHistoryEntry[];
-  /** Immutable summary checkpoint served before the exact raw history tail. */
+  /** Immutable bounded notebook view served before the exact raw history tail. */
   readonly contextCheckpoint?: FrozenContextCheckpoint;
   /** Complete immutable pre-turn session timeline exposed lazily to codemode. */
   readonly contextDocument?: FrozenContextDocument;
@@ -639,6 +656,25 @@ const FrozenContextCheckpointSchema = z.strictObject({
   sourceDigest: z.string().regex(/^[a-f0-9]{64}$/u),
   sensitivity: z.enum(["normal", "private", "secret"]),
   createdAt: z.string().min(1),
+  notes: z
+    .array(
+      z.strictObject({
+        checkpointId: z.string().min(1),
+        checkpointRef: z.strictObject({
+          kind: z.literal("database_row"),
+          table: z.literal("context_checkpoints"),
+          rowId: z.string().min(1),
+        }),
+        summary: z.string().min(1).max(MAX_FROZEN_CONTEXT_CHECKPOINT_SUMMARY_CHARACTERS),
+        summaryDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+        sourceDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+        sensitivity: z.enum(["normal", "private", "secret"]),
+        createdAt: z.string().min(1),
+      }),
+    )
+    .min(1)
+    .optional(),
+  omittedNoteCount: z.number().int().nonnegative().optional(),
 });
 const FrozenContextDocumentSchema = z.strictObject({
   documentId: z.string().min(1),
@@ -732,6 +768,34 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
         .finish(),
     ),
   );
+  const normalizedContextCheckpoint =
+    contextCheckpoint === undefined
+      ? undefined
+      : (() => {
+          const { notes, omittedNoteCount, ...checkpoint } = contextCheckpoint;
+          return Object.freeze(
+            createConditionalObject({
+              ...checkpoint,
+              checkpointRef: Object.freeze({ ...checkpoint.checkpointRef }),
+            } as const)
+              .addOptional(
+                notes
+                  ? {
+                      notes: Object.freeze(
+                        notes.map((note) =>
+                          Object.freeze({
+                            ...note,
+                            checkpointRef: Object.freeze({ ...note.checkpointRef }),
+                          }),
+                        ),
+                      ),
+                    }
+                  : undefined,
+              )
+              .addOptional(!(omittedNoteCount === undefined) ? { omittedNoteCount } : undefined)
+              .finish(),
+          );
+        })();
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const plan = Object.freeze(
     createConditionalObject({
@@ -745,9 +809,9 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
           : undefined,
       )
       .addOptional(
-        !(contextCheckpoint === undefined)
+        !(normalizedContextCheckpoint === undefined)
           ? {
-              contextCheckpoint: Object.freeze({ ...contextCheckpoint }),
+              contextCheckpoint: normalizedContextCheckpoint,
             }
           : undefined,
       )
@@ -846,6 +910,27 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
       throw new Error(`Frozen turn plan ${plan.planId} has a mismatched context checkpoint reference`);
     if (sha256(plan.contextCheckpoint.summary) !== plan.contextCheckpoint.summaryDigest)
       throw new Error(`Frozen turn plan ${plan.planId} context checkpoint failed summary verification`);
+    if (plan.contextCheckpoint.notes !== undefined) {
+      const noteIds = new Set<string>();
+      for (const note of plan.contextCheckpoint.notes) {
+        if (note.checkpointRef.rowId !== note.checkpointId)
+          throw new Error(`Frozen turn plan ${plan.planId} has a mismatched context note reference`);
+        if (sha256(note.summary) !== note.summaryDigest)
+          throw new Error(`Frozen turn plan ${plan.planId} context note failed summary verification`);
+        if (noteIds.has(note.checkpointId))
+          throw new Error(`Frozen turn plan ${plan.planId} repeats context note ${note.checkpointId}`);
+        noteIds.add(note.checkpointId);
+      }
+      if (plan.contextCheckpoint.notes.at(-1)?.checkpointId !== plan.contextCheckpoint.checkpointId)
+        throw new Error(`Frozen turn plan ${plan.planId} notebook does not end at its active checkpoint`);
+      const sourceIdentity = plan.contextCheckpoint.notes.map((note) => ({
+        checkpointId: note.checkpointId,
+        summaryDigest: note.summaryDigest,
+        sourceDigest: note.sourceDigest,
+      }));
+      if (sha256(canonicalJson(sourceIdentity)) !== plan.contextCheckpoint.sourceDigest)
+        throw new Error(`Frozen turn plan ${plan.planId} context notebook failed source verification`);
+    }
   }
   if (plan.contextDocument !== undefined) {
     if (plan.contextDocument.documentId !== `context_document_${plan.contextDocument.contentDigest}`)

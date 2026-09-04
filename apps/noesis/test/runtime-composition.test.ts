@@ -409,6 +409,7 @@ describe("apps/noesis production control-plane composition", () => {
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
     const histories: NonNullable<AgentRuntimeRequest["history"]>[] = [];
+    const compactorInputs: string[] = [];
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const agent: NoesisAgentRuntime = Object.freeze({
       name: "controlled-compaction-agent",
@@ -449,29 +450,29 @@ describe("apps/noesis production control-plane composition", () => {
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
           variants: configurations,
-          respond: (request) =>
-            request.systemPrompt.includes("role: session_compactor")
-              ? Object.freeze({
-                  text: JSON.stringify({
-                    goal: "Continue the established session task.",
-                    constraints: [],
-                    completedWork: ["The first turn completed."],
-                    currentState: "Ready for the next request.",
-                    decisions: [],
-                    blockers: [],
-                    nextSteps: [],
-                    criticalReferences: [],
-                  }),
-                  usage: Object.freeze({
-                    inputTokens: 400,
-                    outputTokens: 80,
-                    totalTokens: 480,
-                    estimatedCost: 0,
-                  }),
-                })
-              : Object.freeze({
-                  text: '{"observation":{"kind":"other","reason":"No learning."},"decision":"no_change","reason":"No change."}',
+          respond: (request) => {
+            if (request.systemPrompt.includes("role: session_compactor")) {
+              compactorInputs.push(request.prompt);
+              return Object.freeze({
+                text: JSON.stringify({
+                  notes: [
+                    { kind: "goal", text: "Continue the established session task." },
+                    { kind: "progress", text: "The first turn completed." },
+                    { kind: "open_loop", text: "Ready for the next request." },
+                  ],
                 }),
+                usage: Object.freeze({
+                  inputTokens: 400,
+                  outputTokens: 80,
+                  totalTokens: 480,
+                  estimatedCost: 0,
+                }),
+              });
+            }
+            return Object.freeze({
+              text: '{"observation":{"kind":"other","reason":"No learning."},"decision":"no_change","reason":"No change."}',
+            });
+          },
         }),
     });
     const shortTrail = await runtime.startTrail({ title: "Manual compaction below threshold" });
@@ -511,8 +512,29 @@ describe("apps/noesis production control-plane composition", () => {
     });
     expect(second.frozenTurnPlan?.contextTokenBudget).toBeLessThanOrEqual(checkpoint?.tokenBudget ?? 0);
     expect(secondHistory).toEqual([
-      expect.objectContaining({ role: "assistant", content: expect.stringContaining("CONTEXT CHECKPOINT") }),
+      expect.objectContaining({
+        role: "assistant",
+        content: expect.stringContaining("SESSION CONTINUITY NOTEBOOK"),
+      }),
     ]);
+    await runtime.compact(trail.trailId);
+    const successor = await runtime.debug.workspace.operational.contextCheckpoints.getActive(trail.trailId);
+    if (!successor) throw new Error("Expected a successor context checkpoint");
+    expect(successor).toMatchObject({
+      previousCheckpointId: checkpoint?.checkpointId,
+      summaryKind: "note_delta",
+    });
+    expect(compactorInputs.at(-1)).not.toContain("Continue the established session task.");
+    await expect(
+      runtime.debug.workspace.operational.contextCheckpoints.lineage(successor.checkpointId),
+    ).resolves.toHaveLength(2);
+    const third = await runtime.debug.runTurn(trail.trailId, "Continue after another compaction.");
+    expect(third.frozenTurnPlan?.contextCheckpoint).toMatchObject({
+      checkpointId: successor.checkpointId,
+      omittedNoteCount: 0,
+      notes: [{ checkpointId: checkpoint?.checkpointId }, { checkpointId: successor.checkpointId }],
+    });
+    expect(histories.at(-1)?.[0]?.content.match(/\[CONTEXT NOTE DELTA — REFERENCE ONLY\]/gu)).toHaveLength(2);
     const automaticTrail = await runtime.startTrail({ title: "Automatic context compaction" });
     await runtime.debug.runTurn(automaticTrail.trailId, firstInput);
     const automaticTurn = await runtime.debug.runTurn(
@@ -525,7 +547,10 @@ describe("apps/noesis production control-plane composition", () => {
         ?.checkpointId,
     );
     expect(automaticHistory).toEqual([
-      expect.objectContaining({ role: "assistant", content: expect.stringContaining("CONTEXT CHECKPOINT") }),
+      expect.objectContaining({
+        role: "assistant",
+        content: expect.stringContaining("SESSION CONTINUITY NOTEBOOK"),
+      }),
     ]);
     await runtime.shutdown();
   });
@@ -632,14 +657,10 @@ describe("apps/noesis production control-plane composition", () => {
               notifyCompactorStarted?.();
               return Object.freeze({
                 text: JSON.stringify({
-                  goal: "Preserve context.",
-                  constraints: [],
-                  completedWork: [],
-                  currentState: "Compacting.",
-                  decisions: [],
-                  blockers: [],
-                  nextSteps: [],
-                  criticalReferences: [],
+                  notes: [
+                    { kind: "goal", text: "Preserve context." },
+                    { kind: "progress", text: "Compacting." },
+                  ],
                 }),
                 latencyMs: 5000,
               });
@@ -2115,7 +2136,7 @@ describe("apps/noesis production control-plane composition", () => {
     const result = await runtime.debug.runTurn(trail.trailId, "Record this ordinary turn");
     expect(result.outcome).toBe("completed");
     expect(requests[0]?.systemPrompt).toContain(
-      "search this installation's previous sessions through `execute` when it could help.",
+      "search compacted material in the current session or this installation's previous sessions through `execute` when it could help.",
     );
     expect(requests[0]?.systemPrompt).toContain("one coherent `execute` program for related multi-call work");
     expect(requests[0]?.systemPrompt).toContain("Treat explicit truncation as incomplete evidence");

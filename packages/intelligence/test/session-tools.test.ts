@@ -231,6 +231,17 @@ describe("AC-07 session search tools", () => {
   });
 
   test("defaults automatic retrieval to hybrid and only searches prior session-linked evidence", async () => {
+    await workspace.operational.toolCalls.put({
+      toolCallId: "tool-call-current-evidence",
+      sessionId: "session-b",
+      toolName: "shell.run",
+      request: Object.freeze({ command: "inspect release artifact" }),
+      response: Object.freeze({ stderr: "obsidian linker failure sentinel" }),
+      status: "failed",
+      sensitivity: "normal",
+      createdAt: later,
+      completedAt: later,
+    });
     expect(
       selectSessionRetrievalStrategy({
         query: "secret token message_session-b",
@@ -272,7 +283,7 @@ describe("AC-07 session search tools", () => {
 
     const explicitCurrent = await tools().searchSessions({
       query: "marigold continuity note",
-      sessionId: "session-b",
+      scope: "current",
     });
     expect(explicitCurrent.ok).toBe(true);
     if (!explicitCurrent.ok) return;
@@ -286,6 +297,28 @@ describe("AC-07 session search tools", () => {
     expect(
       explicitCurrent.value.fragments.every((fragment) => fragment.citation.sessionIds.includes("session-b")),
     ).toBe(true);
+
+    const currentToolEvidence = await tools().searchSessions({
+      query: "obsidian linker failure sentinel",
+      scope: "current",
+      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
+    });
+    expect(currentToolEvidence.ok).toBe(true);
+    if (!currentToolEvidence.ok) return;
+    expect(
+      currentToolEvidence.value.fragments.some(
+        (fragment) =>
+          fragment.citation.identity.kind === "tool_call" &&
+          fragment.citation.identity.toolCallId === "tool-call-current-evidence",
+      ),
+    ).toBe(true);
+
+    const ambiguousScope = await tools().searchSessions({
+      query: "marigold continuity note",
+      sessionId: "session-b",
+      scope: "current",
+    });
+    expect(ambiguousScope).toMatchObject({ ok: false, error: { code: "invalid_input" } });
   });
 
   test("filters the current session before candidate limits can crowd out prior evidence", async () => {

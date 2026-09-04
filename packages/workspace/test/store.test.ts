@@ -396,6 +396,7 @@ describe("WorkspaceStore", () => {
     const checkpoint = Object.freeze({
       checkpointId: "context-checkpoint-1",
       sessionId: "session-context",
+      summaryKind: "note_delta" as const,
       summary: "A bounded continuation summary.",
       summaryDigest: sha256("A bounded continuation summary."),
       sourceDigest: sha256(canonicalJson(sources)),
@@ -494,6 +495,10 @@ describe("WorkspaceStore", () => {
         expectedContextMessageIds: Object.freeze([successorMessage.messageId]),
       }),
     ).resolves.toMatchObject({ status: "activated" });
+    await expect(store.operational.contextCheckpoints.lineage(successor.checkpointId)).resolves.toEqual([
+      checkpoint,
+      successor,
+    ]);
     await store.operational.sessions.put(session("session-context-other"));
     await store.operational.messages.put({
       messageId: "context-message-other",
@@ -692,6 +697,7 @@ describe("WorkspaceStore", () => {
     const checkpoint = Object.freeze({
       checkpointId: "context-checkpoint-chunked",
       sessionId: "session-context-chunked",
+      summaryKind: "note_delta" as const,
       summary: "The oldest chunked context message was summarized.",
       summaryDigest: sha256("The oldest chunked context message was summarized."),
       sourceDigest: sha256(canonicalJson(sources)),
@@ -2273,7 +2279,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 48 });
+    ).toEqual({ version: 49 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -3005,7 +3011,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(48);
+    expect(versions.at(-1)).toBe(49);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
