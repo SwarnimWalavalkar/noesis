@@ -1421,7 +1421,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       name: "search_sessions",
       label: "Search sessions",
       description:
-        "Run hybrid lexical and semantic retrieval with reranking over the current compacted session, previous sessions, all sessions, or one exact sessionId, and return bounded evidence with exact citations. The default scope is previous sessions; use scope=current when older context from this session may have been compacted. One precise query normally suffices; an empty or irrelevant result means only that this bounded search found no relevant evidence. Normal cross-session search needs no private flag; private retrieval requires one exact authorized sessionId.",
+        "Run hybrid lexical and semantic retrieval with reranking over the current compacted session, previous sessions, all sessions, or one exact sessionId, and return bounded evidence with exact citations. The default scope is previous sessions; use scope=current when older context from this session may have been compacted. One precise query normally suffices; an empty or irrelevant result means only that this bounded search found no relevant evidence. Normal cross-session search needs no private flag; private retrieval accepts either one exact authorized sessionId or scope=current for the current authorized session.",
       inputSchema: SearchSessionsInputSchema,
       execute: searchSessions,
     }),

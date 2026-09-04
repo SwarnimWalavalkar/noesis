@@ -95,6 +95,7 @@ async function freezeContextCheckpoint(
             table: "context_checkpoints" as const,
             rowId: note.checkpointId,
           }),
+          summaryKind: note.summaryKind,
           summary: note.summary,
           summaryDigest: note.summaryDigest,
           sourceDigest: note.sourceDigest,

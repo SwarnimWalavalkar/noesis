@@ -204,6 +204,34 @@ describe("session compaction", () => {
     expect(notebook?.content).toContain("The silver result passed.");
   });
 
+  test("keeps a migrated legacy checkpoint usable at its former token ceiling", () => {
+    const legacySummary = "x".repeat(32_000);
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    const legacy = Object.freeze({
+      checkpointId: "checkpoint-legacy",
+      sessionId: "session-1",
+      summaryKind: "legacy_snapshot" as const,
+      summary: legacySummary,
+      summaryDigest: "a".repeat(64),
+      sourceDigest: "b".repeat(64),
+      sources: Object.freeze([Object.freeze({ messageId: "1", contentDigest: "c".repeat(64) })]),
+      lastCoveredMessageId: "1",
+      tokenBudget: 8_000,
+      estimatedSummaryTokens: 8_000,
+      sensitivity: "normal" as const,
+      provider: "controlled",
+      model: "controlled",
+      thinkingLevel: "off" as const,
+      usage: Object.freeze({ inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCost: 0 }),
+      createdAt: "2026-08-13T00:00:00.000Z",
+    });
+
+    const notebook = resolveContextNotebook(Object.freeze([legacy]), 8_000);
+
+    expect(notebook?.content).toBe(legacySummary);
+    expect(notebook?.omittedCheckpointCount).toBe(0);
+  });
+
   test("manual compaction covers an oldest complete turn below the automatic threshold", () => {
     const messages = Object.freeze([
       message("1", "old-user", true),
