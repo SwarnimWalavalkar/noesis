@@ -43,7 +43,7 @@ export default defineConfig({
     target: "node22",
     outDir: outputRoot,
     emptyOutDir: true,
-    sourcemap: true,
+    sourcemap: false,
     minify: false,
     ssr: true,
     rollupOptions: {

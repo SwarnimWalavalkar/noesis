@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 
 const execute = promisify(execFile);
 const repositoryRoot = new URL("../", import.meta.url);
+const sourceManifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
 
 async function run(file, args, options = {}) {
   return await execute(file, args, {
@@ -40,8 +41,11 @@ try {
   const reportStart = packed.stdout.lastIndexOf("\n[");
   const reportJson = reportStart === -1 ? packed.stdout : packed.stdout.slice(reportStart + 1);
   const [report] = JSON.parse(reportJson);
-  requireCondition(report?.name === "noesisai", "Packed artifact must be named noesisai");
-  requireCondition(report.version === "0.0.1", "Packed artifact must be version 0.0.1");
+  requireCondition(report?.name === sourceManifest.name, "Packed artifact name must match package.json");
+  requireCondition(
+    report.version === sourceManifest.version,
+    "Packed artifact version must match package.json",
+  );
   const packedPaths = new Set(report.files.map((file) => file.path));
   for (const required of [
     "README.md",
@@ -60,6 +64,7 @@ try {
       path.includes("/.env") ||
       path.includes("/test/") ||
       path.startsWith("plans/") ||
+      path.endsWith(".map") ||
       path.endsWith(".ts"),
   );
   requireCondition(forbidden === undefined, `Packed artifact contains forbidden path ${forbidden}`);
