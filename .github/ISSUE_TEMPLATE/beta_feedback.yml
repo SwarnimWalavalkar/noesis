@@ -1,0 +1,30 @@
+name: Public beta feedback
+description: Share what felt useful, confusing, or limiting.
+title: "feedback: "
+labels:
+  - feedback
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: What were you trying to do?
+      description: Describe the real task and why you chose Noesis for it.
+    validations:
+      required: true
+  - type: textarea
+    id: experience
+    attributes:
+      label: What happened?
+      description: Tell us what worked, what got in the way, and what surprised you.
+    validations:
+      required: true
+  - type: textarea
+    id: improvement
+    attributes:
+      label: What would make this meaningfully better?
+  - type: checkboxes
+    id: followup
+    attributes:
+      label: Follow-up
+      options:
+        - label: I am willing to answer follow-up questions on this issue.

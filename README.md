@@ -36,41 +36,51 @@ New Capabilities apply anywhere they are relevant. You can narrow one to a proje
 - Connect local and remote MCP servers, including OAuth, from `/mcp`.
 - Inspect what Noesis learned with `/learning`, and restore any earlier version.
 
-Noesis is an early research preview. Its interfaces and internal design will change with use.
+Noesis is an early public beta. Its interfaces and internal design will change with use.
 
-## Start Noesis
+## Install Noesis
 
-Noesis requires Node.js 22.19 or newer and pnpm 10.
+Noesis requires Node.js 22.19 or newer.
+
+The npm command below is the public beta installation path. Until `noesisai@0.0.1` appears on npm, use the source setup under [Develop Noesis](#develop-noesis).
 
 ```sh
-pnpm install
-pnpm start
+npm install --global noesisai
+noesis
 ```
 
 The first launch asks you to choose a model and authenticate. Noesis supports OpenAI Codex, Anthropic, OpenRouter, OpenCode Zen, and OpenCode Go.
 
 OpenCode Zen uses provider ID `opencode` and `OPENCODE_API_KEY`. OpenCode Go uses provider ID `opencode-go` and `OPENCODE_GO_API_KEY`. Keys stored through `noesis auth login` are likewise kept under those separate provider IDs.
 
-For development, install the repository-owned `noesis-dev` command:
-
-```sh
-pnpm dev:install
-noesis-dev
-```
-
-The installer links `scripts/noesis-dev` into `~/.local/bin`. Set `NOESIS_DEV_BIN_DIR` to install the link elsewhere. The command runs the current checkout directly through its pinned `tsx`, works from any directory, and keeps its config, credentials, sessions, and other development state in this repository's ignored `.noesis/` directory. Run it without installing the link with `pnpm dev`.
-
 Reopen a session:
 
 ```sh
-pnpm start -- --continue
-pnpm start -- --resume
-pnpm start -- --resume SESSION_ID
+noesis --continue
+noesis --resume
+noesis --resume SESSION_ID
 ```
 
-`--continue` opens the most recently active session. `--resume` without an ID opens the session picker.
+`--continue` opens the most recently active session. `--resume` without an ID opens the session picker. Project skills and project MCP servers stay disabled unless you start with `--trust-workspace`.
 
-Project skills and project MCP servers stay disabled unless you start with `--trust-workspace`.
+Upgrade or uninstall the CLI with npm:
+
+```sh
+npm install --global noesisai@latest
+npm uninstall --global noesisai
+```
+
+Uninstalling the package does not delete `~/.noesis/`, so your configuration, credentials, sessions, Programs, and Capability history remain available if you reinstall.
+
+## Public beta
+
+The `0.0.x` releases are a public beta. Noesis is intended for macOS and Linux terminals; Windows is not yet part of the release test matrix. Commands, configuration, and durable schemas may change before `1.0`, with migrations supplied for persisted state.
+
+Noesis runs with the file-system and terminal access of its process. Start it in a directory you are comfortable letting an agent inspect and modify. Workspace-selected skills and MCP servers require `--trust-workspace`, but direct file and shell work can still affect anything the process can access.
+
+Noesis does not send product analytics or usage telemetry. It does contact the model providers and MCP servers you configure, refresh compatible model metadata from `pi.dev`, and let the agent fetch HTTP or HTTPS URLs through its web tool. Those services and sites have their own data policies, and model providers may charge for usage.
+
+Please report bugs and beta feedback through [GitHub Issues](https://github.com/SwarnimWalavalkar/noesis/issues). Report security problems privately as described in [SECURITY.md](SECURITY.md).
 
 ## Commands
 
@@ -161,6 +171,22 @@ Noesis asks before credential export, recovery or audit control, and irreversibl
 You can inspect every Capability, challenge it, pause it, or restore an earlier version.
 
 ## Develop Noesis
+
+Development requires pnpm 10. Install the repository and start its source build with:
+
+```sh
+pnpm install
+pnpm start
+```
+
+For regular local testing, install the repository-owned `noesis-dev` command:
+
+```sh
+pnpm dev:install
+noesis-dev
+```
+
+The installer links `scripts/noesis-dev` into `~/.local/bin`. Set `NOESIS_DEV_BIN_DIR` to install the link elsewhere. The command runs the current checkout directly through its pinned `tsx`, works from any directory, and keeps its config, credentials, sessions, and other development state in this repository's ignored `.noesis/` directory. Run it without installing the link with `pnpm dev`.
 
 Run the complete local check before sending a change:
 
