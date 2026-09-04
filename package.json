@@ -39,6 +39,7 @@
     "lint": "oxlint .",
     "package:smoke": "node scripts/test-package.mjs",
     "prepack": "npm run build:release",
+    "release:verify": "node scripts/verify-release.mjs",
     "start": "tsx apps/noesis/src/cli.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

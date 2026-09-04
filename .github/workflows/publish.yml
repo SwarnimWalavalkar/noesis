@@ -1,0 +1,49 @@
+name: Stage npm release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version already recorded in package.json
+        required: true
+        type: string
+      confirmation:
+        description: Type "stage noesisai@VERSION"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+jobs:
+  stage:
+    name: Verify and stage
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.3
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11.19.1
+      - run: pnpm install --frozen-lockfile
+      - name: Verify release inputs
+        run: pnpm release:verify
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+      - run: pnpm check
+      - run: pnpm package:smoke
+      - name: Stage package for maintainer approval
+        run: npm stage publish --access public
