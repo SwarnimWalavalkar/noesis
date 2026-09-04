@@ -43,6 +43,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
+      - run: pnpm audit --prod
       - run: pnpm check
       - run: pnpm package:smoke
       - name: Stage package for maintainer approval

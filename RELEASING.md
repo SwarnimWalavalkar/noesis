@@ -6,7 +6,7 @@ Noesis publishes one npm package, `noesisai`, with the executable name `noesis`.
 
 1. Put the intended version in `package.json` and update `pnpm-lock.yaml`.
 2. Merge only after CI passes on the minimum supported Node.js version and the current Node.js release.
-3. From a clean checkout of `main`, run `pnpm install --frozen-lockfile`, `pnpm check`, and `pnpm package:smoke`.
+3. From a clean checkout of `main`, run `pnpm install --frozen-lockfile`, `pnpm audit --prod`, `pnpm check`, and `pnpm package:smoke`.
 4. Inspect the `npm pack --dry-run` file list. It must contain the CLI, migrations, built-in skills, codemode worker, README, and license, and must not contain credentials, `.noesis/` state, tests, plans, or TypeScript sources.
 5. Confirm that the npm package name, repository metadata, release notes, support statement, and security-reporting route are correct.
 
