@@ -2339,9 +2339,10 @@ describe("WorkspaceStore", () => {
       database.exec(`PRAGMA schema_version = ${String(version + 1)}`);
       database.exec("PRAGMA writable_schema = OFF");
     };
-    replaceWorkflowSchema(seeded.database, relaxedSchemaSql);
     seeded.database.close();
-    const corrupt = new DatabaseSync(seeded.databasePath);
+    const corruptionOptions = { readOnly: false, defensive: false };
+    const corrupt = new DatabaseSync(seeded.databasePath, corruptionOptions);
+    replaceWorkflowSchema(corrupt, relaxedSchemaSql);
     const blobDigest = Buffer.from(digest("a"));
     const legacy = seedLegacyWorkflowDependencyRun(corrupt, "blob-upgrade", blobDigest);
     replaceWorkflowSchema(corrupt, strictSchemaSql);

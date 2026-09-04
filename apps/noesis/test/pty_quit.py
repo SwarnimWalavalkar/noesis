@@ -269,8 +269,8 @@ def main() -> int:
     next_write_at = None
     last_write_label = None
     # Full-suite concurrency can delay the controlled completion slightly while the animated
-    # status is repainting. Keep this below Vitest's seven-second per-case budget.
-    deadline = time.monotonic() + 6
+    # status is repainting. Keep the process watchdog below the TypeScript wrapper's deadline.
+    deadline = time.monotonic() + 8
     child_finished = False
     screen = VirtualScreen(columns, rows)
     try:
