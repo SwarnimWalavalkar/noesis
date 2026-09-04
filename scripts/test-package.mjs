@@ -32,13 +32,14 @@ try {
   const packed = await run("npm", [
     "pack",
     "--json",
-    "--ignore-scripts",
     "--pack-destination",
     packDirectory,
     "--cache",
     npmCache,
   ]);
-  const [report] = JSON.parse(packed.stdout);
+  const reportStart = packed.stdout.lastIndexOf("\n[");
+  const reportJson = reportStart === -1 ? packed.stdout : packed.stdout.slice(reportStart + 1);
+  const [report] = JSON.parse(reportJson);
   requireCondition(report?.name === "noesisai", "Packed artifact must be named noesisai");
   requireCondition(report.version === "0.0.1", "Packed artifact must be version 0.0.1");
   const packedPaths = new Set(report.files.map((file) => file.path));
