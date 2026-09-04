@@ -8,6 +8,22 @@ import {
 } from "../src/index.ts";
 
 describe("frozen context notebook", () => {
+  test("rejects omission metadata on a lone legacy compatibility snapshot", () => {
+    expect(() =>
+      renderFrozenContextNotebook(
+        Object.freeze([
+          Object.freeze({
+            checkpointId: "legacy-checkpoint",
+            summaryKind: "legacy_snapshot" as const,
+            summary: "[CONTEXT CHECKPOINT — REFERENCE ONLY]\nLegacy continuity.",
+            createdAt: "2026-09-04T11:00:00.000Z",
+          }),
+        ]),
+        1,
+      ),
+    ).toThrow("A lone legacy context snapshot cannot omit note windows");
+  });
+
   test("rejects aggregate context unrelated to its pinned notes", () => {
     const noteSummary = "[CONTEXT NOTE DELTA — REFERENCE ONLY]\n- [fact] The copper check passed.";
     const notes = Object.freeze([
